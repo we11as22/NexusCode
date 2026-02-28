@@ -161,6 +161,8 @@ export interface ToolPart {
 export interface IIndexer {
   search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]>
   status(): IndexStatus
+  refreshFile?(filePath: string): Promise<void>
+  refreshFileNow?(filePath: string): Promise<void>
 }
 
 export interface IndexSearchOptions {
@@ -204,6 +206,10 @@ export type AgentEvent =
   | { type: "reasoning_delta"; delta: string; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean }
+  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
+  | { type: "subagent_tool_start"; subagentId: string; tool: string }
+  | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
+  | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string }
   | { type: "tool_approval_needed"; action: ApprovalAction; partId: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
@@ -220,6 +226,11 @@ export interface ProviderConfig {
   id: string
   apiKey?: string
   baseUrl?: string
+  /**
+   * Sampling temperature for generation. 0 = deterministic.
+   * Most providers support range [0, 2].
+   */
+  temperature?: number
   /** Azure-specific */
   resourceName?: string
   deploymentId?: string
@@ -232,7 +243,6 @@ export type ProviderName =
   | "anthropic"
   | "openai"
   | "google"
-  | "openrouter"
   | "ollama"
   | "openai-compatible"
   | "azure"
@@ -254,9 +264,18 @@ export interface EmbeddingConfig {
   dimensions?: number
 }
 
+export interface MaxModeConfig {
+  enabled: boolean
+  /**
+   * Multiplies per-request token budget while max mode is active.
+   * Keeps the same provider/model as config.model.
+   */
+  tokenBudgetMultiplier: number
+}
+
 export interface NexusConfig {
   model: ProviderConfig
-  maxMode: ProviderConfig & { enabled: boolean }
+  maxMode: MaxModeConfig
   embeddings?: EmbeddingConfig
   vectorDb?: {
     enabled: boolean
@@ -278,6 +297,8 @@ export interface NexusConfig {
     fts: boolean
     vector: boolean
     batchSize: number
+    embeddingBatchSize: number
+    embeddingConcurrency: number
     debounceMs: number
   }
   permissions: {

@@ -11,29 +11,51 @@ export class VectorIndex {
   private collectionName: string
   private embeddings: EmbeddingClient
   private initialized = false
+  private vectorSize: number
+  private embeddingBatchSize: number
+  private embeddingConcurrency: number
   readonly dimensions: number
 
   constructor(
     url: string,
     projectHash: string,
-    embeddings: EmbeddingClient
+    embeddings: EmbeddingClient,
+    opts?: {
+      embeddingBatchSize?: number
+      embeddingConcurrency?: number
+    }
   ) {
-    this.client = new QdrantClient({ url })
+    this.client = new QdrantClient({ url, checkCompatibility: false })
     this.collectionName = `nexus_${projectHash}`
     this.embeddings = embeddings
     this.dimensions = embeddings.dimensions
+    this.vectorSize = embeddings.dimensions
+    this.embeddingBatchSize = Math.max(1, opts?.embeddingBatchSize ?? 60)
+    this.embeddingConcurrency = Math.max(1, opts?.embeddingConcurrency ?? 2)
   }
 
   async init(): Promise<void> {
     try {
+      const resolvedSize = await this.resolveVectorSize()
+      this.vectorSize = resolvedSize
+
       // Create collection if it doesn't exist
       const collections = await this.client.getCollections()
-      const exists = collections.collections.some(c => c.name === this.collectionName)
+      let exists = collections.collections.some(c => c.name === this.collectionName)
+
+      // Existing collection might be created with a wrong vector size from old config/defaults.
+      if (exists) {
+        const existingSize = await this.getExistingVectorSize().catch(() => null)
+        if (existingSize && existingSize !== resolvedSize) {
+          await this.client.deleteCollection(this.collectionName)
+          exists = false
+        }
+      }
 
       if (!exists) {
         await this.client.createCollection(this.collectionName, {
           vectors: {
-            size: this.dimensions,
+            size: resolvedSize,
             distance: "Cosine",
           },
         })
@@ -43,6 +65,38 @@ export class VectorIndex {
     } catch (err) {
       throw new Error(`Failed to initialize Qdrant collection: ${(err as Error).message}`)
     }
+  }
+
+  private async resolveVectorSize(): Promise<number> {
+    const configured = Number.isFinite(this.dimensions) && this.dimensions > 0
+      ? this.dimensions
+      : 0
+
+    try {
+      const vectors = await this.embeddings.embed(["nexus vector dimension probe"])
+      const observed = vectors[0]?.length ?? 0
+      if (observed > 0) {
+        return observed
+      }
+    } catch {
+      // Fall back to configured size when probe is unavailable.
+    }
+
+    if (configured > 0) {
+      return configured
+    }
+
+    throw new Error("Unable to resolve embedding vector size. Set embeddings.dimensions explicitly.")
+  }
+
+  private async getExistingVectorSize(): Promise<number | null> {
+    const info = await this.client.getCollection(this.collectionName) as Record<string, unknown>
+    const result = info["result"] as Record<string, unknown> | undefined
+    const config = result?.["config"] as Record<string, unknown> | undefined
+    const params = config?.["params"] as Record<string, unknown> | undefined
+    const vectors = params?.["vectors"] as Record<string, unknown> | undefined
+    const size = vectors?.["size"]
+    return typeof size === "number" && Number.isFinite(size) ? size : null
   }
 
   async upsertSymbols(symbols: Array<{
@@ -57,28 +111,48 @@ export class VectorIndex {
     if (!this.initialized || symbols.length === 0) return
 
     try {
-      const texts = symbols.map(s =>
-        [s.name, s.kind ?? "", s.parent ?? "", s.content.slice(0, 500)].filter(Boolean).join(" ")
-      )
-      const vectors = await this.embeddings.embed(texts)
+      const batches = chunk(symbols, this.embeddingBatchSize)
 
-      const points = symbols.map((s, i) => ({
-        id: stringToUint(s.id),
-        vector: vectors[i]!,
-        payload: {
-          path: s.path,
-          name: s.name,
-          kind: s.kind ?? "chunk",
-          parent: s.parent ?? null,
-          startLine: s.startLine ?? 0,
-          content: s.content.slice(0, 1000),
-        },
-      }))
-
-      await this.client.upsert(this.collectionName, { points })
+      for (let i = 0; i < batches.length; i += this.embeddingConcurrency) {
+        const group = batches.slice(i, i + this.embeddingConcurrency)
+        await Promise.all(group.map(batch => this.upsertBatch(batch)))
+      }
     } catch (err) {
-      console.warn("[nexus] Vector upsert failed:", err)
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[nexus] Vector upsert failed: ${message}`)
     }
+  }
+
+  private async upsertBatch(symbols: Array<{
+    id: string
+    path: string
+    name: string
+    kind?: SymbolKind
+    parent?: string
+    startLine?: number
+    content: string
+  }>): Promise<void> {
+    if (symbols.length === 0) return
+
+    const texts = symbols.map(s =>
+      [s.name, s.kind ?? "", s.parent ?? "", s.content.slice(0, 500)].filter(Boolean).join(" ")
+    )
+    const vectors = await this.embeddings.embed(texts)
+
+    const points = symbols.map((s, i) => ({
+      id: stringToUint(s.id),
+      vector: vectors[i]!,
+      payload: {
+        path: s.path,
+        name: s.name,
+        kind: s.kind ?? "chunk",
+        parent: s.parent ?? null,
+        startLine: s.startLine ?? 0,
+        content: s.content.slice(0, 1000),
+      },
+    }))
+
+    await this.client.upsert(this.collectionName, { points })
   }
 
   async deleteByPath(filePath: string): Promise<void> {
@@ -122,7 +196,8 @@ export class VectorIndex {
         score: r.score,
       }))
     } catch (err) {
-      console.warn("[nexus] Vector search failed:", err)
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[nexus] Vector search failed: ${message}`)
       return []
     }
   }
@@ -133,6 +208,28 @@ export class VectorIndex {
       return true
     } catch {
       return false
+    }
+  }
+
+  async isEmpty(): Promise<boolean> {
+    if (!this.initialized) return true
+    try {
+      const info = await this.client.getCollection(this.collectionName) as Record<string, unknown>
+      const result = info["result"] as Record<string, unknown> | undefined
+      const pointsCount = result?.["points_count"]
+      return typeof pointsCount !== "number" || pointsCount <= 0
+    } catch {
+      return true
+    }
+  }
+
+  async clearCollection(): Promise<void> {
+    try {
+      await this.client.deleteCollection(this.collectionName)
+    } catch {
+      // No-op if collection does not exist or cannot be removed now.
+    } finally {
+      this.initialized = false
     }
   }
 }
@@ -146,4 +243,12 @@ function stringToUint(str: string): number {
     hash = hash & hash
   }
   return Math.abs(hash)
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size))
+  }
+  return out
 }

@@ -1,5 +1,5 @@
 // Config
-export { loadConfig, writeConfig, getGlobalConfigDir, ensureGlobalConfigDir } from "./config/index.js"
+export { loadConfig, writeConfig, writeGlobalProfiles, getGlobalConfigDir, ensureGlobalConfigDir } from "./config/index.js"
 export { NexusConfigSchema } from "./config/schema.js"
 export type { NexusConfig, ProviderConfig, EmbeddingConfig, McpServerConfig, SkillDef, ModeConfig } from "./types.js"
 
@@ -35,6 +35,8 @@ export { getAllBuiltinTools } from "./tools/built-in/index.js"
 // Indexer
 export { CodebaseIndexer } from "./indexer/index.js"
 export { ProjectRegistry, getIndexDir } from "./indexer/multi-project.js"
+export { createCodebaseIndexer } from "./indexer/factory.js"
+export { ensureQdrantRunning } from "./indexer/qdrant-manager.js"
 
 // Context
 export { parseMentions } from "./context/mentions.js"

@@ -1,5 +1,5 @@
 {
-  "name": "@nexuscode/vscode",
+  "name": "nexuscode",
   "displayName": "NexusCode",
   "description": "AI coding agent combining best practices from all vibe-coding tools",
   "version": "0.1.0",
@@ -10,12 +10,14 @@
   },
   "categories": ["AI", "Chat", "Programming Languages"],
   "keywords": ["ai", "coding", "agent", "claude", "gpt", "nexus"],
+  "repository": { "type": "git", "url": "https://github.com/we11as22/NexusCode" },
   "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "scripts": {
     "build": "pnpm build:ext && pnpm build:webview",
     "build:ext": "node esbuild.mjs",
     "build:webview": "pnpm --filter @nexuscode/webview-ui build",
+    "package": "node scripts/svg-to-png.cjs && node scripts/package-vsix.cjs",
     "dev": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit"
   },
@@ -25,7 +27,7 @@
         {
           "id": "nexuscode-activitybar",
           "title": "NexusCode",
-          "icon": "assets/icon.svg"
+          "icon": "assets/icon.png"
         }
       ]
     },
@@ -65,6 +67,16 @@
         "command": "nexuscode.clearChat",
         "title": "Clear Chat",
         "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.reindex",
+        "title": "Re-index Codebase",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.clearIndex",
+        "title": "Clear Index and Rebuild",
+        "category": "NexusCode"
       }
     ],
     "menus": {
@@ -94,36 +106,146 @@
         "nexuscode.provider": {
           "type": "string",
           "default": "anthropic",
-          "description": "Default LLM provider"
+          "description": "Default LLM provider (overrides .nexus/nexus.yaml)"
         },
         "nexuscode.model": {
           "type": "string",
           "default": "claude-sonnet-4-5",
-          "description": "Default model ID"
+          "description": "Default model ID (overrides .nexus/nexus.yaml)"
         },
         "nexuscode.apiKey": {
           "type": "string",
           "default": "",
-          "description": "API key (can also be set via environment variables)"
+          "description": "API key for the provider (overrides env and YAML; leave empty to use env)"
         },
-        "nexuscode.enableCheckpoints": {
+        "nexuscode.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Custom API base URL (e.g. for OpenAI-compatible or local LLM)"
+        },
+        "nexuscode.temperature": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Model temperature (0-2). Lower is more deterministic."
+        },
+        "nexuscode.maxModeEnabled": {
           "type": "boolean",
-          "default": true,
-          "description": "Enable workspace checkpoints (requires git)"
+          "default": false,
+          "description": "Default state of Max Mode (deeper analysis, slower)"
+        },
+        "nexuscode.maxModeTokenBudgetMultiplier": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 6,
+          "description": "How much Max Mode increases per-request token budget while keeping the same LLM model"
         },
         "nexuscode.enableIndexing": {
           "type": "boolean",
           "default": true,
           "description": "Enable codebase indexing for semantic search"
+        },
+        "nexuscode.enableVectorIndex": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable semantic vector indexing (requires embeddings + vector DB)"
+        },
+        "nexuscode.embeddingBatchSize": {
+          "type": "number",
+          "default": 60,
+          "minimum": 1,
+          "description": "Embedding batch size during vector indexing"
+        },
+        "nexuscode.embeddingConcurrency": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "description": "Parallel embedding requests during vector indexing"
+        },
+        "nexuscode.enableVectorDb": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable vector DB integration for semantic search"
+        },
+        "nexuscode.vectorDbUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:6333",
+          "description": "Vector DB URL (Qdrant-compatible API endpoint)"
+        },
+        "nexuscode.vectorDbAutoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Try to auto-start local Qdrant (binary or docker) when unavailable"
+        },
+        "nexuscode.embeddingsProvider": {
+          "type": "string",
+          "default": "",
+          "description": "Embeddings provider (openai, openai-compatible, ollama, local)"
+        },
+        "nexuscode.embeddingsModel": {
+          "type": "string",
+          "default": "",
+          "description": "Embeddings model ID"
+        },
+        "nexuscode.embeddingsApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Embeddings API key (optional)"
+        },
+        "nexuscode.embeddingsBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Embeddings provider base URL (for openai-compatible/ollama)"
+        },
+        "nexuscode.embeddingsDimensions": {
+          "type": "number",
+          "default": 0,
+          "description": "Embeddings dimensions override (0 = provider default)"
+        },
+        "nexuscode.toolClassifyThreshold": {
+          "type": "number",
+          "default": 15,
+          "description": "Dynamic tool filtering threshold. Higher = less filtering."
+        },
+        "nexuscode.skillClassifyThreshold": {
+          "type": "number",
+          "default": 8,
+          "description": "Skill filtering threshold. Higher = less filtering."
+        },
+        "nexuscode.enableCheckpoints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable workspace checkpoints before writes (requires git)"
+        },
+        "nexuscode.autoApproveRead": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-approve file read operations (no dialog)"
+        },
+        "nexuscode.autoApproveWrite": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve file write operations (no diff dialog)"
+        },
+        "nexuscode.autoApproveCommand": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve terminal command execution"
         }
       }
     }
   },
   "dependencies": {
-    "@nexuscode/core": "workspace:*"
+    "@nexuscode/core": "workspace:*",
+    "execa": "^9.5.0"
   },
   "devDependencies": {
+    "@types/node": "^22.10.1",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.0",
+    "sharp": "^0.33.5",
     "typescript": "^5.5.0",
     "esbuild": "^0.24.0"
   }

@@ -3,7 +3,6 @@ import type { LLMClient, EmbeddingClient } from "./types.js"
 import { createAnthropicClient } from "./anthropic.js"
 import { createOpenAIClient } from "./openai.js"
 import { createGoogleClient } from "./google.js"
-import { createOpenRouterClient } from "./openrouter.js"
 import { createOpenAICompatibleClient, createOllamaClient } from "./openai-compatible.js"
 import { createAzureClient } from "./azure.js"
 import { createBedrockClient } from "./bedrock.js"
@@ -25,8 +24,6 @@ export function createLLMClient(config: ProviderConfig): LLMClient {
       return createOpenAIClient(config)
     case "google":
       return createGoogleClient(config)
-    case "openrouter":
-      return createOpenRouterClient(config)
     case "ollama":
       return createOllamaClient(config)
     case "openai-compatible":

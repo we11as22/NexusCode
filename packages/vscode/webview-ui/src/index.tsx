@@ -5,3 +5,4 @@ import "./index.css"
 
 const root = document.getElementById("root")!
 createRoot(root).render(<App />)
+root.classList.add("loaded")

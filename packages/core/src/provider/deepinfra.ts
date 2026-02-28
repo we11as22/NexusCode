@@ -5,5 +5,5 @@ import { BaseLLMClient } from "./base.js"
 export function createDeepInfraClient(config: ProviderConfig) {
   const apiKey = config.apiKey ?? process.env["DEEPINFRA_API_KEY"] ?? ""
   const deepinfra = createDeepInfra({ apiKey })
-  return new BaseLLMClient(deepinfra(config.id), "deepinfra", config.id)
+  return new BaseLLMClient(deepinfra(config.id) as any, "deepinfra", config.id)
 }

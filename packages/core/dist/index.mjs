@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import { mkdirSync } from 'fs';
-import * as path4 from 'path';
+import * as path6 from 'path';
 import * as os5 from 'os';
 import { z } from 'zod';
 import * as yaml from 'js-yaml';
@@ -8,7 +8,6 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { embedMany, streamText, generateObject } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { createAzure } from '@ai-sdk/azure';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import { createGroq } from '@ai-sdk/groq';
@@ -20,7 +19,8 @@ import { createCohere } from '@ai-sdk/cohere';
 import { createTogetherAI } from '@ai-sdk/togetherai';
 import { createPerplexity } from '@ai-sdk/perplexity';
 import * as crypto from 'crypto';
-import * as fs10 from 'fs/promises';
+import * as fs11 from 'fs/promises';
+import { mkdir } from 'fs/promises';
 import { glob } from 'glob';
 import { applyPatch } from 'diff';
 import { execa } from 'execa';
@@ -29,6 +29,7 @@ import TurndownService from 'turndown';
 import Database from 'better-sqlite3';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import ignore from 'ignore';
+import { spawn } from 'child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
@@ -39,7 +40,6 @@ var PROVIDER_NAMES = [
   "anthropic",
   "openai",
   "google",
-  "openrouter",
   "ollama",
   "openai-compatible",
   "azure",
@@ -58,6 +58,7 @@ var providerSchema = z.object({
   id: z.string().min(1),
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
+  temperature: z.number().min(0).max(2).optional(),
   resourceName: z.string().optional(),
   deploymentId: z.string().optional(),
   apiVersion: z.string().optional(),
@@ -88,12 +89,12 @@ var NexusConfigSchema = z.object({
     provider: "anthropic",
     id: "claude-sonnet-4-5"
   }),
-  maxMode: providerSchema.extend({
-    enabled: z.boolean().default(false)
+  maxMode: z.object({
+    enabled: z.boolean().default(false),
+    tokenBudgetMultiplier: z.number().min(1).max(6).default(2)
   }).default({
-    provider: "anthropic",
-    id: "claude-opus-4-5",
-    enabled: false
+    enabled: false,
+    tokenBudgetMultiplier: 2
   }),
   embeddings: embeddingSchema.optional(),
   vectorDb: z.object({
@@ -124,6 +125,8 @@ var NexusConfigSchema = z.object({
     fts: z.boolean().default(true),
     vector: z.boolean().default(false),
     batchSize: z.number().int().positive().default(50),
+    embeddingBatchSize: z.number().int().positive().default(60),
+    embeddingConcurrency: z.number().int().positive().default(2),
     debounceMs: z.number().int().positive().default(1500)
   }).default({}),
   permissions: z.object({
@@ -182,8 +185,9 @@ function getYaml() {
   return yaml;
 }
 var CONFIG_FILE_NAMES = [".nexus/nexus.yaml", ".nexus/nexus.yml", ".nexusrc.yaml", ".nexusrc.yml"];
-var GLOBAL_CONFIG_DIR = path4.join(os5.homedir(), ".nexus");
-var GLOBAL_CONFIG_PATH = path4.join(GLOBAL_CONFIG_DIR, "nexus.yaml");
+var GLOBAL_CONFIG_DIR = path6.join(os5.homedir(), ".nexus");
+var GLOBAL_CONFIG_PATH = path6.join(GLOBAL_CONFIG_DIR, "nexus.yaml");
+var OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 async function loadConfig(cwd) {
   const startDir = cwd ?? process.cwd();
   const globalRaw = readConfigFile(GLOBAL_CONFIG_PATH);
@@ -192,7 +196,7 @@ async function loadConfig(cwd) {
   let maxUp = 20;
   while (maxUp-- > 0) {
     for (const name of CONFIG_FILE_NAMES) {
-      const candidate = path4.join(dir, name);
+      const candidate = path6.join(dir, name);
       const raw = readConfigFile(candidate);
       if (raw) {
         projectRaw = raw;
@@ -200,12 +204,13 @@ async function loadConfig(cwd) {
       }
     }
     if (projectRaw) break;
-    const parent = path4.dirname(dir);
+    const parent = path6.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
   const merged = deepMerge(globalRaw ?? {}, projectRaw ?? {});
   applyEnvOverrides(merged);
+  normalizeProviderAliases(merged);
   const result = NexusConfigSchema.safeParse(merged);
   if (!result.success) {
     console.warn("[nexus] Config validation warnings:", result.error.issues.map((i) => i.message).join(", "));
@@ -228,6 +233,7 @@ function readConfigFile(filePath) {
 var PROVIDER_API_KEY_ENV = {
   anthropic: ["ANTHROPIC_API_KEY"],
   openai: ["OPENAI_API_KEY"],
+  "openai-compatible": ["OPENAI_API_KEY", "OPENROUTER_API_KEY"],
   google: ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
   azure: ["AZURE_OPENAI_API_KEY"],
@@ -242,6 +248,7 @@ var PROVIDER_API_KEY_ENV = {
   perplexity: ["PERPLEXITY_API_KEY"]
 };
 var PROVIDER_MODEL_ENV = {
+  "openai-compatible": ["OPENAI_MODEL", "OPENROUTER_MODEL"],
   openrouter: ["OPENROUTER_MODEL"],
   anthropic: ["ANTHROPIC_MODEL"],
   openai: ["OPENAI_MODEL"],
@@ -291,24 +298,87 @@ function applyEnvOverrides(config) {
   if (process.env["NEXUS_BASE_URL"]) {
     model["baseUrl"] = process.env["NEXUS_BASE_URL"];
   }
+  const tempRaw = process.env["NEXUS_TEMPERATURE"];
+  if (tempRaw) {
+    const t = Number(tempRaw);
+    if (Number.isFinite(t) && t >= 0 && t <= 2) {
+      model["temperature"] = t;
+    }
+  }
   if (process.env["NEXUS_MAX_MODE"] === "1" || process.env["NEXUS_MAX_MODE"] === "true") {
     if (!config.maxMode || typeof config.maxMode !== "object") config.maxMode = {};
     config.maxMode["enabled"] = true;
   }
-  if (config.maxMode && typeof config.maxMode === "object") {
-    const mm = config.maxMode;
-    if (!mm["apiKey"] && mm["provider"]) {
-      const provider = String(mm["provider"]);
-      const envVars = PROVIDER_API_KEY_ENV[provider] ?? [];
-      for (const envVar of envVars) {
-        const v = process.env[envVar];
-        if (v) {
-          mm["apiKey"] = v;
-          break;
-        }
+  if (!config.maxMode || typeof config.maxMode !== "object") config.maxMode = {};
+  const mm = config.maxMode;
+  if (typeof mm["enabled"] !== "boolean") {
+    mm["enabled"] = false;
+  }
+  const mmMultiplierRaw = process.env["NEXUS_MAX_TOKEN_MULTIPLIER"] ?? process.env["NEXUS_MAX_TOKENS_MULTIPLIER"];
+  if (mmMultiplierRaw) {
+    const m = Number(mmMultiplierRaw);
+    if (Number.isFinite(m) && m >= 1 && m <= 6) {
+      mm["tokenBudgetMultiplier"] = m;
+    }
+  }
+}
+function normalizeProviderAliases(config) {
+  const model = asRecord(config["model"]);
+  if (model) {
+    const provider = String(model["provider"] ?? "");
+    if (provider === "openrouter") {
+      model["provider"] = "openai-compatible";
+      if (!isNonEmptyString(model["baseUrl"])) model["baseUrl"] = OPENROUTER_BASE_URL;
+      if (!isNonEmptyString(model["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
+        model["apiKey"] = process.env["OPENROUTER_API_KEY"];
+      }
+      if (!isNonEmptyString(model["id"]) && process.env["OPENROUTER_MODEL"]) {
+        model["id"] = process.env["OPENROUTER_MODEL"];
+      }
+    }
+    if (provider === "openai-compatible" && isOpenRouterBaseUrl(model["baseUrl"])) {
+      if (!isNonEmptyString(model["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
+        model["apiKey"] = process.env["OPENROUTER_API_KEY"];
+      }
+      if (!isNonEmptyString(model["id"]) && process.env["OPENROUTER_MODEL"]) {
+        model["id"] = process.env["OPENROUTER_MODEL"];
       }
     }
   }
+  const embeddings = asRecord(config["embeddings"]);
+  if (embeddings) {
+    if (String(embeddings["provider"] ?? "") === "openrouter") {
+      embeddings["provider"] = "openai-compatible";
+      if (!isNonEmptyString(embeddings["baseUrl"])) embeddings["baseUrl"] = OPENROUTER_BASE_URL;
+    }
+    if (String(embeddings["provider"] ?? "") === "openai-compatible" && isOpenRouterBaseUrl(embeddings["baseUrl"])) {
+      if (!isNonEmptyString(embeddings["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
+        embeddings["apiKey"] = process.env["OPENROUTER_API_KEY"];
+      }
+    }
+  }
+  const profiles = asRecord(config["profiles"]);
+  if (profiles) {
+    for (const value of Object.values(profiles)) {
+      const profile = asRecord(value);
+      if (!profile) continue;
+      if (String(profile["provider"] ?? "") === "openrouter") {
+        profile["provider"] = "openai-compatible";
+        if (!isNonEmptyString(profile["baseUrl"])) profile["baseUrl"] = OPENROUTER_BASE_URL;
+      }
+    }
+  }
+}
+function asRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value;
+}
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+function isOpenRouterBaseUrl(value) {
+  if (!isNonEmptyString(value)) return false;
+  return value.toLowerCase().includes("openrouter.ai");
 }
 function deepMerge(base, override) {
   const result = { ...base };
@@ -322,11 +392,18 @@ function deepMerge(base, override) {
   return result;
 }
 function writeConfig(config, cwd) {
-  const dir = path4.join(cwd ?? process.cwd(), ".nexus");
+  const dir = path6.join(cwd ?? process.cwd(), ".nexus");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const filePath = path4.join(dir, "nexus.yaml");
+  const filePath = path6.join(dir, "nexus.yaml");
   const content = getYaml().dump(config, { indent: 2, lineWidth: 120 });
   fs.writeFileSync(filePath, content, "utf8");
+}
+function writeGlobalProfiles(profiles) {
+  ensureGlobalConfigDir();
+  const current = readConfigFile(GLOBAL_CONFIG_PATH) ?? {};
+  current["profiles"] = profiles;
+  const content = getYaml().dump(current, { indent: 2, lineWidth: 120 });
+  fs.writeFileSync(GLOBAL_CONFIG_PATH, content, "utf8");
 }
 function getGlobalConfigDir() {
   return GLOBAL_CONFIG_DIR;
@@ -335,11 +412,11 @@ function ensureGlobalConfigDir() {
   if (!fs.existsSync(GLOBAL_CONFIG_DIR)) {
     fs.mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
   }
-  const skillsDir = path4.join(GLOBAL_CONFIG_DIR, "skills");
+  const skillsDir = path6.join(GLOBAL_CONFIG_DIR, "skills");
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
   }
-  const rulesDir = path4.join(GLOBAL_CONFIG_DIR, "rules");
+  const rulesDir = path6.join(GLOBAL_CONFIG_DIR, "rules");
   if (!fs.existsSync(rulesDir)) {
     fs.mkdirSync(rulesDir, { recursive: true });
   }
@@ -617,8 +694,8 @@ function isNetworkError(err) {
   return msg.includes("econnreset") || msg.includes("econnrefused") || msg.includes("etimedout") || msg.includes("network") || msg.includes("socket") || msg.includes("fetch failed");
 }
 function sleep(ms, signal) {
-  return new Promise((resolve9, reject) => {
-    const timer = setTimeout(resolve9, ms);
+  return new Promise((resolve10, reject) => {
+    const timer = setTimeout(resolve10, ms);
     signal?.addEventListener("abort", () => {
       clearTimeout(timer);
       reject(new Error("Aborted"));
@@ -673,12 +750,6 @@ function createGoogleClient(config) {
     useSearchGrounding: false
   });
   return new BaseLLMClient(model, "google", config.id);
-}
-function createOpenRouterClient(config) {
-  const apiKey = config.apiKey ?? process.env["OPENROUTER_API_KEY"] ?? "";
-  const openrouter = createOpenRouter({ apiKey });
-  const model = openrouter(config.id);
-  return new BaseLLMClient(model, "openrouter", config.id);
 }
 function createOpenAICompatibleClient(config) {
   if (!config.baseUrl) {
@@ -795,7 +866,7 @@ var OpenAIEmbeddingClient = class {
   dimensions;
   constructor(config) {
     const openai = createOpenAI({
-      apiKey: config.apiKey ?? process.env["OPENAI_API_KEY"] ?? ""
+      apiKey: config.apiKey ?? process.env["OPENAI_API_KEY"] ?? process.env["NEXUS_API_KEY"] ?? ""
     });
     this.model = openai.embedding(config.model);
     this.dimensions = config.dimensions ?? 1536;
@@ -810,7 +881,7 @@ var OpenAICompatibleEmbeddingClient = class {
   dimensions;
   constructor(config) {
     const openai = createOpenAI({
-      apiKey: config.apiKey ?? "dummy",
+      apiKey: config.apiKey ?? process.env["OPENAI_API_KEY"] ?? process.env["OPENROUTER_API_KEY"] ?? process.env["NEXUS_API_KEY"] ?? "dummy",
       baseURL: config.baseUrl,
       compatibility: "compatible"
     });
@@ -870,8 +941,6 @@ function createLLMClient(config) {
       return createOpenAIClient(config);
     case "google":
       return createGoogleClient(config);
-    case "openrouter":
-      return createOpenRouterClient(config);
     case "ollama":
       return createOllamaClient(config);
     case "openai-compatible":
@@ -902,23 +971,23 @@ function createLLMClient(config) {
 }
 function getSessionsDir(cwd) {
   const hash = crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 12);
-  return path4.join(os5.homedir(), ".nexus", "sessions", hash);
+  return path6.join(os5.homedir(), ".nexus", "sessions", hash);
 }
 async function saveSession(session) {
   const dir = getSessionsDir(session.cwd);
-  await fs10.mkdir(dir, { recursive: true });
-  const filePath = path4.join(dir, `${session.id}.jsonl`);
+  await fs11.mkdir(dir, { recursive: true });
+  const filePath = path6.join(dir, `${session.id}.jsonl`);
   const lines = session.messages.map((m) => JSON.stringify(m)).join("\n");
   const meta = JSON.stringify({ id: session.id, cwd: session.cwd, ts: session.ts, title: session.title });
-  await fs10.writeFile(filePath, `${meta}
+  await fs11.writeFile(filePath, `${meta}
 ${lines}
 `, "utf8");
 }
 async function loadSession(sessionId, cwd) {
   const dir = getSessionsDir(cwd);
-  const filePath = path4.join(dir, `${sessionId}.jsonl`);
+  const filePath = path6.join(dir, `${sessionId}.jsonl`);
   if (!fs.existsSync(filePath)) return null;
-  const content = await fs10.readFile(filePath, "utf8");
+  const content = await fs11.readFile(filePath, "utf8");
   const lines = content.split("\n").filter(Boolean);
   if (lines.length === 0) return null;
   const meta = JSON.parse(lines[0]);
@@ -928,12 +997,12 @@ async function loadSession(sessionId, cwd) {
 async function listSessions(cwd) {
   const dir = getSessionsDir(cwd);
   if (!fs.existsSync(dir)) return [];
-  const files = await fs10.readdir(dir).catch(() => []);
+  const files = await fs11.readdir(dir).catch(() => []);
   const sessions = [];
   for (const file of files) {
     if (!file.endsWith(".jsonl")) continue;
     try {
-      const content = await fs10.readFile(path4.join(dir, file), "utf8");
+      const content = await fs11.readFile(path6.join(dir, file), "utf8");
       const lines = content.split("\n").filter(Boolean);
       if (lines.length === 0) continue;
       const meta = JSON.parse(lines[0]);
@@ -1302,7 +1371,7 @@ Answer questions, explain code, and analyze implementations. You CAN read files 
 }
 var MAX_MODE_BLOCK = `## \u26A1 MAX MODE ACTIVE
 
-You are running in MAX MODE with extended depth and thoroughness. Apply these additional steps:
+You are running in MAX MODE with extended depth and thoroughness (same model, larger reasoning/context budget). Apply these additional steps:
 
 - Read ALL relevant files (not just the obvious ones) before starting
 - Map all dependencies, callers, and affected modules
@@ -1545,6 +1614,7 @@ var TOOL_GROUP_MEMBERS = {
   skills: ["use_skill"],
   agents: ["spawn_agent"]
 };
+var PLAN_MODE_ALLOWED_WRITE_PATTERN = /^\.nexus[\\/]plans[\\/].+\.(md|txt)$/i;
 var READ_ONLY_TOOLS = /* @__PURE__ */ new Set([
   "read_file",
   "list_files",
@@ -1661,14 +1731,129 @@ Select the most relevant skills.`;
     return skills.slice(0, 6);
   }
 }
+var MENTION_REGEX = /@(file|folder|url|problems|git|terminal):([^\s]+)|@(problems|git|terminal)/g;
+async function parseMentions(text, cwd, host) {
+  const mentions = [];
+  const regex = new RegExp(MENTION_REGEX.source, "g");
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const type = match[1] ?? match[3] ?? "";
+    const arg = match[2] ?? "";
+    const resolved = await resolveMention(type, arg, cwd, host);
+    if (resolved) {
+      mentions.push({ original: match[0], type, content: resolved });
+    }
+  }
+  if (mentions.length === 0) return { text, contextBlocks: [] };
+  let processedText = text;
+  const contextBlocks = [];
+  for (const mention of mentions) {
+    `mention_${mention.type}`;
+    processedText = processedText.replace(mention.original, `[${mention.type} context below]`);
+    contextBlocks.push(mention.content);
+  }
+  return { text: processedText, contextBlocks };
+}
+async function resolveMention(type, arg, cwd, host) {
+  switch (type) {
+    case "file": {
+      const absPath = path6.resolve(cwd, arg);
+      try {
+        const content = await fs11.readFile(absPath, "utf8");
+        const lines = content.split("\n");
+        const truncated = lines.length > 200 ? lines.slice(0, 200).join("\n") + "\n[...truncated]" : content;
+        const relPath = path6.relative(cwd, absPath);
+        return `<file path="${relPath}">
+${truncated}
+</file>`;
+      } catch {
+        return `<file path="${arg}" error="not found"/>`;
+      }
+    }
+    case "folder": {
+      const absPath = path6.resolve(cwd, arg);
+      try {
+        const entries = await listDirRecursive(absPath, cwd, 50);
+        const relPath = path6.relative(cwd, absPath);
+        return `<folder path="${relPath}">
+${entries.join("\n")}
+</folder>`;
+      } catch {
+        return `<folder path="${arg}" error="not found"/>`;
+      }
+    }
+    case "url": {
+      try {
+        const response = await fetch(arg, {
+          headers: { "User-Agent": "NexusCode/1.0" },
+          signal: AbortSignal.timeout(15e3)
+        });
+        const text = await response.text();
+        const truncated = text.length > 5e4 ? text.slice(0, 5e4) + "\n[...truncated]" : text;
+        return `<url href="${arg}">
+${truncated}
+</url>`;
+      } catch {
+        return `<url href="${arg}" error="fetch failed"/>`;
+      }
+    }
+    case "problems": {
+      if (!host?.getProblems) return null;
+      try {
+        const problems = await host.getProblems();
+        if (problems.length === 0) return `<problems>No diagnostics found.</problems>`;
+        const formatted = problems.slice(0, 50).map(
+          (p) => `[${p.severity.toUpperCase()}] ${p.file}:${p.line} \u2014 ${p.message}`
+        ).join("\n");
+        return `<problems>
+${formatted}
+</problems>`;
+      } catch {
+        return null;
+      }
+    }
+    case "git": {
+      try {
+        const { execa: execa4 } = await import('execa');
+        const { stdout } = await execa4("git", ["diff", "--stat", "HEAD"], { cwd });
+        const status = await execa4("git", ["status", "--short"], { cwd });
+        return `<git_state>
+${status.stdout}
 
-// src/agent/loop.ts
+${stdout}
+</git_state>`;
+      } catch {
+        return null;
+      }
+    }
+    default:
+      return null;
+  }
+}
+async function listDirRecursive(dir, cwd, maxEntries) {
+  const entries = [];
+  async function walk(d, prefix) {
+    if (entries.length >= maxEntries) return;
+    const items = await fs11.readdir(d).catch(() => []);
+    for (const item of items) {
+      if (entries.length >= maxEntries) break;
+      if (item === "node_modules" || item === ".git") continue;
+      const full = path6.join(d, item);
+      path6.relative(cwd, full);
+      const st = await fs11.stat(full).catch(() => null);
+      if (!st) continue;
+      entries.push(prefix + item + (st.isDirectory() ? "/" : ""));
+      if (st.isDirectory()) await walk(full, prefix + "  ");
+    }
+  }
+  await walk(dir, "");
+  return entries;
+}
 var DOOM_LOOP_THRESHOLD = 3;
 async function runAgentLoop(opts) {
   const {
     session,
     client,
-    maxModeClient,
     host,
     config,
     mode,
@@ -1680,7 +1865,7 @@ async function runAgentLoop(opts) {
     signal,
     gitBranch
   } = opts;
-  const activeClient = config.maxMode.enabled && maxModeClient ? maxModeClient : client;
+  const activeClient = client;
   const blockedTools = getBlockedToolsForMode(mode);
   const builtinToolNames = new Set(getBuiltinToolsForMode(mode));
   const builtinTools = tools.filter((t) => builtinToolNames.has(t.name) && !blockedTools.has(t.name));
@@ -1713,7 +1898,27 @@ async function runAgentLoop(opts) {
     signal
   };
   const autoApproveActions = getAutoApproveActions(mode, config.modes[mode]);
+  const mentionsContext = await resolveMentionsContext(session, host);
+  let consecutiveInvalidToolCalls = 0;
+  const MAX_CONSECUTIVE_INVALID = 3;
+  let loopIterations = 0;
+  const baseMaxIterationsByMode = {
+    ask: 10,
+    plan: 16,
+    agent: 32,
+    debug: 32
+  };
+  const maxIterations = config.maxMode.enabled ? Math.floor(baseMaxIterationsByMode[mode] * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2)))) : baseMaxIterationsByMode[mode];
   while (!signal.aborted) {
+    loopIterations++;
+    if (loopIterations > maxIterations) {
+      host.emit({
+        type: "error",
+        error: `Agent loop stopped after ${maxIterations} iterations in ${mode} mode (safety limit).`,
+        fatal: true
+      });
+      break;
+    }
     const promptCtx = {
       mode,
       maxMode: config.maxMode.enabled,
@@ -1726,7 +1931,7 @@ async function runAgentLoop(opts) {
       gitBranch,
       todoList: session.getTodo(),
       compactionSummary: getCompactionSummary(session),
-      mentionsContext: void 0
+      mentionsContext
     };
     const { blocks, cacheableCount } = buildSystemPrompt(promptCtx);
     const systemPrompt = blocks.join("\n\n---\n\n");
@@ -1744,8 +1949,7 @@ async function runAgentLoop(opts) {
     const pendingReads = [];
     let lastToolName = "";
     let finishReason;
-    let consecutiveInvalidToolCalls = 0;
-    const MAX_CONSECUTIVE_INVALID = 3;
+    let fatalStreamError = false;
     const flushPendingReads = async () => {
       if (pendingReads.length === 0) return;
       const tasks = pendingReads.map(
@@ -1772,13 +1976,16 @@ async function runAgentLoop(opts) {
       pendingReads.length = 0;
     };
     try {
+      const tokenMultiplier = config.maxMode.enabled ? Math.max(1, Math.min(6, Number(config.maxMode.tokenBudgetMultiplier || 2))) : 1;
+      const maxTokens = Math.floor(8192 * tokenMultiplier);
       for await (const event of activeClient.stream({
         messages,
         tools: llmTools,
         systemPrompt,
         signal,
         cacheableSystemBlocks: cacheableCount,
-        maxTokens: config.maxMode.enabled ? 16384 : 8192
+        maxTokens,
+        temperature: config.model.temperature
       })) {
         if (signal.aborted) break;
         switch (event.type) {
@@ -1888,7 +2095,12 @@ async function runAgentLoop(opts) {
           case "error":
             if (event.error) {
               await flushPendingReads();
-              host.emit({ type: "error", error: event.error.message });
+              const message = event.error.message;
+              const isRetrying = message.startsWith("Retrying after error");
+              host.emit({ type: "error", error: message, fatal: !isRetrying });
+              if (!isRetrying) {
+                fatalStreamError = true;
+              }
             }
             break;
         }
@@ -1901,6 +2113,9 @@ async function runAgentLoop(opts) {
         await handleCompaction(session, activeClient, config, host, compaction, signal);
         continue;
       }
+      break;
+    }
+    if (fatalStreamError) {
       break;
     }
     if (lastToolName === "attempt_completion") break;
@@ -1925,15 +2140,30 @@ async function executeToolCall(toolCallId, toolName, toolInput, tools, ctx, auto
       output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use execute_command. To present final results, use attempt_completion.`
     };
   }
-  if (ctx.config.modes && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName) && toolInput["path"] && typeof toolInput["path"] === "string") {
-    const pathExtension = toolInput["path"].match(/\.[a-zA-Z0-9]+$/);
-    const ext = pathExtension ? pathExtension[0].toLowerCase() : "";
-    if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
-      const isRestrictedMode = !tools.some((t) => t.name === "execute_command");
-      if (isRestrictedMode) {
+  if (ctx.config.modes && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
+    const isRestrictedMode = !tools.some((t) => t.name === "execute_command");
+    if (isRestrictedMode) {
+      const targetPath = extractWriteTargetPath(toolName, toolInput);
+      if (!targetPath) {
         return {
           success: false,
-          output: `In the current mode, you cannot modify source code files (${ext}). You may only write documentation files (.md, .txt). Use attempt_completion to present your plan as text.`
+          output: "In the current mode, write operations require an explicit target path under .nexus/plans/*.md or .txt."
+        };
+      }
+      const rel = path6.isAbsolute(targetPath) ? path6.relative(ctx.cwd, targetPath) : targetPath;
+      const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "");
+      if (!PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) {
+        const extMatch = normalized.match(/\.[a-zA-Z0-9]+$/);
+        const ext = extMatch ? extMatch[0].toLowerCase() : "";
+        if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
+          return {
+            success: false,
+            output: `In the current mode, you cannot modify source code files (${ext}). You may only write plan docs in .nexus/plans/*.md or .txt.`
+          };
+        }
+        return {
+          success: false,
+          output: "In the current mode, you may only write plan documentation files under .nexus/plans/ (*.md or *.txt)."
         };
       }
     }
@@ -1978,6 +2208,22 @@ async function executeToolCall(toolCallId, toolName, toolInput, tools, ctx, auto
   }
   try {
     const result = await tool.execute(validatedArgs, ctx);
+    if (result.success && ctx.indexer && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
+      const targetPath = extractWriteTargetPath(toolName, validatedArgs);
+      const refreshFile = ctx.indexer.refreshFile;
+      const refreshFileNow = ctx.indexer.refreshFileNow;
+      if (targetPath && (refreshFileNow || refreshFile)) {
+        const absolutePath = path6.isAbsolute(targetPath) ? targetPath : path6.resolve(ctx.cwd, targetPath);
+        try {
+          if (refreshFileNow) {
+            await refreshFileNow.call(ctx.indexer, absolutePath);
+          } else if (refreshFile) {
+            await refreshFile.call(ctx.indexer, absolutePath);
+          }
+        } catch {
+        }
+      }
+    }
     return { success: result.success, output: result.output };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2077,6 +2323,21 @@ ${typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)}
     }
   }
   return messages;
+}
+async function resolveMentionsContext(session, host) {
+  const latestUser = [...session.messages].reverse().find((msg) => msg.role === "user" && typeof msg.content === "string");
+  if (!latestUser || typeof latestUser.content !== "string") return void 0;
+  if (!latestUser.content.includes("@")) return void 0;
+  try {
+    const resolved = await parseMentions(latestUser.content, host.cwd, host);
+    if (resolved.contextBlocks.length === 0) return void 0;
+    if (resolved.text !== latestUser.content) {
+      session.updateMessage(latestUser.id, { content: resolved.text });
+    }
+    return resolved.contextBlocks.join("\n\n");
+  } catch {
+    return void 0;
+  }
 }
 function toolNeedsApproval(toolName, toolInput, autoApproveActions, config) {
   if (READ_ONLY_TOOLS.has(toolName)) {
@@ -2210,6 +2471,19 @@ function isContextOverflowError(message) {
   const lower = message.toLowerCase();
   return lower.includes("context length") || lower.includes("context window") || lower.includes("max tokens") || lower.includes("too long") || lower.includes("token limit");
 }
+function extractWriteTargetPath(toolName, toolInput) {
+  if (typeof toolInput["path"] === "string" && toolInput["path"]) {
+    return toolInput["path"];
+  }
+  if (toolName === "apply_patch" && typeof toolInput["patch"] === "string") {
+    const patch = toolInput["patch"];
+    const match = patch.match(/^(?:---|\+\+\+)\s+(?:a\/|b\/)?(.+?)(?:\t.*)?$/m);
+    if (match?.[1] && match[1] !== "/dev/null") {
+      return match[1];
+    }
+  }
+  return void 0;
+}
 function getContextLimit(modelId) {
   const lower = modelId.toLowerCase();
   if (lower.includes("claude-3") || lower.includes("claude-4") || lower.includes("claude-sonnet") || lower.includes("claude-opus")) return 2e5;
@@ -2229,44 +2503,44 @@ async function loadRules(cwd, rulePatterns) {
   let maxUp = 10;
   while (maxUp-- > 0) {
     for (const file of topLevelFiles) {
-      const candidate = path4.join(dir, file);
+      const candidate = path6.join(dir, file);
       if (!seen.has(candidate)) {
         const content = await readFileSafe(candidate);
         if (content) {
           seen.add(candidate);
-          const rel = path4.relative(cwd, candidate);
+          const rel = path6.relative(cwd, candidate);
           contents.push(`<!-- Rules from ${rel} -->
 ${content}`);
         }
       }
     }
-    const parent = path4.dirname(dir);
+    const parent = path6.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
   for (const pattern of globPatterns) {
-    const expandedPath = pattern.startsWith("~") ? pattern.replace("~", os5.homedir()) : path4.join(cwd, pattern);
+    const expandedPath = pattern.startsWith("~") ? pattern.replace("~", os5.homedir()) : path6.join(cwd, pattern);
     const matches = await glob(expandedPath).catch(() => []);
     for (const match of matches.sort()) {
       if (!seen.has(match)) {
         const content = await readFileSafe(match);
         if (content) {
           seen.add(match);
-          const rel = path4.relative(cwd, match);
+          const rel = path6.relative(cwd, match);
           contents.push(`<!-- Rules from ${rel} -->
 ${content}`);
         }
       }
     }
   }
-  const globalRulesDir = path4.join(os5.homedir(), ".nexus", "rules");
-  const globalRules = await glob(path4.join(globalRulesDir, "**/*.md")).catch(() => []);
+  const globalRulesDir = path6.join(os5.homedir(), ".nexus", "rules");
+  const globalRules = await glob(path6.join(globalRulesDir, "**/*.md")).catch(() => []);
   for (const match of globalRules.sort()) {
     if (!seen.has(match)) {
       const content = await readFileSafe(match);
       if (content) {
         seen.add(match);
-        contents.push(`<!-- Global rule: ${path4.basename(match)} -->
+        contents.push(`<!-- Global rule: ${path6.basename(match)} -->
 ${content}`);
       }
     }
@@ -2275,10 +2549,10 @@ ${content}`);
 }
 async function readFileSafe(filePath) {
   try {
-    const stat7 = await fs10.stat(filePath);
-    if (!stat7.isFile()) return null;
-    if (stat7.size > 100 * 1024) return null;
-    return await fs10.readFile(filePath, "utf8");
+    const stat8 = await fs11.stat(filePath);
+    if (!stat8.isFile()) return null;
+    if (stat8.size > 100 * 1024) return null;
+    return await fs11.readFile(filePath, "utf8");
   } catch {
     return null;
   }
@@ -2287,15 +2561,15 @@ async function loadSkills(skillPaths, cwd) {
   const skills = [];
   const seen = /* @__PURE__ */ new Set();
   const configPaths = skillPaths.map(
-    (p) => path4.isAbsolute(p) ? p : path4.resolve(cwd, p)
+    (p) => path6.isAbsolute(p) ? p : path6.resolve(cwd, p)
   );
   const standardGlobs = [
-    path4.join(cwd, ".nexus", "skills", "**", "SKILL.md"),
-    path4.join(cwd, ".nexus", "skills", "**", "*.md"),
-    path4.join(cwd, ".agents", "skills", "**", "*.md"),
-    path4.join(os5.homedir(), ".nexus", "skills", "**", "SKILL.md"),
-    path4.join(os5.homedir(), ".nexus", "skills", "**", "*.md"),
-    path4.join(os5.homedir(), ".agents", "skills", "**", "*.md")
+    path6.join(cwd, ".nexus", "skills", "**", "SKILL.md"),
+    path6.join(cwd, ".nexus", "skills", "**", "*.md"),
+    path6.join(cwd, ".agents", "skills", "**", "*.md"),
+    path6.join(os5.homedir(), ".nexus", "skills", "**", "SKILL.md"),
+    path6.join(os5.homedir(), ".nexus", "skills", "**", "*.md"),
+    path6.join(os5.homedir(), ".agents", "skills", "**", "*.md")
   ];
   for (const cfgPath of configPaths) {
     await collectSkillFiles(cfgPath, seen, skills);
@@ -2333,24 +2607,24 @@ async function collectSkillFiles(cfgPath, seen, skills, cwd) {
     }
     return;
   }
-  const stat7 = await fs10.stat(cfgPath).catch(() => null);
-  if (!stat7) return;
-  if (stat7.isFile()) {
+  const stat8 = await fs11.stat(cfgPath).catch(() => null);
+  if (!stat8) return;
+  if (stat8.isFile()) {
     if (seen.has(cfgPath)) return;
     seen.add(cfgPath);
     const skill = await loadSkillFile(cfgPath);
     if (skill) skills.push(skill);
     return;
   }
-  if (stat7.isDirectory()) {
+  if (stat8.isDirectory()) {
     const candidates = [
-      path4.join(cfgPath, "SKILL.md"),
-      path4.join(cfgPath, "skill.md"),
-      path4.join(cfgPath, "README.md")
+      path6.join(cfgPath, "SKILL.md"),
+      path6.join(cfgPath, "skill.md"),
+      path6.join(cfgPath, "README.md")
     ];
     for (const c of candidates) {
       if (seen.has(c)) continue;
-      const cStat = await fs10.stat(c).catch(() => null);
+      const cStat = await fs11.stat(c).catch(() => null);
       if (cStat?.isFile()) {
         seen.add(c);
         const skill = await loadSkillFile(c);
@@ -2360,7 +2634,7 @@ async function collectSkillFiles(cfgPath, seen, skills, cwd) {
         }
       }
     }
-    const files = await glob(path4.join(cfgPath, "*.md"), { absolute: true }).catch(() => []);
+    const files = await glob(path6.join(cfgPath, "*.md"), { absolute: true }).catch(() => []);
     for (const file of files) {
       if (seen.has(file)) continue;
       seen.add(file);
@@ -2371,10 +2645,10 @@ async function collectSkillFiles(cfgPath, seen, skills, cwd) {
 }
 async function loadSkillFile(filePath, _cwd) {
   try {
-    const content = await fs10.readFile(filePath, "utf8");
+    const content = await fs11.readFile(filePath, "utf8");
     if (!content.trim()) return null;
-    const dirName = path4.basename(path4.dirname(filePath));
-    const fileName = path4.basename(filePath, path4.extname(filePath));
+    const dirName = path6.basename(path6.dirname(filePath));
+    const fileName = path6.basename(filePath, path6.extname(filePath));
     const name = !["skills", ".nexus", ".agents"].includes(dirName.toLowerCase()) ? dirName : fileName;
     const lines = content.split("\n").filter((l) => l.trim());
     const headingLine = lines.find((l) => l.startsWith("#"));
@@ -2402,31 +2676,31 @@ Maximum: ${MAX_FILE_SIZE / 1024}KB or ${MAX_LINES} lines per read.`,
   parameters: schema,
   readOnly: true,
   async execute({ path: filePath, start_line, end_line }, ctx) {
-    const absPath = path4.resolve(ctx.cwd, filePath);
-    let stat7;
+    const absPath = path6.resolve(ctx.cwd, filePath);
+    let stat8;
     try {
-      stat7 = await fs10.stat(absPath);
+      stat8 = await fs11.stat(absPath);
     } catch {
       return { success: false, output: `File not found: ${filePath}` };
     }
-    if (stat7.isDirectory()) {
+    if (stat8.isDirectory()) {
       return { success: false, output: `Path is a directory, not a file: ${filePath}. Use list_files instead.` };
     }
     if (await isBinaryFile(absPath)) {
       return {
         success: true,
         output: `[Binary file: ${filePath}]
-Size: ${formatBytes(stat7.size)}
+Size: ${formatBytes(stat8.size)}
 Cannot read binary content.`
       };
     }
-    if (stat7.size > MAX_FILE_SIZE && !start_line) {
-      const content2 = await fs10.readFile(absPath, "utf8");
+    if (stat8.size > MAX_FILE_SIZE && !start_line) {
+      const content2 = await fs11.readFile(absPath, "utf8");
       return truncateWithHeadTail(content2, filePath);
     }
     let content;
     try {
-      content = await fs10.readFile(absPath, "utf8");
+      content = await fs11.readFile(absPath, "utf8");
     } catch (err) {
       return { success: false, output: `Failed to read ${filePath}: ${err.message}` };
     }
@@ -2462,7 +2736,7 @@ ${numbered}
 };
 async function isBinaryFile(filePath) {
   try {
-    const handle = await fs10.open(filePath, "r");
+    const handle = await fs11.open(filePath, "r");
     const buffer = Buffer.alloc(512);
     const { bytesRead } = await handle.read(buffer, 0, 512, 0);
     await handle.close();
@@ -2512,16 +2786,16 @@ WARNING: This replaces the entire file content. Provide the complete final conte
   parameters: schema2,
   requiresApproval: true,
   async execute({ path: filePath, content }, ctx) {
-    const absPath = path4.resolve(ctx.cwd, filePath);
-    const dirPath = path4.dirname(absPath);
-    await fs10.mkdir(dirPath, { recursive: true });
+    const absPath = path6.resolve(ctx.cwd, filePath);
+    const dirPath = path6.dirname(absPath);
+    await fs11.mkdir(dirPath, { recursive: true });
     const tmpPath = `${absPath}.nexus_tmp_${Date.now()}`;
     try {
-      await fs10.writeFile(tmpPath, content, "utf8");
-      await fs10.rename(tmpPath, absPath);
+      await fs11.writeFile(tmpPath, content, "utf8");
+      await fs11.rename(tmpPath, absPath);
     } catch (err) {
       try {
-        await fs10.unlink(tmpPath);
+        await fs11.unlink(tmpPath);
       } catch {
       }
       return { success: false, output: `Failed to write ${filePath}: ${err.message}` };
@@ -2560,10 +2834,10 @@ IMPORTANT:
   parameters: schema3,
   requiresApproval: true,
   async execute({ path: filePath, diff }, ctx) {
-    const absPath = path4.resolve(ctx.cwd, filePath);
+    const absPath = path6.resolve(ctx.cwd, filePath);
     let content;
     try {
-      content = await fs10.readFile(absPath, "utf8");
+      content = await fs11.readFile(absPath, "utf8");
     } catch {
       return { success: false, output: `File not found: ${filePath}` };
     }
@@ -2588,11 +2862,11 @@ Hint: Read the file first to verify the exact content.`
     }
     const tmpPath = `${absPath}.nexus_tmp_${Date.now()}`;
     try {
-      await fs10.writeFile(tmpPath, content, "utf8");
-      await fs10.rename(tmpPath, absPath);
+      await fs11.writeFile(tmpPath, content, "utf8");
+      await fs11.rename(tmpPath, absPath);
     } catch (err) {
       try {
-        await fs10.unlink(tmpPath);
+        await fs11.unlink(tmpPath);
       } catch {
       }
       return { success: false, output: `Failed to write: ${err.message}` };
@@ -2632,10 +2906,10 @@ Prefer replace_in_file for targeted edits \u2014 it's more reliable.`,
     if (!filePath) {
       return { success: false, output: "Could not determine target file path from patch" };
     }
-    const absPath = path4.resolve(ctx.cwd, filePath);
+    const absPath = path6.resolve(ctx.cwd, filePath);
     let originalContent = "";
     try {
-      originalContent = await fs10.readFile(absPath, "utf8");
+      originalContent = await fs11.readFile(absPath, "utf8");
     } catch {
     }
     const patched = applyPatch(originalContent, patch);
@@ -2645,15 +2919,15 @@ Prefer replace_in_file for targeted edits \u2014 it's more reliable.`,
         output: `Failed to apply patch to ${filePath}. The patch may not match the current file content. Try replace_in_file instead.`
       };
     }
-    const dirPath = path4.dirname(absPath);
-    await fs10.mkdir(dirPath, { recursive: true });
+    const dirPath = path6.dirname(absPath);
+    await fs11.mkdir(dirPath, { recursive: true });
     const tmpPath = `${absPath}.nexus_tmp_${Date.now()}`;
     try {
-      await fs10.writeFile(tmpPath, patched, "utf8");
-      await fs10.rename(tmpPath, absPath);
+      await fs11.writeFile(tmpPath, patched, "utf8");
+      await fs11.rename(tmpPath, absPath);
     } catch (err) {
       try {
-        await fs10.unlink(tmpPath);
+        await fs11.unlink(tmpPath);
       } catch {
       }
       return { success: false, output: `Failed to write: ${err.message}` };
@@ -2781,7 +3055,7 @@ Examples:
   parameters: searchSchema,
   readOnly: true,
   async execute({ pattern, path: searchPath, include, exclude, context_lines, case_sensitive }, ctx) {
-    const searchDir = searchPath ? path4.resolve(ctx.cwd, searchPath) : ctx.cwd;
+    const searchDir = searchPath ? path6.resolve(ctx.cwd, searchPath) : ctx.cwd;
     const args = [
       "--json",
       "--max-count",
@@ -2813,7 +3087,7 @@ Examples:
           const obj = JSON.parse(line);
           if (obj.type === "match") {
             const data = obj.data;
-            const relPath = path4.relative(ctx.cwd, data.path.text);
+            const relPath = path6.relative(ctx.cwd, data.path.text);
             results.push(`${relPath}:${data.line_number}:${data.lines.text.trimEnd()}`);
             matchCount++;
           }
@@ -2858,17 +3132,17 @@ Maximum 2000 entries.`,
   parameters: listSchema,
   readOnly: true,
   async execute({ path: listPath, recursive, include, max_entries }, ctx) {
-    const targetDir = listPath ? path4.resolve(ctx.cwd, listPath) : ctx.cwd;
+    const targetDir = listPath ? path6.resolve(ctx.cwd, listPath) : ctx.cwd;
     const maxEntries = max_entries ?? 200;
     const maxActual = Math.min(maxEntries, 2e3);
     try {
-      const { readdir: readdir4, stat: stat7 } = await import('fs/promises');
+      const { readdir: readdir4, stat: stat8 } = await import('fs/promises');
       const ignoreMod = await import('ignore');
       const ignoreFactory = ignoreMod.default ?? ignoreMod;
       let ig = ignoreFactory();
       try {
         const gitignoreContent = await import('fs/promises').then(
-          (f) => f.readFile(path4.join(ctx.cwd, ".gitignore"), "utf8").catch(() => "")
+          (f) => f.readFile(path6.join(ctx.cwd, ".gitignore"), "utf8").catch(() => "")
         );
         ig = ig.add(gitignoreContent);
       } catch {
@@ -2881,13 +3155,10 @@ Maximum 2000 entries.`,
         const items = await readdir4(dir).catch(() => []);
         for (const item of items.sort()) {
           if (entries.length >= maxActual) break;
-          const fullPath = path4.join(dir, item);
-          const relPath = path4.relative(ctx.cwd, fullPath);
+          const fullPath = path6.join(dir, item);
+          const relPath = path6.relative(ctx.cwd, fullPath);
           if (ig.ignores(relPath)) continue;
-          if (include) {
-            const { minimatch } = await import('minimatch');
-          }
-          const itemStat = await stat7(fullPath).catch(() => null);
+          const itemStat = await stat8(fullPath).catch(() => null);
           if (!itemStat) continue;
           if (itemStat.isDirectory()) {
             entries.push(`${prefix}${item}/`);
@@ -2895,6 +3166,10 @@ Maximum 2000 entries.`,
               await walk(fullPath, prefix + "  ", depth + 1);
             }
           } else {
+            if (include) {
+              const { minimatch } = await import('minimatch');
+              if (!minimatch(item, include, { matchBase: true })) continue;
+            }
             entries.push(`${prefix}${item}`);
           }
         }
@@ -2927,10 +3202,10 @@ Useful for understanding codebase structure before diving into details.`,
   parameters: schema6,
   readOnly: true,
   async execute({ path: targetPath }, ctx) {
-    const absPath = path4.resolve(ctx.cwd, targetPath);
+    const absPath = path6.resolve(ctx.cwd, targetPath);
     try {
-      const stat7 = await fs10.stat(absPath);
-      if (stat7.isDirectory()) {
+      const stat8 = await fs11.stat(absPath);
+      if (stat8.isDirectory()) {
         return extractFromDirectory(absPath, ctx.cwd);
       }
       return extractFromFile(absPath, ctx.cwd);
@@ -2940,14 +3215,14 @@ Useful for understanding codebase structure before diving into details.`,
   }
 };
 async function extractFromFile(absPath, cwd) {
-  const relPath = path4.relative(cwd, absPath);
-  const ext = path4.extname(absPath).toLowerCase();
+  const relPath = path6.relative(cwd, absPath);
+  const ext = path6.extname(absPath).toLowerCase();
   if (!SUPPORTED_EXTENSIONS.has(ext)) {
     return { success: true, output: `${relPath}: unsupported file type (${ext})` };
   }
   let content;
   try {
-    content = await fs10.readFile(absPath, "utf8");
+    content = await fs11.readFile(absPath, "utf8");
   } catch {
     return { success: false, output: `Cannot read ${relPath}` };
   }
@@ -2966,7 +3241,7 @@ async function extractFromDirectory(absDir, cwd) {
   const ignoreFactory = ignoreMod.default ?? ignoreMod;
   let ig = ignoreFactory();
   try {
-    const gi = await fs10.readFile(path4.join(cwd, ".gitignore"), "utf8").catch(() => "");
+    const gi = await fs11.readFile(path6.join(cwd, ".gitignore"), "utf8").catch(() => "");
     ig = ignoreFactory().add(gi);
   } catch {
   }
@@ -2975,15 +3250,15 @@ async function extractFromDirectory(absDir, cwd) {
     if (depth > 3) return;
     const items = await readdir4(dir).catch(() => []);
     for (const item of items.sort()) {
-      const fullPath = path4.join(dir, item);
-      const relPath = path4.relative(cwd, fullPath);
+      const fullPath = path6.join(dir, item);
+      const relPath = path6.relative(cwd, fullPath);
       if (ig.ignores(relPath)) continue;
-      const st = await fs10.stat(fullPath).catch(() => null);
+      const st = await fs11.stat(fullPath).catch(() => null);
       if (!st) continue;
       if (st.isDirectory()) {
         await processDir(fullPath, depth + 1);
       } else {
-        const ext = path4.extname(item).toLowerCase();
+        const ext = path6.extname(item).toLowerCase();
         if (SUPPORTED_EXTENSIONS.has(ext)) {
           const r = await extractFromFile(fullPath, cwd);
           if (r.success && r.output && !r.output.includes("no top-level")) {
@@ -3285,21 +3560,21 @@ Use when the task requires specialized knowledge documented in a skill.`,
     const skills = ctx.config.skills;
     [...skills];
     const { readFile: readFile12 } = await import('fs/promises');
-    const { resolve: resolve9, basename: basename3, join: join12 } = await import('path');
+    const { resolve: resolve10, basename: basename3, join: join13 } = await import('path');
     const { glob: glob3 } = await import('glob');
     const allSkillFiles = await glob3(skills.length > 0 ? skills : [".nexus/skills/**/*.md", "~/.nexus/skills/**/*.md"], {
       cwd: ctx.cwd,
       absolute: true
     });
     const standardPaths = [
-      join12(ctx.cwd, ".nexus", "skills", skill, "SKILL.md"),
-      join12(ctx.cwd, ".nexus", "skills", `${skill}.md`)
+      join13(ctx.cwd, ".nexus", "skills", skill, "SKILL.md"),
+      join13(ctx.cwd, ".nexus", "skills", `${skill}.md`)
     ];
     let skillContent = null;
     let skillPath = null;
     for (const p of [...standardPaths, ...allSkillFiles]) {
       const name = basename3(p, ".md").toLowerCase();
-      const parentDir = basename3(resolve9(p, "..")).toLowerCase();
+      const parentDir = basename3(resolve10(p, "..")).toLowerCase();
       if (name === skill.toLowerCase() || parentDir === skill.toLowerCase()) {
         try {
           skillContent = await readFile12(p, "utf8");
@@ -3471,13 +3746,13 @@ Rules are automatically loaded in future sessions.
 Use this to codify project conventions, preferences, or important context.`,
   parameters: createRuleSchema,
   async execute({ content, filename, global: isGlobal }, ctx) {
-    const { writeFile: writeFile6, mkdir: mkdir6 } = await import('fs/promises');
-    const { join: join12 } = await import('path');
-    const { homedir: homedir7 } = await import('os');
-    const dir = isGlobal ? join12(homedir7(), ".nexus", "rules") : join12(ctx.cwd, ".nexus", "rules");
-    await mkdir6(dir, { recursive: true });
+    const { writeFile: writeFile6, mkdir: mkdir7 } = await import('fs/promises');
+    const { join: join13 } = await import('path');
+    const { homedir: homedir8 } = await import('os');
+    const dir = isGlobal ? join13(homedir8(), ".nexus", "rules") : join13(ctx.cwd, ".nexus", "rules");
+    await mkdir7(dir, { recursive: true });
     const name = filename ?? `rule-${Date.now()}.md`;
-    const filePath = join12(dir, name);
+    const filePath = join13(dir, name);
     await writeFile6(filePath, content, "utf8");
     return { success: true, output: `Created rule: ${filePath}` };
   }
@@ -3561,12 +3836,12 @@ var ToolRegistry = class {
   async loadFromDirectory(dir) {
     try {
       const { readdir: readdir4 } = await import('fs/promises');
-      const { join: join12 } = await import('path');
+      const { join: join13 } = await import('path');
       const files = await readdir4(dir).catch(() => []);
       for (const file of files) {
         if (!file.endsWith(".js") && !file.endsWith(".ts")) continue;
         try {
-          const mod = await import(join12(dir, file));
+          const mod = await import(join13(dir, file));
           const exported = mod.default ?? mod;
           if (Array.isArray(exported)) {
             for (const tool of exported) {
@@ -3590,30 +3865,25 @@ function isToolDef(obj) {
 // src/agent/parallel.ts
 var ParallelAgentManager = class {
   running = /* @__PURE__ */ new Map();
-  async spawn(description, mode = "agent", config, cwd, signal, maxParallel) {
+  async spawn(description, mode = "agent", config, cwd, signal, maxParallel, emit) {
     while (this.running.size >= maxParallel) {
-      await Promise.race([...this.running.values()]);
-      for (const [id, promise] of this.running) {
-        await Promise.race([promise, Promise.resolve(null)]).catch(() => null);
-      }
+      await Promise.race([...this.running.values()]).catch(() => {
+      });
+      await Promise.resolve();
     }
-    const task = this.runSubAgent(description, mode, config, cwd, signal);
-    const sessionId = `subagent_${Date.now()}`;
-    this.running.set(sessionId, task);
-    try {
-      const result = await task;
-      return result;
-    } finally {
-      this.running.delete(sessionId);
-    }
+    const subagentId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    emit?.({ type: "subagent_start", subagentId, mode, task: description });
+    const task = this.runSubAgent(subagentId, description, mode, config, cwd, signal, emit).finally(() => {
+      this.running.delete(subagentId);
+    });
+    this.running.set(subagentId, task);
+    return task;
   }
-  async runSubAgent(description, mode, config, cwd, signal) {
+  async runSubAgent(subagentId, description, mode, config, cwd, signal, emit) {
     const session = Session.create(cwd);
     session.addMessage({ role: "user", content: description });
     const client = createLLMClient(config.model);
-    const maxModeClient = config.maxMode.enabled ? createLLMClient(config.maxMode) : void 0;
     const toolRegistry = new ToolRegistry();
-    toolRegistry.getAll();
     const { builtin: tools } = toolRegistry.getForMode(mode);
     const rulesContent = await loadRules(cwd, config.rules.files).catch(() => "");
     const skills = await loadSkills(config.skills, cwd).catch(() => []);
@@ -3637,8 +3907,8 @@ var ParallelAgentManager = class {
         return true;
       },
       async runCommand(cmd, wd) {
-        const { execa: execa3 } = await import('execa');
-        const r = await execa3(cmd, { shell: true, cwd: wd, reject: false });
+        const { execa: execa4 } = await import('execa');
+        const r = await execa4(cmd, { shell: true, cwd: wd, reject: false });
         return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", exitCode: r.exitCode ?? 0 };
       },
       async showApprovalDialog() {
@@ -3648,13 +3918,18 @@ var ParallelAgentManager = class {
         if (event.type === "text_delta" && event.delta) {
           output += event.delta;
         }
+        if (event.type === "tool_start") {
+          emit?.({ type: "subagent_tool_start", subagentId, tool: event.tool });
+        }
+        if (event.type === "tool_end") {
+          emit?.({ type: "subagent_tool_end", subagentId, tool: event.tool, success: event.success });
+        }
       }
     };
     try {
       await runAgentLoop({
         session,
         client,
-        maxModeClient,
         host: mockHost,
         config,
         mode,
@@ -3664,20 +3939,39 @@ var ParallelAgentManager = class {
         compaction,
         signal
       });
-      return { sessionId: session.id, success: true, output };
+      emit?.({
+        type: "subagent_done",
+        subagentId,
+        success: true,
+        outputPreview: output.slice(0, 300)
+      });
+      return { subagentId, sessionId: session.id, success: true, output };
     } catch (err) {
+      const error = err.message;
+      emit?.({
+        type: "subagent_done",
+        subagentId,
+        success: false,
+        outputPreview: output.slice(0, 300),
+        error
+      });
       return {
+        subagentId,
         sessionId: session.id,
         success: false,
         output: output || "",
-        error: err.message
+        error
       };
     }
+  }
+  /** How many agents are currently running */
+  get activeCount() {
+    return this.running.size;
   }
 };
 var spawnSchema = z.object({
   description: z.string().describe("What should the sub-agent do? Provide a clear, self-contained task description."),
-  mode: z.enum(["agent", "plan", "debug", "ask"]).optional().describe("Mode for the sub-agent (default: agent)"),
+  mode: z.enum(["agent", "plan", "debug", "ask", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
   task_progress: z.string().optional()
 });
 function createSpawnAgentTool(manager, config) {
@@ -3687,24 +3981,29 @@ function createSpawnAgentTool(manager, config) {
 Use for independent subtasks that don't depend on each other.
 The sub-agent has full capabilities based on the specified mode.
 Returns the sub-agent's final output when done.
-Max ${config.parallelAgents.maxParallel} agents running simultaneously.`,
+Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: spawnSchema,
     modes: ["agent"],
     async execute(args, ctx) {
       const { description, mode } = args;
+      const normalizedMode = mode === "search" || mode === "explore" ? "ask" : mode ?? "agent";
       const result = await manager.spawn(
         description,
-        mode ?? "agent",
+        normalizedMode,
         ctx.config,
         ctx.cwd,
         ctx.signal,
-        ctx.config.parallelAgents.maxParallel
+        ctx.config.parallelAgents.maxParallel,
+        (event) => ctx.host.emit(event)
       );
       if (result.error) {
-        return { success: false, output: `Sub-agent failed: ${result.error}
-Partial output: ${result.output}` };
+        return {
+          success: false,
+          output: `Sub-agent ${result.subagentId} failed: ${result.error}
+Partial output: ${result.output}`
+        };
       }
-      return { success: true, output: `Sub-agent completed:
+      return { success: true, output: `Sub-agent ${result.subagentId} completed:
 
 ${result.output}` };
     }
@@ -3782,6 +4081,12 @@ var FTSIndex = class {
     this.db.prepare("DELETE FROM files WHERE path = ?").run(filePath);
     this.db.prepare("DELETE FROM symbols WHERE path = ?").run(filePath);
     this.db.prepare("DELETE FROM chunks WHERE path = ?").run(filePath);
+  }
+  /** Clear all indexed data (for full reindex). */
+  clear() {
+    this.db.prepare("DELETE FROM files").run();
+    this.db.prepare("DELETE FROM symbols").run();
+    this.db.prepare("DELETE FROM chunks").run();
   }
   searchSymbols(query, limit, kind) {
     let sql;
@@ -3868,21 +4173,36 @@ var VectorIndex = class {
   collectionName;
   embeddings;
   initialized = false;
+  vectorSize;
+  embeddingBatchSize;
+  embeddingConcurrency;
   dimensions;
-  constructor(url, projectHash, embeddings) {
-    this.client = new QdrantClient({ url });
+  constructor(url, projectHash, embeddings, opts) {
+    this.client = new QdrantClient({ url, checkCompatibility: false });
     this.collectionName = `nexus_${projectHash}`;
     this.embeddings = embeddings;
     this.dimensions = embeddings.dimensions;
+    this.vectorSize = embeddings.dimensions;
+    this.embeddingBatchSize = Math.max(1, opts?.embeddingBatchSize ?? 60);
+    this.embeddingConcurrency = Math.max(1, opts?.embeddingConcurrency ?? 2);
   }
   async init() {
     try {
+      const resolvedSize = await this.resolveVectorSize();
+      this.vectorSize = resolvedSize;
       const collections = await this.client.getCollections();
-      const exists = collections.collections.some((c) => c.name === this.collectionName);
+      let exists = collections.collections.some((c) => c.name === this.collectionName);
+      if (exists) {
+        const existingSize = await this.getExistingVectorSize().catch(() => null);
+        if (existingSize && existingSize !== resolvedSize) {
+          await this.client.deleteCollection(this.collectionName);
+          exists = false;
+        }
+      }
       if (!exists) {
         await this.client.createCollection(this.collectionName, {
           vectors: {
-            size: this.dimensions,
+            size: resolvedSize,
             distance: "Cosine"
           }
         });
@@ -3892,29 +4212,62 @@ var VectorIndex = class {
       throw new Error(`Failed to initialize Qdrant collection: ${err.message}`);
     }
   }
+  async resolveVectorSize() {
+    const configured = Number.isFinite(this.dimensions) && this.dimensions > 0 ? this.dimensions : 0;
+    try {
+      const vectors = await this.embeddings.embed(["nexus vector dimension probe"]);
+      const observed = vectors[0]?.length ?? 0;
+      if (observed > 0) {
+        return observed;
+      }
+    } catch {
+    }
+    if (configured > 0) {
+      return configured;
+    }
+    throw new Error("Unable to resolve embedding vector size. Set embeddings.dimensions explicitly.");
+  }
+  async getExistingVectorSize() {
+    const info = await this.client.getCollection(this.collectionName);
+    const result = info["result"];
+    const config = result?.["config"];
+    const params = config?.["params"];
+    const vectors = params?.["vectors"];
+    const size = vectors?.["size"];
+    return typeof size === "number" && Number.isFinite(size) ? size : null;
+  }
   async upsertSymbols(symbols) {
     if (!this.initialized || symbols.length === 0) return;
     try {
-      const texts = symbols.map(
-        (s) => [s.name, s.kind ?? "", s.parent ?? "", s.content.slice(0, 500)].filter(Boolean).join(" ")
-      );
-      const vectors = await this.embeddings.embed(texts);
-      const points = symbols.map((s, i) => ({
-        id: stringToUint(s.id),
-        vector: vectors[i],
-        payload: {
-          path: s.path,
-          name: s.name,
-          kind: s.kind ?? "chunk",
-          parent: s.parent ?? null,
-          startLine: s.startLine ?? 0,
-          content: s.content.slice(0, 1e3)
-        }
-      }));
-      await this.client.upsert(this.collectionName, { points });
+      const batches = chunk(symbols, this.embeddingBatchSize);
+      for (let i = 0; i < batches.length; i += this.embeddingConcurrency) {
+        const group = batches.slice(i, i + this.embeddingConcurrency);
+        await Promise.all(group.map((batch) => this.upsertBatch(batch)));
+      }
     } catch (err) {
-      console.warn("[nexus] Vector upsert failed:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[nexus] Vector upsert failed: ${message}`);
     }
+  }
+  async upsertBatch(symbols) {
+    if (symbols.length === 0) return;
+    const texts = symbols.map(
+      (s) => [s.name, s.kind ?? "", s.parent ?? "", s.content.slice(0, 500)].filter(Boolean).join(" ")
+    );
+    const vectors = await this.embeddings.embed(texts);
+    const points = symbols.map((s, i) => ({
+      id: stringToUint(s.id),
+      vector: vectors[i],
+      payload: {
+        path: s.path,
+        name: s.name,
+        kind: s.kind ?? "chunk",
+        parent: s.parent ?? null,
+        startLine: s.startLine ?? 0,
+        content: s.content.slice(0, 1e3)
+      }
+    }));
+    await this.client.upsert(this.collectionName, { points });
   }
   async deleteByPath(filePath) {
     if (!this.initialized) return;
@@ -3947,7 +4300,8 @@ var VectorIndex = class {
         score: r.score
       }));
     } catch (err) {
-      console.warn("[nexus] Vector search failed:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[nexus] Vector search failed: ${message}`);
       return [];
     }
   }
@@ -3959,6 +4313,25 @@ var VectorIndex = class {
       return false;
     }
   }
+  async isEmpty() {
+    if (!this.initialized) return true;
+    try {
+      const info = await this.client.getCollection(this.collectionName);
+      const result = info["result"];
+      const pointsCount = result?.["points_count"];
+      return typeof pointsCount !== "number" || pointsCount <= 0;
+    } catch {
+      return true;
+    }
+  }
+  async clearCollection() {
+    try {
+      await this.client.deleteCollection(this.collectionName);
+    } catch {
+    } finally {
+      this.initialized = false;
+    }
+  }
 };
 function stringToUint(str) {
   let hash = 0;
@@ -3968,6 +4341,13 @@ function stringToUint(str) {
     hash = hash & hash;
   }
   return Math.abs(hash);
+}
+function chunk(items, size) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
 }
 var SUPPORTED_EXTENSIONS2 = /* @__PURE__ */ new Set([
   ".ts",
@@ -4017,47 +4397,47 @@ async function* walkDir(root, excludePatterns = []) {
   ig.add(DEFAULT_EXCLUDE);
   ig.add(excludePatterns);
   try {
-    const gitignoreContent = await fs10.readFile(path4.join(root, ".gitignore"), "utf8");
+    const gitignoreContent = await fs11.readFile(path6.join(root, ".gitignore"), "utf8");
     ig.add(gitignoreContent);
   } catch {
   }
   try {
-    const nexusignoreContent = await fs10.readFile(path4.join(root, ".nexusignore"), "utf8");
+    const nexusignoreContent = await fs11.readFile(path6.join(root, ".nexusignore"), "utf8");
     ig.add(nexusignoreContent);
   } catch {
   }
   async function* walkInternal(dir) {
     let entries;
     try {
-      entries = await fs10.readdir(dir);
+      entries = await fs11.readdir(dir);
     } catch {
       return;
     }
     for (const entry of entries.sort()) {
-      const absPath = path4.join(dir, entry);
-      const relPath = path4.relative(root, absPath);
+      const absPath = path6.join(dir, entry);
+      const relPath = path6.relative(root, absPath);
       if (ig.ignores(relPath)) continue;
-      let stat7;
+      let stat8;
       try {
-        stat7 = await fs10.stat(absPath);
+        stat8 = await fs11.stat(absPath);
       } catch {
         continue;
       }
-      if (stat7.isSymbolicLink()) continue;
-      if (stat7.isDirectory()) {
+      if (stat8.isSymbolicLink()) continue;
+      if (stat8.isDirectory()) {
         yield* walkInternal(absPath);
-      } else if (stat7.isFile()) {
-        const ext = path4.extname(entry).toLowerCase();
+      } else if (stat8.isFile()) {
+        const ext = path6.extname(entry).toLowerCase();
         if (!SUPPORTED_EXTENSIONS2.has(ext)) continue;
-        if (stat7.size > 1024 * 1024) continue;
-        const hash = await hashFile(absPath, stat7.size);
+        if (stat8.size > 1024 * 1024) continue;
+        const hash = await hashFile(absPath, stat8.size);
         yield {
           path: relPath,
           absPath,
           ext,
-          mtime: stat7.mtimeMs,
+          mtime: stat8.mtimeMs,
           hash,
-          size: stat7.size
+          size: stat8.size
         };
       }
     }
@@ -4067,14 +4447,14 @@ async function* walkDir(root, excludePatterns = []) {
 async function hashFile(filePath, size) {
   if (size < 8192) {
     try {
-      const content = await fs10.readFile(filePath);
+      const content = await fs11.readFile(filePath);
       return crypto.createHash("md5").update(content).digest("hex");
     } catch {
       return `${size}_0`;
     }
   }
   try {
-    const fd = await fs10.open(filePath, "r");
+    const fd = await fs11.open(filePath, "r");
     const buf = Buffer.alloc(4096);
     const { bytesRead } = await fd.read(buf, 0, 4096, 0);
     await fd.close();
@@ -4334,19 +4714,24 @@ function extractJavaSymbols(content, filePath) {
   return symbols.length > 0 ? symbols : extractChunks(content, filePath);
 }
 var CHUNK_SIZE = 50;
+var CHUNK_OVERLAP = 15;
 function extractChunks(content, filePath) {
   const lines = content.split("\n");
   const chunks = [];
-  for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
-    const chunkLines = lines.slice(i, i + CHUNK_SIZE);
+  const stride = CHUNK_SIZE - CHUNK_OVERLAP;
+  for (let i = 0; i < lines.length; i += stride) {
+    const startLine = i + 1;
+    const endLine = Math.min(i + CHUNK_SIZE, lines.length);
+    const chunkLines = lines.slice(i, endLine);
     chunks.push({
       path: filePath,
-      name: `chunk_${i + 1}`,
+      name: `chunk_${startLine}`,
       kind: "chunk",
-      startLine: i + 1,
-      endLine: Math.min(i + CHUNK_SIZE, lines.length),
+      startLine,
+      endLine,
       content: chunkLines.join("\n")
     });
+    if (endLine >= lines.length) break;
   }
   return chunks;
 }
@@ -4455,15 +4840,15 @@ function findContainingClass(lines, lineIdx) {
   }
   return void 0;
 }
-var REGISTRY_PATH = path4.join(os5.homedir(), ".nexus", "projects.json");
-var INDEX_BASE_DIR = path4.join(os5.homedir(), ".nexus", "index");
+var REGISTRY_PATH = path6.join(os5.homedir(), ".nexus", "projects.json");
+var INDEX_BASE_DIR = path6.join(os5.homedir(), ".nexus", "index");
 var MAX_PROJECTS = 10;
 var ProjectRegistry = class _ProjectRegistry {
   projects = /* @__PURE__ */ new Map();
   static async load() {
     const registry = new _ProjectRegistry();
     try {
-      const content = await fs10.readFile(REGISTRY_PATH, "utf8");
+      const content = await fs11.readFile(REGISTRY_PATH, "utf8");
       const data = JSON.parse(content);
       for (const p of data) {
         registry.projects.set(p.root, p);
@@ -4480,8 +4865,8 @@ var ProjectRegistry = class _ProjectRegistry {
       return existing;
     }
     const hash = crypto.createHash("sha1").update(root).digest("hex").slice(0, 16);
-    const indexDir = path4.join(INDEX_BASE_DIR, hash);
-    await fs10.mkdir(indexDir, { recursive: true });
+    const indexDir = path6.join(INDEX_BASE_DIR, hash);
+    await fs11.mkdir(indexDir, { recursive: true });
     const info = {
       root,
       hash,
@@ -4505,7 +4890,7 @@ var ProjectRegistry = class _ProjectRegistry {
     const info = this.projects.get(root);
     if (info) {
       try {
-        await fs10.rm(info.indexDir, { recursive: true, force: true });
+        await fs11.rm(info.indexDir, { recursive: true, force: true });
       } catch {
       }
       this.projects.delete(root);
@@ -4521,16 +4906,16 @@ var ProjectRegistry = class _ProjectRegistry {
   }
   async save() {
     try {
-      const dir = path4.dirname(REGISTRY_PATH);
-      await fs10.mkdir(dir, { recursive: true });
-      await fs10.writeFile(REGISTRY_PATH, JSON.stringify(this.listProjects(), null, 2), "utf8");
+      const dir = path6.dirname(REGISTRY_PATH);
+      await fs11.mkdir(dir, { recursive: true });
+      await fs11.writeFile(REGISTRY_PATH, JSON.stringify(this.listProjects(), null, 2), "utf8");
     } catch {
     }
   }
 };
 function getIndexDir(projectRoot) {
   const hash = crypto.createHash("sha1").update(projectRoot).digest("hex").slice(0, 16);
-  return path4.join(INDEX_BASE_DIR, hash);
+  return path6.join(INDEX_BASE_DIR, hash);
 }
 
 // src/indexer/index.ts
@@ -4556,36 +4941,63 @@ var CodebaseIndexer = class {
     this.config = config;
     const indexDir = getIndexDir(projectRoot);
     mkdirSync(indexDir, { recursive: true });
-    this.fts = new FTSIndex(path4.join(indexDir, "fts.db"));
+    this.fts = new FTSIndex(path6.join(indexDir, "fts.db"));
     if (config.vectorDb?.enabled && embeddingClient && vectorUrl && projectHash) {
-      this.vector = new VectorIndex(vectorUrl, projectHash, embeddingClient);
+      this.vector = new VectorIndex(vectorUrl, projectHash, embeddingClient, {
+        embeddingBatchSize: config.indexing.embeddingBatchSize,
+        embeddingConcurrency: config.indexing.embeddingConcurrency
+      });
     }
   }
   fts;
   vector;
+  forceVectorBackfill = false;
   _status = { state: "idle" };
   indexing = false;
   abortController;
   debounceTimers = /* @__PURE__ */ new Map();
+  statusListeners = [];
   status() {
     return this._status;
   }
+  onStatusChange(listener) {
+    this.statusListeners.push(listener);
+    return () => {
+      this.statusListeners = this.statusListeners.filter((l) => l !== listener);
+    };
+  }
+  notifyStatus(status) {
+    this._status = status;
+    for (const listener of this.statusListeners) {
+      try {
+        listener(status);
+      } catch {
+      }
+    }
+  }
   async startIndexing() {
-    if (this.indexing) return;
+    if (this.indexing) {
+      this.stop();
+      await new Promise((r) => setTimeout(r, 100));
+    }
     this.indexing = true;
     this.abortController = new AbortController();
     if (this.vector) {
       try {
         await this.vector.init();
+        this.forceVectorBackfill = await this.vector.isEmpty();
       } catch (err) {
         console.warn("[nexus] Vector index init failed:", err);
         this.vector = void 0;
+        this.forceVectorBackfill = false;
       }
+    } else {
+      this.forceVectorBackfill = false;
     }
-    this._status = { state: "indexing", progress: 0, total: 0 };
+    this.notifyStatus({ state: "indexing", progress: 0, total: 0 });
     this.indexInBackground().catch((err) => {
       console.warn("[nexus] Indexing error:", err);
-      this._status = { state: "error", error: err.message };
+      this.notifyStatus({ state: "error", error: err.message });
       this.indexing = false;
     });
   }
@@ -4594,28 +5006,28 @@ var CodebaseIndexer = class {
     const seen = /* @__PURE__ */ new Set();
     let processed = 0;
     let total = 0;
-    for await (const _ of walkDir(this.projectRoot, this.config.indexing.excludePatterns)) {
-      total++;
-      if (this.abortController?.signal.aborted) break;
-    }
-    this._status = { state: "indexing", progress: 0, total };
     const batchSize = this.config.indexing.batchSize;
     let batch = [];
     for await (const file of walkDir(this.projectRoot, this.config.indexing.excludePatterns)) {
       if (this.abortController?.signal.aborted) break;
+      total++;
       seen.add(file.path);
       batch.push(file);
       if (batch.length >= batchSize) {
         await this.processBatch(batch);
         processed += batch.length;
-        this._status = { state: "indexing", progress: processed, total };
+        this.notifyStatus({ state: "indexing", progress: processed, total });
         batch = [];
         await new Promise((r) => setImmediate(r));
       }
     }
-    if (batch.length > 0) {
+    if (batch.length > 0 && !this.abortController?.signal.aborted) {
       await this.processBatch(batch);
       processed += batch.length;
+    }
+    if (this.abortController?.signal.aborted) {
+      this.indexing = false;
+      return;
     }
     for (const [filePath] of existing) {
       if (!seen.has(filePath)) {
@@ -4624,24 +5036,32 @@ var CodebaseIndexer = class {
       }
     }
     const stats = this.fts.getStats();
-    this._status = { state: "ready", files: stats.files, symbols: stats.symbols };
+    this.notifyStatus({ state: "ready", files: stats.files, symbols: stats.symbols });
+    this.forceVectorBackfill = false;
     this.indexing = false;
   }
   async processBatch(files) {
     const vectorEntries = [];
     for (const file of files) {
-      if (this.fts.isFileIndexed(file.path, file.mtime, file.hash)) continue;
+      if (!file) continue;
+      const unchanged = this.fts.isFileIndexed(file.path, file.mtime, file.hash);
+      if (unchanged && !this.forceVectorBackfill) continue;
       let content;
       try {
-        content = await fs10.readFile(file.absPath, "utf8");
+        content = await fs11.readFile(file.absPath, "utf8");
       } catch {
         continue;
       }
-      this.fts.upsertFile(file.path, file.mtime, file.hash);
+      if (!unchanged) {
+        this.fts.upsertFile(file.path, file.mtime, file.hash);
+      }
+      const shouldUpdateFts = !unchanged;
       if (SUPPORTED_CODE_EXTENSIONS.has(file.ext) && this.config.indexing.symbolExtract) {
         const symbols = extractSymbols(content, file.path, file.ext);
         for (const sym of symbols) {
-          this.fts.insertSymbol(sym);
+          if (shouldUpdateFts) {
+            this.fts.insertSymbol(sym);
+          }
           if (this.vector && this.config.indexing.vector) {
             const id = `${file.hash}_${sym.startLine}`;
             vectorEntries.push({
@@ -4655,10 +5075,10 @@ var CodebaseIndexer = class {
             });
           }
         }
-      } else {
+      } else if (shouldUpdateFts) {
         const chunks = extractChunks(content, file.path);
-        for (const chunk of chunks) {
-          this.fts.insertChunk({ path: chunk.path, offset: chunk.startLine, content: chunk.content });
+        for (const chunk2 of chunks) {
+          this.fts.insertChunk({ path: chunk2.path, offset: chunk2.startLine, content: chunk2.content });
         }
       }
     }
@@ -4671,11 +5091,22 @@ var CodebaseIndexer = class {
     if (existing) clearTimeout(existing);
     const timer = setTimeout(async () => {
       this.debounceTimers.delete(filePath);
-      await this.processBatch([
-        await buildFileInfo(filePath, this.projectRoot).catch(() => null)
-      ].filter(Boolean));
+      try {
+        await this.refreshFileNow(filePath);
+      } catch {
+      }
     }, this.config.indexing.debounceMs);
     this.debounceTimers.set(filePath, timer);
+  }
+  async refreshFileNow(filePath) {
+    const fileInfo = await buildFileInfo(filePath, this.projectRoot);
+    if (!fileInfo) {
+      const relPath = path6.relative(this.projectRoot, filePath);
+      this.fts.deleteFile(relPath);
+      await this.vector?.deleteByPath(relPath);
+      return;
+    }
+    await this.processBatch([fileInfo]);
   }
   async search(query, opts) {
     const limit = opts?.limit ?? 10;
@@ -4702,22 +5133,46 @@ var CodebaseIndexer = class {
     }
     return results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, limit);
   }
+  /**
+   * Clear all index data and restart indexing.
+   */
+  async reindex() {
+    this.stop();
+    this.fts.clear();
+    await this.vector?.clearCollection();
+    await this.startIndexing();
+  }
   stop() {
     this.abortController?.abort();
+    this.indexing = false;
+    for (const timer of this.debounceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.debounceTimers.clear();
+  }
+  /**
+   * Fully close the indexer — clears timers, closes SQLite.
+   * Call when the extension is deactivated or the indexer is no longer needed.
+   */
+  close() {
+    this.stop();
+    this.statusListeners = [];
+    try {
+      this.fts.close();
+    } catch {
+    }
   }
 };
 async function buildFileInfo(absPath, root) {
   try {
-    const { stat: stat7, readFile: readFile12 } = await import('fs/promises');
-    const { createHash: createHash4 } = await import('crypto');
-    const { extname: extname4, relative: relative6 } = await import('path');
-    const s = await stat7(absPath);
-    const content = await readFile12(absPath);
-    const hash = createHash4("md5").update(content).digest("hex");
+    const s = await fs11.stat(absPath);
+    const content = await fs11.readFile(absPath);
+    const hash = crypto.createHash("md5").update(content).digest("hex");
+    const ext = path6.extname(absPath).toLowerCase();
     return {
-      path: relative6(root, absPath),
+      path: path6.relative(root, absPath),
       absPath,
-      ext: extname4(absPath).toLowerCase(),
+      ext,
       mtime: s.mtimeMs,
       hash,
       size: s.size
@@ -4726,123 +5181,194 @@ async function buildFileInfo(absPath, root) {
     return null;
   }
 }
-var MENTION_REGEX = /@(file|folder|url|problems|git|terminal):([^\s]+)|@(problems|git|terminal)/g;
-async function parseMentions(text, cwd, host) {
-  const mentions = [];
-  const regex = new RegExp(MENTION_REGEX.source, "g");
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    const type = match[1] ?? match[3] ?? "";
-    const arg = match[2] ?? "";
-    const resolved = await resolveMention(type, arg, cwd, host);
-    if (resolved) {
-      mentions.push({ original: match[0], type, content: resolved });
+var DEFAULT_HEALTH_TIMEOUT_MS = 1500;
+var DEFAULT_START_TIMEOUT_MS = 2e4;
+async function ensureQdrantRunning(opts) {
+  const { url, autoStart, log } = opts;
+  if (await isQdrantHealthy(url)) {
+    return { available: true, started: false, method: "existing" };
+  }
+  if (!autoStart) {
+    return {
+      available: false,
+      started: false,
+      warning: `Qdrant is not reachable at ${url}. Enable vectorDb.autoStart or start Qdrant manually.`
+    };
+  }
+  const parsed = safeParseUrl(url);
+  if (!parsed) {
+    return {
+      available: false,
+      started: false,
+      warning: `Invalid vectorDb.url: ${url}`
+    };
+  }
+  const host = parsed.hostname;
+  const port = Number(parsed.port || "6333");
+  if (!isLocalHost(host)) {
+    return {
+      available: false,
+      started: false,
+      warning: `vectorDb.autoStart only supports localhost URLs, got: ${url}`
+    };
+  }
+  if (await tryStartLocalBinary(port, log)) {
+    if (await waitForHealthy(url, DEFAULT_START_TIMEOUT_MS)) {
+      return { available: true, started: true, method: "binary" };
     }
   }
-  if (mentions.length === 0) return { text, contextBlocks: [] };
-  let processedText = text;
-  const contextBlocks = [];
-  for (const mention of mentions) {
-    `mention_${mention.type}`;
-    processedText = processedText.replace(mention.original, `[${mention.type} context below]`);
-    contextBlocks.push(mention.content);
+  if (await tryStartDocker(port, log)) {
+    if (await waitForHealthy(url, DEFAULT_START_TIMEOUT_MS)) {
+      return { available: true, started: true, method: "docker" };
+    }
   }
-  return { text: processedText, contextBlocks };
+  return {
+    available: false,
+    started: false,
+    warning: `Failed to auto-start Qdrant for ${url}. Install local qdrant binary or run container manually.`
+  };
 }
-async function resolveMention(type, arg, cwd, host) {
-  switch (type) {
-    case "file": {
-      const absPath = path4.resolve(cwd, arg);
-      try {
-        const content = await fs10.readFile(absPath, "utf8");
-        const lines = content.split("\n");
-        const truncated = lines.length > 200 ? lines.slice(0, 200).join("\n") + "\n[...truncated]" : content;
-        const relPath = path4.relative(cwd, absPath);
-        return `<file path="${relPath}">
-${truncated}
-</file>`;
-      } catch {
-        return `<file path="${arg}" error="not found"/>`;
+async function isQdrantHealthy(baseUrl, timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const response = await fetch(joinUrl(baseUrl, "/collections"), {
+      signal: controller.signal,
+      headers: { Accept: "application/json" }
+    });
+    clearTimeout(timer);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+async function waitForHealthy(baseUrl, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isQdrantHealthy(baseUrl, 1e3)) return true;
+    await sleep2(500);
+  }
+  return false;
+}
+async function tryStartLocalBinary(port, log) {
+  if (!await commandExists("qdrant")) {
+    return false;
+  }
+  try {
+    const storagePath = path6.join(os5.homedir(), ".nexus", "qdrant", "storage");
+    await mkdir(storagePath, { recursive: true });
+    const child = spawn("qdrant", [], {
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        QDRANT__SERVICE__HOST: "127.0.0.1",
+        QDRANT__SERVICE__HTTP_PORT: String(port),
+        QDRANT__STORAGE__STORAGE_PATH: storagePath
+      }
+    });
+    child.unref();
+    log?.(`[nexus] Qdrant: started local binary on port ${port}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function tryStartDocker(port, log) {
+  if (!await commandExists("docker")) {
+    return false;
+  }
+  const containerName = `nexus-qdrant-${port}`;
+  try {
+    const running = await execa("docker", ["inspect", "-f", "{{.State.Running}}", containerName], {
+      reject: false
+    });
+    if ((running.stdout ?? "").trim() === "true") {
+      log?.(`[nexus] Qdrant: docker container ${containerName} is already running`);
+      return true;
+    }
+    if (running.exitCode === 0) {
+      const started = await execa("docker", ["start", containerName], { reject: false });
+      if (started.exitCode === 0) {
+        log?.(`[nexus] Qdrant: started docker container ${containerName}`);
+        return true;
       }
     }
-    case "folder": {
-      const absPath = path4.resolve(cwd, arg);
-      try {
-        const entries = await listDirRecursive(absPath, cwd, 50);
-        const relPath = path4.relative(cwd, absPath);
-        return `<folder path="${relPath}">
-${entries.join("\n")}
-</folder>`;
-      } catch {
-        return `<folder path="${arg}" error="not found"/>`;
-      }
+    const storagePath = path6.join(os5.homedir(), ".nexus", "qdrant", "docker-storage");
+    await mkdir(storagePath, { recursive: true });
+    const result = await execa(
+      "docker",
+      [
+        "run",
+        "-d",
+        "--name",
+        containerName,
+        "-p",
+        `127.0.0.1:${port}:6333`,
+        "-v",
+        `${storagePath}:/qdrant/storage`,
+        "qdrant/qdrant"
+      ],
+      { reject: false }
+    );
+    if (result.exitCode === 0) {
+      log?.(`[nexus] Qdrant: launched docker container ${containerName} on port ${port}`);
+      return true;
     }
-    case "url": {
-      try {
-        const response = await fetch(arg, {
-          headers: { "User-Agent": "NexusCode/1.0" },
-          signal: AbortSignal.timeout(15e3)
-        });
-        const text = await response.text();
-        const truncated = text.length > 5e4 ? text.slice(0, 5e4) + "\n[...truncated]" : text;
-        return `<url href="${arg}">
-${truncated}
-</url>`;
-      } catch {
-        return `<url href="${arg}" error="fetch failed"/>`;
-      }
-    }
-    case "problems": {
-      if (!host?.getProblems) return null;
-      try {
-        const problems = await host.getProblems();
-        if (problems.length === 0) return `<problems>No diagnostics found.</problems>`;
-        const formatted = problems.slice(0, 50).map(
-          (p) => `[${p.severity.toUpperCase()}] ${p.file}:${p.line} \u2014 ${p.message}`
-        ).join("\n");
-        return `<problems>
-${formatted}
-</problems>`;
-      } catch {
-        return null;
-      }
-    }
-    case "git": {
-      try {
-        const { execa: execa3 } = await import('execa');
-        const { stdout } = await execa3("git", ["diff", "--stat", "HEAD"], { cwd });
-        const status = await execa3("git", ["status", "--short"], { cwd });
-        return `<git_state>
-${status.stdout}
+  } catch {
+    return false;
+  }
+  return false;
+}
+async function commandExists(cmd) {
+  const result = await execa("bash", ["-lc", `command -v ${cmd} >/dev/null 2>&1`], {
+    reject: false
+  });
+  return result.exitCode === 0;
+}
+function safeParseUrl(url) {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+function isLocalHost(host) {
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+function joinUrl(base, suffix) {
+  return `${base.replace(/\/+$/, "")}${suffix}`;
+}
+function sleep2(ms) {
+  return new Promise((resolve10) => setTimeout(resolve10, ms));
+}
 
-${stdout}
-</git_state>`;
-      } catch {
-        return null;
-      }
-    }
-    default:
-      return null;
+// src/indexer/factory.ts
+async function createCodebaseIndexer(projectRoot, config, options = {}) {
+  const warn = options.onWarning ?? (() => {
+  });
+  const wantsVector = Boolean(config.indexing.vector && config.vectorDb?.enabled);
+  if (!wantsVector) {
+    return new CodebaseIndexer(projectRoot, config);
   }
-}
-async function listDirRecursive(dir, cwd, maxEntries) {
-  const entries = [];
-  async function walk(d, prefix) {
-    if (entries.length >= maxEntries) return;
-    const items = await fs10.readdir(d).catch(() => []);
-    for (const item of items) {
-      if (entries.length >= maxEntries) break;
-      if (item === "node_modules" || item === ".git") continue;
-      const full = path4.join(d, item);
-      path4.relative(cwd, full);
-      const st = await fs10.stat(full).catch(() => null);
-      if (!st) continue;
-      entries.push(prefix + item + (st.isDirectory() ? "/" : ""));
-      if (st.isDirectory()) await walk(full, prefix + "  ");
-    }
+  if (!config.embeddings) {
+    warn("[nexus] Vector indexing is enabled but embeddings config is missing. Falling back to FTS-only index.");
+    return new CodebaseIndexer(projectRoot, config);
   }
-  await walk(dir, "");
-  return entries;
+  const vectorUrl = config.vectorDb?.url ?? "http://127.0.0.1:6333";
+  const autoStart = config.vectorDb?.autoStart ?? true;
+  const qdrant = await ensureQdrantRunning({
+    url: vectorUrl,
+    autoStart,
+    log: warn
+  });
+  if (!qdrant.available) {
+    warn(qdrant.warning ?? "[nexus] Qdrant is unavailable. Falling back to FTS-only index.");
+    return new CodebaseIndexer(projectRoot, config);
+  }
+  const embeddingClient = createEmbeddingClient(config.embeddings);
+  const projectHash = crypto.createHash("sha1").update(projectRoot).digest("hex").slice(0, 16);
+  return new CodebaseIndexer(projectRoot, config, embeddingClient, vectorUrl, projectHash);
 }
 var McpClient = class {
   clients = /* @__PURE__ */ new Map();
@@ -4961,7 +5487,7 @@ var CheckpointTracker = class {
   constructor(taskId, workspaceRoot) {
     this.taskId = taskId;
     this.workspaceRoot = workspaceRoot;
-    this.shadowRoot = path4.join(os5.homedir(), ".nexus", "checkpoints", taskId);
+    this.shadowRoot = path6.join(os5.homedir(), ".nexus", "checkpoints", taskId);
     this.git = simpleGit(this.shadowRoot);
   }
   git;
@@ -4994,7 +5520,7 @@ var CheckpointTracker = class {
     }
   }
   async initInternal() {
-    await fs10.mkdir(this.shadowRoot, { recursive: true });
+    await fs11.mkdir(this.shadowRoot, { recursive: true });
     try {
       await this.git.status();
     } catch {
@@ -5080,15 +5606,15 @@ var CheckpointTracker = class {
   }
 };
 async function copyDir(src, dest, ignoreNames) {
-  const { readdir: readdir4, copyFile, mkdir: mkdir6, stat: stat7 } = await import('fs/promises');
-  await mkdir6(dest, { recursive: true });
+  const { readdir: readdir4, copyFile, mkdir: mkdir7, stat: stat8 } = await import('fs/promises');
+  await mkdir7(dest, { recursive: true });
   const items = await readdir4(src).catch(() => []);
   await Promise.all(
     items.map(async (item) => {
       if (ignoreNames.has(item)) return;
-      const srcPath = path4.join(src, item);
-      const destPath = path4.join(dest, item);
-      const itemStat = await stat7(srcPath).catch(() => null);
+      const srcPath = path6.join(src, item);
+      const destPath = path6.join(dest, item);
+      const itemStat = await stat8(srcPath).catch(() => null);
       if (!itemStat) return;
       if (itemStat.isDirectory()) {
         await copyDir(srcPath, destPath, ignoreNames);
@@ -5100,6 +5626,6 @@ async function copyDir(src, dest, ignoreNames) {
   );
 }
 
-export { CheckpointTracker, CodebaseIndexer, MODE_TOOL_GROUPS, McpClient, NexusConfigSchema, ParallelAgentManager, ProjectRegistry, READ_ONLY_TOOLS, Session, TOOL_GROUP_MEMBERS, ToolRegistry, buildSystemPrompt, classifySkills, classifyTools, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, ensureGlobalConfigDir, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, listSessions, loadConfig, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, writeConfig };
+export { CheckpointTracker, CodebaseIndexer, MODE_TOOL_GROUPS, McpClient, NexusConfigSchema, ParallelAgentManager, ProjectRegistry, READ_ONLY_TOOLS, Session, TOOL_GROUP_MEMBERS, ToolRegistry, buildSystemPrompt, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, listSessions, loadConfig, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, writeConfig, writeGlobalProfiles };
 //# sourceMappingURL=index.mjs.map
 //# sourceMappingURL=index.mjs.map

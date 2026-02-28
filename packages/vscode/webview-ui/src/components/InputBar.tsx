@@ -10,7 +10,7 @@ const AT_MENTION_SUGGESTIONS = [
 ]
 
 export function InputBar() {
-  const { inputValue, isRunning, setInputValue, sendMessage, abort } = useChatStore()
+  const { inputValue, isRunning, setInputValue, sendMessage, abort, config, selectedProfile, setProfile } = useChatStore()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [suggestions, setSuggestions] = useState(AT_MENTION_SUGGESTIONS)
@@ -71,52 +71,54 @@ export function InputBar() {
   }, [isRunning])
 
   return (
-    <div className="relative border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-sideBar-background)]">
-      {/* @ mention suggestions */}
+    <div className="relative">
+      <div className="mb-2 flex items-center gap-2">
+        <label className="text-[10px] text-[var(--vscode-descriptionForeground)]">Profile</label>
+        <select
+          value={selectedProfile}
+          onChange={(e) => setProfile(e.target.value)}
+          className="nexus-input text-[11px] py-1 px-2 max-w-[220px]"
+        >
+          <option value="">default</option>
+          {Object.keys(config?.profiles ?? {}).map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+        </select>
+      </div>
+
       {showSuggestions && (
-        <div className="absolute bottom-full left-0 right-0 bg-[var(--vscode-editor-background)] border border-[var(--vscode-panel-border)] rounded-t-lg overflow-hidden shadow-lg z-10">
+        <div className="absolute bottom-full left-0 right-0 bg-[var(--vscode-editor-background)] border border-[var(--vscode-panel-border)] rounded-t-xl overflow-hidden shadow-lg z-10">
           {suggestions.map(s => (
             <button
               key={s.value}
               onClick={() => insertSuggestion(s.value)}
-              className="w-full text-left px-3 py-1.5 text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] transition-colors"
+              className="w-full text-left px-3 py-2 text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] transition-colors"
             >
-              <span className="font-mono text-[#4ec9b0]">{s.value}</span>
+              <span className="font-mono text-[var(--nexus-accent)]">{s.value}</span>
               <span className="ml-2 text-[var(--vscode-descriptionForeground)]">{s.label.split("—")[1]}</span>
             </button>
           ))}
         </div>
       )}
 
-      <div className="flex items-end gap-1.5 px-2 py-2">
-        <textarea
-          ref={textareaRef}
-          value={inputValue}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          placeholder={isRunning ? "Agent is running... (Esc to abort)" : "Message NexusCode... (@ to mention, Enter to send, Shift+Enter for newline)"}
-          disabled={false}
-          rows={1}
-          className={`
-            flex-1 resize-none rounded border text-sm
-            bg-[var(--vscode-input-background,#3c3c3c)]
-            border-[var(--vscode-input-border,transparent)]
-            text-[var(--vscode-input-foreground,#cccccc)]
-            placeholder:text-[var(--vscode-input-placeholderForeground,#6a6a6a)]
-            focus:outline-none focus:border-[var(--vscode-focusBorder,#007acc)]
-            px-2.5 py-1.5 min-h-[32px] max-h-[200px]
-            transition-colors
-            ${isRunning ? "opacity-60" : ""}
-          `}
-          style={{ height: "32px" }}
-        />
-
-        <div className="flex gap-1 flex-shrink-0">
+      <div className="prompt-input-container">
+        <div className="prompt-input-wrapper">
+          <textarea
+            ref={textareaRef}
+            value={inputValue}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            placeholder={isRunning ? "Running… (Esc to abort)" : "Ask NexusCode anything… (@ for context)"}
+            disabled={false}
+            rows={1}
+            className={`prompt-input flex-1 min-w-0 ${isRunning ? "opacity-70" : ""}`}
+            style={{ height: "54px" }}
+          />
           {isRunning ? (
             <button
               onClick={abort}
-              title="Abort (Esc)"
-              className="w-7 h-7 flex items-center justify-center rounded bg-red-600 hover:bg-red-500 text-white transition-colors"
+              title="Stop (Esc)"
+              className="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-lg bg-red-600/90 hover:bg-red-500 text-white transition-colors"
             >
               <StopIcon />
             </button>
@@ -125,7 +127,11 @@ export function InputBar() {
               onClick={() => inputValue.trim() && sendMessage(inputValue.trim())}
               disabled={!inputValue.trim()}
               title="Send (Enter)"
-              className="w-7 h-7 flex items-center justify-center rounded bg-[var(--vscode-button-background)] hover:bg-[var(--vscode-button-hoverBackground)] text-[var(--vscode-button-foreground)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-lg text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{
+                background: inputValue.trim() ? "var(--nexus-accent)" : "var(--vscode-button-secondaryBackground)",
+                color: inputValue.trim() ? "#fff" : "var(--vscode-button-secondaryForeground)",
+              }}
             >
               <SendIcon />
             </button>

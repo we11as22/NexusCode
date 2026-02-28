@@ -6,11 +6,11 @@ import { hideBin } from "yargs/helpers"
 import * as path from "node:path"
 import * as os from "node:os"
 import {
-  loadConfig, Session, createLLMClient, ToolRegistry, loadSkills,
+  loadConfig, writeConfig, Session, createLLMClient, ToolRegistry, loadSkills,
   loadRules, McpClient, setMcpClientInstance, createCompaction,
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
-  CodebaseIndexer, listSessions,
-  type Mode, type AgentEvent,
+  CodebaseIndexer, createCodebaseIndexer, listSessions,
+  type Mode, type AgentEvent, type IndexStatus,
 } from "@nexuscode/core"
 import { App } from "./tui/App.js"
 import { CliHost } from "./host.js"
@@ -26,7 +26,11 @@ const argv = await yargs(hideBin(process.argv))
   .option("max-mode", {
     type: "boolean",
     default: false,
-    describe: "Enable max mode (deeper analysis with more capable model)",
+    describe: "Enable max mode (same model, deeper/longer reasoning)",
+  })
+  .option("temperature", {
+    type: "number",
+    describe: "Sampling temperature (0-2)",
   })
   .option("auto", {
     type: "boolean",
@@ -37,10 +41,10 @@ const argv = await yargs(hideBin(process.argv))
     type: "string",
     describe: "Project directory (default: current directory)",
   })
-  .option("no-index", {
+  .option("index", {
     type: "boolean",
-    default: false,
-    describe: "Disable codebase indexing",
+    default: true,
+    describe: "Enable codebase indexing (use --no-index to disable)",
   })
   .option("session", {
     alias: "s",
@@ -79,19 +83,31 @@ if (argv["nexus-version"]) {
 }
 
 const cwd = argv.project ? path.resolve(argv.project) : process.cwd()
+const indexEnabledFlag = Boolean((argv as Record<string, unknown>)["index"])
 
 // Load config
 let config = await loadConfig(cwd)
 
 // Apply --model override
 if (argv.model) {
-  const parts = argv.model.split("/")
-  if (parts.length === 2) {
-    config.model.provider = parts[0] as any
-    config.model.id = parts[1]!
+  const slashIdx = argv.model.indexOf("/")
+  if (slashIdx > 0) {
+    const provider = argv.model.slice(0, slashIdx)
+    const modelId = argv.model.slice(slashIdx + 1)
+    if (provider === "openrouter") {
+      config.model.provider = "openai-compatible"
+      config.model.baseUrl = config.model.baseUrl || "https://openrouter.ai/api/v1"
+    } else {
+      config.model.provider = provider as any
+    }
+    config.model.id = modelId
   } else {
-    config.model.id = parts[0]!
+    config.model.id = argv.model
   }
+}
+
+if (typeof argv.temperature === "number" && Number.isFinite(argv.temperature)) {
+  config.model.temperature = Math.max(0, Math.min(2, argv.temperature))
 }
 
 // Apply profile override
@@ -134,6 +150,27 @@ if (isPrintMode && initialMessage) {
 
   const client = createLLMClient(config.model)
   const toolRegistry = new ToolRegistry()
+  const mcpClientNI = new McpClient()
+  setMcpClientInstance(mcpClientNI)
+  if (config.mcp.servers.length > 0) {
+    await mcpClientNI.connectAll(config.mcp.servers).catch(() => {})
+    for (const tool of mcpClientNI.getTools()) {
+      toolRegistry.register(tool)
+    }
+  }
+  const parallelManagerNI = new ParallelAgentManager()
+  toolRegistry.register(createSpawnAgentTool(parallelManagerNI, config))
+
+  let indexer: CodebaseIndexer | undefined
+  if (config.indexing.enabled && indexEnabledFlag) {
+    indexer = await createCodebaseIndexer(cwd, config, {
+      onWarning: (message) => {
+        console.error(`\n[indexer] ${message}`)
+      },
+    }).catch(() => undefined)
+    indexer?.startIndexing().catch(() => {})
+  }
+
   const compaction = createCompaction()
   const abortController = new AbortController()
 
@@ -149,6 +186,15 @@ if (isPrintMode && initialMessage) {
       process.stderr.write(`\n[tool: ${event.tool}]`)
     }
     if (event.type === "tool_end") {
+      process.stderr.write(event.success ? " ✓" : " ✗")
+    }
+    if (event.type === "subagent_start") {
+      process.stderr.write(`\n[subagent: ${event.subagentId.slice(0, 10)} ${event.mode}] ${event.task.slice(0, 80)}`)
+    }
+    if (event.type === "subagent_tool_start") {
+      process.stderr.write(`\n[subagent tool: ${event.tool}]`)
+    }
+    if (event.type === "subagent_done") {
       process.stderr.write(event.success ? " ✓" : " ✗")
     }
     if (event.type === "error") {
@@ -175,6 +221,7 @@ if (isPrintMode && initialMessage) {
       tools: [...tools, ...dynamic],
       skills,
       rulesContent,
+      indexer,
       compaction,
       signal: abortController.signal,
     })
@@ -185,15 +232,15 @@ if (isPrintMode && initialMessage) {
     }
   }
 
+  indexer?.close()
+  await mcpClientNI.disconnectAll().catch(() => {})
   await session.save().catch(() => {})
   process.exit(0)
 }
 
 // Interactive TUI mode
-const events = createEventStream()
-
-const client = createLLMClient(config.model)
-const maxModeClient = config.maxMode.enabled ? createLLMClient(config.maxMode) : undefined
+let client = createLLMClient(config.model)
+let defaultModelProfile = { ...config.model }
 const toolRegistry = new ToolRegistry()
 const mcpClient = new McpClient()
 setMcpClientInstance(mcpClient)
@@ -208,20 +255,51 @@ if (config.mcp.servers.length > 0) {
 const parallelManager = new ParallelAgentManager()
 toolRegistry.register(createSpawnAgentTool(parallelManager, config))
 
-const rulesContent = await loadRules(cwd, config.rules.files).catch(() => "")
-const skills = await loadSkills(config.skills, cwd).catch(() => [])
+let rulesContent = await loadRules(cwd, config.rules.files).catch(() => "")
+let skills = await loadSkills(config.skills, cwd).catch(() => [])
 const compaction = createCompaction()
+const { push: pushEvent, iterable: eventIterable } = createEventStream()
 
 let indexer: CodebaseIndexer | undefined
-if (config.indexing.enabled && !argv["no-index"]) {
-  indexer = new CodebaseIndexer(cwd, config)
+
+async function rebuildIndexer(): Promise<void> {
+  indexer?.close()
+  indexer = undefined
+
+  if (!config.indexing.enabled || !indexEnabledFlag) {
+    pushEvent({ type: "index_update", status: { state: "idle" } })
+    return
+  }
+
+  indexer = await createCodebaseIndexer(cwd, config, {
+    onWarning: (message) => {
+      pushEvent({ type: "error", error: message })
+    },
+  })
+  indexer.onStatusChange((status: IndexStatus) => {
+    pushEvent({ type: "index_update", status })
+  })
   indexer.startIndexing().catch(console.warn)
 }
 
+await rebuildIndexer()
+
 let currentAbortController: AbortController | null = null
 
-const { builtin: builtinTools, dynamic: dynamicTools } = toolRegistry.getForMode(mode)
-const allTools = [...builtinTools, ...dynamicTools]
+function getAllTools(activeMode: Mode) {
+  const { builtin, dynamic } = toolRegistry.getForMode(activeMode)
+  return [...builtin, ...dynamic]
+}
+
+async function reconnectMcpServers(): Promise<void> {
+  await mcpClient.disconnectAll().catch(() => {})
+  if (config.mcp.servers.length > 0) {
+    await mcpClient.connectAll(config.mcp.servers).catch(() => {})
+    for (const tool of mcpClient.getTools()) {
+      toolRegistry.register(tool)
+    }
+  }
+}
 
 function createEventStream() {
   let resolve: (event: AgentEvent) => void
@@ -256,7 +334,66 @@ function createEventStream() {
   return { push, iterable }
 }
 
-const { push: pushEvent, iterable: eventIterable } = createEventStream()
+function saveConfig(updates: Partial<typeof config>): void {
+  if (updates.model) {
+    const nextModel = { ...config.model, ...updates.model }
+    if ((nextModel.provider as unknown as string) === "openrouter") {
+      nextModel.provider = "openai-compatible"
+      nextModel.baseUrl = nextModel.baseUrl || "https://openrouter.ai/api/v1"
+    }
+    config.model = nextModel
+    defaultModelProfile = { ...config.model }
+    client = createLLMClient(config.model)
+  }
+  if (updates.maxMode) config.maxMode = { ...config.maxMode, ...updates.maxMode }
+  if (updates.embeddings) {
+    const nextEmbeddings = { ...config.embeddings, ...updates.embeddings } as typeof config.embeddings
+    if (nextEmbeddings && (nextEmbeddings.provider as unknown as string) === "openrouter") {
+      nextEmbeddings.provider = "openai-compatible"
+      nextEmbeddings.baseUrl = nextEmbeddings.baseUrl || "https://openrouter.ai/api/v1"
+    }
+    config.embeddings = nextEmbeddings
+  }
+  if (updates.mcp) {
+    config.mcp = { ...config.mcp, ...updates.mcp }
+    reconnectMcpServers().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      pushEvent({ type: "error", error: `[mcp] ${msg}` })
+    })
+  }
+  if (updates.skills) {
+    config.skills = [...updates.skills]
+    loadSkills(config.skills, cwd)
+      .then((loaded) => {
+        skills = loaded
+      })
+      .catch(() => {})
+  }
+  if (updates.rules) {
+    config.rules = { ...config.rules, ...updates.rules }
+    loadRules(cwd, config.rules.files)
+      .then((loaded) => {
+        rulesContent = loaded
+      })
+      .catch(() => {})
+  }
+  if (updates.modes) {
+    config.modes = { ...config.modes, ...updates.modes }
+  }
+  if (updates.profiles) {
+    config.profiles = { ...config.profiles, ...updates.profiles }
+  }
+  if (updates.indexing) config.indexing = { ...config.indexing, ...updates.indexing }
+  if (updates.vectorDb) config.vectorDb = config.vectorDb ? { ...config.vectorDb, ...updates.vectorDb } : (updates.vectorDb as any)
+  writeConfig(config, cwd)
+
+  if (updates.indexing || updates.vectorDb || updates.embeddings) {
+    rebuildIndexer().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      pushEvent({ type: "error", error: `[indexer] ${msg}` })
+    })
+  }
+}
 
 const host = new CliHost(cwd, pushEvent, argv.auto)
 
@@ -268,11 +405,10 @@ async function runMessage(content: string, msgMode: Mode) {
     await runAgentLoop({
       session,
       client,
-      maxModeClient,
       host,
       config,
       mode: msgMode,
-      tools: allTools,
+      tools: getAllTools(msgMode),
       skills,
       rulesContent,
       indexer,
@@ -289,7 +425,6 @@ async function runMessage(content: string, msgMode: Mode) {
 }
 
 // If initial message provided, run it
-let started = false
 const startMessage = initialMessage
 
 // Render TUI
@@ -316,6 +451,56 @@ const { unmount } = render(
     initialProvider: config.model.provider,
     initialMode: mode,
     initialMaxMode: config.maxMode.enabled,
+    sessionId: session.id,
+    projectDir: cwd,
+    profileNames: Object.keys(config.profiles ?? {}),
+    onProfileSelect: (profileName) => {
+      if (!profileName) {
+        config.model = { ...defaultModelProfile }
+        client = createLLMClient(config.model)
+        return
+      }
+      const profile = config.profiles?.[profileName]
+      if (!profile) {
+        return
+      }
+      config.model = { ...config.model, ...profile } as typeof config.model
+      if ((config.model.provider as unknown as string) === "openrouter") {
+        config.model.provider = "openai-compatible"
+        config.model.baseUrl = config.model.baseUrl || "https://openrouter.ai/api/v1"
+      }
+      client = createLLMClient(config.model)
+    },
+    noIndex: !indexEnabledFlag,
+    configSnapshot: {
+      model: { provider: config.model.provider, id: config.model.id, temperature: config.model.temperature },
+      maxMode: {
+        enabled: config.maxMode.enabled,
+        tokenBudgetMultiplier: config.maxMode.tokenBudgetMultiplier,
+      },
+      embeddings: config.embeddings
+        ? {
+            provider: config.embeddings.provider,
+            model: config.embeddings.model,
+            dimensions: config.embeddings.dimensions,
+          }
+        : undefined,
+      indexing: { enabled: config.indexing.enabled, vector: config.indexing.vector },
+      vectorDb: config.vectorDb ? { enabled: config.vectorDb.enabled, url: config.vectorDb.url } : undefined,
+      mcp: { servers: (config.mcp?.servers ?? []) as unknown as Array<Record<string, unknown>> },
+      skills: config.skills ?? [],
+      rules: { files: config.rules?.files ?? [] },
+      modes: {
+        agent: { customInstructions: config.modes?.agent?.customInstructions },
+        plan: { customInstructions: config.modes?.plan?.customInstructions },
+        debug: { customInstructions: config.modes?.debug?.customInstructions },
+        ask: { customInstructions: config.modes?.ask?.customInstructions },
+      },
+      profiles: config.profiles ?? {},
+    },
+    saveConfig,
+    onReindex: () => indexer?.reindex(),
+    onIndexStop: () => indexer?.stop(),
   }),
   { exitOnCtrlC: false }
 )
@@ -329,6 +514,7 @@ if (startMessage) {
 
 process.on("SIGINT", () => {
   currentAbortController?.abort()
+  indexer?.close()
   setTimeout(() => {
     unmount()
     process.exit(0)

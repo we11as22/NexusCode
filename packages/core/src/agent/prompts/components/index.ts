@@ -111,7 +111,7 @@ Answer questions, explain code, and analyze implementations. You CAN read files 
 
 const MAX_MODE_BLOCK = `## ⚡ MAX MODE ACTIVE
 
-You are running in MAX MODE with extended depth and thoroughness. Apply these additional steps:
+You are running in MAX MODE with extended depth and thoroughness (same model, larger reasoning/context budget). Apply these additional steps:
 
 - Read ALL relevant files (not just the obvious ones) before starting
 - Map all dependencies, callers, and affected modules

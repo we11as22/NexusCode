@@ -19,17 +19,18 @@ import type {
 } from "../types.js"
 import type { LLMStreamEvent, LLMMessage, LLMToolDef } from "../provider/types.js"
 import { buildSystemPrompt, type PromptContext } from "./prompts/components/index.js"
-import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS } from "./modes.js"
+import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN } from "./modes.js"
 import { classifyTools, classifySkills } from "./classifier.js"
 import { estimateTokens } from "../context/condense.js"
+import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
+import * as path from "node:path"
 
 const DOOM_LOOP_THRESHOLD = 3
 
 export interface AgentLoopOptions {
   session: ISession
   client: LLMClient
-  maxModeClient?: LLMClient
   host: IHost
   config: NexusConfig
   mode: Mode
@@ -48,12 +49,12 @@ export interface AgentLoopOptions {
  */
 export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const {
-    session, client, maxModeClient, host, config, mode,
+    session, client, host, config, mode,
     tools, skills, rulesContent, indexer, compaction,
     signal, gitBranch,
   } = opts
 
-  const activeClient = (config.maxMode.enabled && maxModeClient) ? maxModeClient : client
+  const activeClient = client
 
   // 1. Resolve tools: built-ins always active + MCP/custom classified if >threshold
   //    Hard-blocked tools for this mode are NEVER included (even if sent as dynamic tools)
@@ -102,8 +103,35 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
 
   const autoApproveActions = getAutoApproveActions(mode, config.modes[mode])
+  const mentionsContext = await resolveMentionsContext(session, host)
+  /**
+   * Keep tracking across outer iterations; otherwise one invalid tool call per turn
+   * can bypass the threshold forever.
+   */
+  let consecutiveInvalidToolCalls = 0
+  const MAX_CONSECUTIVE_INVALID = 3
+  let loopIterations = 0
+  const baseMaxIterationsByMode: Record<Mode, number> = {
+    ask: 10,
+    plan: 16,
+    agent: 32,
+    debug: 32,
+  }
+  const maxIterations = config.maxMode.enabled
+    ? Math.floor(baseMaxIterationsByMode[mode] * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2))))
+    : baseMaxIterationsByMode[mode]
 
   while (!signal.aborted) {
+    loopIterations++
+    if (loopIterations > maxIterations) {
+      host.emit({
+        type: "error",
+        error: `Agent loop stopped after ${maxIterations} iterations in ${mode} mode (safety limit).`,
+        fatal: true,
+      })
+      break
+    }
+
     // 3. Build system prompt (cache-aware)
     const promptCtx: PromptContext = {
       mode,
@@ -118,7 +146,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       gitBranch,
       todoList: session.getTodo(),
       compactionSummary: getCompactionSummary(session),
-      mentionsContext: undefined,
+      mentionsContext,
     }
 
     const { blocks, cacheableCount } = buildSystemPrompt(promptCtx)
@@ -141,12 +169,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }).id
 
     let currentText = ""
-  const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
-  let lastToolName = ""
-  let finishReason: string | undefined
-  /** Count consecutive calls to unknown/invalid tools — detect hallucination loops */
-  let consecutiveInvalidToolCalls = 0
-  const MAX_CONSECUTIVE_INVALID = 3
+    const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
+    let lastToolName = ""
+    let finishReason: string | undefined
+    let fatalStreamError = false
 
     const flushPendingReads = async () => {
       if (pendingReads.length === 0) return
@@ -183,13 +209,19 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
 
     try {
+      const tokenMultiplier = config.maxMode.enabled
+        ? Math.max(1, Math.min(6, Number(config.maxMode.tokenBudgetMultiplier || 2)))
+        : 1
+      const maxTokens = Math.floor(8192 * tokenMultiplier)
+
       for await (const event of activeClient.stream({
         messages,
         tools: llmTools,
         systemPrompt,
         signal,
         cacheableSystemBlocks: cacheableCount,
-        maxTokens: config.maxMode.enabled ? 16384 : 8192,
+        maxTokens,
+        temperature: config.model.temperature,
       })) {
         if (signal.aborted) break
 
@@ -318,7 +350,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           case "error":
             if (event.error) {
               await flushPendingReads()
-              host.emit({ type: "error", error: event.error.message })
+              const message = event.error.message
+              const isRetrying = message.startsWith("Retrying after error")
+              host.emit({ type: "error", error: message, fatal: !isRetrying })
+              if (!isRetrying) {
+                fatalStreamError = true
+              }
             }
             break
         }
@@ -333,6 +370,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         await handleCompaction(session, activeClient, config, host, compaction, signal)
         continue
       }
+      break
+    }
+
+    // Stop on fatal stream errors; without this the outer loop can repeat forever.
+    if (fatalStreamError) {
       break
     }
 
@@ -375,23 +417,32 @@ async function executeToolCall(
     }
   }
 
-  // Plan mode: block writing source code files (only .md/.txt/docs allowed)
-  if (
-    ctx.config.modes &&
-    ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName) &&
-    toolInput["path"] && typeof toolInput["path"] === "string"
-  ) {
-    const pathExtension = (toolInput["path"] as string).match(/\.[a-zA-Z0-9]+$/)
-    const ext = pathExtension ? pathExtension[0].toLowerCase() : ""
-    // Only enforce in plan/ask modes
-    const autoApproveActionsSet = autoApproveActions
-    if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
-      // Check if we're actually in a restricted mode by seeing if execute_command was blocked
-      const isRestrictedMode = !tools.some(t => t.name === "execute_command")
-      if (isRestrictedMode) {
+  // Restricted modes (plan/ask): allow writes only to .nexus/plans/*.md|*.txt
+  if (ctx.config.modes && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
+    // We infer restricted modes by tool availability: execute_command is unavailable in plan/ask.
+    const isRestrictedMode = !tools.some(t => t.name === "execute_command")
+    if (isRestrictedMode) {
+      const targetPath = extractWriteTargetPath(toolName, toolInput)
+      if (!targetPath) {
         return {
           success: false,
-          output: `In the current mode, you cannot modify source code files (${ext}). You may only write documentation files (.md, .txt). Use attempt_completion to present your plan as text.`,
+          output: "In the current mode, write operations require an explicit target path under .nexus/plans/*.md or .txt.",
+        }
+      }
+      const rel = path.isAbsolute(targetPath) ? path.relative(ctx.cwd, targetPath) : targetPath
+      const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
+      if (!PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) {
+        const extMatch = normalized.match(/\.[a-zA-Z0-9]+$/)
+        const ext = extMatch ? extMatch[0].toLowerCase() : ""
+        if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
+          return {
+            success: false,
+            output: `In the current mode, you cannot modify source code files (${ext}). You may only write plan docs in .nexus/plans/*.md or .txt.`,
+          }
+        }
+        return {
+          success: false,
+          output: "In the current mode, you may only write plan documentation files under .nexus/plans/ (*.md or *.txt).",
         }
       }
     }
@@ -447,6 +498,26 @@ async function executeToolCall(
   // Execute
   try {
     const result = await tool.execute(validatedArgs as Record<string, unknown>, ctx)
+
+    // Keep code index fresh after successful file edits in both CLI and VSCode hosts.
+    if (result.success && ctx.indexer && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
+      const targetPath = extractWriteTargetPath(toolName, validatedArgs as Record<string, unknown>)
+      const refreshFile = ctx.indexer.refreshFile
+      const refreshFileNow = ctx.indexer.refreshFileNow
+      if (targetPath && (refreshFileNow || refreshFile)) {
+        const absolutePath = path.isAbsolute(targetPath) ? targetPath : path.resolve(ctx.cwd, targetPath)
+        try {
+          if (refreshFileNow) {
+            await refreshFileNow.call(ctx.indexer, absolutePath)
+          } else if (refreshFile) {
+            await refreshFile.call(ctx.indexer, absolutePath)
+          }
+        } catch {
+          // Ignore index refresh errors; they should not fail a successful write.
+        }
+      }
+    }
+
     return { success: result.success, output: result.output }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -608,6 +679,28 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
   }
 
   return messages
+}
+
+async function resolveMentionsContext(session: ISession, host: IHost): Promise<string | undefined> {
+  const latestUser = [...session.messages]
+    .reverse()
+    .find((msg) => msg.role === "user" && typeof msg.content === "string")
+
+  if (!latestUser || typeof latestUser.content !== "string") return undefined
+  if (!latestUser.content.includes("@")) return undefined
+
+  try {
+    const resolved = await parseMentions(latestUser.content, host.cwd, host)
+    if (resolved.contextBlocks.length === 0) return undefined
+
+    if (resolved.text !== latestUser.content) {
+      session.updateMessage(latestUser.id, { content: resolved.text })
+    }
+
+    return resolved.contextBlocks.join("\n\n")
+  } catch {
+    return undefined
+  }
 }
 
 
@@ -775,6 +868,20 @@ function isContextOverflowError(message: string): boolean {
     lower.includes("too long") ||
     lower.includes("token limit")
   )
+}
+
+function extractWriteTargetPath(toolName: string, toolInput: Record<string, unknown>): string | undefined {
+  if (typeof toolInput["path"] === "string" && toolInput["path"]) {
+    return toolInput["path"] as string
+  }
+  if (toolName === "apply_patch" && typeof toolInput["patch"] === "string") {
+    const patch = toolInput["patch"] as string
+    const match = patch.match(/^(?:---|\+\+\+)\s+(?:a\/|b\/)?(.+?)(?:\t.*)?$/m)
+    if (match?.[1] && match[1] !== "/dev/null") {
+      return match[1]
+    }
+  }
+  return undefined
 }
 
 function getContextLimit(modelId: string): number {

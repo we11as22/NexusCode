@@ -1,15 +1,18 @@
-import React, { useEffect } from "react"
-import { useChatStore } from "./stores/chat.js"
+import React, { useEffect, useMemo, useState } from "react"
+import { useChatStore, type NexusConfigState } from "./stores/chat.js"
 import { MessageList } from "./components/MessageList.js"
 import { InputBar } from "./components/InputBar.js"
 import { ModeSelector } from "./components/ModeSelector.js"
 import { postMessage } from "./vscode.js"
-import type { ExtensionMessage } from "../../src/provider.js"
+import type { ExtensionMessage } from "./types/messages.js"
+
+const ICON_CLASS = "w-4 h-4 flex-shrink-0"
+const BTN_CLASS =
+  "p-1.5 rounded-md text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
 
 export function App() {
   const store = useChatStore()
 
-  // Listen for messages from the extension
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const msg = event.data as ExtensionMessage
@@ -26,190 +29,848 @@ export function App() {
           store.handleIndexStatus(msg.status as any)
           break
         case "sessionList":
-          // TODO: expose session list in UI
+          store.handleSessionList(msg.sessions)
           break
         case "configLoaded":
-          // Config loaded — could expose settings UI
+          store.handleConfigLoaded(msg.config)
+          break
+        case "addToChatContent":
+          store.appendToInput(msg.content)
           break
       }
     }
 
     window.addEventListener("message", handler)
     postMessage({ type: "getState" })
-
+    postMessage({ type: "webviewDidLaunch" })
     return () => window.removeEventListener("message", handler)
   }, [])
 
-  const indexStatus = store.indexStatus
-
   return (
-    <div className="flex flex-col h-screen bg-[var(--vscode-sideBar-background)] overflow-hidden">
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-2 py-1 border-b border-[var(--vscode-panel-border)] flex-shrink-0">
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs font-bold text-[var(--vscode-foreground)]">⚡ NexusCode</span>
-          <IndexBadge status={indexStatus} />
+    <div className="container">
+      <header className="nexus-header">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="nexus-logo-dot" />
+          <span className="text-sm font-semibold text-[var(--vscode-foreground)] truncate">NexusCode</span>
+          <IndexBadge status={store.indexStatus} />
         </div>
 
-        <div className="flex items-center gap-1">
-          {/* Compact button */}
+        <div className="flex items-center gap-0.5 flex-shrink-0">
           <button
-            onClick={store.compact}
-            title="Compact conversation history (Ctrl+S in CLI)"
-            disabled={store.isRunning || store.messages.length === 0}
-            className="text-[9px] px-1.5 py-0.5 rounded text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] disabled:opacity-30 transition-colors"
+            type="button"
+            onClick={store.clearChat}
+            title="New chat"
+            disabled={store.isRunning}
+            className={BTN_CLASS}
           >
-            ⚡ Compact
+            <PlusIcon className={ICON_CLASS} />
           </button>
-
-          {/* Re-index button */}
           <button
+            type="button"
+            onClick={store.compact}
+            title="Compact history"
+            disabled={store.isRunning || store.messages.length === 0}
+            className={BTN_CLASS}
+          >
+            <CompactIcon className={ICON_CLASS} />
+          </button>
+          <button
+            type="button"
             onClick={store.reindex}
             title="Re-index codebase"
-            disabled={indexStatus.state === "indexing"}
-            className="text-[9px] px-1.5 py-0.5 rounded text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] disabled:opacity-30 transition-colors"
+            disabled={store.indexStatus.state === "indexing"}
+            className={BTN_CLASS}
           >
-            ↺
+            <RefreshIcon className={ICON_CLASS} />
           </button>
-
-          {/* Clear index button */}
           <button
+            type="button"
             onClick={() => {
               if (window.confirm("Clear the entire codebase index and rebuild from scratch?")) {
                 store.clearIndex()
               }
             }}
             title="Clear index and rebuild"
-            disabled={indexStatus.state === "indexing"}
-            className="text-[9px] px-1.5 py-0.5 rounded text-[var(--vscode-descriptionForeground)] hover:text-red-400 hover:bg-red-500/10 disabled:opacity-30 transition-colors"
+            disabled={store.indexStatus.state === "indexing"}
+            className={`${BTN_CLASS} hover:text-red-400 hover:bg-red-500/10`}
           >
-            ✕
+            <DatabaseOffIcon className={ICON_CLASS} />
           </button>
-
-          {/* Clear chat button */}
           <button
-            onClick={store.clearChat}
-            title="Clear chat"
-            disabled={store.isRunning}
-            className="text-[9px] px-1.5 py-0.5 rounded text-[var(--vscode-descriptionForeground)] hover:text-red-400 hover:bg-red-500/10 disabled:opacity-30 transition-colors"
+            type="button"
+            onClick={() => store.setView("settings")}
+            title="Agent settings"
+            className={BTN_CLASS}
           >
-            Clear
+            <GearIcon className={ICON_CLASS} />
           </button>
         </div>
+      </header>
+
+      <div className="nexus-nav">
+        <TabButton active={store.view === "chat"} onClick={() => store.setView("chat")} label="Chat" />
+        <TabButton active={store.view === "sessions"} onClick={() => store.setView("sessions")} label="Sessions" />
+        <TabButton active={store.view === "settings"} onClick={() => store.setView("settings")} label="Settings" />
       </div>
 
-      {/* ── Mode selector ──────────────────────────────────────────────────── */}
+      {store.indexStatus.state === "indexing" && (
+        <IndexProgress progress={store.indexStatus.progress} total={store.indexStatus.total} />
+      )}
+
+      {store.view === "chat" && <ChatView />}
+      {store.view === "sessions" && <SessionsView />}
+      {store.view === "settings" && <SettingsView />}
+    </div>
+  )
+}
+
+function ChatView() {
+  const store = useChatStore()
+
+  return (
+    <>
       <div className="flex-shrink-0 border-b border-[var(--vscode-panel-border)]">
         <ModeSelector />
       </div>
 
-      {/* ── Index progress bar ─────────────────────────────────────────────── */}
-      {indexStatus.state === "indexing" && (
-        <IndexProgress progress={indexStatus.progress} total={indexStatus.total} />
+      {store.isCompacting && (
+        <div className="flex-shrink-0 px-3 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-badge-background)] text-[10px] text-[var(--vscode-descriptionForeground)]">
+          Compacting conversation...
+        </div>
       )}
 
-      {/* ── Todo list ──────────────────────────────────────────────────────── */}
       {store.todo && (
-        <div className="flex-shrink-0 border-b border-[var(--vscode-panel-border)] px-3 py-1.5">
-          <div className="text-[9px] text-[var(--vscode-descriptionForeground)] uppercase mb-0.5 font-semibold tracking-wide">Progress</div>
-          <div className="text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap font-mono leading-relaxed">
+        <details className="flex-shrink-0 border-b border-[var(--vscode-panel-border)] group">
+          <summary className="px-3 py-1.5 cursor-pointer list-none flex items-center justify-between text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] text-xs font-medium select-none">
+            <span>Progress</span>
+            <span className="text-[10px] group-open:rotate-180 transition-transform">▼</span>
+          </summary>
+          <div className="px-3 pb-2 pt-0 text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap font-mono leading-relaxed border-t border-[var(--vscode-panel-border)]">
             {store.todo.split("\n").map((line, i) => {
               const isDone = line.trim().startsWith("- [x]")
               const isPending = line.trim().startsWith("- [ ]")
               return (
-                <div key={i} className={isDone ? "text-[var(--vscode-descriptionForeground)] line-through" : isPending ? "" : "font-medium"}>
+                <div
+                  key={i}
+                  className={
+                    isDone
+                      ? "text-[var(--vscode-descriptionForeground)] line-through"
+                      : isPending
+                        ? ""
+                        : "font-medium"
+                  }
+                >
                   {line}
                 </div>
               )
             })}
           </div>
-        </div>
+        </details>
       )}
 
-      {/* ── Message list ───────────────────────────────────────────────────── */}
-      <MessageList messages={store.messages} />
+      <div className="chat-view">
+        {store.subagents.length > 0 && <SubagentStrip />}
 
-      {/* ── Status bar ─────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 px-2 py-0.5 border-t border-[var(--vscode-panel-border)] flex items-center justify-between">
-        <div className="text-[9px] text-[var(--vscode-descriptionForeground)]">
-          {store.provider}/{store.model}
-        </div>
-        {store.isRunning && (
-          <div className="flex items-center gap-1 text-[9px] text-blue-400">
-            <svg className="animate-spin h-2.5 w-2.5" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-            </svg>
-            thinking...
+        <div className="chat-messages-wrapper">
+          <div className="chat-messages">
+            <MessageList messages={store.messages} />
           </div>
-        )}
-      </div>
+        </div>
 
-      {/* ── Input ──────────────────────────────────────────────────────────── */}
-      <InputBar />
+        <div className="nexus-status">
+          <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
+            {store.provider}/{store.model}
+          </span>
+          <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
+            session {store.sessionId.slice(0, 8)}
+          </span>
+          {store.isRunning && (
+            <span className="flex items-center gap-1 text-[10px] text-[var(--vscode-badge-foreground)] bg-[var(--vscode-badge-background)] px-1.5 py-0.5 rounded">
+              <SpinnerIcon className="w-3 h-3" />
+              Running
+            </span>
+          )}
+        </div>
+
+        <div className="chat-input">
+          <InputBar />
+        </div>
+      </div>
+    </>
+  )
+}
+
+function SessionsView() {
+  const { sessions, sessionId, switchSession } = useChatStore()
+
+  return (
+    <div className="nexus-pane">
+      <div className="nexus-pane-title">Session History</div>
+      {sessions.length === 0 && (
+        <div className="nexus-muted text-xs">No saved sessions yet.</div>
+      )}
+
+      <div className="flex flex-col gap-2 mt-2">
+        {sessions.map((s) => {
+          const isActive = s.id === sessionId
+          const date = new Date(s.ts).toLocaleString()
+          return (
+            <button
+              key={s.id}
+              className={`nexus-session-item ${isActive ? "nexus-session-item-active" : ""}`}
+              onClick={() => switchSession(s.id)}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-[11px] truncate">{s.id}</span>
+                <span className="text-[10px] nexus-muted flex-shrink-0">{s.messageCount} msgs</span>
+              </div>
+              <div className="text-[10px] nexus-muted mt-0.5 truncate">{s.title ?? "Untitled session"}</div>
+              <div className="text-[10px] nexus-muted mt-0.5">{date}</div>
+            </button>
+          )
+        })}
+      </div>
     </div>
   )
 }
 
-// ── Index badge ──────────────────────────────────────────────────────────────
-
-function IndexBadge({ status }: { status: ReturnType<typeof useChatStore>["indexStatus"] }) {
-  if (status.state === "idle") return null
-
-  if (status.state === "indexing") {
-    const pct = status.total > 0 ? Math.round((status.progress / status.total) * 100) : 0
-    return (
-      <span className="flex items-center gap-0.5 text-[9px] text-blue-400 bg-blue-500/10 rounded px-1 py-0.5">
-        <svg className="animate-spin h-2 w-2" fill="none" viewBox="0 0 24 24">
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-        </svg>
-        {pct > 0 ? `${pct}%` : "indexing"}
-      </span>
-    )
-  }
-
-  if (status.state === "ready") {
-    return (
-      <span
-        title={`${status.files} files · ${status.symbols} symbols indexed`}
-        className="text-[9px] text-green-400 bg-green-500/10 rounded px-1 py-0.5 cursor-default"
-      >
-        ✓ {status.files}f {status.symbols}s
-      </span>
-    )
-  }
-
-  if (status.state === "error") {
-    return (
-      <span title={status.error} className="text-[9px] text-red-400 bg-red-500/10 rounded px-1 py-0.5">
-        ✗ index error
-      </span>
-    )
-  }
-
-  return null
+function SubagentStrip() {
+  const subagents = useChatStore((s) => s.subagents)
+  return (
+    <div className="nexus-subagent-strip">
+      {subagents.map((a) => (
+        <div
+          key={a.id}
+          className={`nexus-subagent-card ${
+            a.status === "completed" ? "nexus-subagent-card-ok" : a.status === "error" ? "nexus-subagent-card-err" : ""
+          }`}
+        >
+          <div className="nexus-subagent-head">
+            <span className="font-mono text-[10px]">{a.id.slice(0, 12)}</span>
+            <span className="text-[10px] uppercase">{a.mode}</span>
+          </div>
+          <div className="nexus-subagent-tool">Task</div>
+          <div className="nexus-subagent-task">{a.task}</div>
+          <div className="nexus-subagent-tool">
+            {a.currentTool
+              ? `Tool: ${a.currentTool}`
+              : a.status === "completed"
+                ? "Tool: completed"
+                : a.status === "error"
+                  ? "Tool: failed"
+                  : "Tool: waiting"}
+          </div>
+          {a.error && <div className="nexus-subagent-error">{a.error}</div>}
+        </div>
+      ))}
+    </div>
+  )
 }
 
-// ── Index progress bar ────────────────────────────────────────────────────────
+interface SettingsDraft {
+  modelProvider: string
+  modelId: string
+  modelApiKey: string
+  modelBaseUrl: string
+  modelTemperature: string
+  maxEnabled: boolean
+  maxTokenBudgetMultiplier: string
+  embProvider: string
+  embModel: string
+  embApiKey: string
+  embBaseUrl: string
+  embDimensions: string
+  indexingEnabled: boolean
+  indexingVector: boolean
+  embeddingBatchSize: string
+  embeddingConcurrency: string
+  vectorDbEnabled: boolean
+  vectorDbUrl: string
+  vectorDbAutoStart: boolean
+  filterTools: boolean
+  toolClassifyThreshold: string
+  filterSkills: boolean
+  skillClassifyThreshold: string
+  parallelReads: boolean
+  maxParallelReads: string
+  mcpServersJson: string
+  skillsText: string
+  rulesFilesText: string
+  claudeMdPath: string
+  agentInstructions: string
+  planInstructions: string
+  debugInstructions: string
+  askInstructions: string
+  profilesJson: string
+}
 
-function IndexProgress({ progress, total }: { progress: number; total: number }) {
-  const pct = total > 0 ? Math.min(100, Math.round((progress / total) * 100)) : 0
-  const label = total > 0
-    ? `Indexing… ${progress}/${total} files (${pct}%)`
-    : "Indexing codebase…"
+function SettingsView() {
+  const { config, provider, model, saveConfig } = useChatStore()
+  const [draft, setDraft] = useState<SettingsDraft | null>(null)
+
+  useEffect(() => {
+    if (!config) return
+    setDraft(toDraft(config, provider, model))
+  }, [config, provider, model])
+
+  const canSave = Boolean(draft)
+  const vectorHint = useMemo(() => {
+    if (!draft) return ""
+    if (!draft.indexingVector || !draft.vectorDbEnabled) return "Vector search is disabled."
+    if (!draft.embModel.trim()) return "Set embeddings model to enable semantic index."
+    return "Vector search enabled (Qdrant-compatible)."
+  }, [draft])
+
+  if (!draft) {
+    return (
+      <div className="nexus-pane">
+        <div className="nexus-pane-title">Settings</div>
+        <div className="nexus-muted text-xs">Configuration is loading...</div>
+      </div>
+    )
+  }
 
   return (
-    <div className="flex-shrink-0 px-3 py-1 border-b border-[var(--vscode-panel-border)] bg-blue-500/5">
-      <div className="flex items-center justify-between mb-0.5">
-        <span className="text-[9px] text-blue-400">{label}</span>
+    <div className="nexus-pane">
+      <div className="nexus-pane-title">Agent Settings</div>
+      <div className="nexus-settings-grid">
+
+      <section className="nexus-section">
+        <h3 className="nexus-section-title">LLM</h3>
+        <SettingsInput label="Provider" value={draft.modelProvider} onChange={(v) => setDraft({ ...draft, modelProvider: v })} />
+        <SettingsInput label="Model" value={draft.modelId} onChange={(v) => setDraft({ ...draft, modelId: v })} />
+        <SettingsInput label="Temperature (0-2)" value={draft.modelTemperature} onChange={(v) => setDraft({ ...draft, modelTemperature: v })} />
+        <SettingsInput label="API Key" value={draft.modelApiKey} onChange={(v) => setDraft({ ...draft, modelApiKey: v })} />
+        <SettingsInput label="Base URL" value={draft.modelBaseUrl} onChange={(v) => setDraft({ ...draft, modelBaseUrl: v })} />
+      </section>
+
+      <section className="nexus-section">
+        <h3 className="nexus-section-title">Max Mode</h3>
+        <SettingsToggle
+          label="Enable max mode"
+          checked={draft.maxEnabled}
+          onChange={(checked) => setDraft({ ...draft, maxEnabled: checked })}
+        />
+        <SettingsInput
+          label="Token budget multiplier (1-6)"
+          value={draft.maxTokenBudgetMultiplier}
+          onChange={(v) => setDraft({ ...draft, maxTokenBudgetMultiplier: v })}
+        />
+        <div className="nexus-muted text-[10px]">Uses the same model/provider as LLM section, only increases depth and context budget.</div>
+      </section>
+
+      <section className="nexus-section">
+        <h3 className="nexus-section-title">Embeddings</h3>
+        <SettingsInput label="Provider" value={draft.embProvider} onChange={(v) => setDraft({ ...draft, embProvider: v })} />
+        <SettingsInput label="Model" value={draft.embModel} onChange={(v) => setDraft({ ...draft, embModel: v })} />
+        <SettingsInput label="API Key" value={draft.embApiKey} onChange={(v) => setDraft({ ...draft, embApiKey: v })} />
+        <SettingsInput label="Base URL" value={draft.embBaseUrl} onChange={(v) => setDraft({ ...draft, embBaseUrl: v })} />
+        <SettingsInput label="Dimensions" value={draft.embDimensions} onChange={(v) => setDraft({ ...draft, embDimensions: v })} />
+      </section>
+
+      <section className="nexus-section">
+        <h3 className="nexus-section-title">Index & Vector DB</h3>
+        <SettingsToggle
+          label="Indexing enabled"
+          checked={draft.indexingEnabled}
+          onChange={(checked) => setDraft({ ...draft, indexingEnabled: checked })}
+        />
+        <SettingsToggle
+          label="Vector index enabled"
+          checked={draft.indexingVector}
+          onChange={(checked) => setDraft({ ...draft, indexingVector: checked })}
+        />
+        <SettingsInput
+          label="Embedding batch size"
+          value={draft.embeddingBatchSize}
+          onChange={(v) => setDraft({ ...draft, embeddingBatchSize: v })}
+        />
+        <SettingsInput
+          label="Embedding concurrency"
+          value={draft.embeddingConcurrency}
+          onChange={(v) => setDraft({ ...draft, embeddingConcurrency: v })}
+        />
+        <SettingsToggle
+          label="Vector DB enabled"
+          checked={draft.vectorDbEnabled}
+          onChange={(checked) => setDraft({ ...draft, vectorDbEnabled: checked })}
+        />
+        <SettingsToggle
+          label="Vector DB auto-start"
+          checked={draft.vectorDbAutoStart}
+          onChange={(checked) => setDraft({ ...draft, vectorDbAutoStart: checked })}
+        />
+        <SettingsInput label="Vector DB URL" value={draft.vectorDbUrl} onChange={(v) => setDraft({ ...draft, vectorDbUrl: v })} />
+        <div className="nexus-muted text-[10px]">{vectorHint}</div>
+      </section>
+
+      <section className="nexus-section">
+        <h3 className="nexus-section-title">Tools & Skills Filtering</h3>
+        <SettingsToggle
+          label="Filter tools when list is large"
+          checked={draft.filterTools}
+          onChange={(checked) => setDraft({ ...draft, filterTools: checked })}
+        />
+        <SettingsInput
+          label="Tool threshold"
+          value={draft.toolClassifyThreshold}
+          onChange={(v) => setDraft({ ...draft, toolClassifyThreshold: v })}
+        />
+        <SettingsToggle
+          label="Filter skills when list is large"
+          checked={draft.filterSkills}
+          onChange={(checked) => setDraft({ ...draft, filterSkills: checked })}
+        />
+        <SettingsInput
+          label="Skill threshold"
+          value={draft.skillClassifyThreshold}
+          onChange={(v) => setDraft({ ...draft, skillClassifyThreshold: v })}
+        />
+        <SettingsToggle
+          label="Parallel read tools"
+          checked={draft.parallelReads}
+          onChange={(checked) => setDraft({ ...draft, parallelReads: checked })}
+        />
+        <SettingsInput
+          label="Max parallel reads"
+          value={draft.maxParallelReads}
+          onChange={(v) => setDraft({ ...draft, maxParallelReads: v })}
+        />
+      </section>
+
+      <section className="nexus-section">
+        <h3 className="nexus-section-title">MCP, Skills, Rules & Instructions</h3>
+        <SettingsTextarea
+          label="MCP servers (JSON array)"
+          value={draft.mcpServersJson}
+          onChange={(v) => setDraft({ ...draft, mcpServersJson: v })}
+          rows={4}
+        />
+        <SettingsTextarea
+          label="Skills paths (one per line)"
+          value={draft.skillsText}
+          onChange={(v) => setDraft({ ...draft, skillsText: v })}
+          rows={3}
+        />
+        <SettingsInput
+          label="CLAUDE.md path in rules (empty = disabled)"
+          value={draft.claudeMdPath}
+          onChange={(v) => setDraft({ ...draft, claudeMdPath: v })}
+        />
+        <SettingsTextarea
+          label="Additional rules files (one per line)"
+          value={draft.rulesFilesText}
+          onChange={(v) => setDraft({ ...draft, rulesFilesText: v })}
+          rows={3}
+        />
+        <SettingsTextarea
+          label="Agent custom instructions"
+          value={draft.agentInstructions}
+          onChange={(v) => setDraft({ ...draft, agentInstructions: v })}
+          rows={3}
+        />
+        <SettingsTextarea
+          label="Plan custom instructions"
+          value={draft.planInstructions}
+          onChange={(v) => setDraft({ ...draft, planInstructions: v })}
+          rows={3}
+        />
+        <SettingsTextarea
+          label="Debug custom instructions"
+          value={draft.debugInstructions}
+          onChange={(v) => setDraft({ ...draft, debugInstructions: v })}
+          rows={3}
+        />
+        <SettingsTextarea
+          label="Ask custom instructions"
+          value={draft.askInstructions}
+          onChange={(v) => setDraft({ ...draft, askInstructions: v })}
+          rows={3}
+        />
+      </section>
+
+      <section className="nexus-section">
+        <h3 className="nexus-section-title">Agent Profiles</h3>
+        <SettingsTextarea
+          label='Profiles JSON object (saved in project config; global presets are loaded from ~/.nexus/nexus.yaml)'
+          value={draft.profilesJson}
+          onChange={(v) => setDraft({ ...draft, profilesJson: v })}
+          rows={5}
+        />
+      </section>
       </div>
-      <div className="h-0.5 w-full bg-[var(--vscode-editor-background)] rounded-full overflow-hidden">
+
+      <div className="flex items-center gap-2 mt-3">
+        <button
+          className="nexus-primary-btn"
+          disabled={!canSave}
+          onClick={() => {
+            if (!draft) return
+            saveConfig(fromDraft(draft))
+          }}
+        >
+          Apply Settings
+        </button>
+        <button
+          className="nexus-secondary-btn"
+          onClick={() => config && setDraft(toDraft(config, provider, model))}
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackModel: string): SettingsDraft {
+  return {
+    modelProvider: config.model.provider ?? fallbackProvider,
+    modelId: config.model.id ?? fallbackModel,
+    modelApiKey: config.model.apiKey ?? "",
+    modelBaseUrl: config.model.baseUrl ?? "",
+    modelTemperature: toInputNumber(config.model.temperature),
+    maxEnabled: Boolean(config.maxMode.enabled),
+    maxTokenBudgetMultiplier: toInputNumber(config.maxMode.tokenBudgetMultiplier ?? 2),
+    embProvider: config.embeddings?.provider ?? "openai",
+    embModel: config.embeddings?.model ?? "",
+    embApiKey: config.embeddings?.apiKey ?? "",
+    embBaseUrl: config.embeddings?.baseUrl ?? "",
+    embDimensions: toInputNumber(config.embeddings?.dimensions),
+    indexingEnabled: Boolean(config.indexing.enabled),
+    indexingVector: Boolean(config.indexing.vector),
+    embeddingBatchSize: String(config.indexing.embeddingBatchSize ?? 60),
+    embeddingConcurrency: String(config.indexing.embeddingConcurrency ?? 2),
+    vectorDbEnabled: Boolean(config.vectorDb?.enabled),
+    vectorDbUrl: config.vectorDb?.url ?? "http://127.0.0.1:6333",
+    vectorDbAutoStart: config.vectorDb?.autoStart ?? true,
+    filterTools: (config.tools.classifyThreshold ?? 15) < 9000,
+    toolClassifyThreshold: String(config.tools.classifyThreshold ?? 15),
+    filterSkills: (config.skillClassifyThreshold ?? 8) < 9000,
+    skillClassifyThreshold: String(config.skillClassifyThreshold ?? 8),
+    parallelReads: Boolean(config.tools.parallelReads),
+    maxParallelReads: String(config.tools.maxParallelReads ?? 5),
+    mcpServersJson: JSON.stringify(config.mcp?.servers ?? [], null, 2),
+    skillsText: (config.skills ?? []).join("\n"),
+    rulesFilesText: (config.rules?.files ?? []).filter((f) => !/CLAUDE\.md$/i.test(f)).join("\n"),
+    claudeMdPath: (config.rules?.files ?? []).find((f) => /CLAUDE\.md$/i.test(f)) ?? "CLAUDE.md",
+    agentInstructions: config.modes?.agent?.customInstructions ?? "",
+    planInstructions: config.modes?.plan?.customInstructions ?? "",
+    debugInstructions: config.modes?.debug?.customInstructions ?? "",
+    askInstructions: config.modes?.ask?.customInstructions ?? "",
+    profilesJson: JSON.stringify(config.profiles ?? {}, null, 2),
+  }
+}
+
+function fromDraft(draft: SettingsDraft): Record<string, unknown> {
+  const modelProviderRaw = draft.modelProvider.trim() || "anthropic"
+  const modelProvider = modelProviderRaw === "openrouter" ? "openai-compatible" : modelProviderRaw
+  const modelBaseUrl = draft.modelBaseUrl.trim()
+  const normalizedBaseUrl = modelProviderRaw === "openrouter"
+    ? (modelBaseUrl || "https://openrouter.ai/api/v1")
+    : (modelBaseUrl || undefined)
+  const modelTemperature = parseNumber(draft.modelTemperature)
+  const maxTokenBudgetMultiplier = parseMaxMultiplier(draft.maxTokenBudgetMultiplier)
+  const embDimensions = parseIntOrUndefined(draft.embDimensions)
+  const embProviderRaw = draft.embProvider.trim() || "openai"
+  const embProvider = embProviderRaw === "openrouter" ? "openai-compatible" : embProviderRaw
+  const embBaseUrlRaw = draft.embBaseUrl.trim()
+  const embBaseUrl = embProvider === "openai-compatible"
+    ? (isLikelyHttpUrl(embBaseUrlRaw) ? embBaseUrlRaw : "https://openrouter.ai/api/v1")
+    : (embBaseUrlRaw || undefined)
+  const toolThresholdRaw = parsePositiveInt(draft.toolClassifyThreshold, 15)
+  const skillThresholdRaw = parsePositiveInt(draft.skillClassifyThreshold, 8)
+  const mcpServers = parseJsonArray(draft.mcpServersJson)
+  const skills = linesToList(draft.skillsText)
+  const ruleFiles = linesToList(draft.rulesFilesText)
+  const claudePath = draft.claudeMdPath.trim()
+  const parsedProfiles = parseJsonObject(draft.profilesJson)
+
+  return {
+    model: {
+      provider: modelProvider,
+      id: draft.modelId.trim() || "claude-sonnet-4-5",
+      apiKey: draft.modelApiKey.trim() || undefined,
+      baseUrl: normalizedBaseUrl,
+      temperature: modelTemperature,
+    },
+    maxMode: {
+      enabled: draft.maxEnabled,
+      tokenBudgetMultiplier: maxTokenBudgetMultiplier,
+    },
+    embeddings: draft.embModel.trim()
+      ? {
+          provider: embProvider as "openai" | "openai-compatible" | "ollama" | "local",
+          model: draft.embModel.trim(),
+          apiKey: draft.embApiKey.trim() || undefined,
+          baseUrl: embBaseUrl,
+          dimensions: embDimensions,
+        }
+      : undefined,
+    indexing: {
+      enabled: draft.indexingEnabled,
+      vector: draft.indexingVector,
+      embeddingBatchSize: parsePositiveInt(draft.embeddingBatchSize, 60),
+      embeddingConcurrency: parsePositiveInt(draft.embeddingConcurrency, 2),
+    },
+    vectorDb: {
+      enabled: draft.vectorDbEnabled,
+      url: draft.vectorDbUrl.trim() || "http://127.0.0.1:6333",
+      collection: "nexus",
+      autoStart: draft.vectorDbAutoStart,
+    },
+    tools: {
+      classifyThreshold: draft.filterTools ? toolThresholdRaw : 9999,
+      parallelReads: draft.parallelReads,
+      maxParallelReads: parsePositiveInt(draft.maxParallelReads, 5),
+      custom: [],
+    },
+    skillClassifyThreshold: draft.filterSkills ? skillThresholdRaw : 9999,
+    mcp: {
+      servers: mcpServers,
+    },
+    skills,
+    rules: {
+      files: [...(claudePath ? [claudePath] : []), ...ruleFiles],
+    },
+    modes: {
+      agent: { customInstructions: draft.agentInstructions.trim() || undefined },
+      plan: { customInstructions: draft.planInstructions.trim() || undefined },
+      debug: { customInstructions: draft.debugInstructions.trim() || undefined },
+      ask: { customInstructions: draft.askInstructions.trim() || undefined },
+    },
+    profiles: parsedProfiles,
+  }
+}
+
+function parseJsonArray(value: string): Array<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(value || "[]")
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((v) => v && typeof v === "object") as Array<Record<string, unknown>>
+  } catch {
+    return []
+  }
+}
+
+function parseJsonObject(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value || "{}")
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
+    return parsed as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+function linesToList(value: string): string[] {
+  return value
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+function isLikelyHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value)
+}
+
+function parseNumber(value: string): number | undefined {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return undefined
+  return Math.max(0, Math.min(2, n))
+}
+
+function parseMaxMultiplier(value: string): number {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return 2
+  return Math.max(1, Math.min(6, n))
+}
+
+function parseIntOrUndefined(value: string): number | undefined {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  return Math.floor(n)
+}
+
+function parsePositiveInt(value: string, fallback: number): number {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  return Math.floor(n)
+}
+
+function toInputNumber(value: number | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : ""
+}
+
+function SettingsInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <label className="nexus-field">
+      <span className="nexus-field-label">{label}</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="nexus-input"
+      />
+    </label>
+  )
+}
+
+function SettingsTextarea({
+  label,
+  value,
+  onChange,
+  rows = 4,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  rows?: number
+}) {
+  return (
+    <label className="nexus-field">
+      <span className="nexus-field-label">{label}</span>
+      <textarea
+        value={value}
+        rows={rows}
+        onChange={(e) => onChange(e.target.value)}
+        className="nexus-input"
+        style={{ fontFamily: "var(--vscode-editor-font-family, var(--vscode-font-family))" }}
+      />
+    </label>
+  )
+}
+
+function SettingsToggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string
+  checked: boolean
+  onChange: (checked: boolean) => void
+}) {
+  return (
+    <label className="nexus-toggle">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>{label}</span>
+    </label>
+  )
+}
+
+function TabButton({
+  active,
+  label,
+  onClick,
+}: {
+  active: boolean
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      className={`nexus-tab-btn ${active ? "nexus-tab-btn-active" : ""}`}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  )
+}
+
+function IndexProgress({ progress, total }: { progress: number; total: number }) {
+  const pct = total > 0 ? Math.max(0, Math.min(100, Math.floor((progress / total) * 100))) : 0
+  return (
+    <div className="px-3 py-1 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+      <div className="flex items-center justify-between text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
+        <span>Indexing codebase...</span>
+        <span>{progress}/{total}</span>
+      </div>
+      <div className="w-full h-1 rounded-full bg-[var(--vscode-progressBar-background)]/30 overflow-hidden">
         <div
-          className="h-full bg-blue-400 rounded-full transition-all duration-300"
-          style={{ width: `${total > 0 ? pct : 0}%` }}
+          className="h-full bg-[var(--nexus-accent)] transition-all duration-200"
+          style={{ width: `${pct}%` }}
         />
       </div>
     </div>
+  )
+}
+
+function IndexBadge({ status }: { status: { state: string } }) {
+  if (status.state === "ready") {
+    return <span className="nexus-badge nexus-badge-ok">indexed</span>
+  }
+  if (status.state === "indexing") {
+    return <span className="nexus-badge nexus-badge-warn">indexing</span>
+  }
+  if (status.state === "error") {
+    return <span className="nexus-badge nexus-badge-err">index error</span>
+  }
+  return <span className="nexus-badge">index off</span>
+}
+
+function PlusIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  )
+}
+
+function CompactIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+    </svg>
+  )
+}
+
+function RefreshIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12a9 9 0 01-9 9 9.75 9.75 0 01-6.74-2.74L3 16" />
+      <path d="M3 3v5h5" />
+      <path d="M3 12a9 9 0 009 9 9.75 9.75 0 006.74-2.74L21 8" />
+      <path d="M21 21v-5h-5" />
+    </svg>
+  )
+}
+
+function DatabaseOffIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14a9 3 0 0018 0V5" />
+      <path d="M3 12a9 3 0 006 2.25 9 3 0 006-2.25" />
+      <line x1="3" y1="3" x2="21" y2="21" />
+    </svg>
+  )
+}
+
+function GearIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" />
+    </svg>
+  )
+}
+
+function SpinnerIcon({ className }: { className?: string }) {
+  return (
+    <svg className={`animate-spin ${className}`} viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
   )
 }

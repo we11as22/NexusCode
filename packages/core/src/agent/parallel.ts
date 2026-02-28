@@ -9,6 +9,7 @@ import { createLLMClient } from "../provider/index.js"
 import { runAgentLoop } from "./loop.js"
 
 export interface SubAgentResult {
+  subagentId: string
   sessionId: string
   success: boolean
   output: string
@@ -33,7 +34,8 @@ export class ParallelAgentManager {
     config: NexusConfig,
     cwd: string,
     signal: AbortSignal,
-    maxParallel: number
+    maxParallel: number,
+    emit?: (event: AgentEvent) => void,
   ): Promise<SubAgentResult> {
     // Wait for a concurrency slot
     while (this.running.size >= maxParallel) {
@@ -43,31 +45,33 @@ export class ParallelAgentManager {
       await Promise.resolve()
     }
 
-    const sessionId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const subagentId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    emit?.({ type: "subagent_start", subagentId, mode, task: description })
 
     // The task self-removes from the map when it settles (success or error).
     // This is what makes the while-loop above eventually terminate.
-    const task = this.runSubAgent(description, mode, config, cwd, signal).finally(() => {
-      this.running.delete(sessionId)
+    const task = this.runSubAgent(subagentId, description, mode, config, cwd, signal, emit).finally(() => {
+      this.running.delete(subagentId)
     })
 
-    this.running.set(sessionId, task)
+    this.running.set(subagentId, task)
 
     return task
   }
 
   private async runSubAgent(
+    subagentId: string,
     description: string,
     mode: Mode,
     config: NexusConfig,
     cwd: string,
-    signal: AbortSignal
+    signal: AbortSignal,
+    emit?: (event: AgentEvent) => void,
   ): Promise<SubAgentResult> {
     const session = Session.create(cwd)
     session.addMessage({ role: "user", content: description })
 
     const client = createLLMClient(config.model)
-    const maxModeClient = config.maxMode.enabled ? createLLMClient(config.maxMode) : undefined
 
     const toolRegistry = new ToolRegistry()
     const { builtin: tools } = toolRegistry.getForMode(mode)
@@ -103,6 +107,12 @@ export class ParallelAgentManager {
         if (event.type === "text_delta" && event.delta) {
           output += event.delta
         }
+        if (event.type === "tool_start") {
+          emit?.({ type: "subagent_tool_start", subagentId, tool: event.tool })
+        }
+        if (event.type === "tool_end") {
+          emit?.({ type: "subagent_tool_end", subagentId, tool: event.tool, success: event.success })
+        }
       },
     }
 
@@ -110,7 +120,6 @@ export class ParallelAgentManager {
       await runAgentLoop({
         session,
         client,
-        maxModeClient,
         host: mockHost as any,
         config,
         mode,
@@ -120,13 +129,28 @@ export class ParallelAgentManager {
         compaction,
         signal,
       })
-      return { sessionId: session.id, success: true, output }
+      emit?.({
+        type: "subagent_done",
+        subagentId,
+        success: true,
+        outputPreview: output.slice(0, 300),
+      })
+      return { subagentId, sessionId: session.id, success: true, output }
     } catch (err) {
+      const error = (err as Error).message
+      emit?.({
+        type: "subagent_done",
+        subagentId,
+        success: false,
+        outputPreview: output.slice(0, 300),
+        error,
+      })
       return {
+        subagentId,
         sessionId: session.id,
         success: false,
         output: output || "",
-        error: (err as Error).message,
+        error,
       }
     }
   }
@@ -139,7 +163,7 @@ export class ParallelAgentManager {
 
 const spawnSchema = z.object({
   description: z.string().describe("What should the sub-agent do? Provide a clear, self-contained task description."),
-  mode: z.enum(["agent", "plan", "debug", "ask"]).optional().describe("Mode for the sub-agent (default: agent)"),
+  mode: z.enum(["agent", "plan", "debug", "ask", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
   task_progress: z.string().optional(),
 })
 
@@ -154,22 +178,29 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
     parameters: spawnSchema,
     modes: ["agent"],
 
-    async execute(args: { description: string; mode?: Mode; task_progress?: string }, ctx: ToolContext) {
+    async execute(args: { description: string; mode?: Mode | "search" | "explore"; task_progress?: string }, ctx: ToolContext) {
       const { description, mode } = args
+      const normalizedMode: Mode = mode === "search" || mode === "explore"
+        ? "ask"
+        : ((mode ?? "agent") as Mode)
       const result = await manager.spawn(
         description,
-        (mode ?? "agent") as Mode,
+        normalizedMode,
         ctx.config,
         ctx.cwd,
         ctx.signal,
-        ctx.config.parallelAgents.maxParallel
+        ctx.config.parallelAgents.maxParallel,
+        (event) => ctx.host.emit(event),
       )
 
       if (result.error) {
-        return { success: false, output: `Sub-agent failed: ${result.error}\nPartial output: ${result.output}` }
+        return {
+          success: false,
+          output: `Sub-agent ${result.subagentId} failed: ${result.error}\nPartial output: ${result.output}`,
+        }
       }
 
-      return { success: true, output: `Sub-agent completed:\n\n${result.output}` }
+      return { success: true, output: `Sub-agent ${result.subagentId} completed:\n\n${result.output}` }
     },
   }
 }

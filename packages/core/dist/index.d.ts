@@ -3,64 +3,45 @@ import { LanguageModelV1 } from 'ai';
 
 declare const NexusConfigSchema: z.ZodObject<{
     model: z.ZodDefault<z.ZodObject<{
-        provider: z.ZodEnum<["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>;
+        provider: z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>;
         id: z.ZodString;
         apiKey: z.ZodOptional<z.ZodString>;
         baseUrl: z.ZodOptional<z.ZodString>;
+        temperature: z.ZodOptional<z.ZodNumber>;
         resourceName: z.ZodOptional<z.ZodString>;
         deploymentId: z.ZodOptional<z.ZodString>;
         apiVersion: z.ZodOptional<z.ZodString>;
         extra: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     }, "strip", z.ZodTypeAny, {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
+        temperature?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }, {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
+        temperature?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }>>;
     maxMode: z.ZodDefault<z.ZodObject<{
-        provider: z.ZodEnum<["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>;
-        id: z.ZodString;
-        apiKey: z.ZodOptional<z.ZodString>;
-        baseUrl: z.ZodOptional<z.ZodString>;
-        resourceName: z.ZodOptional<z.ZodString>;
-        deploymentId: z.ZodOptional<z.ZodString>;
-        apiVersion: z.ZodOptional<z.ZodString>;
-        extra: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
-    } & {
         enabled: z.ZodDefault<z.ZodBoolean>;
+        tokenBudgetMultiplier: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
-        id: string;
         enabled: boolean;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
+        tokenBudgetMultiplier: number;
     }, {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
-        id: string;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
         enabled?: boolean | undefined;
+        tokenBudgetMultiplier?: number | undefined;
     }>>;
     embeddings: z.ZodOptional<z.ZodObject<{
         provider: z.ZodEnum<["openai", "openai-compatible", "ollama", "local"]>;
@@ -300,6 +281,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         fts: z.ZodDefault<z.ZodBoolean>;
         vector: z.ZodDefault<z.ZodBoolean>;
         batchSize: z.ZodDefault<z.ZodNumber>;
+        embeddingBatchSize: z.ZodDefault<z.ZodNumber>;
+        embeddingConcurrency: z.ZodDefault<z.ZodNumber>;
         debounceMs: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
         enabled: boolean;
@@ -308,6 +291,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         fts: boolean;
         vector: boolean;
         batchSize: number;
+        embeddingBatchSize: number;
+        embeddingConcurrency: number;
         debounceMs: number;
     }, {
         enabled?: boolean | undefined;
@@ -316,6 +301,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         fts?: boolean | undefined;
         vector?: boolean | undefined;
         batchSize?: number | undefined;
+        embeddingBatchSize?: number | undefined;
+        embeddingConcurrency?: number | undefined;
         debounceMs?: number | undefined;
     }>>;
     permissions: z.ZodDefault<z.ZodObject<{
@@ -494,28 +481,31 @@ declare const NexusConfigSchema: z.ZodObject<{
         files?: string[] | undefined;
     }>>;
     profiles: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
-        provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>>;
+        provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>>;
         id: z.ZodOptional<z.ZodString>;
         apiKey: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         baseUrl: z.ZodOptional<z.ZodOptional<z.ZodString>>;
+        temperature: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
         resourceName: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         deploymentId: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         apiVersion: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         extra: z.ZodOptional<z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
     }, "strip", z.ZodTypeAny, {
-        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
+        temperature?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }, {
-        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
+        temperature?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -523,10 +513,11 @@ declare const NexusConfigSchema: z.ZodObject<{
     }>>>;
 }, "strip", z.ZodTypeAny, {
     model: {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
+        temperature?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -543,15 +534,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         }[];
     };
     maxMode: {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
-        id: string;
         enabled: boolean;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
+        tokenBudgetMultiplier: number;
     };
     modes: {
         agent?: {
@@ -588,6 +572,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         fts: boolean;
         vector: boolean;
         batchSize: number;
+        embeddingBatchSize: number;
+        embeddingConcurrency: number;
         debounceMs: number;
     };
     rules: {
@@ -638,10 +624,11 @@ declare const NexusConfigSchema: z.ZodObject<{
         maxParallel: number;
     };
     profiles: Record<string, {
-        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
+        temperature?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -662,10 +649,11 @@ declare const NexusConfigSchema: z.ZodObject<{
     } | undefined;
 }, {
     model?: {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
+        temperature?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -682,15 +670,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         }[] | undefined;
     } | undefined;
     maxMode?: {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
-        id: string;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
         enabled?: boolean | undefined;
+        tokenBudgetMultiplier?: number | undefined;
     } | undefined;
     embeddings?: {
         provider: "openai" | "ollama" | "openai-compatible" | "local";
@@ -778,6 +759,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         fts?: boolean | undefined;
         vector?: boolean | undefined;
         batchSize?: number | undefined;
+        embeddingBatchSize?: number | undefined;
+        embeddingConcurrency?: number | undefined;
         debounceMs?: number | undefined;
     } | undefined;
     rules?: {
@@ -828,10 +811,11 @@ declare const NexusConfigSchema: z.ZodObject<{
         maxParallel?: number | undefined;
     } | undefined;
     profiles?: Record<string, {
-        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
+        temperature?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -968,6 +952,8 @@ interface ToolPart {
 interface IIndexer {
     search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]>;
     status(): IndexStatus;
+    refreshFile?(filePath: string): Promise<void>;
+    refreshFileNow?(filePath: string): Promise<void>;
 }
 interface IndexSearchOptions {
     limit?: number;
@@ -1019,6 +1005,26 @@ type AgentEvent = {
     messageId: string;
     success: boolean;
 } | {
+    type: "subagent_start";
+    subagentId: string;
+    mode: Mode;
+    task: string;
+} | {
+    type: "subagent_tool_start";
+    subagentId: string;
+    tool: string;
+} | {
+    type: "subagent_tool_end";
+    subagentId: string;
+    tool: string;
+    success: boolean;
+} | {
+    type: "subagent_done";
+    subagentId: string;
+    success: boolean;
+    outputPreview?: string;
+    error?: string;
+} | {
     type: "tool_approval_needed";
     action: ApprovalAction;
     partId: string;
@@ -1048,6 +1054,11 @@ interface ProviderConfig {
     id: string;
     apiKey?: string;
     baseUrl?: string;
+    /**
+     * Sampling temperature for generation. 0 = deterministic.
+     * Most providers support range [0, 2].
+     */
+    temperature?: number;
     /** Azure-specific */
     resourceName?: string;
     deploymentId?: string;
@@ -1055,7 +1066,7 @@ interface ProviderConfig {
     /** Extra provider options */
     extra?: Record<string, unknown>;
 }
-type ProviderName = "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+type ProviderName = "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
 interface EmbeddingConfig {
     provider: "openai" | "openai-compatible" | "ollama" | "local";
     model: string;
@@ -1063,11 +1074,17 @@ interface EmbeddingConfig {
     apiKey?: string;
     dimensions?: number;
 }
+interface MaxModeConfig {
+    enabled: boolean;
+    /**
+     * Multiplies per-request token budget while max mode is active.
+     * Keeps the same provider/model as config.model.
+     */
+    tokenBudgetMultiplier: number;
+}
 interface NexusConfig {
     model: ProviderConfig;
-    maxMode: ProviderConfig & {
-        enabled: boolean;
-    };
+    maxMode: MaxModeConfig;
     embeddings?: EmbeddingConfig;
     vectorDb?: {
         enabled: boolean;
@@ -1089,6 +1106,8 @@ interface NexusConfig {
         fts: boolean;
         vector: boolean;
         batchSize: number;
+        embeddingBatchSize: number;
+        embeddingConcurrency: number;
         debounceMs: number;
     };
     permissions: {
@@ -1196,6 +1215,10 @@ declare function loadConfig(cwd?: string): Promise<NexusConfig>;
  * Write config to project .nexus/nexus.yaml
  */
 declare function writeConfig(config: Partial<NexusConfig>, cwd?: string): void;
+/**
+ * Persist profiles to global ~/.nexus/nexus.yaml so they are available across all projects.
+ */
+declare function writeGlobalProfiles(profiles: Record<string, unknown>): void;
 /**
  * Get the global config directory
  */
@@ -1328,7 +1351,6 @@ declare function createCompaction(): SessionCompaction;
 interface AgentLoopOptions {
     session: ISession;
     client: LLMClient;
-    maxModeClient?: LLMClient;
     host: IHost;
     config: NexusConfig;
     mode: Mode;
@@ -1414,6 +1436,7 @@ declare function buildSystemPrompt(ctx: PromptContext): {
 };
 
 interface SubAgentResult {
+    subagentId: string;
     sessionId: string;
     success: boolean;
     output: string;
@@ -1421,12 +1444,19 @@ interface SubAgentResult {
 }
 /**
  * Manager for parallel sub-agents.
- * Each sub-agent runs its own session and agent loop.
+ * Each sub-agent runs its own isolated session and agent loop.
+ *
+ * Concurrency model: each promise added to `this.running` removes itself
+ * via `.finally()`, so after `await Promise.race(...)` at least one slot
+ * is guaranteed to be free (the race resolves in a microtask, `.finally`
+ * queues in the next microtask, `await Promise.resolve()` drains them).
  */
 declare class ParallelAgentManager {
     private running;
-    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number): Promise<SubAgentResult>;
+    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void): Promise<SubAgentResult>;
     private runSubAgent;
+    /** How many agents are currently running */
+    get activeCount(): number;
 }
 declare function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
 
@@ -1466,18 +1496,32 @@ declare class CodebaseIndexer implements IIndexer {
     private readonly config;
     private fts;
     private vector?;
+    private forceVectorBackfill;
     private _status;
     private indexing;
     private abortController?;
     private debounceTimers;
+    private statusListeners;
     constructor(projectRoot: string, config: NexusConfig, embeddingClient?: EmbeddingClient, vectorUrl?: string, projectHash?: string);
     status(): IndexStatus;
+    onStatusChange(listener: (status: IndexStatus) => void): () => void;
+    private notifyStatus;
     startIndexing(): Promise<void>;
     private indexInBackground;
     private processBatch;
     refreshFile(filePath: string): Promise<void>;
+    refreshFileNow(filePath: string): Promise<void>;
     search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]>;
+    /**
+     * Clear all index data and restart indexing.
+     */
+    reindex(): Promise<void>;
     stop(): void;
+    /**
+     * Fully close the indexer — clears timers, closes SQLite.
+     * Call when the extension is deactivated or the indexer is no longer needed.
+     */
+    close(): void;
 }
 
 interface ProjectInfo {
@@ -1501,6 +1545,31 @@ declare class ProjectRegistry {
     private save;
 }
 declare function getIndexDir(projectRoot: string): string;
+
+interface IndexerFactoryOptions {
+    onWarning?: (message: string) => void;
+}
+/**
+ * Creates a CodebaseIndexer with optional vector-search wiring.
+ * If vector prerequisites are missing, falls back to FTS-only indexer.
+ */
+declare function createCodebaseIndexer(projectRoot: string, config: NexusConfig, options?: IndexerFactoryOptions): Promise<CodebaseIndexer>;
+
+interface EnsureQdrantOptions {
+    url: string;
+    autoStart: boolean;
+    log?: (message: string) => void;
+}
+interface EnsureQdrantResult {
+    available: boolean;
+    started: boolean;
+    method?: "existing" | "binary" | "docker";
+    warning?: string;
+}
+/**
+ * Ensures Qdrant is reachable. If autoStart is enabled, tries to start a local instance.
+ */
+declare function ensureQdrantRunning(opts: EnsureQdrantOptions): Promise<EnsureQdrantResult>;
 
 /**
  * Parse @mentions in text and resolve them to content.
@@ -1576,4 +1645,4 @@ declare class CheckpointTracker {
     private restoreToWorkspace;
 }
 
-export { type AgentEvent, type ApprovalAction, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProviderConfig, READ_ONLY_TOOLS, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, classifySkills, classifyTools, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, ensureGlobalConfigDir, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, listSessions, loadConfig, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, writeConfig };
+export { type AgentEvent, type ApprovalAction, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProviderConfig, READ_ONLY_TOOLS, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, listSessions, loadConfig, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, writeConfig, writeGlobalProfiles };

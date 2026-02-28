@@ -2,6 +2,7 @@ import { create } from "zustand"
 import { postMessage } from "../vscode.js"
 
 export type Mode = "agent" | "plan" | "debug" | "ask"
+export type AppView = "chat" | "sessions" | "settings"
 
 export type IndexStatusKind =
   | { state: "idle" }
@@ -21,10 +22,101 @@ export type MessagePart = TextPart | ToolPart | ReasoningPart
 export interface TextPart { type: "text"; text: string }
 export interface ReasoningPart { type: "reasoning"; text: string }
 export interface ToolPart {
-  type: "tool"; id: string; tool: string;
+  type: "tool"
+  id: string
+  tool: string
   status: "pending" | "running" | "completed" | "error"
-  input?: Record<string, unknown>; output?: string; error?: string
-  timeStart?: number; timeEnd?: number; compacted?: boolean
+  input?: Record<string, unknown>
+  output?: string
+  error?: string
+  timeStart?: number
+  timeEnd?: number
+  compacted?: boolean
+}
+
+export interface NexusConfigState {
+  model: {
+    provider: string
+    id: string
+    apiKey?: string
+    baseUrl?: string
+    temperature?: number
+  }
+  maxMode: {
+    enabled: boolean
+    tokenBudgetMultiplier: number
+  }
+  embeddings?: {
+    provider: "openai" | "openai-compatible" | "ollama" | "local"
+    model: string
+    baseUrl?: string
+    apiKey?: string
+    dimensions?: number
+  }
+  indexing: {
+    enabled: boolean
+    vector: boolean
+    symbolExtract: boolean
+    fts: boolean
+    batchSize: number
+    embeddingBatchSize: number
+    embeddingConcurrency: number
+    debounceMs: number
+    excludePatterns: string[]
+  }
+  vectorDb?: {
+    enabled: boolean
+    url: string
+    collection: string
+    autoStart: boolean
+  }
+  tools: {
+    classifyThreshold: number
+    parallelReads: boolean
+    maxParallelReads: number
+    custom: string[]
+  }
+  skillClassifyThreshold: number
+  mcp: {
+    servers: Array<{
+      name: string
+      command?: string
+      args?: string[]
+      env?: Record<string, string>
+      url?: string
+      transport?: "stdio" | "http" | "sse"
+    }>
+  }
+  skills: string[]
+  rules: {
+    files: string[]
+  }
+  modes: {
+    agent?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
+    plan?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
+    debug?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
+    ask?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
+    [key: string]: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string } | undefined
+  }
+  profiles: Record<string, Partial<{ provider: string; id: string; apiKey: string; baseUrl: string; temperature: number }>>
+}
+
+export interface SubAgentState {
+  id: string
+  mode: Mode
+  task: string
+  status: "running" | "completed" | "error"
+  currentTool?: string
+  startedAt: number
+  finishedAt?: number
+  error?: string
+}
+
+interface SessionPreview {
+  id: string
+  ts: number
+  title?: string
+  messageCount: number
 }
 
 interface ChatState {
@@ -39,21 +131,34 @@ interface ChatState {
   indexReady: boolean
   indexStatus: IndexStatusKind
   inputValue: string
+  view: AppView
+  sessions: SessionPreview[]
+  config: NexusConfigState | null
+  isCompacting: boolean
+  subagents: SubAgentState[]
+  selectedProfile: string
 
   // Actions
+  setView: (view: AppView) => void
   setInputValue: (v: string) => void
+  appendToInput: (v: string) => void
   setMode: (mode: Mode) => void
   setMaxMode: (enabled: boolean) => void
+  setProfile: (profileName: string) => void
   sendMessage: (content: string) => void
   abort: () => void
   compact: () => void
   clearChat: () => void
   forkSession: (messageId: string) => void
+  switchSession: (sessionId: string) => void
   reindex: () => void
   clearIndex: () => void
+  saveConfig: (patch: Record<string, unknown>) => void
   handleStateUpdate: (state: Partial<ChatState>) => void
+  handleConfigLoaded: (config: NexusConfigState) => void
   handleAgentEvent: (event: AgentEvent) => void
   handleIndexStatus: (status: IndexStatusKind) => void
+  handleSessionList: (sessions: SessionPreview[]) => void
 }
 
 export type AgentEvent =
@@ -61,6 +166,10 @@ export type AgentEvent =
   | { type: "reasoning_delta"; delta: string; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean }
+  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
+  | { type: "subagent_tool_start"; subagentId: string; tool: string }
+  | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
+  | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
   | { type: "index_update"; status: IndexStatusKind }
@@ -80,8 +189,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   indexReady: false,
   indexStatus: { state: "idle" },
   inputValue: "",
+  view: "chat",
+  sessions: [],
+  config: null,
+  isCompacting: false,
+  subagents: [],
+  selectedProfile: "",
 
+  setView: (view) => set({ view }),
   setInputValue: (v) => set({ inputValue: v }),
+
+  appendToInput: (v) => set((prev) => ({
+    inputValue: prev.inputValue ? `${prev.inputValue}\n\n${v}` : v,
+  })),
 
   setMode: (mode) => {
     set({ mode })
@@ -92,12 +212,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ maxMode: enabled })
     postMessage({ type: "setMaxMode", enabled })
   },
+  setProfile: (profileName) => {
+    set({ selectedProfile: profileName })
+    postMessage({ type: "setProfile", profile: profileName })
+  },
 
   sendMessage: (content) => {
     const { mode, isRunning } = get()
     if (isRunning) return
-
-    set({ inputValue: "", isRunning: true })
+    set({ inputValue: "", isRunning: true, view: "chat" })
     postMessage({ type: "newMessage", content, mode })
   },
 
@@ -112,11 +235,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   clearChat: () => {
     postMessage({ type: "clearChat" })
-    set({ messages: [], todo: "" })
+    set({ messages: [], todo: "", view: "chat", subagents: [] })
   },
 
   forkSession: (messageId) => {
     postMessage({ type: "forkSession", messageId })
+  },
+
+  switchSession: (sessionId) => {
+    postMessage({ type: "switchSession", sessionId })
+    set({ view: "chat" })
   },
 
   reindex: () => {
@@ -129,8 +257,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ indexStatus: { state: "indexing", progress: 0, total: 0 } })
   },
 
+  saveConfig: (patch) => {
+    postMessage({ type: "saveConfig", config: patch })
+  },
+
   handleStateUpdate: (state) => {
-    set(prev => ({ ...prev, ...state }))
+    set((prev) => ({ ...prev, ...state }))
+  },
+
+  handleConfigLoaded: (config) => {
+    set({
+      config,
+      maxMode: config.maxMode.enabled,
+      provider: config.model.provider,
+      model: config.model.id,
+    })
   },
 
   handleIndexStatus: (status) => {
@@ -138,6 +279,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       indexStatus: status,
       indexReady: status.state === "ready",
     })
+  },
+
+  handleSessionList: (sessions) => {
+    set({ sessions })
   },
 
   handleAgentEvent: (event) => {
@@ -198,9 +343,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "tool_end": {
-        const msgs = messages.map(msg => {
+        const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg
-          const parts = (msg.content as MessagePart[]).map(p => {
+          const parts = (msg.content as MessagePart[]).map((p) => {
             if (p.type === "tool" && (p as ToolPart).id === event.partId) {
               return {
                 ...(p as ToolPart),
@@ -216,6 +361,100 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
       }
 
+      case "subagent_start": {
+        const prev = get().subagents.filter((a) => a.id !== event.subagentId)
+        prev.push({
+          id: event.subagentId,
+          mode: event.mode,
+          task: event.task,
+          status: "running",
+          startedAt: Date.now(),
+        })
+        set({ subagents: prev.slice(-12) })
+        break
+      }
+
+      case "subagent_tool_start": {
+        const subagents: SubAgentState[] = get().subagents.map((a) =>
+          a.id === event.subagentId
+            ? { ...a, status: "running" as const, currentTool: event.tool }
+            : a
+        )
+        set({ subagents })
+        break
+      }
+
+      case "subagent_tool_end": {
+        const subagents: SubAgentState[] = get().subagents.map((a) =>
+          a.id === event.subagentId
+            ? {
+                ...a,
+                status: (event.success ? "running" : "error") as "running" | "error",
+                currentTool: event.success ? undefined : event.tool,
+              }
+            : a
+        )
+        set({ subagents })
+        break
+      }
+
+      case "subagent_done": {
+        const subagents: SubAgentState[] = get().subagents.map((a) =>
+          a.id === event.subagentId
+            ? {
+                ...a,
+                status: (event.success ? "completed" : "error") as "completed" | "error",
+                currentTool: undefined,
+                finishedAt: Date.now(),
+                error: event.error,
+              }
+            : a
+        )
+        set({ subagents })
+        break
+      }
+
+      case "reasoning_delta": {
+        const lastMsg = messages[messages.length - 1]
+        if (lastMsg?.role === "assistant") {
+          const updated = { ...lastMsg }
+          const parts = Array.isArray(updated.content)
+            ? [...(updated.content as MessagePart[])]
+            : [{ type: "text" as const, text: updated.content as string }]
+          const lastPart = parts[parts.length - 1]
+          if (lastPart?.type === "reasoning") {
+            parts[parts.length - 1] = { ...lastPart, text: lastPart.text + event.delta } as ReasoningPart
+          } else {
+            parts.push({ type: "reasoning", text: event.delta })
+          }
+          updated.content = parts
+          set({ messages: [...messages.slice(0, -1), updated] })
+        }
+        break
+      }
+
+      case "compaction_start":
+        set({ isCompacting: true })
+        break
+
+      case "compaction_end":
+        set({ isCompacting: false })
+        break
+
+      case "doom_loop_detected":
+        set({
+          messages: [
+            ...messages,
+            {
+              id: `doom_${Date.now()}`,
+              ts: Date.now(),
+              role: "system" as const,
+              content: `Loop detected (tool: ${event.tool}). Stop or continue in the dialog.`,
+            },
+          ],
+        })
+        break
+
       case "index_update": {
         const status = event.status as IndexStatusKind
         set({
@@ -226,11 +465,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "done":
-        set({ isRunning: false })
+        set((state) => ({
+          isRunning: false,
+          subagents: state.subagents.filter((a) => a.status === "running"),
+        }))
         break
 
       case "error":
-        set({ isRunning: false })
+        set((state) => ({
+          isRunning: false,
+          subagents: state.subagents.map((a) =>
+            a.status === "running"
+              ? { ...a, status: "error", finishedAt: Date.now(), error: "Parent agent failed" }
+              : a
+          ),
+        }))
         if (event.error) {
           const msgs = [
             ...messages,

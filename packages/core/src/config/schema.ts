@@ -1,7 +1,7 @@
 import { z } from "zod"
 
 const PROVIDER_NAMES = [
-  "anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible",
+  "anthropic", "openai", "google", "ollama", "openai-compatible",
   "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras",
   "cohere", "togetherai", "perplexity",
 ] as const
@@ -11,6 +11,7 @@ const providerSchema = z.object({
   id: z.string().min(1),
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
+  temperature: z.number().min(0).max(2).optional(),
   resourceName: z.string().optional(),
   deploymentId: z.string().optional(),
   apiVersion: z.string().optional(),
@@ -46,12 +47,12 @@ export const NexusConfigSchema = z.object({
     id: "claude-sonnet-4-5",
   }),
 
-  maxMode: providerSchema.extend({
+  maxMode: z.object({
     enabled: z.boolean().default(false),
+    tokenBudgetMultiplier: z.number().min(1).max(6).default(2),
   }).default({
-    provider: "anthropic",
-    id: "claude-opus-4-5",
     enabled: false,
+    tokenBudgetMultiplier: 2,
   }),
 
   embeddings: embeddingSchema.optional(),
@@ -80,6 +81,8 @@ export const NexusConfigSchema = z.object({
     fts: z.boolean().default(true),
     vector: z.boolean().default(false),
     batchSize: z.number().int().positive().default(50),
+    embeddingBatchSize: z.number().int().positive().default(60),
+    embeddingConcurrency: z.number().int().positive().default(2),
     debounceMs: z.number().int().positive().default(1500),
   }).default({}),
 

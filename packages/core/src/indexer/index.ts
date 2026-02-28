@@ -22,6 +22,7 @@ const SUPPORTED_CODE_EXTENSIONS = new Set([
 export class CodebaseIndexer implements IIndexer {
   private fts: FTSIndex
   private vector?: VectorIndex
+  private forceVectorBackfill = false
   private _status: IndexStatus = { state: "idle" }
   private indexing = false
   private abortController?: AbortController
@@ -41,7 +42,10 @@ export class CodebaseIndexer implements IIndexer {
     this.fts = new FTSIndex(path.join(indexDir, "fts.db"))
 
     if (config.vectorDb?.enabled && embeddingClient && vectorUrl && projectHash) {
-      this.vector = new VectorIndex(vectorUrl, projectHash, embeddingClient)
+      this.vector = new VectorIndex(vectorUrl, projectHash, embeddingClient, {
+        embeddingBatchSize: config.indexing.embeddingBatchSize,
+        embeddingConcurrency: config.indexing.embeddingConcurrency,
+      })
     }
   }
 
@@ -75,10 +79,16 @@ export class CodebaseIndexer implements IIndexer {
     if (this.vector) {
       try {
         await this.vector.init()
+        // If vector collection is empty (for example after enabling vector on an existing FTS index),
+        // force a one-pass embedding backfill even for unchanged files.
+        this.forceVectorBackfill = await this.vector.isEmpty()
       } catch (err) {
         console.warn("[nexus] Vector index init failed:", err)
         this.vector = undefined
+        this.forceVectorBackfill = false
       }
+    } else {
+      this.forceVectorBackfill = false
     }
 
     this.notifyStatus({ state: "indexing", progress: 0, total: 0 })
@@ -137,6 +147,7 @@ export class CodebaseIndexer implements IIndexer {
 
     const stats = this.fts.getStats()
     this.notifyStatus({ state: "ready", files: stats.files, symbols: stats.symbols })
+    this.forceVectorBackfill = false
     this.indexing = false
   }
 
@@ -146,8 +157,8 @@ export class CodebaseIndexer implements IIndexer {
     for (const file of files) {
       if (!file) continue
 
-      // Skip if unchanged
-      if (this.fts.isFileIndexed(file.path, file.mtime, file.hash)) continue
+      const unchanged = this.fts.isFileIndexed(file.path, file.mtime, file.hash)
+      if (unchanged && !this.forceVectorBackfill) continue
 
       let content: string
       try {
@@ -156,12 +167,18 @@ export class CodebaseIndexer implements IIndexer {
         continue
       }
 
-      this.fts.upsertFile(file.path, file.mtime, file.hash)
+      if (!unchanged) {
+        this.fts.upsertFile(file.path, file.mtime, file.hash)
+      }
+
+      const shouldUpdateFts = !unchanged
 
       if (SUPPORTED_CODE_EXTENSIONS.has(file.ext) && this.config.indexing.symbolExtract) {
         const symbols = extractSymbols(content, file.path, file.ext)
         for (const sym of symbols) {
-          this.fts.insertSymbol(sym)
+          if (shouldUpdateFts) {
+            this.fts.insertSymbol(sym)
+          }
           if (this.vector && this.config.indexing.vector) {
             const id = `${file.hash}_${sym.startLine}`
             vectorEntries.push({
@@ -175,7 +192,7 @@ export class CodebaseIndexer implements IIndexer {
             })
           }
         }
-      } else {
+      } else if (shouldUpdateFts) {
         // Fallback: chunk by lines with overlap
         const chunks = extractChunks(content, file.path)
         for (const chunk of chunks) {
@@ -195,21 +212,28 @@ export class CodebaseIndexer implements IIndexer {
 
     const timer = setTimeout(async () => {
       this.debounceTimers.delete(filePath)
-
-      // Check if file still exists
-      const fileInfo = await buildFileInfo(filePath, this.projectRoot)
-      if (!fileInfo) {
-        // File deleted — remove from index
-        const relPath = path.relative(this.projectRoot, filePath)
-        this.fts.deleteFile(relPath)
-        await this.vector?.deleteByPath(relPath)
-        return
+      try {
+        await this.refreshFileNow(filePath)
+      } catch {
+        // Ignore late debounce callbacks during shutdown/rebuild windows.
       }
-
-      await this.processBatch([fileInfo])
     }, this.config.indexing.debounceMs)
 
     this.debounceTimers.set(filePath, timer)
+  }
+
+  async refreshFileNow(filePath: string): Promise<void> {
+    // Check if file still exists
+    const fileInfo = await buildFileInfo(filePath, this.projectRoot)
+    if (!fileInfo) {
+      // File deleted — remove from index
+      const relPath = path.relative(this.projectRoot, filePath)
+      this.fts.deleteFile(relPath)
+      await this.vector?.deleteByPath(relPath)
+      return
+    }
+
+    await this.processBatch([fileInfo])
   }
 
   async search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]> {
@@ -252,6 +276,7 @@ export class CodebaseIndexer implements IIndexer {
   async reindex(): Promise<void> {
     this.stop()
     this.fts.clear()
+    await this.vector?.clearCollection()
     await this.startIndexing()
   }
 

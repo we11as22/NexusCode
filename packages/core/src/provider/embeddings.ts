@@ -24,7 +24,10 @@ class OpenAIEmbeddingClient implements EmbeddingClient {
 
   constructor(config: EmbeddingConfig) {
     const openai = createOpenAI({
-      apiKey: config.apiKey ?? process.env["OPENAI_API_KEY"] ?? "",
+      apiKey: config.apiKey
+        ?? process.env["OPENAI_API_KEY"]
+        ?? process.env["NEXUS_API_KEY"]
+        ?? "",
     })
     this.model = openai.embedding(config.model)
     this.dimensions = config.dimensions ?? 1536
@@ -42,7 +45,11 @@ class OpenAICompatibleEmbeddingClient implements EmbeddingClient {
 
   constructor(config: EmbeddingConfig) {
     const openai = createOpenAI({
-      apiKey: config.apiKey ?? "dummy",
+      apiKey: config.apiKey
+        ?? process.env["OPENAI_API_KEY"]
+        ?? process.env["OPENROUTER_API_KEY"]
+        ?? process.env["NEXUS_API_KEY"]
+        ?? "dummy",
       baseURL: config.baseUrl,
       compatibility: "compatible",
     })

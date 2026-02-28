@@ -1,4 +1,4 @@
-import { streamText, generateObject, type LanguageModelV1 } from "ai"
+import { streamText, type LanguageModelV1 } from "ai"
 import type { z } from "zod"
 import type {
   LLMClient,
@@ -93,9 +93,6 @@ export class BaseLLMClient implements LLMClient {
       maxSteps: 1, // We handle multi-step manually in agentLoop
     })
 
-    let reasoningText = ""
-    let hasError = false
-
     for await (const part of result.fullStream) {
       if (opts.signal?.aborted) break
 
@@ -105,7 +102,6 @@ export class BaseLLMClient implements LLMClient {
           break
 
         case "reasoning":
-          reasoningText += (part as Record<string, string>)["textDelta"] ?? ""
           yield { type: "reasoning_delta", delta: (part as Record<string, string>)["textDelta"] ?? "" }
           break
 
@@ -115,15 +111,6 @@ export class BaseLLMClient implements LLMClient {
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             toolInput: part.args as Record<string, unknown>,
-          }
-          break
-
-        case "tool-result":
-          yield {
-            type: "tool_result",
-            toolCallId: part.toolCallId,
-            toolName: part.toolName,
-            toolOutput: typeof part.result === "string" ? part.result : JSON.stringify(part.result),
           }
           break
 
@@ -142,7 +129,6 @@ export class BaseLLMClient implements LLMClient {
         }
 
         case "error":
-          hasError = true
           yield { type: "error", error: part.error instanceof Error ? part.error : new Error(String(part.error)) }
           break
       }
@@ -168,22 +154,19 @@ function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typ
 
     if (!Array.isArray(msg.content) || msg.content.length === 0) continue
 
-    // Tool result messages (role === "tool") with array content
+    // Tool result messages (role === "tool") are converted to plain user text.
+    // This keeps compatibility with AI SDK message typings that do not accept role "tool".
     if (msg.role === "tool") {
-      const toolResultParts = msg.content
+      const toolResultLines = msg.content
         .filter(p => p.type === "tool-result")
         .map(p => {
           const tr = p as { type: "tool-result"; toolCallId: string; toolName: string; result: string; isError?: boolean }
-          return {
-            type: "tool-result" as const,
-            toolCallId: tr.toolCallId,
-            toolName: tr.toolName ?? "",
-            result: [{ type: "text" as const, text: tr.result }],
-            isError: tr.isError ?? false,
-          }
+          const toolName = tr.toolName ?? "unknown_tool"
+          const prefix = tr.isError ? "TOOL_ERROR" : "TOOL_RESULT"
+          return `${prefix} ${toolName} (${tr.toolCallId}): ${tr.result}`
         })
-      if (toolResultParts.length > 0) {
-        result.push({ role: "tool", content: toolResultParts })
+      if (toolResultLines.length > 0) {
+        result.push({ role: "user", content: toolResultLines.join("\n") })
       }
       continue
     }

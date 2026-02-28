@@ -10,6 +10,7 @@ function getYaml() { return yaml }
 const CONFIG_FILE_NAMES = [".nexus/nexus.yaml", ".nexus/nexus.yml", ".nexusrc.yaml", ".nexusrc.yml"]
 const GLOBAL_CONFIG_DIR = path.join(os.homedir(), ".nexus")
 const GLOBAL_CONFIG_PATH = path.join(GLOBAL_CONFIG_DIR, "nexus.yaml")
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 /**
  * Load config by walking up from cwd.
@@ -46,6 +47,7 @@ export async function loadConfig(cwd?: string): Promise<NexusConfig> {
 
   // 4. Apply env overrides
   applyEnvOverrides(merged)
+  normalizeProviderAliases(merged)
 
   // 5. Parse and validate
   const result = NexusConfigSchema.safeParse(merged)
@@ -75,6 +77,7 @@ function readConfigFile(filePath: string): NexusConfigInput | null {
 const PROVIDER_API_KEY_ENV: Record<string, string[]> = {
   anthropic:    ["ANTHROPIC_API_KEY"],
   openai:       ["OPENAI_API_KEY"],
+  "openai-compatible": ["OPENAI_API_KEY", "OPENROUTER_API_KEY"],
   google:       ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
   openrouter:   ["OPENROUTER_API_KEY"],
   azure:        ["AZURE_OPENAI_API_KEY"],
@@ -91,6 +94,7 @@ const PROVIDER_API_KEY_ENV: Record<string, string[]> = {
 
 // Map of provider name → env var for model ID (e.g. OPENROUTER_MODEL)
 const PROVIDER_MODEL_ENV: Record<string, string[]> = {
+  "openai-compatible": ["OPENAI_MODEL", "OPENROUTER_MODEL"],
   openrouter:   ["OPENROUTER_MODEL"],
   anthropic:    ["ANTHROPIC_MODEL"],
   openai:       ["OPENAI_MODEL"],
@@ -146,24 +150,99 @@ function applyEnvOverrides(config: Record<string, unknown>) {
     model["baseUrl"] = process.env["NEXUS_BASE_URL"]
   }
 
+  // NEXUS_TEMPERATURE override
+  const tempRaw = process.env["NEXUS_TEMPERATURE"]
+  if (tempRaw) {
+    const t = Number(tempRaw)
+    if (Number.isFinite(t) && t >= 0 && t <= 2) {
+      model["temperature"] = t
+    }
+  }
+
   // NEXUS_MAX_MODE
   if (process.env["NEXUS_MAX_MODE"] === "1" || process.env["NEXUS_MAX_MODE"] === "true") {
     if (!config.maxMode || typeof config.maxMode !== "object") config.maxMode = {}
     ;(config.maxMode as Record<string, unknown>)["enabled"] = true
   }
 
-  // Apply same provider key logic for maxMode if it has a provider set
-  if (config.maxMode && typeof config.maxMode === "object") {
-    const mm = config.maxMode as Record<string, unknown>
-    if (!mm["apiKey"] && mm["provider"]) {
-      const provider = String(mm["provider"])
-      const envVars = PROVIDER_API_KEY_ENV[provider] ?? []
-      for (const envVar of envVars) {
-        const v = process.env[envVar]
-        if (v) { mm["apiKey"] = v; break }
+  if (!config.maxMode || typeof config.maxMode !== "object") config.maxMode = {}
+  const mm = config.maxMode as Record<string, unknown>
+  if (typeof mm["enabled"] !== "boolean") {
+    mm["enabled"] = false
+  }
+
+  const mmMultiplierRaw = process.env["NEXUS_MAX_TOKEN_MULTIPLIER"] ?? process.env["NEXUS_MAX_TOKENS_MULTIPLIER"]
+  if (mmMultiplierRaw) {
+    const m = Number(mmMultiplierRaw)
+    if (Number.isFinite(m) && m >= 1 && m <= 6) {
+      mm["tokenBudgetMultiplier"] = m
+    }
+  }
+}
+
+function normalizeProviderAliases(config: Record<string, unknown>): void {
+  const model = asRecord(config["model"])
+  if (model) {
+    const provider = String(model["provider"] ?? "")
+    if (provider === "openrouter") {
+      model["provider"] = "openai-compatible"
+      if (!isNonEmptyString(model["baseUrl"])) model["baseUrl"] = OPENROUTER_BASE_URL
+      if (!isNonEmptyString(model["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
+        model["apiKey"] = process.env["OPENROUTER_API_KEY"]
+      }
+      if (!isNonEmptyString(model["id"]) && process.env["OPENROUTER_MODEL"]) {
+        model["id"] = process.env["OPENROUTER_MODEL"]
+      }
+    }
+
+    if (provider === "openai-compatible" && isOpenRouterBaseUrl(model["baseUrl"])) {
+      if (!isNonEmptyString(model["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
+        model["apiKey"] = process.env["OPENROUTER_API_KEY"]
+      }
+      if (!isNonEmptyString(model["id"]) && process.env["OPENROUTER_MODEL"]) {
+        model["id"] = process.env["OPENROUTER_MODEL"]
       }
     }
   }
+
+  const embeddings = asRecord(config["embeddings"])
+  if (embeddings) {
+    if (String(embeddings["provider"] ?? "") === "openrouter") {
+      embeddings["provider"] = "openai-compatible"
+      if (!isNonEmptyString(embeddings["baseUrl"])) embeddings["baseUrl"] = OPENROUTER_BASE_URL
+    }
+    if (String(embeddings["provider"] ?? "") === "openai-compatible" && isOpenRouterBaseUrl(embeddings["baseUrl"])) {
+      if (!isNonEmptyString(embeddings["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
+        embeddings["apiKey"] = process.env["OPENROUTER_API_KEY"]
+      }
+    }
+  }
+
+  const profiles = asRecord(config["profiles"])
+  if (profiles) {
+    for (const value of Object.values(profiles)) {
+      const profile = asRecord(value)
+      if (!profile) continue
+      if (String(profile["provider"] ?? "") === "openrouter") {
+        profile["provider"] = "openai-compatible"
+        if (!isNonEmptyString(profile["baseUrl"])) profile["baseUrl"] = OPENROUTER_BASE_URL
+      }
+    }
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== ""
+}
+
+function isOpenRouterBaseUrl(value: unknown): boolean {
+  if (!isNonEmptyString(value)) return false
+  return value.toLowerCase().includes("openrouter.ai")
 }
 
 function deepMerge(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
@@ -187,6 +266,17 @@ export function writeConfig(config: Partial<NexusConfig>, cwd?: string) {
   const filePath = path.join(dir, "nexus.yaml")
   const content = getYaml().dump(config, { indent: 2, lineWidth: 120 })
   fs.writeFileSync(filePath, content, "utf8")
+}
+
+/**
+ * Persist profiles to global ~/.nexus/nexus.yaml so they are available across all projects.
+ */
+export function writeGlobalProfiles(profiles: Record<string, unknown>): void {
+  ensureGlobalConfigDir()
+  const current = (readConfigFile(GLOBAL_CONFIG_PATH) ?? {}) as Record<string, unknown>
+  current["profiles"] = profiles
+  const content = getYaml().dump(current, { indent: 2, lineWidth: 120 })
+  fs.writeFileSync(GLOBAL_CONFIG_PATH, content, "utf8")
 }
 
 /**

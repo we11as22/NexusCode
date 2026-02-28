@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react"
 
 export default defineConfig({
   plugins: [react()],
+  base: "./",
   build: {
     outDir: "dist",
     rollupOptions: {
@@ -10,6 +11,7 @@ export default defineConfig({
         entryFileNames: "index.js",
         chunkFileNames: "chunks/[name].js",
         assetFileNames: "index.css",
+        inlineDynamicImports: true,
       },
     },
   },

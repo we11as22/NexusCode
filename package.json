@@ -8,14 +8,15 @@
     "packages/vscode/webview-ui"
   ],
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "pnpm -r --stream build",
     "build:core": "pnpm --filter @nexuscode/core build",
-    "build:vscode": "pnpm --filter @nexuscode/vscode build",
+    "build:vscode": "pnpm --filter nexuscode build",
     "build:cli": "pnpm --filter @nexuscode/cli build",
+    "package:vscode": "pnpm build && pnpm --filter nexuscode package",
     "dev:core": "pnpm --filter @nexuscode/core dev",
     "dev:cli": "pnpm --filter @nexuscode/cli dev",
-    "typecheck": "pnpm -r typecheck",
-    "clean": "pnpm -r clean && rm -rf node_modules"
+    "typecheck": "pnpm -r --stream typecheck",
+    "clean": "pnpm -r --stream clean && rm -rf node_modules"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

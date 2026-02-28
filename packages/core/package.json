@@ -8,9 +8,9 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
-      "import": "./dist/index.mjs",
-      "types": "./dist/index.d.ts"
+      "import": "./dist/index.mjs"
     }
   },
   "scripts": {
@@ -33,7 +33,6 @@
     "@ai-sdk/togetherai": "^2.0.35",
     "@ai-sdk/xai": "^3.0.60",
     "@modelcontextprotocol/sdk": "^1.10.0",
-    "@openrouter/ai-sdk-provider": "^0.4.0",
     "@qdrant/js-client-rest": "^1.13.0",
     "ai": "^4.3.0",
     "better-sqlite3": "^9.6.0",

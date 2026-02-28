@@ -1,11 +1,11 @@
 import * as vscode from "vscode"
-import * as path from "path"
+import * as crypto from "crypto"
 import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
 import {
-  loadConfig, Session, listSessions, createLLMClient, ToolRegistry, loadSkills,
+  loadConfig, writeConfig, writeGlobalProfiles, Session, listSessions, createLLMClient, ToolRegistry, loadSkills,
   loadRules, McpClient, setMcpClientInstance, createCompaction,
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
-  CheckpointTracker, CodebaseIndexer,
+  CheckpointTracker, CodebaseIndexer, createCodebaseIndexer,
 } from "@nexuscode/core"
 import { VsCodeHost } from "./host.js"
 
@@ -16,7 +16,9 @@ export type WebviewMessage =
   | { type: "clearChat" }
   | { type: "setMode"; mode: Mode }
   | { type: "setMaxMode"; enabled: boolean }
+  | { type: "setProfile"; profile: string }
   | { type: "getState" }
+  | { type: "webviewDidLaunch" }
   | { type: "openSettings" }
   | { type: "saveConfig"; config: Partial<NexusConfig> }
   | { type: "switchSession"; sessionId: string }
@@ -30,6 +32,7 @@ export type ExtensionMessage =
   | { type: "sessionList"; sessions: Array<{ id: string; ts: number; title?: string; messageCount: number }> }
   | { type: "indexStatus"; status: IndexStatus }
   | { type: "configLoaded"; config: NexusConfig }
+  | { type: "addToChatContent"; content: string }
 
 export interface WebviewState {
   messages: SessionMessage[]
@@ -55,6 +58,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
 
   private session?: Session
   private config?: NexusConfig
+  private defaultModelProfile?: NexusConfig["model"]
   private mode: Mode = "agent"
   private maxMode = false
   private isRunning = false
@@ -68,7 +72,18 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   private indexStatusUnsubscribe?: () => void
   private disposables: vscode.Disposable[] = []
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) {
+    this.disposables.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!e.affectsConfiguration("nexuscode")) return
+        if (this.config) {
+          applyVscodeOverrides(this.config)
+          this.maxMode = this.config.maxMode.enabled
+          this.postStateUpdate()
+        }
+      })
+    )
+  }
 
   async resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -77,9 +92,9 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   ): Promise<void> {
     this.view = webviewView
     this.setupWebview(webviewView.webview)
-    await this.ensureInitialized()
+    // Run init in background so the panel appears immediately; state will update when ready
+    void this.ensureInitialized()
 
-    // Re-initialize if the webview is re-opened after being hidden
     webviewView.onDidChangeVisibility(() => {
       if (webviewView.visible) {
         this.postStateUpdate()
@@ -88,9 +103,6 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     }, null, this.disposables)
   }
 
-  /**
-   * Open NexusCode in a panel to the right (ViewColumn.Beside)
-   */
   async openPanel(): Promise<void> {
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Beside)
@@ -104,14 +116,12 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: [
-          vscode.Uri.joinPath(this.context.extensionUri, "webview-ui", "dist"),
-        ],
+        localResourceRoots: [this.context.extensionUri],
       }
     )
 
     this.setupWebview(this.panel.webview)
-    await this.ensureInitialized()
+    void this.ensureInitialized()
 
     this.panel.onDidDispose(() => {
       this.panel = undefined
@@ -119,11 +129,10 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 
   private setupWebview(webview: vscode.Webview): void {
+    // Like Roo-Code: whole extension as resource root so webview can load dist assets
     webview.options = {
       enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.context.extensionUri, "webview-ui", "dist"),
-      ],
+      localResourceRoots: [this.context.extensionUri],
     }
 
     webview.html = this.getHtml(webview)
@@ -131,14 +140,20 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
       await this.handleMessage(msg)
     }, null, this.disposables)
+
+    // Send initial state so webview gets data even before getState/webviewDidLaunch
+    queueMicrotask(() => {
+      this.postStateUpdate()
+      this.sendIndexStatus()
+    })
   }
 
   /**
    * Initialize once — guard prevents double-init when both sidebar and panel are active.
+   * Sends state to webview immediately after config/session load; MCP and indexer run in background.
    */
   private async ensureInitialized(): Promise<void> {
     if (this.initialized) {
-      // Just send the current state to the newly connected webview
       this.postStateUpdate()
       this.sendIndexStatus()
       return
@@ -154,49 +169,41 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     }
 
     if (!this.config) {
-      // Fallback: try loading with empty cwd defaults
       try {
         this.config = await loadConfig(process.cwd())
       } catch {}
     }
 
-    if (!this.config) return
-
-    // Init session
-    this.session = Session.create(cwd)
-
-    // Init MCP
-    if (this.config.mcp.servers.length > 0) {
-      this.mcpClient = new McpClient()
-      setMcpClientInstance(this.mcpClient)
-      await this.mcpClient.connectAll(this.config.mcp.servers).catch(err => {
-        console.warn("[nexus] MCP connection error:", err)
-      })
+    if (!this.config) {
+      this.postStateUpdate()
+      return
     }
 
-    // Init indexer and file watcher
-    if (this.config.indexing.enabled) {
-      this.indexer = new CodebaseIndexer(cwd, this.config)
+    applyVscodeOverrides(this.config)
 
-      // Subscribe to index status changes to push updates to webview
-      this.indexStatusUnsubscribe = this.indexer.onStatusChange((status) => {
-        this.sendIndexStatus(status)
-        // Emit index_update agent event so CLI and webview can react
-        this.postMessage({
-          type: "agentEvent",
-          event: { type: "index_update", status },
+    this.maxMode = this.config.maxMode.enabled
+    this.defaultModelProfile = { ...this.config.model }
+
+    try {
+      this.session = Session.create(cwd)
+
+      this.postStateUpdate()
+      this.sendIndexStatus()
+
+      if (this.config.mcp.servers.length > 0) {
+        this.mcpClient = new McpClient()
+        setMcpClientInstance(this.mcpClient)
+        this.mcpClient.connectAll(this.config.mcp.servers).catch(err => {
+          console.warn("[nexus] MCP connection error:", err)
         })
-      })
+      }
 
-      this.indexer.startIndexing().catch(err => {
-        console.warn("[nexus] Indexer start error:", err)
-      })
-
-      // File watcher for auto-updating the index on file changes
-      this.setupFileWatcher(cwd)
+      await this.initializeIndexer(cwd)
+      this.postMessage({ type: "configLoaded", config: this.config })
+    } catch (err) {
+      console.warn("[nexus] Init error:", err)
+      this.postStateUpdate()
     }
-
-    this.postStateUpdate()
   }
 
   private setupFileWatcher(cwd: string): void {
@@ -251,24 +258,84 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
 
       case "setMaxMode":
         this.maxMode = msg.enabled
-        if (this.config) this.config.maxMode.enabled = msg.enabled
+        if (this.config) {
+          this.config.maxMode.enabled = msg.enabled
+          writeConfig(this.config, this.getCwd())
+        }
         this.postStateUpdate()
+        break
+
+      case "setProfile":
+        if (this.config) {
+          if (!msg.profile) {
+            if (this.defaultModelProfile) {
+              this.config.model = { ...this.defaultModelProfile }
+            }
+            this.postMessage({ type: "configLoaded", config: this.config })
+            this.postStateUpdate()
+            break
+          }
+          const profile = this.config.profiles[msg.profile]
+          if (!profile) break
+          this.config.model = {
+            ...this.config.model,
+            ...profile,
+          }
+          this.postMessage({ type: "configLoaded", config: this.config })
+          this.postStateUpdate()
+        }
         break
 
       case "getState":
         this.postStateUpdate()
         this.sendIndexStatus()
+        if (this.config) this.postMessage({ type: "configLoaded", config: this.config })
+        await this.sendSessionList()
+        break
+
+      case "webviewDidLaunch":
+        // Like Roo-Code: webview signals ready → send full state
+        this.postStateUpdate()
+        this.sendIndexStatus()
+        if (this.config) this.postMessage({ type: "configLoaded", config: this.config })
         await this.sendSessionList()
         break
 
       case "openSettings":
-        await vscode.commands.executeCommand("workbench.action.openSettings", "nexuscode")
+        try {
+          await vscode.commands.executeCommand("workbench.action.openSettings", "nexuscode")
+        } catch {
+          try {
+            await vscode.commands.executeCommand("workbench.action.openSettings")
+          } catch {}
+        }
         break
 
       case "saveConfig":
-        // Merge config updates
         if (this.config && msg.config) {
-          Object.assign(this.config, msg.config)
+          const before = JSON.stringify({
+            indexing: this.config.indexing,
+            vectorDb: this.config.vectorDb,
+            embeddings: this.config.embeddings,
+          })
+
+          deepMergeInto(this.config as any, normalizeConfigPatch(msg.config as any))
+          this.defaultModelProfile = { ...this.config.model }
+          if (msg.config.profiles && typeof msg.config.profiles === "object") {
+            writeGlobalProfiles(msg.config.profiles as Record<string, unknown>)
+          }
+          writeConfig(this.config, this.getCwd())
+          this.maxMode = this.config.maxMode.enabled
+
+          const after = JSON.stringify({
+            indexing: this.config.indexing,
+            vectorDb: this.config.vectorDb,
+            embeddings: this.config.embeddings,
+          })
+          if (before !== after) {
+            await this.initializeIndexer(this.getCwd())
+          }
+
           this.postMessage({ type: "configLoaded", config: this.config })
           this.postStateUpdate()
         }
@@ -316,9 +383,6 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     })
 
     const client = createLLMClient(this.config.model)
-    const maxModeClient = this.config.maxMode.enabled
-      ? createLLMClient(this.config.maxMode)
-      : undefined
 
     const toolRegistry = new ToolRegistry()
 
@@ -348,7 +412,6 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       await runAgentLoop({
         session: this.session,
         client,
-        maxModeClient,
         host,
         config: this.config,
         mode: this.mode,
@@ -395,32 +458,39 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 
   async clearIndex(): Promise<void> {
-    if (!this.indexer || !this.config) return
-    this.indexer.close()
+    if (!this.config || !this.config.indexing.enabled) return
     const cwd = this.getCwd()
-    this.indexer = new CodebaseIndexer(cwd, this.config)
-    this.indexStatusUnsubscribe?.()
-    this.indexStatusUnsubscribe = this.indexer.onStatusChange((status) => {
-      this.sendIndexStatus(status)
-      this.postMessage({ type: "agentEvent", event: { type: "index_update", status } })
-    })
-    await this.indexer.startIndexing().catch(console.warn)
+    await this.initializeIndexer(cwd)
+    await this.indexer?.reindex()
     this.sendIndexStatus()
     this.postStateUpdate()
   }
 
   addToChat(text: string): void {
-    this.postMessage({
-      type: "agentEvent",
-      event: { type: "text_delta", delta: `\n\`\`\`\n${text}\n\`\`\``, messageId: "" },
-    })
-    vscode.commands.executeCommand("nexuscode.sidebar.focus")
+    this.postMessage({ type: "addToChatContent", content: text })
+    vscode.commands.executeCommand("nexuscode.sidebar.focus").then(() => {}, () => {})
   }
 
   private postStateUpdate(): void {
-    if (!this.session || !this.config) return
-
     const status = this.indexer?.status() ?? { state: "idle" as const }
+    if (!this.session || !this.config) {
+      this.postMessage({
+        type: "stateUpdate",
+        state: {
+          messages: [],
+          mode: this.mode,
+          maxMode: this.maxMode,
+          isRunning: false,
+          model: "—",
+          provider: "—",
+          sessionId: "",
+          todo: "",
+          indexReady: status.state === "ready",
+          indexStatus: status,
+        },
+      })
+      return
+    }
 
     const state: WebviewState = {
       messages: this.session.messages,
@@ -473,32 +543,88 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     return process.cwd()
   }
 
+  private async initializeIndexer(cwd: string): Promise<void> {
+    this.indexStatusUnsubscribe?.()
+    this.indexStatusUnsubscribe = undefined
+
+    this.indexer?.close()
+    this.indexer = undefined
+
+    if (!this.config?.indexing.enabled) {
+      this.fileWatcher?.dispose()
+      this.fileWatcher = undefined
+      this.sendIndexStatus({ state: "idle" })
+      return
+    }
+
+    this.indexer = await createCodebaseIndexer(cwd, this.config, {
+      onWarning: (message) => console.warn(message),
+    })
+    this.indexStatusUnsubscribe = this.indexer.onStatusChange((status) => {
+      this.sendIndexStatus(status)
+      this.postMessage({ type: "agentEvent", event: { type: "index_update", status } })
+    })
+    this.indexer.startIndexing().catch((err) => {
+      console.warn("[nexus] Indexer start error:", err)
+    })
+    this.setupFileWatcher(cwd)
+  }
+
   private getHtml(webview: vscode.Webview): string {
     const webviewDistPath = vscode.Uri.joinPath(
       this.context.extensionUri, "webview-ui", "dist"
     )
-
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(webviewDistPath, "index.js")
     )
     const styleUri = webview.asWebviewUri(
       vscode.Uri.joinPath(webviewDistPath, "index.css")
     )
-
-    const nonce = generateNonce()
+    const nonce = getNonce()
+    const csp = [
+      "default-src 'none'",
+      `style-src 'unsafe-inline' ${webview.cspSource}`,
+      `script-src 'nonce-${nonce}' 'wasm-unsafe-eval' ${webview.cspSource}`,
+      `font-src ${webview.cspSource}`,
+      "connect-src http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*",
+      `img-src ${webview.cspSource} data: https:`,
+    ].join("; ")
+    const extraStyles = ".container { height: 100%; display: flex; flex-direction: column; min-height: 0; }"
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data: https:; font-src ${webview.cspSource};">
-  <link href="${styleUri}" rel="stylesheet">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
+  <link rel="stylesheet" href="${styleUri}">
   <title>NexusCode</title>
+  <style>
+    html { scrollbar-color: auto; }
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+    body {
+      background-color: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-font-family);
+    }
+    #root { height: 100%; }
+    #root .loading-msg { display: flex; align-items: center; justify-content: center; flex: 1; }
+    #root.loaded .loading-msg { display: none; }
+    ${extraStyles}
+  </style>
 </head>
 <body>
-  <div id="root"></div>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
+  <div id="root">
+    <span class="loading-msg" aria-live="polite">Loading NexusCode…</span>
+  </div>
+  <script nonce="${nonce}" type="module" src="${scriptUri}" id="main-script"></script>
+  <script nonce="${nonce}">
+    document.getElementById('main-script').addEventListener('error', function() {
+      var r = document.getElementById('root');
+      r.className = 'error';
+      r.innerHTML = '<span>Failed to load. Right‑click panel → Inspect → check Console.</span>';
+    });
+  </script>
 </body>
 </html>`
   }
@@ -531,11 +657,214 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 }
 
-function generateNonce(): string {
-  let text = ""
-  const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-  for (let i = 0; i < 32; i++) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length))
+/**
+ * Apply VS Code workspace/user settings over the loaded config.
+ * File config (.nexus/nexus.yaml) is base; VS Code settings override.
+ */
+function applyVscodeOverrides(config: NexusConfig): void {
+  const cfg = vscode.workspace.getConfiguration("nexuscode")
+
+  const provider = cfg.get<string>("provider")
+  if (provider != null && provider !== "") {
+    if (provider === "openrouter") {
+      config.model.provider = "openai-compatible"
+      if (!config.model.baseUrl) config.model.baseUrl = "https://openrouter.ai/api/v1"
+    } else {
+      config.model.provider = provider as NexusConfig["model"]["provider"]
+    }
   }
-  return text
+
+  const model = cfg.get<string>("model")
+  if (model != null && model !== "") {
+    config.model.id = model
+  }
+
+  const apiKey = cfg.get<string>("apiKey")
+  if (apiKey != null && apiKey !== "") {
+    config.model.apiKey = apiKey
+  }
+
+  const baseUrl = cfg.get<string>("baseUrl")
+  if (baseUrl != null && baseUrl !== "") {
+    config.model.baseUrl = baseUrl
+  }
+
+  const temperature = cfg.get<number>("temperature")
+  if (typeof temperature === "number" && Number.isFinite(temperature)) {
+    config.model.temperature = Math.max(0, Math.min(2, temperature))
+  }
+
+  const maxModeEnabled = cfg.get<boolean>("maxModeEnabled")
+  if (typeof maxModeEnabled === "boolean") {
+    config.maxMode.enabled = maxModeEnabled
+  }
+
+  const maxModeTokenBudgetMultiplier = cfg.get<number>("maxModeTokenBudgetMultiplier")
+  if (typeof maxModeTokenBudgetMultiplier === "number" && Number.isFinite(maxModeTokenBudgetMultiplier)) {
+    config.maxMode.tokenBudgetMultiplier = Math.max(1, Math.min(6, maxModeTokenBudgetMultiplier))
+  }
+
+  const enableIndexing = cfg.get<boolean>("enableIndexing")
+  if (typeof enableIndexing === "boolean") {
+    config.indexing.enabled = enableIndexing
+  }
+
+  const enableVectorIndex = cfg.get<boolean>("enableVectorIndex")
+  if (typeof enableVectorIndex === "boolean") {
+    config.indexing.vector = enableVectorIndex
+  }
+
+  const embeddingBatchSize = cfg.get<number>("embeddingBatchSize")
+  if (typeof embeddingBatchSize === "number" && Number.isFinite(embeddingBatchSize) && embeddingBatchSize > 0) {
+    config.indexing.embeddingBatchSize = Math.floor(embeddingBatchSize)
+  }
+
+  const embeddingConcurrency = cfg.get<number>("embeddingConcurrency")
+  if (typeof embeddingConcurrency === "number" && Number.isFinite(embeddingConcurrency) && embeddingConcurrency > 0) {
+    config.indexing.embeddingConcurrency = Math.floor(embeddingConcurrency)
+  }
+
+  const enableVectorDb = cfg.get<boolean>("enableVectorDb")
+  if (typeof enableVectorDb === "boolean") {
+    config.vectorDb = config.vectorDb ?? {
+      enabled: false,
+      url: "http://127.0.0.1:6333",
+      collection: "nexus",
+      autoStart: true,
+    }
+    config.vectorDb.enabled = enableVectorDb
+  }
+
+  const vectorDbUrl = cfg.get<string>("vectorDbUrl")
+  if (vectorDbUrl != null && vectorDbUrl !== "") {
+    config.vectorDb = config.vectorDb ?? {
+      enabled: true,
+      url: "http://127.0.0.1:6333",
+      collection: "nexus",
+      autoStart: true,
+    }
+    config.vectorDb.url = vectorDbUrl
+  }
+
+  const vectorDbAutoStart = cfg.get<boolean>("vectorDbAutoStart")
+  if (typeof vectorDbAutoStart === "boolean") {
+    config.vectorDb = config.vectorDb ?? {
+      enabled: true,
+      url: "http://127.0.0.1:6333",
+      collection: "nexus",
+      autoStart: true,
+    }
+    config.vectorDb.autoStart = vectorDbAutoStart
+  }
+
+  const embeddingsProvider = cfg.get<string>("embeddingsProvider")
+  const embeddingsModel = cfg.get<string>("embeddingsModel")
+  const embeddingsApiKey = cfg.get<string>("embeddingsApiKey")
+  const embeddingsBaseUrl = cfg.get<string>("embeddingsBaseUrl")
+  const embeddingsDimensions = cfg.get<number>("embeddingsDimensions")
+  if (
+    (embeddingsProvider && embeddingsProvider !== "")
+    || (embeddingsModel && embeddingsModel !== "")
+    || (embeddingsApiKey && embeddingsApiKey !== "")
+    || (embeddingsBaseUrl && embeddingsBaseUrl !== "")
+    || (typeof embeddingsDimensions === "number" && Number.isFinite(embeddingsDimensions))
+  ) {
+    config.embeddings = config.embeddings ?? {
+      provider: "openai",
+      model: "text-embedding-3-small",
+    }
+    if (embeddingsProvider && embeddingsProvider !== "") {
+      if (embeddingsProvider === "openrouter") {
+        config.embeddings.provider = "openai-compatible"
+        config.embeddings.baseUrl = config.embeddings.baseUrl || "https://openrouter.ai/api/v1"
+      } else {
+        config.embeddings.provider = embeddingsProvider as "openai" | "openai-compatible" | "ollama" | "local"
+      }
+    }
+    if (embeddingsModel && embeddingsModel !== "") {
+      config.embeddings.model = embeddingsModel
+    }
+    if (embeddingsApiKey && embeddingsApiKey !== "") {
+      config.embeddings.apiKey = embeddingsApiKey
+    }
+    if (embeddingsBaseUrl && embeddingsBaseUrl !== "") {
+      config.embeddings.baseUrl = embeddingsBaseUrl
+    }
+    if (typeof embeddingsDimensions === "number" && Number.isFinite(embeddingsDimensions) && embeddingsDimensions > 0) {
+      config.embeddings.dimensions = Math.floor(embeddingsDimensions)
+    }
+  }
+
+  const toolClassifyThreshold = cfg.get<number>("toolClassifyThreshold")
+  if (typeof toolClassifyThreshold === "number" && Number.isFinite(toolClassifyThreshold) && toolClassifyThreshold > 0) {
+    config.tools.classifyThreshold = Math.floor(toolClassifyThreshold)
+  }
+
+  const skillClassifyThreshold = cfg.get<number>("skillClassifyThreshold")
+  if (typeof skillClassifyThreshold === "number" && Number.isFinite(skillClassifyThreshold) && skillClassifyThreshold > 0) {
+    config.skillClassifyThreshold = Math.floor(skillClassifyThreshold)
+  }
+
+  const enableCheckpoints = cfg.get<boolean>("enableCheckpoints")
+  if (typeof enableCheckpoints === "boolean") {
+    config.checkpoint.enabled = enableCheckpoints
+  }
+
+  const autoApproveRead = cfg.get<boolean>("autoApproveRead")
+  if (typeof autoApproveRead === "boolean") {
+    config.permissions.autoApproveRead = autoApproveRead
+  }
+
+  const autoApproveWrite = cfg.get<boolean>("autoApproveWrite")
+  if (typeof autoApproveWrite === "boolean") {
+    config.permissions.autoApproveWrite = autoApproveWrite
+  }
+
+  const autoApproveCommand = cfg.get<boolean>("autoApproveCommand")
+  if (typeof autoApproveCommand === "boolean") {
+    config.permissions.autoApproveCommand = autoApproveCommand
+  }
+}
+
+function deepMergeInto<T extends Record<string, unknown>>(target: T, patch: Partial<T>): T {
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue
+
+    const current = target[key as keyof T]
+    if (
+      current
+      && typeof current === "object"
+      && !Array.isArray(current)
+      && value
+      && typeof value === "object"
+      && !Array.isArray(value)
+    ) {
+      deepMergeInto(current as Record<string, unknown>, value as Record<string, unknown>)
+    } else {
+      ;(target as Record<string, unknown>)[key] = value as unknown
+    }
+  }
+  return target
+}
+
+function normalizeConfigPatch<T extends Record<string, unknown>>(patch: T): T {
+  const clone = JSON.parse(JSON.stringify(patch)) as Record<string, unknown>
+
+  const model = clone["model"] as Record<string, unknown> | undefined
+  if (model && model["provider"] === "openrouter") {
+    model["provider"] = "openai-compatible"
+    if (!model["baseUrl"]) model["baseUrl"] = "https://openrouter.ai/api/v1"
+  }
+
+  const embeddings = clone["embeddings"] as Record<string, unknown> | undefined
+  if (embeddings && embeddings["provider"] === "openrouter") {
+    embeddings["provider"] = "openai-compatible"
+    if (!embeddings["baseUrl"]) embeddings["baseUrl"] = "https://openrouter.ai/api/v1"
+  }
+
+  return clone as T
+}
+
+function getNonce(): string {
+  return crypto.randomBytes(16).toString("hex")
 }

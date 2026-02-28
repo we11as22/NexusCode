@@ -29,7 +29,7 @@ Useful for: reading documentation, fetching API specs, checking URLs.`,
       const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
 
       const response = await fetch(url, {
-        signal: controller.signal,
+        signal: controller.signal as any,
         headers: {
           "User-Agent": "NexusCode/1.0 (AI coding assistant)",
           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8",

@@ -105,6 +105,13 @@ export class FTSIndex {
     this.db.prepare("DELETE FROM chunks WHERE path = ?").run(filePath)
   }
 
+  /** Clear all indexed data (for full reindex). */
+  clear(): void {
+    this.db.prepare("DELETE FROM files").run()
+    this.db.prepare("DELETE FROM symbols").run()
+    this.db.prepare("DELETE FROM chunks").run()
+  }
+
   searchSymbols(query: string, limit: number, kind?: SymbolKind): IndexSearchResult[] {
     let sql: string
     let params: (string | number)[]

@@ -7,7 +7,7 @@
     "nexus": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --minify --target node18 --outDir dist",
+    "build": "tsup src/index.ts --format esm --minify --target node18 --outDir dist && cp nexus dist/nexus && chmod +x dist/nexus",
     "dev": "tsup src/index.ts --format esm --target node18 --watch --outDir dist",
     "typecheck": "tsc --noEmit"
   },
@@ -23,6 +23,8 @@
     "yargs": "^17.7.0"
   },
   "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/yargs": "^17.0.33",
     "tsup": "^8.3.0",
     "typescript": "^5.5.0"
   }

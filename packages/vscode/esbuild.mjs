@@ -9,7 +9,10 @@ const ctx = await esbuild.context({
   entryPoints: ["src/extension.ts"],
   bundle: true,
   outfile: "dist/extension.js",
-  external: ["vscode"],
+  external: [
+    "vscode",
+    "@xenova/transformers",
+  ],
   format: "cjs",
   platform: "node",
   target: "node18",

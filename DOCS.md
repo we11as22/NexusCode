@@ -21,6 +21,7 @@
 13. [MCP](#mcp)
 14. [Skills](#skills)
 15. [Правила и правила проекта](#правила-и-правила-проекта)
+16. [Устранение неполадок](#устранение-неполадок)
 
 ---
 
@@ -29,7 +30,26 @@
 ### Требования
 
 - **Node.js** 18+
-- **pnpm** (рекомендуется) или npm
+- **pnpm** (рекомендуется для монорепозитория) или npm
+
+### Установка pnpm
+
+Если `pnpm` не найден:
+
+**Вариант 1 — через npm** (если уже есть Node.js):
+
+```bash
+npm install -g pnpm
+```
+
+**Вариант 2 — через Corepack** (встроен в Node.js 16+):
+
+```bash
+corepack enable
+corepack prepare pnpm@latest --activate
+```
+
+Проверка: `pnpm -v`.
 
 ### Из репозитория (разработка)
 
@@ -50,11 +70,34 @@ pnpm install
 pnpm build
 # Создать симлинк или добавить в PATH
 ln -s "$(pwd)/packages/cli/dist/index.js" /usr/local/bin/nexus
-# или
+# или (после сборки в dist появляется скрипт nexus)
 export PATH="$(pwd)/packages/cli/dist:$PATH"
+nexus
 ```
 
-Запуск: `node packages/cli/dist/index.js` или `nexus` (если в PATH).
+### Устранение неполадок
+
+**Ошибка `better_sqlite3.node was compiled against a different Node.js version` (NODE_MODULE_VERSION)**  
+Нативный модуль `better-sqlite3` собран под другую версию Node. Пересоберите его под текущую:
+
+1. В проекте включена сборка нативных модулей: в `pnpm-workspace.yaml` задано `allowBuilds: better-sqlite3: true`. Если после свежего `pnpm install` скрипты сборки не запускались — проверьте этот пункт.
+2. Пересборка под текущий Node:
+   ```bash
+   pnpm rebuild better-sqlite3
+   ```
+   Если после этого ошибка сохраняется (например, в сообщении фигурируют 108 и 109), пересоберите в каталоге пакета тем же `node`, которым запускаете `nexus`:
+   ```bash
+   cd node_modules/.pnpm/better-sqlite3@9.6.0/node_modules/better-sqlite3 && npm run build-release
+   ```
+   Запускайте `nexus` той же версией Node, под которую собирали модуль (например: `nvm use 20 && nexus`).
+3. Если пересборка падает из‑за отсутствия компилятора, установите (Debian/Ubuntu): `sudo apt-get install -y build-essential python3`.
+4. После смены мажорной версии Node (20 ↔ 18) лучше переустановить зависимости: `rm -rf node_modules packages/*/node_modules && pnpm install`.
+
+**Временно обойтись без индекса** (индексация и `codebase_search` отключены, остальное работает):
+
+```bash
+nexus --no-index
+```
 
 ### Установка расширения VS Code
 
@@ -113,26 +156,27 @@ model:
 
 maxMode:
   enabled: false
-  provider: anthropic
-  id: claude-opus-4-5
+  tokenBudgetMultiplier: 2
 ```
 
 ### Полная схема конфигурации
 
 | Секция | Ключ | Тип | По умолчанию | Описание |
 |--------|------|-----|--------------|----------|
-| **model** | provider | string | anthropic | Провайдер LLM: anthropic, openai, google, openrouter, ollama, azure, bedrock, groq, mistral, xai, deepinfra, cerebras, cohere, togetherai, perplexity, openai-compatible |
+| **model** | provider | string | anthropic | Провайдер LLM: anthropic, openai, google, ollama, azure, bedrock, groq, mistral, xai, deepinfra, cerebras, cohere, togetherai, perplexity, openai-compatible (OpenRouter через openai-compatible + baseUrl) |
 | | id | string | claude-sonnet-4-5 | Идентификатор модели |
 | | apiKey | string | — | API-ключ (можно не указывать, если задан в env) |
 | | baseUrl | string | — | Кастомный URL API (для openai-compatible) |
-| **maxMode** | enabled | boolean | false | Включить «макс» режим (более мощная модель для сложных шагов) |
-| | provider, id, apiKey | — | — | Те же поля, что у model |
+| **maxMode** | enabled | boolean | false | Включить «макс» режим (та же модель, но глубже и дольше работает) |
+| | tokenBudgetMultiplier | number | 2 | Множитель бюджета токенов на запрос в max mode (1-6) |
 | **indexing** | enabled | boolean | true | Включить индексацию кодовой базы |
 | | excludePatterns | string[] | node_modules/**, .git/**, dist/**, ... | Glob-паттерны исключения при индексации |
 | | symbolExtract | boolean | true | Извлекать символы (классы, функции) для умной индексации |
 | | fts | boolean | true | Полнотекстовый поиск (SQLite FTS5) |
 | | vector | boolean | false | Векторный поиск (нужен Qdrant и embeddings) |
 | | batchSize | number | 50 | Размер батча при индексации |
+| | embeddingBatchSize | number | 60 | Размер батча embedding-запросов при векторной индексации |
+| | embeddingConcurrency | number | 2 | Параллелизм embedding-запросов при векторной индексации |
 | | debounceMs | number | 1500 | Задержка перед обновлением индекса при изменении файла |
 | **vectorDb** | enabled | boolean | false | Включить векторную БД |
 | | url | string | http://localhost:6333 | URL Qdrant |
@@ -451,6 +495,6 @@ rules:
 - **Сборка всего**: `pnpm build` в корне.
 - **Только core**: `pnpm --filter @nexuscode/core build`.
 - **Только CLI**: `pnpm --filter @nexuscode/cli build`.
-- **Только VS Code**: `pnpm --filter @nexuscode/vscode build` (собирает extension и webview-ui).
+- **Только VS Code**: `pnpm --filter nexuscode build` (собирает extension и webview-ui).
 
 Документация актуальна для текущего состояния репозитория; при добавлении новых фич и опций конфига их стоит дополнять в этот файл.

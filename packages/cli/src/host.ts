@@ -112,7 +112,7 @@ export class CliHost implements IHost {
         terminal: process.stdout.isTTY,
       })
 
-      rl.once("line", (answer) => {
+      rl.once("line", (answer: string) => {
         rl.close()
         const lower = answer.trim().toLowerCase()
         const approved = ["y", "yes", "a", "always", "s", "skip"].includes(lower)
