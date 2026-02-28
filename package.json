@@ -1,0 +1,24 @@
+{
+  "name": "nexuscode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NexusCode — AI coding agent combining best practices from all vibe-coding tools",
+  "workspaces": [
+    "packages/*",
+    "packages/vscode/webview-ui"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "build:core": "pnpm --filter @nexuscode/core build",
+    "build:vscode": "pnpm --filter @nexuscode/vscode build",
+    "build:cli": "pnpm --filter @nexuscode/cli build",
+    "dev:core": "pnpm --filter @nexuscode/core dev",
+    "dev:cli": "pnpm --filter @nexuscode/cli dev",
+    "typecheck": "pnpm -r typecheck",
+    "clean": "pnpm -r clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tsup": "^8.3.0"
+  }
+}

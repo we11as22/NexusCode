@@ -1,0 +1,28 @@
+import * as esbuild from "esbuild"
+import * as path from "path"
+import { fileURLToPath } from "url"
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const watch = process.argv.includes("--watch")
+
+const ctx = await esbuild.context({
+  entryPoints: ["src/extension.ts"],
+  bundle: true,
+  outfile: "dist/extension.js",
+  external: ["vscode"],
+  format: "cjs",
+  platform: "node",
+  target: "node18",
+  sourcemap: true,
+  minify: !watch,
+  loader: { ".md": "text", ".txt": "text" },
+})
+
+if (watch) {
+  await ctx.watch()
+  console.log("Watching for changes...")
+} else {
+  await ctx.rebuild()
+  await ctx.dispose()
+  console.log("Extension built.")
+}

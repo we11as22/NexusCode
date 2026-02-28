@@ -1,0 +1,130 @@
+{
+  "name": "@nexuscode/vscode",
+  "displayName": "NexusCode",
+  "description": "AI coding agent combining best practices from all vibe-coding tools",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "nexuscode",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["AI", "Chat", "Programming Languages"],
+  "keywords": ["ai", "coding", "agent", "claude", "gpt", "nexus"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build": "pnpm build:ext && pnpm build:webview",
+    "build:ext": "node esbuild.mjs",
+    "build:webview": "pnpm --filter @nexuscode/webview-ui build",
+    "dev": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "nexuscode-activitybar",
+          "title": "NexusCode",
+          "icon": "assets/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "nexuscode-activitybar": [
+        {
+          "type": "webview",
+          "id": "nexuscode.sidebar",
+          "name": "NexusCode",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "nexuscode.openPanel",
+        "title": "Open NexusCode Panel",
+        "category": "NexusCode",
+        "icon": "$(robot)"
+      },
+      {
+        "command": "nexuscode.newTask",
+        "title": "New Task",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.addToChat",
+        "title": "Add to NexusCode Chat",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.compact",
+        "title": "Compact Conversation History",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.clearChat",
+        "title": "Clear Chat",
+        "category": "NexusCode"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "nexuscode.addToChat",
+          "group": "nexuscode",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "nexuscode.openPanel",
+        "key": "ctrl+shift+n",
+        "mac": "cmd+shift+n"
+      },
+      {
+        "command": "nexuscode.newTask",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a"
+      }
+    ],
+    "configuration": {
+      "title": "NexusCode",
+      "properties": {
+        "nexuscode.provider": {
+          "type": "string",
+          "default": "anthropic",
+          "description": "Default LLM provider"
+        },
+        "nexuscode.model": {
+          "type": "string",
+          "default": "claude-sonnet-4-5",
+          "description": "Default model ID"
+        },
+        "nexuscode.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key (can also be set via environment variables)"
+        },
+        "nexuscode.enableCheckpoints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable workspace checkpoints (requires git)"
+        },
+        "nexuscode.enableIndexing": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable codebase indexing for semantic search"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "@nexuscode/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.5.0",
+    "esbuild": "^0.24.0"
+  }
+}
