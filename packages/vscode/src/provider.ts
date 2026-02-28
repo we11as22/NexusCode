@@ -1,9 +1,8 @@
 import * as vscode from "vscode"
 import * as path from "path"
-import * as fs from "fs"
-import type { AgentEvent, NexusConfig, Mode, SessionMessage } from "@nexuscode/core"
+import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
 import {
-  loadConfig, Session, createLLMClient, ToolRegistry, loadSkills,
+  loadConfig, Session, listSessions, createLLMClient, ToolRegistry, loadSkills,
   loadRules, McpClient, setMcpClientInstance, createCompaction,
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
   CheckpointTracker, CodebaseIndexer,
@@ -22,12 +21,14 @@ export type WebviewMessage =
   | { type: "saveConfig"; config: Partial<NexusConfig> }
   | { type: "switchSession"; sessionId: string }
   | { type: "forkSession"; messageId: string }
+  | { type: "reindex" }
+  | { type: "clearIndex" }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
   | { type: "agentEvent"; event: AgentEvent }
   | { type: "sessionList"; sessions: Array<{ id: string; ts: number; title?: string; messageCount: number }> }
-  | { type: "indexStatus"; status: unknown }
+  | { type: "indexStatus"; status: IndexStatus }
   | { type: "configLoaded"; config: NexusConfig }
 
 export interface WebviewState {
@@ -40,13 +41,14 @@ export interface WebviewState {
   sessionId: string
   todo: string
   indexReady: boolean
+  indexStatus: IndexStatus
 }
 
 /**
  * VS Code WebviewView provider for NexusCode.
  * Manages the agent session, webview, and all state.
  */
-export class NexusProvider implements vscode.WebviewViewProvider {
+export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = "nexuscode.sidebar"
   private view?: vscode.WebviewView
   private panel?: vscode.WebviewPanel
@@ -61,6 +63,11 @@ export class NexusProvider implements vscode.WebviewViewProvider {
   private indexer?: CodebaseIndexer
   private mcpClient?: McpClient
 
+  private initialized = false
+  private fileWatcher?: vscode.FileSystemWatcher
+  private indexStatusUnsubscribe?: () => void
+  private disposables: vscode.Disposable[] = []
+
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   async resolveWebviewView(
@@ -70,7 +77,15 @@ export class NexusProvider implements vscode.WebviewViewProvider {
   ): Promise<void> {
     this.view = webviewView
     this.setupWebview(webviewView.webview)
-    await this.initialize()
+    await this.ensureInitialized()
+
+    // Re-initialize if the webview is re-opened after being hidden
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible) {
+        this.postStateUpdate()
+        this.sendIndexStatus()
+      }
+    }, null, this.disposables)
   }
 
   /**
@@ -96,11 +111,11 @@ export class NexusProvider implements vscode.WebviewViewProvider {
     )
 
     this.setupWebview(this.panel.webview)
-    await this.initialize()
+    await this.ensureInitialized()
 
     this.panel.onDidDispose(() => {
       this.panel = undefined
-    })
+    }, null, this.disposables)
   }
 
   private setupWebview(webview: vscode.Webview): void {
@@ -115,16 +130,34 @@ export class NexusProvider implements vscode.WebviewViewProvider {
 
     webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
       await this.handleMessage(msg)
-    })
+    }, null, this.disposables)
   }
 
-  private async initialize(): Promise<void> {
+  /**
+   * Initialize once — guard prevents double-init when both sidebar and panel are active.
+   */
+  private async ensureInitialized(): Promise<void> {
+    if (this.initialized) {
+      // Just send the current state to the newly connected webview
+      this.postStateUpdate()
+      this.sendIndexStatus()
+      return
+    }
+
+    this.initialized = true
     const cwd = this.getCwd()
 
     try {
       this.config = await loadConfig(cwd)
     } catch {
-      this.config = await loadConfig(cwd).catch(() => undefined)
+      this.config = undefined
+    }
+
+    if (!this.config) {
+      // Fallback: try loading with empty cwd defaults
+      try {
+        this.config = await loadConfig(process.cwd())
+      } catch {}
     }
 
     if (!this.config) return
@@ -136,16 +169,57 @@ export class NexusProvider implements vscode.WebviewViewProvider {
     if (this.config.mcp.servers.length > 0) {
       this.mcpClient = new McpClient()
       setMcpClientInstance(this.mcpClient)
-      await this.mcpClient.connectAll(this.config.mcp.servers)
+      await this.mcpClient.connectAll(this.config.mcp.servers).catch(err => {
+        console.warn("[nexus] MCP connection error:", err)
+      })
     }
 
-    // Init indexer in background
+    // Init indexer and file watcher
     if (this.config.indexing.enabled) {
       this.indexer = new CodebaseIndexer(cwd, this.config)
-      this.indexer.startIndexing().catch(console.warn)
+
+      // Subscribe to index status changes to push updates to webview
+      this.indexStatusUnsubscribe = this.indexer.onStatusChange((status) => {
+        this.sendIndexStatus(status)
+        // Emit index_update agent event so CLI and webview can react
+        this.postMessage({
+          type: "agentEvent",
+          event: { type: "index_update", status },
+        })
+      })
+
+      this.indexer.startIndexing().catch(err => {
+        console.warn("[nexus] Indexer start error:", err)
+      })
+
+      // File watcher for auto-updating the index on file changes
+      this.setupFileWatcher(cwd)
     }
 
     this.postStateUpdate()
+  }
+
+  private setupFileWatcher(cwd: string): void {
+    if (this.fileWatcher) {
+      this.fileWatcher.dispose()
+    }
+
+    // Watch all files in workspace for changes/creates/deletes
+    this.fileWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(cwd, "**/*"),
+      false, // create
+      false, // change
+      false  // delete
+    )
+
+    const onFileChange = (uri: vscode.Uri) => {
+      this.indexer?.refreshFile(uri.fsPath)
+    }
+
+    this.fileWatcher.onDidChange(onFileChange, null, this.disposables)
+    this.fileWatcher.onDidCreate(onFileChange, null, this.disposables)
+    this.fileWatcher.onDidDelete(onFileChange, null, this.disposables)
+    this.disposables.push(this.fileWatcher)
   }
 
   private async handleMessage(msg: WebviewMessage): Promise<void> {
@@ -166,6 +240,7 @@ export class NexusProvider implements vscode.WebviewViewProvider {
 
       case "clearChat":
         this.session = Session.create(this.getCwd())
+        this.checkpoint = undefined
         this.postStateUpdate()
         break
 
@@ -182,10 +257,25 @@ export class NexusProvider implements vscode.WebviewViewProvider {
 
       case "getState":
         this.postStateUpdate()
+        this.sendIndexStatus()
+        await this.sendSessionList()
         break
 
       case "openSettings":
         await vscode.commands.executeCommand("workbench.action.openSettings", "nexuscode")
+        break
+
+      case "saveConfig":
+        // Merge config updates
+        if (this.config && msg.config) {
+          Object.assign(this.config, msg.config)
+          this.postMessage({ type: "configLoaded", config: this.config })
+          this.postStateUpdate()
+        }
+        break
+
+      case "switchSession":
+        await this.switchSession(msg.sessionId)
         break
 
       case "forkSession":
@@ -193,6 +283,14 @@ export class NexusProvider implements vscode.WebviewViewProvider {
           this.session = this.session.fork(msg.messageId) as Session
           this.postStateUpdate()
         }
+        break
+
+      case "reindex":
+        await this.reindex()
+        break
+
+      case "clearIndex":
+        await this.clearIndex()
         break
     }
   }
@@ -204,7 +302,6 @@ export class NexusProvider implements vscode.WebviewViewProvider {
     this.isRunning = true
     this.abortController = new AbortController()
 
-    // Add user message
     this.session.addMessage({ role: "user", content })
     this.postStateUpdate()
 
@@ -225,14 +322,12 @@ export class NexusProvider implements vscode.WebviewViewProvider {
 
     const toolRegistry = new ToolRegistry()
 
-    // Add MCP tools
     if (this.mcpClient) {
       for (const tool of this.mcpClient.getTools()) {
         toolRegistry.register(tool)
       }
     }
 
-    // Add spawn_agent tool
     const parallelManager = new ParallelAgentManager()
     toolRegistry.register(createSpawnAgentTool(parallelManager, this.config))
 
@@ -243,10 +338,9 @@ export class NexusProvider implements vscode.WebviewViewProvider {
     const skills = await loadSkills(this.config.skills, cwd).catch(() => [])
     const compaction = createCompaction()
 
-    // Init checkpoint
+    // Init checkpoint (once per session, not per message)
     if (this.config.checkpoint.enabled && !this.checkpoint) {
-      const taskId = this.session.id
-      this.checkpoint = new CheckpointTracker(taskId, cwd)
+      this.checkpoint = new CheckpointTracker(this.session.id, cwd)
       await this.checkpoint.init(this.config.checkpoint.timeoutMs).catch(console.warn)
     }
 
@@ -266,7 +360,8 @@ export class NexusProvider implements vscode.WebviewViewProvider {
         signal: this.abortController.signal,
       })
     } catch (err) {
-      if ((err as Error).message !== "AbortError") {
+      const errMsg = (err as Error).message
+      if (errMsg !== "AbortError" && !errMsg.includes("aborted")) {
         console.error("[nexus] Agent loop error:", err)
       }
     } finally {
@@ -281,22 +376,51 @@ export class NexusProvider implements vscode.WebviewViewProvider {
 
     const client = createLLMClient(this.config.model)
     const compaction = createCompaction()
-    await compaction.compact(this.session, client)
+    this.postMessage({ type: "agentEvent", event: { type: "compaction_start" } })
+    try {
+      await compaction.compact(this.session, client)
+    } finally {
+      this.postMessage({ type: "agentEvent", event: { type: "compaction_end" } })
+      this.postStateUpdate()
+    }
+  }
+
+  async reindex(): Promise<void> {
+    if (!this.indexer || !this.config) return
+    try {
+      await this.indexer.reindex()
+    } catch (err) {
+      console.warn("[nexus] Reindex error:", err)
+    }
+  }
+
+  async clearIndex(): Promise<void> {
+    if (!this.indexer || !this.config) return
+    this.indexer.close()
+    const cwd = this.getCwd()
+    this.indexer = new CodebaseIndexer(cwd, this.config)
+    this.indexStatusUnsubscribe?.()
+    this.indexStatusUnsubscribe = this.indexer.onStatusChange((status) => {
+      this.sendIndexStatus(status)
+      this.postMessage({ type: "agentEvent", event: { type: "index_update", status } })
+    })
+    await this.indexer.startIndexing().catch(console.warn)
+    this.sendIndexStatus()
     this.postStateUpdate()
   }
 
   addToChat(text: string): void {
-    const msg = `\n\`\`\`\n${text}\n\`\`\``
     this.postMessage({
       type: "agentEvent",
-      event: { type: "text_delta", delta: msg, messageId: "" },
+      event: { type: "text_delta", delta: `\n\`\`\`\n${text}\n\`\`\``, messageId: "" },
     })
-    // Focus the sidebar
     vscode.commands.executeCommand("nexuscode.sidebar.focus")
   }
 
   private postStateUpdate(): void {
     if (!this.session || !this.config) return
+
+    const status = this.indexer?.status() ?? { state: "idle" as const }
 
     const state: WebviewState = {
       messages: this.session.messages,
@@ -307,10 +431,31 @@ export class NexusProvider implements vscode.WebviewViewProvider {
       provider: this.config.model.provider,
       sessionId: this.session.id,
       todo: this.session.getTodo(),
-      indexReady: this.indexer?.status().state === "ready",
+      indexReady: status.state === "ready",
+      indexStatus: status,
     }
 
     this.postMessage({ type: "stateUpdate", state })
+  }
+
+  private sendIndexStatus(status?: IndexStatus): void {
+    const s = status ?? this.indexer?.status() ?? { state: "idle" as const }
+    this.postMessage({ type: "indexStatus", status: s })
+  }
+
+  private async sendSessionList(): Promise<void> {
+    const sessions = await listSessions(this.getCwd()).catch(() => [])
+    this.postMessage({ type: "sessionList", sessions })
+  }
+
+  private async switchSession(sessionId: string): Promise<void> {
+    const cwd = this.getCwd()
+    const loaded = await Session.resume(sessionId, cwd)
+    if (loaded) {
+      this.session = loaded
+      this.checkpoint = undefined
+      this.postStateUpdate()
+    }
   }
 
   private postMessage(msg: ExtensionMessage): void {
@@ -356,6 +501,33 @@ export class NexusProvider implements vscode.WebviewViewProvider {
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`
+  }
+
+  /**
+   * Dispose all resources. Called when extension is deactivated.
+   */
+  dispose(): void {
+    this.abortController?.abort()
+
+    this.indexStatusUnsubscribe?.()
+    this.indexer?.close()
+    this.indexer = undefined
+
+    this.fileWatcher?.dispose()
+    this.fileWatcher = undefined
+
+    this.mcpClient?.disconnectAll().catch(() => {})
+    this.mcpClient = undefined
+
+    this.panel?.dispose()
+    this.panel = undefined
+
+    for (const d of this.disposables) {
+      d.dispose()
+    }
+    this.disposables = []
+
+    this.initialized = false
   }
 }
 

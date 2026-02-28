@@ -7,6 +7,14 @@ import { createOpenRouterClient } from "./openrouter.js"
 import { createOpenAICompatibleClient, createOllamaClient } from "./openai-compatible.js"
 import { createAzureClient } from "./azure.js"
 import { createBedrockClient } from "./bedrock.js"
+import { createGroqClient } from "./groq.js"
+import { createMistralClient } from "./mistral.js"
+import { createXAIClient } from "./xai.js"
+import { createDeepInfraClient } from "./deepinfra.js"
+import { createCerebrasClient } from "./cerebras.js"
+import { createCohereClient } from "./cohere.js"
+import { createTogetherAIClient } from "./togetherai.js"
+import { createPerplexityClient } from "./perplexity.js"
 import { createEmbeddingClient } from "./embeddings.js"
 
 export function createLLMClient(config: ProviderConfig): LLMClient {
@@ -27,6 +35,22 @@ export function createLLMClient(config: ProviderConfig): LLMClient {
       return createAzureClient(config)
     case "bedrock":
       return createBedrockClient(config)
+    case "groq":
+      return createGroqClient(config)
+    case "mistral":
+      return createMistralClient(config)
+    case "xai":
+      return createXAIClient(config)
+    case "deepinfra":
+      return createDeepInfraClient(config)
+    case "cerebras":
+      return createCerebrasClient(config)
+    case "cohere":
+      return createCohereClient(config)
+    case "togetherai":
+      return createTogetherAIClient(config)
+    case "perplexity":
+      return createPerplexityClient(config)
     default:
       throw new Error(`Unknown provider: ${(config as ProviderConfig).provider}`)
   }

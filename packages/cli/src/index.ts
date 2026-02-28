@@ -16,13 +16,8 @@ import { App } from "./tui/App.js"
 import { CliHost } from "./host.js"
 
 const argv = await yargs(hideBin(process.argv))
-  .usage("$0 [mode] [message]")
-  .positional("mode", {
-    describe: "Agent mode: agent | plan | debug | ask",
-    type: "string",
-    choices: ["agent", "plan", "debug", "ask"] as const,
-    default: "agent",
-  })
+  .usage("$0 [mode] [message...]")
+  .version(false)
   .option("model", {
     alias: "m",
     type: "string",
@@ -68,7 +63,7 @@ const argv = await yargs(hideBin(process.argv))
     type: "string",
     describe: "Named profile from nexus.yaml",
   })
-  .option("version", {
+  .option("nexus-version", {
     alias: "v",
     type: "boolean",
     describe: "Show version",
@@ -78,7 +73,7 @@ const argv = await yargs(hideBin(process.argv))
   .argv
 
 // Handle version
-if (argv.version) {
+if (argv["nexus-version"]) {
   console.log("nexus 0.1.0")
   process.exit(0)
 }
@@ -146,8 +141,21 @@ if (isPrintMode && initialMessage) {
     if (event.type === "text_delta" && event.delta) {
       process.stdout.write(event.delta)
     }
+    if (event.type === "reasoning_delta" && event.delta) {
+      // Show reasoning progress as dots to stderr so it doesn't pollute output
+      process.stderr.write(".")
+    }
+    if (event.type === "tool_start") {
+      process.stderr.write(`\n[tool: ${event.tool}]`)
+    }
+    if (event.type === "tool_end") {
+      process.stderr.write(event.success ? " ✓" : " ✗")
+    }
     if (event.type === "error") {
       console.error(`\nError: ${event.error}`)
+    }
+    if (event.type === "done") {
+      process.stderr.write("\n")
     }
   }, argv.auto)
 
@@ -157,18 +165,25 @@ if (isPrintMode && initialMessage) {
 
   process.on("SIGINT", () => abortController.abort())
 
-  await runAgentLoop({
-    session,
-    client,
-    host,
-    config,
-    mode,
-    tools: [...tools, ...dynamic],
-    skills,
-    rulesContent,
-    compaction,
-    signal: abortController.signal,
-  })
+  try {
+    await runAgentLoop({
+      session,
+      client,
+      host,
+      config,
+      mode,
+      tools: [...tools, ...dynamic],
+      skills,
+      rulesContent,
+      compaction,
+      signal: abortController.signal,
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (!msg.includes("AbortError") && !msg.includes("Aborted")) {
+      process.stderr.write(`\n[nexus error] ${msg}\n`)
+    }
+  }
 
   await session.save().catch(() => {})
   process.exit(0)
@@ -266,8 +281,9 @@ async function runMessage(content: string, msgMode: Mode) {
     })
     await session.save().catch(() => {})
   } catch (err) {
-    if ((err as Error).message !== "AbortError") {
-      pushEvent({ type: "error", error: (err as Error).message })
+    const msg = err instanceof Error ? err.message : String(err)
+    if (!msg.includes("AbortError") && !msg.includes("Aborted")) {
+      pushEvent({ type: "error", error: msg })
     }
   }
 }

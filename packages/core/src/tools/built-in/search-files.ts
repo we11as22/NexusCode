@@ -148,12 +148,6 @@ Maximum 2000 entries.`,
           const relPath = path.relative(ctx.cwd, fullPath)
 
           if (ig.ignores(relPath)) continue
-          if (include) {
-            const { minimatch } = await import("minimatch")
-            // For directories: always recurse if recursive mode
-            // For files: check pattern
-          }
-
           const itemStat = await stat(fullPath).catch(() => null)
           if (!itemStat) continue
 
@@ -163,6 +157,11 @@ Maximum 2000 entries.`,
               await walk(fullPath, prefix + "  ", depth + 1)
             }
           } else {
+            // Apply include glob filter for files
+            if (include) {
+              const { minimatch } = await import("minimatch")
+              if (!minimatch(item, include, { matchBase: true })) continue
+            }
             entries.push(`${prefix}${item}`)
           }
         }

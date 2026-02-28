@@ -5,14 +5,38 @@ export type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "m
 /**
  * Core built-in tool groups per mode.
  * These are ALWAYS active if the mode permits — no classifier applied.
- * Classifier only applies to MCP tools and custom skills when count exceeds threshold.
+ * Classifier only applies to MCP/custom tools when count exceeds threshold.
  */
 export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
   agent: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents"],
-  plan:  ["always", "read", "search", "mcp", "skills"],
-  debug: ["always", "read", "write", "execute", "search", "mcp", "skills"],
-  ask:   ["always", "read", "search", "mcp"],
+  plan:  ["always", "read", "write", "search", "skills"],   // write allowed but restricted to docs
+  debug: ["always", "read", "write", "execute", "search", "skills"],
+  ask:   ["always", "read", "search"],
 }
+
+/**
+ * Tools that are explicitly BLOCKED per mode (even if passed as dynamic tools).
+ * Plan mode allows writing .md plan files but blocks code files and commands.
+ * Ask mode is fully read-only.
+ */
+export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
+  agent: [],
+  plan:  ["execute_command", "browser_action"],
+  debug: [],
+  ask:   ["write_to_file", "replace_in_file", "apply_patch", "execute_command", "browser_action", "spawn_agent", "create_rule"],
+}
+
+/**
+ * Source code file extensions that are blocked in plan mode.
+ * Plan mode may only write markdown/text documentation files.
+ */
+export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+  ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp",
+  ".rb", ".php", ".cs", ".swift", ".kt", ".lua",
+  ".sh", ".bash", ".zsh", ".fish",
+  ".sql", ".graphql",
+])
 
 /**
  * Built-in tool names per group.
@@ -31,12 +55,13 @@ export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
 }
 
 /**
- * In plan mode, write is restricted to .md/.txt plan files only.
+ * In plan mode, write_to_file is allowed ONLY for .md plan files in .nexus/plans/.
+ * This regex matches the allowed path patterns.
  */
-export const PLAN_MODE_WRITE_REGEX = /\.(md|txt|yaml|yml|json)$/i
+export const PLAN_MODE_ALLOWED_WRITE_PATTERN = /^\.nexus[\\/]plans[\\/].+\.(md|txt)$/i
 
 /**
- * Read-only tools that can be parallelized.
+ * Read-only tools that can be parallelized safely.
  */
 export const READ_ONLY_TOOLS = new Set([
   "read_file",
@@ -46,6 +71,7 @@ export const READ_ONLY_TOOLS = new Set([
   "codebase_search",
   "web_fetch",
   "web_search",
+  "use_skill",
 ])
 
 /**
@@ -64,11 +90,19 @@ export function getBuiltinToolsForMode(mode: Mode): string[] {
 }
 
 /**
+ * Get the set of tools that are hard-blocked in a mode.
+ * These tools should never be sent to the LLM and should error if called.
+ */
+export function getBlockedToolsForMode(mode: Mode): Set<string> {
+  return new Set(MODE_BLOCKED_TOOLS[mode])
+}
+
+/**
  * Check if a tool is allowed in a given mode.
  */
 export function isToolAllowedInMode(toolName: string, mode: Mode): boolean {
-  const allowed = getBuiltinToolsForMode(mode)
-  return allowed.includes(toolName)
+  if (getBlockedToolsForMode(mode).has(toolName)) return false
+  return getBuiltinToolsForMode(mode).includes(toolName)
 }
 
 /**
@@ -89,8 +123,8 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
  * Mode descriptions for system prompt.
  */
 export const MODE_DESCRIPTIONS: Record<Mode, string> = {
-  agent: "You are in AGENT mode. You have full access to read/write files, run commands, search the codebase, use browser, and interact with MCP servers. Complete tasks autonomously and efficiently.",
-  plan:  "You are in PLAN mode. You can read files and explore the codebase, but you MUST NOT modify source code files. Create implementation plans as markdown files in .nexus/plans/. When your plan is complete, call attempt_completion with the plan summary.",
-  debug: "You are in DEBUG mode. Your goal is to identify and fix bugs. Approach: reproduce → isolate → identify root cause → fix → verify. Add targeted logging if needed. Run tests to verify the fix.",
-  ask:   "You are in ASK mode. Answer questions, explain code, review implementations. You can read files but MUST NOT modify anything. Be precise and concise.",
+  agent: "AGENT mode: full access to read/write files, run commands, search codebase, browser, MCP, and spawn sub-agents. Complete tasks autonomously end-to-end.",
+  plan:  "PLAN mode: read-only access + codebase search. MUST NOT modify source code. Write plan files to .nexus/plans/ directory only. When plan is complete, call attempt_completion.",
+  debug: "DEBUG mode: full access like agent mode, but focused on finding and fixing bugs. Use systematic diagnosis: reproduce → isolate → root cause → minimal fix → verify.",
+  ask:   "ASK mode: read-only. Answer questions, explain code, analyze implementations. MUST NOT modify any files or run commands.",
 }

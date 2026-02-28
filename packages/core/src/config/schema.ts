@@ -1,7 +1,13 @@
 import { z } from "zod"
 
+const PROVIDER_NAMES = [
+  "anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible",
+  "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras",
+  "cohere", "togetherai", "perplexity",
+] as const
+
 const providerSchema = z.object({
-  provider: z.enum(["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock"]),
+  provider: z.enum(PROVIDER_NAMES),
   id: z.string().min(1),
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
@@ -83,6 +89,21 @@ export const NexusConfigSchema = z.object({
     autoApproveCommand: z.boolean().default(false),
     autoApproveReadPatterns: z.array(z.string()).default([]),
     denyPatterns: z.array(z.string()).default(["**/.env", "**/secrets/**", "**/*.key", "**/*.pem"]),
+    rules: z.array(z.object({
+      tool: z.string().optional(),
+      pathPattern: z.string().optional(),
+      commandPattern: z.string().optional(),
+      action: z.enum(["allow", "deny", "ask"]),
+      reason: z.string().optional(),
+    })).default([]),
+  }).default({}),
+
+  retry: z.object({
+    enabled: z.boolean().default(true),
+    maxAttempts: z.number().int().positive().default(3),
+    initialDelayMs: z.number().int().positive().default(1000),
+    maxDelayMs: z.number().int().positive().default(30000),
+    retryOnStatus: z.array(z.number().int()).default([429, 500, 502, 503, 504]),
   }).default({}),
 
   checkpoint: z.object({

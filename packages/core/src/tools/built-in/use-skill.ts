@@ -19,10 +19,7 @@ Use when the task requires specialized knowledge documented in a skill.`,
     const skills = ctx.config.skills
 
     // Try to find by name
-    const skillPaths = [
-      ...skills,
-      ...require("node:path").resolve ? [] : [],
-    ]
+    const skillPaths = [...skills]
 
     // Check each path
     const { readFile } = await import("node:fs/promises")

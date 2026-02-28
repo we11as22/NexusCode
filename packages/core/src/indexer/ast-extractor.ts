@@ -274,22 +274,33 @@ function extractJavaSymbols(content: string, filePath: string): SymbolEntry[] {
   return symbols.length > 0 ? symbols : extractChunks(content, filePath)
 }
 
-const CHUNK_SIZE = 50 // lines per chunk
+const CHUNK_SIZE = 50    // lines per chunk
+const CHUNK_OVERLAP = 15  // lines of overlap between consecutive chunks
 
+/**
+ * Fallback chunker — splits file into overlapping line-range chunks.
+ * Overlap ensures code that spans a chunk boundary is captured by at least one chunk.
+ */
 export function extractChunks(content: string, filePath: string): SymbolEntry[] {
   const lines = content.split("\n")
   const chunks: SymbolEntry[] = []
+  const stride = CHUNK_SIZE - CHUNK_OVERLAP
 
-  for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
-    const chunkLines = lines.slice(i, i + CHUNK_SIZE)
+  for (let i = 0; i < lines.length; i += stride) {
+    const startLine = i + 1
+    const endLine = Math.min(i + CHUNK_SIZE, lines.length)
+    const chunkLines = lines.slice(i, endLine)
+
     chunks.push({
       path: filePath,
-      name: `chunk_${i + 1}`,
+      name: `chunk_${startLine}`,
       kind: "chunk",
-      startLine: i + 1,
-      endLine: Math.min(i + CHUNK_SIZE, lines.length),
+      startLine,
+      endLine,
       content: chunkLines.join("\n"),
     })
+
+    if (endLine >= lines.length) break
   }
 
   return chunks

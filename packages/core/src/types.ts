@@ -237,6 +237,14 @@ export type ProviderName =
   | "openai-compatible"
   | "azure"
   | "bedrock"
+  | "groq"
+  | "mistral"
+  | "xai"
+  | "deepinfra"
+  | "cerebras"
+  | "cohere"
+  | "togetherai"
+  | "perplexity"
 
 export interface EmbeddingConfig {
   provider: "openai" | "openai-compatible" | "ollama" | "local"
@@ -278,7 +286,10 @@ export interface NexusConfig {
     autoApproveCommand: boolean
     autoApproveReadPatterns: string[]
     denyPatterns: string[]
+    /** Fine-grained permission rules evaluated in order, first match wins */
+    rules: PermissionRule[]
   }
+  retry: RetryConfig
   checkpoint: {
     enabled: boolean
     timeoutMs: number
@@ -315,6 +326,34 @@ export interface ModeConfig {
   autoApprove?: PermissionAction[]
   systemPrompt?: string
   customInstructions?: string
+}
+
+// ─── Permission Rules ─────────────────────────────────────────────────────────
+
+export type PermissionRuleAction = "allow" | "deny" | "ask"
+
+export interface PermissionRule {
+  /** Tool name or glob pattern matching tool names */
+  tool?: string
+  /** Path pattern (glob) to match against file args */
+  pathPattern?: string
+  /** Regex to match against command args */
+  commandPattern?: string
+  /** Action to take when rule matches */
+  action: PermissionRuleAction
+  /** Human-readable reason for the rule */
+  reason?: string
+}
+
+// ─── Retry Config ─────────────────────────────────────────────────────────────
+
+export interface RetryConfig {
+  enabled: boolean
+  maxAttempts: number
+  initialDelayMs: number
+  maxDelayMs: number
+  /** HTTP status codes that trigger retry */
+  retryOnStatus: number[]
 }
 
 export interface McpServerConfig {

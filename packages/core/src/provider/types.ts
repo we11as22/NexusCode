@@ -26,7 +26,7 @@ export interface LLMStreamEvent {
 }
 
 export interface LLMMessage {
-  role: "user" | "assistant" | "system"
+  role: "user" | "assistant" | "system" | "tool"
   content: LLMMessageContent
 }
 
@@ -35,8 +35,9 @@ export type LLMMessageContent =
   | Array<
       | { type: "text"; text: string }
       | { type: "image"; data: string; mimeType: string }
-      | { type: "tool_call"; toolCallId: string; toolName: string; args: Record<string, unknown> }
-      | { type: "tool_result"; toolCallId: string; result: string; isError?: boolean }
+      // AI SDK uses "tool-call" (with dash) — this must match exactly
+      | { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> }
+      | { type: "tool-result"; toolCallId: string; toolName: string; result: string; isError?: boolean }
     >
 
 export interface LLMToolDef {
@@ -54,6 +55,7 @@ export interface StreamOptions {
   cacheableSystemBlocks?: number
   maxTokens?: number
   temperature?: number
+  maxRetries?: number
 }
 
 export interface GenerateOptions<T> {

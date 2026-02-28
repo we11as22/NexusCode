@@ -11,10 +11,15 @@ import type {
   ApprovalAction,
   IIndexer,
   PermissionResult,
+  TextPart,
+  ReasoningPart,
+  ToolPart,
+  SessionRole,
+  MessagePart,
 } from "../types.js"
 import type { LLMStreamEvent, LLMMessage, LLMToolDef } from "../provider/types.js"
 import { buildSystemPrompt, type PromptContext } from "./prompts/components/index.js"
-import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions } from "./modes.js"
+import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS } from "./modes.js"
 import { classifyTools, classifySkills } from "./classifier.js"
 import { estimateTokens } from "../context/condense.js"
 import type { SessionCompaction } from "../session/compaction.js"
@@ -51,9 +56,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const activeClient = (config.maxMode.enabled && maxModeClient) ? maxModeClient : client
 
   // 1. Resolve tools: built-ins always active + MCP/custom classified if >threshold
+  //    Hard-blocked tools for this mode are NEVER included (even if sent as dynamic tools)
+  const blockedTools = getBlockedToolsForMode(mode)
   const builtinToolNames = new Set(getBuiltinToolsForMode(mode))
-  const builtinTools = tools.filter(t => builtinToolNames.has(t.name))
-  const dynamicTools = tools.filter(t => !builtinToolNames.has(t.name))
+  const builtinTools = tools.filter(t => builtinToolNames.has(t.name) && !blockedTools.has(t.name))
+  const dynamicTools = tools.filter(t => !builtinToolNames.has(t.name) && !blockedTools.has(t.name))
 
   let resolvedDynamicTools: ToolDef[]
   if (dynamicTools.length > config.tools.classifyThreshold) {
@@ -134,9 +141,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }).id
 
     let currentText = ""
-    const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
-    let lastToolName = ""
-    let finishReason: string | undefined
+  const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
+  let lastToolName = ""
+  let finishReason: string | undefined
+  /** Count consecutive calls to unknown/invalid tools — detect hallucination loops */
+  let consecutiveInvalidToolCalls = 0
+  const MAX_CONSECUTIVE_INVALID = 3
 
     const flushPendingReads = async () => {
       if (pendingReads.length === 0) return
@@ -150,13 +160,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       for (let i = 0; i < pendingReads.length; i++) {
         const tc = pendingReads[i]!
         const result = results[i]!
-        session.updateMessage(newMessageId, {
-          content: currentText,
+        const partId = `part_${tc.toolCallId}`
+
+        // CRITICAL: update the tool part in the session with the result
+        // This is what buildMessagesFromSession reads to include in the next LLM call
+        session.updateToolPart(newMessageId, partId, {
+          status: result.success ? "completed" : "error",
+          output: result.output,
+          timeEnd: Date.now(),
         })
-        // Add tool result to messages for next iteration
-        session.addMessage({
-          role: "tool",
-          content: JSON.stringify({ toolCallId: tc.toolCallId, result: result.output }),
+
+        host.emit({
+          type: "tool_end",
+          tool: tc.toolName,
+          partId,
+          messageId: newMessageId,
+          success: result.success,
         })
       }
 
@@ -193,6 +212,20 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             const { toolCallId, toolName, toolInput } = event
             if (!toolCallId || !toolName || !toolInput) break
 
+            // Track invalid tool calls — if model keeps calling non-existent tools, stop it
+            const isKnownTool = resolvedTools.some(t => t.name === toolName)
+            if (!isKnownTool) {
+              consecutiveInvalidToolCalls++
+              if (consecutiveInvalidToolCalls >= MAX_CONSECUTIVE_INVALID) {
+                throw new Error(
+                  `Model called ${consecutiveInvalidToolCalls} non-existent tools in a row ("${toolName}" etc). ` +
+                  `This likely indicates model confusion. Stopping to prevent infinite loop.`
+                )
+              }
+            } else {
+              consecutiveInvalidToolCalls = 0
+            }
+
             // Create pending tool part
             const partId = `part_${toolCallId}`
             session.addToolPart(newMessageId, {
@@ -206,21 +239,26 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
             host.emit({ type: "tool_start", tool: toolName, partId, messageId: newMessageId })
 
+            // Inform host of available tools list so UI/user knows context
             // Check task_progress parameter
             if (toolInput["task_progress"] && typeof toolInput["task_progress"] === "string") {
               session.updateTodo(toolInput["task_progress"])
             }
 
-            // DOOM LOOP DETECTION
+            // DOOM LOOP DETECTION — halt if same tool called 3x with identical args
             if (await detectDoomLoop(session, toolName, toolInput)) {
               host.emit({ type: "doom_loop_detected", tool: toolName })
+              // In non-interactive mode always abort to prevent infinite loops
+              if (!process.stdin.isTTY) {
+                throw new Error(`Doom loop: tool "${toolName}" called ${DOOM_LOOP_THRESHOLD} times with same arguments. Aborting.`)
+              }
               const doomApproval = await host.showApprovalDialog({
                 type: "doom_loop",
                 tool: toolName,
-                description: `Potential infinite loop detected: tool "${toolName}" called ${DOOM_LOOP_THRESHOLD} times with same arguments.`,
+                description: `Potential infinite loop: "${toolName}" called ${DOOM_LOOP_THRESHOLD} times with same args.`,
               })
               if (!doomApproval.approved) {
-                signal.throwIfAborted()
+                throw new Error(`User aborted doom loop for "${toolName}"`)
               }
             }
 
@@ -330,11 +368,53 @@ async function executeToolCall(
 ): Promise<{ success: boolean; output: string }> {
   const tool = tools.find(t => t.name === toolName)
   if (!tool) {
-    return { success: false, output: `Unknown tool: ${toolName}` }
+    const availableList = tools.map(t => t.name).join(", ")
+    return {
+      success: false,
+      output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use execute_command. To present final results, use attempt_completion.`,
+    }
   }
 
-  // Check deny patterns
-  if (toolInput["path"] && typeof toolInput["path"] === "string") {
+  // Plan mode: block writing source code files (only .md/.txt/docs allowed)
+  if (
+    ctx.config.modes &&
+    ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName) &&
+    toolInput["path"] && typeof toolInput["path"] === "string"
+  ) {
+    const pathExtension = (toolInput["path"] as string).match(/\.[a-zA-Z0-9]+$/)
+    const ext = pathExtension ? pathExtension[0].toLowerCase() : ""
+    // Only enforce in plan/ask modes
+    const autoApproveActionsSet = autoApproveActions
+    if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
+      // Check if we're actually in a restricted mode by seeing if execute_command was blocked
+      const isRestrictedMode = !tools.some(t => t.name === "execute_command")
+      if (isRestrictedMode) {
+        return {
+          success: false,
+          output: `In the current mode, you cannot modify source code files (${ext}). You may only write documentation files (.md, .txt). Use attempt_completion to present your plan as text.`,
+        }
+      }
+    }
+  }
+
+  // --- Evaluate permission rules (fine-grained, first-match wins) ---
+  const ruleResult = evaluatePermissionRules(toolName, toolInput, config)
+  if (ruleResult === "deny") {
+    const ruleReason = findRuleReason(toolName, toolInput, config)
+    return { success: false, output: `Access denied by permission rule${ruleReason ? `: ${ruleReason}` : ""}` }
+  }
+  if (ruleResult === "ask") {
+    const action = buildApprovalAction(toolName, toolInput)
+    action.description = `[Permission Rule] ${action.description}`
+    host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` })
+    const approval = await host.showApprovalDialog(action)
+    if (!approval.approved) {
+      return { success: false, output: `User denied ${toolName}` }
+    }
+  }
+
+  // --- Legacy deny patterns (kept for backwards compat) ---
+  if (ruleResult === null && toolInput["path"] && typeof toolInput["path"] === "string") {
     for (const pattern of config.permissions.denyPatterns) {
       if (matchesGlob(toolInput["path"], pattern)) {
         return { success: false, output: `Access denied: path matches deny pattern "${pattern}"` }
@@ -342,15 +422,17 @@ async function executeToolCall(
     }
   }
 
-  // Check if approval needed
-  const needsApproval = toolNeedsApproval(toolName, toolInput, autoApproveActions, config)
-  if (needsApproval) {
-    const action = buildApprovalAction(toolName, toolInput)
-    host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` })
+  // --- Standard approval flow (only when no explicit rule matched) ---
+  if (ruleResult === null) {
+    const needsApproval = toolNeedsApproval(toolName, toolInput, autoApproveActions, config)
+    if (needsApproval) {
+      const action = buildApprovalAction(toolName, toolInput)
+      host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` })
 
-    const approval = await host.showApprovalDialog(action)
-    if (!approval.approved) {
-      return { success: false, output: `User denied ${toolName}` }
+      const approval = await host.showApprovalDialog(action)
+      if (!approval.approved) {
+        return { success: false, output: `User denied ${toolName}` }
+      }
     }
   }
 
@@ -422,55 +504,112 @@ async function handleCompaction(
   }
 }
 
+/**
+ * Build messages for the LLM from session history.
+ *
+ * Vercel AI SDK expects interleaved format:
+ *   [user] question
+ *   [assistant] { type: "tool-call", toolCallId, toolName, args }
+ *   [tool]      { type: "tool-result", toolCallId, toolName, result }
+ *   [assistant] final text answer
+ *
+ * This function converts our session format (assistant messages that contain
+ * both the text AND tool call parts) into that interleaved format.
+ */
 function buildMessagesFromSession(session: ISession): LLMMessage[] {
   const messages: LLMMessage[] = []
 
   for (const msg of session.messages) {
+    // Compaction summary → inject as conversation_summary block
     if (msg.summary) {
-      // Compaction summaries go as user messages
-      messages.push({ role: "user", content: `<conversation_summary>\n${msg.content}\n</conversation_summary>` })
+      messages.push({
+        role: "user",
+        content: `<conversation_summary>\n${typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)}\n</conversation_summary>`,
+      })
       continue
     }
 
     if (msg.role === "system") continue
 
+    // ── Simple string content ────────────────────────────────────────────────
     if (typeof msg.content === "string") {
-      if (msg.role === "user" || msg.role === "assistant") {
-        messages.push({ role: msg.role, content: msg.content })
+      if (!msg.content.trim()) continue
+      if (msg.role === "user") {
+        messages.push({ role: "user", content: msg.content })
+      } else if (msg.role === "assistant") {
+        messages.push({ role: "assistant", content: msg.content })
+      }
+      // role "tool" with string content = legacy, skip
+      continue
+    }
+
+    // ── Complex content (array of parts) ────────────────────────────────────
+    const parts = msg.content as MessagePart[]
+    if (!Array.isArray(parts) || parts.length === 0) continue
+
+    if (msg.role === "user") {
+      // User messages with parts (mentions, etc.)
+      const textContent = parts
+        .filter((p): p is TextPart => p.type === "text")
+        .map(p => p.text)
+        .join("")
+        .trim()
+      if (textContent) {
+        messages.push({ role: "user", content: textContent })
       }
       continue
     }
 
-    // Complex content with tool calls
-    const parts = msg.content as Array<unknown>
-    const contentParts: LLMMessage["content"] = []
+    if (msg.role !== "assistant") continue
 
-    if (typeof contentParts !== "string") {
-      for (const partUnknown of parts) {
-        const part = partUnknown as Record<string, unknown>
-        if (part["type"] === "text") {
-          (contentParts as Array<{type: string; text: string}>).push({ type: "text", text: part["text"] as string })
-        } else if (part["type"] === "tool") {
-          const tp = part as {type: string; tool: string; id: string; input?: Record<string, unknown>; output?: string; status: string}
-          if (tp.status === "completed" || tp.status === "error") {
-            (contentParts as Array<{type: string; toolCallId: string; toolName?: string; result?: string; isError?: boolean; args?: Record<string, unknown>}>).push({
-              type: "tool_result",
-              toolCallId: tp.id,
-              result: tp.output ?? "",
-              isError: tp.status === "error",
-            })
-          }
-        }
+    // ── Assistant message ────────────────────────────────────────────────────
+    const textParts = parts.filter((p): p is TextPart => p.type === "text")
+    const reasoningParts = parts.filter((p): p is ReasoningPart => p.type === "reasoning")
+    const toolParts = parts.filter((p): p is ToolPart => p.type === "tool")
+
+    const textContent = textParts.map(p => p.text).join("").trim()
+    const toolCallParts = toolParts.filter(tp => tp.input != null)
+    const completedToolParts = toolParts.filter(tp => tp.status === "completed" || tp.status === "error")
+
+    if (toolCallParts.length > 0) {
+      // Assistant message with tool calls
+      const assistantContent: Array<Record<string, unknown>> = []
+
+      if (textContent) {
+        assistantContent.push({ type: "text", text: textContent })
       }
-    }
+      for (const tp of toolCallParts) {
+        assistantContent.push({
+          type: "tool-call",
+          toolCallId: tp.id,
+          toolName: tp.tool,
+          args: tp.input ?? {},
+        })
+      }
+      messages.push({ role: "assistant", content: assistantContent as LLMMessage["content"] })
 
-    if (Array.isArray(contentParts) && contentParts.length > 0) {
-      messages.push({ role: msg.role as "user" | "assistant", content: contentParts as LLMMessage["content"] })
+      // Tool results as a "tool" role message (AI SDK format)
+      if (completedToolParts.length > 0) {
+        const toolResultContent = completedToolParts.map(tp => ({
+          type: "tool-result",
+          toolCallId: tp.id,
+          toolName: tp.tool,
+          result: tp.compacted
+            ? "[output pruned for context efficiency]"
+            : (tp.output ?? ""),
+          isError: tp.status === "error",
+        }))
+        messages.push({ role: "tool" as SessionRole, content: toolResultContent as LLMMessage["content"] })
+      }
+    } else if (textContent) {
+      // Pure text response (no tool calls)
+      messages.push({ role: "assistant", content: textContent })
     }
   }
 
   return messages
 }
+
 
 function toolNeedsApproval(
   toolName: string,
@@ -520,14 +659,111 @@ function buildApprovalAction(toolName: string, toolInput: Record<string, unknown
   }
 }
 
-function matchesGlob(filePath: string, pattern: string): boolean {
-  // Simple glob matching
+/**
+ * Evaluate fine-grained permission rules.
+ * Returns "allow", "deny", "ask", or null (no rule matched → use default logic).
+ */
+function evaluatePermissionRules(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  config: NexusConfig
+): "allow" | "deny" | "ask" | null {
+  const rules = config.permissions.rules ?? []
+  for (const rule of rules) {
+    if (!ruleMatchesTool(rule.tool, toolName)) continue
+    if (rule.pathPattern && !ruleMatchesPath(rule.pathPattern, toolInput)) continue
+    if (rule.commandPattern && !ruleMatchesCommand(rule.commandPattern, toolInput)) continue
+    return rule.action
+  }
+  return null
+}
+
+function findRuleReason(toolName: string, toolInput: Record<string, unknown>, config: NexusConfig): string | undefined {
+  const rules = config.permissions.rules ?? []
+  for (const rule of rules) {
+    if (!ruleMatchesTool(rule.tool, toolName)) continue
+    if (rule.pathPattern && !ruleMatchesPath(rule.pathPattern, toolInput)) continue
+    if (rule.commandPattern && !ruleMatchesCommand(rule.commandPattern, toolInput)) continue
+    return rule.reason
+  }
+  return undefined
+}
+
+function ruleMatchesTool(pattern: string | undefined, toolName: string): boolean {
+  if (!pattern) return true
+  // Support glob patterns and exact matches
+  if (pattern.includes("*") || pattern.includes("?")) {
+    return matchesGlob(toolName, pattern)
+  }
+  return pattern === toolName || toolName.startsWith(pattern + "_")
+}
+
+function ruleMatchesPath(pathPattern: string, toolInput: Record<string, unknown>): boolean {
+  const filePath = toolInput["path"] as string | undefined
+  if (!filePath) return false
+  return matchesGlob(filePath, pathPattern)
+}
+
+function ruleMatchesCommand(commandPattern: string, toolInput: Record<string, unknown>): boolean {
+  const command = String(toolInput["command"] ?? "")
   try {
-    const { minimatch } = require("minimatch")
-    return minimatch(filePath, pattern, { dot: true })
+    return new RegExp(commandPattern).test(command)
+  } catch {
+    return command.includes(commandPattern)
+  }
+}
+
+function matchesGlob(filePath: string, pattern: string): boolean {
+  try {
+    // Use basic glob matching without dynamic require
+    return globMatch(filePath, pattern)
   } catch {
     return filePath.includes(pattern.replace(/\*/g, ""))
   }
+}
+
+/**
+ * Simple glob matching without external deps.
+ * Supports * (single segment), ** (any depth), ? (single char), {a,b} (alternatives).
+ */
+function globMatch(str: string, pattern: string): boolean {
+  // Convert glob to regex
+  let regexStr = ""
+  let i = 0
+  while (i < pattern.length) {
+    const c = pattern[i]!
+    if (c === "*") {
+      if (pattern[i + 1] === "*") {
+        regexStr += ".*"
+        i += 2
+        if (pattern[i] === "/") i++ // skip trailing slash after **
+      } else {
+        regexStr += "[^/]*"
+        i++
+      }
+    } else if (c === "?") {
+      regexStr += "[^/]"
+      i++
+    } else if (c === "{") {
+      const end = pattern.indexOf("}", i)
+      if (end === -1) { regexStr += "\\{"; i++; continue }
+      const alts = pattern.slice(i + 1, end).split(",").map(escapeRegex)
+      regexStr += `(?:${alts.join("|")})`
+      i = end + 1
+    } else {
+      regexStr += escapeRegex(c)
+      i++
+    }
+  }
+  try {
+    return new RegExp(`^${regexStr}$`).test(str)
+  } catch {
+    return str.includes(pattern.replace(/[*?{}]/g, ""))
+  }
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.+^$|()[\]\\]/g, "\\$&")
 }
 
 function isContextOverflowError(message: string): boolean {

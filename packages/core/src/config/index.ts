@@ -4,12 +4,8 @@ import * as os from "node:os"
 import { NexusConfigSchema, type NexusConfigInput } from "./schema.js"
 import type { NexusConfig } from "../types.js"
 
-// YAML parsing — lazy load to avoid adding yaml as a hard dep at module load
-let yaml: typeof import("js-yaml") | null = null
-function getYaml() {
-  if (!yaml) yaml = require("js-yaml") as typeof import("js-yaml")
-  return yaml
-}
+import * as yaml from "js-yaml"
+function getYaml() { return yaml }
 
 const CONFIG_FILE_NAMES = [".nexus/nexus.yaml", ".nexus/nexus.yml", ".nexusrc.yaml", ".nexusrc.yml"]
 const GLOBAL_CONFIG_DIR = path.join(os.homedir(), ".nexus")
@@ -75,35 +71,73 @@ function readConfigFile(filePath: string): NexusConfigInput | null {
   }
 }
 
-function applyEnvOverrides(config: Record<string, unknown>) {
-  // NEXUS_API_KEY or provider-specific keys
-  const nexusKey = process.env["NEXUS_API_KEY"]
-  const anthropicKey = process.env["ANTHROPIC_API_KEY"]
-  const openaiKey = process.env["OPENAI_API_KEY"]
-  const googleKey = process.env["GOOGLE_API_KEY"] ?? process.env["GEMINI_API_KEY"]
+// Map of provider name → env var name for API keys
+const PROVIDER_API_KEY_ENV: Record<string, string[]> = {
+  anthropic:    ["ANTHROPIC_API_KEY"],
+  openai:       ["OPENAI_API_KEY"],
+  google:       ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+  openrouter:   ["OPENROUTER_API_KEY"],
+  azure:        ["AZURE_OPENAI_API_KEY"],
+  bedrock:      ["AWS_ACCESS_KEY_ID"],
+  groq:         ["GROQ_API_KEY"],
+  mistral:      ["MISTRAL_API_KEY"],
+  xai:          ["XAI_API_KEY"],
+  deepinfra:    ["DEEPINFRA_API_KEY"],
+  cerebras:     ["CEREBRAS_API_KEY"],
+  cohere:       ["COHERE_API_KEY"],
+  togetherai:   ["TOGETHER_AI_API_KEY", "TOGETHERAI_API_KEY"],
+  perplexity:   ["PERPLEXITY_API_KEY"],
+}
 
+// Map of provider name → env var for model ID (e.g. OPENROUTER_MODEL)
+const PROVIDER_MODEL_ENV: Record<string, string[]> = {
+  openrouter:   ["OPENROUTER_MODEL"],
+  anthropic:    ["ANTHROPIC_MODEL"],
+  openai:       ["OPENAI_MODEL"],
+  groq:         ["GROQ_MODEL"],
+  mistral:      ["MISTRAL_MODEL"],
+  google:       ["GOOGLE_MODEL", "GEMINI_MODEL"],
+  xai:          ["XAI_MODEL"],
+  cerebras:     ["CEREBRAS_MODEL"],
+}
+
+function applyEnvOverrides(config: Record<string, unknown>) {
   if (!config.model || typeof config.model !== "object") config.model = {}
   const model = config.model as Record<string, unknown>
 
+  // Universal NEXUS_API_KEY
+  const nexusKey = process.env["NEXUS_API_KEY"]
   if (nexusKey && !model["apiKey"]) model["apiKey"] = nexusKey
+
+  // Provider-specific API key from env
   if (!model["apiKey"]) {
-    const provider = model["provider"] as string
-    if (provider === "anthropic" && anthropicKey) model["apiKey"] = anthropicKey
-    if (provider === "openai" && openaiKey) model["apiKey"] = openaiKey
-    if (provider === "google" && googleKey) model["apiKey"] = googleKey
-    if (provider === "openrouter" && process.env["OPENROUTER_API_KEY"]) {
-      model["apiKey"] = process.env["OPENROUTER_API_KEY"]
+    const provider = String(model["provider"] ?? "")
+    const envVars = PROVIDER_API_KEY_ENV[provider] ?? []
+    for (const envVar of envVars) {
+      const v = process.env[envVar]
+      if (v) { model["apiKey"] = v; break }
     }
   }
 
-  // NEXUS_MODEL override
-  if (process.env["NEXUS_MODEL"]) {
-    const [provider, ...rest] = process.env["NEXUS_MODEL"].split("/")
-    if (rest.length > 0) {
-      model["provider"] = provider
-      model["id"] = rest.join("/")
+  // Provider-specific model from env (e.g. OPENROUTER_MODEL=qwen/qwen3-coder-next)
+  if (!model["id"] || model["id"] === "") {
+    const provider = String(model["provider"] ?? "")
+    const envVars = PROVIDER_MODEL_ENV[provider] ?? []
+    for (const envVar of envVars) {
+      const v = process.env[envVar]
+      if (v) { model["id"] = v; break }
+    }
+  }
+
+  // NEXUS_MODEL override: provider/model-name or just model-name
+  const nexusModel = process.env["NEXUS_MODEL"]
+  if (nexusModel) {
+    const slashIdx = nexusModel.indexOf("/")
+    if (slashIdx > 0) {
+      model["provider"] = nexusModel.slice(0, slashIdx)
+      model["id"] = nexusModel.slice(slashIdx + 1)
     } else {
-      model["id"] = provider
+      model["id"] = nexusModel
     }
   }
 
@@ -116,6 +150,19 @@ function applyEnvOverrides(config: Record<string, unknown>) {
   if (process.env["NEXUS_MAX_MODE"] === "1" || process.env["NEXUS_MAX_MODE"] === "true") {
     if (!config.maxMode || typeof config.maxMode !== "object") config.maxMode = {}
     ;(config.maxMode as Record<string, unknown>)["enabled"] = true
+  }
+
+  // Apply same provider key logic for maxMode if it has a provider set
+  if (config.maxMode && typeof config.maxMode === "object") {
+    const mm = config.maxMode as Record<string, unknown>
+    if (!mm["apiKey"] && mm["provider"]) {
+      const provider = String(mm["provider"])
+      const envVars = PROVIDER_API_KEY_ENV[provider] ?? []
+      for (const envVar of envVars) {
+        const v = process.env[envVar]
+        if (v) { mm["apiKey"] = v; break }
+      }
+    }
   }
 }
 

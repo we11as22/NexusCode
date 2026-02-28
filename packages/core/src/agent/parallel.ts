@@ -17,7 +17,12 @@ export interface SubAgentResult {
 
 /**
  * Manager for parallel sub-agents.
- * Each sub-agent runs its own session and agent loop.
+ * Each sub-agent runs its own isolated session and agent loop.
+ *
+ * Concurrency model: each promise added to `this.running` removes itself
+ * via `.finally()`, so after `await Promise.race(...)` at least one slot
+ * is guaranteed to be free (the race resolves in a microtask, `.finally`
+ * queues in the next microtask, `await Promise.resolve()` drains them).
  */
 export class ParallelAgentManager {
   private running = new Map<string, Promise<SubAgentResult>>()
@@ -30,25 +35,25 @@ export class ParallelAgentManager {
     signal: AbortSignal,
     maxParallel: number
   ): Promise<SubAgentResult> {
-    // Limit concurrency
+    // Wait for a concurrency slot
     while (this.running.size >= maxParallel) {
-      await Promise.race([...this.running.values()])
-      // Clean up completed
-      for (const [id, promise] of this.running) {
-        await Promise.race([promise, Promise.resolve(null)]).catch(() => null)
-      }
+      await Promise.race([...this.running.values()]).catch(() => {})
+      // Flush the microtask queue so .finally() cleanup handlers run
+      // before we re-check .size
+      await Promise.resolve()
     }
 
-    const task = this.runSubAgent(description, mode, config, cwd, signal)
-    const sessionId = `subagent_${Date.now()}`
+    const sessionId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+
+    // The task self-removes from the map when it settles (success or error).
+    // This is what makes the while-loop above eventually terminate.
+    const task = this.runSubAgent(description, mode, config, cwd, signal).finally(() => {
+      this.running.delete(sessionId)
+    })
+
     this.running.set(sessionId, task)
 
-    try {
-      const result = await task
-      return result
-    } finally {
-      this.running.delete(sessionId)
-    }
+    return task
   }
 
   private async runSubAgent(
@@ -65,7 +70,6 @@ export class ParallelAgentManager {
     const maxModeClient = config.maxMode.enabled ? createLLMClient(config.maxMode) : undefined
 
     const toolRegistry = new ToolRegistry()
-    const allTools = toolRegistry.getAll()
     const { builtin: tools } = toolRegistry.getForMode(mode)
 
     const rulesContent = await loadRules(cwd, config.rules.files).catch(() => "")
@@ -73,13 +77,18 @@ export class ParallelAgentManager {
     const compaction = createCompaction()
 
     let output = ""
-    const events: string[] = []
 
     const mockHost = {
       cwd,
-      async readFile(p: string) { return (await import("node:fs/promises")).readFile(p, "utf8") },
-      async writeFile(p: string, c: string) { return (await import("node:fs/promises")).writeFile(p, c, "utf8") },
-      async deleteFile(p: string) { return (await import("node:fs/promises")).unlink(p) },
+      async readFile(p: string) {
+        return (await import("node:fs/promises")).readFile(p, "utf8")
+      },
+      async writeFile(p: string, c: string) {
+        return (await import("node:fs/promises")).writeFile(p, c, "utf8")
+      },
+      async deleteFile(p: string) {
+        return (await import("node:fs/promises")).unlink(p)
+      },
       async exists(p: string) {
         return (await import("node:fs/promises")).access(p).then(() => true).catch(() => false)
       },
@@ -121,6 +130,11 @@ export class ParallelAgentManager {
       }
     }
   }
+
+  /** How many agents are currently running */
+  get activeCount(): number {
+    return this.running.size
+  }
 }
 
 const spawnSchema = z.object({
@@ -136,7 +150,7 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
 Use for independent subtasks that don't depend on each other.
 The sub-agent has full capabilities based on the specified mode.
 Returns the sub-agent's final output when done.
-Max ${config.parallelAgents.maxParallel} agents running simultaneously.`,
+Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: spawnSchema,
     modes: ["agent"],
 

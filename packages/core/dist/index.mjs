@@ -1,7 +1,9 @@
 import * as fs from 'fs';
-import * as path from 'path';
+import { mkdirSync } from 'fs';
+import * as path4 from 'path';
 import * as os5 from 'os';
 import { z } from 'zod';
+import * as yaml from 'js-yaml';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { embedMany, streamText, generateObject } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
@@ -9,12 +11,21 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { createAzure } from '@ai-sdk/azure';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
+import { createGroq } from '@ai-sdk/groq';
+import { createMistral } from '@ai-sdk/mistral';
+import { createXai } from '@ai-sdk/xai';
+import { createDeepInfra } from '@ai-sdk/deepinfra';
+import { createCerebras } from '@ai-sdk/cerebras';
+import { createCohere } from '@ai-sdk/cohere';
+import { createTogetherAI } from '@ai-sdk/togetherai';
+import { createPerplexity } from '@ai-sdk/perplexity';
 import * as crypto from 'crypto';
 import * as fs10 from 'fs/promises';
 import { glob } from 'glob';
 import { applyPatch } from 'diff';
 import { execa } from 'execa';
 import stripAnsi from 'strip-ansi';
+import TurndownService from 'turndown';
 import Database from 'better-sqlite3';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import ignore from 'ignore';
@@ -23,14 +34,27 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { simpleGit } from 'simple-git';
 
-var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
-  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
-}) : x)(function(x) {
-  if (typeof require !== "undefined") return require.apply(this, arguments);
-  throw Error('Dynamic require of "' + x + '" is not supported');
-});
+// src/config/index.ts
+var PROVIDER_NAMES = [
+  "anthropic",
+  "openai",
+  "google",
+  "openrouter",
+  "ollama",
+  "openai-compatible",
+  "azure",
+  "bedrock",
+  "groq",
+  "mistral",
+  "xai",
+  "deepinfra",
+  "cerebras",
+  "cohere",
+  "togetherai",
+  "perplexity"
+];
 var providerSchema = z.object({
-  provider: z.enum(["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock"]),
+  provider: z.enum(PROVIDER_NAMES),
   id: z.string().min(1),
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
@@ -107,7 +131,21 @@ var NexusConfigSchema = z.object({
     autoApproveWrite: z.boolean().default(false),
     autoApproveCommand: z.boolean().default(false),
     autoApproveReadPatterns: z.array(z.string()).default([]),
-    denyPatterns: z.array(z.string()).default(["**/.env", "**/secrets/**", "**/*.key", "**/*.pem"])
+    denyPatterns: z.array(z.string()).default(["**/.env", "**/secrets/**", "**/*.key", "**/*.pem"]),
+    rules: z.array(z.object({
+      tool: z.string().optional(),
+      pathPattern: z.string().optional(),
+      commandPattern: z.string().optional(),
+      action: z.enum(["allow", "deny", "ask"]),
+      reason: z.string().optional()
+    })).default([])
+  }).default({}),
+  retry: z.object({
+    enabled: z.boolean().default(true),
+    maxAttempts: z.number().int().positive().default(3),
+    initialDelayMs: z.number().int().positive().default(1e3),
+    maxDelayMs: z.number().int().positive().default(3e4),
+    retryOnStatus: z.array(z.number().int()).default([429, 500, 502, 503, 504])
   }).default({}),
   checkpoint: z.object({
     enabled: z.boolean().default(true),
@@ -140,16 +178,12 @@ var NexusConfigSchema = z.object({
   }).default({}),
   profiles: z.record(providerSchema.partial()).default({})
 });
-
-// src/config/index.ts
-var yaml = null;
 function getYaml() {
-  if (!yaml) yaml = __require("js-yaml");
   return yaml;
 }
 var CONFIG_FILE_NAMES = [".nexus/nexus.yaml", ".nexus/nexus.yml", ".nexusrc.yaml", ".nexusrc.yml"];
-var GLOBAL_CONFIG_DIR = path.join(os5.homedir(), ".nexus");
-var GLOBAL_CONFIG_PATH = path.join(GLOBAL_CONFIG_DIR, "nexus.yaml");
+var GLOBAL_CONFIG_DIR = path4.join(os5.homedir(), ".nexus");
+var GLOBAL_CONFIG_PATH = path4.join(GLOBAL_CONFIG_DIR, "nexus.yaml");
 async function loadConfig(cwd) {
   const startDir = cwd ?? process.cwd();
   const globalRaw = readConfigFile(GLOBAL_CONFIG_PATH);
@@ -158,7 +192,7 @@ async function loadConfig(cwd) {
   let maxUp = 20;
   while (maxUp-- > 0) {
     for (const name of CONFIG_FILE_NAMES) {
-      const candidate = path.join(dir, name);
+      const candidate = path4.join(dir, name);
       const raw = readConfigFile(candidate);
       if (raw) {
         projectRaw = raw;
@@ -166,7 +200,7 @@ async function loadConfig(cwd) {
       }
     }
     if (projectRaw) break;
-    const parent = path.dirname(dir);
+    const parent = path4.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
@@ -191,30 +225,67 @@ function readConfigFile(filePath) {
     return null;
   }
 }
+var PROVIDER_API_KEY_ENV = {
+  anthropic: ["ANTHROPIC_API_KEY"],
+  openai: ["OPENAI_API_KEY"],
+  google: ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"],
+  azure: ["AZURE_OPENAI_API_KEY"],
+  bedrock: ["AWS_ACCESS_KEY_ID"],
+  groq: ["GROQ_API_KEY"],
+  mistral: ["MISTRAL_API_KEY"],
+  xai: ["XAI_API_KEY"],
+  deepinfra: ["DEEPINFRA_API_KEY"],
+  cerebras: ["CEREBRAS_API_KEY"],
+  cohere: ["COHERE_API_KEY"],
+  togetherai: ["TOGETHER_AI_API_KEY", "TOGETHERAI_API_KEY"],
+  perplexity: ["PERPLEXITY_API_KEY"]
+};
+var PROVIDER_MODEL_ENV = {
+  openrouter: ["OPENROUTER_MODEL"],
+  anthropic: ["ANTHROPIC_MODEL"],
+  openai: ["OPENAI_MODEL"],
+  groq: ["GROQ_MODEL"],
+  mistral: ["MISTRAL_MODEL"],
+  google: ["GOOGLE_MODEL", "GEMINI_MODEL"],
+  xai: ["XAI_MODEL"],
+  cerebras: ["CEREBRAS_MODEL"]
+};
 function applyEnvOverrides(config) {
-  const nexusKey = process.env["NEXUS_API_KEY"];
-  const anthropicKey = process.env["ANTHROPIC_API_KEY"];
-  const openaiKey = process.env["OPENAI_API_KEY"];
-  const googleKey = process.env["GOOGLE_API_KEY"] ?? process.env["GEMINI_API_KEY"];
   if (!config.model || typeof config.model !== "object") config.model = {};
   const model = config.model;
+  const nexusKey = process.env["NEXUS_API_KEY"];
   if (nexusKey && !model["apiKey"]) model["apiKey"] = nexusKey;
   if (!model["apiKey"]) {
-    const provider = model["provider"];
-    if (provider === "anthropic" && anthropicKey) model["apiKey"] = anthropicKey;
-    if (provider === "openai" && openaiKey) model["apiKey"] = openaiKey;
-    if (provider === "google" && googleKey) model["apiKey"] = googleKey;
-    if (provider === "openrouter" && process.env["OPENROUTER_API_KEY"]) {
-      model["apiKey"] = process.env["OPENROUTER_API_KEY"];
+    const provider = String(model["provider"] ?? "");
+    const envVars = PROVIDER_API_KEY_ENV[provider] ?? [];
+    for (const envVar of envVars) {
+      const v = process.env[envVar];
+      if (v) {
+        model["apiKey"] = v;
+        break;
+      }
     }
   }
-  if (process.env["NEXUS_MODEL"]) {
-    const [provider, ...rest] = process.env["NEXUS_MODEL"].split("/");
-    if (rest.length > 0) {
-      model["provider"] = provider;
-      model["id"] = rest.join("/");
+  if (!model["id"] || model["id"] === "") {
+    const provider = String(model["provider"] ?? "");
+    const envVars = PROVIDER_MODEL_ENV[provider] ?? [];
+    for (const envVar of envVars) {
+      const v = process.env[envVar];
+      if (v) {
+        model["id"] = v;
+        break;
+      }
+    }
+  }
+  const nexusModel = process.env["NEXUS_MODEL"];
+  if (nexusModel) {
+    const slashIdx = nexusModel.indexOf("/");
+    if (slashIdx > 0) {
+      model["provider"] = nexusModel.slice(0, slashIdx);
+      model["id"] = nexusModel.slice(slashIdx + 1);
     } else {
-      model["id"] = provider;
+      model["id"] = nexusModel;
     }
   }
   if (process.env["NEXUS_BASE_URL"]) {
@@ -223,6 +294,20 @@ function applyEnvOverrides(config) {
   if (process.env["NEXUS_MAX_MODE"] === "1" || process.env["NEXUS_MAX_MODE"] === "true") {
     if (!config.maxMode || typeof config.maxMode !== "object") config.maxMode = {};
     config.maxMode["enabled"] = true;
+  }
+  if (config.maxMode && typeof config.maxMode === "object") {
+    const mm = config.maxMode;
+    if (!mm["apiKey"] && mm["provider"]) {
+      const provider = String(mm["provider"]);
+      const envVars = PROVIDER_API_KEY_ENV[provider] ?? [];
+      for (const envVar of envVars) {
+        const v = process.env[envVar];
+        if (v) {
+          mm["apiKey"] = v;
+          break;
+        }
+      }
+    }
   }
 }
 function deepMerge(base, override) {
@@ -237,9 +322,9 @@ function deepMerge(base, override) {
   return result;
 }
 function writeConfig(config, cwd) {
-  const dir = path.join(cwd ?? process.cwd(), ".nexus");
+  const dir = path4.join(cwd ?? process.cwd(), ".nexus");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const filePath = path.join(dir, "nexus.yaml");
+  const filePath = path4.join(dir, "nexus.yaml");
   const content = getYaml().dump(config, { indent: 2, lineWidth: 120 });
   fs.writeFileSync(filePath, content, "utf8");
 }
@@ -250,11 +335,11 @@ function ensureGlobalConfigDir() {
   if (!fs.existsSync(GLOBAL_CONFIG_DIR)) {
     fs.mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
   }
-  const skillsDir = path.join(GLOBAL_CONFIG_DIR, "skills");
+  const skillsDir = path4.join(GLOBAL_CONFIG_DIR, "skills");
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
   }
-  const rulesDir = path.join(GLOBAL_CONFIG_DIR, "rules");
+  const rulesDir = path4.join(GLOBAL_CONFIG_DIR, "rules");
   if (!fs.existsSync(rulesDir)) {
     fs.mkdirSync(rulesDir, { recursive: true });
   }
@@ -343,6 +428,10 @@ function extractJsonString(text) {
 }
 
 // src/provider/base.ts
+var DEFAULT_MAX_RETRIES = 3;
+var DEFAULT_INITIAL_DELAY = 1e3;
+var DEFAULT_MAX_DELAY = 3e4;
+var RETRYABLE_STATUS = /* @__PURE__ */ new Set([429, 500, 502, 503, 504]);
 var BaseLLMClient = class {
   constructor(model, providerName, modelId) {
     this.model = model;
@@ -366,10 +455,35 @@ var BaseLLMClient = class {
       ])
     ) : void 0;
     const messages = buildAISDKMessages(opts.messages);
-    let systemPrompt = opts.systemPrompt;
+    let attempt = 0;
+    const maxAttempts = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
+    const initialDelay = DEFAULT_INITIAL_DELAY;
+    const maxDelay = DEFAULT_MAX_DELAY;
+    while (true) {
+      attempt++;
+      try {
+        yield* this._streamOnce(opts, messages, tools);
+        return;
+      } catch (err) {
+        if (opts.signal?.aborted) throw err;
+        const status = getErrorStatus(err);
+        const isRetryable = status ? RETRYABLE_STATUS.has(status) : isNetworkError(err);
+        if (!isRetryable || attempt >= maxAttempts) {
+          throw err;
+        }
+        const delay = Math.min(
+          initialDelay * Math.pow(2, attempt - 1) + Math.random() * 500,
+          maxDelay
+        );
+        yield { type: "error", error: new Error(`Retrying after error (attempt ${attempt}/${maxAttempts}): ${String(err)}`) };
+        await sleep(delay, opts.signal);
+      }
+    }
+  }
+  async *_streamOnce(opts, messages, tools) {
     const result = streamText({
       model: this.model,
-      system: systemPrompt,
+      system: opts.systemPrompt,
       messages,
       tools,
       maxTokens: opts.maxTokens ?? 8192,
@@ -378,6 +492,7 @@ var BaseLLMClient = class {
       maxSteps: 1
       // We handle multi-step manually in agentLoop
     });
+    let reasoningText = "";
     for await (const part of result.fullStream) {
       if (opts.signal?.aborted) break;
       switch (part.type) {
@@ -385,6 +500,7 @@ var BaseLLMClient = class {
           yield { type: "text_delta", delta: part.textDelta };
           break;
         case "reasoning":
+          reasoningText += part["textDelta"] ?? "";
           yield { type: "reasoning_delta", delta: part["textDelta"] ?? "" };
           break;
         case "tool-call":
@@ -405,12 +521,13 @@ var BaseLLMClient = class {
           break;
         case "finish": {
           const usage = result.usage;
+          const usageData = await usage.catch(() => null);
           yield {
             type: "finish",
             finishReason: part.finishReason,
             usage: {
-              inputTokens: (await usage)?.promptTokens ?? 0,
-              outputTokens: (await usage)?.completionTokens ?? 0
+              inputTokens: usageData?.promptTokens ?? 0,
+              outputTokens: usageData?.completionTokens ?? 0
             }
           };
           break;
@@ -430,7 +547,25 @@ function buildAISDKMessages(messages) {
   for (const msg of messages) {
     if (msg.role === "system") continue;
     if (typeof msg.content === "string") {
+      if (msg.role === "tool") continue;
       result.push({ role: msg.role, content: msg.content });
+      continue;
+    }
+    if (!Array.isArray(msg.content) || msg.content.length === 0) continue;
+    if (msg.role === "tool") {
+      const toolResultParts = msg.content.filter((p) => p.type === "tool-result").map((p) => {
+        const tr = p;
+        return {
+          type: "tool-result",
+          toolCallId: tr.toolCallId,
+          toolName: tr.toolName ?? "",
+          result: [{ type: "text", text: tr.result }],
+          isError: tr.isError ?? false
+        };
+      });
+      if (toolResultParts.length > 0) {
+        result.push({ role: "tool", content: toolResultParts });
+      }
       continue;
     }
     const parts = [];
@@ -442,7 +577,7 @@ function buildAISDKMessages(messages) {
         case "image":
           parts.push({ type: "image", image: part.data, mimeType: part.mimeType });
           break;
-        case "tool_call":
+        case "tool-call":
           parts.push({
             type: "tool-call",
             toolCallId: part.toolCallId,
@@ -450,20 +585,45 @@ function buildAISDKMessages(messages) {
             args: part.args
           });
           break;
-        case "tool_result":
+        case "tool-result":
           parts.push({
             type: "tool-result",
             toolCallId: part.toolCallId,
-            toolName: "",
+            toolName: part.toolName ?? "",
             result: [{ type: "text", text: part.result }],
-            isError: part.isError
+            isError: part.isError ?? false
           });
           break;
       }
     }
-    result.push({ role: msg.role, content: parts });
+    if (parts.length > 0) {
+      result.push({ role: msg.role, content: parts });
+    }
   }
   return result;
+}
+function getErrorStatus(err) {
+  if (err && typeof err === "object") {
+    const status = err["statusCode"] ?? err["status"];
+    if (typeof status === "number") return status;
+  }
+  const msg = String(err);
+  const m = msg.match(/(?:status|code)[^\d]*(\d{3})/i);
+  if (m) return parseInt(m[1]);
+  return null;
+}
+function isNetworkError(err) {
+  const msg = String(err).toLowerCase();
+  return msg.includes("econnreset") || msg.includes("econnrefused") || msg.includes("etimedout") || msg.includes("network") || msg.includes("socket") || msg.includes("fetch failed");
+}
+function sleep(ms, signal) {
+  return new Promise((resolve9, reject) => {
+    const timer = setTimeout(resolve9, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new Error("Aborted"));
+    });
+  });
 }
 
 // src/provider/anthropic.ts
@@ -576,6 +736,46 @@ function createBedrockClient(config) {
   const model = bedrock(config.id);
   return new BaseLLMClient(model, "bedrock", config.id);
 }
+function createGroqClient(config) {
+  const apiKey = config.apiKey ?? process.env["GROQ_API_KEY"] ?? "";
+  const groq = createGroq({ apiKey });
+  return new BaseLLMClient(groq(config.id), "groq", config.id);
+}
+function createMistralClient(config) {
+  const apiKey = config.apiKey ?? process.env["MISTRAL_API_KEY"] ?? "";
+  const mistral = createMistral({ apiKey, baseURL: config.baseUrl });
+  return new BaseLLMClient(mistral(config.id), "mistral", config.id);
+}
+function createXAIClient(config) {
+  const apiKey = config.apiKey ?? process.env["XAI_API_KEY"] ?? "";
+  const xai = createXai({ apiKey });
+  return new BaseLLMClient(xai(config.id), "xai", config.id);
+}
+function createDeepInfraClient(config) {
+  const apiKey = config.apiKey ?? process.env["DEEPINFRA_API_KEY"] ?? "";
+  const deepinfra = createDeepInfra({ apiKey });
+  return new BaseLLMClient(deepinfra(config.id), "deepinfra", config.id);
+}
+function createCerebrasClient(config) {
+  const apiKey = config.apiKey ?? process.env["CEREBRAS_API_KEY"] ?? "";
+  const cerebras = createCerebras({ apiKey });
+  return new BaseLLMClient(cerebras(config.id), "cerebras", config.id);
+}
+function createCohereClient(config) {
+  const apiKey = config.apiKey ?? process.env["COHERE_API_KEY"] ?? "";
+  const cohere = createCohere({ apiKey });
+  return new BaseLLMClient(cohere(config.id), "cohere", config.id);
+}
+function createTogetherAIClient(config) {
+  const apiKey = config.apiKey ?? process.env["TOGETHER_AI_API_KEY"] ?? process.env["TOGETHERAI_API_KEY"] ?? "";
+  const together = createTogetherAI({ apiKey });
+  return new BaseLLMClient(together(config.id), "togetherai", config.id);
+}
+function createPerplexityClient(config) {
+  const apiKey = config.apiKey ?? process.env["PERPLEXITY_API_KEY"] ?? "";
+  const perplexity = createPerplexity({ apiKey });
+  return new BaseLLMClient(perplexity(config.id), "perplexity", config.id);
+}
 function createEmbeddingClient(config) {
   switch (config.provider) {
     case "openai":
@@ -680,18 +880,34 @@ function createLLMClient(config) {
       return createAzureClient(config);
     case "bedrock":
       return createBedrockClient(config);
+    case "groq":
+      return createGroqClient(config);
+    case "mistral":
+      return createMistralClient(config);
+    case "xai":
+      return createXAIClient(config);
+    case "deepinfra":
+      return createDeepInfraClient(config);
+    case "cerebras":
+      return createCerebrasClient(config);
+    case "cohere":
+      return createCohereClient(config);
+    case "togetherai":
+      return createTogetherAIClient(config);
+    case "perplexity":
+      return createPerplexityClient(config);
     default:
       throw new Error(`Unknown provider: ${config.provider}`);
   }
 }
 function getSessionsDir(cwd) {
   const hash = crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 12);
-  return path.join(os5.homedir(), ".nexus", "sessions", hash);
+  return path4.join(os5.homedir(), ".nexus", "sessions", hash);
 }
 async function saveSession(session) {
   const dir = getSessionsDir(session.cwd);
   await fs10.mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, `${session.id}.jsonl`);
+  const filePath = path4.join(dir, `${session.id}.jsonl`);
   const lines = session.messages.map((m) => JSON.stringify(m)).join("\n");
   const meta = JSON.stringify({ id: session.id, cwd: session.cwd, ts: session.ts, title: session.title });
   await fs10.writeFile(filePath, `${meta}
@@ -700,7 +916,7 @@ ${lines}
 }
 async function loadSession(sessionId, cwd) {
   const dir = getSessionsDir(cwd);
-  const filePath = path.join(dir, `${sessionId}.jsonl`);
+  const filePath = path4.join(dir, `${sessionId}.jsonl`);
   if (!fs.existsSync(filePath)) return null;
   const content = await fs10.readFile(filePath, "utf8");
   const lines = content.split("\n").filter(Boolean);
@@ -717,7 +933,7 @@ async function listSessions(cwd) {
   for (const file of files) {
     if (!file.endsWith(".jsonl")) continue;
     try {
-      const content = await fs10.readFile(path.join(dir, file), "utf8");
+      const content = await fs10.readFile(path4.join(dir, file), "utf8");
       const lines = content.split("\n").filter(Boolean);
       if (lines.length === 0) continue;
       const meta = JSON.parse(lines[0]);
@@ -1008,140 +1224,252 @@ function findMessageIdForPart(session, partId) {
   return void 0;
 }
 function buildRoleBlock(ctx) {
-  const parts = [];
-  parts.push(`You are Nexus, a highly skilled software engineering assistant with deep knowledge of programming languages, frameworks, architecture patterns, and best practices.`);
-  parts.push(``);
-  const modeRoles = {
-    agent: `You are operating in **AGENT mode**. You have full access to read/write files, run shell commands, search the codebase, use browser automation, and interact with MCP tool servers. Your goal is to autonomously complete software engineering tasks efficiently and correctly.`,
-    plan: `You are operating in **PLAN mode**. You can read files and explore the codebase, but you MUST NOT modify source code files directly. Create detailed implementation plans as markdown files. Focus on research, analysis, and comprehensive planning.`,
-    debug: `You are operating in **DEBUG mode**. Your goal is to identify and fix bugs systematically. Approach: reproduce \u2192 isolate \u2192 identify root cause \u2192 minimal targeted fix \u2192 verify. Add diagnostic logging only when needed.`,
-    ask: `You are operating in **ASK mode**. Answer questions, explain code, analyze implementations. You can read files but MUST NOT modify anything. Be precise, accurate, and helpful.`
-  };
-  parts.push(modeRoles[ctx.mode]);
-  parts.push(``);
+  const lines = [];
+  lines.push(IDENTITY_BLOCK);
+  lines.push("");
+  lines.push(getModeBlock(ctx.mode));
+  lines.push("");
   if (ctx.maxMode) {
-    parts.push(`## \u26A1 MAX MODE ACTIVE`);
-    parts.push(`You are running in MAX MODE with extended capabilities. Take extra steps to ensure quality:`);
-    parts.push(`- Read all relevant files before starting any changes`);
-    parts.push(`- Understand the full context, dependencies, and affected areas`);
-    parts.push(`- After making changes, review them for correctness and potential regressions`);
-    parts.push(`- Consider security implications and edge cases`);
-    parts.push(`- Use parallel tool calls to explore the codebase efficiently`);
-    parts.push(``);
+    lines.push(MAX_MODE_BLOCK);
+    lines.push("");
   }
-  parts.push(`## Core Principles`);
-  parts.push(`- **Accuracy first**: Prioritize technical correctness over speed. Investigate before concluding.`);
-  parts.push(`- **Minimal impact**: Make targeted changes. Prefer replace_in_file over write_to_file for existing files.`);
-  parts.push(`- **Verify your work**: After changes, check for compilation errors, test failures, and regressions.`);
-  parts.push(`- **No assumptions**: Read the actual code before modifying it. Never guess at file contents.`);
-  parts.push(`- **Professional tone**: Be direct, objective, and technically precise. No unnecessary praise.`);
-  parts.push(``);
-  parts.push(EDITING_FILES_GUIDE);
-  parts.push(``);
-  parts.push(TOOL_USE_GUIDE);
-  parts.push(``);
-  parts.push(TASK_PROGRESS_GUIDE);
-  return parts.join("\n");
+  lines.push(CORE_PRINCIPLES);
+  lines.push("");
+  lines.push(EDITING_FILES_GUIDE);
+  lines.push("");
+  lines.push(TOOL_USE_GUIDE);
+  lines.push("");
+  lines.push(GIT_HYGIENE);
+  lines.push("");
+  lines.push(TASK_PROGRESS_GUIDE);
+  lines.push("");
+  lines.push(RESPONSE_STYLE);
+  lines.push("");
+  lines.push(CODE_REFERENCES_FORMAT);
+  lines.push("");
+  lines.push(SECURITY_GUIDELINES);
+  return lines.join("\n");
 }
+var IDENTITY_BLOCK = `You are Nexus, an expert software engineering assistant with deep knowledge of programming languages, frameworks, architecture patterns, and best practices.
+
+You are an interactive tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user efficiently and accurately.
+
+Your goal is to accomplish the user's task \u2014 not to engage in back-and-forth conversation. Work autonomously, break tasks into steps, and execute them methodically.`;
+function getModeBlock(mode) {
+  const blocks = {
+    agent: `## AGENT Mode \u2014 Full Capabilities
+
+You have complete access: read/write files, run shell commands, search the codebase, browser automation, and MCP tool servers. Autonomously complete software engineering tasks end-to-end.
+
+- Read all relevant context before making changes
+- Prefer \`replace_in_file\` over \`write_to_file\` for existing files
+- Verify your changes compile/run and don't break existing functionality
+- Use parallel tool calls for independent operations
+- Call \`attempt_completion\` when the task is fully done`,
+    plan: `## PLAN Mode \u2014 Research & Planning
+
+You can READ files and explore the codebase, but MUST NOT modify source code files. Create detailed plans as markdown files in \`.nexus/plans/\`.
+
+- Thoroughly analyze the codebase before planning
+- Use parallel reads to explore efficiently
+- Create a concrete, step-by-step implementation plan
+- Include file paths, function signatures, and architecture decisions
+- Identify risks, dependencies, and edge cases
+- When plan is complete, call \`attempt_completion\` with a summary`,
+    debug: `## DEBUG Mode \u2014 Systematic Problem Diagnosis
+
+Diagnose and fix bugs using a structured approach:
+
+1. **Reproduce** \u2014 Understand exactly what's failing and when
+2. **Isolate** \u2014 Narrow down the failing component (add targeted logging if needed)
+3. **Root cause** \u2014 Identify the actual underlying cause (don't guess)
+4. **Minimal fix** \u2014 Make the smallest correct change to fix the issue
+5. **Verify** \u2014 Confirm the fix works and nothing else broke
+
+- Reflect on 3-5 possible causes before committing to one
+- Read the code before diagnosing; never assume
+- Prefer minimal targeted fixes over broad refactors`,
+    ask: `## ASK Mode \u2014 Questions & Explanations
+
+Answer questions, explain code, and analyze implementations. You CAN read files but MUST NOT modify anything.
+
+- Give thorough, accurate, technically precise answers
+- Use Mermaid diagrams when they clarify architecture
+- If implementation is needed, suggest switching to agent mode
+- Support your answers with actual code evidence (read files to verify)`
+  };
+  return blocks[mode];
+}
+var MAX_MODE_BLOCK = `## \u26A1 MAX MODE ACTIVE
+
+You are running in MAX MODE with extended depth and thoroughness. Apply these additional steps:
+
+- Read ALL relevant files (not just the obvious ones) before starting
+- Map all dependencies, callers, and affected modules
+- After changes: review for correctness, regressions, security, edge cases
+- Run tests if available; check for compilation errors explicitly
+- Use parallel tool calls aggressively to explore faster
+- Document non-obvious decisions in comments`;
+var CORE_PRINCIPLES = `## Core Principles
+
+- **Accuracy first** \u2014 Prioritize correctness over speed. Investigate before concluding.
+- **Minimal impact** \u2014 Make targeted changes. Prefer \`replace_in_file\` over full rewrites.
+- **No assumptions** \u2014 Read actual code before modifying it. Never guess file contents.
+- **Verify your work** \u2014 After changes, check for errors, test failures, and regressions.
+- **Professional tone** \u2014 Be direct, objective, technically precise. No unnecessary praise.
+- **Complete tasks** \u2014 Never leave tasks half-done. If blocked, explain why clearly.`;
 var EDITING_FILES_GUIDE = `## Editing Files
 
-You have two tools for modifying files: **write_to_file** and **replace_in_file**.
+Two tools to modify files: **write_to_file** and **replace_in_file**.
 
 ### replace_in_file (PREFERRED for existing files)
-- Make targeted edits to specific parts of a file without rewriting it entirely
-- Use for: small changes, bug fixes, adding/modifying functions, updating imports
-- Requires exact matching of the SEARCH block \u2014 read the file first if unsure
-- You can stack multiple SEARCH/REPLACE blocks in a single call for related changes
-- After editing, the tool returns the final file state \u2014 use it as reference for subsequent edits
+- Make targeted edits without rewriting the entire file
+- Use for: bug fixes, adding/modifying functions, updating imports, small changes
+- SEARCH block must match exactly \u2014 read the file first if unsure
+- Stack multiple SEARCH/REPLACE blocks in one call for related changes
+- Tool returns final file state \u2014 use it as reference for subsequent edits
 
 ### write_to_file (for new files or major rewrites)
-- Creates new files or completely replaces file content
-- Use for: new files, scaffolding, complete restructuring, files where >50% changes
-- Must provide the complete final content \u2014 no partial writes
+- Creates new files or completely replaces content
+- Use when: new files, complete restructuring, files where >50% changes
+- Must provide complete final content \u2014 no partial writes
 
 ### Auto-formatting
-The editor may auto-format files after writing (indentation, quotes, semicolons, imports).
-The tool response includes the post-format content \u2014 always use that as the reference for subsequent edits.`;
+Editor may auto-format files after writing. Tool response includes post-format content \u2014 always use that as reference for next edits.`;
 var TOOL_USE_GUIDE = `## Tool Usage
 
-- **Parallel execution**: When multiple tool calls are independent (e.g., reading multiple files), call them all in parallel in a single response. This significantly improves efficiency.
-- **Sequential when dependent**: If tool B depends on tool A's output, run them sequentially.
-- **Prefer specialized tools**: Use read_file instead of execute_command with cat. Use search_files instead of grep. Reserve execute_command for actual shell operations.
-- **Code references**: When mentioning code locations, include the path: \`src/foo.ts:42\` for easy navigation.`;
-var TASK_PROGRESS_GUIDE = `## Task Progress Tracking
+- **Parallel reads** \u2014 When fetching multiple independent files/results, call all tools in parallel in a single response. This is significantly faster.
+- **Sequential when dependent** \u2014 If tool B needs tool A's output, run them in order.
+- **Specialized tools** \u2014 Use \`read_file\` instead of \`execute_command\` with cat. Use \`search_files\` instead of execute+grep. Reserve \`execute_command\` for actual shell operations.
+- **Codebase search** \u2014 Use \`codebase_search\` for semantic queries, \`search_files\` for exact pattern matching, \`list_code_definitions\` for symbol discovery.
+- **Don't repeat** \u2014 If a tool already returned a result, don't call it again with the same args.`;
+var GIT_HYGIENE = `## Git & Workspace
 
-Use the **update_todo_list** tool frequently to track your progress. This keeps the user informed and helps you stay on task.
+- Never revert changes you didn't make unless explicitly asked
+- If there are unrelated changes in files you touch, work around them \u2014 don't revert them
+- Never use destructive commands (\`git reset --hard\`, \`git checkout --\`) unless explicitly requested
+- Do not amend commits unless explicitly asked
+- When creating commits: use conventional commit format (\`feat:\`, \`fix:\`, \`refactor:\`, etc.)`;
+var TASK_PROGRESS_GUIDE = `## Task Progress
 
-- When starting a complex task, create a checklist: \`- [ ] Step 1\`, \`- [ ] Step 2\`, etc.
-- Mark items as completed immediately: \`- [x] Step 1\`
-- Update the list as scope changes or new steps emerge
+Use \`update_todo_list\` frequently to track progress on complex tasks:
+
+- Start complex tasks with a checklist: \`- [ ] Step 1\`, \`- [ ] Step 2\`
+- Mark complete immediately: \`- [x] Step 1\`
+- Update as scope changes or new steps emerge
 - For simple 1-2 step tasks, a todo list is optional
-- Never announce todo updates \u2014 just call the tool silently`;
+- Call \`update_todo_list\` silently \u2014 don't announce it`;
+var RESPONSE_STYLE = `## Response Style
+
+- **Concise**: Be direct and to the point. Match verbosity to task complexity.
+- **No preamble**: Don't start with "Great!", "Sure!", "Certainly!". Go straight to the answer/action.
+- **No postamble**: Don't end with "Let me know if you need anything!", "Feel free to ask!", etc.
+- **No unnecessary summaries**: After completing a task, confirm briefly. Don't re-explain what you did.
+- **No emojis** unless the user explicitly asks for them.
+- For substantial changes: lead with a quick explanation of what changed and why.
+- For code changes: mention relevant file paths with line numbers when helpful.
+- Never ask permission questions ("Should I proceed?", "Do you want me to run tests?") \u2014 just do the most reasonable thing.
+- If you must ask: do all non-blocked work first, ask exactly one targeted question.`;
+var CODE_REFERENCES_FORMAT = `## Code References
+
+When referencing specific code locations, use the format \`path/to/file.ts:42\` \u2014 this makes references clickable.
+
+Examples:
+- \`src/auth/login.ts:156\` \u2014 specific line
+- \`packages/core/src/agent/loop.ts\` \u2014 whole file
+- \`packages/core/src/provider/base.ts:30\` \u2014 function start
+
+Rules:
+- Use workspace-relative or absolute paths
+- Include line numbers for specific functions or bugs
+- Each reference should be a standalone inline code span`;
+var SECURITY_GUIDELINES = `## Security
+
+- Assist only with defensive security tasks
+- Never help with credential harvesting, bulk scraping of keys/tokens, or malicious code
+- Never guess or fabricate API keys, passwords, or tokens
+- If a task seems malicious or harmful, decline and explain briefly
+- Never write code that bypasses authentication without explicit user consent`;
 function buildRulesBlock(rulesContent) {
   if (!rulesContent.trim()) return "";
-  return `## Project Rules and Guidelines
+  return `## Project Rules & Guidelines
+
+The following rules apply to this project. Follow them strictly:
 
 ${rulesContent}`;
 }
 function buildSkillsBlock(skills) {
   if (skills.length === 0) return "";
-  const parts = [`## Active Skills
+  const lines = [`## Active Skills
+`, `The following skills are active for this task:
 `];
   for (const skill of skills) {
-    parts.push(`### ${skill.name}`);
-    parts.push(skill.content);
-    parts.push(``);
+    lines.push(`### Skill: ${skill.name}`);
+    lines.push(skill.content);
+    lines.push(``);
   }
-  return parts.join("\n");
+  return lines.join("\n");
 }
 function buildSystemInfoBlock(ctx) {
-  const parts = [];
-  parts.push(`## Environment`);
-  parts.push(`<env>`);
-  parts.push(`  Working directory: ${ctx.cwd}`);
-  parts.push(`  Platform: ${os5.platform()} ${os5.arch()}`);
-  parts.push(`  Today: ${(/* @__PURE__ */ new Date()).toDateString()}`);
-  parts.push(`  Model: ${ctx.providerName}/${ctx.modelId}`);
+  const lines = [];
+  lines.push(`## Environment`);
+  lines.push(`<env>`);
+  lines.push(`  Working directory: ${ctx.cwd}`);
+  lines.push(`  Platform: ${os5.platform()} ${os5.arch()}`);
+  lines.push(`  Date: ${(/* @__PURE__ */ new Date()).toISOString().split("T")[0]}`);
+  lines.push(`  Shell: ${process.env["SHELL"] ?? "bash"}`);
+  lines.push(`  Node.js: ${process.version}`);
+  lines.push(`  Model: ${ctx.providerName}/${ctx.modelId}`);
   if (ctx.gitBranch) {
-    parts.push(`  Git branch: ${ctx.gitBranch}`);
+    lines.push(`  Git branch: ${ctx.gitBranch}`);
   }
   if (ctx.indexStatus) {
-    const status = ctx.indexStatus;
-    if (status.state === "ready") {
-      parts.push(`  Codebase index: ready (${status.files} files, ${status.symbols} symbols)`);
-    } else if (status.state === "indexing") {
-      parts.push(`  Codebase index: indexing ${status.progress}/${status.total} files`);
+    const s = ctx.indexStatus;
+    if (s.state === "ready") {
+      lines.push(`  Codebase index: ready \u2014 ${s.files ?? 0} files, ${s.symbols ?? 0} symbols indexed`);
+      lines.push(`  Tip: Use codebase_search for semantic queries, search_files for exact patterns`);
+    } else if (s.state === "indexing") {
+      lines.push(`  Codebase index: indexing ${s.progress ?? 0}/${s.total ?? 0} files...`);
+    } else {
+      lines.push(`  Codebase index: not ready (${s.state})`);
     }
   }
-  parts.push(`</env>`);
+  lines.push(`</env>`);
   if (ctx.todoList?.trim()) {
-    parts.push(``);
-    parts.push(`## Current Todo List`);
-    parts.push(ctx.todoList);
+    lines.push(``);
+    lines.push(`## Current Todo List`);
+    lines.push(ctx.todoList);
   }
   if (ctx.diagnostics && ctx.diagnostics.length > 0) {
-    parts.push(``);
-    parts.push(`## Current Diagnostics (Errors/Warnings)`);
-    for (const d of ctx.diagnostics.slice(0, 20)) {
-      parts.push(`- [${d.severity}] ${d.file}:${d.line} \u2014 ${d.message}`);
+    lines.push(``);
+    lines.push(`## Active Diagnostics (Errors/Warnings)`);
+    lines.push(`The following diagnostics are currently active. Address them if relevant to your task:`);
+    const shown = ctx.diagnostics.slice(0, 30);
+    for (const d of shown) {
+      const icon = d.severity === "error" ? "\u2717" : d.severity === "warning" ? "\u26A0" : "\u2139";
+      lines.push(`  ${icon} ${d.file}:${d.line}:${d.col} [${d.severity}] ${d.message}${d.source ? ` (${d.source})` : ""}`);
     }
-    if (ctx.diagnostics.length > 20) {
-      parts.push(`... and ${ctx.diagnostics.length - 20} more`);
+    if (ctx.diagnostics.length > 30) {
+      lines.push(`  ... and ${ctx.diagnostics.length - 30} more`);
     }
   }
-  return parts.join("\n");
+  return lines.join("\n");
 }
 function buildMentionsBlock(mentionsContext) {
   if (!mentionsContext.trim()) return "";
-  return mentionsContext;
+  return `## Additional Context (from @mentions)
+
+${mentionsContext}`;
 }
 function buildCompactionBlock(summary) {
   if (!summary.trim()) return "";
-  return `## Conversation Summary
+  return `## Conversation History Summary
 
-The conversation has been compacted. Here is the context needed to continue:
+The conversation has been compacted. Here is the context to continue:
 
-${summary}`;
+${summary}
+
+> Note: Continue from where we left off based on this summary.`;
 }
 function buildSystemPrompt(ctx) {
   const blocks = [];
@@ -1154,10 +1482,10 @@ function buildSystemPrompt(ctx) {
   }
   const cacheableCount = blocks.length;
   blocks.push(buildSystemInfoBlock(ctx));
-  if (ctx.mentionsContext) {
+  if (ctx.mentionsContext?.trim()) {
     blocks.push(buildMentionsBlock(ctx.mentionsContext));
   }
-  if (ctx.compactionSummary) {
+  if (ctx.compactionSummary?.trim()) {
     blocks.push(buildCompactionBlock(ctx.compactionSummary));
   }
   return { blocks, cacheableCount };
@@ -1166,10 +1494,45 @@ function buildSystemPrompt(ctx) {
 // src/agent/modes.ts
 var MODE_TOOL_GROUPS = {
   agent: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents"],
-  plan: ["always", "read", "search", "mcp", "skills"],
-  debug: ["always", "read", "write", "execute", "search", "mcp", "skills"],
-  ask: ["always", "read", "search", "mcp"]
+  plan: ["always", "read", "write", "search", "skills"],
+  // write allowed but restricted to docs
+  debug: ["always", "read", "write", "execute", "search", "skills"],
+  ask: ["always", "read", "search"]
 };
+var MODE_BLOCKED_TOOLS = {
+  agent: [],
+  plan: ["execute_command", "browser_action"],
+  debug: [],
+  ask: ["write_to_file", "replace_in_file", "apply_patch", "execute_command", "browser_action", "spawn_agent", "create_rule"]
+};
+var PLAN_MODE_BLOCKED_EXTENSIONS = /* @__PURE__ */ new Set([
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".py",
+  ".rs",
+  ".go",
+  ".java",
+  ".c",
+  ".cpp",
+  ".h",
+  ".hpp",
+  ".rb",
+  ".php",
+  ".cs",
+  ".swift",
+  ".kt",
+  ".lua",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".fish",
+  ".sql",
+  ".graphql"
+]);
 var TOOL_GROUP_MEMBERS = {
   always: ["attempt_completion", "ask_followup_question", "update_todo_list"],
   read: ["read_file", "list_files", "list_code_definitions"],
@@ -1189,7 +1552,8 @@ var READ_ONLY_TOOLS = /* @__PURE__ */ new Set([
   "search_files",
   "codebase_search",
   "web_fetch",
-  "web_search"
+  "web_search",
+  "use_skill"
 ]);
 function getBuiltinToolsForMode(mode) {
   const groups = MODE_TOOL_GROUPS[mode];
@@ -1201,6 +1565,9 @@ function getBuiltinToolsForMode(mode) {
     }
   }
   return Array.from(tools);
+}
+function getBlockedToolsForMode(mode) {
+  return new Set(MODE_BLOCKED_TOOLS[mode]);
 }
 function getAutoApproveActions(mode, modeConfig) {
   const defaults = {
@@ -1314,9 +1681,10 @@ async function runAgentLoop(opts) {
     gitBranch
   } = opts;
   const activeClient = config.maxMode.enabled && maxModeClient ? maxModeClient : client;
+  const blockedTools = getBlockedToolsForMode(mode);
   const builtinToolNames = new Set(getBuiltinToolsForMode(mode));
-  const builtinTools = tools.filter((t) => builtinToolNames.has(t.name));
-  const dynamicTools = tools.filter((t) => !builtinToolNames.has(t.name));
+  const builtinTools = tools.filter((t) => builtinToolNames.has(t.name) && !blockedTools.has(t.name));
+  const dynamicTools = tools.filter((t) => !builtinToolNames.has(t.name) && !blockedTools.has(t.name));
   let resolvedDynamicTools;
   if (dynamicTools.length > config.tools.classifyThreshold) {
     const lastMessage = session.messages[session.messages.length - 1];
@@ -1376,6 +1744,8 @@ async function runAgentLoop(opts) {
     const pendingReads = [];
     let lastToolName = "";
     let finishReason;
+    let consecutiveInvalidToolCalls = 0;
+    const MAX_CONSECUTIVE_INVALID = 3;
     const flushPendingReads = async () => {
       if (pendingReads.length === 0) return;
       const tasks = pendingReads.map(
@@ -1385,12 +1755,18 @@ async function runAgentLoop(opts) {
       for (let i = 0; i < pendingReads.length; i++) {
         const tc = pendingReads[i];
         const result = results[i];
-        session.updateMessage(newMessageId, {
-          content: currentText
+        const partId = `part_${tc.toolCallId}`;
+        session.updateToolPart(newMessageId, partId, {
+          status: result.success ? "completed" : "error",
+          output: result.output,
+          timeEnd: Date.now()
         });
-        session.addMessage({
-          role: "tool",
-          content: JSON.stringify({ toolCallId: tc.toolCallId, result: result.output })
+        host.emit({
+          type: "tool_end",
+          tool: tc.toolName,
+          partId,
+          messageId: newMessageId,
+          success: result.success
         });
       }
       pendingReads.length = 0;
@@ -1421,6 +1797,17 @@ async function runAgentLoop(opts) {
           case "tool_call": {
             const { toolCallId, toolName, toolInput } = event;
             if (!toolCallId || !toolName || !toolInput) break;
+            const isKnownTool = resolvedTools.some((t) => t.name === toolName);
+            if (!isKnownTool) {
+              consecutiveInvalidToolCalls++;
+              if (consecutiveInvalidToolCalls >= MAX_CONSECUTIVE_INVALID) {
+                throw new Error(
+                  `Model called ${consecutiveInvalidToolCalls} non-existent tools in a row ("${toolName}" etc). This likely indicates model confusion. Stopping to prevent infinite loop.`
+                );
+              }
+            } else {
+              consecutiveInvalidToolCalls = 0;
+            }
             const partId = `part_${toolCallId}`;
             session.addToolPart(newMessageId, {
               type: "tool",
@@ -1436,13 +1823,16 @@ async function runAgentLoop(opts) {
             }
             if (await detectDoomLoop(session, toolName, toolInput)) {
               host.emit({ type: "doom_loop_detected", tool: toolName });
+              if (!process.stdin.isTTY) {
+                throw new Error(`Doom loop: tool "${toolName}" called ${DOOM_LOOP_THRESHOLD} times with same arguments. Aborting.`);
+              }
               const doomApproval = await host.showApprovalDialog({
                 type: "doom_loop",
                 tool: toolName,
-                description: `Potential infinite loop detected: tool "${toolName}" called ${DOOM_LOOP_THRESHOLD} times with same arguments.`
+                description: `Potential infinite loop: "${toolName}" called ${DOOM_LOOP_THRESHOLD} times with same args.`
               });
               if (!doomApproval.approved) {
-                signal.throwIfAborted();
+                throw new Error(`User aborted doom loop for "${toolName}"`);
               }
             }
             if (READ_ONLY_TOOLS.has(toolName) && config.tools.parallelReads && !toolInput["task_progress"]) {
@@ -1529,22 +1919,55 @@ async function runAgentLoop(opts) {
 async function executeToolCall(toolCallId, toolName, toolInput, tools, ctx, autoApproveActions, config, host, session, messageId) {
   const tool = tools.find((t) => t.name === toolName);
   if (!tool) {
-    return { success: false, output: `Unknown tool: ${toolName}` };
+    const availableList = tools.map((t) => t.name).join(", ");
+    return {
+      success: false,
+      output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use execute_command. To present final results, use attempt_completion.`
+    };
   }
-  if (toolInput["path"] && typeof toolInput["path"] === "string") {
+  if (ctx.config.modes && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName) && toolInput["path"] && typeof toolInput["path"] === "string") {
+    const pathExtension = toolInput["path"].match(/\.[a-zA-Z0-9]+$/);
+    const ext = pathExtension ? pathExtension[0].toLowerCase() : "";
+    if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
+      const isRestrictedMode = !tools.some((t) => t.name === "execute_command");
+      if (isRestrictedMode) {
+        return {
+          success: false,
+          output: `In the current mode, you cannot modify source code files (${ext}). You may only write documentation files (.md, .txt). Use attempt_completion to present your plan as text.`
+        };
+      }
+    }
+  }
+  const ruleResult = evaluatePermissionRules(toolName, toolInput, config);
+  if (ruleResult === "deny") {
+    const ruleReason = findRuleReason(toolName, toolInput, config);
+    return { success: false, output: `Access denied by permission rule${ruleReason ? `: ${ruleReason}` : ""}` };
+  }
+  if (ruleResult === "ask") {
+    const action = buildApprovalAction(toolName, toolInput);
+    action.description = `[Permission Rule] ${action.description}`;
+    host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` });
+    const approval = await host.showApprovalDialog(action);
+    if (!approval.approved) {
+      return { success: false, output: `User denied ${toolName}` };
+    }
+  }
+  if (ruleResult === null && toolInput["path"] && typeof toolInput["path"] === "string") {
     for (const pattern of config.permissions.denyPatterns) {
       if (matchesGlob(toolInput["path"], pattern)) {
         return { success: false, output: `Access denied: path matches deny pattern "${pattern}"` };
       }
     }
   }
-  const needsApproval = toolNeedsApproval(toolName, toolInput, autoApproveActions, config);
-  if (needsApproval) {
-    const action = buildApprovalAction(toolName, toolInput);
-    host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` });
-    const approval = await host.showApprovalDialog(action);
-    if (!approval.approved) {
-      return { success: false, output: `User denied ${toolName}` };
+  if (ruleResult === null) {
+    const needsApproval = toolNeedsApproval(toolName, toolInput, autoApproveActions, config);
+    if (needsApproval) {
+      const action = buildApprovalAction(toolName, toolInput);
+      host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` });
+      const approval = await host.showApprovalDialog(action);
+      if (!approval.approved) {
+        return { success: false, output: `User denied ${toolName}` };
+      }
     }
   }
   let validatedArgs;
@@ -1591,40 +2014,66 @@ function buildMessagesFromSession(session) {
   const messages = [];
   for (const msg of session.messages) {
     if (msg.summary) {
-      messages.push({ role: "user", content: `<conversation_summary>
-${msg.content}
-</conversation_summary>` });
+      messages.push({
+        role: "user",
+        content: `<conversation_summary>
+${typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)}
+</conversation_summary>`
+      });
       continue;
     }
     if (msg.role === "system") continue;
     if (typeof msg.content === "string") {
-      if (msg.role === "user" || msg.role === "assistant") {
-        messages.push({ role: msg.role, content: msg.content });
+      if (!msg.content.trim()) continue;
+      if (msg.role === "user") {
+        messages.push({ role: "user", content: msg.content });
+      } else if (msg.role === "assistant") {
+        messages.push({ role: "assistant", content: msg.content });
       }
       continue;
     }
     const parts = msg.content;
-    const contentParts = [];
-    if (typeof contentParts !== "string") {
-      for (const partUnknown of parts) {
-        const part = partUnknown;
-        if (part["type"] === "text") {
-          contentParts.push({ type: "text", text: part["text"] });
-        } else if (part["type"] === "tool") {
-          const tp = part;
-          if (tp.status === "completed" || tp.status === "error") {
-            contentParts.push({
-              type: "tool_result",
-              toolCallId: tp.id,
-              result: tp.output ?? "",
-              isError: tp.status === "error"
-            });
-          }
-        }
+    if (!Array.isArray(parts) || parts.length === 0) continue;
+    if (msg.role === "user") {
+      const textContent2 = parts.filter((p) => p.type === "text").map((p) => p.text).join("").trim();
+      if (textContent2) {
+        messages.push({ role: "user", content: textContent2 });
       }
+      continue;
     }
-    if (Array.isArray(contentParts) && contentParts.length > 0) {
-      messages.push({ role: msg.role, content: contentParts });
+    if (msg.role !== "assistant") continue;
+    const textParts = parts.filter((p) => p.type === "text");
+    parts.filter((p) => p.type === "reasoning");
+    const toolParts = parts.filter((p) => p.type === "tool");
+    const textContent = textParts.map((p) => p.text).join("").trim();
+    const toolCallParts = toolParts.filter((tp) => tp.input != null);
+    const completedToolParts = toolParts.filter((tp) => tp.status === "completed" || tp.status === "error");
+    if (toolCallParts.length > 0) {
+      const assistantContent = [];
+      if (textContent) {
+        assistantContent.push({ type: "text", text: textContent });
+      }
+      for (const tp of toolCallParts) {
+        assistantContent.push({
+          type: "tool-call",
+          toolCallId: tp.id,
+          toolName: tp.tool,
+          args: tp.input ?? {}
+        });
+      }
+      messages.push({ role: "assistant", content: assistantContent });
+      if (completedToolParts.length > 0) {
+        const toolResultContent = completedToolParts.map((tp) => ({
+          type: "tool-result",
+          toolCallId: tp.id,
+          toolName: tp.tool,
+          result: tp.compacted ? "[output pruned for context efficiency]" : tp.output ?? "",
+          isError: tp.status === "error"
+        }));
+        messages.push({ role: "tool", content: toolResultContent });
+      }
+    } else if (textContent) {
+      messages.push({ role: "assistant", content: textContent });
     }
   }
   return messages;
@@ -1669,13 +2118,93 @@ function buildApprovalAction(toolName, toolInput) {
     description: `${toolName}(${JSON.stringify(toolInput).slice(0, 100)})`
   };
 }
+function evaluatePermissionRules(toolName, toolInput, config) {
+  const rules = config.permissions.rules ?? [];
+  for (const rule of rules) {
+    if (!ruleMatchesTool(rule.tool, toolName)) continue;
+    if (rule.pathPattern && !ruleMatchesPath(rule.pathPattern, toolInput)) continue;
+    if (rule.commandPattern && !ruleMatchesCommand(rule.commandPattern, toolInput)) continue;
+    return rule.action;
+  }
+  return null;
+}
+function findRuleReason(toolName, toolInput, config) {
+  const rules = config.permissions.rules ?? [];
+  for (const rule of rules) {
+    if (!ruleMatchesTool(rule.tool, toolName)) continue;
+    if (rule.pathPattern && !ruleMatchesPath(rule.pathPattern, toolInput)) continue;
+    if (rule.commandPattern && !ruleMatchesCommand(rule.commandPattern, toolInput)) continue;
+    return rule.reason;
+  }
+  return void 0;
+}
+function ruleMatchesTool(pattern, toolName) {
+  if (!pattern) return true;
+  if (pattern.includes("*") || pattern.includes("?")) {
+    return matchesGlob(toolName, pattern);
+  }
+  return pattern === toolName || toolName.startsWith(pattern + "_");
+}
+function ruleMatchesPath(pathPattern, toolInput) {
+  const filePath = toolInput["path"];
+  if (!filePath) return false;
+  return matchesGlob(filePath, pathPattern);
+}
+function ruleMatchesCommand(commandPattern, toolInput) {
+  const command = String(toolInput["command"] ?? "");
+  try {
+    return new RegExp(commandPattern).test(command);
+  } catch {
+    return command.includes(commandPattern);
+  }
+}
 function matchesGlob(filePath, pattern) {
   try {
-    const { minimatch } = __require("minimatch");
-    return minimatch(filePath, pattern, { dot: true });
+    return globMatch(filePath, pattern);
   } catch {
     return filePath.includes(pattern.replace(/\*/g, ""));
   }
+}
+function globMatch(str, pattern) {
+  let regexStr = "";
+  let i = 0;
+  while (i < pattern.length) {
+    const c = pattern[i];
+    if (c === "*") {
+      if (pattern[i + 1] === "*") {
+        regexStr += ".*";
+        i += 2;
+        if (pattern[i] === "/") i++;
+      } else {
+        regexStr += "[^/]*";
+        i++;
+      }
+    } else if (c === "?") {
+      regexStr += "[^/]";
+      i++;
+    } else if (c === "{") {
+      const end = pattern.indexOf("}", i);
+      if (end === -1) {
+        regexStr += "\\{";
+        i++;
+        continue;
+      }
+      const alts = pattern.slice(i + 1, end).split(",").map(escapeRegex);
+      regexStr += `(?:${alts.join("|")})`;
+      i = end + 1;
+    } else {
+      regexStr += escapeRegex(c);
+      i++;
+    }
+  }
+  try {
+    return new RegExp(`^${regexStr}$`).test(str);
+  } catch {
+    return str.includes(pattern.replace(/[*?{}]/g, ""));
+  }
+}
+function escapeRegex(s) {
+  return s.replace(/[.+^$|()[\]\\]/g, "\\$&");
 }
 function isContextOverflowError(message) {
   const lower = message.toLowerCase();
@@ -1700,44 +2229,44 @@ async function loadRules(cwd, rulePatterns) {
   let maxUp = 10;
   while (maxUp-- > 0) {
     for (const file of topLevelFiles) {
-      const candidate = path.join(dir, file);
+      const candidate = path4.join(dir, file);
       if (!seen.has(candidate)) {
         const content = await readFileSafe(candidate);
         if (content) {
           seen.add(candidate);
-          const rel = path.relative(cwd, candidate);
+          const rel = path4.relative(cwd, candidate);
           contents.push(`<!-- Rules from ${rel} -->
 ${content}`);
         }
       }
     }
-    const parent = path.dirname(dir);
+    const parent = path4.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
   for (const pattern of globPatterns) {
-    const expandedPath = pattern.startsWith("~") ? pattern.replace("~", os5.homedir()) : path.join(cwd, pattern);
+    const expandedPath = pattern.startsWith("~") ? pattern.replace("~", os5.homedir()) : path4.join(cwd, pattern);
     const matches = await glob(expandedPath).catch(() => []);
     for (const match of matches.sort()) {
       if (!seen.has(match)) {
         const content = await readFileSafe(match);
         if (content) {
           seen.add(match);
-          const rel = path.relative(cwd, match);
+          const rel = path4.relative(cwd, match);
           contents.push(`<!-- Rules from ${rel} -->
 ${content}`);
         }
       }
     }
   }
-  const globalRulesDir = path.join(os5.homedir(), ".nexus", "rules");
-  const globalRules = await glob(path.join(globalRulesDir, "**/*.md")).catch(() => []);
+  const globalRulesDir = path4.join(os5.homedir(), ".nexus", "rules");
+  const globalRules = await glob(path4.join(globalRulesDir, "**/*.md")).catch(() => []);
   for (const match of globalRules.sort()) {
     if (!seen.has(match)) {
       const content = await readFileSafe(match);
       if (content) {
         seen.add(match);
-        contents.push(`<!-- Global rule: ${path.basename(match)} -->
+        contents.push(`<!-- Global rule: ${path4.basename(match)} -->
 ${content}`);
       }
     }
@@ -1757,23 +2286,24 @@ async function readFileSafe(filePath) {
 async function loadSkills(skillPaths, cwd) {
   const skills = [];
   const seen = /* @__PURE__ */ new Set();
-  const searchPaths = [
-    ...skillPaths,
-    path.join(cwd, ".nexus", "skills", "**", "*.md"),
-    path.join(cwd, ".agents", "skills", "**", "*.md"),
-    path.join(os5.homedir(), ".nexus", "skills", "**", "*.md"),
-    path.join(os5.homedir(), ".agents", "skills", "**", "*.md")
+  const configPaths = skillPaths.map(
+    (p) => path4.isAbsolute(p) ? p : path4.resolve(cwd, p)
+  );
+  const standardGlobs = [
+    path4.join(cwd, ".nexus", "skills", "**", "SKILL.md"),
+    path4.join(cwd, ".nexus", "skills", "**", "*.md"),
+    path4.join(cwd, ".agents", "skills", "**", "*.md"),
+    path4.join(os5.homedir(), ".nexus", "skills", "**", "SKILL.md"),
+    path4.join(os5.homedir(), ".nexus", "skills", "**", "*.md"),
+    path4.join(os5.homedir(), ".agents", "skills", "**", "*.md")
   ];
-  for (const pattern of searchPaths) {
-    const expanded = pattern.startsWith("~") ? pattern.replace("~", os5.homedir()) : pattern;
+  for (const cfgPath of configPaths) {
+    await collectSkillFiles(cfgPath, seen, skills);
+  }
+  for (const pattern of standardGlobs) {
     let files;
     try {
-      if (expanded.includes("*")) {
-        files = await glob(expanded);
-      } else {
-        const stat7 = await fs10.stat(expanded).catch(() => null);
-        files = stat7?.isFile() ? [expanded] : [];
-      }
+      files = await glob(pattern, { absolute: true });
     } catch {
       continue;
     }
@@ -1784,18 +2314,72 @@ async function loadSkills(skillPaths, cwd) {
       if (skill) skills.push(skill);
     }
   }
-  return skills;
+  const byName = /* @__PURE__ */ new Map();
+  for (const skill of skills) {
+    if (!byName.has(skill.name)) {
+      byName.set(skill.name, skill);
+    }
+  }
+  return Array.from(byName.values());
 }
-async function loadSkillFile(filePath, cwd) {
+async function collectSkillFiles(cfgPath, seen, skills, cwd) {
+  if (cfgPath.includes("*")) {
+    const files = await glob(cfgPath, { absolute: true }).catch(() => []);
+    for (const file of files) {
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const skill = await loadSkillFile(file);
+      if (skill) skills.push(skill);
+    }
+    return;
+  }
+  const stat7 = await fs10.stat(cfgPath).catch(() => null);
+  if (!stat7) return;
+  if (stat7.isFile()) {
+    if (seen.has(cfgPath)) return;
+    seen.add(cfgPath);
+    const skill = await loadSkillFile(cfgPath);
+    if (skill) skills.push(skill);
+    return;
+  }
+  if (stat7.isDirectory()) {
+    const candidates = [
+      path4.join(cfgPath, "SKILL.md"),
+      path4.join(cfgPath, "skill.md"),
+      path4.join(cfgPath, "README.md")
+    ];
+    for (const c of candidates) {
+      if (seen.has(c)) continue;
+      const cStat = await fs10.stat(c).catch(() => null);
+      if (cStat?.isFile()) {
+        seen.add(c);
+        const skill = await loadSkillFile(c);
+        if (skill) {
+          skills.push(skill);
+          return;
+        }
+      }
+    }
+    const files = await glob(path4.join(cfgPath, "*.md"), { absolute: true }).catch(() => []);
+    for (const file of files) {
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const skill = await loadSkillFile(file);
+      if (skill) skills.push(skill);
+    }
+  }
+}
+async function loadSkillFile(filePath, _cwd) {
   try {
     const content = await fs10.readFile(filePath, "utf8");
     if (!content.trim()) return null;
-    const dirName = path.basename(path.dirname(filePath));
-    const fileName = path.basename(filePath, path.extname(filePath));
-    const name = dirName !== "skills" ? dirName : fileName;
+    const dirName = path4.basename(path4.dirname(filePath));
+    const fileName = path4.basename(filePath, path4.extname(filePath));
+    const name = !["skills", ".nexus", ".agents"].includes(dirName.toLowerCase()) ? dirName : fileName;
     const lines = content.split("\n").filter((l) => l.trim());
-    const summaryLine = lines.find((l) => !l.startsWith("#")) ?? lines[0] ?? "";
-    const summary = summaryLine.replace(/^[-*]\s*/, "").slice(0, 100);
+    const headingLine = lines.find((l) => l.startsWith("#"));
+    const summaryLine = headingLine ? headingLine.replace(/^#+\s*/, "") : lines.find((l) => !l.startsWith("#")) ?? "";
+    const summary = summaryLine.replace(/^[-*]\s*/, "").slice(0, 120);
     return { name, path: filePath, summary, content };
   } catch {
     return null;
@@ -1818,7 +2402,7 @@ Maximum: ${MAX_FILE_SIZE / 1024}KB or ${MAX_LINES} lines per read.`,
   parameters: schema,
   readOnly: true,
   async execute({ path: filePath, start_line, end_line }, ctx) {
-    const absPath = path.resolve(ctx.cwd, filePath);
+    const absPath = path4.resolve(ctx.cwd, filePath);
     let stat7;
     try {
       stat7 = await fs10.stat(absPath);
@@ -1928,8 +2512,8 @@ WARNING: This replaces the entire file content. Provide the complete final conte
   parameters: schema2,
   requiresApproval: true,
   async execute({ path: filePath, content }, ctx) {
-    const absPath = path.resolve(ctx.cwd, filePath);
-    const dirPath = path.dirname(absPath);
+    const absPath = path4.resolve(ctx.cwd, filePath);
+    const dirPath = path4.dirname(absPath);
     await fs10.mkdir(dirPath, { recursive: true });
     const tmpPath = `${absPath}.nexus_tmp_${Date.now()}`;
     try {
@@ -1976,7 +2560,7 @@ IMPORTANT:
   parameters: schema3,
   requiresApproval: true,
   async execute({ path: filePath, diff }, ctx) {
-    const absPath = path.resolve(ctx.cwd, filePath);
+    const absPath = path4.resolve(ctx.cwd, filePath);
     let content;
     try {
       content = await fs10.readFile(absPath, "utf8");
@@ -2048,7 +2632,7 @@ Prefer replace_in_file for targeted edits \u2014 it's more reliable.`,
     if (!filePath) {
       return { success: false, output: "Could not determine target file path from patch" };
     }
-    const absPath = path.resolve(ctx.cwd, filePath);
+    const absPath = path4.resolve(ctx.cwd, filePath);
     let originalContent = "";
     try {
       originalContent = await fs10.readFile(absPath, "utf8");
@@ -2061,7 +2645,7 @@ Prefer replace_in_file for targeted edits \u2014 it's more reliable.`,
         output: `Failed to apply patch to ${filePath}. The patch may not match the current file content. Try replace_in_file instead.`
       };
     }
-    const dirPath = path.dirname(absPath);
+    const dirPath = path4.dirname(absPath);
     await fs10.mkdir(dirPath, { recursive: true });
     const tmpPath = `${absPath}.nexus_tmp_${Date.now()}`;
     try {
@@ -2197,7 +2781,7 @@ Examples:
   parameters: searchSchema,
   readOnly: true,
   async execute({ pattern, path: searchPath, include, exclude, context_lines, case_sensitive }, ctx) {
-    const searchDir = searchPath ? path.resolve(ctx.cwd, searchPath) : ctx.cwd;
+    const searchDir = searchPath ? path4.resolve(ctx.cwd, searchPath) : ctx.cwd;
     const args = [
       "--json",
       "--max-count",
@@ -2229,7 +2813,7 @@ Examples:
           const obj = JSON.parse(line);
           if (obj.type === "match") {
             const data = obj.data;
-            const relPath = path.relative(ctx.cwd, data.path.text);
+            const relPath = path4.relative(ctx.cwd, data.path.text);
             results.push(`${relPath}:${data.line_number}:${data.lines.text.trimEnd()}`);
             matchCount++;
           }
@@ -2274,7 +2858,7 @@ Maximum 2000 entries.`,
   parameters: listSchema,
   readOnly: true,
   async execute({ path: listPath, recursive, include, max_entries }, ctx) {
-    const targetDir = listPath ? path.resolve(ctx.cwd, listPath) : ctx.cwd;
+    const targetDir = listPath ? path4.resolve(ctx.cwd, listPath) : ctx.cwd;
     const maxEntries = max_entries ?? 200;
     const maxActual = Math.min(maxEntries, 2e3);
     try {
@@ -2284,7 +2868,7 @@ Maximum 2000 entries.`,
       let ig = ignoreFactory();
       try {
         const gitignoreContent = await import('fs/promises').then(
-          (f) => f.readFile(path.join(ctx.cwd, ".gitignore"), "utf8").catch(() => "")
+          (f) => f.readFile(path4.join(ctx.cwd, ".gitignore"), "utf8").catch(() => "")
         );
         ig = ig.add(gitignoreContent);
       } catch {
@@ -2297,8 +2881,8 @@ Maximum 2000 entries.`,
         const items = await readdir4(dir).catch(() => []);
         for (const item of items.sort()) {
           if (entries.length >= maxActual) break;
-          const fullPath = path.join(dir, item);
-          const relPath = path.relative(ctx.cwd, fullPath);
+          const fullPath = path4.join(dir, item);
+          const relPath = path4.relative(ctx.cwd, fullPath);
           if (ig.ignores(relPath)) continue;
           if (include) {
             const { minimatch } = await import('minimatch');
@@ -2343,7 +2927,7 @@ Useful for understanding codebase structure before diving into details.`,
   parameters: schema6,
   readOnly: true,
   async execute({ path: targetPath }, ctx) {
-    const absPath = path.resolve(ctx.cwd, targetPath);
+    const absPath = path4.resolve(ctx.cwd, targetPath);
     try {
       const stat7 = await fs10.stat(absPath);
       if (stat7.isDirectory()) {
@@ -2356,8 +2940,8 @@ Useful for understanding codebase structure before diving into details.`,
   }
 };
 async function extractFromFile(absPath, cwd) {
-  const relPath = path.relative(cwd, absPath);
-  const ext = path.extname(absPath).toLowerCase();
+  const relPath = path4.relative(cwd, absPath);
+  const ext = path4.extname(absPath).toLowerCase();
   if (!SUPPORTED_EXTENSIONS.has(ext)) {
     return { success: true, output: `${relPath}: unsupported file type (${ext})` };
   }
@@ -2382,7 +2966,7 @@ async function extractFromDirectory(absDir, cwd) {
   const ignoreFactory = ignoreMod.default ?? ignoreMod;
   let ig = ignoreFactory();
   try {
-    const gi = await fs10.readFile(path.join(cwd, ".gitignore"), "utf8").catch(() => "");
+    const gi = await fs10.readFile(path4.join(cwd, ".gitignore"), "utf8").catch(() => "");
     ig = ignoreFactory().add(gi);
   } catch {
   }
@@ -2391,15 +2975,15 @@ async function extractFromDirectory(absDir, cwd) {
     if (depth > 3) return;
     const items = await readdir4(dir).catch(() => []);
     for (const item of items.sort()) {
-      const fullPath = path.join(dir, item);
-      const relPath = path.relative(cwd, fullPath);
+      const fullPath = path4.join(dir, item);
+      const relPath = path4.relative(cwd, fullPath);
       if (ig.ignores(relPath)) continue;
       const st = await fs10.stat(fullPath).catch(() => null);
       if (!st) continue;
       if (st.isDirectory()) {
         await processDir(fullPath, depth + 1);
       } else {
-        const ext = path.extname(item).toLowerCase();
+        const ext = path4.extname(item).toLowerCase();
         if (SUPPORTED_EXTENSIONS.has(ext)) {
           const r = await extractFromFile(fullPath, cwd);
           if (r.success && r.output && !r.output.includes("no top-level")) {
@@ -2592,7 +3176,6 @@ ${text}`
 };
 function htmlToMarkdown(html) {
   try {
-    const TurndownService = __require("turndown");
     const td = new TurndownService({
       headingStyle: "atx",
       codeBlockStyle: "fenced",
@@ -2700,12 +3283,9 @@ Use when the task requires specialized knowledge documented in a skill.`,
   readOnly: true,
   async execute({ skill }, ctx) {
     const skills = ctx.config.skills;
-    [
-      ...skills,
-      ...__require("path").resolve ? [] : []
-    ];
+    [...skills];
     const { readFile: readFile12 } = await import('fs/promises');
-    const { resolve: resolve8, basename: basename3, join: join12 } = await import('path');
+    const { resolve: resolve9, basename: basename3, join: join12 } = await import('path');
     const { glob: glob3 } = await import('glob');
     const allSkillFiles = await glob3(skills.length > 0 ? skills : [".nexus/skills/**/*.md", "~/.nexus/skills/**/*.md"], {
       cwd: ctx.cwd,
@@ -2719,7 +3299,7 @@ Use when the task requires specialized knowledge documented in a skill.`,
     let skillPath = null;
     for (const p of [...standardPaths, ...allSkillFiles]) {
       const name = basename3(p, ".md").toLowerCase();
-      const parentDir = basename3(resolve8(p, "..")).toLowerCase();
+      const parentDir = basename3(resolve9(p, "..")).toLowerCase();
       if (name === skill.toLowerCase() || parentDir === skill.toLowerCase()) {
         try {
           skillContent = await readFile12(p, "utf8");
@@ -3437,12 +4017,12 @@ async function* walkDir(root, excludePatterns = []) {
   ig.add(DEFAULT_EXCLUDE);
   ig.add(excludePatterns);
   try {
-    const gitignoreContent = await fs10.readFile(path.join(root, ".gitignore"), "utf8");
+    const gitignoreContent = await fs10.readFile(path4.join(root, ".gitignore"), "utf8");
     ig.add(gitignoreContent);
   } catch {
   }
   try {
-    const nexusignoreContent = await fs10.readFile(path.join(root, ".nexusignore"), "utf8");
+    const nexusignoreContent = await fs10.readFile(path4.join(root, ".nexusignore"), "utf8");
     ig.add(nexusignoreContent);
   } catch {
   }
@@ -3454,8 +4034,8 @@ async function* walkDir(root, excludePatterns = []) {
       return;
     }
     for (const entry of entries.sort()) {
-      const absPath = path.join(dir, entry);
-      const relPath = path.relative(root, absPath);
+      const absPath = path4.join(dir, entry);
+      const relPath = path4.relative(root, absPath);
       if (ig.ignores(relPath)) continue;
       let stat7;
       try {
@@ -3467,7 +4047,7 @@ async function* walkDir(root, excludePatterns = []) {
       if (stat7.isDirectory()) {
         yield* walkInternal(absPath);
       } else if (stat7.isFile()) {
-        const ext = path.extname(entry).toLowerCase();
+        const ext = path4.extname(entry).toLowerCase();
         if (!SUPPORTED_EXTENSIONS2.has(ext)) continue;
         if (stat7.size > 1024 * 1024) continue;
         const hash = await hashFile(absPath, stat7.size);
@@ -3875,8 +4455,8 @@ function findContainingClass(lines, lineIdx) {
   }
   return void 0;
 }
-var REGISTRY_PATH = path.join(os5.homedir(), ".nexus", "projects.json");
-var INDEX_BASE_DIR = path.join(os5.homedir(), ".nexus", "index");
+var REGISTRY_PATH = path4.join(os5.homedir(), ".nexus", "projects.json");
+var INDEX_BASE_DIR = path4.join(os5.homedir(), ".nexus", "index");
 var MAX_PROJECTS = 10;
 var ProjectRegistry = class _ProjectRegistry {
   projects = /* @__PURE__ */ new Map();
@@ -3900,7 +4480,7 @@ var ProjectRegistry = class _ProjectRegistry {
       return existing;
     }
     const hash = crypto.createHash("sha1").update(root).digest("hex").slice(0, 16);
-    const indexDir = path.join(INDEX_BASE_DIR, hash);
+    const indexDir = path4.join(INDEX_BASE_DIR, hash);
     await fs10.mkdir(indexDir, { recursive: true });
     const info = {
       root,
@@ -3941,7 +4521,7 @@ var ProjectRegistry = class _ProjectRegistry {
   }
   async save() {
     try {
-      const dir = path.dirname(REGISTRY_PATH);
+      const dir = path4.dirname(REGISTRY_PATH);
       await fs10.mkdir(dir, { recursive: true });
       await fs10.writeFile(REGISTRY_PATH, JSON.stringify(this.listProjects(), null, 2), "utf8");
     } catch {
@@ -3950,7 +4530,7 @@ var ProjectRegistry = class _ProjectRegistry {
 };
 function getIndexDir(projectRoot) {
   const hash = crypto.createHash("sha1").update(projectRoot).digest("hex").slice(0, 16);
-  return path.join(INDEX_BASE_DIR, hash);
+  return path4.join(INDEX_BASE_DIR, hash);
 }
 
 // src/indexer/index.ts
@@ -3975,9 +4555,8 @@ var CodebaseIndexer = class {
     this.projectRoot = projectRoot;
     this.config = config;
     const indexDir = getIndexDir(projectRoot);
-    const { mkdirSync: mkdirSync2 } = __require("fs");
-    mkdirSync2(indexDir, { recursive: true });
-    this.fts = new FTSIndex(path.join(indexDir, "fts.db"));
+    mkdirSync(indexDir, { recursive: true });
+    this.fts = new FTSIndex(path4.join(indexDir, "fts.db"));
     if (config.vectorDb?.enabled && embeddingClient && vectorUrl && projectHash) {
       this.vector = new VectorIndex(vectorUrl, projectHash, embeddingClient);
     }
@@ -4173,12 +4752,12 @@ async function parseMentions(text, cwd, host) {
 async function resolveMention(type, arg, cwd, host) {
   switch (type) {
     case "file": {
-      const absPath = path.resolve(cwd, arg);
+      const absPath = path4.resolve(cwd, arg);
       try {
         const content = await fs10.readFile(absPath, "utf8");
         const lines = content.split("\n");
         const truncated = lines.length > 200 ? lines.slice(0, 200).join("\n") + "\n[...truncated]" : content;
-        const relPath = path.relative(cwd, absPath);
+        const relPath = path4.relative(cwd, absPath);
         return `<file path="${relPath}">
 ${truncated}
 </file>`;
@@ -4187,10 +4766,10 @@ ${truncated}
       }
     }
     case "folder": {
-      const absPath = path.resolve(cwd, arg);
+      const absPath = path4.resolve(cwd, arg);
       try {
         const entries = await listDirRecursive(absPath, cwd, 50);
-        const relPath = path.relative(cwd, absPath);
+        const relPath = path4.relative(cwd, absPath);
         return `<folder path="${relPath}">
 ${entries.join("\n")}
 </folder>`;
@@ -4254,8 +4833,8 @@ async function listDirRecursive(dir, cwd, maxEntries) {
     for (const item of items) {
       if (entries.length >= maxEntries) break;
       if (item === "node_modules" || item === ".git") continue;
-      const full = path.join(d, item);
-      path.relative(cwd, full);
+      const full = path4.join(d, item);
+      path4.relative(cwd, full);
       const st = await fs10.stat(full).catch(() => null);
       if (!st) continue;
       entries.push(prefix + item + (st.isDirectory() ? "/" : ""));
@@ -4382,7 +4961,7 @@ var CheckpointTracker = class {
   constructor(taskId, workspaceRoot) {
     this.taskId = taskId;
     this.workspaceRoot = workspaceRoot;
-    this.shadowRoot = path.join(os5.homedir(), ".nexus", "checkpoints", taskId);
+    this.shadowRoot = path4.join(os5.homedir(), ".nexus", "checkpoints", taskId);
     this.git = simpleGit(this.shadowRoot);
   }
   git;
@@ -4507,8 +5086,8 @@ async function copyDir(src, dest, ignoreNames) {
   await Promise.all(
     items.map(async (item) => {
       if (ignoreNames.has(item)) return;
-      const srcPath = path.join(src, item);
-      const destPath = path.join(dest, item);
+      const srcPath = path4.join(src, item);
+      const destPath = path4.join(dest, item);
       const itemStat = await stat7(srcPath).catch(() => null);
       if (!itemStat) return;
       if (itemStat.isDirectory()) {

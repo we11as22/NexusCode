@@ -3,6 +3,12 @@ import { postMessage } from "../vscode.js"
 
 export type Mode = "agent" | "plan" | "debug" | "ask"
 
+export type IndexStatusKind =
+  | { state: "idle" }
+  | { state: "indexing"; progress: number; total: number }
+  | { state: "ready"; files: number; symbols: number }
+  | { state: "error"; error: string }
+
 export interface SessionMessage {
   id: string
   ts: number
@@ -31,6 +37,7 @@ interface ChatState {
   sessionId: string
   todo: string
   indexReady: boolean
+  indexStatus: IndexStatusKind
   inputValue: string
 
   // Actions
@@ -42,8 +49,11 @@ interface ChatState {
   compact: () => void
   clearChat: () => void
   forkSession: (messageId: string) => void
+  reindex: () => void
+  clearIndex: () => void
   handleStateUpdate: (state: Partial<ChatState>) => void
   handleAgentEvent: (event: AgentEvent) => void
+  handleIndexStatus: (status: IndexStatusKind) => void
 }
 
 export type AgentEvent =
@@ -53,7 +63,7 @@ export type AgentEvent =
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
-  | { type: "index_update"; status: unknown }
+  | { type: "index_update"; status: IndexStatusKind }
   | { type: "error"; error: string; fatal?: boolean }
   | { type: "done"; messageId: string }
   | { type: "doom_loop_detected"; tool: string }
@@ -68,6 +78,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionId: "",
   todo: "",
   indexReady: false,
+  indexStatus: { state: "idle" },
   inputValue: "",
 
   setInputValue: (v) => set({ inputValue: v }),
@@ -108,8 +119,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
     postMessage({ type: "forkSession", messageId })
   },
 
+  reindex: () => {
+    postMessage({ type: "reindex" })
+    set({ indexStatus: { state: "indexing", progress: 0, total: 0 } })
+  },
+
+  clearIndex: () => {
+    postMessage({ type: "clearIndex" })
+    set({ indexStatus: { state: "indexing", progress: 0, total: 0 } })
+  },
+
   handleStateUpdate: (state) => {
     set(prev => ({ ...prev, ...state }))
+  },
+
+  handleIndexStatus: (status) => {
+    set({
+      indexStatus: status,
+      indexReady: status.state === "ready",
+    })
   },
 
   handleAgentEvent: (event) => {
@@ -123,13 +151,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (typeof updated.content === "string") {
             updated.content += event.delta
           } else {
-            const parts = updated.content as MessagePart[]
+            const parts = [...(updated.content as MessagePart[])]
             const lastPart = parts[parts.length - 1]
             if (lastPart?.type === "text") {
-              (lastPart as TextPart).text += event.delta
+              parts[parts.length - 1] = { ...lastPart, text: lastPart.text + event.delta } as TextPart
             } else {
               parts.push({ type: "text", text: event.delta })
             }
+            updated.content = parts
           }
           set({ messages: [...messages.slice(0, -1), updated] })
         } else {
@@ -139,7 +168,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               {
                 id: `msg_${Date.now()}`,
                 ts: Date.now(),
-                role: "assistant",
+                role: "assistant" as const,
                 content: event.delta,
               },
             ],
@@ -184,6 +213,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return { ...msg, content: parts }
         })
         set({ messages: msgs })
+        break
+      }
+
+      case "index_update": {
+        const status = event.status as IndexStatusKind
+        set({
+          indexStatus: status,
+          indexReady: status.state === "ready",
+        })
         break
       }
 

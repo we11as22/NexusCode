@@ -1,5 +1,7 @@
 import * as path from "node:path"
 import * as fs from "node:fs/promises"
+import * as crypto from "node:crypto"
+import { mkdirSync } from "node:fs"
 import type { IIndexer, IndexStatus, IndexSearchOptions, IndexSearchResult, NexusConfig } from "../types.js"
 import type { FileInfo } from "./scanner.js"
 import { FTSIndex } from "./fts.js"
@@ -23,7 +25,8 @@ export class CodebaseIndexer implements IIndexer {
   private _status: IndexStatus = { state: "idle" }
   private indexing = false
   private abortController?: AbortController
-  private debounceTimers = new Map<string, NodeJS.Timeout>()
+  private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private statusListeners: Array<(status: IndexStatus) => void> = []
 
   constructor(
     private readonly projectRoot: string,
@@ -33,7 +36,6 @@ export class CodebaseIndexer implements IIndexer {
     projectHash?: string
   ) {
     const indexDir = getIndexDir(projectRoot)
-    const { mkdirSync } = require("node:fs")
     mkdirSync(indexDir, { recursive: true })
 
     this.fts = new FTSIndex(path.join(indexDir, "fts.db"))
@@ -47,12 +49,29 @@ export class CodebaseIndexer implements IIndexer {
     return this._status
   }
 
+  onStatusChange(listener: (status: IndexStatus) => void): () => void {
+    this.statusListeners.push(listener)
+    return () => {
+      this.statusListeners = this.statusListeners.filter(l => l !== listener)
+    }
+  }
+
+  private notifyStatus(status: IndexStatus): void {
+    this._status = status
+    for (const listener of this.statusListeners) {
+      try { listener(status) } catch {}
+    }
+  }
+
   async startIndexing(): Promise<void> {
-    if (this.indexing) return
+    if (this.indexing) {
+      // If already indexing, restart cleanly
+      this.stop()
+      await new Promise<void>(r => setTimeout(r, 100))
+    }
     this.indexing = true
     this.abortController = new AbortController()
 
-    // Init vector if enabled
     if (this.vector) {
       try {
         await this.vector.init()
@@ -62,11 +81,11 @@ export class CodebaseIndexer implements IIndexer {
       }
     }
 
-    this._status = { state: "indexing", progress: 0, total: 0 }
+    this.notifyStatus({ state: "indexing", progress: 0, total: 0 })
 
     this.indexInBackground().catch(err => {
       console.warn("[nexus] Indexing error:", err)
-      this._status = { state: "error", error: (err as Error).message }
+      this.notifyStatus({ state: "error", error: (err as Error).message })
       this.indexing = false
     })
   }
@@ -75,41 +94,40 @@ export class CodebaseIndexer implements IIndexer {
     const existing = this.fts.getFilesWithHashes()
     const seen = new Set<string>()
     let processed = 0
-
-    // Count files first for progress
     let total = 0
-    for await (const _ of walkDir(this.projectRoot, this.config.indexing.excludePatterns)) {
-      total++
-      if (this.abortController?.signal.aborted) break
-    }
-
-    this._status = { state: "indexing", progress: 0, total }
 
     const batchSize = this.config.indexing.batchSize
     let batch: FileInfo[] = []
 
+    // Single-pass: walk + process in one traversal
     for await (const file of walkDir(this.projectRoot, this.config.indexing.excludePatterns)) {
       if (this.abortController?.signal.aborted) break
 
+      total++
       seen.add(file.path)
       batch.push(file)
 
       if (batch.length >= batchSize) {
         await this.processBatch(batch)
         processed += batch.length
-        this._status = { state: "indexing", progress: processed, total }
+        this.notifyStatus({ state: "indexing", progress: processed, total })
         batch = []
-        // Yield to event loop between batches
-        await new Promise(r => setImmediate(r))
+        // Yield to event loop between batches to avoid blocking
+        await new Promise<void>(r => setImmediate(r))
       }
     }
 
-    if (batch.length > 0) {
+    if (batch.length > 0 && !this.abortController?.signal.aborted) {
       await this.processBatch(batch)
       processed += batch.length
     }
 
-    // Delete removed files
+    if (this.abortController?.signal.aborted) {
+      this.indexing = false
+      return
+    }
+
+    // Remove files that no longer exist
     for (const [filePath] of existing) {
       if (!seen.has(filePath)) {
         this.fts.deleteFile(filePath)
@@ -118,7 +136,7 @@ export class CodebaseIndexer implements IIndexer {
     }
 
     const stats = this.fts.getStats()
-    this._status = { state: "ready", files: stats.files, symbols: stats.symbols }
+    this.notifyStatus({ state: "ready", files: stats.files, symbols: stats.symbols })
     this.indexing = false
   }
 
@@ -126,6 +144,8 @@ export class CodebaseIndexer implements IIndexer {
     const vectorEntries: Parameters<VectorIndex["upsertSymbols"]>[0] = []
 
     for (const file of files) {
+      if (!file) continue
+
       // Skip if unchanged
       if (this.fts.isFileIndexed(file.path, file.mtime, file.hash)) continue
 
@@ -156,7 +176,7 @@ export class CodebaseIndexer implements IIndexer {
           }
         }
       } else {
-        // Fallback: chunk by lines
+        // Fallback: chunk by lines with overlap
         const chunks = extractChunks(content, file.path)
         for (const chunk of chunks) {
           this.fts.insertChunk({ path: chunk.path, offset: chunk.startLine, content: chunk.content })
@@ -170,15 +190,23 @@ export class CodebaseIndexer implements IIndexer {
   }
 
   async refreshFile(filePath: string): Promise<void> {
-    // Debounce
     const existing = this.debounceTimers.get(filePath)
     if (existing) clearTimeout(existing)
 
     const timer = setTimeout(async () => {
       this.debounceTimers.delete(filePath)
-      await this.processBatch([
-        await buildFileInfo(filePath, this.projectRoot).catch(() => null),
-      ].filter(Boolean) as any[])
+
+      // Check if file still exists
+      const fileInfo = await buildFileInfo(filePath, this.projectRoot)
+      if (!fileInfo) {
+        // File deleted — remove from index
+        const relPath = path.relative(this.projectRoot, filePath)
+        this.fts.deleteFile(relPath)
+        await this.vector?.deleteByPath(relPath)
+        return
+      }
+
+      await this.processBatch([fileInfo])
     }, this.config.indexing.debounceMs)
 
     this.debounceTimers.set(filePath, timer)
@@ -190,7 +218,6 @@ export class CodebaseIndexer implements IIndexer {
 
     const results: IndexSearchResult[] = []
 
-    // FTS search
     if (this.config.indexing.fts) {
       const symbolResults = this.fts.searchSymbols(query, limit, kind)
       results.push(...symbolResults)
@@ -201,11 +228,9 @@ export class CodebaseIndexer implements IIndexer {
       }
     }
 
-    // Vector search (merge if available)
     if (this.vector && this.config.indexing.vector && opts?.semantic !== false) {
       const vecResults = await this.vector.search(query, limit, kind)
 
-      // Merge and deduplicate by path+line
       const seen = new Set(results.map(r => `${r.path}:${r.startLine}`))
       for (const r of vecResults) {
         const key = `${r.path}:${r.startLine}`
@@ -216,33 +241,55 @@ export class CodebaseIndexer implements IIndexer {
       }
     }
 
-    // Sort by score (lower FTS rank = better, higher vector score = better)
     return results
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .slice(0, limit)
   }
 
+  /**
+   * Clear all index data and restart indexing.
+   */
+  async reindex(): Promise<void> {
+    this.stop()
+    this.fts.clear()
+    await this.startIndexing()
+  }
+
   stop(): void {
     this.abortController?.abort()
+    this.indexing = false
+
+    // Clear all pending debounce timers to prevent post-stop callbacks
+    for (const timer of this.debounceTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.debounceTimers.clear()
+  }
+
+  /**
+   * Fully close the indexer — clears timers, closes SQLite.
+   * Call when the extension is deactivated or the indexer is no longer needed.
+   */
+  close(): void {
+    this.stop()
+    this.statusListeners = []
+    try {
+      this.fts.close()
+    } catch {}
   }
 }
 
-async function buildFileInfo(absPath: string, root: string): Promise<{
-  path: string; absPath: string; ext: string; mtime: number; hash: string; size: number
-} | null> {
+async function buildFileInfo(absPath: string, root: string): Promise<FileInfo | null> {
   try {
-    const { stat, readFile } = await import("node:fs/promises")
-    const { createHash } = await import("node:crypto")
-    const { extname, relative } = await import("node:path")
-
-    const s = await stat(absPath)
-    const content = await readFile(absPath)
-    const hash = createHash("md5").update(content).digest("hex")
+    const s = await fs.stat(absPath)
+    const content = await fs.readFile(absPath)
+    const hash = crypto.createHash("md5").update(content).digest("hex")
+    const ext = path.extname(absPath).toLowerCase()
 
     return {
-      path: relative(root, absPath),
+      path: path.relative(root, absPath),
       absPath,
-      ext: extname(absPath).toLowerCase(),
+      ext,
       mtime: s.mtimeMs,
       hash,
       size: s.size,

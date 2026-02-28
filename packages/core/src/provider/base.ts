@@ -8,9 +8,14 @@ import type {
 } from "./types.js"
 import { generateStructuredWithFallback, supportsStructuredOutput } from "./structured-output.js"
 
+const DEFAULT_MAX_RETRIES = 3
+const DEFAULT_INITIAL_DELAY = 1000
+const DEFAULT_MAX_DELAY = 30_000
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+
 /**
  * Base LLM client implementation using Vercel AI SDK.
- * Handles streaming, tool calls, reasoning blocks, and structured output.
+ * Handles streaming, tool calls, reasoning blocks, structured output and retry.
  */
 export class BaseLLMClient implements LLMClient {
   constructor(
@@ -42,13 +47,44 @@ export class BaseLLMClient implements LLMClient {
 
     const messages = buildAISDKMessages(opts.messages)
 
-    let systemPrompt = opts.systemPrompt
-    // For Anthropic, inject cache_control markers if cacheableSystemBlocks is set
-    // (This is handled per-provider, not here — the Anthropic provider overrides)
+    let attempt = 0
+    const maxAttempts = opts.maxRetries ?? DEFAULT_MAX_RETRIES
+    const initialDelay = DEFAULT_INITIAL_DELAY
+    const maxDelay = DEFAULT_MAX_DELAY
 
+    while (true) {
+      attempt++
+      try {
+        yield* this._streamOnce(opts, messages, tools)
+        return
+      } catch (err) {
+        if (opts.signal?.aborted) throw err
+        const status = getErrorStatus(err)
+        const isRetryable = status ? RETRYABLE_STATUS.has(status) : isNetworkError(err)
+
+        if (!isRetryable || attempt >= maxAttempts) {
+          throw err
+        }
+
+        // Exponential backoff with jitter
+        const delay = Math.min(
+          initialDelay * Math.pow(2, attempt - 1) + Math.random() * 500,
+          maxDelay
+        )
+        yield { type: "error", error: new Error(`Retrying after error (attempt ${attempt}/${maxAttempts}): ${String(err)}`) }
+        await sleep(delay, opts.signal)
+      }
+    }
+  }
+
+  private async *_streamOnce(
+    opts: StreamOptions,
+    messages: Parameters<typeof streamText>[0]["messages"],
+    tools: Record<string, { description: string; parameters: z.ZodType<unknown> }> | undefined
+  ): AsyncIterable<LLMStreamEvent> {
     const result = streamText({
       model: this.model,
-      system: systemPrompt,
+      system: opts.systemPrompt,
       messages,
       tools,
       maxTokens: opts.maxTokens ?? 8192,
@@ -57,6 +93,7 @@ export class BaseLLMClient implements LLMClient {
       maxSteps: 1, // We handle multi-step manually in agentLoop
     })
 
+    let reasoningText = ""
     let hasError = false
 
     for await (const part of result.fullStream) {
@@ -68,6 +105,7 @@ export class BaseLLMClient implements LLMClient {
           break
 
         case "reasoning":
+          reasoningText += (part as Record<string, string>)["textDelta"] ?? ""
           yield { type: "reasoning_delta", delta: (part as Record<string, string>)["textDelta"] ?? "" }
           break
 
@@ -91,12 +129,13 @@ export class BaseLLMClient implements LLMClient {
 
         case "finish": {
           const usage = result.usage
+          const usageData = await usage.catch(() => null)
           yield {
             type: "finish",
             finishReason: part.finishReason as LLMStreamEvent["finishReason"],
             usage: {
-              inputTokens: (await usage)?.promptTokens ?? 0,
-              outputTokens: (await usage)?.completionTokens ?? 0,
+              inputTokens: usageData?.promptTokens ?? 0,
+              outputTokens: usageData?.completionTokens ?? 0,
             },
           }
           break
@@ -107,10 +146,6 @@ export class BaseLLMClient implements LLMClient {
           yield { type: "error", error: part.error instanceof Error ? part.error : new Error(String(part.error)) }
           break
       }
-    }
-
-    if (!hasError) {
-      // Ensure finish is always yielded
     }
   }
 
@@ -126,11 +161,34 @@ function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typ
     if (msg.role === "system") continue // handled via system param
 
     if (typeof msg.content === "string") {
+      if (msg.role === "tool") continue // skip legacy string-content tool messages
       result.push({ role: msg.role as "user" | "assistant", content: msg.content })
       continue
     }
 
-    // Handle complex content
+    if (!Array.isArray(msg.content) || msg.content.length === 0) continue
+
+    // Tool result messages (role === "tool") with array content
+    if (msg.role === "tool") {
+      const toolResultParts = msg.content
+        .filter(p => p.type === "tool-result")
+        .map(p => {
+          const tr = p as { type: "tool-result"; toolCallId: string; toolName: string; result: string; isError?: boolean }
+          return {
+            type: "tool-result" as const,
+            toolCallId: tr.toolCallId,
+            toolName: tr.toolName ?? "",
+            result: [{ type: "text" as const, text: tr.result }],
+            isError: tr.isError ?? false,
+          }
+        })
+      if (toolResultParts.length > 0) {
+        result.push({ role: "tool", content: toolResultParts })
+      }
+      continue
+    }
+
+    // User / assistant messages with complex content
     const parts: unknown[] = []
     for (const part of msg.content) {
       switch (part.type) {
@@ -140,7 +198,7 @@ function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typ
         case "image":
           parts.push({ type: "image", image: part.data, mimeType: part.mimeType })
           break
-        case "tool_call":
+        case "tool-call":
           parts.push({
             type: "tool-call",
             toolCallId: part.toolCallId,
@@ -148,19 +206,55 @@ function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typ
             args: part.args,
           })
           break
-        case "tool_result":
+        case "tool-result":
           parts.push({
             type: "tool-result",
             toolCallId: part.toolCallId,
-            toolName: "",
+            toolName: part.toolName ?? "",
             result: [{ type: "text", text: part.result }],
-            isError: part.isError,
+            isError: part.isError ?? false,
           })
           break
       }
     }
-    result.push({ role: msg.role as "user" | "assistant", content: parts as string })
+    if (parts.length > 0) {
+      result.push({ role: msg.role as "user" | "assistant", content: parts as any })
+    }
   }
 
   return result
+}
+
+function getErrorStatus(err: unknown): number | null {
+  if (err && typeof err === "object") {
+    const status = (err as Record<string, unknown>)["statusCode"]
+      ?? (err as Record<string, unknown>)["status"]
+    if (typeof status === "number") return status
+  }
+  const msg = String(err)
+  const m = msg.match(/(?:status|code)[^\d]*(\d{3})/i)
+  if (m) return parseInt(m[1]!)
+  return null
+}
+
+function isNetworkError(err: unknown): boolean {
+  const msg = String(err).toLowerCase()
+  return (
+    msg.includes("econnreset") ||
+    msg.includes("econnrefused") ||
+    msg.includes("etimedout") ||
+    msg.includes("network") ||
+    msg.includes("socket") ||
+    msg.includes("fetch failed")
+  )
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms)
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer)
+      reject(new Error("Aborted"))
+    })
+  })
 }

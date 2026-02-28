@@ -1,5 +1,6 @@
 import { z } from "zod"
 import type { ToolDef, ToolContext } from "../../types.js"
+import TurndownService from "turndown"
 
 const MAX_CONTENT_BYTES = 100 * 1024 // 100 KB
 const FETCH_TIMEOUT = 30_000
@@ -74,8 +75,6 @@ Useful for: reading documentation, fetching API specs, checking URLs.`,
 
 function htmlToMarkdown(html: string): string {
   try {
-    // Lazy-load turndown to avoid import at module load
-    const TurndownService = require("turndown")
     const td = new TurndownService({
       headingStyle: "atx",
       codeBlockStyle: "fenced",

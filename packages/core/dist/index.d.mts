@@ -3,7 +3,7 @@ import { LanguageModelV1 } from 'ai';
 
 declare const NexusConfigSchema: z.ZodObject<{
     model: z.ZodDefault<z.ZodObject<{
-        provider: z.ZodEnum<["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock"]>;
+        provider: z.ZodEnum<["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>;
         id: z.ZodString;
         apiKey: z.ZodOptional<z.ZodString>;
         baseUrl: z.ZodOptional<z.ZodString>;
@@ -12,7 +12,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiVersion: z.ZodOptional<z.ZodString>;
         extra: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     }, "strip", z.ZodTypeAny, {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock";
+        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -21,7 +21,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }, {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock";
+        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -31,7 +31,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         extra?: Record<string, unknown> | undefined;
     }>>;
     maxMode: z.ZodDefault<z.ZodObject<{
-        provider: z.ZodEnum<["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock"]>;
+        provider: z.ZodEnum<["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>;
         id: z.ZodString;
         apiKey: z.ZodOptional<z.ZodString>;
         baseUrl: z.ZodOptional<z.ZodString>;
@@ -42,7 +42,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     } & {
         enabled: z.ZodDefault<z.ZodBoolean>;
     }, "strip", z.ZodTypeAny, {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock";
+        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         enabled: boolean;
         apiKey?: string | undefined;
@@ -52,7 +52,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }, {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock";
+        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -324,18 +324,70 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand: z.ZodDefault<z.ZodBoolean>;
         autoApproveReadPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         denyPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        rules: z.ZodDefault<z.ZodArray<z.ZodObject<{
+            tool: z.ZodOptional<z.ZodString>;
+            pathPattern: z.ZodOptional<z.ZodString>;
+            commandPattern: z.ZodOptional<z.ZodString>;
+            action: z.ZodEnum<["allow", "deny", "ask"]>;
+            reason: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            action: "ask" | "allow" | "deny";
+            tool?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+            reason?: string | undefined;
+        }, {
+            action: "ask" | "allow" | "deny";
+            tool?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+            reason?: string | undefined;
+        }>, "many">>;
     }, "strip", z.ZodTypeAny, {
         autoApproveRead: boolean;
         autoApproveWrite: boolean;
         autoApproveCommand: boolean;
         autoApproveReadPatterns: string[];
         denyPatterns: string[];
+        rules: {
+            action: "ask" | "allow" | "deny";
+            tool?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+            reason?: string | undefined;
+        }[];
     }, {
         autoApproveRead?: boolean | undefined;
         autoApproveWrite?: boolean | undefined;
         autoApproveCommand?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
         denyPatterns?: string[] | undefined;
+        rules?: {
+            action: "ask" | "allow" | "deny";
+            tool?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+            reason?: string | undefined;
+        }[] | undefined;
+    }>>;
+    retry: z.ZodDefault<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        maxAttempts: z.ZodDefault<z.ZodNumber>;
+        initialDelayMs: z.ZodDefault<z.ZodNumber>;
+        maxDelayMs: z.ZodDefault<z.ZodNumber>;
+        retryOnStatus: z.ZodDefault<z.ZodArray<z.ZodNumber, "many">>;
+    }, "strip", z.ZodTypeAny, {
+        enabled: boolean;
+        maxAttempts: number;
+        initialDelayMs: number;
+        maxDelayMs: number;
+        retryOnStatus: number[];
+    }, {
+        enabled?: boolean | undefined;
+        maxAttempts?: number | undefined;
+        initialDelayMs?: number | undefined;
+        maxDelayMs?: number | undefined;
+        retryOnStatus?: number[] | undefined;
     }>>;
     checkpoint: z.ZodDefault<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
@@ -442,7 +494,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         files?: string[] | undefined;
     }>>;
     profiles: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
-        provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock"]>>;
+        provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "openrouter", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>>;
         id: z.ZodOptional<z.ZodString>;
         apiKey: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         baseUrl: z.ZodOptional<z.ZodOptional<z.ZodString>>;
@@ -451,7 +503,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiVersion: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         extra: z.ZodOptional<z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
     }, "strip", z.ZodTypeAny, {
-        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -460,7 +512,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }, {
-        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -471,7 +523,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     }>>>;
 }, "strip", z.ZodTypeAny, {
     model: {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock";
+        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -491,7 +543,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         }[];
     };
     maxMode: {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock";
+        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         enabled: boolean;
         apiKey?: string | undefined;
@@ -538,12 +590,29 @@ declare const NexusConfigSchema: z.ZodObject<{
         batchSize: number;
         debounceMs: number;
     };
+    rules: {
+        files: string[];
+    };
     permissions: {
         autoApproveRead: boolean;
         autoApproveWrite: boolean;
         autoApproveCommand: boolean;
         autoApproveReadPatterns: string[];
         denyPatterns: string[];
+        rules: {
+            action: "ask" | "allow" | "deny";
+            tool?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+            reason?: string | undefined;
+        }[];
+    };
+    retry: {
+        enabled: boolean;
+        maxAttempts: number;
+        initialDelayMs: number;
+        maxDelayMs: number;
+        retryOnStatus: number[];
     };
     checkpoint: {
         enabled: boolean;
@@ -568,11 +637,8 @@ declare const NexusConfigSchema: z.ZodObject<{
     parallelAgents: {
         maxParallel: number;
     };
-    rules: {
-        files: string[];
-    };
     profiles: Record<string, {
-        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -596,7 +662,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     } | undefined;
 }, {
     model?: {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock";
+        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -616,7 +682,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         }[] | undefined;
     } | undefined;
     maxMode?: {
-        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock";
+        provider: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -714,12 +780,29 @@ declare const NexusConfigSchema: z.ZodObject<{
         batchSize?: number | undefined;
         debounceMs?: number | undefined;
     } | undefined;
+    rules?: {
+        files?: string[] | undefined;
+    } | undefined;
     permissions?: {
         autoApproveRead?: boolean | undefined;
         autoApproveWrite?: boolean | undefined;
         autoApproveCommand?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
         denyPatterns?: string[] | undefined;
+        rules?: {
+            action: "ask" | "allow" | "deny";
+            tool?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+            reason?: string | undefined;
+        }[] | undefined;
+    } | undefined;
+    retry?: {
+        enabled?: boolean | undefined;
+        maxAttempts?: number | undefined;
+        initialDelayMs?: number | undefined;
+        maxDelayMs?: number | undefined;
+        retryOnStatus?: number[] | undefined;
     } | undefined;
     checkpoint?: {
         enabled?: boolean | undefined;
@@ -744,11 +827,8 @@ declare const NexusConfigSchema: z.ZodObject<{
     parallelAgents?: {
         maxParallel?: number | undefined;
     } | undefined;
-    rules?: {
-        files?: string[] | undefined;
-    } | undefined;
     profiles?: Record<string, {
-        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -975,7 +1055,7 @@ interface ProviderConfig {
     /** Extra provider options */
     extra?: Record<string, unknown>;
 }
-type ProviderName = "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock";
+type ProviderName = "anthropic" | "openai" | "google" | "openrouter" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
 interface EmbeddingConfig {
     provider: "openai" | "openai-compatible" | "ollama" | "local";
     model: string;
@@ -1017,7 +1097,10 @@ interface NexusConfig {
         autoApproveCommand: boolean;
         autoApproveReadPatterns: string[];
         denyPatterns: string[];
+        /** Fine-grained permission rules evaluated in order, first match wins */
+        rules: PermissionRule[];
     };
+    retry: RetryConfig;
     checkpoint: {
         enabled: boolean;
         timeoutMs: number;
@@ -1053,6 +1136,27 @@ interface ModeConfig {
     autoApprove?: PermissionAction[];
     systemPrompt?: string;
     customInstructions?: string;
+}
+type PermissionRuleAction = "allow" | "deny" | "ask";
+interface PermissionRule {
+    /** Tool name or glob pattern matching tool names */
+    tool?: string;
+    /** Path pattern (glob) to match against file args */
+    pathPattern?: string;
+    /** Regex to match against command args */
+    commandPattern?: string;
+    /** Action to take when rule matches */
+    action: PermissionRuleAction;
+    /** Human-readable reason for the rule */
+    reason?: string;
+}
+interface RetryConfig {
+    enabled: boolean;
+    maxAttempts: number;
+    initialDelayMs: number;
+    maxDelayMs: number;
+    /** HTTP status codes that trigger retry */
+    retryOnStatus: number[];
 }
 interface McpServerConfig {
     name: string;
@@ -1118,7 +1222,7 @@ interface LLMStreamEvent {
     error?: Error;
 }
 interface LLMMessage {
-    role: "user" | "assistant" | "system";
+    role: "user" | "assistant" | "system" | "tool";
     content: LLMMessageContent;
 }
 type LLMMessageContent = string | Array<{
@@ -1129,13 +1233,14 @@ type LLMMessageContent = string | Array<{
     data: string;
     mimeType: string;
 } | {
-    type: "tool_call";
+    type: "tool-call";
     toolCallId: string;
     toolName: string;
     args: Record<string, unknown>;
 } | {
-    type: "tool_result";
+    type: "tool-result";
     toolCallId: string;
+    toolName: string;
     result: string;
     isError?: boolean;
 }>;
@@ -1153,6 +1258,7 @@ interface StreamOptions {
     cacheableSystemBlocks?: number;
     maxTokens?: number;
     temperature?: number;
+    maxRetries?: number;
 }
 interface GenerateOptions<T> {
     messages: LLMMessage[];
@@ -1244,7 +1350,7 @@ type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "mcp" | "
 /**
  * Core built-in tool groups per mode.
  * These are ALWAYS active if the mode permits — no classifier applied.
- * Classifier only applies to MCP tools and custom skills when count exceeds threshold.
+ * Classifier only applies to MCP/custom tools when count exceeds threshold.
  */
 declare const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]>;
 /**
@@ -1253,7 +1359,7 @@ declare const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]>;
  */
 declare const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]>;
 /**
- * Read-only tools that can be parallelized.
+ * Read-only tools that can be parallelized safely.
  */
 declare const READ_ONLY_TOOLS: Set<string>;
 /**
@@ -1290,7 +1396,17 @@ interface PromptContext {
 }
 /**
  * Assemble the full system prompt from blocks.
- * First 3 blocks are stable/cacheable. Last 3 are dynamic.
+ * Cacheable blocks come first (stable = good for Anthropic prompt caching).
+ * Dynamic blocks come last (vary per turn).
+ *
+ * Cache layout:
+ *   [Block 0] Role + Identity (cacheable — changes rarely)
+ *   [Block 1] Rules (cacheable — project-specific but stable)
+ *   [Block 2] Skills (cacheable — task-specific but stable within a task)
+ *   --- cache boundary ---
+ *   [Block 3] System info + todos + diagnostics (dynamic per turn)
+ *   [Block 4] @mentions context (dynamic)
+ *   [Block 5] Compaction summary (dynamic)
  */
 declare function buildSystemPrompt(ctx: PromptContext): {
     blocks: string[];
@@ -1409,6 +1525,13 @@ declare function estimateTokens(text: string): number;
 
 /**
  * Load skills from configured paths and standard locations.
+ *
+ * Config paths can be:
+ *  - A directory path like ".nexus/skills/my-skill" → loads SKILL.md or any .md inside
+ *  - A glob pattern like ".nexus/skills/**\/*.md"
+ *  - A direct file path like ".nexus/skills/my-skill/SKILL.md"
+ *
+ * Standard locations are also auto-searched.
  */
 declare function loadSkills(skillPaths: string[], cwd: string): Promise<SkillDef[]>;
 

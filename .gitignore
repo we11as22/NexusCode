@@ -1,1 +1,59 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+**/dist/
+*.tsbuildinfo
+*.js.map
+*.mjs.map
+
+# Packages build dirs
+packages/core/dist/
+packages/cli/dist/
+packages/vscode/dist/
+packages/vscode/webview-ui/dist/
+
+# IDE / Editor
+.idea/
+.vscode/
+.vscode-test/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# NexusCode runtime (project-local index/checkpoints; keep .nexus/nexus.yaml)
+.nexus/index/
+.nexus/checkpoints/
+.nexus/sessions/
+
+# Generated / temp
+*.log
+coverage/
+.turbo/
+.cache/
+tmp/
+temp/
+
+# Optional: generated comparison docs (uncomment if you don't want to commit)
+# COMPARISON_SUMMARY.md
+# DETAILED_COMPARISON.md
+
+# Legacy (was in original .gitignore)
 sources/

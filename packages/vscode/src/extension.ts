@@ -15,7 +15,11 @@ export function activate(context: vscode.ExtensionContext): void {
     )
   )
 
-  // Commands
+  // Register the provider itself for disposal
+  context.subscriptions.push(provider)
+
+  // ── Commands ──────────────────────────────────────────────────────────────
+
   context.subscriptions.push(
     vscode.commands.registerCommand("nexuscode.openPanel", async () => {
       await provider?.openPanel()
@@ -40,14 +44,33 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand("nexuscode.compact", () => {
-      // Trigger compact via webview message
       vscode.commands.executeCommand("nexuscode.sidebar.focus")
     }),
 
     vscode.commands.registerCommand("nexuscode.clearChat", () => {
       vscode.commands.executeCommand("nexuscode.sidebar.focus")
+    }),
+
+    vscode.commands.registerCommand("nexuscode.reindex", async () => {
+      await provider?.reindex()
+      vscode.window.showInformationMessage("NexusCode: Re-indexing codebase...")
+    }),
+
+    vscode.commands.registerCommand("nexuscode.clearIndex", async () => {
+      const confirm = await vscode.window.showWarningMessage(
+        "NexusCode: Clear the entire codebase index and re-build it from scratch?",
+        "Clear & Rebuild",
+        "Cancel"
+      )
+      if (confirm === "Clear & Rebuild") {
+        await provider?.clearIndex()
+        vscode.window.showInformationMessage("NexusCode: Index cleared. Re-indexing...")
+      }
     })
   )
 }
 
-export function deactivate(): void {}
+export function deactivate(): void {
+  provider?.dispose()
+  provider = undefined
+}
