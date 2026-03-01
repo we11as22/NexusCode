@@ -19,6 +19,7 @@ const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
  */
 export async function loadConfig(cwd?: string): Promise<NexusConfig> {
   const startDir = cwd ?? process.cwd()
+  loadEnvFileFromTree(startDir)
 
   // 1. Load global config
   const globalRaw = readConfigFile(GLOBAL_CONFIG_PATH)
@@ -58,6 +59,45 @@ export async function loadConfig(cwd?: string): Promise<NexusConfig> {
   }
 
   return result.data as NexusConfig
+}
+
+function loadEnvFileFromTree(startDir: string): void {
+  let dir = startDir
+  let maxUp = 20
+  while (maxUp-- > 0) {
+    const envPath = path.join(dir, ".env")
+    if (fs.existsSync(envPath)) {
+      loadEnvFile(envPath)
+      return
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+}
+
+function loadEnvFile(filePath: string): void {
+  try {
+    const content = fs.readFileSync(filePath, "utf8")
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim()
+      if (!line || line.startsWith("#")) continue
+      const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/)
+      if (!m) continue
+      const key = m[1]!
+      if (process.env[key] !== undefined) continue
+      let value = m[2] ?? ""
+      if (
+        (value.startsWith("\"") && value.endsWith("\"")) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1)
+      }
+      process.env[key] = value
+    }
+  } catch {
+    // Ignore malformed or unreadable .env
+  }
 }
 
 function readConfigFile(filePath: string): NexusConfigInput | null {

@@ -19,6 +19,7 @@ import { createCohere } from '@ai-sdk/cohere';
 import { createTogetherAI } from '@ai-sdk/togetherai';
 import { createPerplexity } from '@ai-sdk/perplexity';
 import * as crypto from 'crypto';
+import crypto__default from 'crypto';
 import * as fs11 from 'fs/promises';
 import { mkdir } from 'fs/promises';
 import { glob } from 'glob';
@@ -190,6 +191,7 @@ var GLOBAL_CONFIG_PATH = path6.join(GLOBAL_CONFIG_DIR, "nexus.yaml");
 var OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 async function loadConfig(cwd) {
   const startDir = cwd ?? process.cwd();
+  loadEnvFileFromTree(startDir);
   const globalRaw = readConfigFile(GLOBAL_CONFIG_PATH);
   let projectRaw = null;
   let dir = startDir;
@@ -217,6 +219,39 @@ async function loadConfig(cwd) {
     return NexusConfigSchema.parse({});
   }
   return result.data;
+}
+function loadEnvFileFromTree(startDir) {
+  let dir = startDir;
+  let maxUp = 20;
+  while (maxUp-- > 0) {
+    const envPath = path6.join(dir, ".env");
+    if (fs.existsSync(envPath)) {
+      loadEnvFile(envPath);
+      return;
+    }
+    const parent = path6.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+}
+function loadEnvFile(filePath) {
+  try {
+    const content = fs.readFileSync(filePath, "utf8");
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+      if (!m) continue;
+      const key = m[1];
+      if (process.env[key] !== void 0) continue;
+      let value = m[2] ?? "";
+      if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'")) {
+        value = value.slice(1, -1);
+      }
+      process.env[key] = value;
+    }
+  } catch {
+  }
 }
 function readConfigFile(filePath) {
   try {
@@ -569,7 +604,6 @@ var BaseLLMClient = class {
       maxSteps: 1
       // We handle multi-step manually in agentLoop
     });
-    let reasoningText = "";
     for await (const part of result.fullStream) {
       if (opts.signal?.aborted) break;
       switch (part.type) {
@@ -577,7 +611,6 @@ var BaseLLMClient = class {
           yield { type: "text_delta", delta: part.textDelta };
           break;
         case "reasoning":
-          reasoningText += part["textDelta"] ?? "";
           yield { type: "reasoning_delta", delta: part["textDelta"] ?? "" };
           break;
         case "tool-call":
@@ -586,14 +619,6 @@ var BaseLLMClient = class {
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             toolInput: part.args
-          };
-          break;
-        case "tool-result":
-          yield {
-            type: "tool_result",
-            toolCallId: part.toolCallId,
-            toolName: part.toolName,
-            toolOutput: typeof part.result === "string" ? part.result : JSON.stringify(part.result)
           };
           break;
         case "finish": {
@@ -630,18 +655,14 @@ function buildAISDKMessages(messages) {
     }
     if (!Array.isArray(msg.content) || msg.content.length === 0) continue;
     if (msg.role === "tool") {
-      const toolResultParts = msg.content.filter((p) => p.type === "tool-result").map((p) => {
+      const toolResultLines = msg.content.filter((p) => p.type === "tool-result").map((p) => {
         const tr = p;
-        return {
-          type: "tool-result",
-          toolCallId: tr.toolCallId,
-          toolName: tr.toolName ?? "",
-          result: [{ type: "text", text: tr.result }],
-          isError: tr.isError ?? false
-        };
+        const toolName = tr.toolName ?? "unknown_tool";
+        const prefix = tr.isError ? "TOOL_ERROR" : "TOOL_RESULT";
+        return `${prefix} ${toolName} (${tr.toolCallId}): ${tr.result}`;
       });
-      if (toolResultParts.length > 0) {
-        result.push({ role: "tool", content: toolResultParts });
+      if (toolResultLines.length > 0) {
+        result.push({ role: "user", content: toolResultLines.join("\n") });
       }
       continue;
     }
@@ -755,7 +776,12 @@ function createOpenAICompatibleClient(config) {
   if (!config.baseUrl) {
     throw new Error("openai-compatible provider requires baseUrl");
   }
-  const apiKey = config.apiKey ?? process.env["NEXUS_API_KEY"] ?? "dummy";
+  const apiKey = config.apiKey ?? process.env["OPENAI_API_KEY"] ?? process.env["OPENROUTER_API_KEY"] ?? process.env["NEXUS_API_KEY"] ?? "dummy";
+  if (apiKey === "dummy" && !isLocalBaseUrl(config.baseUrl)) {
+    throw new Error(
+      "Missing API key for openai-compatible provider. Set model.apiKey or OPENROUTER_API_KEY/NEXUS_API_KEY."
+    );
+  }
   const openai = createOpenAI({
     apiKey,
     baseURL: config.baseUrl,
@@ -786,6 +812,10 @@ function detectProviderFromUrl(baseUrl) {
   if (url.includes("x.ai") || url.includes("xai")) return "xai";
   if (url.includes("localhost") || url.includes("127.0.0.1")) return "local";
   return "openai-compatible";
+}
+function isLocalBaseUrl(baseUrl) {
+  const url = baseUrl.toLowerCase();
+  return url.includes("localhost") || url.includes("127.0.0.1");
 }
 function createAzureClient(config) {
   const apiKey = config.apiKey ?? process.env["AZURE_API_KEY"] ?? "";
@@ -880,8 +910,14 @@ var OpenAICompatibleEmbeddingClient = class {
   model;
   dimensions;
   constructor(config) {
+    const apiKey = config.apiKey ?? process.env["OPENAI_API_KEY"] ?? process.env["OPENROUTER_API_KEY"] ?? process.env["NEXUS_API_KEY"] ?? "dummy";
+    if (apiKey === "dummy" && !isLocalBaseUrl2(config.baseUrl)) {
+      throw new Error(
+        "Missing API key for openai-compatible embeddings. Set embeddings.apiKey or OPENROUTER_API_KEY/NEXUS_API_KEY."
+      );
+    }
     const openai = createOpenAI({
-      apiKey: config.apiKey ?? process.env["OPENAI_API_KEY"] ?? process.env["OPENROUTER_API_KEY"] ?? process.env["NEXUS_API_KEY"] ?? "dummy",
+      apiKey,
       baseURL: config.baseUrl,
       compatibility: "compatible"
     });
@@ -931,6 +967,11 @@ var LocalEmbeddingClient = class {
     return results;
   }
 };
+function isLocalBaseUrl2(baseUrl) {
+  if (!baseUrl) return false;
+  const url = baseUrl.toLowerCase();
+  return url.includes("localhost") || url.includes("127.0.0.1");
+}
 
 // src/provider/index.ts
 function createLLMClient(config) {
@@ -1909,6 +1950,14 @@ async function runAgentLoop(opts) {
     debug: 32
   };
   const maxIterations = config.maxMode.enabled ? Math.floor(baseMaxIterationsByMode[mode] * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2)))) : baseMaxIterationsByMode[mode];
+  let lastAssistantMessageId = "";
+  const emitContextUsage = () => {
+    const limitTokens = getContextLimit(activeClient.modelId);
+    const usedTokens = session.getTokenEstimate();
+    const percent = limitTokens > 0 ? Math.min(100, Math.round(usedTokens / limitTokens * 100)) : 0;
+    host.emit({ type: "context_usage", usedTokens, limitTokens, percent });
+  };
+  emitContextUsage();
   while (!signal.aborted) {
     loopIterations++;
     if (loopIterations > maxIterations) {
@@ -1919,6 +1968,7 @@ async function runAgentLoop(opts) {
       });
       break;
     }
+    const isFinalIteration = loopIterations === maxIterations;
     const promptCtx = {
       mode,
       maxMode: config.maxMode.enabled,
@@ -1934,17 +1984,27 @@ async function runAgentLoop(opts) {
       mentionsContext
     };
     const { blocks, cacheableCount } = buildSystemPrompt(promptCtx);
+    if (isFinalIteration) {
+      blocks.push("FINAL ITERATION: do not call tools. Return a concise final answer from gathered context.");
+    }
     const systemPrompt = blocks.join("\n\n---\n\n");
-    const llmTools = resolvedTools.map((t) => ({
+    const llmTools = (isFinalIteration ? [] : resolvedTools).map((t) => ({
       name: t.name,
       description: t.description,
       parameters: t.parameters
     }));
     const messages = buildMessagesFromSession(session);
+    if (isFinalIteration) {
+      messages.push({
+        role: "user",
+        content: "Provide the final answer now in plain text only. Do not emit tool-call markup, XML, or JSON function calls."
+      });
+    }
     const newMessageId = session.addMessage({
       role: "assistant",
       content: ""
     }).id;
+    lastAssistantMessageId = newMessageId;
     let currentText = "";
     const pendingReads = [];
     let lastToolName = "";
@@ -2090,7 +2150,7 @@ async function runAgentLoop(opts) {
                 }
               });
             }
-            host.emit({ type: "done", messageId: newMessageId });
+            emitContextUsage();
             break;
           case "error":
             if (event.error) {
@@ -2129,6 +2189,11 @@ async function runAgentLoop(opts) {
       host.emit({ type: "compaction_end" });
     }
     await session.save();
+    emitContextUsage();
+  }
+  if (!signal.aborted && lastAssistantMessageId) {
+    emitContextUsage();
+    host.emit({ type: "done", messageId: lastAssistantMessageId });
   }
 }
 async function executeToolCall(toolCallId, toolName, toolInput, tools, ctx, autoApproveActions, config, host, session, messageId) {
@@ -3034,12 +3099,15 @@ function truncateOutput(output) {
 var MAX_RESULTS = 500;
 var MAX_OUTPUT_CHARS = 1e5;
 var searchSchema = z.object({
-  pattern: z.string().describe("Regex pattern to search for"),
+  pattern: z.string().optional().describe("Regex pattern to search for"),
+  patterns: z.array(z.string()).min(1).max(20).optional().describe("Multiple regex patterns to search in one call"),
   path: z.string().optional().describe("Directory or file to search in (relative to project root)"),
+  paths: z.array(z.string()).min(1).max(20).optional().describe("Multiple directories/files to search in"),
   include: z.string().optional().describe("File glob pattern to include, e.g. '*.ts' or '**/*.{ts,tsx}'"),
   exclude: z.string().optional().describe("File glob pattern to exclude"),
   context_lines: z.number().int().min(0).max(10).optional().describe("Lines of context around matches (0-10)"),
   case_sensitive: z.boolean().optional().describe("Case sensitive search (default: false)"),
+  max_results: z.number().int().positive().max(2e3).optional().describe("Max total matches across all patterns/paths (default: 500)"),
   task_progress: z.string().optional()
 });
 var searchFilesTool = {
@@ -3054,48 +3122,50 @@ Examples:
 - Find class usages: pattern="new MyClass\\("`,
   parameters: searchSchema,
   readOnly: true,
-  async execute({ pattern, path: searchPath, include, exclude, context_lines, case_sensitive }, ctx) {
-    const searchDir = searchPath ? path6.resolve(ctx.cwd, searchPath) : ctx.cwd;
-    const args = [
-      "--json",
-      "--max-count",
-      "1",
-      "-e",
-      pattern
-    ];
-    if (!case_sensitive) args.push("--ignore-case");
-    if (include) args.push("--glob", include);
-    if (exclude) args.push("--glob", `!${exclude}`);
-    if (context_lines) {
-      args.push("--context", String(context_lines));
+  async execute({ pattern, patterns, path: searchPath, paths, include, exclude, context_lines, case_sensitive, max_results }, ctx) {
+    const allPatterns = (patterns?.length ? patterns : pattern ? [pattern] : []).map((p) => p.trim()).filter(Boolean);
+    if (allPatterns.length === 0) {
+      return { success: false, output: "Provide pattern or patterns." };
     }
-    args.push(searchDir);
+    const targets = (paths?.length ? paths : searchPath ? [searchPath] : ["."]).map((p) => path6.resolve(ctx.cwd, p));
+    const maxMatches = Math.min(max_results ?? MAX_RESULTS, 2e3);
     try {
-      const { stdout } = await execa("rg", args, {
-        cwd: ctx.cwd,
-        reject: false
-      });
-      if (!stdout) {
-        return { success: true, output: `No matches found for pattern: ${pattern}` };
-      }
-      const lines = stdout.split("\n").filter(Boolean);
       const results = [];
+      const seen = /* @__PURE__ */ new Set();
       let matchCount = 0;
-      for (const line of lines) {
-        if (matchCount >= MAX_RESULTS) break;
-        try {
-          const obj = JSON.parse(line);
-          if (obj.type === "match") {
-            const data = obj.data;
-            const relPath = path6.relative(ctx.cwd, data.path.text);
-            results.push(`${relPath}:${data.line_number}:${data.lines.text.trimEnd()}`);
-            matchCount++;
+      for (const pat of allPatterns) {
+        if (matchCount >= maxMatches) break;
+        for (const target of targets) {
+          if (matchCount >= maxMatches) break;
+          const args = ["--json", "-e", pat];
+          if (!case_sensitive) args.push("--ignore-case");
+          if (include) args.push("--glob", include);
+          if (exclude) args.push("--glob", `!${exclude}`);
+          if (context_lines) args.push("--context", String(context_lines));
+          args.push(target);
+          const { stdout } = await execa("rg", args, { cwd: ctx.cwd, reject: false });
+          if (!stdout) continue;
+          const lines = stdout.split("\n").filter(Boolean);
+          for (const line of lines) {
+            if (matchCount >= maxMatches) break;
+            try {
+              const obj = JSON.parse(line);
+              if (obj.type !== "match") continue;
+              const data = obj.data;
+              const relPath = path6.relative(ctx.cwd, data.path.text);
+              const text = `${relPath}:${data.line_number}:${data.lines.text.trimEnd()}`;
+              const key = `${pat}|${text}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              results.push(`[${pat}] ${text}`);
+              matchCount++;
+            } catch {
+            }
           }
-        } catch {
         }
       }
       if (results.length === 0) {
-        return { success: true, output: `No matches found for pattern: ${pattern}` };
+        return { success: true, output: `No matches found for: ${allPatterns.join(", ")}` };
       }
       let output = results.join("\n");
       if (output.length > MAX_OUTPUT_CHARS) {
@@ -3104,7 +3174,7 @@ Examples:
       }
       return {
         success: true,
-        output: `Found ${matchCount} matches for /${pattern}/:
+        output: `Found ${matchCount} matches for ${allPatterns.length} pattern(s) in ${targets.length} target(s):
 
 ${output}`
       };
@@ -3328,7 +3398,9 @@ function extractDefinitionFromLine(line, ext, lineNum) {
   return null;
 }
 var schema7 = z.object({
-  query: z.string().describe("Semantic search query (natural language description of what you're looking for)"),
+  query: z.string().optional().describe("Semantic search query (natural language description of what you're looking for)"),
+  queries: z.array(z.string()).min(1).max(20).optional().describe("Multiple semantic queries in one call"),
+  path: z.string().optional().describe("Optional path scope (file or directory, relative to project root)"),
   kind: z.enum(["class", "function", "method", "interface", "type", "enum", "const", "any"]).optional().describe("Filter by symbol type"),
   limit: z.number().int().positive().max(50).optional().describe("Max results (default: 10)"),
   task_progress: z.string().optional()
@@ -3342,7 +3414,7 @@ If vector search is enabled, uses semantic similarity.
 Requires the codebase to be indexed (runs automatically on startup).`,
   parameters: schema7,
   readOnly: true,
-  async execute({ query, kind, limit }, ctx) {
+  async execute({ query, queries, path: path18, kind, limit }, ctx) {
     if (!ctx.indexer) {
       return {
         success: false,
@@ -3357,26 +3429,43 @@ Requires the codebase to be indexed (runs automatically on startup).`,
       return { success: false, output: `Index error: ${status.error}` };
     }
     try {
-      const results = await ctx.indexer.search(query, {
-        limit: limit ?? 10,
-        kind: kind === "any" ? void 0 : kind,
-        semantic: true
-      });
-      if (results.length === 0) {
-        return { success: true, output: `No results found for: "${query}"` };
+      const allQueries = (queries?.length ? queries : query ? [query] : []).map((q) => q.trim()).filter(Boolean);
+      if (allQueries.length === 0) {
+        return { success: false, output: "Provide query or queries." };
       }
-      const formatted = results.map((r, i) => {
-        const loc = r.startLine ? `:${r.startLine}` : "";
-        const parent = r.parent ? ` (in ${r.parent})` : "";
-        const kindStr = r.kind ? `[${r.kind}]` : "";
-        return `${i + 1}. ${r.path}${loc} ${kindStr}${parent}
+      const scope = path18?.replace(/\\/g, "/").replace(/\/+$/, "");
+      const isFileScope = scope != null && /\.[a-z0-9]+$/i.test(scope);
+      const sections = [];
+      for (const q of allQueries) {
+        const raw = await ctx.indexer.search(q, {
+          limit: limit ?? 10,
+          kind: kind === "any" ? void 0 : kind,
+          semantic: true
+        });
+        const filtered = scope ? raw.filter((r) => {
+          const p = r.path.replace(/\\/g, "/");
+          return isFileScope ? p === scope : p === scope || p.startsWith(`${scope}/`);
+        }) : raw;
+        if (filtered.length === 0) {
+          sections.push(`Query: "${q}"
+No results.`);
+          continue;
+        }
+        const formatted = filtered.map((r, i) => {
+          const loc = r.startLine ? `:${r.startLine}` : "";
+          const parent = r.parent ? ` (in ${r.parent})` : "";
+          const kindStr = r.kind ? `[${r.kind}]` : "";
+          return `${i + 1}. ${r.path}${loc} ${kindStr}${parent}
    ${r.content.slice(0, 200).replace(/\n/g, " ")}`;
-      }).join("\n\n");
+        }).join("\n\n");
+        sections.push(`Query: "${q}"
+${formatted}`);
+      }
       return {
         success: true,
-        output: `Found ${results.length} results for "${query}":
+        output: `${scope ? `Scope: ${scope}
 
-${formatted}`
+` : ""}${sections.join("\n\n---\n\n")}`
       };
     } catch (err) {
       return { success: false, output: `Search failed: ${err.message}` };
@@ -4255,8 +4344,13 @@ var VectorIndex = class {
       (s) => [s.name, s.kind ?? "", s.parent ?? "", s.content.slice(0, 500)].filter(Boolean).join(" ")
     );
     const vectors = await this.embeddings.embed(texts);
+    if (vectors.length === 0) return;
+    const observedSize = vectors[0]?.length ?? 0;
+    if (observedSize > 0 && observedSize !== this.vectorSize) {
+      await this.recreateCollection(observedSize);
+    }
     const points = symbols.map((s, i) => ({
-      id: stringToUint(s.id),
+      id: toPointId(s.id),
       vector: vectors[i],
       payload: {
         path: s.path,
@@ -4266,8 +4360,26 @@ var VectorIndex = class {
         startLine: s.startLine ?? 0,
         content: s.content.slice(0, 1e3)
       }
-    }));
-    await this.client.upsert(this.collectionName, { points });
+    })).filter((p) => Array.isArray(p.vector) && p.vector.length === this.vectorSize);
+    if (points.length === 0) return;
+    try {
+      await this.client.upsert(this.collectionName, { points });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const sizeHint = detectSizeFromMessage(message);
+      if (sizeHint && sizeHint !== this.vectorSize) {
+        await this.recreateCollection(sizeHint);
+        await this.client.upsert(this.collectionName, { points });
+        return;
+      }
+      if (/bad request/i.test(message)) {
+        const fallbackSize = observedSize > 0 ? observedSize : this.vectorSize;
+        await this.recreateCollection(fallbackSize);
+        await this.client.upsert(this.collectionName, { points });
+        return;
+      }
+      throw err;
+    }
   }
   async deleteByPath(filePath) {
     if (!this.initialized) return;
@@ -4332,15 +4444,25 @@ var VectorIndex = class {
       this.initialized = false;
     }
   }
-};
-function stringToUint(str) {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash;
+  async recreateCollection(size) {
+    if (!Number.isFinite(size) || size <= 0) return;
+    try {
+      await this.client.deleteCollection(this.collectionName);
+    } catch {
+    }
+    await this.client.createCollection(this.collectionName, {
+      vectors: {
+        size,
+        distance: "Cosine"
+      }
+    });
+    this.vectorSize = size;
+    this.initialized = true;
   }
-  return Math.abs(hash);
+};
+function toPointId(value) {
+  const hex = crypto__default.createHash("md5").update(value).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 function chunk(items, size) {
   const out = [];
@@ -4348,6 +4470,19 @@ function chunk(items, size) {
     out.push(items.slice(i, i + size));
   }
   return out;
+}
+function detectSizeFromMessage(message) {
+  const expected = message.match(/expected[^0-9]*(\d{2,5})/i);
+  if (expected?.[1]) {
+    const n = Number(expected[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const vectorSize = message.match(/vector[^0-9]*(\d{2,5})/i);
+  if (vectorSize?.[1]) {
+    const n = Number(vectorSize[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
 }
 var SUPPORTED_EXTENSIONS2 = /* @__PURE__ */ new Set([
   ".ts",
@@ -5063,7 +5198,7 @@ var CodebaseIndexer = class {
             this.fts.insertSymbol(sym);
           }
           if (this.vector && this.config.indexing.vector) {
-            const id = `${file.hash}_${sym.startLine}`;
+            const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`;
             vectorEntries.push({
               id,
               path: file.path,
@@ -5366,7 +5501,14 @@ async function createCodebaseIndexer(projectRoot, config, options = {}) {
     warn(qdrant.warning ?? "[nexus] Qdrant is unavailable. Falling back to FTS-only index.");
     return new CodebaseIndexer(projectRoot, config);
   }
-  const embeddingClient = createEmbeddingClient(config.embeddings);
+  let embeddingClient;
+  try {
+    embeddingClient = createEmbeddingClient(config.embeddings);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    warn(`[nexus] Embeddings init failed (${msg}). Falling back to FTS-only index.`);
+    return new CodebaseIndexer(projectRoot, config);
+  }
   const projectHash = crypto.createHash("sha1").update(projectRoot).digest("hex").slice(0, 16);
   return new CodebaseIndexer(projectRoot, config, embeddingClient, vectorUrl, projectHash);
 }

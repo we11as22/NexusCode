@@ -23,16 +23,22 @@
 
 ## Сборка и установка
 
-### Требования
+### Требования (версии)
 
-- **Node.js 20+** (для упаковки `.vsix` нужен Node 20: в Node 18 зависимость `vsce` падает с `File is not defined`)
-- **pnpm** (рекомендуется): `npm install -g pnpm`
+| Что | Версия | Заметка |
+|-----|--------|---------|
+| **Node.js** | **20+** | Для команды `pnpm package:vscode` обязателен Node 20+: в Node 18 `vsce` (undici) падает с `File is not defined` (нет глобального File API). Остальная сборка (`pnpm build`) работает на Node 18. |
+| **pnpm** | актуальная | Рекомендуется: `npm install -g pnpm` |
 
-Проверка версии Node:
+В репозитории есть **`.nvmrc`** с версией `20` — при использовании nvm достаточно выполнить в корне:
 ```bash
-node -v   # должно быть v20.x или выше
+nvm use
 ```
-При необходимости: `nvm use 20` или установи Node 20 с [nodejs.org](https://nodejs.org/).
+Проверка Node:
+```bash
+node -v   # для упаковки .vsix должно быть v20.x или выше
+```
+Если Node &lt; 20: `nvm use 20` или установи Node 20 с [nodejs.org](https://nodejs.org/).
 
 ---
 
@@ -175,6 +181,15 @@ node /полный/путь/к/NexusCode/packages/cli/dist/index.js --help
 ---
 
 ## Installation (English)
+
+### Requirements (versions)
+
+| Requirement | Version | Note |
+|-------------|---------|------|
+| **Node.js** | **20+** | Required for `pnpm package:vscode`; on Node 18, `vsce` (undici) fails with `File is not defined`. The rest of the build (`pnpm build`) runs on Node 18. |
+| **pnpm** | current | Recommended: `npm install -g pnpm` |
+
+The repo includes **`.nvmrc`** set to `20`. With nvm, run in the project root: `nvm use`. If Node &lt; 20: `nvm use 20` or install Node 20 from [nodejs.org](https://nodejs.org/).
 
 ### VS Code Extension
 

@@ -12,7 +12,17 @@ export function createOpenAICompatibleClient(config: ProviderConfig) {
     throw new Error("openai-compatible provider requires baseUrl")
   }
 
-  const apiKey = config.apiKey ?? process.env["NEXUS_API_KEY"] ?? "dummy"
+  const apiKey =
+    config.apiKey ??
+    process.env["OPENAI_API_KEY"] ??
+    process.env["OPENROUTER_API_KEY"] ??
+    process.env["NEXUS_API_KEY"] ??
+    "dummy"
+  if (apiKey === "dummy" && !isLocalBaseUrl(config.baseUrl)) {
+    throw new Error(
+      "Missing API key for openai-compatible provider. Set model.apiKey or OPENROUTER_API_KEY/NEXUS_API_KEY."
+    )
+  }
   const openai = createOpenAI({
     apiKey,
     baseURL: config.baseUrl,
@@ -53,4 +63,9 @@ function detectProviderFromUrl(baseUrl: string): string {
   if (url.includes("x.ai") || url.includes("xai")) return "xai"
   if (url.includes("localhost") || url.includes("127.0.0.1")) return "local"
   return "openai-compatible"
+}
+
+function isLocalBaseUrl(baseUrl: string): boolean {
+  const url = baseUrl.toLowerCase()
+  return url.includes("localhost") || url.includes("127.0.0.1")
 }

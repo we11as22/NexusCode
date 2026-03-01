@@ -44,12 +44,18 @@ class OpenAICompatibleEmbeddingClient implements EmbeddingClient {
   readonly dimensions: number
 
   constructor(config: EmbeddingConfig) {
+    const apiKey = config.apiKey
+      ?? process.env["OPENAI_API_KEY"]
+      ?? process.env["OPENROUTER_API_KEY"]
+      ?? process.env["NEXUS_API_KEY"]
+      ?? "dummy"
+    if (apiKey === "dummy" && !isLocalBaseUrl(config.baseUrl)) {
+      throw new Error(
+        "Missing API key for openai-compatible embeddings. Set embeddings.apiKey or OPENROUTER_API_KEY/NEXUS_API_KEY."
+      )
+    }
     const openai = createOpenAI({
-      apiKey: config.apiKey
-        ?? process.env["OPENAI_API_KEY"]
-        ?? process.env["OPENROUTER_API_KEY"]
-        ?? process.env["NEXUS_API_KEY"]
-        ?? "dummy",
+      apiKey,
       baseURL: config.baseUrl,
       compatibility: "compatible",
     })
@@ -110,4 +116,10 @@ class LocalEmbeddingClient implements EmbeddingClient {
     }
     return results
   }
+}
+
+function isLocalBaseUrl(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return false
+  const url = baseUrl.toLowerCase()
+  return url.includes("localhost") || url.includes("127.0.0.1")
 }

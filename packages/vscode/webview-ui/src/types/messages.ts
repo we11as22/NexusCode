@@ -11,6 +11,9 @@ export interface WebviewState {
   todo: string
   indexReady: boolean
   indexStatus: IndexStatusKind
+  contextUsedTokens: number
+  contextLimitTokens: number
+  contextPercent: number
 }
 
 export type ExtensionMessage =

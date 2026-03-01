@@ -1,141 +1,90 @@
-# NexusCode Configuration
-# Full reference: https://github.com/nexuscode/nexuscode#configuration
-#
-# This file can be placed in:
-#   .nexus/nexus.yaml      — project-level config
-#   ~/.nexus/nexus.yaml    — global user config (project overrides)
-
-# ─── LLM Model ───────────────────────────────────────────────────────────────
 model:
-  provider: anthropic       # anthropic | openai | google | openrouter | ollama
-                             # openai-compatible | azure | bedrock
-  id: claude-sonnet-4-5
-  # apiKey: ""              # or set ANTHROPIC_API_KEY / OPENAI_API_KEY env var
-  # baseUrl: ""             # for openai-compatible APIs (LM Studio, vLLM, etc.)
-
-# ─── Max Mode ─────────────────────────────────────────────────────────────────
-# Use a more powerful (slower) model for complex tasks
+  provider: openai-compatible
+  id: qwen/qwen3-coder-next
+  apiKey: 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
+  baseUrl: https://openrouter.ai/api/v1
+  temperature: 0
 maxMode:
-  provider: anthropic
-  id: claude-opus-4-5
-  enabled: false            # enable with ⚡ button in VS Code or --max-mode CLI flag
-
-# ─── Embedding Model (for semantic code search) ───────────────────────────────
-# embeddings:
-#   provider: openai
-#   model: text-embedding-3-small
-#   dimensions: 1536
-
-# ─── Vector Database ──────────────────────────────────────────────────────────
-# vectorDb:
-#   enabled: true           # requires embeddings + Docker (for auto-start)
-#   url: "http://localhost:6333"
-#   autoStart: true         # auto-start Qdrant with docker run
-
-# ─── Agent Modes ──────────────────────────────────────────────────────────────
-# Customize per-mode behavior (all have sensible defaults)
+  enabled: false
+  tokenBudgetMultiplier: 2
 modes:
   agent:
-    autoApprove: [read]     # auto-approve read operations (no dialog)
+    autoApprove:
+      - read
   plan:
-    autoApprove: [read]
+    autoApprove:
+      - read
   debug:
-    autoApprove: [read]
+    autoApprove:
+      - read
   ask:
-    autoApprove: [read]
-
-# ─── Codebase Indexing ────────────────────────────────────────────────────────
+    autoApprove:
+      - read
 indexing:
   enabled: true
-  symbolExtract: true       # extract classes, functions, methods via AST
-  fts: true                 # SQLite full-text search
-  vector: false             # semantic search (requires vectorDb.enabled: true)
   excludePatterns:
     - node_modules/**
     - .git/**
     - dist/**
     - build/**
-    - "*.lock"
+    - '*.lock'
     - .next/**
     - coverage/**
-
-# ─── Permissions ──────────────────────────────────────────────────────────────
+  symbolExtract: true
+  fts: true
+  vector: false
+  batchSize: 50
+  embeddingBatchSize: 60
+  embeddingConcurrency: 2
+  debounceMs: 1500
 permissions:
-  autoApproveRead: true     # no dialog for file reads
-  autoApproveWrite: false   # show diff + approve dialog for writes
-  autoApproveCommand: false # show dialog for terminal commands
-  denyPatterns:             # never access these files
-    - "**/.env"
-    - "**/secrets/**"
-    - "**/*.key"
-    - "**/*.pem"
-
-# ─── Checkpoints ──────────────────────────────────────────────────────────────
+  autoApproveRead: true
+  autoApproveWrite: false
+  autoApproveCommand: false
+  autoApproveReadPatterns: []
+  denyPatterns:
+    - '**/.env'
+    - '**/secrets/**'
+    - '**/*.key'
+    - '**/*.pem'
+  rules: []
+retry:
+  enabled: true
+  maxAttempts: 3
+  initialDelayMs: 1000
+  maxDelayMs: 30000
+  retryOnStatus:
+    - 429
+    - 500
+    - 502
+    - 503
+    - 504
 checkpoint:
-  enabled: true             # shadow git snapshots before writes
-  timeoutMs: 15000          # abort if git init takes >15s (large repos)
+  enabled: true
+  timeoutMs: 15000
   createOnWrite: true
-
-# ─── Context Compaction ───────────────────────────────────────────────────────
-summarization:
-  auto: true                # compact automatically when context is 80% full
-  threshold: 0.80           # trigger at 80% of context window
-  keepRecentMessages: 8     # keep last 8 messages verbatim
-
-# ─── MCP Servers ──────────────────────────────────────────────────────────────
 mcp:
   servers: []
-  # Example:
-  # servers:
-  #   - name: github
-  #     command: npx
-  #     args: [-y, "@modelcontextprotocol/server-github"]
-  #     env:
-  #       GITHUB_TOKEN: "${GITHUB_TOKEN}"
-  #
-  #   - name: my-api
-  #     url: "http://localhost:3100/mcp"
-  #     transport: sse
-
-# ─── Skills ───────────────────────────────────────────────────────────────────
 skills: []
-# Standard skill locations (auto-discovered):
-#   .nexus/skills/**/*.md
-#   ~/.nexus/skills/**/*.md
-#   .agents/skills/**/*.md
-#
-# Or configure explicitly:
-# skills:
-#   - .nexus/skills/typescript/SKILL.md
-#   - .nexus/skills/testing/SKILL.md
-
-# ─── Custom Tools ─────────────────────────────────────────────────────────────
 tools:
-  custom: []                # paths to .ts/.js custom tool files
-  classifyThreshold: 15     # classify MCP/custom tools when >15 available
-  parallelReads: true       # execute read-only tools in parallel
+  custom: []
+  classifyThreshold: 15
+  parallelReads: true
   maxParallelReads: 5
-
-# ─── Skill Classification ─────────────────────────────────────────────────────
-skillClassifyThreshold: 8   # use LLM to select relevant skills when >8 available
-
-# ─── Structured Output ────────────────────────────────────────────────────────
-structuredOutput: auto       # auto | always | never
-                             # auto = use JSON schema when provider supports it
-
-# ─── Parallel Agents ──────────────────────────────────────────────────────────
+skillClassifyThreshold: 8
+structuredOutput: auto
+summarization:
+  auto: true
+  threshold: 0.8
+  keepRecentMessages: 8
+  model: ''
 parallelAgents:
-  maxParallel: 4             # max simultaneous sub-agents
-
-# ─── Rules (CLAUDE.md, AGENTS.md etc.) ───────────────────────────────────────
+  maxParallel: 4
 rules:
   files:
     - CLAUDE.md
     - AGENTS.md
     - .nexus/rules/**
-
-# ─── Provider Profiles ────────────────────────────────────────────────────────
-# Quick profile switching: nexus --profile local
 profiles:
   fast:
     provider: openai
@@ -143,7 +92,4 @@ profiles:
   local:
     provider: ollama
     id: qwen2.5-coder:32b
-    baseUrl: "http://localhost:11434/v1"
-  # strong:
-  #   provider: anthropic
-  #   id: claude-opus-4-5
+    baseUrl: http://localhost:11434/v1

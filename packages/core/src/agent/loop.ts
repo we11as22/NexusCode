@@ -120,6 +120,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const maxIterations = config.maxMode.enabled
     ? Math.floor(baseMaxIterationsByMode[mode] * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2))))
     : baseMaxIterationsByMode[mode]
+  let lastAssistantMessageId = ""
+  const emitContextUsage = () => {
+    const limitTokens = getContextLimit(activeClient.modelId)
+    const usedTokens = session.getTokenEstimate()
+    const percent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
+    host.emit({ type: "context_usage", usedTokens, limitTokens, percent })
+  }
+  emitContextUsage()
 
   while (!signal.aborted) {
     loopIterations++
@@ -131,6 +139,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       })
       break
     }
+    const isFinalIteration = loopIterations === maxIterations
 
     // 3. Build system prompt (cache-aware)
     const promptCtx: PromptContext = {
@@ -150,10 +159,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
 
     const { blocks, cacheableCount } = buildSystemPrompt(promptCtx)
+    if (isFinalIteration) {
+      blocks.push("FINAL ITERATION: do not call tools. Return a concise final answer from gathered context.")
+    }
     const systemPrompt = blocks.join("\n\n---\n\n")
 
     // 4. Build LLM tool definitions
-    const llmTools: LLMToolDef[] = resolvedTools.map(t => ({
+    const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedTools).map(t => ({
       name: t.name,
       description: t.description,
       parameters: t.parameters,
@@ -161,12 +173,19 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     // 5. Build messages from session
     const messages = buildMessagesFromSession(session)
+    if (isFinalIteration) {
+      messages.push({
+        role: "user",
+        content: "Provide the final answer now in plain text only. Do not emit tool-call markup, XML, or JSON function calls.",
+      })
+    }
 
     // 6. Start streaming
     const newMessageId = session.addMessage({
       role: "assistant",
       content: "",
     }).id
+    lastAssistantMessageId = newMessageId
 
     let currentText = ""
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
@@ -343,8 +362,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 },
               })
             }
+            emitContextUsage()
 
-            host.emit({ type: "done", messageId: newMessageId })
             break
 
           case "error":
@@ -393,6 +412,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
 
     await session.save()
+    emitContextUsage()
+  }
+
+  if (!signal.aborted && lastAssistantMessageId) {
+    emitContextUsage()
+    host.emit({ type: "done", messageId: lastAssistantMessageId })
   }
 }
 

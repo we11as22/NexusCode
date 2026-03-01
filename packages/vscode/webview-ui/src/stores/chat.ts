@@ -130,6 +130,9 @@ interface ChatState {
   todo: string
   indexReady: boolean
   indexStatus: IndexStatusKind
+  contextUsedTokens: number
+  contextLimitTokens: number
+  contextPercent: number
   inputValue: string
   view: AppView
   sessions: SessionPreview[]
@@ -173,6 +176,7 @@ export type AgentEvent =
   | { type: "compaction_start" }
   | { type: "compaction_end" }
   | { type: "index_update"; status: IndexStatusKind }
+  | { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
   | { type: "error"; error: string; fatal?: boolean }
   | { type: "done"; messageId: string }
   | { type: "doom_loop_detected"; tool: string }
@@ -188,6 +192,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   todo: "",
   indexReady: false,
   indexStatus: { state: "idle" },
+  contextUsedTokens: 0,
+  contextLimitTokens: 128000,
+  contextPercent: 0,
   inputValue: "",
   view: "chat",
   sessions: [],
@@ -463,6 +470,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         })
         break
       }
+
+      case "context_usage":
+        set({
+          contextUsedTokens: event.usedTokens,
+          contextLimitTokens: event.limitTokens,
+          contextPercent: event.percent,
+        })
+        break
 
       case "done":
         set((state) => ({

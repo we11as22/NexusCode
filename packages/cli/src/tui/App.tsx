@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react"
-import { Box, Text, useInput, useApp, Static } from "ink"
+import { Box, Text, useInput, useApp } from "ink"
 import Spinner from "ink-spinner"
 import type { AgentEvent, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
 
@@ -41,6 +41,9 @@ interface AppState {
   indexStatus: IndexStatus | null
   totalTokensIn: number
   totalTokensOut: number
+  contextUsedTokens: number
+  contextLimitTokens: number
+  contextPercent: number
   lastError: string | null
   awaitingApproval: boolean
   compacting: boolean
@@ -122,6 +125,8 @@ const TOOL_ICONS: Record<string, string> = {
 }
 
 const MODES: Mode[] = ["agent", "plan", "debug", "ask"]
+const MODEL_PROVIDERS = ["anthropic", "openai", "google", "openai-compatible", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"] as const
+const EMBEDDING_PROVIDERS = ["openai", "openai-compatible", "ollama", "local"] as const
 
 /** Slash commands */
 type SlashAction = "clear" | "compact" | "max" | "help" | "settings" | "model" | "embeddings" | "index" | "advanced"
@@ -196,6 +201,9 @@ export function App({
     indexStatus: null,
     totalTokensIn: 0,
     totalTokensOut: 0,
+    contextUsedTokens: 0,
+    contextLimitTokens: 128000,
+    contextPercent: 0,
     lastError: null,
     awaitingApproval: false,
     compacting: false,
@@ -221,6 +229,7 @@ export function App({
   })
   const [advancedFocus, setAdvancedFocus] = useState(0)
   const [activeProfileIdx, setActiveProfileIdx] = useState(0)
+  const [chatScrollLines, setChatScrollLines] = useState(0)
   const inputHistory = useRef<string[]>([])
   const cols = process.stdout.columns ?? 100
   const rows = process.stdout.rows ?? 30
@@ -377,15 +386,18 @@ export function App({
           case "done":
             setState((s) => {
               const text = s.currentStreaming
-              const newMsg: SessionMessage = {
-                id: `r_${Date.now()}`,
-                ts: Date.now(),
-                role: "assistant",
-                content: text,
-              }
+              const hasText = text.trim().length > 0
+              const newMsg: SessionMessage | null = hasText
+                ? {
+                    id: `r_${Date.now()}`,
+                    ts: Date.now(),
+                    role: "assistant",
+                    content: text,
+                  }
+                : null
               return {
                 ...s,
-                messages: [...s.messages, newMsg],
+                messages: newMsg ? [...s.messages, newMsg] : s.messages,
                 liveTools: [],
                 subAgents: s.subAgents.filter((a) => a.status === "running"),
                 reasoning: "",
@@ -430,6 +442,15 @@ export function App({
               lastError: `Doom loop: "${event.tool}" repeated`,
             }))
             break
+        }
+        if ((event as { type: string }).type === "context_usage") {
+          const usage = event as { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
+          setState((s) => ({
+            ...s,
+            contextUsedTokens: usage.usedTokens,
+            contextLimitTokens: usage.limitTokens,
+            contextPercent: usage.percent,
+          }))
         }
       }
     }
@@ -488,6 +509,7 @@ export function App({
   }
 
   useInput((inputChar, key) => {
+    const isEnter = key.return || inputChar === "\r" || inputChar === "\n"
     if (key.ctrl && inputChar === "c") {
       if (state.isRunning) {
         onAbort()
@@ -500,6 +522,7 @@ export function App({
 
     if (key.ctrl && inputChar === "k") {
       setState((s) => ({ ...s, messages: [], todo: "", lastError: null, liveTools: [], subAgents: [] }))
+      setChatScrollLines(0)
       return
     }
 
@@ -512,6 +535,14 @@ export function App({
       const next = !state.maxMode
       setState((s) => ({ ...s, maxMode: next }))
       onMaxModeChange(next)
+      return
+    }
+    if (key.ctrl && inputChar === "u" && view === "chat") {
+      setChatScrollLines((v) => v + 12)
+      return
+    }
+    if (key.ctrl && inputChar === "d" && view === "chat") {
+      setChatScrollLines((v) => Math.max(0, v - 12))
       return
     }
 
@@ -531,15 +562,23 @@ export function App({
         return
       }
       if (view === "model") {
+        if (modelFocus === 0 && (key.upArrow || key.downArrow)) {
+          const currentIdx = Math.max(0, MODEL_PROVIDERS.findIndex((p) => p === modelForm.provider))
+          const nextIdx = key.downArrow
+            ? (currentIdx + 1) % MODEL_PROVIDERS.length
+            : (currentIdx - 1 + MODEL_PROVIDERS.length) % MODEL_PROVIDERS.length
+          setModelForm((f) => ({ ...f, provider: MODEL_PROVIDERS[nextIdx]! }))
+          return
+        }
         if (key.tab) {
           setModelFocus((f) => (f + 1) % 6)
           return
         }
-        if (key.return && modelFocus < 5) {
+        if (isEnter && modelFocus < 5) {
           setModelFocus((f) => (f + 1) % 6)
           return
         }
-        if (key.return && modelFocus === 5 && saveConfig) {
+        if (isEnter && modelFocus === 5 && saveConfig) {
           const parsedTemp = Number(modelForm.temperature)
           saveConfig({
             model: {
@@ -554,12 +593,12 @@ export function App({
           setState((s) => ({ ...s, provider: modelForm.provider, model: modelForm.id }))
           return
         }
-        if (modelFocus < 5 && key.backspace) {
+        if (modelFocus > 0 && modelFocus < 5 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f" || inputChar === "\u0008")) {
           const k = ["provider", "id", "apiKey", "baseUrl", "temperature"][modelFocus] as "provider" | "id" | "apiKey" | "baseUrl" | "temperature"
           setModelForm((f) => ({ ...f, [k]: f[k].slice(0, -1) }))
           return
         }
-        if (modelFocus < 5 && inputChar && !key.ctrl && !key.meta) {
+        if (modelFocus > 0 && modelFocus < 5 && inputChar && !key.ctrl && !key.meta) {
           const k = ["provider", "id", "apiKey", "baseUrl", "temperature"][modelFocus] as "provider" | "id" | "apiKey" | "baseUrl" | "temperature"
           setModelForm((f) => ({ ...f, [k]: f[k] + inputChar }))
           return
@@ -567,15 +606,23 @@ export function App({
         return
       }
       if (view === "embeddings") {
+        if (embeddingsFocus === 0 && (key.upArrow || key.downArrow)) {
+          const currentIdx = Math.max(0, EMBEDDING_PROVIDERS.findIndex((p) => p === embeddingsForm.provider))
+          const nextIdx = key.downArrow
+            ? (currentIdx + 1) % EMBEDDING_PROVIDERS.length
+            : (currentIdx - 1 + EMBEDDING_PROVIDERS.length) % EMBEDDING_PROVIDERS.length
+          setEmbeddingsForm((f) => ({ ...f, provider: EMBEDDING_PROVIDERS[nextIdx]! }))
+          return
+        }
         if (key.tab) {
           setEmbeddingsFocus((f) => (f + 1) % 6)
           return
         }
-        if (key.return && embeddingsFocus < 5) {
+        if (isEnter && embeddingsFocus < 5) {
           setEmbeddingsFocus((f) => (f + 1) % 6)
           return
         }
-        if (key.return && embeddingsFocus === 5 && saveConfig && embeddingsForm.model) {
+        if (isEnter && embeddingsFocus === 5 && saveConfig && embeddingsForm.model) {
           const parsedDims = Number(embeddingsForm.dimensions)
           saveConfig({
             embeddings: {
@@ -589,12 +636,12 @@ export function App({
           setView("chat")
           return
         }
-        if (embeddingsFocus < 5 && key.backspace) {
+        if (embeddingsFocus > 0 && embeddingsFocus < 5 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f" || inputChar === "\u0008")) {
           const k = ["provider", "model", "apiKey", "baseUrl", "dimensions"][embeddingsFocus] as "provider" | "model" | "apiKey" | "baseUrl" | "dimensions"
           setEmbeddingsForm((f) => ({ ...f, [k]: (f[k] as string).slice(0, -1) }))
           return
         }
-        if (embeddingsFocus < 5 && inputChar && !key.ctrl && !key.meta) {
+        if (embeddingsFocus > 0 && embeddingsFocus < 5 && inputChar && !key.ctrl && !key.meta) {
           const k = ["provider", "model", "apiKey", "baseUrl", "dimensions"][embeddingsFocus] as "provider" | "model" | "apiKey" | "baseUrl" | "dimensions"
           setEmbeddingsForm((f) => ({ ...f, [k]: (f[k] as string) + inputChar }))
           return
@@ -622,14 +669,14 @@ export function App({
           setView("help")
           return
         }
-        if (key.return) {
+        if (isEnter) {
           setView("model")
           return
         }
         return
       }
       if (view === "index") {
-        if (key.return && state.indexStatus?.state !== "indexing" && onReindex) {
+        if (isEnter && state.indexStatus?.state !== "indexing" && onReindex) {
           onReindex()
         } else if ((inputChar === "s" || inputChar === "S") && state.indexStatus?.state === "indexing" && onIndexStop) {
           onIndexStop()
@@ -641,7 +688,7 @@ export function App({
           setAdvancedFocus((f) => (f + 1) % 10)
           return
         }
-        if (advancedFocus === 9 && key.return && saveConfig) {
+        if (advancedFocus === 9 && isEnter && saveConfig) {
           let mcpServers: Array<Record<string, unknown>> = []
           let profiles: Record<string, unknown> = {}
           try {
@@ -681,12 +728,12 @@ export function App({
           "askInstructions",
           "profilesJson",
         ] as const
-        if (advancedFocus < 9 && key.backspace) {
+        if (advancedFocus < 9 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f")) {
           const k = keys[advancedFocus]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k].slice(0, -1) }))
           return
         }
-        if (advancedFocus < 9 && key.return) {
+        if (advancedFocus < 9 && isEnter) {
           const k = keys[advancedFocus]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k] + "\n" }))
           return
@@ -718,7 +765,7 @@ export function App({
         setSlashSelected((i) => (i >= filteredCommands.length - 1 ? 0 : i + 1))
         return
       }
-      if (key.return && selectedCmd) {
+      if (isEnter && selectedCmd) {
         applySlashCommand(selectedCmd)
         return
       }
@@ -751,7 +798,7 @@ export function App({
       return
     }
 
-    if (key.return && !slashOpen) {
+    if (isEnter && !slashOpen) {
       if (input.trim() && !state.isRunning) {
         const content = input.trim()
         inputHistory.current.push(content)
@@ -772,12 +819,13 @@ export function App({
             },
           ],
         }))
+        setChatScrollLines(0)
         onMessage(content, state.mode)
       }
       return
     }
 
-    if (key.backspace || key.delete) {
+    if (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f" || inputChar === "\u0008") {
       setInput((s) => s.slice(0, -1))
       return
     }
@@ -802,6 +850,9 @@ export function App({
         noIndex={noIndex}
         indexReady={state.indexReady}
         cols={cols}
+        contextUsedTokens={state.contextUsedTokens}
+        contextLimitTokens={state.contextLimitTokens}
+        contextPercent={state.contextPercent}
       />
 
       {/* ── Chat area or Config view ───────────────────────────────────────── */}
@@ -842,56 +893,7 @@ export function App({
           )}
         </Box>
       ) : (
-      <Box flexDirection="column" flexGrow={1} overflowY="hidden">
-        <Static items={state.messages}>
-          {(msg, i) => <MessageItem key={i} msg={msg} cols={cols} />}
-        </Static>
-
-        {state.isRunning && state.reasoning && (
-          <ReasoningBlock text={state.reasoning} cols={cols} />
-        )}
-
-        {state.isRunning && state.currentStreaming && (
-          <StreamingText text={state.currentStreaming} cols={cols} />
-        )}
-
-        {state.liveTools
-          .filter((lt) => lt.status === "running")
-          .map((lt) => (
-            <LiveToolCard key={lt.id} tool={lt} />
-          ))}
-
-        {state.subAgents.length > 0 && (
-          <Box flexDirection="column" paddingX={1} paddingTop={1}>
-            {state.subAgents.map((sa) => (
-              <SubAgentCard key={sa.id} agent={sa} />
-            ))}
-          </Box>
-        )}
-
-        {state.compacting && (
-          <Box paddingX={1} paddingY={0}>
-            <Text color="blue">
-              <Spinner type="dots" />
-            </Text>
-            <Text color="blue"> Compacting context...</Text>
-          </Box>
-        )}
-
-        {state.isRunning &&
-          !state.currentStreaming &&
-          !state.reasoning &&
-          state.liveTools.length === 0 && (
-            <Box paddingX={1}>
-              <Text color="cyan">
-                <Spinner type="dots3" />
-              </Text>
-              <Text color="cyan"> Thinking...</Text>
-            </Box>
-          )}
-
-        {state.lastError && <ErrorBanner message={state.lastError} />}
-      </Box>
+      <ChatViewport state={state} cols={cols} rows={rows} scrollLines={chatScrollLines} />
       )}
 
 
@@ -939,6 +941,8 @@ export function App({
         sessionId={sessionId}
         activeProfile={profileOptions[activeProfileIdx] ?? "default"}
         cols={cols}
+        contextUsedTokens={state.contextUsedTokens}
+        contextLimitTokens={state.contextLimitTokens}
       />
     </Box>
   )
@@ -983,10 +987,19 @@ function ModelConfigView({
       {labels.map((label, i) => (
         <Box key={label}>
           <Text color={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </Text>
-          <Text color="white">{(form[keys[i]] as string) || ""}</Text>
+          <Text color="white">
+            {keys[i] === "apiKey"
+              ? maskSecret((form[keys[i]] as string) || "")
+              : ((form[keys[i]] as string) || "")}
+          </Text>
           {focus === i && <Text color="cyan">│</Text>}
         </Box>
       ))}
+      {focus === 0 && (
+        <Box paddingLeft={2}>
+          <Text color="gray"> Providers: {MODEL_PROVIDERS.join(" · ")} (↑↓)</Text>
+        </Box>
+      )}
       <Box>
         <Text color={focus === 5 ? "cyan" : "gray"}>{focus === 5 ? "▸ " : "  "}</Text>
         <Text color={focus === 5 ? "green" : "gray"}>[Save] — press Enter</Text>
@@ -1011,10 +1024,19 @@ function EmbeddingsConfigView({
       {labels.map((label, i) => (
         <Box key={label}>
           <Text color={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </Text>
-          <Text color="white">{(form[keys[i]] as string) || ""}</Text>
+          <Text color="white">
+            {keys[i] === "apiKey"
+              ? maskSecret((form[keys[i]] as string) || "")
+              : ((form[keys[i]] as string) || "")}
+          </Text>
           {focus === i && <Text color="cyan">│</Text>}
         </Box>
       ))}
+      {focus === 0 && (
+        <Box paddingLeft={2}>
+          <Text color="gray"> Providers: {EMBEDDING_PROVIDERS.join(" · ")} (↑↓)</Text>
+        </Box>
+      )}
       <Box>
         <Text color={focus === 5 ? "cyan" : "gray"}>{focus === 5 ? "▸ " : "  "}</Text>
         <Text color={focus === 5 ? "green" : "gray"}>[Save] — press Enter</Text>
@@ -1144,6 +1166,9 @@ function WelcomeBar({
   noIndex,
   indexReady,
   cols,
+  contextUsedTokens,
+  contextLimitTokens,
+  contextPercent,
 }: {
   provider: string
   model: string
@@ -1151,33 +1176,27 @@ function WelcomeBar({
   noIndex: boolean
   indexReady: boolean
   cols: number
+  contextUsedTokens: number
+  contextLimitTokens: number
+  contextPercent: number
 }) {
   const indexLabel = noIndex ? "Index: off" : indexReady ? "Index: ● ready" : "Index: … building"
-  const indexColor = noIndex ? "gray" : indexReady ? "green" : "yellow"
   const shortPath = projectDir ? fit(projectDir, Math.max(20, Math.floor(cols * 0.45))) : ""
   const modelLabel = fit(`${provider}/${model}`, Math.max(20, Math.floor(cols * 0.65)))
+  const line1 = fit(`Model ${modelLabel}`, Math.max(20, cols - 4))
+  const line2 = fit(shortPath ? `${indexLabel} · Project: ${shortPath}` : indexLabel, Math.max(20, cols - 4))
+  const line3 = fit("Type / for commands  /settings for all agent settings", Math.max(20, cols - 4))
+  const line4 = fit(
+    `Context: ${formatTokens(contextUsedTokens)} / ${formatTokens(contextLimitTokens)} (${contextPercent}%)`,
+    Math.max(20, cols - 4),
+  )
+  const indexColor = noIndex ? "gray" : indexReady ? "green" : "yellow"
   return (
     <Box flexDirection="column" paddingX={1} paddingBottom={1} borderStyle="single" borderColor="gray">
-      <Box>
-        <Text color="cyan" bold>Model </Text>
-        <Text color="white">{modelLabel}</Text>
-      </Box>
-      <Box>
-        <Text color={indexColor as "green" | "yellow" | "gray"}> {indexLabel}</Text>
-        {shortPath && (
-          <>
-            <Text color="gray">  ·  </Text>
-            <Text color="gray">Project: {shortPath}</Text>
-          </>
-        )}
-      </Box>
-      <Box>
-        <Text color="gray"> Type </Text>
-        <Text color="cyan">/</Text>
-        <Text color="gray"> for commands  </Text>
-        <Text color="cyan">/settings</Text>
-        <Text color="gray"> for all agent settings</Text>
-      </Box>
+      <Text color="white">{line1}</Text>
+      <Text color={indexColor as "green" | "yellow" | "gray"}>{line2}</Text>
+      <Text color="gray">{line3}</Text>
+      <Text color={contextPercent >= 90 ? "red" : contextPercent >= 75 ? "yellow" : "green"}>{line4}</Text>
     </Box>
   )
 }
@@ -1471,6 +1490,8 @@ function Footer({
   sessionId,
   activeProfile,
   cols,
+  contextUsedTokens,
+  contextLimitTokens,
 }: {
   isRunning: boolean
   provider: string
@@ -1478,31 +1499,23 @@ function Footer({
   sessionId?: string
   activeProfile: string
   cols: number
+  contextUsedTokens: number
+  contextLimitTokens: number
 }) {
   const shortModel = fit(model, 18)
   const shortSession = sessionId ? (sessionId.slice(0, 8) + "…") : ""
+  const line1 = fit(
+    `profile: ${activeProfile} · ${provider}/${shortModel}${shortSession ? ` · session: ${shortSession}` : ""} · ctx: ${formatTokens(contextUsedTokens)}/${formatTokens(contextLimitTokens)}`,
+    Math.max(20, cols - 2)
+  )
   const line2 = fit(
-    `/  /model  /embeddings  /advanced  /index  Tab  Ctrl+M  Ctrl+P(profile)  Ctrl+S  Ctrl+K  Ctrl+C:${isRunning ? "abort" : "quit"}  ↑↓`,
+    `/  /model  /embeddings  /advanced  /index  Tab  Ctrl+M  Ctrl+P(profile)  Ctrl+S  Ctrl+U/D(scroll)  Ctrl+K  Ctrl+C:${isRunning ? "abort" : "quit"}  ↑↓`,
     Math.max(20, cols - 2)
   )
   return (
     <Box paddingX={1} flexDirection="column">
       <Box>
-        <Text color="gray"> profile: </Text>
-        <Text color="white">{activeProfile}</Text>
-        <Text color="gray">  · </Text>
-        <Text color="gray">
-          {provider}/
-        </Text>
-        <Text color="white">
-          {shortModel}
-        </Text>
-        {shortSession && (
-          <>
-            <Text color="gray">  ·  session: </Text>
-            <Text color="gray">{shortSession}</Text>
-          </>
-        )}
+        <Text color="gray">{line1}</Text>
       </Box>
       <Box>
         <Text color="gray">{line2}</Text>
@@ -1511,11 +1524,145 @@ function Footer({
   )
 }
 
+type ChatLine = { text: string; color?: "white" | "gray" | "cyan" | "green" | "yellow" | "red" | "magenta" | "blue"; bold?: boolean }
+
+function ChatViewport({
+  state,
+  cols,
+  rows,
+  scrollLines,
+}: {
+  state: AppState
+  cols: number
+  rows: number
+  scrollLines: number
+}) {
+  const width = Math.max(20, cols - 4)
+  const allLines = buildChatLines(state, width)
+  const visibleHeight = Math.max(6, rows - 20)
+  const maxScroll = Math.max(0, allLines.length - visibleHeight)
+  const safeScroll = Math.max(0, Math.min(scrollLines, maxScroll))
+  const start = Math.max(0, allLines.length - visibleHeight - safeScroll)
+  const lines = allLines.slice(start, start + visibleHeight)
+
+  return (
+    <Box flexDirection="column" flexGrow={1} overflowY="hidden" paddingX={1}>
+      {safeScroll > 0 && (
+        <Text color="gray">↑ history ({safeScroll} lines) — Ctrl+D to return</Text>
+      )}
+      {lines.map((line, idx) => (
+        <Text key={`${idx}_${line.text.slice(0, 20)}`} color={line.color ?? "white"} bold={line.bold}>
+          {line.text}
+        </Text>
+      ))}
+      {lines.length === 0 && <Text color="gray">No messages yet.</Text>}
+    </Box>
+  )
+}
+
+function buildChatLines(state: AppState, width: number): ChatLine[] {
+  const out: ChatLine[] = []
+  for (const msg of state.messages) {
+    const content = sanitizeText(typeof msg.content === "string" ? msg.content : "[complex message]")
+    if (msg.role === "user") {
+      out.push({ text: "You", color: "cyan", bold: true })
+      for (const line of wrapToWidth(content, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
+      out.push({ text: "", color: "gray" })
+      continue
+    }
+    if (msg.role === "assistant") {
+      out.push({ text: "NexusCode", color: "green", bold: true })
+      for (const line of wrapToWidth(content, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
+      out.push({ text: "", color: "gray" })
+      continue
+    }
+    if (msg.role === "system") {
+      for (const line of wrapToWidth(`WARN ${content}`, width)) out.push({ text: line, color: "red" })
+      out.push({ text: "", color: "gray" })
+      continue
+    }
+  }
+
+  if (state.isRunning && state.reasoning) {
+    out.push({ text: "Thinking...", color: "magenta" })
+    const preview = sanitizeText(state.reasoning).slice(-1200)
+    for (const line of wrapToWidth(preview, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "magenta" })
+    out.push({ text: "", color: "gray" })
+  }
+  if (state.isRunning && state.currentStreaming) {
+    out.push({ text: "NexusCode (streaming)", color: "green", bold: true })
+    for (const line of wrapToWidth(sanitizeText(state.currentStreaming), Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
+    out.push({ text: "", color: "gray" })
+  }
+
+  for (const tool of state.liveTools.filter((t) => t.status === "running")) {
+    const preview = tool.input?.["path"] ?? tool.input?.["command"] ?? tool.input?.["query"] ?? ""
+    const line = preview ? `tool: ${sanitizeText(tool.tool)} :: ${sanitizeText(String(preview))}` : `tool: ${sanitizeText(tool.tool)}`
+    for (const l of wrapToWidth(line, width)) out.push({ text: l, color: "yellow" })
+  }
+
+  for (const sa of state.subAgents) {
+    const id = sanitizeText(sa?.id ?? "unknown")
+    const mode = sanitizeText(String(sa?.mode ?? "agent"))
+    const status = sa?.status === "running" ? "RUN" : sa?.status === "completed" ? "OK" : "ERR"
+    const rawTask = sanitizeText(sa?.task ?? "")
+    const task = rawTask.length > 120 ? `${rawTask.slice(0, 120)}...` : rawTask
+    for (const l of wrapToWidth(`[subagent ${id.slice(0, 8)} ${mode} ${status}] ${task}`, width)) out.push({ text: l, color: "cyan" })
+    if (sa?.currentTool) out.push({ text: `  tool: ${sanitizeText(sa.currentTool)}`, color: "gray" })
+    if (sa?.error) out.push({ text: `  error: ${sanitizeText(sa.error)}`, color: "red" })
+  }
+
+  if (state.compacting) out.push({ text: "Compacting context...", color: "blue" })
+  if (state.lastError) for (const l of wrapToWidth(`Error: ${sanitizeText(state.lastError)}`, width)) out.push({ text: l, color: "red" })
+
+  return out
+}
+
+function wrapToWidth(text: string, width: number): string[] {
+  const safe = sanitizeText(text)
+  if (width <= 1) return [safe]
+  const lines: string[] = []
+  for (const raw of safe.split("\n")) {
+    const line = raw || ""
+    if (line.length <= width) {
+      lines.push(line)
+      continue
+    }
+    let rest = line
+    while (rest.length > width) {
+      lines.push(rest.slice(0, width))
+      rest = rest.slice(width)
+    }
+    lines.push(rest)
+  }
+  return lines
+}
+
 function fit(value: string, max: number): string {
   if (max <= 0) return ""
   if (value.length <= max) return value
   if (max <= 1) return "…"
   return `${value.slice(0, Math.max(0, max - 1))}…`
+}
+
+function maskSecret(value: string): string {
+  if (!value) return ""
+  if (value.length <= 4) return "*".repeat(value.length)
+  return `${"*".repeat(Math.max(4, value.length - 4))}${value.slice(-4)}`
+}
+
+function formatTokens(value: number): string {
+  const n = Math.max(0, Math.floor(value))
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+function sanitizeText(value: string): string {
+  if (!value) return ""
+  return value
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .replace(/[\x00-\x08\x0B-\x1F\x7F]/g, "")
 }
 
 function HelpBox({

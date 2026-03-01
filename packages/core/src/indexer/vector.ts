@@ -1,6 +1,7 @@
 import { QdrantClient } from "@qdrant/js-client-rest"
 import type { IndexSearchResult, SymbolKind } from "../types.js"
 import type { EmbeddingClient } from "../provider/types.js"
+import crypto from "node:crypto"
 
 /**
  * Qdrant vector store for semantic code search.
@@ -138,9 +139,15 @@ export class VectorIndex {
       [s.name, s.kind ?? "", s.parent ?? "", s.content.slice(0, 500)].filter(Boolean).join(" ")
     )
     const vectors = await this.embeddings.embed(texts)
+    if (vectors.length === 0) return
+
+    const observedSize = vectors[0]?.length ?? 0
+    if (observedSize > 0 && observedSize !== this.vectorSize) {
+      await this.recreateCollection(observedSize)
+    }
 
     const points = symbols.map((s, i) => ({
-      id: stringToUint(s.id),
+      id: toPointId(s.id),
       vector: vectors[i]!,
       payload: {
         path: s.path,
@@ -150,9 +157,28 @@ export class VectorIndex {
         startLine: s.startLine ?? 0,
         content: s.content.slice(0, 1000),
       },
-    }))
+    })).filter(p => Array.isArray(p.vector) && p.vector.length === this.vectorSize)
 
-    await this.client.upsert(this.collectionName, { points })
+    if (points.length === 0) return
+
+    try {
+      await this.client.upsert(this.collectionName, { points })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const sizeHint = detectSizeFromMessage(message)
+      if (sizeHint && sizeHint !== this.vectorSize) {
+        await this.recreateCollection(sizeHint)
+        await this.client.upsert(this.collectionName, { points })
+        return
+      }
+      if (/bad request/i.test(message)) {
+        const fallbackSize = observedSize > 0 ? observedSize : this.vectorSize
+        await this.recreateCollection(fallbackSize)
+        await this.client.upsert(this.collectionName, { points })
+        return
+      }
+      throw err
+    }
   }
 
   async deleteByPath(filePath: string): Promise<void> {
@@ -232,17 +258,28 @@ export class VectorIndex {
       this.initialized = false
     }
   }
+
+  private async recreateCollection(size: number): Promise<void> {
+    if (!Number.isFinite(size) || size <= 0) return
+    try {
+      await this.client.deleteCollection(this.collectionName)
+    } catch {
+      // collection may not exist yet
+    }
+    await this.client.createCollection(this.collectionName, {
+      vectors: {
+        size,
+        distance: "Cosine",
+      },
+    })
+    this.vectorSize = size
+    this.initialized = true
+  }
 }
 
-function stringToUint(str: string): number {
-  // Simple deterministic hash for Qdrant point IDs
-  let hash = 0
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i)
-    hash = ((hash << 5) - hash) + char
-    hash = hash & hash
-  }
-  return Math.abs(hash)
+function toPointId(value: string): string {
+  const hex = crypto.createHash("md5").update(value).digest("hex")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -251,4 +288,19 @@ function chunk<T>(items: T[], size: number): T[][] {
     out.push(items.slice(i, i + size))
   }
   return out
+}
+
+function detectSizeFromMessage(message: string): number | null {
+  // Qdrant mismatch errors usually contain "... expected 1024 ... got 1536 ..."
+  const expected = message.match(/expected[^0-9]*(\d{2,5})/i)
+  if (expected?.[1]) {
+    const n = Number(expected[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  const vectorSize = message.match(/vector[^0-9]*(\d{2,5})/i)
+  if (vectorSize?.[1]) {
+    const n = Number(vectorSize[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
 }

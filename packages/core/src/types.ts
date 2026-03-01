@@ -215,6 +215,7 @@ export type AgentEvent =
   | { type: "compaction_end" }
   | { type: "index_update"; status: IndexStatus }
   | { type: "session_saved"; sessionId: string }
+  | { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
   | { type: "error"; error: string; fatal?: boolean }
   | { type: "done"; messageId: string }
   | { type: "doom_loop_detected"; tool: string }

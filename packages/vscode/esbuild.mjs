@@ -13,6 +13,16 @@ const ctx = await esbuild.context({
     "vscode",
     "@xenova/transformers",
   ],
+  plugins: [
+    {
+      name: "resolve-core-workspace",
+      setup(build) {
+        build.onResolve({ filter: /^@nexuscode\/core$/ }, () => ({
+          path: path.join(__dirname, "..", "core", "src", "index.ts"),
+        }))
+      },
+    },
+  ],
   format: "cjs",
   platform: "node",
   target: "node18",

@@ -41,7 +41,14 @@ export async function createCodebaseIndexer(
     return new CodebaseIndexer(projectRoot, config)
   }
 
-  const embeddingClient = createEmbeddingClient(config.embeddings)
+  let embeddingClient
+  try {
+    embeddingClient = createEmbeddingClient(config.embeddings)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    warn(`[nexus] Embeddings init failed (${msg}). Falling back to FTS-only index.`)
+    return new CodebaseIndexer(projectRoot, config)
+  }
   const projectHash = crypto.createHash("sha1").update(projectRoot).digest("hex").slice(0, 16)
 
   return new CodebaseIndexer(projectRoot, config, embeddingClient, vectorUrl, projectHash)

@@ -1039,6 +1039,11 @@ type AgentEvent = {
     type: "session_saved";
     sessionId: string;
 } | {
+    type: "context_usage";
+    usedTokens: number;
+    limitTokens: number;
+    percent: number;
+} | {
     type: "error";
     error: string;
     fatal?: boolean;

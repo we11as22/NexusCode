@@ -180,7 +180,7 @@ export class CodebaseIndexer implements IIndexer {
             this.fts.insertSymbol(sym)
           }
           if (this.vector && this.config.indexing.vector) {
-            const id = `${file.hash}_${sym.startLine}`
+            const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`
             vectorEntries.push({
               id,
               path: file.path,

@@ -66,6 +66,11 @@ Both UI hosts call the same `runAgentLoop` in `core`, so behavior remains consis
 | SQLite (FTS5 via `better-sqlite3`) | Fast local keyword + symbol indexing |
 | MCP SDK | External tool ecosystem integration |
 
+## Version requirements
+
+- **Node.js**: 20+ is required only for **packaging** the VS Code extension (`pnpm package:vscode`). The `vsce` CLI (via undici) needs the global `File` API available from Node 20. The rest of the build (`pnpm build`, core, webview, extension bundle) works on Node 18. The repo provides `.nvmrc` with `20` for nvm/fnm users.
+- **pnpm**: used for workspace and scripts; no minimum version enforced in code.
+
 ## Known Constraints
 
 - Auto-started Qdrant currently supports only local endpoints.

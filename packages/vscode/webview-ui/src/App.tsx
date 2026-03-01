@@ -9,6 +9,8 @@ import type { ExtensionMessage } from "./types/messages.js"
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
   "p-1.5 rounded-md text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+const MODEL_PROVIDER_OPTIONS = ["anthropic", "openai", "google", "openai-compatible", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]
+const EMB_PROVIDER_OPTIONS = ["openai", "openai-compatible", "ollama", "local"]
 
 export function App() {
   const store = useChatStore()
@@ -126,6 +128,12 @@ export function App() {
 
 function ChatView() {
   const store = useChatStore()
+  const contextColor =
+    store.contextPercent >= 90
+      ? "text-red-400"
+      : store.contextPercent >= 75
+        ? "text-yellow-300"
+        : "text-emerald-300"
 
   return (
     <>
@@ -183,6 +191,9 @@ function ChatView() {
           </span>
           <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
             session {store.sessionId.slice(0, 8)}
+          </span>
+          <span className={`text-[10px] ${contextColor} truncate`}>
+            ctx {formatTokens(store.contextUsedTokens)}/{formatTokens(store.contextLimitTokens)} ({store.contextPercent}%)
           </span>
           {store.isRunning && (
             <span className="flex items-center gap-1 text-[10px] text-[var(--vscode-badge-foreground)] bg-[var(--vscode-badge-background)] px-1.5 py-0.5 rounded">
@@ -307,6 +318,7 @@ interface SettingsDraft {
 function SettingsView() {
   const { config, provider, model, saveConfig } = useChatStore()
   const [draft, setDraft] = useState<SettingsDraft | null>(null)
+  const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles">("llm")
 
   useEffect(() => {
     if (!config) return
@@ -333,41 +345,66 @@ function SettingsView() {
   return (
     <div className="nexus-pane">
       <div className="nexus-pane-title">Agent Settings</div>
-      <div className="nexus-settings-grid">
+      <div className="flex flex-wrap gap-1.5 mt-2 mb-2">
+        <TabPill id="llm" tab={tab} setTab={setTab} label="LLM" />
+        <TabPill id="embeddings" tab={tab} setTab={setTab} label="Embeddings" />
+        <TabPill id="index" tab={tab} setTab={setTab} label="Index" />
+        <TabPill id="tools" tab={tab} setTab={setTab} label="Tools" />
+        <TabPill id="integrations" tab={tab} setTab={setTab} label="MCP/Rules" />
+        <TabPill id="profiles" tab={tab} setTab={setTab} label="Profiles" />
+      </div>
 
-      <section className="nexus-section">
-        <h3 className="nexus-section-title">LLM</h3>
-        <SettingsInput label="Provider" value={draft.modelProvider} onChange={(v) => setDraft({ ...draft, modelProvider: v })} />
-        <SettingsInput label="Model" value={draft.modelId} onChange={(v) => setDraft({ ...draft, modelId: v })} />
-        <SettingsInput label="Temperature (0-2)" value={draft.modelTemperature} onChange={(v) => setDraft({ ...draft, modelTemperature: v })} />
-        <SettingsInput label="API Key" value={draft.modelApiKey} onChange={(v) => setDraft({ ...draft, modelApiKey: v })} />
-        <SettingsInput label="Base URL" value={draft.modelBaseUrl} onChange={(v) => setDraft({ ...draft, modelBaseUrl: v })} />
-      </section>
+      {tab === "llm" && (
+        <>
+          <section className="nexus-section">
+            <h3 className="nexus-section-title">LLM</h3>
+            <SettingsSelect
+              label="Provider"
+              value={draft.modelProvider}
+              onChange={(v) => setDraft({ ...draft, modelProvider: v })}
+              options={MODEL_PROVIDER_OPTIONS}
+            />
+            <SettingsInput label="Model" value={draft.modelId} onChange={(v) => setDraft({ ...draft, modelId: v })} />
+            <SettingsInput label="Temperature (0-2)" value={draft.modelTemperature} onChange={(v) => setDraft({ ...draft, modelTemperature: v })} />
+            <SettingsInput type="password" label="API Key" value={draft.modelApiKey} onChange={(v) => setDraft({ ...draft, modelApiKey: v })} />
+            <SettingsInput label="Base URL" value={draft.modelBaseUrl} onChange={(v) => setDraft({ ...draft, modelBaseUrl: v })} />
+            <div className="nexus-muted text-[10px]">Default context window fallback: 128k tokens.</div>
+          </section>
 
-      <section className="nexus-section">
-        <h3 className="nexus-section-title">Max Mode</h3>
-        <SettingsToggle
-          label="Enable max mode"
-          checked={draft.maxEnabled}
-          onChange={(checked) => setDraft({ ...draft, maxEnabled: checked })}
-        />
-        <SettingsInput
-          label="Token budget multiplier (1-6)"
-          value={draft.maxTokenBudgetMultiplier}
-          onChange={(v) => setDraft({ ...draft, maxTokenBudgetMultiplier: v })}
-        />
-        <div className="nexus-muted text-[10px]">Uses the same model/provider as LLM section, only increases depth and context budget.</div>
-      </section>
+          <section className="nexus-section">
+            <h3 className="nexus-section-title">Max Mode</h3>
+            <SettingsToggle
+              label="Enable max mode"
+              checked={draft.maxEnabled}
+              onChange={(checked) => setDraft({ ...draft, maxEnabled: checked })}
+            />
+            <SettingsInput
+              label="Token budget multiplier (1-6)"
+              value={draft.maxTokenBudgetMultiplier}
+              onChange={(v) => setDraft({ ...draft, maxTokenBudgetMultiplier: v })}
+            />
+            <div className="nexus-muted text-[10px]">Uses the same model/provider as LLM section, only increases depth and context budget.</div>
+          </section>
+        </>
+      )}
 
+      {tab === "embeddings" && (
       <section className="nexus-section">
         <h3 className="nexus-section-title">Embeddings</h3>
-        <SettingsInput label="Provider" value={draft.embProvider} onChange={(v) => setDraft({ ...draft, embProvider: v })} />
+        <SettingsSelect
+          label="Provider"
+          value={draft.embProvider}
+          onChange={(v) => setDraft({ ...draft, embProvider: v })}
+          options={EMB_PROVIDER_OPTIONS}
+        />
         <SettingsInput label="Model" value={draft.embModel} onChange={(v) => setDraft({ ...draft, embModel: v })} />
-        <SettingsInput label="API Key" value={draft.embApiKey} onChange={(v) => setDraft({ ...draft, embApiKey: v })} />
+        <SettingsInput type="password" label="API Key" value={draft.embApiKey} onChange={(v) => setDraft({ ...draft, embApiKey: v })} />
         <SettingsInput label="Base URL" value={draft.embBaseUrl} onChange={(v) => setDraft({ ...draft, embBaseUrl: v })} />
         <SettingsInput label="Dimensions" value={draft.embDimensions} onChange={(v) => setDraft({ ...draft, embDimensions: v })} />
       </section>
+      )}
 
+      {tab === "index" && (
       <section className="nexus-section">
         <h3 className="nexus-section-title">Index & Vector DB</h3>
         <SettingsToggle
@@ -403,7 +440,9 @@ function SettingsView() {
         <SettingsInput label="Vector DB URL" value={draft.vectorDbUrl} onChange={(v) => setDraft({ ...draft, vectorDbUrl: v })} />
         <div className="nexus-muted text-[10px]">{vectorHint}</div>
       </section>
+      )}
 
+      {tab === "tools" && (
       <section className="nexus-section">
         <h3 className="nexus-section-title">Tools & Skills Filtering</h3>
         <SettingsToggle
@@ -437,7 +476,9 @@ function SettingsView() {
           onChange={(v) => setDraft({ ...draft, maxParallelReads: v })}
         />
       </section>
+      )}
 
+      {tab === "integrations" && (
       <section className="nexus-section">
         <h3 className="nexus-section-title">MCP, Skills, Rules & Instructions</h3>
         <SettingsTextarea
@@ -488,7 +529,9 @@ function SettingsView() {
           rows={3}
         />
       </section>
+      )}
 
+      {tab === "profiles" && (
       <section className="nexus-section">
         <h3 className="nexus-section-title">Agent Profiles</h3>
         <SettingsTextarea
@@ -498,7 +541,7 @@ function SettingsView() {
           rows={5}
         />
       </section>
-      </div>
+      )}
 
       <div className="flex items-center gap-2 mt-3">
         <button
@@ -519,6 +562,29 @@ function SettingsView() {
         </button>
       </div>
     </div>
+  )
+}
+
+function TabPill({
+  id,
+  tab,
+  setTab,
+  label,
+}: {
+  id: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles"
+  tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles"
+  setTab: (tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles") => void
+  label: string
+}) {
+  const active = tab === id
+  return (
+    <button
+      type="button"
+      className={`nexus-tab-btn ${active ? "nexus-tab-btn-active" : ""}`}
+      onClick={() => setTab(id)}
+    >
+      {label}
+    </button>
   )
 }
 
@@ -705,19 +771,45 @@ function SettingsInput({
   label,
   value,
   onChange,
+  type = "text",
 }: {
   label: string
   value: string
   onChange: (value: string) => void
+  type?: "text" | "password"
 }) {
   return (
     <label className="nexus-field">
       <span className="nexus-field-label">{label}</span>
       <input
+        type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="nexus-input"
       />
+    </label>
+  )
+}
+
+function SettingsSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  options: string[]
+}) {
+  return (
+    <label className="nexus-field">
+      <span className="nexus-field-label">{label}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="nexus-input">
+        {options.map((opt) => (
+          <option key={opt} value={opt}>{opt}</option>
+        ))}
+      </select>
     </label>
   )
 }
@@ -816,6 +908,13 @@ function IndexBadge({ status }: { status: { state: string } }) {
     return <span className="nexus-badge nexus-badge-err">index error</span>
   }
   return <span className="nexus-badge">index off</span>
+}
+
+function formatTokens(value: number): string {
+  const n = Math.max(0, Math.floor(value))
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
 }
 
 function PlusIcon({ className }: { className?: string }) {

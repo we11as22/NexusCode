@@ -397,6 +397,19 @@ function saveConfig(updates: Partial<typeof config>): void {
 
 const host = new CliHost(cwd, pushEvent, argv.auto)
 
+function toErrMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+const onUnhandledRejection = (reason: unknown) => {
+  pushEvent({ type: "error", error: `[unhandledRejection] ${toErrMessage(reason)}` })
+}
+const onUncaughtException = (err: Error) => {
+  pushEvent({ type: "error", error: `[uncaughtException] ${toErrMessage(err)}` })
+}
+process.on("unhandledRejection", onUnhandledRejection)
+process.on("uncaughtException", onUncaughtException)
+
 async function runMessage(content: string, msgMode: Mode) {
   session.addMessage({ role: "user", content })
   currentAbortController = new AbortController()
@@ -515,6 +528,8 @@ if (startMessage) {
 process.on("SIGINT", () => {
   currentAbortController?.abort()
   indexer?.close()
+  process.off("unhandledRejection", onUnhandledRejection)
+  process.off("uncaughtException", onUncaughtException)
   setTimeout(() => {
     unmount()
     process.exit(0)

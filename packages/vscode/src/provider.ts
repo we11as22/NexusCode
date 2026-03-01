@@ -45,6 +45,9 @@ export interface WebviewState {
   todo: string
   indexReady: boolean
   indexStatus: IndexStatus
+  contextUsedTokens: number
+  contextLimitTokens: number
+  contextPercent: number
 }
 
 /**
@@ -193,7 +196,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       if (this.config.mcp.servers.length > 0) {
         this.mcpClient = new McpClient()
         setMcpClientInstance(this.mcpClient)
-        this.mcpClient.connectAll(this.config.mcp.servers).catch(err => {
+        this.mcpClient.connectAll(this.config.mcp.servers).catch((err: unknown) => {
           console.warn("[nexus] MCP connection error:", err)
         })
       }
@@ -376,7 +379,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
 
     const host = new VsCodeHost(cwd, (event: AgentEvent) => {
       this.postMessage({ type: "agentEvent", event })
-      if (event.type === "done" || event.type === "error") {
+      if (event.type === "error") {
         this.isRunning = false
         this.postStateUpdate()
       }
@@ -487,10 +490,19 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
           todo: "",
           indexReady: status.state === "ready",
           indexStatus: status,
+          contextUsedTokens: 0,
+          contextLimitTokens: 128000,
+          contextPercent: 0,
         },
       })
       return
     }
+
+    const contextUsedTokens = this.session.getTokenEstimate()
+    const contextLimitTokens = getContextLimit(this.config.model.id)
+    const contextPercent = contextLimitTokens > 0
+      ? Math.min(100, Math.round((contextUsedTokens / contextLimitTokens) * 100))
+      : 0
 
     const state: WebviewState = {
       messages: this.session.messages,
@@ -503,6 +515,9 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       todo: this.session.getTodo(),
       indexReady: status.state === "ready",
       indexStatus: status,
+      contextUsedTokens,
+      contextLimitTokens,
+      contextPercent,
     }
 
     this.postMessage({ type: "stateUpdate", state })
@@ -558,13 +573,13 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     }
 
     this.indexer = await createCodebaseIndexer(cwd, this.config, {
-      onWarning: (message) => console.warn(message),
+      onWarning: (message: string) => console.warn(message),
     })
-    this.indexStatusUnsubscribe = this.indexer.onStatusChange((status) => {
+    this.indexStatusUnsubscribe = this.indexer.onStatusChange((status: IndexStatus) => {
       this.sendIndexStatus(status)
       this.postMessage({ type: "agentEvent", event: { type: "index_update", status } })
     })
-    this.indexer.startIndexing().catch((err) => {
+    this.indexer.startIndexing().catch((err: unknown) => {
       console.warn("[nexus] Indexer start error:", err)
     })
     this.setupFileWatcher(cwd)
@@ -655,6 +670,17 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
 
     this.initialized = false
   }
+}
+
+function getContextLimit(modelId: string): number {
+  const lower = modelId.toLowerCase()
+  if (lower.includes("claude-3") || lower.includes("claude-4") || lower.includes("claude-sonnet") || lower.includes("claude-opus")) return 200000
+  if (lower.includes("gpt-4o")) return 128000
+  if (lower.includes("gpt-4")) return 128000
+  if (lower.includes("gpt-3.5")) return 16000
+  if (lower.includes("gemini-2")) return 1000000
+  if (lower.includes("gemini")) return 200000
+  return 128000
 }
 
 /**

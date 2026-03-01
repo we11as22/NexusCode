@@ -1,24 +1,21 @@
 #!/usr/bin/env node
 /**
- * Run vsce package. Requires Node.js 20+ (vsce/undici use global File, not available in Node 18).
+ * Run vsce package.
+ * Node 18 lacks global File used by undici; inject a lightweight polyfill via NODE_OPTIONS.
  */
-const major = parseInt(process.version.slice(1).split('.')[0], 10)
-if (major < 20) {
-  console.error(
-    'Error: Packaging the VS Code extension requires Node.js 20+ (current: ' +
-      process.version +
-      ').\n' +
-      '  undici (used by vsce) needs the global File API from Node 20.\n' +
-      '  Use: nvm use 20  (or install Node 20), then run: pnpm package:vscode'
-  )
-  process.exit(1)
-}
 const { execSync } = require('child_process')
 const path = require('path')
 const cwd = path.resolve(__dirname, '..')
+const polyfillPath = path.join(cwd, 'scripts', 'node18-file-polyfill.cjs')
+const extraNodeOpts = `--require=${JSON.stringify(polyfillPath)}`
+const inheritedNodeOpts = process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : ''
 execSync('pnpm exec vsce package --no-dependencies --allow-missing-repository --no-yarn', {
   stdio: 'inherit',
   cwd,
+  env: {
+    ...process.env,
+    NODE_OPTIONS: `${inheritedNodeOpts}${extraNodeOpts}`.trim(),
+  },
 })
 const vsixName = 'nexuscode-0.1.0.vsix'
 console.log('')
