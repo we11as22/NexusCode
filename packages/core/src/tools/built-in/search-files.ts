@@ -5,6 +5,12 @@ import type { ToolDef, ToolContext } from "../../types.js"
 
 const MAX_RESULTS = 500
 const MAX_OUTPUT_CHARS = 100_000
+const DEFAULT_CODE_GLOBS = [
+  "*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs",
+  "*.py", "*.rs", "*.go", "*.java", "*.c", "*.cpp", "*.h", "*.hpp",
+  "*.cs", "*.rb", "*.php", "*.swift", "*.kt", "*.scala",
+  "*.md", "*.mdx",
+]
 
 const searchSchema = z.object({
   pattern: z.string().optional().describe("Regex pattern to search for"),
@@ -52,7 +58,13 @@ Examples:
           if (matchCount >= maxMatches) break
           const args = ["--json", "-e", pat]
           if (!case_sensitive) args.push("--ignore-case")
-          if (include) args.push("--glob", include)
+          if (include) {
+            args.push("--glob", include)
+          } else {
+            for (const g of DEFAULT_CODE_GLOBS) {
+              args.push("--glob", g)
+            }
+          }
           if (exclude) args.push("--glob", `!${exclude}`)
           if (context_lines) args.push("--context", String(context_lines))
           args.push(target)

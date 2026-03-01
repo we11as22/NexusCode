@@ -393,6 +393,24 @@ html, body, #root {
   background: var(--nexus-chat-bg);
 }
 
+.nexus-jump-latest {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--nexus-accent) 65%, #000 35%);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  background: color-mix(in srgb, var(--nexus-accent) 88%, #000 12%);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.26);
+}
+
+.nexus-jump-latest:hover {
+  background: var(--nexus-accent-hover);
+}
+
 .message-list-loading {
   display: flex;
   flex-direction: column;

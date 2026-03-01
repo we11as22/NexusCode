@@ -715,8 +715,8 @@ function isNetworkError(err) {
   return msg.includes("econnreset") || msg.includes("econnrefused") || msg.includes("etimedout") || msg.includes("network") || msg.includes("socket") || msg.includes("fetch failed");
 }
 function sleep(ms, signal) {
-  return new Promise((resolve10, reject) => {
-    const timer = setTimeout(resolve10, ms);
+  return new Promise((resolve11, reject) => {
+    const timer = setTimeout(resolve11, ms);
     signal?.addEventListener("abort", () => {
       clearTimeout(timer);
       reject(new Error("Aborted"));
@@ -1891,6 +1891,12 @@ async function listDirRecursive(dir, cwd, maxEntries) {
   return entries;
 }
 var DOOM_LOOP_THRESHOLD = 3;
+var BASE_TOOL_CALL_BUDGET_BY_MODE = {
+  ask: 24,
+  plan: 40,
+  agent: 120,
+  debug: 120
+};
 async function runAgentLoop(opts) {
   const {
     session,
@@ -1950,6 +1956,10 @@ async function runAgentLoop(opts) {
     debug: 32
   };
   const maxIterations = config.maxMode.enabled ? Math.floor(baseMaxIterationsByMode[mode] * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2)))) : baseMaxIterationsByMode[mode];
+  const toolBudgetMultiplier = config.maxMode.enabled ? Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2))) : 1;
+  const toolCallBudget = Math.max(8, Math.floor(BASE_TOOL_CALL_BUDGET_BY_MODE[mode] * toolBudgetMultiplier));
+  let executedToolCallsTotal = 0;
+  let forceFinalAnswerNext = false;
   let lastAssistantMessageId = "";
   const emitContextUsage = () => {
     const limitTokens = getContextLimit(activeClient.modelId);
@@ -1968,7 +1978,7 @@ async function runAgentLoop(opts) {
       });
       break;
     }
-    const isFinalIteration = loopIterations === maxIterations;
+    const isFinalIteration = forceFinalAnswerNext || loopIterations === maxIterations;
     const promptCtx = {
       mode,
       maxMode: config.maxMode.enabled,
@@ -2008,8 +2018,22 @@ async function runAgentLoop(opts) {
     let currentText = "";
     const pendingReads = [];
     let lastToolName = "";
+    let sawNativeToolCall = false;
+    let executedToolThisIteration = false;
+    let attemptedCompletionThisIteration = false;
     let finishReason;
     let fatalStreamError = false;
+    let budgetExceededThisIteration = false;
+    const markToolBudgetExceeded = () => {
+      if (budgetExceededThisIteration) return;
+      budgetExceededThisIteration = true;
+      forceFinalAnswerNext = true;
+      host.emit({
+        type: "error",
+        error: `Tool-call budget reached (${toolCallBudget}). Forcing final answer without additional tools.`,
+        fatal: false
+      });
+    };
     const flushPendingReads = async () => {
       if (pendingReads.length === 0) return;
       const tasks = pendingReads.map(
@@ -2032,13 +2056,15 @@ async function runAgentLoop(opts) {
           messageId: newMessageId,
           success: result.success
         });
+        executedToolThisIteration = true;
+        executedToolCallsTotal++;
       }
       pendingReads.length = 0;
     };
     try {
       const tokenMultiplier = config.maxMode.enabled ? Math.max(1, Math.min(6, Number(config.maxMode.tokenBudgetMultiplier || 2))) : 1;
       const maxTokens = Math.floor(8192 * tokenMultiplier);
-      for await (const event of activeClient.stream({
+      streamLoop: for await (const event of activeClient.stream({
         messages,
         tools: llmTools,
         systemPrompt,
@@ -2064,6 +2090,7 @@ async function runAgentLoop(opts) {
           case "tool_call": {
             const { toolCallId, toolName, toolInput } = event;
             if (!toolCallId || !toolName || !toolInput) break;
+            sawNativeToolCall = true;
             const isKnownTool = resolvedTools.some((t) => t.name === toolName);
             if (!isKnownTool) {
               consecutiveInvalidToolCalls++;
@@ -2074,6 +2101,10 @@ async function runAgentLoop(opts) {
               }
             } else {
               consecutiveInvalidToolCalls = 0;
+            }
+            if (executedToolCallsTotal + pendingReads.length >= toolCallBudget) {
+              markToolBudgetExceeded();
+              break;
             }
             const partId = `part_${toolCallId}`;
             session.addToolPart(newMessageId, {
@@ -2134,6 +2165,11 @@ async function runAgentLoop(opts) {
                 success: result.success
               });
               lastToolName = toolName;
+              executedToolThisIteration = true;
+              executedToolCallsTotal++;
+              if (toolName === "attempt_completion") {
+                attemptedCompletionThisIteration = true;
+              }
             }
             break;
           }
@@ -2164,6 +2200,10 @@ async function runAgentLoop(opts) {
             }
             break;
         }
+        if (budgetExceededThisIteration) {
+          await flushPendingReads();
+          break streamLoop;
+        }
       }
     } catch (err) {
       if (signal.aborted) break;
@@ -2175,11 +2215,79 @@ async function runAgentLoop(opts) {
       }
       break;
     }
+    if (!isFinalIteration && !sawNativeToolCall) {
+      const textualCalls = parseTextualToolCalls(currentText);
+      if (textualCalls.length > 0) {
+        const cleaned = stripTextualToolCalls(currentText).trim();
+        if (cleaned !== currentText) {
+          currentText = cleaned;
+          session.updateMessage(newMessageId, { content: currentText });
+        }
+        for (let i = 0; i < textualCalls.length; i++) {
+          if (executedToolCallsTotal >= toolCallBudget) {
+            markToolBudgetExceeded();
+            break;
+          }
+          const call = textualCalls[i];
+          const syntheticCallId = `textual_${loopIterations}_${i}_${Date.now()}`;
+          const partId = `part_${syntheticCallId}`;
+          session.addToolPart(newMessageId, {
+            type: "tool",
+            id: partId,
+            tool: call.toolName,
+            status: "pending",
+            input: call.toolInput,
+            timeStart: Date.now()
+          });
+          host.emit({ type: "tool_start", tool: call.toolName, partId, messageId: newMessageId });
+          if (call.toolInput["task_progress"] && typeof call.toolInput["task_progress"] === "string") {
+            session.updateTodo(call.toolInput["task_progress"]);
+          }
+          if (await detectDoomLoop(session, call.toolName, call.toolInput)) {
+            host.emit({ type: "doom_loop_detected", tool: call.toolName });
+            throw new Error(`Doom loop: tool "${call.toolName}" repeatedly called via textual tool-call markup.`);
+          }
+          const result = await executeToolCall(
+            syntheticCallId,
+            call.toolName,
+            call.toolInput,
+            resolvedTools,
+            toolCtx,
+            autoApproveActions,
+            config,
+            host);
+          session.updateToolPart(newMessageId, partId, {
+            status: result.success ? "completed" : "error",
+            output: result.output,
+            timeEnd: Date.now()
+          });
+          host.emit({
+            type: "tool_end",
+            tool: call.toolName,
+            partId,
+            messageId: newMessageId,
+            success: result.success
+          });
+          lastToolName = call.toolName;
+          executedToolThisIteration = true;
+          executedToolCallsTotal++;
+          if (call.toolName === "attempt_completion") {
+            attemptedCompletionThisIteration = true;
+          }
+        }
+        finishReason = "tool_calls";
+      }
+    }
     if (fatalStreamError) {
       break;
     }
-    if (lastToolName === "attempt_completion") break;
-    if (finishReason === "stop" && !lastToolName) break;
+    if (budgetExceededThisIteration) {
+      await session.save();
+      emitContextUsage();
+      continue;
+    }
+    if (attemptedCompletionThisIteration || lastToolName === "attempt_completion") break;
+    if (finishReason === "stop" && !executedToolThisIteration) break;
     if (signal.aborted) break;
     const tokenCount = session.getTokenEstimate();
     const contextLimit = getContextLimit(activeClient.modelId);
@@ -2195,6 +2303,58 @@ async function runAgentLoop(opts) {
     emitContextUsage();
     host.emit({ type: "done", messageId: lastAssistantMessageId });
   }
+}
+function parseTextualToolCalls(text) {
+  if (!text || !text.includes("<tool_call>")) return [];
+  const calls = [];
+  const blockRe = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
+  let blockMatch;
+  while ((blockMatch = blockRe.exec(text)) !== null) {
+    const block = blockMatch[1] ?? "";
+    const fnMatch = block.match(/<function=([A-Za-z0-9_\-]+)>/i);
+    if (!fnMatch?.[1]) continue;
+    const toolName = fnMatch[1].trim();
+    const toolInput = {};
+    const paramRe = /<parameter=([A-Za-z0-9_\-]+)>\s*([\s\S]*?)\s*<\/parameter>/gi;
+    let paramMatch;
+    while ((paramMatch = paramRe.exec(block)) !== null) {
+      const key = (paramMatch[1] ?? "").trim();
+      const valueRaw = (paramMatch[2] ?? "").trim();
+      if (!key) continue;
+      toolInput[key] = parseLooseValue(valueRaw);
+    }
+    if (Object.keys(toolInput).length === 0) {
+      const argsMatch = block.match(/<arguments>\s*([\s\S]*?)\s*<\/arguments>/i);
+      if (argsMatch?.[1]) {
+        try {
+          const parsed = JSON.parse(argsMatch[1]);
+          Object.assign(toolInput, parsed);
+        } catch {
+        }
+      }
+    }
+    calls.push({ toolName, toolInput });
+  }
+  return calls;
+}
+function stripTextualToolCalls(text) {
+  if (!text) return text;
+  return text.replace(/<tool_call>\s*[\s\S]*?\s*<\/tool_call>/gi, "").trim();
+}
+function parseLooseValue(value) {
+  if (!value) return "";
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (value === "null") return null;
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  if (value.startsWith("{") && value.endsWith("}") || value.startsWith("[") && value.endsWith("]")) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+  return value;
 }
 async function executeToolCall(toolCallId, toolName, toolInput, tools, ctx, autoApproveActions, config, host, session, messageId) {
   const tool = tools.find((t) => t.name === toolName);
@@ -2866,6 +3026,14 @@ WARNING: This replaces the entire file content. Provide the complete final conte
       return { success: false, output: `Failed to write ${filePath}: ${err.message}` };
     }
     const lines = content.split("\n").length;
+    const indexer = ctx.indexer;
+    if (indexer?.refreshFileNow) {
+      await indexer.refreshFileNow(absPath).catch(() => {
+      });
+    } else if (ctx.indexer?.refreshFile) {
+      await ctx.indexer.refreshFile(absPath).catch(() => {
+      });
+    }
     return {
       success: true,
       output: `Successfully wrote ${filePath} (${lines} lines)`
@@ -2936,6 +3104,14 @@ Hint: Read the file first to verify the exact content.`
       }
       return { success: false, output: `Failed to write: ${err.message}` };
     }
+    const indexer = ctx.indexer;
+    if (indexer?.refreshFileNow) {
+      await indexer.refreshFileNow(absPath).catch(() => {
+      });
+    } else if (ctx.indexer?.refreshFile) {
+      await ctx.indexer.refreshFile(absPath).catch(() => {
+      });
+    }
     return {
       success: true,
       output: `Successfully updated ${filePath}:
@@ -2996,6 +3172,14 @@ Prefer replace_in_file for targeted edits \u2014 it's more reliable.`,
       } catch {
       }
       return { success: false, output: `Failed to write: ${err.message}` };
+    }
+    const indexer = ctx.indexer;
+    if (indexer?.refreshFileNow) {
+      await indexer.refreshFileNow(absPath).catch(() => {
+      });
+    } else if (ctx.indexer?.refreshFile) {
+      await ctx.indexer.refreshFile(absPath).catch(() => {
+      });
     }
     return {
       success: true,
@@ -3098,6 +3282,30 @@ function truncateOutput(output) {
 }
 var MAX_RESULTS = 500;
 var MAX_OUTPUT_CHARS = 1e5;
+var DEFAULT_CODE_GLOBS = [
+  "*.ts",
+  "*.tsx",
+  "*.js",
+  "*.jsx",
+  "*.mjs",
+  "*.cjs",
+  "*.py",
+  "*.rs",
+  "*.go",
+  "*.java",
+  "*.c",
+  "*.cpp",
+  "*.h",
+  "*.hpp",
+  "*.cs",
+  "*.rb",
+  "*.php",
+  "*.swift",
+  "*.kt",
+  "*.scala",
+  "*.md",
+  "*.mdx"
+];
 var searchSchema = z.object({
   pattern: z.string().optional().describe("Regex pattern to search for"),
   patterns: z.array(z.string()).min(1).max(20).optional().describe("Multiple regex patterns to search in one call"),
@@ -3139,7 +3347,13 @@ Examples:
           if (matchCount >= maxMatches) break;
           const args = ["--json", "-e", pat];
           if (!case_sensitive) args.push("--ignore-case");
-          if (include) args.push("--glob", include);
+          if (include) {
+            args.push("--glob", include);
+          } else {
+            for (const g of DEFAULT_CODE_GLOBS) {
+              args.push("--glob", g);
+            }
+          }
           if (exclude) args.push("--glob", `!${exclude}`);
           if (context_lines) args.push("--context", String(context_lines));
           args.push(target);
@@ -3401,6 +3615,7 @@ var schema7 = z.object({
   query: z.string().optional().describe("Semantic search query (natural language description of what you're looking for)"),
   queries: z.array(z.string()).min(1).max(20).optional().describe("Multiple semantic queries in one call"),
   path: z.string().optional().describe("Optional path scope (file or directory, relative to project root)"),
+  paths: z.array(z.string()).min(1).max(20).optional().describe("Multiple path scopes (files and/or directories)"),
   kind: z.enum(["class", "function", "method", "interface", "type", "enum", "const", "any"]).optional().describe("Filter by symbol type"),
   limit: z.number().int().positive().max(50).optional().describe("Max results (default: 10)"),
   task_progress: z.string().optional()
@@ -3414,7 +3629,7 @@ If vector search is enabled, uses semantic similarity.
 Requires the codebase to be indexed (runs automatically on startup).`,
   parameters: schema7,
   readOnly: true,
-  async execute({ query, queries, path: path18, kind, limit }, ctx) {
+  async execute({ query, queries, path: path19, paths, kind, limit }, ctx) {
     if (!ctx.indexer) {
       return {
         success: false,
@@ -3433,8 +3648,13 @@ Requires the codebase to be indexed (runs automatically on startup).`,
       if (allQueries.length === 0) {
         return { success: false, output: "Provide query or queries." };
       }
-      const scope = path18?.replace(/\\/g, "/").replace(/\/+$/, "");
-      const isFileScope = scope != null && /\.[a-z0-9]+$/i.test(scope);
+      const scopeCandidates = [
+        ...path19 ? [path19] : [],
+        ...Array.isArray(paths) ? paths : []
+      ];
+      const normalizedScopes = Array.from(new Set(
+        scopeCandidates.map((p) => normalizeScopePath(p, ctx.cwd)).filter(Boolean)
+      ));
       const sections = [];
       for (const q of allQueries) {
         const raw = await ctx.indexer.search(q, {
@@ -3442,36 +3662,49 @@ Requires the codebase to be indexed (runs automatically on startup).`,
           kind: kind === "any" ? void 0 : kind,
           semantic: true
         });
-        const filtered = scope ? raw.filter((r) => {
-          const p = r.path.replace(/\\/g, "/");
-          return isFileScope ? p === scope : p === scope || p.startsWith(`${scope}/`);
-        }) : raw;
-        if (filtered.length === 0) {
-          sections.push(`Query: "${q}"
-No results.`);
-          continue;
-        }
-        const formatted = filtered.map((r, i) => {
-          const loc = r.startLine ? `:${r.startLine}` : "";
-          const parent = r.parent ? ` (in ${r.parent})` : "";
-          const kindStr = r.kind ? `[${r.kind}]` : "";
-          return `${i + 1}. ${r.path}${loc} ${kindStr}${parent}
+        const scopedSections = [];
+        const scopesToUse = normalizedScopes.length > 0 ? normalizedScopes : [""];
+        for (const scope of scopesToUse) {
+          const isFileScope = scope ? /\.[a-z0-9]+$/i.test(scope) : false;
+          const filtered = scope ? raw.filter((r) => {
+            const p = r.path.replace(/\\/g, "/");
+            return isFileScope ? p === scope : p === scope || p.startsWith(`${scope}/`);
+          }) : raw;
+          if (filtered.length === 0) {
+            scopedSections.push(`${scope ? `Scope: ${scope}
+` : ""}No results.`);
+            continue;
+          }
+          const formatted = filtered.map((r, i) => {
+            const loc = r.startLine ? `:${r.startLine}` : "";
+            const parent = r.parent ? ` (in ${r.parent})` : "";
+            const kindStr = r.kind ? `[${r.kind}]` : "";
+            return `${i + 1}. ${r.path}${loc} ${kindStr}${parent}
    ${r.content.slice(0, 200).replace(/\n/g, " ")}`;
-        }).join("\n\n");
+          }).join("\n\n");
+          scopedSections.push(`${scope ? `Scope: ${scope}
+` : ""}${formatted}`);
+        }
         sections.push(`Query: "${q}"
-${formatted}`);
+${scopedSections.join("\n\n")}`);
       }
       return {
         success: true,
-        output: `${scope ? `Scope: ${scope}
-
-` : ""}${sections.join("\n\n---\n\n")}`
+        output: sections.join("\n\n---\n\n")
       };
     } catch (err) {
       return { success: false, output: `Search failed: ${err.message}` };
     }
   }
 };
+function normalizeScopePath(input, cwd) {
+  const raw = input.trim();
+  if (!raw) return "";
+  const abs = path6.isAbsolute(raw) ? raw : path6.resolve(cwd, raw);
+  const rel = path6.relative(cwd, abs);
+  const safe = rel && !rel.startsWith("..") ? rel : raw;
+  return safe.replace(/\\/g, "/").replace(/\/+$/, "");
+}
 var MAX_CONTENT_BYTES = 100 * 1024;
 var FETCH_TIMEOUT = 3e4;
 var schema8 = z.object({
@@ -3649,7 +3882,7 @@ Use when the task requires specialized knowledge documented in a skill.`,
     const skills = ctx.config.skills;
     [...skills];
     const { readFile: readFile12 } = await import('fs/promises');
-    const { resolve: resolve10, basename: basename3, join: join13 } = await import('path');
+    const { resolve: resolve11, basename: basename3, join: join13 } = await import('path');
     const { glob: glob3 } = await import('glob');
     const allSkillFiles = await glob3(skills.length > 0 ? skills : [".nexus/skills/**/*.md", "~/.nexus/skills/**/*.md"], {
       cwd: ctx.cwd,
@@ -3663,7 +3896,7 @@ Use when the task requires specialized knowledge documented in a skill.`,
     let skillPath = null;
     for (const p of [...standardPaths, ...allSkillFiles]) {
       const name = basename3(p, ".md").toLowerCase();
-      const parentDir = basename3(resolve10(p, "..")).toLowerCase();
+      const parentDir = basename3(resolve11(p, "..")).toLowerCase();
       if (name === skill.toLowerCase() || parentDir === skill.toLowerCase()) {
         try {
           skillContent = await readFile12(p, "utf8");
@@ -4506,11 +4739,7 @@ var SUPPORTED_EXTENSIONS2 = /* @__PURE__ */ new Set([
   ".kt",
   ".scala",
   ".md",
-  ".txt",
-  ".yaml",
-  ".yml",
-  ".json",
-  ".toml"
+  ".mdx"
 ]);
 var DEFAULT_EXCLUDE = [
   "node_modules/**",
@@ -4618,6 +4847,9 @@ function extractSymbols(content, filePath, ext) {
       return extractGoSymbols(content, filePath);
     case ".java":
       return extractJavaSymbols(content, filePath);
+    case ".md":
+    case ".mdx":
+      return extractMarkdownSections(content, filePath);
     default:
       return extractChunks(content, filePath);
   }
@@ -4848,6 +5080,79 @@ function extractJavaSymbols(content, filePath) {
   }
   return symbols.length > 0 ? symbols : extractChunks(content, filePath);
 }
+function extractMarkdownSections(content, filePath) {
+  const lines = content.split("\n");
+  const chunks = [];
+  const headingRegex = /^(#{1,6})\s+(.+?)\s*$/;
+  const stack = [];
+  let sectionStart = 0;
+  let sectionTitle = "document";
+  const flushSection = (endExclusive) => {
+    if (endExclusive <= sectionStart) return;
+    const sectionLines = lines.slice(sectionStart, endExclusive);
+    const sectionContent = sectionLines.join("\n").trim();
+    if (!sectionContent) return;
+    const parent = stack.length > 1 ? stack[stack.length - 2]?.title : void 0;
+    const startLine = sectionStart + 1;
+    const endLine = endExclusive;
+    const bounded = splitMarkdownSection(sectionContent, startLine, endLine, filePath, sectionTitle, parent);
+    chunks.push(...bounded);
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const m = line.match(headingRegex);
+    if (!m) continue;
+    const level = m[1].length;
+    const title = m[2].trim();
+    flushSection(i);
+    while (stack.length > 0 && stack[stack.length - 1].level >= level) {
+      stack.pop();
+    }
+    stack.push({ level, title });
+    sectionStart = i;
+    sectionTitle = title;
+  }
+  flushSection(lines.length);
+  if (chunks.length === 0) {
+    return extractChunks(content, filePath);
+  }
+  return chunks;
+}
+function splitMarkdownSection(sectionContent, startLine, endLine, filePath, title, parent) {
+  const lines = sectionContent.split("\n");
+  const maxLines = 120;
+  if (lines.length <= maxLines) {
+    return [{
+      path: filePath,
+      name: title || `section_${startLine}`,
+      kind: "chunk",
+      parent,
+      startLine,
+      endLine,
+      content: sectionContent
+    }];
+  }
+  const out = [];
+  let cursor = 0;
+  let part = 1;
+  while (cursor < lines.length) {
+    const slice = lines.slice(cursor, cursor + maxLines);
+    const relStart = startLine + cursor;
+    const relEnd = Math.min(endLine, relStart + slice.length - 1);
+    out.push({
+      path: filePath,
+      name: `${title || "section"}#${part}`,
+      kind: "chunk",
+      parent,
+      startLine: relStart,
+      endLine: relEnd,
+      content: slice.join("\n")
+    });
+    cursor += maxLines;
+    part += 1;
+  }
+  return out;
+}
 var CHUNK_SIZE = 50;
 var CHUNK_OVERLAP = 15;
 function extractChunks(content, filePath) {
@@ -5068,7 +5373,18 @@ var SUPPORTED_CODE_EXTENSIONS = /* @__PURE__ */ new Set([
   ".c",
   ".cpp",
   ".h",
-  ".hpp"
+  ".hpp",
+  ".cs",
+  ".rb",
+  ".php",
+  ".swift",
+  ".kt",
+  ".scala"
+]);
+var SUPPORTED_MARKDOWN_EXTENSIONS = /* @__PURE__ */ new Set([".md", ".mdx"]);
+var SUPPORTED_INDEX_EXTENSIONS = /* @__PURE__ */ new Set([
+  ...SUPPORTED_CODE_EXTENSIONS,
+  ...SUPPORTED_MARKDOWN_EXTENSIONS
 ]);
 var CodebaseIndexer = class {
   constructor(projectRoot, config, embeddingClient, vectorUrl, projectHash) {
@@ -5129,7 +5445,7 @@ var CodebaseIndexer = class {
     } else {
       this.forceVectorBackfill = false;
     }
-    this.notifyStatus({ state: "indexing", progress: 0, total: 0 });
+    this.notifyStatus({ state: "indexing", progress: 0, total: 0, chunksProcessed: 0, chunksTotal: 0 });
     this.indexInBackground().catch((err) => {
       console.warn("[nexus] Indexing error:", err);
       this.notifyStatus({ state: "error", error: err.message });
@@ -5141,6 +5457,8 @@ var CodebaseIndexer = class {
     const seen = /* @__PURE__ */ new Set();
     let processed = 0;
     let total = 0;
+    let chunksProcessed = 0;
+    let chunksTotal = 0;
     const batchSize = this.config.indexing.batchSize;
     let batch = [];
     for await (const file of walkDir(this.projectRoot, this.config.indexing.excludePatterns)) {
@@ -5149,15 +5467,19 @@ var CodebaseIndexer = class {
       seen.add(file.path);
       batch.push(file);
       if (batch.length >= batchSize) {
-        await this.processBatch(batch);
+        const stats2 = await this.processBatch(batch);
+        chunksTotal += stats2.plannedChunks;
+        chunksProcessed += stats2.indexedChunks;
         processed += batch.length;
-        this.notifyStatus({ state: "indexing", progress: processed, total });
+        this.notifyStatus({ state: "indexing", progress: processed, total, chunksProcessed, chunksTotal });
         batch = [];
         await new Promise((r) => setImmediate(r));
       }
     }
     if (batch.length > 0 && !this.abortController?.signal.aborted) {
-      await this.processBatch(batch);
+      const stats2 = await this.processBatch(batch);
+      chunksTotal += stats2.plannedChunks;
+      chunksProcessed += stats2.indexedChunks;
       processed += batch.length;
     }
     if (this.abortController?.signal.aborted) {
@@ -5171,12 +5493,14 @@ var CodebaseIndexer = class {
       }
     }
     const stats = this.fts.getStats();
-    this.notifyStatus({ state: "ready", files: stats.files, symbols: stats.symbols });
+    this.notifyStatus({ state: "ready", files: stats.files, symbols: stats.symbols, chunks: stats.chunks });
     this.forceVectorBackfill = false;
     this.indexing = false;
   }
   async processBatch(files) {
     const vectorEntries = [];
+    let plannedChunks = 0;
+    let indexedChunks = 0;
     for (const file of files) {
       if (!file) continue;
       const unchanged = this.fts.isFileIndexed(file.path, file.mtime, file.hash);
@@ -5191,35 +5515,39 @@ var CodebaseIndexer = class {
         this.fts.upsertFile(file.path, file.mtime, file.hash);
       }
       const shouldUpdateFts = !unchanged;
-      if (SUPPORTED_CODE_EXTENSIONS.has(file.ext) && this.config.indexing.symbolExtract) {
-        const symbols = extractSymbols(content, file.path, file.ext);
-        for (const sym of symbols) {
-          if (shouldUpdateFts) {
+      const supportsStructuredSymbols = SUPPORTED_CODE_EXTENSIONS.has(file.ext) && this.config.indexing.symbolExtract;
+      const supportsMarkdownSections = SUPPORTED_MARKDOWN_EXTENSIONS.has(file.ext);
+      const extracted = supportsStructuredSymbols || supportsMarkdownSections ? extractSymbols(content, file.path, file.ext) : extractChunks(content, file.path);
+      plannedChunks += extracted.length;
+      if (extracted.length > 0) {
+        indexedChunks += extracted.length;
+      }
+      for (const sym of extracted) {
+        if (shouldUpdateFts) {
+          if (sym.kind === "chunk") {
+            this.fts.insertChunk({ path: sym.path, offset: sym.startLine, content: sym.content });
+          } else {
             this.fts.insertSymbol(sym);
           }
-          if (this.vector && this.config.indexing.vector) {
-            const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`;
-            vectorEntries.push({
-              id,
-              path: file.path,
-              name: sym.name,
-              kind: sym.kind,
-              parent: sym.parent,
-              startLine: sym.startLine,
-              content: sym.content
-            });
-          }
         }
-      } else if (shouldUpdateFts) {
-        const chunks = extractChunks(content, file.path);
-        for (const chunk2 of chunks) {
-          this.fts.insertChunk({ path: chunk2.path, offset: chunk2.startLine, content: chunk2.content });
+        if (this.vector && this.config.indexing.vector) {
+          const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`;
+          vectorEntries.push({
+            id,
+            path: file.path,
+            name: sym.name,
+            kind: sym.kind,
+            parent: sym.parent,
+            startLine: sym.startLine,
+            content: sym.content
+          });
         }
       }
     }
     if (vectorEntries.length > 0) {
       await this.vector?.upsertSymbols(vectorEntries);
     }
+    return { plannedChunks, indexedChunks };
   }
   async refreshFile(filePath) {
     const existing = this.debounceTimers.get(filePath);
@@ -5237,6 +5565,7 @@ var CodebaseIndexer = class {
     const fileInfo = await buildFileInfo(filePath, this.projectRoot);
     if (!fileInfo) {
       const relPath = path6.relative(this.projectRoot, filePath);
+      if (!relPath || relPath.startsWith("..")) return;
       this.fts.deleteFile(relPath);
       await this.vector?.deleteByPath(relPath);
       return;
@@ -5301,11 +5630,16 @@ var CodebaseIndexer = class {
 async function buildFileInfo(absPath, root) {
   try {
     const s = await fs11.stat(absPath);
+    if (!s.isFile()) return null;
+    if (s.size > 1024 * 1024) return null;
+    const relPath = path6.relative(root, absPath);
+    if (!relPath || relPath.startsWith("..")) return null;
+    const ext = path6.extname(absPath).toLowerCase();
+    if (!SUPPORTED_INDEX_EXTENSIONS.has(ext)) return null;
     const content = await fs11.readFile(absPath);
     const hash = crypto.createHash("md5").update(content).digest("hex");
-    const ext = path6.extname(absPath).toLowerCase();
     return {
-      path: path6.relative(root, absPath),
+      path: relPath,
       absPath,
       ext,
       mtime: s.mtimeMs,
@@ -5475,7 +5809,7 @@ function joinUrl(base, suffix) {
   return `${base.replace(/\/+$/, "")}${suffix}`;
 }
 function sleep2(ms) {
-  return new Promise((resolve10) => setTimeout(resolve10, ms));
+  return new Promise((resolve11) => setTimeout(resolve11, ms));
 }
 
 // src/indexer/factory.ts

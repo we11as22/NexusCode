@@ -14,6 +14,12 @@ import type { EmbeddingClient } from "../provider/types.js"
 const SUPPORTED_CODE_EXTENSIONS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp",
+  ".cs", ".rb", ".php", ".swift", ".kt", ".scala",
+])
+const SUPPORTED_MARKDOWN_EXTENSIONS = new Set([".md", ".mdx"])
+const SUPPORTED_INDEX_EXTENSIONS = new Set([
+  ...SUPPORTED_CODE_EXTENSIONS,
+  ...SUPPORTED_MARKDOWN_EXTENSIONS,
 ])
 
 /**
@@ -91,7 +97,7 @@ export class CodebaseIndexer implements IIndexer {
       this.forceVectorBackfill = false
     }
 
-    this.notifyStatus({ state: "indexing", progress: 0, total: 0 })
+    this.notifyStatus({ state: "indexing", progress: 0, total: 0, chunksProcessed: 0, chunksTotal: 0 })
 
     this.indexInBackground().catch(err => {
       console.warn("[nexus] Indexing error:", err)
@@ -105,6 +111,8 @@ export class CodebaseIndexer implements IIndexer {
     const seen = new Set<string>()
     let processed = 0
     let total = 0
+    let chunksProcessed = 0
+    let chunksTotal = 0
 
     const batchSize = this.config.indexing.batchSize
     let batch: FileInfo[] = []
@@ -118,9 +126,11 @@ export class CodebaseIndexer implements IIndexer {
       batch.push(file)
 
       if (batch.length >= batchSize) {
-        await this.processBatch(batch)
+        const stats = await this.processBatch(batch)
+        chunksTotal += stats.plannedChunks
+        chunksProcessed += stats.indexedChunks
         processed += batch.length
-        this.notifyStatus({ state: "indexing", progress: processed, total })
+        this.notifyStatus({ state: "indexing", progress: processed, total, chunksProcessed, chunksTotal })
         batch = []
         // Yield to event loop between batches to avoid blocking
         await new Promise<void>(r => setImmediate(r))
@@ -128,7 +138,9 @@ export class CodebaseIndexer implements IIndexer {
     }
 
     if (batch.length > 0 && !this.abortController?.signal.aborted) {
-      await this.processBatch(batch)
+      const stats = await this.processBatch(batch)
+      chunksTotal += stats.plannedChunks
+      chunksProcessed += stats.indexedChunks
       processed += batch.length
     }
 
@@ -146,13 +158,15 @@ export class CodebaseIndexer implements IIndexer {
     }
 
     const stats = this.fts.getStats()
-    this.notifyStatus({ state: "ready", files: stats.files, symbols: stats.symbols })
+    this.notifyStatus({ state: "ready", files: stats.files, symbols: stats.symbols, chunks: stats.chunks })
     this.forceVectorBackfill = false
     this.indexing = false
   }
 
-  private async processBatch(files: FileInfo[]): Promise<void> {
+  private async processBatch(files: FileInfo[]): Promise<{ plannedChunks: number; indexedChunks: number }> {
     const vectorEntries: Parameters<VectorIndex["upsertSymbols"]>[0] = []
+    let plannedChunks = 0
+    let indexedChunks = 0
 
     for (const file of files) {
       if (!file) continue
@@ -173,30 +187,36 @@ export class CodebaseIndexer implements IIndexer {
 
       const shouldUpdateFts = !unchanged
 
-      if (SUPPORTED_CODE_EXTENSIONS.has(file.ext) && this.config.indexing.symbolExtract) {
-        const symbols = extractSymbols(content, file.path, file.ext)
-        for (const sym of symbols) {
-          if (shouldUpdateFts) {
+      const supportsStructuredSymbols = SUPPORTED_CODE_EXTENSIONS.has(file.ext) && this.config.indexing.symbolExtract
+      const supportsMarkdownSections = SUPPORTED_MARKDOWN_EXTENSIONS.has(file.ext)
+      const extracted = (supportsStructuredSymbols || supportsMarkdownSections)
+        ? extractSymbols(content, file.path, file.ext)
+        : extractChunks(content, file.path)
+
+      plannedChunks += extracted.length
+      if (extracted.length > 0) {
+        indexedChunks += extracted.length
+      }
+
+      for (const sym of extracted) {
+        if (shouldUpdateFts) {
+          if (sym.kind === "chunk") {
+            this.fts.insertChunk({ path: sym.path, offset: sym.startLine, content: sym.content })
+          } else {
             this.fts.insertSymbol(sym)
           }
-          if (this.vector && this.config.indexing.vector) {
-            const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`
-            vectorEntries.push({
-              id,
-              path: file.path,
-              name: sym.name,
-              kind: sym.kind,
-              parent: sym.parent,
-              startLine: sym.startLine,
-              content: sym.content,
-            })
-          }
         }
-      } else if (shouldUpdateFts) {
-        // Fallback: chunk by lines with overlap
-        const chunks = extractChunks(content, file.path)
-        for (const chunk of chunks) {
-          this.fts.insertChunk({ path: chunk.path, offset: chunk.startLine, content: chunk.content })
+        if (this.vector && this.config.indexing.vector) {
+          const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`
+          vectorEntries.push({
+            id,
+            path: file.path,
+            name: sym.name,
+            kind: sym.kind,
+            parent: sym.parent,
+            startLine: sym.startLine,
+            content: sym.content,
+          })
         }
       }
     }
@@ -204,6 +224,8 @@ export class CodebaseIndexer implements IIndexer {
     if (vectorEntries.length > 0) {
       await this.vector?.upsertSymbols(vectorEntries)
     }
+
+    return { plannedChunks, indexedChunks }
   }
 
   async refreshFile(filePath: string): Promise<void> {
@@ -228,6 +250,7 @@ export class CodebaseIndexer implements IIndexer {
     if (!fileInfo) {
       // File deleted — remove from index
       const relPath = path.relative(this.projectRoot, filePath)
+      if (!relPath || relPath.startsWith("..")) return
       this.fts.deleteFile(relPath)
       await this.vector?.deleteByPath(relPath)
       return
@@ -307,12 +330,20 @@ export class CodebaseIndexer implements IIndexer {
 async function buildFileInfo(absPath: string, root: string): Promise<FileInfo | null> {
   try {
     const s = await fs.stat(absPath)
+    if (!s.isFile()) return null
+    if (s.size > 1024 * 1024) return null // keep parity with scanner
+
+    const relPath = path.relative(root, absPath)
+    if (!relPath || relPath.startsWith("..")) return null
+
+    const ext = path.extname(absPath).toLowerCase()
+    if (!SUPPORTED_INDEX_EXTENSIONS.has(ext)) return null
+
     const content = await fs.readFile(absPath)
     const hash = crypto.createHash("md5").update(content).digest("hex")
-    const ext = path.extname(absPath).toLowerCase()
 
     return {
-      path: path.relative(root, absPath),
+      path: relPath,
       absPath,
       ext,
       mtime: s.mtimeMs,

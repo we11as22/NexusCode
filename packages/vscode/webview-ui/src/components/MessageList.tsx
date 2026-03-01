@@ -8,11 +8,26 @@ interface Props {
 }
 
 export function MessageList({ messages }: Props) {
+  const listRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const [stickToBottom, setStickToBottom] = React.useState(true)
 
   useEffect(() => {
+    if (!stickToBottom) return
+    bottomRef.current?.scrollIntoView({ behavior: "auto" })
+  }, [messages, stickToBottom])
+
+  const handleScroll = () => {
+    const el = listRef.current
+    if (!el) return
+    const distanceToBottom = el.scrollHeight - el.clientHeight - el.scrollTop
+    setStickToBottom(distanceToBottom < 24)
+  }
+
+  const jumpToLatest = () => {
+    setStickToBottom(true)
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages.length])
+  }
 
   if (messages.length === 0) {
     return (
@@ -34,12 +49,22 @@ export function MessageList({ messages }: Props) {
 
   return (
     <div className="message-list-container">
-      <div className="message-list flex flex-col space-y-4">
+      <div ref={listRef} onScroll={handleScroll} className="message-list flex flex-col space-y-4">
         {messages.map(msg => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
         <div ref={bottomRef} />
       </div>
+      {!stickToBottom && (
+        <button
+          type="button"
+          onClick={jumpToLatest}
+          className="nexus-jump-latest"
+          title="Jump to latest message"
+        >
+          Jump to latest
+        </button>
+      )}
     </div>
   )
 }

@@ -1,8 +1,11 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@nexuscode/core": ["../core/src/index.ts"]
+    },
     "outDir": "./dist",
-    "rootDir": "./src",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "jsx": "react-jsx",

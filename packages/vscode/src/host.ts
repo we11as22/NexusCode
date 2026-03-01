@@ -8,6 +8,7 @@ import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticIte
 export class VsCodeHost implements IHost {
   private eventEmitter: (event: AgentEvent) => void
   readonly cwd: string
+  private alwaysApproved = new Set<string>()
 
   constructor(cwd: string, onEvent: (event: AgentEvent) => void) {
     this.cwd = cwd
@@ -101,6 +102,11 @@ export class VsCodeHost implements IHost {
       return { approved: true }
     }
 
+    const alwaysKey = `${action.type}:${action.tool}`
+    if (this.alwaysApproved.has(alwaysKey)) {
+      return { approved: true, alwaysApprove: true }
+    }
+
     // For write/execute, show an inline notification
     const actionStr = action.type === "write" ? "Write" : "Execute"
     const detail = action.content
@@ -115,10 +121,12 @@ export class VsCodeHost implements IHost {
       "Deny"
     )
 
-    return {
-      approved: choice === "Allow" || choice === "Allow Always",
-      alwaysApprove: choice === "Allow Always",
+    const approved = choice === "Allow" || choice === "Allow Always"
+    const alwaysApprove = choice === "Allow Always"
+    if (alwaysApprove) {
+      this.alwaysApproved.add(alwaysKey)
     }
+    return { approved, alwaysApprove }
   }
 
   emit(event: AgentEvent): void {

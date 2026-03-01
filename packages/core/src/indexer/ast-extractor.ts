@@ -29,6 +29,9 @@ export function extractSymbols(
       return extractGoSymbols(content, filePath)
     case ".java":
       return extractJavaSymbols(content, filePath)
+    case ".md":
+    case ".mdx":
+      return extractMarkdownSections(content, filePath)
     default:
       return extractChunks(content, filePath)
   }
@@ -272,6 +275,99 @@ function extractJavaSymbols(content: string, filePath: string): SymbolEntry[] {
   }
 
   return symbols.length > 0 ? symbols : extractChunks(content, filePath)
+}
+
+function extractMarkdownSections(content: string, filePath: string): SymbolEntry[] {
+  const lines = content.split("\n")
+  const chunks: SymbolEntry[] = []
+  const headingRegex = /^(#{1,6})\s+(.+?)\s*$/
+  const stack: Array<{ level: number; title: string }> = []
+
+  let sectionStart = 0
+  let sectionTitle = "document"
+
+  const flushSection = (endExclusive: number) => {
+    if (endExclusive <= sectionStart) return
+    const sectionLines = lines.slice(sectionStart, endExclusive)
+    const sectionContent = sectionLines.join("\n").trim()
+    if (!sectionContent) return
+
+    const parent = stack.length > 1 ? stack[stack.length - 2]?.title : undefined
+    const startLine = sectionStart + 1
+    const endLine = endExclusive
+    const bounded = splitMarkdownSection(sectionContent, startLine, endLine, filePath, sectionTitle, parent)
+    chunks.push(...bounded)
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ""
+    const m = line.match(headingRegex)
+    if (!m) continue
+
+    const level = m[1]!.length
+    const title = m[2]!.trim()
+    flushSection(i)
+
+    while (stack.length > 0 && stack[stack.length - 1]!.level >= level) {
+      stack.pop()
+    }
+    stack.push({ level, title })
+    sectionStart = i
+    sectionTitle = title
+  }
+
+  flushSection(lines.length)
+
+  if (chunks.length === 0) {
+    return extractChunks(content, filePath)
+  }
+
+  return chunks
+}
+
+function splitMarkdownSection(
+  sectionContent: string,
+  startLine: number,
+  endLine: number,
+  filePath: string,
+  title: string,
+  parent?: string
+): SymbolEntry[] {
+  const lines = sectionContent.split("\n")
+  // Keep markdown chunks reasonably sized for retrieval and embedding quality.
+  const maxLines = 120
+  if (lines.length <= maxLines) {
+    return [{
+      path: filePath,
+      name: title || `section_${startLine}`,
+      kind: "chunk",
+      parent,
+      startLine,
+      endLine,
+      content: sectionContent,
+    }]
+  }
+
+  const out: SymbolEntry[] = []
+  let cursor = 0
+  let part = 1
+  while (cursor < lines.length) {
+    const slice = lines.slice(cursor, cursor + maxLines)
+    const relStart = startLine + cursor
+    const relEnd = Math.min(endLine, relStart + slice.length - 1)
+    out.push({
+      path: filePath,
+      name: `${title || "section"}#${part}`,
+      kind: "chunk",
+      parent,
+      startLine: relStart,
+      endLine: relEnd,
+      content: slice.join("\n"),
+    })
+    cursor += maxLines
+    part += 1
+  }
+  return out
 }
 
 const CHUNK_SIZE = 50    // lines per chunk

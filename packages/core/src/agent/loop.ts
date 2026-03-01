@@ -27,6 +27,12 @@ import type { SessionCompaction } from "../session/compaction.js"
 import * as path from "node:path"
 
 const DOOM_LOOP_THRESHOLD = 3
+const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
+  ask: 24,
+  plan: 40,
+  agent: 120,
+  debug: 120,
+}
 
 export interface AgentLoopOptions {
   session: ISession
@@ -120,6 +126,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const maxIterations = config.maxMode.enabled
     ? Math.floor(baseMaxIterationsByMode[mode] * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2))))
     : baseMaxIterationsByMode[mode]
+  const toolBudgetMultiplier = config.maxMode.enabled
+    ? Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2)))
+    : 1
+  const toolCallBudget = Math.max(8, Math.floor(BASE_TOOL_CALL_BUDGET_BY_MODE[mode] * toolBudgetMultiplier))
+  let executedToolCallsTotal = 0
+  let forceFinalAnswerNext = false
   let lastAssistantMessageId = ""
   const emitContextUsage = () => {
     const limitTokens = getContextLimit(activeClient.modelId)
@@ -139,7 +151,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       })
       break
     }
-    const isFinalIteration = loopIterations === maxIterations
+    const isFinalIteration = forceFinalAnswerNext || loopIterations === maxIterations
 
     // 3. Build system prompt (cache-aware)
     const promptCtx: PromptContext = {
@@ -190,8 +202,23 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     let currentText = ""
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
     let lastToolName = ""
+    let sawNativeToolCall = false
+    let executedToolThisIteration = false
+    let attemptedCompletionThisIteration = false
     let finishReason: string | undefined
     let fatalStreamError = false
+    let budgetExceededThisIteration = false
+
+    const markToolBudgetExceeded = () => {
+      if (budgetExceededThisIteration) return
+      budgetExceededThisIteration = true
+      forceFinalAnswerNext = true
+      host.emit({
+        type: "error",
+        error: `Tool-call budget reached (${toolCallBudget}). Forcing final answer without additional tools.`,
+        fatal: false,
+      })
+    }
 
     const flushPendingReads = async () => {
       if (pendingReads.length === 0) return
@@ -222,6 +249,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           messageId: newMessageId,
           success: result.success,
         })
+        executedToolThisIteration = true
+        executedToolCallsTotal++
       }
 
       pendingReads.length = 0
@@ -233,7 +262,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         : 1
       const maxTokens = Math.floor(8192 * tokenMultiplier)
 
-      for await (const event of activeClient.stream({
+      streamLoop: for await (const event of activeClient.stream({
         messages,
         tools: llmTools,
         systemPrompt,
@@ -262,6 +291,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           case "tool_call": {
             const { toolCallId, toolName, toolInput } = event
             if (!toolCallId || !toolName || !toolInput) break
+            sawNativeToolCall = true
 
             // Track invalid tool calls — if model keeps calling non-existent tools, stop it
             const isKnownTool = resolvedTools.some(t => t.name === toolName)
@@ -275,6 +305,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               }
             } else {
               consecutiveInvalidToolCalls = 0
+            }
+
+            if (executedToolCallsTotal + pendingReads.length >= toolCallBudget) {
+              markToolBudgetExceeded()
+              break
             }
 
             // Create pending tool part
@@ -343,6 +378,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               })
 
               lastToolName = toolName
+              executedToolThisIteration = true
+              executedToolCallsTotal++
+              if (toolName === "attempt_completion") {
+                attemptedCompletionThisIteration = true
+              }
             }
             break
           }
@@ -378,6 +418,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             }
             break
         }
+        if (budgetExceededThisIteration) {
+          await flushPendingReads()
+          break streamLoop
+        }
       }
     } catch (err) {
       if (signal.aborted) break
@@ -392,14 +436,94 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       break
     }
 
+    if (!isFinalIteration && !sawNativeToolCall) {
+      const textualCalls = parseTextualToolCalls(currentText)
+      if (textualCalls.length > 0) {
+        const cleaned = stripTextualToolCalls(currentText).trim()
+        if (cleaned !== currentText) {
+          currentText = cleaned
+          session.updateMessage(newMessageId, { content: currentText })
+        }
+
+        for (let i = 0; i < textualCalls.length; i++) {
+          if (executedToolCallsTotal >= toolCallBudget) {
+            markToolBudgetExceeded()
+            break
+          }
+          const call = textualCalls[i]!
+          const syntheticCallId = `textual_${loopIterations}_${i}_${Date.now()}`
+          const partId = `part_${syntheticCallId}`
+          session.addToolPart(newMessageId, {
+            type: "tool",
+            id: partId,
+            tool: call.toolName,
+            status: "pending",
+            input: call.toolInput,
+            timeStart: Date.now(),
+          })
+          host.emit({ type: "tool_start", tool: call.toolName, partId, messageId: newMessageId })
+
+          if (call.toolInput["task_progress"] && typeof call.toolInput["task_progress"] === "string") {
+            session.updateTodo(call.toolInput["task_progress"])
+          }
+
+          if (await detectDoomLoop(session, call.toolName, call.toolInput)) {
+            host.emit({ type: "doom_loop_detected", tool: call.toolName })
+            throw new Error(`Doom loop: tool "${call.toolName}" repeatedly called via textual tool-call markup.`)
+          }
+
+          const result = await executeToolCall(
+            syntheticCallId,
+            call.toolName,
+            call.toolInput,
+            resolvedTools,
+            toolCtx,
+            autoApproveActions,
+            config,
+            host,
+            session,
+            newMessageId
+          )
+
+          session.updateToolPart(newMessageId, partId, {
+            status: result.success ? "completed" : "error",
+            output: result.output,
+            timeEnd: Date.now(),
+          })
+
+          host.emit({
+            type: "tool_end",
+            tool: call.toolName,
+            partId,
+            messageId: newMessageId,
+            success: result.success,
+          })
+
+          lastToolName = call.toolName
+          executedToolThisIteration = true
+          executedToolCallsTotal++
+          if (call.toolName === "attempt_completion") {
+            attemptedCompletionThisIteration = true
+          }
+        }
+
+        finishReason = "tool_calls"
+      }
+    }
+
     // Stop on fatal stream errors; without this the outer loop can repeat forever.
     if (fatalStreamError) {
       break
     }
+    if (budgetExceededThisIteration) {
+      await session.save()
+      emitContextUsage()
+      continue
+    }
 
     // Check if done
-    if (lastToolName === "attempt_completion") break
-    if (finishReason === "stop" && !lastToolName) break
+    if (attemptedCompletionThisIteration || lastToolName === "attempt_completion") break
+    if (finishReason === "stop" && !executedToolThisIteration) break
     if (signal.aborted) break
 
     // Check for context overflow proactively
@@ -419,6 +543,65 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     emitContextUsage()
     host.emit({ type: "done", messageId: lastAssistantMessageId })
   }
+}
+
+function parseTextualToolCalls(text: string): Array<{ toolName: string; toolInput: Record<string, unknown> }> {
+  if (!text || !text.includes("<tool_call>")) return []
+  const calls: Array<{ toolName: string; toolInput: Record<string, unknown> }> = []
+  const blockRe = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi
+  let blockMatch: RegExpExecArray | null
+  while ((blockMatch = blockRe.exec(text)) !== null) {
+    const block = blockMatch[1] ?? ""
+    const fnMatch = block.match(/<function=([A-Za-z0-9_\-]+)>/i)
+    if (!fnMatch?.[1]) continue
+    const toolName = fnMatch[1].trim()
+    const toolInput: Record<string, unknown> = {}
+
+    const paramRe = /<parameter=([A-Za-z0-9_\-]+)>\s*([\s\S]*?)\s*<\/parameter>/gi
+    let paramMatch: RegExpExecArray | null
+    while ((paramMatch = paramRe.exec(block)) !== null) {
+      const key = (paramMatch[1] ?? "").trim()
+      const valueRaw = (paramMatch[2] ?? "").trim()
+      if (!key) continue
+      toolInput[key] = parseLooseValue(valueRaw)
+    }
+
+    if (Object.keys(toolInput).length === 0) {
+      const argsMatch = block.match(/<arguments>\s*([\s\S]*?)\s*<\/arguments>/i)
+      if (argsMatch?.[1]) {
+        try {
+          const parsed = JSON.parse(argsMatch[1]) as Record<string, unknown>
+          Object.assign(toolInput, parsed)
+        } catch {
+          // Ignore malformed JSON arguments blocks.
+        }
+      }
+    }
+
+    calls.push({ toolName, toolInput })
+  }
+  return calls
+}
+
+function stripTextualToolCalls(text: string): string {
+  if (!text) return text
+  return text.replace(/<tool_call>\s*[\s\S]*?\s*<\/tool_call>/gi, "").trim()
+}
+
+function parseLooseValue(value: string): unknown {
+  if (!value) return ""
+  if (value === "true") return true
+  if (value === "false") return false
+  if (value === "null") return null
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value)
+  if ((value.startsWith("{") && value.endsWith("}")) || (value.startsWith("[") && value.endsWith("]"))) {
+    try {
+      return JSON.parse(value)
+    } catch {
+      return value
+    }
+  }
+  return value
 }
 
 async function executeToolCall(

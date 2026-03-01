@@ -6,8 +6,8 @@ export type AppView = "chat" | "sessions" | "settings"
 
 export type IndexStatusKind =
   | { state: "idle" }
-  | { state: "indexing"; progress: number; total: number }
-  | { state: "ready"; files: number; symbols: number }
+  | { state: "indexing"; progress: number; total: number; chunksProcessed?: number; chunksTotal?: number }
+  | { state: "ready"; files: number; symbols: number; chunks?: number }
   | { state: "error"; error: string }
 
 export interface SessionMessage {
@@ -227,7 +227,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sendMessage: (content) => {
     const { mode, isRunning } = get()
     if (isRunning) return
-    set({ inputValue: "", isRunning: true, view: "chat" })
+    set((prev) => ({
+      inputValue: "",
+      isRunning: true,
+      view: "chat",
+      messages: [
+        ...prev.messages,
+        {
+          id: `local_user_${Date.now()}`,
+          ts: Date.now(),
+          role: "user",
+          content,
+        },
+      ],
+    }))
     postMessage({ type: "newMessage", content, mode })
   },
 
@@ -301,19 +314,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (lastMsg?.role === "assistant") {
           const updated = { ...lastMsg }
           if (typeof updated.content === "string") {
-            updated.content += event.delta
+            updated.content = sanitizeAssistantText(updated.content + event.delta)
           } else {
             const parts = [...(updated.content as MessagePart[])]
             const lastPart = parts[parts.length - 1]
             if (lastPart?.type === "text") {
-              parts[parts.length - 1] = { ...lastPart, text: lastPart.text + event.delta } as TextPart
+              parts[parts.length - 1] = { ...lastPart, text: sanitizeAssistantText(lastPart.text + event.delta) } as TextPart
             } else {
-              parts.push({ type: "text", text: event.delta })
+              const cleaned = sanitizeAssistantText(event.delta)
+              if (cleaned) {
+                parts.push({ type: "text", text: cleaned })
+              }
             }
             updated.content = parts
           }
           set({ messages: [...messages.slice(0, -1), updated] })
         } else {
+          const cleaned = sanitizeAssistantText(event.delta)
+          if (!cleaned) break
           set({
             messages: [
               ...messages,
@@ -321,7 +339,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 id: `msg_${Date.now()}`,
                 ts: Date.now(),
                 role: "assistant" as const,
-                content: event.delta,
+                content: cleaned,
               },
             ],
           })
@@ -480,10 +498,44 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
 
       case "done":
-        set((state) => ({
-          isRunning: false,
-          subagents: state.subagents.filter((a) => a.status === "running"),
-        }))
+        set((state) => {
+          const msgs = [...state.messages]
+          const last = msgs[msgs.length - 1]
+          if (last?.role === "assistant") {
+            if (typeof last.content === "string") {
+              msgs[msgs.length - 1] = { ...last, content: stripToolCallMarkup(last.content) }
+            } else if (Array.isArray(last.content)) {
+              const cleanedParts = (last.content as MessagePart[])
+                .filter((p) => p.type !== "text" || stripToolCallMarkup((p as TextPart).text).length > 0)
+                .map((p) => (p.type === "text" ? { ...p, text: stripToolCallMarkup((p as TextPart).text) } : p))
+              msgs[msgs.length - 1] = { ...last, content: cleanedParts }
+            }
+          }
+
+          const latestAssistant = msgs[msgs.length - 1]
+          const hasAssistantText =
+            latestAssistant?.role === "assistant"
+            && (
+              typeof latestAssistant.content === "string"
+                ? latestAssistant.content.trim().length > 0
+                : (latestAssistant.content as MessagePart[]).some((p) => p.type === "text" && p.text.trim().length > 0)
+            )
+
+          if (!hasAssistantText && state.messages.length > 0) {
+            msgs.push({
+              id: `system_done_${Date.now()}`,
+              ts: Date.now(),
+              role: "system",
+              content: "No final text response was produced. Retry with a narrower prompt or switch mode.",
+            })
+          }
+
+          return {
+            messages: msgs,
+            isRunning: false,
+            subagents: state.subagents.filter((a) => a.status === "running"),
+          }
+        })
         break
 
       case "error":
@@ -511,3 +563,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 }))
+
+function stripToolCallMarkup(value: string): string {
+  if (!value) return value
+  return value
+    .replace(/<tool_call>\s*[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<function=[^>]+>/gi, "")
+    .replace(/<\/function>/gi, "")
+    .replace(/<parameter=[^>]+>/gi, "")
+    .replace(/<\/parameter>/gi, "")
+    .trim()
+}
+
+function sanitizeAssistantText(value: string): string {
+  return stripToolCallMarkup(value)
+    .replace(/<tool_call[^>]*>/gi, "")
+    .replace(/<\/tool_call>/gi, "")
+    .replace(/<function=[^>]*>/gi, "")
+    .replace(/<\/function>/gi, "")
+    .replace(/<parameter=[^>]*>/gi, "")
+    .replace(/<\/parameter>/gi, "")
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim()
+      if (!t) return true
+      if (t === "<" || t === ">" || t === "</" || t === "/>") return false
+      if (t.startsWith("<") && /(tool_call|function|parameter)/i.test(t)) return false
+      return true
+    })
+    .join("\n")
+    .trim()
+}

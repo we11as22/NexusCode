@@ -9,7 +9,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp",
   ".cs", ".rb", ".php", ".swift", ".kt", ".scala",
-  ".md", ".txt", ".yaml", ".yml", ".json", ".toml",
+  ".md", ".mdx",
 ])
 
 const DEFAULT_EXCLUDE = [

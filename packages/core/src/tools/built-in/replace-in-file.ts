@@ -69,6 +69,13 @@ IMPORTANT:
       return { success: false, output: `Failed to write: ${(err as Error).message}` }
     }
 
+    const indexer = ctx.indexer as { refreshFileNow?: (filePath: string) => Promise<void> } | undefined
+    if (indexer?.refreshFileNow) {
+      await indexer.refreshFileNow(absPath).catch(() => {})
+    } else if (ctx.indexer?.refreshFile) {
+      await ctx.indexer.refreshFile(absPath).catch(() => {})
+    }
+
     return {
       success: true,
       output: `Successfully updated ${filePath}:\n${results.join("\n")}\n\n<updated_content>\n${content}\n</updated_content>`,

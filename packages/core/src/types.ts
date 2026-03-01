@@ -195,8 +195,8 @@ export type SymbolKind =
 
 export type IndexStatus =
   | { state: "idle" }
-  | { state: "indexing"; progress: number; total: number }
-  | { state: "ready"; files: number; symbols: number }
+  | { state: "indexing"; progress: number; total: number; chunksProcessed?: number; chunksTotal?: number }
+  | { state: "ready"; files: number; symbols: number; chunks?: number }
   | { state: "error"; error: string }
 
 // ─── Agent Events ─────────────────────────────────────────────────────────────

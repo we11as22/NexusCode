@@ -35,6 +35,12 @@ WARNING: This replaces the entire file content. Provide the complete final conte
     }
 
     const lines = content.split("\n").length
+    const indexer = ctx.indexer as { refreshFileNow?: (filePath: string) => Promise<void> } | undefined
+    if (indexer?.refreshFileNow) {
+      await indexer.refreshFileNow(absPath).catch(() => {})
+    } else if (ctx.indexer?.refreshFile) {
+      await ctx.indexer.refreshFile(absPath).catch(() => {})
+    }
     return {
       success: true,
       output: `Successfully wrote ${filePath} (${lines} lines)`,

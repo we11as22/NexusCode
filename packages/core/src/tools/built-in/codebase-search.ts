@@ -1,10 +1,12 @@
 import { z } from "zod"
+import * as path from "node:path"
 import type { ToolDef, ToolContext } from "../../types.js"
 
 const schema = z.object({
   query: z.string().optional().describe("Semantic search query (natural language description of what you're looking for)"),
   queries: z.array(z.string()).min(1).max(20).optional().describe("Multiple semantic queries in one call"),
   path: z.string().optional().describe("Optional path scope (file or directory, relative to project root)"),
+  paths: z.array(z.string()).min(1).max(20).optional().describe("Multiple path scopes (files and/or directories)"),
   kind: z.enum(["class", "function", "method", "interface", "type", "enum", "const", "any"]).optional().describe("Filter by symbol type"),
   limit: z.number().int().positive().max(50).optional().describe("Max results (default: 10)"),
   task_progress: z.string().optional(),
@@ -20,7 +22,7 @@ Requires the codebase to be indexed (runs automatically on startup).`,
   parameters: schema,
   readOnly: true,
 
-  async execute({ query, queries, path, kind, limit }, ctx: ToolContext) {
+  async execute({ query, queries, path, paths, kind, limit }, ctx: ToolContext) {
     if (!ctx.indexer) {
       return {
         success: false,
@@ -42,8 +44,15 @@ Requires the codebase to be indexed (runs automatically on startup).`,
         return { success: false, output: "Provide query or queries." }
       }
 
-      const scope = path?.replace(/\\/g, "/").replace(/\/+$/, "")
-      const isFileScope = scope != null && /\.[a-z0-9]+$/i.test(scope)
+      const scopeCandidates = [
+        ...(path ? [path] : []),
+        ...(Array.isArray(paths) ? paths : []),
+      ]
+      const normalizedScopes = Array.from(new Set(
+        scopeCandidates
+          .map((p) => normalizeScopePath(p, ctx.cwd))
+          .filter(Boolean)
+      ))
       const sections: string[] = []
 
       for (const q of allQueries) {
@@ -52,34 +61,50 @@ Requires the codebase to be indexed (runs automatically on startup).`,
           kind: kind === "any" ? undefined : kind as any,
           semantic: true,
         })
+        const scopedSections: string[] = []
+        const scopesToUse = normalizedScopes.length > 0 ? normalizedScopes : [""]
 
-        const filtered = scope
-          ? raw.filter((r) => {
-              const p = r.path.replace(/\\/g, "/")
-              return isFileScope ? p === scope : (p === scope || p.startsWith(`${scope}/`))
-            })
-          : raw
+        for (const scope of scopesToUse) {
+          const isFileScope = scope ? /\.[a-z0-9]+$/i.test(scope) : false
+          const filtered = scope
+            ? raw.filter((r) => {
+                const p = r.path.replace(/\\/g, "/")
+                return isFileScope ? p === scope : (p === scope || p.startsWith(`${scope}/`))
+              })
+            : raw
 
-        if (filtered.length === 0) {
-          sections.push(`Query: "${q}"\nNo results.`)
-          continue
+          if (filtered.length === 0) {
+            scopedSections.push(`${scope ? `Scope: ${scope}\n` : ""}No results.`)
+            continue
+          }
+
+          const formatted = filtered.map((r, i) => {
+            const loc = r.startLine ? `:${r.startLine}` : ""
+            const parent = r.parent ? ` (in ${r.parent})` : ""
+            const kindStr = r.kind ? `[${r.kind}]` : ""
+            return `${i + 1}. ${r.path}${loc} ${kindStr}${parent}\n   ${r.content.slice(0, 200).replace(/\n/g, " ")}`
+          }).join("\n\n")
+          scopedSections.push(`${scope ? `Scope: ${scope}\n` : ""}${formatted}`)
         }
 
-        const formatted = filtered.map((r, i) => {
-          const loc = r.startLine ? `:${r.startLine}` : ""
-          const parent = r.parent ? ` (in ${r.parent})` : ""
-          const kindStr = r.kind ? `[${r.kind}]` : ""
-          return `${i + 1}. ${r.path}${loc} ${kindStr}${parent}\n   ${r.content.slice(0, 200).replace(/\n/g, " ")}`
-        }).join("\n\n")
-        sections.push(`Query: "${q}"\n${formatted}`)
+        sections.push(`Query: "${q}"\n${scopedSections.join("\n\n")}`)
       }
 
       return {
         success: true,
-        output: `${scope ? `Scope: ${scope}\n\n` : ""}${sections.join("\n\n---\n\n")}`,
+        output: sections.join("\n\n---\n\n"),
       }
     } catch (err) {
       return { success: false, output: `Search failed: ${(err as Error).message}` }
     }
   },
+}
+
+function normalizeScopePath(input: string, cwd: string): string {
+  const raw = input.trim()
+  if (!raw) return ""
+  const abs = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw)
+  const rel = path.relative(cwd, abs)
+  const safe = rel && !rel.startsWith("..") ? rel : raw
+  return safe.replace(/\\/g, "/").replace(/\/+$/, "")
 }

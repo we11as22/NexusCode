@@ -2,8 +2,10 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src",
     "baseUrl": ".",
+    "paths": {
+      "@nexuscode/core": ["../core/src/index.ts"]
+    },
     "module": "CommonJS",
     "moduleResolution": "Node",
     "lib": ["ES2022"],

@@ -62,6 +62,13 @@ Prefer replace_in_file for targeted edits — it's more reliable.`,
       return { success: false, output: `Failed to write: ${(err as Error).message}` }
     }
 
+    const indexer = ctx.indexer as { refreshFileNow?: (filePath: string) => Promise<void> } | undefined
+    if (indexer?.refreshFileNow) {
+      await indexer.refreshFileNow(absPath).catch(() => {})
+    } else if (ctx.indexer?.refreshFile) {
+      await ctx.indexer.refreshFile(absPath).catch(() => {})
+    }
+
     return {
       success: true,
       output: `Successfully applied patch to ${filePath}`,

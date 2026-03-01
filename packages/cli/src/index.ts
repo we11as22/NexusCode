@@ -5,6 +5,7 @@ import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 import * as path from "node:path"
 import * as os from "node:os"
+import { execa } from "execa"
 import {
   loadConfig, writeConfig, Session, createLLMClient, ToolRegistry, loadSkills,
   loadRules, McpClient, setMcpClientInstance, createCompaction,
@@ -173,10 +174,22 @@ if (isPrintMode && initialMessage) {
 
   const compaction = createCompaction()
   const abortController = new AbortController()
+  const timeoutMsNI = config.maxMode.enabled ? 20 * 60_000 : 10 * 60_000
+  const timeoutNI = setTimeout(() => {
+    abortController.abort()
+    process.stderr.write(`\n[nexus] timed out after ${Math.round(timeoutMsNI / 60000)} minutes\n`)
+  }, timeoutMsNI)
 
+  let suppressToolMarkupOutput = false
   const host = new CliHost(cwd, (event: AgentEvent) => {
     if (event.type === "text_delta" && event.delta) {
-      process.stdout.write(event.delta)
+      const delta = event.delta
+      if (suppressToolMarkupOutput || delta.includes("<tool_call>") || delta.includes("<function=") || delta.includes("<parameter=")) {
+        if (delta.includes("<tool_call>")) suppressToolMarkupOutput = true
+        if (delta.includes("</tool_call>")) suppressToolMarkupOutput = false
+      } else {
+        process.stdout.write(delta)
+      }
     }
     if (event.type === "reasoning_delta" && event.delta) {
       // Show reasoning progress as dots to stderr so it doesn't pollute output
@@ -212,6 +225,7 @@ if (isPrintMode && initialMessage) {
   process.on("SIGINT", () => abortController.abort())
 
   try {
+    await refreshIndexerFromGit(indexer, cwd).catch(() => {})
     await runAgentLoop({
       session,
       client,
@@ -230,6 +244,8 @@ if (isPrintMode && initialMessage) {
     if (!msg.includes("AbortError") && !msg.includes("Aborted")) {
       process.stderr.write(`\n[nexus error] ${msg}\n`)
     }
+  } finally {
+    clearTimeout(timeoutNI)
   }
 
   indexer?.close()
@@ -413,8 +429,14 @@ process.on("uncaughtException", onUncaughtException)
 async function runMessage(content: string, msgMode: Mode) {
   session.addMessage({ role: "user", content })
   currentAbortController = new AbortController()
+  const timeoutMs = config.maxMode.enabled ? 20 * 60_000 : 10 * 60_000
+  const timeout = setTimeout(() => {
+    currentAbortController?.abort()
+    pushEvent({ type: "error", error: `Timed out after ${Math.round(timeoutMs / 60000)} minutes.` })
+  }, timeoutMs)
 
   try {
+    await refreshIndexerFromGit(indexer, cwd).catch(() => {})
     await runAgentLoop({
       session,
       client,
@@ -434,6 +456,47 @@ async function runMessage(content: string, msgMode: Mode) {
     if (!msg.includes("AbortError") && !msg.includes("Aborted")) {
       pushEvent({ type: "error", error: msg })
     }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function refreshIndexerFromGit(indexer: CodebaseIndexer | undefined, projectCwd: string): Promise<void> {
+  if (!indexer?.refreshFileNow) return
+
+  const runGit = async (args: string[]): Promise<string> => {
+    const res = await execa("git", ["-C", projectCwd, ...args], { reject: false })
+    if (res.exitCode !== 0) return ""
+    return (res.stdout ?? "").trim()
+  }
+
+  const [changedTracked, changedStaged, untracked, deletedTracked, deletedStaged] = await Promise.all([
+    runGit(["diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD"]),
+    runGit(["diff", "--name-only", "--cached", "--diff-filter=ACMRTUXB"]),
+    runGit(["ls-files", "--others", "--exclude-standard"]),
+    runGit(["diff", "--name-only", "--diff-filter=D", "HEAD"]),
+    runGit(["diff", "--name-only", "--cached", "--diff-filter=D"]),
+  ])
+
+  const changed = new Set<string>()
+  const deleted = new Set<string>()
+  for (const line of [changedTracked, changedStaged, untracked].join("\n").split(/\r?\n/)) {
+    const p = line.trim()
+    if (p) changed.add(p)
+  }
+  for (const line of [deletedTracked, deletedStaged].join("\n").split(/\r?\n/)) {
+    const p = line.trim()
+    if (p) deleted.add(p)
+  }
+
+  const all = [...changed, ...deleted].slice(0, 512)
+  if (all.length === 0) return
+
+  for (let i = 0; i < all.length; i += 16) {
+    const chunk = all.slice(i, i + 16)
+    await Promise.allSettled(
+      chunk.map((relPath) => indexer.refreshFileNow!(path.resolve(projectCwd, relPath)))
+    )
   }
 }
 

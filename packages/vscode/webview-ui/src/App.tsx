@@ -116,7 +116,7 @@ export function App() {
       </div>
 
       {store.indexStatus.state === "indexing" && (
-        <IndexProgress progress={store.indexStatus.progress} total={store.indexStatus.total} />
+        <IndexProgress status={store.indexStatus} />
       )}
 
       {store.view === "chat" && <ChatView />}
@@ -879,7 +879,13 @@ function TabButton({
   )
 }
 
-function IndexProgress({ progress, total }: { progress: number; total: number }) {
+function IndexProgress({
+  status,
+}: {
+  status: { progress: number; total: number; chunksProcessed?: number; chunksTotal?: number }
+}) {
+  const progress = status.progress
+  const total = status.total
   const pct = total > 0 ? Math.max(0, Math.min(100, Math.floor((progress / total) * 100))) : 0
   return (
     <div className="px-3 py-1 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
@@ -887,6 +893,11 @@ function IndexProgress({ progress, total }: { progress: number; total: number })
         <span>Indexing codebase...</span>
         <span>{progress}/{total}</span>
       </div>
+      {typeof status.chunksProcessed === "number" && typeof status.chunksTotal === "number" && (
+        <div className="text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
+          Chunks: {status.chunksProcessed}/{status.chunksTotal}
+        </div>
+      )}
       <div className="w-full h-1 rounded-full bg-[var(--vscode-progressBar-background)]/30 overflow-hidden">
         <div
           className="h-full bg-[var(--nexus-accent)] transition-all duration-200"

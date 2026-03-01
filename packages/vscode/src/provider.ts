@@ -1,5 +1,6 @@
 import * as vscode from "vscode"
 import * as crypto from "crypto"
+import * as path from "path"
 import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
 import {
   loadConfig, writeConfig, writeGlobalProfiles, Session, listSessions, createLLMClient, ToolRegistry, loadSkills,
@@ -193,13 +194,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       this.postStateUpdate()
       this.sendIndexStatus()
 
-      if (this.config.mcp.servers.length > 0) {
-        this.mcpClient = new McpClient()
-        setMcpClientInstance(this.mcpClient)
-        this.mcpClient.connectAll(this.config.mcp.servers).catch((err: unknown) => {
-          console.warn("[nexus] MCP connection error:", err)
-        })
-      }
+      await this.reconnectMcpServers()
 
       await this.initializeIndexer(cwd)
       this.postMessage({ type: "configLoaded", config: this.config })
@@ -235,6 +230,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   private async handleMessage(msg: WebviewMessage): Promise<void> {
     switch (msg.type) {
       case "newMessage":
+        await this.ensureInitialized()
         await this.runAgent(msg.content, msg.mode)
         break
 
@@ -316,10 +312,13 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
 
       case "saveConfig":
         if (this.config && msg.config) {
-          const before = JSON.stringify({
+          const indexBefore = JSON.stringify({
             indexing: this.config.indexing,
             vectorDb: this.config.vectorDb,
             embeddings: this.config.embeddings,
+          })
+          const mcpBefore = JSON.stringify({
+            mcp: this.config.mcp,
           })
 
           deepMergeInto(this.config as any, normalizeConfigPatch(msg.config as any))
@@ -330,12 +329,18 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
           writeConfig(this.config, this.getCwd())
           this.maxMode = this.config.maxMode.enabled
 
-          const after = JSON.stringify({
+          const indexAfter = JSON.stringify({
             indexing: this.config.indexing,
             vectorDb: this.config.vectorDb,
             embeddings: this.config.embeddings,
           })
-          if (before !== after) {
+          const mcpAfter = JSON.stringify({
+            mcp: this.config.mcp,
+          })
+          if (mcpBefore !== mcpAfter) {
+            await this.reconnectMcpServers()
+          }
+          if (indexBefore !== indexAfter) {
             await this.initializeIndexer(this.getCwd())
           }
 
@@ -366,7 +371,16 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 
   private async runAgent(content: string, mode?: Mode): Promise<void> {
-    if (this.isRunning || !this.session || !this.config) return
+    if (this.isRunning) return
+    if (!this.session || !this.config) {
+      this.isRunning = false
+      this.postMessage({
+        type: "agentEvent",
+        event: { type: "error", error: "NexusCode is still initializing. Please retry in a moment." },
+      })
+      this.postStateUpdate()
+      return
+    }
 
     this.mode = mode ?? this.mode
     this.isRunning = true
@@ -385,33 +399,47 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       }
     })
 
-    const client = createLLMClient(this.config.model)
-
-    const toolRegistry = new ToolRegistry()
-
-    if (this.mcpClient) {
-      for (const tool of this.mcpClient.getTools()) {
-        toolRegistry.register(tool)
-      }
-    }
-
-    const parallelManager = new ParallelAgentManager()
-    toolRegistry.register(createSpawnAgentTool(parallelManager, this.config))
-
-    const { builtin: tools, dynamic } = toolRegistry.getForMode(this.mode)
-    const allTools = [...tools, ...dynamic]
-
-    const rulesContent = await loadRules(cwd, this.config.rules.files).catch(() => "")
-    const skills = await loadSkills(this.config.skills, cwd).catch(() => [])
-    const compaction = createCompaction()
-
-    // Init checkpoint (once per session, not per message)
-    if (this.config.checkpoint.enabled && !this.checkpoint) {
-      this.checkpoint = new CheckpointTracker(this.session.id, cwd)
-      await this.checkpoint.init(this.config.checkpoint.timeoutMs).catch(console.warn)
-    }
+    const timeoutMs = this.maxMode ? 20 * 60_000 : 10 * 60_000
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      if (!this.isRunning) return
+      timedOut = true
+      this.abortController?.abort()
+      this.postMessage({
+        type: "agentEvent",
+        event: { type: "error", error: `LLM request timed out after ${Math.round(timeoutMs / 60000)} minutes.` },
+      })
+    }, timeoutMs)
 
     try {
+      const client = createLLMClient(this.config.model)
+
+      const toolRegistry = new ToolRegistry()
+
+      if (this.mcpClient) {
+        for (const tool of this.mcpClient.getTools()) {
+          toolRegistry.register(tool)
+        }
+      }
+
+      const parallelManager = new ParallelAgentManager()
+      toolRegistry.register(createSpawnAgentTool(parallelManager, this.config))
+
+      const { builtin: tools, dynamic } = toolRegistry.getForMode(this.mode)
+      const allTools = [...tools, ...dynamic]
+
+      const rulesContent = await loadRules(cwd, this.config.rules.files).catch(() => "")
+      const skills = await loadSkills(this.config.skills, cwd).catch(() => [])
+      const compaction = createCompaction()
+
+      // Init checkpoint (once per session, not per message)
+      if (this.config.checkpoint.enabled && !this.checkpoint) {
+        this.checkpoint = new CheckpointTracker(this.session.id, cwd)
+        await this.checkpoint.init(this.config.checkpoint.timeoutMs).catch(console.warn)
+      }
+
+      await this.refreshIndexerFromGit(cwd)
+
       await runAgentLoop({
         session: this.session,
         client,
@@ -429,12 +457,31 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       const errMsg = (err as Error).message
       if (errMsg !== "AbortError" && !errMsg.includes("aborted")) {
         console.error("[nexus] Agent loop error:", err)
+        this.postMessage({ type: "agentEvent", event: { type: "error", error: errMsg } })
       }
     } finally {
+      clearTimeout(timeout)
+      if (timedOut) {
+        this.postMessage({ type: "agentEvent", event: { type: "error", error: "Agent run aborted due to timeout." } })
+      }
       this.isRunning = false
       await this.session.save().catch(() => {})
       this.postStateUpdate()
     }
+  }
+
+  private async reconnectMcpServers(): Promise<void> {
+    if (!this.config) return
+    if (!this.mcpClient) {
+      this.mcpClient = new McpClient()
+      setMcpClientInstance(this.mcpClient)
+    }
+    await this.mcpClient.disconnectAll().catch(() => {})
+    if (this.config.mcp.servers.length === 0) return
+    await this.mcpClient.connectAll(this.config.mcp.servers).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err)
+      this.postMessage({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
+    })
   }
 
   private async compactHistory(): Promise<void> {
@@ -583,6 +630,43 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       console.warn("[nexus] Indexer start error:", err)
     })
     this.setupFileWatcher(cwd)
+  }
+
+  private async refreshIndexerFromGit(cwd: string): Promise<void> {
+    if (!this.indexer?.refreshFileNow) return
+    const { execa } = await import("execa")
+    const runGit = async (args: string[]): Promise<string> => {
+      const res = await execa("git", ["-C", cwd, ...args], { reject: false })
+      if (res.exitCode !== 0) return ""
+      return (res.stdout ?? "").trim()
+    }
+
+    const [changedTracked, changedStaged, untracked, deletedTracked, deletedStaged] = await Promise.all([
+      runGit(["diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD"]),
+      runGit(["diff", "--name-only", "--cached", "--diff-filter=ACMRTUXB"]),
+      runGit(["ls-files", "--others", "--exclude-standard"]),
+      runGit(["diff", "--name-only", "--diff-filter=D", "HEAD"]),
+      runGit(["diff", "--name-only", "--cached", "--diff-filter=D"]),
+    ])
+
+    const changed = new Set<string>()
+    const deleted = new Set<string>()
+    for (const line of [changedTracked, changedStaged, untracked].join("\n").split(/\r?\n/)) {
+      const p = line.trim()
+      if (p) changed.add(p)
+    }
+    for (const line of [deletedTracked, deletedStaged].join("\n").split(/\r?\n/)) {
+      const p = line.trim()
+      if (p) deleted.add(p)
+    }
+
+    const all = [...changed, ...deleted].slice(0, 512)
+    for (let i = 0; i < all.length; i += 16) {
+      const chunk = all.slice(i, i + 16)
+      await Promise.allSettled(
+        chunk.map((relPath) => this.indexer!.refreshFileNow!(path.resolve(cwd, relPath)))
+      )
+    }
   }
 
   private getHtml(webview: vscode.Webview): string {
