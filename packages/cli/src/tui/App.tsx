@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react"
 import { Box, Text, useInput, useApp } from "ink"
 import Spinner from "ink-spinner"
-import type { AgentEvent, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
+import type { AgentEvent, Mode, SessionMessage, IndexStatus, PermissionResult } from "@nexuscode/core"
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -32,7 +32,6 @@ interface AppState {
   subAgents: SubAgentState[]
   reasoning: string
   mode: Mode
-  maxMode: boolean
   isRunning: boolean
   model: string
   provider: string
@@ -52,6 +51,8 @@ interface AppState {
   showThinking: boolean
   /** OpenCode-style: toggle tool execution details in chat */
   showToolDetails: boolean
+  /** Plan mode: plan_exit was called; show Approve / Revise / Abandon */
+  planCompleted: boolean
 }
 
 interface AppProps {
@@ -59,14 +60,12 @@ interface AppProps {
   onAbort: () => void
   onCompact: () => void
   onModeChange: (mode: Mode) => void
-  onMaxModeChange: (enabled: boolean) => void
   events: AsyncIterable<AgentEvent>
   /** Initial chat history (e.g. from resumed session) */
   initialMessages?: SessionMessage[]
   initialModel: string
   initialProvider: string
   initialMode: Mode
-  initialMaxMode: boolean
   sessionId?: string
   projectDir?: string
   profileNames?: string[]
@@ -74,7 +73,6 @@ interface AppProps {
   noIndex?: boolean
   configSnapshot?: {
     model: { provider: string; id: string; temperature?: number }
-    maxMode: { enabled: boolean; tokenBudgetMultiplier: number }
     embeddings?: { provider: string; model: string; dimensions?: number }
     indexing: { enabled: boolean; vector: boolean }
     vectorDb?: { enabled: boolean; url: string }
@@ -91,6 +89,8 @@ interface AppProps {
   saveConfig?: (updates: Record<string, unknown>) => void
   onReindex?: () => void
   onIndexStop?: () => void
+  /** Resolve pending tool approval (y/n/a/s). Called when user submits during awaitingApproval. */
+  onResolveApproval?: (result: PermissionResult) => void
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ const MODEL_PROVIDERS = ["anthropic", "openai", "google", "openai-compatible", "
 const EMBEDDING_PROVIDERS = ["openai", "openai-compatible", "ollama", "local"] as const
 
 /** Slash commands (OpenCode-style: /new, /sessions, /compact, /thinking, /details, etc.) */
-type SlashAction = "clear" | "compact" | "max" | "help" | "settings" | "model" | "embeddings" | "index" | "advanced" | "thinking" | "details"
+type SlashAction = "clear" | "compact" | "help" | "settings" | "model" | "embeddings" | "index" | "advanced" | "thinking" | "details"
 const SLASH_COMMANDS: Array<{ cmd: string; label: string; desc: string; mode?: Mode; action?: SlashAction }> = [
   { cmd: "agent", label: "/agent", desc: "Agent mode (code & tools)", mode: "agent" },
   { cmd: "plan", label: "/plan", desc: "Plan mode", mode: "plan" },
@@ -143,7 +143,6 @@ const SLASH_COMMANDS: Array<{ cmd: string; label: string; desc: string; mode?: M
   { cmd: "clear", label: "/clear", desc: "Clear chat", action: "clear" },
   { cmd: "new", label: "/new", desc: "New session (clear chat)", action: "clear" },
   { cmd: "compact", label: "/compact", desc: "Compact context", action: "compact" },
-  { cmd: "max", label: "/max", desc: "Toggle max mode", action: "max" },
   { cmd: "thinking", label: "/thinking", desc: "Toggle reasoning visibility", action: "thinking" },
   { cmd: "details", label: "/details", desc: "Toggle tool execution details", action: "details" },
   { cmd: "model", label: "/model", desc: "Configure LLM provider & model", action: "model" },
@@ -175,13 +174,11 @@ export function App({
   onAbort,
   onCompact,
   onModeChange,
-  onMaxModeChange,
   events,
   initialMessages,
   initialModel,
   initialProvider,
   initialMode,
-  initialMaxMode,
   sessionId,
   projectDir,
   profileNames = [],
@@ -191,6 +188,7 @@ export function App({
   saveConfig,
   onReindex,
   onIndexStop,
+  onResolveApproval,
 }: AppProps) {
   const { exit } = useApp()
   type View = "chat" | "model" | "embeddings" | "settings" | "index" | "advanced" | "help"
@@ -201,7 +199,6 @@ export function App({
     subAgents: [],
     reasoning: "",
     mode: initialMode,
-    maxMode: initialMaxMode,
     isRunning: false,
     model: initialModel,
     provider: initialProvider,
@@ -219,6 +216,7 @@ export function App({
     currentStreaming: "",
     showThinking: true,
     showToolDetails: true,
+    planCompleted: false,
   })
   const [input, setInput] = useState("")
   const [historyIdx, setHistoryIdx] = useState(-1)
@@ -345,6 +343,7 @@ export function App({
                   ? { ...lt, status: event.success ? "completed" : "error", timeEnd: Date.now() }
                   : lt
               ),
+              ...(event.tool === "plan_exit" && event.success ? { planCompleted: true } : {}),
             }))
             break
           case "subagent_start":
@@ -514,7 +513,7 @@ export function App({
     setInput("")
     setSlashSelected(0)
     if (cmd.mode) {
-      setState((s) => ({ ...s, mode: cmd.mode! }))
+      setState((s) => ({ ...s, mode: cmd.mode!, planCompleted: false }))
       onModeChange(cmd.mode)
       setView("chat")
       return
@@ -528,13 +527,6 @@ export function App({
         if (!state.isRunning) onCompact()
         setView("chat")
         return
-      case "max": {
-        const next = !state.maxMode
-        setState((s) => ({ ...s, maxMode: next }))
-        onMaxModeChange(next)
-        setView("chat")
-        return
-      }
       case "model":
         setView("model")
         return
@@ -578,6 +570,35 @@ export function App({
       return
     }
 
+    // Plan mode: after plan_exit, [A]pprove / [R]evise / [D]abandon
+    if (
+      view === "chat" &&
+      state.mode === "plan" &&
+      state.planCompleted &&
+      !state.isRunning &&
+      (inputChar === "a" || inputChar === "A" || inputChar === "r" || inputChar === "R" || inputChar === "d" || inputChar === "D")
+    ) {
+      const action = inputChar.toLowerCase()
+      if (action === "a") {
+        setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
+        onModeChange("agent")
+        onMessage(
+          "Execute the plan above. Follow the steps in .nexus/plans/ and the plan we agreed. Do not ask for confirmation — proceed with implementation.",
+          "agent"
+        )
+        return
+      }
+      if (action === "r") {
+        setState((s) => ({ ...s, planCompleted: false }))
+        return
+      }
+      if (action === "d") {
+        setState((s) => ({ ...s, mode: "ask", planCompleted: false }))
+        onModeChange("ask")
+        return
+      }
+    }
+
     if (key.ctrl && inputChar === "k") {
       setState((s) => ({ ...s, messages: [], todo: "", lastError: null, liveTools: [], subAgents: [] }))
       setChatScrollLines(0)
@@ -589,12 +610,6 @@ export function App({
       return
     }
 
-    if (key.ctrl && inputChar === "m") {
-      const next = !state.maxMode
-      setState((s) => ({ ...s, maxMode: next }))
-      onMaxModeChange(next)
-      return
-    }
     if (key.ctrl && inputChar === "u" && view === "chat") {
       setChatScrollLines((v) => v + 12)
       return
@@ -888,11 +903,30 @@ export function App({
     }
 
     if (isEnter && !slashOpen) {
+      if (state.awaitingApproval && onResolveApproval) {
+        const raw = input.trim().toLowerCase()
+        if (["y", "yes", "n", "no", "a", "always", "s", "skip"].includes(raw)) {
+          const approved = ["y", "yes", "a", "always", "s", "skip"].includes(raw)
+          const alwaysApprove = raw === "a" || raw === "always"
+          const skipAll = raw === "s" || raw === "skip"
+          setInput("")
+          setChatScrollLines(0)
+          setState((s) => ({ ...s, awaitingApproval: false }))
+          onResolveApproval({ approved, alwaysApprove, skipAll })
+          return
+        }
+      }
       if (input.trim() && !state.isRunning) {
         const now = Date.now()
         if (now - lastSubmitRef.current < 400) return
         lastSubmitRef.current = now
         const content = input.trim()
+        // Dedupe: avoid adding the same user message twice (e.g. double Enter or echo)
+        const lastMsg = state.messages[state.messages.length - 1]
+        if (lastMsg?.role === "user" && typeof lastMsg.content === "string" && lastMsg.content.trim() === content) {
+          setInput("")
+          return
+        }
         inputHistory.current.push(content)
         if (inputHistory.current.length > 50) inputHistory.current.shift()
         setHistoryIdx(-1)
@@ -902,6 +936,7 @@ export function App({
           isRunning: true,
           lastError: null,
           liveTools: [],
+          planCompleted: false,
           messages: [
             ...s.messages,
             {
@@ -992,11 +1027,16 @@ export function App({
 
       {state.todo && <TodoBar todo={state.todo} cols={cols} />}
 
+      {view === "chat" && state.mode === "plan" && state.planCompleted && !state.isRunning && (
+        <PlanActionsBar cols={cols} />
+      )}
+
       {/* ── Slash command popup (above input) ────────────────────────────────── */}
       {slashOpen && filteredCommands.length > 0 && (
         <SlashPopup
           commands={filteredCommands}
           selectedIndex={slashSelected}
+          cols={cols}
         />
       )}
 
@@ -1010,7 +1050,6 @@ export function App({
           isRunning={state.isRunning}
           awaitingApproval={state.awaitingApproval}
           indexReady={state.indexReady}
-          maxMode={state.maxMode}
         />
       ) : (
         <Box paddingX={1} paddingY={0}>
@@ -1293,7 +1332,7 @@ function WelcomeBar({
   const line2 = fitPad(shortPath ? `${indexLabel} · Project: ${shortPath}` : indexLabel, Math.max(20, cols - 4))
   const line3 = fitPad("Type / for commands  /settings for all agent settings", Math.max(20, cols - 4))
   const line4 = fitPad(
-    `Context: ${formatTokens(contextUsedTokens)} / ${formatTokens(contextLimitTokens)} (${contextPercent}%)`,
+    `Context: ${formatTokens(contextUsedTokens)} / ${formatTokens(contextLimitTokens)} (${contextPercent}%) · sys on`,
     Math.max(20, cols - 4),
   )
   const indexColor = noIndex ? "gray" : indexReady ? "green" : "yellow"
@@ -1307,32 +1346,32 @@ function WelcomeBar({
   )
 }
 
-// ─── Slash command popup ─────────────────────────────────────────────────────
+// ─── Slash command popup (over chat: one line per command to avoid overlap) ─
 
 function SlashPopup({
   commands,
   selectedIndex,
+  cols,
 }: {
   commands: typeof SLASH_COMMANDS
   selectedIndex: number
+  cols: number
 }) {
+  const maxLen = Math.max(40, cols - 4)
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1} marginBottom={0}>
-      <Text color="gray">
-        Commands — ↑↓ choose, Enter select, Esc close
-      </Text>
-      {commands.map((cmd, i) => (
-        <Box key={cmd.cmd}>
-          <Text color={i === selectedIndex ? "cyan" : "gray"} bold={i === selectedIndex}>
-            {i === selectedIndex ? "▸ " : "  "}
-            {cmd.label}
-          </Text>
-          <Text color="gray">
-            {" "}
-            — {cmd.desc}
-          </Text>
-        </Box>
-      ))}
+    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1} marginBottom={1}>
+      <Text color="gray">Commands — ↑↓ choose, Enter select, Esc close</Text>
+      {commands.map((cmd, i) => {
+        const line = `${i === selectedIndex ? "▸ " : "  "}${cmd.label} — ${cmd.desc}`
+        const show = line.length > maxLen ? line.slice(0, maxLen - 1) + "…" : line
+        return (
+          <Box key={cmd.cmd}>
+            <Text color={i === selectedIndex ? "cyan" : "gray"} bold={i === selectedIndex}>
+              {show}
+            </Text>
+          </Box>
+        )
+      })}
     </Box>
   )
 }
@@ -1347,7 +1386,6 @@ function InputBar({
   isRunning,
   awaitingApproval,
   indexReady,
-  maxMode,
 }: {
   input: string
   cols: number
@@ -1356,7 +1394,6 @@ function InputBar({
   isRunning: boolean
   awaitingApproval: boolean
   indexReady: boolean
-  maxMode: boolean
 }) {
   const borderColor = awaitingApproval ? "yellow" : isRunning ? "red" : "cyan"
   const prompt = awaitingApproval
@@ -1373,12 +1410,6 @@ function InputBar({
       <Text color={promptColor} bold>
         {prompt}
       </Text>
-      {maxMode && (
-        <Text color="yellow" bold>
-          {" "}
-          MAX
-        </Text>
-      )}
       {indexReady && (
         <Text color="green" dimColor>
           {" "}
@@ -1560,22 +1591,50 @@ function SubAgentCard({ agent }: { agent: SubAgentState }) {
 }
 
 function TodoBar({ todo, cols }: { todo: string; cols: number }) {
-  const lines = todo.split("\n").filter((l) => l.trim())
-  const completed = lines.filter((l) => l.includes("[x]") || l.includes("✅")).length
-  const total = lines.length
+  const items = parseTodoItems(todo)
+  const total = items.length
+  const completed = items.filter((i) => i.done).length
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0
-  const firstLine = lines[0]?.slice(0, cols - 20) ?? ""
+  const summary =
+    items.length > 0
+      ? items
+          .slice(0, 3)
+          .map((i) => (i.done ? "●" : "○") + " " + i.text.slice(0, 20))
+          .join("  ·  ")
+      : todo.slice(0, cols - 24).trim()
 
   return (
     <Box paddingX={1} borderStyle="single" borderColor="gray" flexDirection="row">
-      <Text color="gray">Progress </Text>
+      <Text color="gray">Plan </Text>
       <Text color="cyan">
         [{completed}/{total}]
       </Text>
       <Text color="gray"> {pct}% </Text>
       <Text color="gray" dimColor>
-        {firstLine}
+        {summary.length > cols - 24 ? summary.slice(0, cols - 27) + "…" : summary}
       </Text>
+    </Box>
+  )
+}
+
+function PlanActionsBar({ cols }: { cols: number }) {
+  return (
+    <Box paddingX={1} paddingY={0} borderStyle="single" borderColor="yellow" flexDirection="column">
+      <Text color="yellow" bold>
+        Plan ready. Choose:
+      </Text>
+      <Box>
+        <Text color="cyan"> [A]</Text>
+        <Text color="gray"> Approve — run in agent mode and execute the plan</Text>
+      </Box>
+      <Box>
+        <Text color="cyan"> [R]</Text>
+        <Text color="gray"> Revise — type your message and press Enter to update the plan</Text>
+      </Box>
+      <Box>
+        <Text color="cyan"> [D]</Text>
+        <Text color="gray"> Abandon — switch to Ask mode</Text>
+      </Box>
     </Box>
   )
 }
@@ -1673,17 +1732,143 @@ function ChatViewport({
   )
 }
 
+function formatToolPreview(tool: LiveTool): string {
+  const pathVal = tool.input?.["path"]
+  const pathStr = pathVal != null ? String(pathVal) : ""
+  const startLine = tool.input?.["start_line"]
+  const endLine = tool.input?.["end_line"]
+  const pattern = tool.input?.["pattern"]
+  const patterns = tool.input?.["patterns"]
+  const pathsArr = tool.input?.["paths"]
+  const command = tool.input?.["command"]
+  const query = tool.input?.["query"]
+  const url = tool.input?.["url"]
+  const parts: string[] = []
+
+  if (tool.tool === "list_files") {
+    const dir = pathStr || "."
+    const short = dir.length > 36 ? dir.slice(0, 33) + "…" : dir
+    parts.push(`folder ${short}`)
+  } else if (tool.tool === "batch") {
+    const reads = (tool.input?.["reads"] as unknown[])?.length ?? 0
+    const searches = (tool.input?.["searches"] as unknown[])?.length ?? 0
+    const replaces = (tool.input?.["replaces"] as unknown[])?.length ?? 0
+    if (reads) parts.push(`${reads} read(s)`)
+    if (searches) parts.push(`${searches} search(es)`)
+    if (replaces) parts.push(`${replaces} replace(s)`)
+  } else if (tool.tool === "spawn_agent") {
+    const desc = tool.input?.["description"]
+    if (desc && typeof desc === "string") parts.push((desc.length > 40 ? desc.slice(0, 37) + "…" : desc).replace(/\s+/g, " "))
+  } else if (pathStr) {
+    const base = pathStr.split("/").pop() ?? pathStr
+    const short = base.length > 36 ? base.slice(0, 33) + "…" : base
+    parts.push(short)
+    if (typeof startLine === "number" && typeof endLine === "number") parts.push(`L${startLine}-${endLine}`)
+    else if (typeof startLine === "number") parts.push(`L${startLine}`)
+  }
+
+  if (Array.isArray(pathsArr) && pathsArr.length > 0) parts.push(pathsArr.slice(0, 2).join(", "))
+  if (pattern && typeof pattern === "string") parts.push((pattern.length > 24 ? pattern.slice(0, 21) + "…" : pattern).replace(/\s+/g, " "))
+  if (Array.isArray(patterns) && patterns.length > 0) parts.push(`pat:${patterns.length}`)
+  if (command && typeof command === "string") parts.push((command.length > 32 ? command.slice(0, 29) + "…" : command).replace(/\s+/g, " "))
+  if (query && typeof query === "string") parts.push((query.length > 28 ? query.slice(0, 25) + "…" : query).replace(/\s+/g, " "))
+  if (url && typeof url === "string") parts.push((url.length > 36 ? url.slice(0, 33) + "…" : url))
+  return parts.length > 0 ? parts.join(" · ") : ""
+}
+
+function parseTodoItems(todo: string): { done: boolean; text: string }[] {
+  const items: { done: boolean; text: string }[] = []
+  for (const raw of todo.split("\n")) {
+    const line = raw.trim()
+    if (!line) continue
+    const checkboxDone = /^[-*]\s*\[[xX]\]\s*(.*)$/.exec(line) || /^[-*]\s*✅\s*(.*)$/.exec(line)
+    const checkboxPending = /^[-*]\s*\[\s?\]\s*(.*)$/.exec(line)
+    const plainBullet = /^[-*]\s+(.*)$/.exec(line)
+    const numbered = /^\d+[.)]\s+(.*)$/.exec(line)
+    if (checkboxDone) {
+      items.push({ done: true, text: checkboxDone[1]!.trim() })
+    } else if (checkboxPending) {
+      items.push({ done: false, text: checkboxPending[1]!.trim() })
+    } else if (plainBullet) {
+      items.push({ done: false, text: plainBullet[1]!.trim() })
+    } else if (numbered) {
+      items.push({ done: false, text: numbered[1]!.trim() })
+    } else {
+      items.push({ done: false, text: line })
+    }
+  }
+  return items
+}
+
+type MessageSegment = { type: "text" | "code"; content: string }
+
+function splitMessageBlocks(content: string): MessageSegment[] {
+  const segments: MessageSegment[] = []
+  const re = /```(\w*)\n?([\s\S]*?)```/g
+  let lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(content)) !== null) {
+    if (m.index > lastIndex) {
+      const text = content.slice(lastIndex, m.index).trimEnd()
+      if (text) segments.push({ type: "text", content: text })
+    }
+    const lang = m[1] ? m[1].trim() : ""
+    const code = m[2]?.replace(/\n$/, "") ?? ""
+    segments.push({ type: "code", content: lang ? `(${lang})\n${code}` : code })
+    lastIndex = re.lastIndex
+  }
+  if (lastIndex < content.length) {
+    const text = content.slice(lastIndex).trimEnd()
+    if (text) segments.push({ type: "text", content: text })
+  }
+  return segments.length > 0 ? segments : [{ type: "text", content }]
+}
+
 function buildChatLines(state: AppState, width: number): ChatLine[] {
   const out: ChatLine[] = []
 
-  // ─── Top: progress (OpenCode-style — tools and todo visible first) ─────────
-  if (state.todo.trim()) {
-    out.push({ text: "Todo", color: "yellow", bold: true })
-    for (const line of wrapToWidth(sanitizeText(state.todo), Math.max(10, width - 2)))
-      out.push({ text: `  ${line}`, color: "white" })
-    out.push({ text: "", color: "gray" })
+  // ─── Chat messages first (chronological) ───────────────────────────────────
+  let prevUserContent: string | undefined
+  for (const msg of state.messages) {
+    const raw = sanitizeText(typeof msg.content === "string" ? msg.content : "[complex message]")
+    const content = msg.role === "assistant" ? cleanAssistantText(raw) : raw
+    if (msg.role === "user") {
+      if (prevUserContent === content) continue
+      prevUserContent = content
+      out.push({ text: "You", color: "cyan", bold: true })
+      for (const line of wrapToWidth(content, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
+      out.push({ text: "", color: "gray" })
+      continue
+    }
+    prevUserContent = undefined
+    if (msg.role === "assistant") {
+      out.push({ text: "NexusCode", color: "green", bold: true })
+      const segments = splitMessageBlocks(content)
+      const wrapW = Math.max(10, width - 2)
+      for (const seg of segments) {
+        if (seg.type === "text") {
+          for (const line of wrapToWidth(seg.content, wrapW)) out.push({ text: `  ${line}`, color: "white" })
+        } else {
+          const codeLines = seg.content.split("\n")
+          const borderW = Math.max(12, Math.min(width - 4, 58))
+          out.push({ text: "  ┌" + "─".repeat(Math.max(0, borderW - 2)) + "┐", color: "gray" })
+          for (const codeLine of codeLines) {
+            for (const l of wrapToWidth(codeLine, borderW - 4)) out.push({ text: `  │ ${l}`, color: "gray" })
+          }
+          out.push({ text: "  └" + "─".repeat(Math.max(0, borderW - 2)) + "┘", color: "gray" })
+        }
+      }
+      out.push({ text: "", color: "gray" })
+      continue
+    }
+    if (msg.role === "system") {
+      for (const line of wrapToWidth(`WARN ${content}`, width)) out.push({ text: line, color: "red" })
+      out.push({ text: "", color: "gray" })
+      continue
+    }
   }
 
+  // ─── Tools (chronological: right after messages, with file/line detail) ──────
   const recentTools = state.liveTools.slice(-80)
   if (recentTools.length > 0) {
     out.push({ text: "Tools", color: "yellow", bold: true })
@@ -1691,8 +1876,7 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
     for (const tool of recentTools) {
       const status =
         tool.status === "running" ? "…" : tool.status === "completed" ? "ok" : "err"
-      const previewRaw = tool.input?.["path"] ?? tool.input?.["command"] ?? tool.input?.["query"] ?? tool.input?.["url"] ?? ""
-      const preview = previewRaw ? sanitizeText(String(previewRaw)).slice(0, 64) : ""
+      const preview = formatToolPreview(tool)
       const last = groups[groups.length - 1]
       if (last && last.tool === tool.tool && last.status === status) {
         last.count += 1
@@ -1704,7 +1888,7 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
     for (const g of groups) {
       const label = g.count > 1 ? `${g.count}× ${sanitizeText(g.tool)}` : sanitizeText(g.tool)
       const showPreview = state.showToolDetails && g.preview
-      const line = showPreview ? `  [${g.status}] ${label} :: ${g.preview}` : `  [${g.status}] ${label}`
+      const line = showPreview ? `  [${g.status}] ${label} — ${g.preview}` : `  [${g.status}] ${label}`
       for (const l of wrapToWidth(line, width)) {
         out.push({
           text: l,
@@ -1727,27 +1911,34 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
   }
   if (state.subAgents.length > 0) out.push({ text: "", color: "gray" })
 
-  // ─── Chat messages ───────────────────────────────────────────────────────
-  for (const msg of state.messages) {
-    const raw = sanitizeText(typeof msg.content === "string" ? msg.content : "[complex message]")
-    const content = msg.role === "assistant" ? cleanAssistantText(raw) : raw
-    if (msg.role === "user") {
-      out.push({ text: "You", color: "cyan", bold: true })
-      for (const line of wrapToWidth(content, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
-      out.push({ text: "", color: "gray" })
-      continue
+  // ─── Todo / plan items (at bottom, above input) ─────────────────────────────
+  if (state.todo.trim()) {
+    out.push({ text: "Plan", color: "yellow", bold: true })
+    const runningTool = state.liveTools.find((t) => t.status === "running")
+    if (state.isRunning && runningTool) {
+      const preview = formatToolPreview(runningTool)
+      const line = preview
+        ? `  ▶ Working on: ${sanitizeText(runningTool.tool)} — ${preview}`
+        : `  ▶ Working on: ${sanitizeText(runningTool.tool)}`
+      for (const l of wrapToWidth(line, Math.max(10, width - 2))) out.push({ text: l, color: "cyan" })
     }
-    if (msg.role === "assistant") {
-      out.push({ text: "NexusCode", color: "green", bold: true })
-      for (const line of wrapToWidth(content, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
-      out.push({ text: "", color: "gray" })
-      continue
+    const items = parseTodoItems(state.todo)
+    for (const item of items) {
+      const bullet = item.done ? "  ● " : "  ○ "
+      const text = sanitizeText(item.text)
+      const wrapped = wrapToWidth(text, Math.max(10, width - 4))
+      wrapped.forEach((line, i) => {
+        out.push({
+          text: (i === 0 ? bullet : "    ") + line,
+          color: item.done ? "gray" : "white",
+        })
+      })
     }
-    if (msg.role === "system") {
-      for (const line of wrapToWidth(`WARN ${content}`, width)) out.push({ text: line, color: "red" })
-      out.push({ text: "", color: "gray" })
-      continue
+    if (items.length === 0) {
+      for (const line of wrapToWidth(sanitizeText(state.todo), Math.max(10, width - 2)))
+        out.push({ text: `  ${line}`, color: "white" })
     }
+    out.push({ text: "", color: "gray" })
   }
 
   if (state.isRunning && state.reasoning && state.showThinking) {
@@ -1874,7 +2065,6 @@ function HelpBox({
   cols: number
   configSnapshot?: {
     model: { provider: string; id: string; temperature?: number }
-    maxMode: { enabled: boolean; tokenBudgetMultiplier: number }
     embeddings?: { provider: string; model: string; dimensions?: number }
     indexing: { enabled: boolean; vector: boolean }
     vectorDb?: { enabled: boolean; url: string }
@@ -1896,13 +2086,6 @@ function HelpBox({
           <Text color="white">{modelLine}</Text>
           {typeof snap?.model?.temperature === "number" && (
             <Text color="gray"> · temp {snap.model.temperature}</Text>
-          )}
-        </Box>
-        <Box>
-          <Text color="gray">Max mode: </Text>
-          <Text color={snap?.maxMode?.enabled ? "yellow" : "gray"}>{snap?.maxMode?.enabled ? "on" : "off"}</Text>
-          {snap?.maxMode?.enabled && (
-            <Text color="gray"> · token x{snap.maxMode.tokenBudgetMultiplier}</Text>
           )}
         </Box>
         <Box>
@@ -1935,7 +2118,7 @@ function HelpBox({
       <Text color="white" bold>{"\n"} Commands</Text>
       <Text color="gray"> /settings  /model  /embeddings  /index  /advanced  /help</Text>
       <Text color="white" bold>{"\n"} Shortcuts</Text>
-      <Text color="gray"> Tab mode · Ctrl+M max · Ctrl+P profile · Ctrl+S compact · Ctrl+K clear · Ctrl+C abort/quit</Text>
+      <Text color="gray"> Tab mode · Ctrl+P profile · Ctrl+S compact · Ctrl+K clear · Ctrl+C abort/quit</Text>
       <Text color="white" bold>{"\n"} Config files</Text>
       <Text color="gray"> .nexus/nexus.yaml (project) · ~/.nexus/nexus.yaml (global)</Text>
       <Text color="gray"> OpenRouter: provider `openai-compatible` + baseUrl `https://openrouter.ai/api/v1`</Text>

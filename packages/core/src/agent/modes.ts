@@ -21,7 +21,7 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
 export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   agent: ["plan_exit"],
   plan:  ["execute_command", "browser_action"],
-  ask:   ["write_to_file", "replace_in_file", "apply_patch", "execute_command", "browser_action", "spawn_agent", "create_rule", "plan_exit"],
+  ask:   ["write_to_file", "replace_in_file", "apply_patch", "execute_command", "browser_action", "spawn_agent", "create_rule", "plan_exit", "batch"],
 }
 
 /**
@@ -43,7 +43,7 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   always:  ["attempt_completion", "ask_followup_question", "update_todo_list"],
   read:    ["read_file", "list_files", "list_code_definitions"],
-  write:   ["write_to_file", "replace_in_file", "apply_patch", "create_rule"],
+  write:   ["write_to_file", "replace_in_file", "apply_patch", "create_rule", "batch"],
   execute: ["execute_command"],
   search:  ["search_files", "codebase_search", "web_fetch", "web_search"],
   browser: ["browser_action"],
@@ -125,6 +125,6 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
  */
 export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   agent: "AGENT mode: full access to read/write files, run commands, search codebase, browser, MCP, and spawn sub-agents. Complete tasks autonomously end-to-end.",
-  plan:  "PLAN mode: read-only access + codebase search. MUST NOT modify source code. Write plan files to .nexus/plans/ directory only. When plan is complete, call attempt_completion.",
+  plan:  "PLAN mode: two phases. (1) Thoroughly study the codebase and produce a detailed step-by-step plan; write only to .nexus/plans/. (2) Call plan_exit when done; user may then approve (execute in agent), revise (send message), or abandon.",
   ask:   "ASK mode: read-only. Answer questions, explain code, analyze implementations. MUST NOT modify any files or run commands.",
 }

@@ -165,18 +165,6 @@
           "maximum": 2,
           "description": "Model temperature (0-2). Lower is more deterministic."
         },
-        "nexuscode.maxModeEnabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Default state of Max Mode (deeper analysis, slower)"
-        },
-        "nexuscode.maxModeTokenBudgetMultiplier": {
-          "type": "number",
-          "default": 2,
-          "minimum": 1,
-          "maximum": 6,
-          "description": "How much Max Mode increases per-request token budget while keeping the same LLM model"
-        },
         "nexuscode.enableIndexing": {
           "type": "boolean",
           "default": true,

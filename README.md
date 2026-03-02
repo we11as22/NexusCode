@@ -4,11 +4,10 @@
 
 **VS Code extension + CLI** with:
 - Modes: **agent** | **plan** | **debug** | **ask**
-- **Max Mode** toggle for deeper, more thorough analysis
 - **AST-based codebase indexing** (classes, functions, methods by language)
 - **Optional semantic vector index** with embeddings + Qdrant auto-start (local binary/docker)
 - **All LLM providers** including any OpenAI-compatible API
-- **Model temperature control** per main/max model
+- **Model temperature control**
 - **Parallel tool execution** (read operations run concurrently)
 - **Doom loop detection** — no artificial step limits
 - **Structured output** with JSON schema when supported by provider
@@ -358,10 +357,6 @@ model:
   temperature: 0.2
   # apiKey: from ANTHROPIC_API_KEY env var
 
-maxMode:
-  enabled: false
-  tokenBudgetMultiplier: 2
-
 embeddings:
   provider: openai
   model: text-embedding-3-small
@@ -464,9 +459,6 @@ nexus plan "Design the database schema for a blog"
 nexus debug "The tests are failing with timeout errors"
 nexus ask "How does the caching layer work?"
 
-# Max mode (deeper analysis)
-nexus --max-mode "Review the entire codebase for security issues"
-
 # Different model
 nexus --model openai/gpt-4o "Add TypeScript generics to this API"
 nexus --model ollama/qwen2.5-coder:32b "..."
@@ -505,8 +497,6 @@ nexus -p "Summarize this codebase"
 | **plan** | Read + create .md plan files | Planning without touching code |
 | **debug** | Full (focused on tracing bugs) | Finding and fixing bugs |
 | **ask** | Read only | Questions and explanations |
-
-**Max Mode** (`⚡` in VS Code, `--max-mode` in CLI): Switches to the max mode model configured in `nexus.yaml` and uses a deeper exploration prompt. The agent reads more context, verifies changes, and considers edge cases.
 
 ---
 

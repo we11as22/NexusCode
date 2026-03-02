@@ -3,7 +3,6 @@ import type { IndexStatusKind, Mode, NexusConfigState, SessionMessage } from "..
 export interface WebviewState {
   messages: SessionMessage[]
   mode: Mode
-  maxMode: boolean
   isRunning: boolean
   model: string
   provider: string

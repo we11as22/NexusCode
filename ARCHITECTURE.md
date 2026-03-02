@@ -22,7 +22,7 @@ Both UI hosts call the same `runAgentLoop` in `core`, so behavior remains consis
 ### Unified Config Flow Across Hosts
 **Status:** active  
 **Context:** VS Code and CLI exposed different slices of config and some settings were UI-only.  
-**Decision:** both hosts now persist updates into `.nexus/nexus.yaml` and deep-merge nested sections (`model`, `maxMode`, `embeddings`, `indexing`, `vectorDb`, `tools`).  
+**Decision:** both hosts now persist updates into `.nexus/nexus.yaml` and deep-merge nested sections (`model`, `embeddings`, `indexing`, `vectorDb`, `tools`).  
 **Rationale:** one source of truth for local/project behavior, with predictable cross-host parity.  
 **Trade-offs:** host-specific overrides (e.g. VS Code settings) can still mask file config at runtime.
 

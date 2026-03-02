@@ -35,7 +35,6 @@ export type WebviewMessage =
   | { type: "compact" }
   | { type: "clearChat" }
   | { type: "setMode"; mode: Mode }
-  | { type: "setMaxMode"; enabled: boolean }
   | { type: "setProfile"; profile: string }
   | { type: "getState" }
   | { type: "webviewDidLaunch" }
@@ -60,7 +59,6 @@ export type ExtensionMessage =
 export interface WebviewState {
   messages: SessionMessage[]
   mode: Mode
-  maxMode: boolean
   isRunning: boolean
   model: string
   provider: string
@@ -91,7 +89,6 @@ export class Controller {
   private config?: NexusConfig
   private defaultModelProfile?: NexusConfig["model"]
   private mode: Mode = "agent"
-  private maxMode = false
   private isRunning = false
   private abortController?: AbortController
   private checkpoint?: CheckpointTracker
@@ -112,7 +109,6 @@ export class Controller {
         if (!e.affectsConfiguration("nexuscode")) return
         if (this.config) {
           this.applyVscodeOverrides(this.config)
-          this.maxMode = this.config.maxMode.enabled
           this.postStateToWebview()
         }
       })
@@ -150,7 +146,6 @@ export class Controller {
       return {
         messages: [],
         mode: this.mode,
-        maxMode: this.maxMode,
         isRunning: false,
         model: "—",
         provider: "—",
@@ -174,7 +169,6 @@ export class Controller {
     return {
       messages: this.session.messages,
       mode: this.mode,
-      maxMode: this.maxMode,
       isRunning: this.isRunning,
       model: this.config.model.id,
       provider: this.config.model.provider,
@@ -236,7 +230,6 @@ export class Controller {
         this.config = NexusConfigSchema.parse({}) as NexusConfig
       }
       this.applyVscodeOverrides(this.config)
-      this.maxMode = this.config.maxMode.enabled
       this.defaultModelProfile = { ...this.config.model }
       try {
         this.session = Session.create(cwd)
@@ -282,14 +275,6 @@ export class Controller {
         break
       case "setMode":
         this.mode = msg.mode
-        this.postStateToWebview()
-        break
-      case "setMaxMode":
-        this.maxMode = msg.enabled
-        if (this.config) {
-          this.config.maxMode.enabled = msg.enabled
-          writeConfig(this.config, this.getCwd())
-        }
         this.postStateToWebview()
         break
       case "setProfile":
@@ -339,6 +324,7 @@ export class Controller {
       case "forkSession":
         if (this.session && msg.messageId) {
           this.session = this.session.fork(msg.messageId) as Session
+          if (this.getServerUrl()) this.serverSessionId = undefined
           this.postStateToWebview()
         }
         break
@@ -417,7 +403,6 @@ export class Controller {
       vscode.window.showErrorMessage(`NexusCode: Failed to save settings — ${message}`)
       this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `Save failed: ${message}` } })
     }
-    this.maxMode = this.config.maxMode.enabled
     const mcpAfter = JSON.stringify({ mcp: this.config.mcp })
     if (mcpBefore !== mcpAfter) {
       void this.reconnectMcpServers().catch((err: unknown) => {
@@ -526,7 +511,6 @@ export class Controller {
         } finally {
           reader.releaseLock()
         }
-        await this.session.save().catch(() => {})
         try {
           const metaRes = await fetch(
             `${serverUrl.replace(/\/$/, "")}/session/${sid}?directory=${encodeURIComponent(cwd)}`,
@@ -565,7 +549,7 @@ export class Controller {
       }
     })
 
-    const timeoutMs = this.maxMode ? 20 * 60_000 : 10 * 60_000
+    const timeoutMs = 10 * 60_000
     const timeout = setTimeout(() => {
       if (!this.isRunning) return
       this.abortController?.abort()
@@ -642,6 +626,10 @@ export class Controller {
 
   private async compactHistory(): Promise<void> {
     if (!this.session || !this.config) return
+    if (this.getServerUrl()) {
+      vscode.window.showInformationMessage("NexusCode: Compaction is not supported when using NexusCode Server.")
+      return
+    }
     const client = createLLMClient(this.config.model)
     const compaction = createCompaction()
     this.postMessageToWebview({ type: "agentEvent", event: { type: "compaction_start" } })
@@ -766,8 +754,6 @@ export class Controller {
     if (typeof temperature === "number" && Number.isFinite(temperature)) {
       config.model.temperature = Math.max(0, Math.min(2, temperature))
     }
-    const maxModeEnabled = cfg.get<boolean>("maxModeEnabled")
-    if (typeof maxModeEnabled === "boolean") config.maxMode.enabled = maxModeEnabled
     const enableCheckpoints = cfg.get<boolean>("enableCheckpoints")
     if (typeof enableCheckpoints === "boolean") config.checkpoint.enabled = enableCheckpoints
     const autoApproveRead = cfg.get<boolean>("autoApproveRead")

@@ -199,25 +199,7 @@ function applyEnvOverrides(config: Record<string, unknown>) {
     }
   }
 
-  // NEXUS_MAX_MODE
-  if (process.env["NEXUS_MAX_MODE"] === "1" || process.env["NEXUS_MAX_MODE"] === "true") {
-    if (!config.maxMode || typeof config.maxMode !== "object") config.maxMode = {}
-    ;(config.maxMode as Record<string, unknown>)["enabled"] = true
-  }
-
-  if (!config.maxMode || typeof config.maxMode !== "object") config.maxMode = {}
-  const mm = config.maxMode as Record<string, unknown>
-  if (typeof mm["enabled"] !== "boolean") {
-    mm["enabled"] = false
-  }
-
-  const mmMultiplierRaw = process.env["NEXUS_MAX_TOKEN_MULTIPLIER"] ?? process.env["NEXUS_MAX_TOKENS_MULTIPLIER"]
-  if (mmMultiplierRaw) {
-    const m = Number(mmMultiplierRaw)
-    if (Number.isFinite(m) && m >= 1 && m <= 6) {
-      mm["tokenBudgetMultiplier"] = m
-    }
-  }
+  // NEXUS_MAX_MODE / NEXUS_MAX_TOKEN_MULTIPLIER removed (max mode feature removed)
 }
 
 function normalizeProviderAliases(config: Record<string, unknown>): void {

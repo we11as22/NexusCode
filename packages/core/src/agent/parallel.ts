@@ -36,6 +36,7 @@ export class ParallelAgentManager {
     signal: AbortSignal,
     maxParallel: number,
     emit?: (event: AgentEvent) => void,
+    contextSummary?: string,
   ): Promise<SubAgentResult> {
     // Wait for a concurrency slot
     while (this.running.size >= maxParallel) {
@@ -50,7 +51,7 @@ export class ParallelAgentManager {
 
     // The task self-removes from the map when it settles (success or error).
     // This is what makes the while-loop above eventually terminate.
-    const task = this.runSubAgent(subagentId, description, mode, config, cwd, signal, emit).finally(() => {
+    const task = this.runSubAgent(subagentId, description, mode, config, cwd, signal, emit, contextSummary).finally(() => {
       this.running.delete(subagentId)
     })
 
@@ -67,9 +68,13 @@ export class ParallelAgentManager {
     cwd: string,
     signal: AbortSignal,
     emit?: (event: AgentEvent) => void,
+    contextSummary?: string,
   ): Promise<SubAgentResult> {
     const session = Session.create(cwd)
-    session.addMessage({ role: "user", content: description })
+    const userContent = contextSummary?.trim()
+      ? `${contextSummary}\n\n---\n\nTask: ${description}`
+      : description
+    session.addMessage({ role: "user", content: userContent })
 
     const client = createLLMClient(config.model)
 
@@ -163,6 +168,7 @@ export class ParallelAgentManager {
 
 const spawnSchema = z.object({
   description: z.string().describe("What should the sub-agent do? Provide a clear, self-contained task description."),
+  context_summary: z.string().optional().describe("Optional summarized context (new_task style) to give the sub-agent before the task. Use when the subtask benefits from brief background (e.g. what we're building, which files matter)."),
   mode: z.enum(["agent", "plan", "ask", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
   task_progress: z.string().optional(),
 })
@@ -172,17 +178,18 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
     name: "spawn_agent",
     description: `Launch a parallel sub-agent to work on a specific task concurrently.
 Use for independent subtasks that don't depend on each other.
+Optionally pass \`context_summary\` (new_task style) to give the sub-agent brief background before the task.
 The sub-agent has full capabilities based on the specified mode.
 **The sub-agent must call attempt_completion when the task is done**; its result is returned to you.
 Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: spawnSchema,
     modes: ["agent"],
 
-    async execute(args: { description: string; mode?: Mode | "search" | "explore"; task_progress?: string }, ctx: ToolContext) {
-      const { description, mode } = args
-      const normalizedMode: Mode = mode === "search" || mode === "explore"
+    async execute(args: { description: string; context_summary?: string; mode?: Mode | "search" | "explore"; task_progress?: string }, ctx: ToolContext) {
+      const { description, context_summary } = args
+      const normalizedMode: Mode = args.mode === "search" || args.mode === "explore"
         ? "ask"
-        : ((mode ?? "agent") as Mode)
+        : ((args.mode ?? "agent") as Mode)
       const result = await manager.spawn(
         description,
         normalizedMode,
@@ -191,6 +198,7 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
         ctx.signal,
         ctx.config.parallelAgents.maxParallel,
         (event) => ctx.host.emit(event),
+        context_summary,
       )
 
       if (result.error) {

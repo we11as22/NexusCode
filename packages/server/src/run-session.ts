@@ -25,7 +25,7 @@ export interface RunSessionOptions {
   mode: "agent" | "plan" | "ask"
   onEvent: (event: AgentEvent) => void
   signal: AbortSignal
-  configOverride?: { maxMode?: { enabled: boolean } }
+  configOverride?: Record<string, unknown>
 }
 
 /**
@@ -37,7 +37,6 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   let config = await loadConfig(cwd).catch(() => undefined)
   if (!config) config = await loadConfig(process.cwd()).catch(() => undefined)
   if (!config) config = NexusConfigSchema.parse({}) as NexusConfig
-  if (configOverride?.maxMode) config.maxMode = configOverride.maxMode!
 
   const host = new ServerHost(cwd, onEvent)
   session.addMessage({ role: "user", content })

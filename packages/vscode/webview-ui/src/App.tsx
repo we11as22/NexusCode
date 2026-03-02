@@ -348,20 +348,11 @@ function SubagentStrip() {
             a.status === "completed" ? "nexus-subagent-card-ok" : a.status === "error" ? "nexus-subagent-card-err" : ""
           }`}
         >
-          <div className="nexus-subagent-head">
-            <span className="font-mono text-[10px]">{a.id.slice(0, 12)}</span>
-            <span className="text-[10px] uppercase">{a.mode}</span>
+          <div className="nexus-subagent-title">
+            {truncateTaskTitle(a.task)}
           </div>
-          <div className="nexus-subagent-tool">Task</div>
-          <div className="nexus-subagent-task">{a.task}</div>
-          <div className="nexus-subagent-tool">
-            {a.currentTool
-              ? `Tool: ${a.currentTool}`
-              : a.status === "completed"
-                ? "Tool: completed"
-                : a.status === "error"
-                  ? "Tool: failed"
-                  : "Tool: waiting"}
+          <div className="nexus-subagent-action">
+            {getSubagentActionLabel(a)}
           </div>
           {a.error && <div className="nexus-subagent-error">{a.error}</div>}
         </div>
@@ -370,14 +361,52 @@ function SubagentStrip() {
   )
 }
 
+function truncateTaskTitle(task: string, maxLen = 56): string {
+  const oneLine = task.replace(/\s+/g, " ").trim()
+  if (oneLine.length <= maxLen) return oneLine
+  return oneLine.slice(0, maxLen - 1) + "…"
+}
+
+function getSubagentActionLabel(a: { status: string; currentTool?: string }): string {
+  if (a.status === "completed") return "Completed"
+  if (a.status === "error") return "Failed"
+  if (a.currentTool) return toolToActionLabel(a.currentTool)
+  return "Starting…"
+}
+
+function toolToActionLabel(tool: string): string {
+  const labels: Record<string, string> = {
+    read_file: "Reading file",
+    list_files: "Listing directory",
+    list_code_definitions: "Listing definitions",
+    search_files: "Searching files",
+    codebase_search: "Searching codebase",
+    write_to_file: "Writing file",
+    replace_in_file: "Editing file",
+    apply_patch: "Applying patch",
+    execute_command: "Running command",
+    web_fetch: "Fetching URL",
+    web_search: "Web search",
+    browser_action: "Browser action",
+    use_skill: "Using skill",
+    attempt_completion: "Completing",
+    ask_followup_question: "Asking user",
+    update_todo_list: "Updating todo",
+    create_rule: "Creating rule",
+    condense: "Compacting",
+    summarize_task: "Summarizing",
+    plan_exit: "Exiting plan",
+    batch: "Batch operation",
+  }
+  return labels[tool] ?? `Running ${tool}`
+}
+
 interface SettingsDraft {
   modelProvider: string
   modelId: string
   modelApiKey: string
   modelBaseUrl: string
   modelTemperature: string
-  maxEnabled: boolean
-  maxTokenBudgetMultiplier: string
   embProvider: string
   embModel: string
   embApiKey: string
@@ -480,21 +509,6 @@ function SettingsView() {
             <SettingsInput type="password" label="API Key" value={draft.modelApiKey} onChange={(v) => setDraft({ ...draft, modelApiKey: v })} />
             <SettingsInput label="Base URL" value={draft.modelBaseUrl} onChange={(v) => setDraft({ ...draft, modelBaseUrl: v })} />
             <div className="nexus-muted text-[10px]">Default context window fallback: 128k tokens.</div>
-          </section>
-
-          <section className="nexus-section">
-            <h3 className="nexus-section-title">Max Mode</h3>
-            <SettingsToggle
-              label="Enable max mode"
-              checked={draft.maxEnabled}
-              onChange={(checked) => setDraft({ ...draft, maxEnabled: checked })}
-            />
-            <SettingsInput
-              label="Token budget multiplier (1-6)"
-              value={draft.maxTokenBudgetMultiplier}
-              onChange={(v) => setDraft({ ...draft, maxTokenBudgetMultiplier: v })}
-            />
-            <div className="nexus-muted text-[10px]">Uses the same model/provider as LLM section, only increases depth and context budget.</div>
           </section>
         </>
       )}
@@ -706,8 +720,6 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     modelApiKey: config.model.apiKey ?? "",
     modelBaseUrl: isOpenRouter && baseUrl ? baseUrl : (config.model.baseUrl ?? ""),
     modelTemperature: toInputNumber(config.model.temperature),
-    maxEnabled: Boolean(config.maxMode.enabled),
-    maxTokenBudgetMultiplier: toInputNumber(config.maxMode.tokenBudgetMultiplier ?? 2),
     embProvider: config.embeddings?.provider ?? "openai",
     embModel: config.embeddings?.model ?? "",
     embApiKey: config.embeddings?.apiKey ?? "",
@@ -746,7 +758,6 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       ? (modelBaseUrl || "https://openrouter.ai/api/v1")
       : (modelBaseUrl || undefined)
   const modelTemperature = parseNumber(draft.modelTemperature)
-  const maxTokenBudgetMultiplier = parseMaxMultiplier(draft.maxTokenBudgetMultiplier)
   const embDimensions = parseIntOrUndefined(draft.embDimensions)
   const embProviderRaw = draft.embProvider.trim() || "openai"
   const embProvider = embProviderRaw === "openrouter" ? "openai-compatible" : embProviderRaw
@@ -769,10 +780,6 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       apiKey: draft.modelApiKey.trim() || undefined,
       baseUrl: normalizedBaseUrl,
       temperature: modelTemperature,
-    },
-    maxMode: {
-      enabled: draft.maxEnabled,
-      tokenBudgetMultiplier: maxTokenBudgetMultiplier,
     },
     embeddings: draft.embModel.trim()
       ? {
@@ -853,12 +860,6 @@ function parseNumber(value: string): number | undefined {
   const n = Number(value)
   if (!Number.isFinite(n)) return undefined
   return Math.max(0, Math.min(2, n))
-}
-
-function parseMaxMultiplier(value: string): number {
-  const n = Number(value)
-  if (!Number.isFinite(n)) return 2
-  return Math.max(1, Math.min(6, n))
 }
 
 function parseIntOrUndefined(value: string): number | undefined {

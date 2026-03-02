@@ -46,6 +46,7 @@ const TOOL_ICONS: Record<string, string> = {
   ask_followup_question: "❓",
   update_todo_list: "📝",
   create_rule: "📏",
+  batch: "📦",
 }
 
 const STATUS_STYLES = {
@@ -53,6 +54,147 @@ const STATUS_STYLES = {
   running:   "border-l-2 border-l-blue-400 bg-blue-400/5",
   completed: "border-l-2 border-l-green-500 bg-green-500/5",
   error:     "border-l-2 border-l-red-500 bg-red-500/5",
+}
+
+function getLangBadge(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? ""
+  const map: Record<string, string> = {
+    ts: "TS", tsx: "TSX", js: "JS", jsx: "JSX", mjs: "JS", cjs: "JS",
+    py: "PY", rs: "RS", go: "GO", java: "JAVA", c: "C", cpp: "CPP", h: "H",
+    md: "MD", json: "JSON", yaml: "YAML", yml: "YAML", html: "HTML", css: "CSS",
+    vue: "VUE", svelte: "SVELTE",
+  }
+  return (map[ext] ?? ext.toUpperCase().slice(0, 4)) || "FILE"
+}
+
+function getDiffStats(output: string): { add: number; del: number } {
+  let add = 0, del = 0
+  const lines = output.split("\n")
+  for (const line of lines) {
+    if (line.startsWith("+") && !line.startsWith("+++")) add++
+    else if (line.startsWith("-") && !line.startsWith("---")) del++
+  }
+  return { add, del }
+}
+
+function isFileEditTool(part: ToolPart): boolean {
+  return ["read_file", "write_to_file", "replace_in_file", "apply_patch"].includes(part.tool)
+}
+
+function getFileEditPath(part: ToolPart): string | null {
+  const pathVal = part.input?.path
+  if (pathVal != null && String(pathVal).trim()) return String(pathVal).trim()
+  const m = part.output?.match(/<file_content\s+path="([^"]+)"/)
+  if (m) return m[1]!
+  return null
+}
+
+/** File edit/add block: language badge + path + diff stats, then code with green/red highlights (reference design). */
+function FileEditBlock({ part }: { part: ToolPart }) {
+  const path = getFileEditPath(part)
+  const output = part.output ?? ""
+  if (!path && !output) return null
+  const lang = path ? getLangBadge(path) : "FILE"
+  const fileName = path ? path.split("/").pop() ?? path : "file"
+  const stats = getDiffStats(output)
+  const isDiff = output.split("\n").filter((l) => l.startsWith("+") || l.startsWith("-")).length >= 3
+  const statLabel =
+    isDiff && (stats.add > 0 || stats.del > 0)
+      ? [stats.add > 0 ? `+${stats.add}` : "", stats.del > 0 ? `-${stats.del}` : ""].filter(Boolean).join(" ")
+      : part.tool === "read_file"
+        ? "view"
+        : ""
+
+  return (
+    <div className="nexus-file-edit-block">
+      <div className="nexus-file-edit-header">
+        <span className="nexus-file-edit-badge">{lang}</span>
+        <span className="nexus-file-edit-path">{fileName}</span>
+        {statLabel && <span className="nexus-file-edit-stats">{statLabel}</span>}
+      </div>
+      <div className="nexus-file-edit-content">
+        <ToolOutputBlock output={output} compacted={part.compacted} />
+      </div>
+    </div>
+  )
+}
+
+/** One-line progress preview: file path + lines, folder, or other key args (same idea as CLI formatToolPreview). */
+function formatToolInputPreview(part: ToolPart): string {
+  const inp = part.input ?? {}
+  const pathVal = inp["path"]
+  const pathStr = pathVal != null ? String(pathVal).trim() : ""
+  const startLine = inp["start_line"]
+  const endLine = inp["end_line"]
+  const pattern = inp["pattern"]
+  const patterns = inp["patterns"]
+  const pathsArr = inp["paths"]
+  const command = inp["command"]
+  const query = inp["query"]
+  const url = inp["url"]
+  const short = (s: string, max: number) => (s.length > max ? s.slice(0, max - 1) + "…" : s)
+
+  switch (part.tool) {
+    case "read_file":
+      if (!pathStr) return ""
+      const lines =
+        typeof startLine === "number" && typeof endLine === "number"
+          ? ` (lines ${startLine}–${endLine})`
+          : typeof startLine === "number"
+            ? ` (line ${startLine})`
+            : ""
+      return short(pathStr, 56) + lines
+    case "list_files":
+      return pathStr ? `folder ${short(pathStr, 48)}` : "folder ."
+    case "write_to_file":
+    case "replace_in_file":
+      return pathStr ? short(pathStr, 56) : ""
+    case "apply_patch":
+      return pathStr ? short(pathStr, 56) : "patch"
+    case "search_files": {
+      const pat = Array.isArray(patterns) && patterns.length
+        ? `patterns(${patterns.length})`
+        : pattern && typeof pattern === "string"
+          ? short(String(pattern).replace(/\s+/g, " "), 32)
+          : ""
+      const scope = Array.isArray(pathsArr) && pathsArr.length
+        ? pathsArr.slice(0, 2).join(", ")
+        : pathStr
+          ? pathStr
+          : ""
+      return [pat, scope].filter(Boolean).join(" in ") || "search"
+    }
+    case "codebase_search": {
+      const q = query && typeof query === "string" ? short(String(query).replace(/\s+/g, " "), 36) : ""
+      const scope = Array.isArray(pathsArr) && pathsArr.length
+        ? pathsArr.slice(0, 1).join("")
+        : pathStr || ""
+      return scope ? `${q} in ${short(scope, 24)}` : q || "search"
+    }
+    case "execute_command":
+      return command && typeof command === "string" ? short(String(command).replace(/\s+/g, " "), 48) : ""
+    case "web_fetch":
+    case "web_search":
+      return url && typeof url === "string" ? short(String(url), 52) : ""
+    case "list_code_definitions":
+      return pathStr ? short(pathStr, 56) : ""
+    case "batch": {
+      const reads = (inp["reads"] as unknown[])?.length ?? 0
+      const searches = (inp["searches"] as unknown[])?.length ?? 0
+      const replaces = (inp["replaces"] as unknown[])?.length ?? 0
+      return [reads && `${reads} read(s)`, searches && `${searches} search(es)`, replaces && `${replaces} replace(s)`].filter(Boolean).join(", ") || "batch"
+    }
+    case "spawn_agent": {
+      const desc = inp["description"]
+      return desc && typeof desc === "string" ? short(desc.replace(/\s+/g, " "), 48) : "subtask"
+    }
+    default:
+      return Object.entries(inp)
+        .filter(([k]) => k !== "task_progress")
+        .map(([k, v]) => `${k}: ${String(v).slice(0, 40)}`)
+        .slice(0, 2)
+        .join(", ") || ""
+  }
 }
 
 export function ToolCallCard({ part }: Props) {
@@ -69,13 +211,7 @@ export function ToolCallCard({ part }: Props) {
     error:     "✗",
   }[part.status]
 
-  const inputPreview = part.input
-    ? Object.entries(part.input)
-        .filter(([k]) => k !== "task_progress")
-        .map(([k, v]) => `${k}: ${String(v).slice(0, 60)}`)
-        .slice(0, 2)
-        .join(", ")
-    : ""
+  const inputPreview = formatToolInputPreview(part)
 
   return (
     <div className={`my-1 rounded text-xs ${STATUS_STYLES[part.status]}`}>
@@ -98,7 +234,10 @@ export function ToolCallCard({ part }: Props) {
 
       {expanded && (
         <div className="px-2 pb-2 space-y-1">
-          {part.input && Object.keys(part.input).length > 0 && (
+          {isFileEditTool(part) && part.output && (
+            <FileEditBlock part={part} />
+          )}
+          {part.input && Object.keys(part.input).length > 0 && !(isFileEditTool(part) && part.output) && (
             <div>
               <div className="text-[var(--vscode-descriptionForeground)] mb-0.5">Input:</div>
               <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-32 overflow-y-auto">
@@ -109,7 +248,7 @@ export function ToolCallCard({ part }: Props) {
               </pre>
             </div>
           )}
-          {part.output && (
+          {part.output && !isFileEditTool(part) && (
             <div>
               <div className="flex items-center justify-between gap-2 mb-0.5">
                 <span className="text-[var(--vscode-descriptionForeground)]">Output:</span>
@@ -118,8 +257,18 @@ export function ToolCallCard({ part }: Props) {
               <ToolOutputBlock output={part.output} compacted={part.compacted} />
             </div>
           )}
+          {part.output && isFileEditTool(part) && (
+            <div className="flex items-center justify-end">
+              <OpenAtLineLinks output={part.output} />
+            </div>
+          )}
           {part.error && (
             <div className="text-red-400 text-[10px] p-1.5 bg-red-500/10 rounded">{part.error}</div>
+          )}
+          {elapsed && part.status === "completed" && (
+            <div className="nexus-tool-elapsed text-[10px] text-[var(--vscode-descriptionForeground)] pt-0.5">
+              Ran in {elapsed}
+            </div>
           )}
         </div>
       )}

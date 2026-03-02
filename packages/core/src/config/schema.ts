@@ -47,14 +47,6 @@ export const NexusConfigSchema = z.object({
     id: "claude-sonnet-4-5",
   }),
 
-  maxMode: z.object({
-    enabled: z.boolean().default(false),
-    tokenBudgetMultiplier: z.number().min(1).max(6).default(2),
-  }).default({
-    enabled: false,
-    tokenBudgetMultiplier: 2,
-  }),
-
   embeddings: embeddingSchema.optional(),
 
   vectorDb: z.object({

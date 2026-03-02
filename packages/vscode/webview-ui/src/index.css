@@ -338,43 +338,39 @@ html, body, #root {
 
 .nexus-subagent-strip {
   flex-shrink: 0;
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-  padding: 8px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--vscode-panel-border);
-  background: color-mix(in srgb, var(--vscode-editor-background) 88%, #000 12%);
-  max-height: 180px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 92%, #000 8%);
+  max-height: 200px;
   overflow-y: auto;
 }
 
 .nexus-subagent-card {
-  border: 1px solid color-mix(in srgb, var(--nexus-accent) 34%, var(--vscode-panel-border) 66%);
-  border-radius: 8px;
-  padding: 8px;
-  background: color-mix(in srgb, var(--nexus-accent-muted) 45%, var(--vscode-editor-background) 55%);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-width: 200px;
+  max-width: 100%;
+  background: color-mix(in srgb, var(--vscode-editor-inactiveSelectionBackground) 85%, var(--vscode-editor-background) 15%);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 
 .nexus-subagent-card-ok {
-  border-color: rgba(44, 186, 92, 0.45);
-  background: rgba(44, 186, 92, 0.09);
+  border-color: rgba(44, 186, 92, 0.4);
+  background: rgba(44, 186, 92, 0.08);
 }
 
 .nexus-subagent-card-err {
-  border-color: rgba(240, 92, 92, 0.45);
-  background: rgba(240, 92, 92, 0.09);
+  border-color: rgba(240, 92, 92, 0.4);
+  background: rgba(240, 92, 92, 0.08);
 }
 
-.nexus-subagent-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: var(--vscode-descriptionForeground);
-  margin-bottom: 4px;
-}
-
-.nexus-subagent-task {
-  font-size: 11px;
+.nexus-subagent-title {
+  font-size: 12px;
+  font-weight: 600;
   color: var(--vscode-foreground);
   line-height: 1.35;
   display: -webkit-box;
@@ -382,19 +378,89 @@ html, body, #root {
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  margin-bottom: 4px;
 }
 
-.nexus-subagent-tool {
-  margin-top: 4px;
-  font-size: 10px;
+.nexus-subagent-action {
+  font-size: 11px;
+  font-weight: 400;
   color: var(--vscode-descriptionForeground);
   font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
 }
 
 .nexus-subagent-error {
-  margin-top: 4px;
+  margin-top: 6px;
   font-size: 10px;
   color: #ff8a8a;
+}
+
+/* File edit/add block — language badge + path + diff stats, code with green/red (reference design) */
+.nexus-file-edit-block {
+  border-radius: 10px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+  margin-top: 6px;
+}
+
+.nexus-file-edit-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-panel-border) 8%);
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-size: 11px;
+}
+
+.nexus-file-edit-badge {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-badge-background);
+  border: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-file-edit-path {
+  font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+  color: var(--vscode-foreground);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexus-file-edit-stats {
+  flex-shrink: 0;
+  font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+}
+
+.nexus-file-edit-content {
+  padding: 0;
+}
+
+.nexus-file-edit-content .diff-output,
+.nexus-file-edit-content pre {
+  margin: 0;
+  border-radius: 0;
+  max-height: 280px;
+}
+
+.nexus-file-edit-content .diff-output > div {
+  padding: 0 10px;
+  line-height: 1.45;
+}
+
+.nexus-tool-elapsed {
+  font-style: italic;
 }
 
 .message-list-container {

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react"
+import React, { useEffect, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import { ToolCallCard } from "./ToolCallCard.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
@@ -168,26 +168,54 @@ function AssistantText({ text }: { text: string }) {
 
 function AssistantParts({ parts }: { parts: MessagePart[] }) {
   return (
-    <div className="space-y-1">
+    <div className="space-y-3">
       {parts.map((part, i) => {
-        if (part.type === "text" && (part as { text: string }).text) {
-          return <AssistantText key={i} text={(part as { text: string }).text} />
+        if (part.type === "text") {
+          const text = (part as { text: string }).text
+          if (!text || !text.trim()) return null
+          return <AssistantText key={i} text={text} />
         }
         if (part.type === "tool") {
           return <ToolCallCard key={i} part={part as ToolPart} />
         }
         if (part.type === "reasoning") {
+          const reasoningText = (part as { text: string }).text
+          if (!reasoningText.trim()) return null
           return (
-            <details key={i} className="text-xs text-[var(--vscode-descriptionForeground)]">
-              <summary className="cursor-pointer hover:text-[var(--vscode-foreground)]">🧠 Reasoning</summary>
-              <div className="mt-1 pl-2 border-l border-[var(--vscode-panel-border)] whitespace-pre-wrap">
-                {(part as { text: string }).text}
-              </div>
-            </details>
+            <ReasoningPartBlock key={i} text={reasoningText} />
           )
         }
         return null
       })}
+    </div>
+  )
+}
+
+/** Inline reasoning/thinking block in message — chronological with text and tools, Cline-style */
+function ReasoningPartBlock({ text }: { text: string }) {
+  const [collapsed, setCollapsed] = useState(false)
+  const isLong = text.length > 600
+  const displayText = collapsed && isLong ? text.slice(0, 600) + "\n…" : text
+
+  return (
+    <div className="nexus-reasoning-block rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
+      <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)]">
+        <span className="text-[10px] font-semibold text-[var(--vscode-descriptionForeground)] uppercase tracking-wide">
+          Thinking
+        </span>
+      </div>
+      <div className="px-2.5 py-2 text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed">
+        {displayText}
+      </div>
+      {isLong && (
+        <button
+          type="button"
+          onClick={() => setCollapsed(!collapsed)}
+          className="w-full px-2.5 py-1.5 text-[10px] text-[var(--nexus-accent)] hover:bg-[var(--vscode-list-hoverBackground)] border-t border-[var(--vscode-panel-border)]"
+        >
+          {collapsed ? "Show more" : "Show less"}
+        </button>
+      )}
     </div>
   )
 }

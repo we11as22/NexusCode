@@ -153,10 +153,6 @@ model:
   provider: anthropic
   id: claude-sonnet-4-5
   # apiKey задаётся через ANTHROPIC_API_KEY
-
-maxMode:
-  enabled: false
-  tokenBudgetMultiplier: 2
 ```
 
 ### Полная схема конфигурации
@@ -167,8 +163,6 @@ maxMode:
 | | id | string | claude-sonnet-4-5 | Идентификатор модели |
 | | apiKey | string | — | API-ключ (можно не указывать, если задан в env) |
 | | baseUrl | string | — | Кастомный URL API (для openai-compatible) |
-| **maxMode** | enabled | boolean | false | Включить «макс» режим (та же модель, но глубже и дольше работает) |
-| | tokenBudgetMultiplier | number | 2 | Множитель бюджета токенов на запрос в max mode (1-6) |
 | **indexing** | enabled | boolean | true | Включить индексацию кодовой базы |
 | | excludePatterns | string[] | node_modules/**, .git/**, dist/**, ... | Glob-паттерны исключения при индексации |
 | | symbolExtract | boolean | true | Извлекать символы (классы, функции) для умной индексации |
@@ -221,8 +215,6 @@ maxMode:
 | **ask** | Только вопросы: объяснения, анализ кода; без изменений и команд | ✅ | ❌ | ❌ | ✅ | — |
 
 Переключение режима: в CLI — **Tab**; в VS Code — кнопки режимов в панели NexusCode.
-
-**Max Mode**: при включении для сложных шагов используется модель из `maxMode` (например, Claude Opus). В CLI: **Ctrl+M**; в VS Code — переключатель «Max» в панели.
 
 ---
 
@@ -306,7 +298,6 @@ nexus [mode] [message...] [options]
 | Опция | Короткая | Описание |
 |-------|----------|----------|
 | --model, -m | | Провайдер/модель, например `anthropic/claude-sonnet-4-5` или `openai/gpt-4o` |
-| --max-mode | | Включить max mode |
 | --auto | | Авто-одобрение всех действий (для CI) |
 | --project | | Рабочая директория проекта |
 | --no-index | | Отключить индексацию |
@@ -323,7 +314,6 @@ nexus [mode] [message...] [options]
 - **Ctrl+C** — прервать агента или выйти.
 - **Ctrl+K** — очистить чат.
 - **Ctrl+S** — компактизировать историю.
-- **Ctrl+M** — переключить max mode.
 - **Tab** — сменить режим (agent → plan → debug → ask).
 - **↑ / ↓** — история ввода.
 
@@ -357,7 +347,6 @@ nexus [mode] [message...] [options]
 
 - Заголовок: логотип, статус индекса, кнопки Compact / Re-index / Clear index / Clear chat.
 - Переключатель режимов: Agent, Plan, Debug, Ask.
-- Переключатель Max Mode.
 - Блок «Progress» (todo list от агента).
 - Список сообщений с раскрываемыми карточками инструментов.
 - Строка статуса: провайдер/модель, индикатор «thinking» при работе.
@@ -412,7 +401,6 @@ permissions:
 | И другие по провайдеру (GROQ_API_KEY, MISTRAL_API_KEY, XAI_API_KEY, …) | См. код конфига (PROVIDER_API_KEY_ENV) |
 | **NEXUS_MODEL** | Модель: `provider/id` или только `id` |
 | **NEXUS_BASE_URL** | Базовый URL API |
-| **NEXUS_MAX_MODE** | `1` или `true` — включить max mode |
 | **OPENROUTER_MODEL**, **ANTHROPIC_MODEL**, … | Переопределение модели для конкретного провайдера |
 
 ---

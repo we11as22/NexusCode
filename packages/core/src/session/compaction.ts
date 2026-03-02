@@ -6,8 +6,15 @@ import { estimateTokens } from "../context/condense.js"
 const PRUNE_MINIMUM = 10_000
 // Keep at least this many tokens of recent tool output (don't prune)
 const PRUNE_PROTECT = 30_000
-// Tools whose output should never be pruned
-const PRUNE_PROTECTED_TOOLS = new Set(["use_skill", "read_file", "codebase_search"])
+// Tools whose output should never be pruned (Cline/OpenCode-style: keep completion, plan exit, key context)
+const PRUNE_PROTECTED_TOOLS = new Set([
+  "use_skill",
+  "read_file",
+  "codebase_search",
+  "attempt_completion",
+  "plan_exit",
+  "ask_followup_question",
+])
 
 const COMPACTION_BUFFER = 20_000
 

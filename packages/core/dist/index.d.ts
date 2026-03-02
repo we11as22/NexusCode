@@ -33,16 +33,6 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }>>;
-    maxMode: z.ZodDefault<z.ZodObject<{
-        enabled: z.ZodDefault<z.ZodBoolean>;
-        tokenBudgetMultiplier: z.ZodDefault<z.ZodNumber>;
-    }, "strip", z.ZodTypeAny, {
-        enabled: boolean;
-        tokenBudgetMultiplier: number;
-    }, {
-        enabled?: boolean | undefined;
-        tokenBudgetMultiplier?: number | undefined;
-    }>>;
     embeddings: z.ZodOptional<z.ZodObject<{
         provider: z.ZodEnum<["openai", "openai-compatible", "ollama", "local"]>;
         model: z.ZodString;
@@ -548,10 +538,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             transport?: "stdio" | "http" | "sse" | undefined;
         }[];
     };
-    maxMode: {
-        enabled: boolean;
-        tokenBudgetMultiplier: number;
-    };
     modes: {
         agent?: {
             autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
@@ -691,10 +677,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
         }[] | undefined;
-    } | undefined;
-    maxMode?: {
-        enabled?: boolean | undefined;
-        tokenBudgetMultiplier?: number | undefined;
     } | undefined;
     embeddings?: {
         provider: "openai" | "ollama" | "openai-compatible" | "local";
@@ -851,6 +833,8 @@ type PermissionAction = "read" | "write" | "execute" | "mcp" | "browser" | "sear
 interface PermissionResult {
     approved: boolean;
     alwaysApprove?: boolean;
+    /** When true, host should set autoApprove for the rest of the session (e.g. "Skip all") */
+    skipAll?: boolean;
 }
 interface ToolDef<TArgs = Record<string, unknown>> {
     name: string;
@@ -1119,17 +1103,8 @@ interface EmbeddingConfig {
     apiKey?: string;
     dimensions?: number;
 }
-interface MaxModeConfig {
-    enabled: boolean;
-    /**
-     * Multiplies per-request token budget while max mode is active.
-     * Keeps the same provider/model as config.model.
-     */
-    tokenBudgetMultiplier: number;
-}
 interface NexusConfig {
     model: ProviderConfig;
-    maxMode: MaxModeConfig;
     embeddings?: EmbeddingConfig;
     vectorDb?: {
         enabled: boolean;
@@ -1457,7 +1432,6 @@ declare function classifySkills(skills: SkillDef[], taskDescription: string, cli
 
 interface PromptContext {
     mode: Mode;
-    maxMode: boolean;
     config: NexusConfig;
     cwd: string;
     modelId: string;
@@ -1514,7 +1488,7 @@ interface SubAgentResult {
  */
 declare class ParallelAgentManager {
     private running;
-    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void): Promise<SubAgentResult>;
+    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string): Promise<SubAgentResult>;
     private runSubAgent;
     /** How many agents are currently running */
     get activeCount(): number;

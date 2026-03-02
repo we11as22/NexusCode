@@ -5,7 +5,6 @@ import * as path from "node:path"
 
 export interface PromptContext {
   mode: Mode
-  maxMode: boolean
   config: NexusConfig
   cwd: string
   modelId: string
@@ -35,11 +34,6 @@ export function buildRoleBlock(ctx: PromptContext): string {
   lines.push("")
   lines.push(getModeBlock(ctx.mode))
   lines.push("")
-
-  if (ctx.maxMode) {
-    lines.push(MAX_MODE_BLOCK)
-    lines.push("")
-  }
 
   lines.push(CORE_PRINCIPLES)
   lines.push("")
@@ -83,41 +77,43 @@ You have complete access: read/write files, run shell commands, search the codeb
 - Call \`attempt_completion\` when the task is fully done
 - **Always end your turn with a text reply to the user** (or attempt_completion). After using tools, summarize what you did. Never end with only tool calls.`,
 
-    plan: `## PLAN Mode — Research & Planning
+    plan: `## PLAN Mode — Research & Planning (two phases)
 
-You can READ files and explore the codebase, but MUST NOT modify source code files. Create detailed plans as markdown files in \`.nexus/plans/\`.
+**Phase 1 — Study and plan (read-only except plan files):**
+- You are in READ-ONLY planning phase. You MUST NOT modify source code or run shell commands. You may ONLY write to \`.nexus/plans/*.md\` or \`.nexus/plans/*.txt\`.
+- Thoroughly study everything relevant: read files, search the codebase, explore structure. Do not skip this.
+- Produce a detailed, step-by-step implementation plan (file paths, function signatures, architecture, risks, dependencies).
+- Write the plan to \`.nexus/plans/\` as markdown. When the plan is complete and ready for the user, call \`plan_exit\` with a short summary.
+- Ask clarifying questions if needed. Think of this as a brainstorming session before implementation.
 
-- Thoroughly analyze the codebase before planning
-- Use parallel reads to explore efficiently
-- Create a concrete, step-by-step implementation plan
-- Include file paths, function signatures, and architecture decisions
-- Identify risks, dependencies, and edge cases
-- When plan is complete, call \`plan_exit\` with a short summary (or \`attempt_completion\`)
-- **Always end your turn with a text reply to the user** (or plan_exit/attempt_completion). After using tools, summarize what you found. Never end with only tool calls.`,
+**Phase 2 — After plan_exit:**
+The user will choose one of:
+- **Approve** — they switch to agent mode and you (or the next run) will execute the plan.
+- **Revise** — they send a message; continue in plan mode and update the plan accordingly.
+- **Abandon** — they leave plan mode; no execution.
 
-    ask: `## ASK Mode — Questions & Explanations
+- Use parallel reads to explore efficiently.
+- **Always end your turn with a text reply to the user** (or plan_exit). After using tools, summarize what you found. Never end with only tool calls.`,
 
-Answer questions, explain code, and analyze implementations. You CAN read files but MUST NOT modify anything.
+    ask: `## ASK Mode — Read-only Q&A and Explanations
 
-- Give thorough, accurate, technically precise answers
-- **After using tools (list_files, read_file, codebase_search, etc.) you MUST respond with a concise text summary for the user. Never end your turn with only tool calls — always add a short answer or summary.**
-- Use Mermaid diagrams when they clarify architecture
-- If implementation is needed, suggest switching to agent mode
-- Support your answers with actual code evidence (read files to verify)`,
+You are a knowledgeable technical assistant focused on answering questions and explaining code. This mode is READ-ONLY.
+
+**Strict constraints:**
+- You MUST NOT edit, create, or delete any files. Do not use write_to_file, replace_in_file, apply_patch, or create_rule.
+- You MUST NOT run shell commands (execute_command is disabled). Do not suggest commands for the user to run unless they explicitly ask.
+- You MUST NOT use browser_action or spawn_agent. If the task requires implementation, tell the user to switch to agent mode.
+
+**What you should do:**
+- Answer questions thoroughly with clear explanations and relevant examples.
+- Analyze code, explain concepts, architecture, and patterns. Use read_file, list_files, codebase_search, and search_files to support your answers.
+- Use Mermaid diagrams when they clarify architecture or flow.
+- Support answers with actual code evidence (read files to verify). Reference locations as \`path/to/file.ts:42\`.
+- **After using any tools, you MUST respond with a concise text summary for the user.** Never end your turn with only tool calls.
+- If the user asks for implementation, changes, or commands: recommend switching to **agent mode** for that. Stay in ask mode for explanation and analysis only.`,
   }
   return blocks[mode]
 }
-
-const MAX_MODE_BLOCK = `## ⚡ MAX MODE ACTIVE
-
-You are running in MAX MODE with extended depth and thoroughness (same model, larger reasoning/context budget). Apply these additional steps:
-
-- Read ALL relevant files (not just the obvious ones) before starting
-- Map all dependencies, callers, and affected modules
-- After changes: review for correctness, regressions, security, edge cases
-- Run tests if available; check for compilation errors explicitly
-- Use parallel tool calls aggressively to explore faster
-- Document non-obvious decisions in comments`
 
 const CORE_PRINCIPLES = `## Core Principles
 
@@ -167,7 +163,7 @@ const TOOL_USE_GUIDE = `## Tool Usage
 - **Context window** — Check the Environment block for "Context: X / Y tokens (Z%)". When usage is high (e.g. >80%), use the \`condense\` tool to summarize the conversation and free tokens before continuing.
 - **Parallel reads** — When fetching multiple independent files/results, call all tools in parallel in a single response. This is significantly faster.
 - **Sequential when dependent** — If tool B needs tool A's output, run them in order.
-- **Specialized tools** — Use \`read_file\` instead of \`execute_command\` with cat. Use \`search_files\` instead of execute+grep. Reserve \`execute_command\` for actual shell operations.
+- **Specialized tools** — Use \`read_file\` instead of \`execute_command\` with cat. Use \`search_files\` for one-off content search. Use \`execute_command\` for: (1) **find/glob** — when you need to list files by name pattern (e.g. \`find . -name "*.test.ts"\`, \`find src -type f\`); (2) **ripgrep (rg)** — when you need batch or shell-specific search flags (e.g. \`rg "pattern" -l -t ts\`). Reserve \`execute_command\` for real shell operations (tests, builds, git, installs).
 - **Codebase search** — Use \`codebase_search\` for semantic queries, \`search_files\` for exact pattern matching, \`list_code_definitions\` for symbol discovery.
 - **Don't repeat** — If a tool already returned a result, don't call it again with the same args.`
 
@@ -247,6 +243,19 @@ export function buildSkillsBlock(skills: SkillDef[]): string {
 
 // ─── BLOCK 4: Dynamic System Info (NOT CACHED) ───────────────────────────────
 
+function getCurrentModeLabel(mode: Mode): string {
+  switch (mode) {
+    case "agent":
+      return "AGENT (full access: read, write, execute, search, MCP). Complete tasks end-to-end; use attempt_completion when done."
+    case "plan":
+      return "PLAN (read-only planning). You may ONLY write to .nexus/plans/*.md or .txt. Do not modify source code or run commands. Use plan_exit when the plan is ready."
+    case "ask":
+      return "ASK (read-only). Do NOT modify files or run commands. Answer questions and explain code; suggest switching to agent mode for implementation."
+    default:
+      return String(mode).toUpperCase()
+  }
+}
+
 export function buildSystemInfoBlock(ctx: PromptContext): string {
   const lines: string[] = []
 
@@ -258,6 +267,7 @@ export function buildSystemInfoBlock(ctx: PromptContext): string {
     const pct = ctx.contextPercent ?? (limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0)
     lines.push(`  Context: ${used.toLocaleString()} / ${limit.toLocaleString()} tokens (${pct}%) — manage length by using condense when the conversation is long.`)
   }
+  lines.push(`  Current mode: ${getCurrentModeLabel(ctx.mode)}`)
   lines.push(`  Working directory: ${ctx.cwd}`)
   lines.push(`  Platform: ${os.platform()} ${os.arch()}`)
   lines.push(`  Date: ${new Date().toISOString().split("T")[0]}`)

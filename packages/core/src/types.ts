@@ -19,6 +19,8 @@ export type PermissionAction =
 export interface PermissionResult {
   approved: boolean
   alwaysApprove?: boolean
+  /** When true, host should set autoApprove for the rest of the session (e.g. "Skip all") */
+  skipAll?: boolean
 }
 
 // ─── Tool Types ───────────────────────────────────────────────────────────────
@@ -275,18 +277,8 @@ export interface EmbeddingConfig {
   dimensions?: number
 }
 
-export interface MaxModeConfig {
-  enabled: boolean
-  /**
-   * Multiplies per-request token budget while max mode is active.
-   * Keeps the same provider/model as config.model.
-   */
-  tokenBudgetMultiplier: number
-}
-
 export interface NexusConfig {
   model: ProviderConfig
-  maxMode: MaxModeConfig
   embeddings?: EmbeddingConfig
   vectorDb?: {
     enabled: boolean

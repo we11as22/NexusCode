@@ -19,15 +19,20 @@ export function ThoughtBlock({ reasoningText, startTime, isRunning }: Props) {
 
   if (!reasoningText.trim() || !isRunning) return null
 
-  const preview = reasoningText.length > 400 ? reasoningText.slice(-400) : reasoningText
+  const preview = reasoningText.length > 800 ? reasoningText.slice(-800) : reasoningText
 
   return (
     <div className="nexus-thought-block flex-shrink-0 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
-      <div className="px-3 py-2.5 flex items-start gap-2 rounded-lg border border-[var(--vscode-panel-border)] mx-2 my-1.5 bg-[var(--nexus-assistant-bubble)]">
-        <span className="text-[10px] font-semibold text-[var(--vscode-descriptionForeground)] flex-shrink-0 uppercase tracking-wide">
-          {startTime != null ? `Thought for ${elapsed}s` : "Thinking…"}
-        </span>
-        <div className="flex-1 min-w-0 text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words line-clamp-3">
+      <div className="nexus-reasoning-block rounded-lg border border-[var(--vscode-panel-border)] mx-2 my-1.5 bg-[var(--vscode-editor-background)] overflow-hidden">
+        <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)]">
+          <span className="text-[10px] font-semibold text-[var(--vscode-descriptionForeground)] uppercase tracking-wide">
+            {startTime != null ? `Thought for ${elapsed}s` : "Thinking…"}
+          </span>
+          <span className="text-[9px] text-[var(--vscode-descriptionForeground)] bg-[var(--vscode-badge-background)] px-1.5 py-0.5 rounded">
+            Live
+          </span>
+        </div>
+        <div className="px-2.5 py-2 max-h-40 overflow-y-auto text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed">
           {preview}
         </div>
       </div>

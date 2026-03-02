@@ -11,7 +11,7 @@ import {
   loadRules, McpClient, setMcpClientInstance, createCompaction,
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
   CodebaseIndexer, createCodebaseIndexer, listSessions,
-  type Mode, type AgentEvent, type IndexStatus,
+  type Mode, type AgentEvent, type IndexStatus, type PermissionResult,
 } from "@nexuscode/core"
 import { App } from "./tui/App.js"
 import { CliHost } from "./host.js"
@@ -24,11 +24,6 @@ const argv = await yargs(hideBin(process.argv))
     alias: "m",
     type: "string",
     describe: "Provider/model (e.g. anthropic/claude-sonnet-4-5, openai/gpt-4o)",
-  })
-  .option("max-mode", {
-    type: "boolean",
-    default: false,
-    describe: "Enable max mode (same model, deeper/longer reasoning)",
   })
   .option("temperature", {
     type: "number",
@@ -122,11 +117,6 @@ if (argv.profile && config.profiles[argv.profile]) {
   config.model = { ...config.model, ...config.profiles[argv.profile] } as any
 }
 
-// Apply max mode
-if (argv["max-mode"]) {
-  config.maxMode.enabled = true
-}
-
 // Determine mode
 const mode = (argv._[0] as Mode) ?? "agent"
 const isPrintMode = argv.print
@@ -166,11 +156,12 @@ if (serverUrl) {
         id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         ts: Date.now(),
       })
-      // Keep only last 100 in memory to avoid OOM on long dialogs
       if (initialMessagesForApp.length > 120) {
         initialMessagesForApp = initialMessagesForApp.slice(-100)
       }
     },
+    getTodo: () => "",
+    save: async () => {},
   } as unknown as Session
 } else {
   if (argv.continue) {
@@ -191,6 +182,32 @@ if (serverUrl) {
 
 // Non-interactive mode
 if (isPrintMode && initialMessage) {
+  if (serverUrl) {
+    const serverClientPrint = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
+    let suppressToolMarkup = false
+    try {
+      for await (const event of serverClientPrint.streamMessage(session.id, initialMessage, mode)) {
+        if (event.type === "text_delta" && event.delta) {
+          const delta = event.delta
+          if (!suppressToolMarkup && !delta.includes("<tool_call>") && !delta.includes("<function=")) {
+            process.stdout.write(delta)
+          }
+          if (delta.includes("<tool_call>")) suppressToolMarkup = true
+          if (delta.includes("</tool_call>")) suppressToolMarkup = false
+        }
+        if (event.type === "error") {
+          process.stderr.write(`\nError: ${(event as { error: string }).error}\n`)
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!msg.includes("abort") && !msg.includes("AbortError")) {
+        process.stderr.write(`\n[nexus error] ${msg}\n`)
+      }
+    }
+    process.exit(0)
+  }
+
   session.addMessage({ role: "user", content: initialMessage })
 
   const client = createLLMClient(config.model)
@@ -218,7 +235,7 @@ if (isPrintMode && initialMessage) {
 
   const compaction = createCompaction()
   const abortController = new AbortController()
-  const timeoutMsNI = config.maxMode.enabled ? 20 * 60_000 : 10 * 60_000
+  const timeoutMsNI = 10 * 60_000
   const timeoutNI = setTimeout(() => {
     abortController.abort()
     process.stderr.write(`\n[nexus] timed out after ${Math.round(timeoutMsNI / 60000)} minutes\n`)
@@ -411,7 +428,6 @@ function saveConfig(updates: Partial<typeof config>): void {
     defaultModelProfile = { ...config.model }
     client = createLLMClient(config.model)
   }
-  if (updates.maxMode) config.maxMode = { ...config.maxMode, ...updates.maxMode }
   if (updates.embeddings) {
     const nextEmbeddings = { ...config.embeddings, ...updates.embeddings } as typeof config.embeddings
     if (nextEmbeddings && (nextEmbeddings.provider as unknown as string) === "openrouter") {
@@ -461,7 +477,8 @@ function saveConfig(updates: Partial<typeof config>): void {
   }
 }
 
-const host = new CliHost(cwd, pushEvent, argv.auto)
+const approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
+const host = new CliHost(cwd, pushEvent, argv.auto, approvalResolveRef)
 
 function toErrMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -479,7 +496,7 @@ process.on("uncaughtException", onUncaughtException)
 async function runMessage(content: string, msgMode: Mode) {
   session.addMessage({ role: "user", content })
   currentAbortController = new AbortController()
-  const timeoutMs = config.maxMode.enabled ? 20 * 60_000 : 10 * 60_000
+  const timeoutMs = 10 * 60_000
   const timeout = setTimeout(() => {
     currentAbortController?.abort()
     pushEvent({ type: "error", error: `Timed out after ${Math.round(timeoutMs / 60000)} minutes.` })
@@ -591,15 +608,11 @@ const { unmount } = render(
     onModeChange: (newMode) => {
       // Mode is managed in the App state
     },
-    onMaxModeChange: (enabled) => {
-      config.maxMode.enabled = enabled
-    },
     events: eventIterable,
     initialMessages: session.messages,
     initialModel: config.model.id,
     initialProvider: config.model.provider,
     initialMode: mode,
-    initialMaxMode: config.maxMode.enabled,
     sessionId: session.id,
     projectDir: cwd,
     profileNames: Object.keys(config.profiles ?? {}),
@@ -623,10 +636,6 @@ const { unmount } = render(
     noIndex: !indexEnabledFlag || !!serverUrl,
     configSnapshot: {
       model: { provider: config.model.provider, id: config.model.id, temperature: config.model.temperature },
-      maxMode: {
-        enabled: config.maxMode.enabled,
-        tokenBudgetMultiplier: config.maxMode.tokenBudgetMultiplier,
-      },
       embeddings: config.embeddings
         ? {
             provider: config.embeddings.provider,
@@ -649,6 +658,12 @@ const { unmount } = render(
     saveConfig,
     onReindex: () => indexer?.reindex(),
     onIndexStop: () => indexer?.stop(),
+    onResolveApproval: (result: PermissionResult) => {
+      if (approvalResolveRef.current) {
+        approvalResolveRef.current(result)
+        approvalResolveRef.current = null
+      }
+    },
   }),
   { exitOnCtrlC: false }
 )

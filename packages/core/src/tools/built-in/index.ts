@@ -16,6 +16,7 @@ import {
   updateTodoTool,
   createRuleTool,
 } from "./attempt-completion.js"
+import { batchTool } from "./batch.js"
 
 export function getAllBuiltinTools(): ToolDef[] {
   return [
@@ -34,6 +35,7 @@ export function getAllBuiltinTools(): ToolDef[] {
     replaceInFileTool,
     applyPatchTool,
     createRuleTool,
+    batchTool,
 
     // Execute group
     executeCommandTool,
@@ -78,4 +80,5 @@ export {
   condenseTool,
   summarizeTaskTool,
   planExitTool,
+  batchTool,
 }

@@ -143,13 +143,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     plan: iterFromConfig?.plan ?? baseMaxIterationsByMode.plan,
     agent: iterFromConfig?.agent ?? baseMaxIterationsByMode.agent,
   }
-  const toolBudgetMultiplier = config.maxMode.enabled
-    ? Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2)))
-    : 1
-  const maxIterations = config.maxMode.enabled
-    ? Math.floor((effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode]) * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2))))
-    : (effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode])
-  const toolCallBudget = Math.max(8, Math.floor((effectiveToolBudget[mode] ?? BASE_TOOL_CALL_BUDGET_BY_MODE[mode]) * toolBudgetMultiplier))
+  const maxIterations = effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode]
+  const toolCallBudget = Math.max(8, effectiveToolBudget[mode] ?? BASE_TOOL_CALL_BUDGET_BY_MODE[mode])
   let executedToolCallsTotal = 0
   let forceFinalAnswerNext = false
   let lastAssistantMessageId = ""
@@ -188,7 +183,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     const contextPercent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
     const promptCtx: PromptContext = {
       mode,
-      maxMode: config.maxMode.enabled,
       config,
       cwd: host.cwd,
       modelId: activeClient.modelId,
@@ -220,6 +214,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       )
     }
     const systemPrompt = blocks.join("\n\n---\n\n")
+
+    // Emit context usage including system prompt (so UI shows real total, e.g. ask mode)
+    const systemTokens = estimateTokens(systemPrompt)
+    const totalUsed = session.getTokenEstimate() + systemTokens
+    const totalPercent = limitTokens > 0 ? Math.min(100, Math.round((totalUsed / limitTokens) * 100)) : 0
+    host.emit({ type: "context_usage", usedTokens: totalUsed, limitTokens, percent: totalPercent })
 
     // 4. Build LLM tool definitions
     const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedTools).map(t => ({
@@ -307,10 +307,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
 
     try {
-      const tokenMultiplier = config.maxMode.enabled
-        ? Math.max(1, Math.min(6, Number(config.maxMode.tokenBudgetMultiplier || 2)))
-        : 1
-      const maxTokens = Math.floor(8192 * tokenMultiplier)
+      const maxTokens = 8192
 
       streamLoop: for await (const event of activeClient.stream({
         messages,
@@ -429,6 +426,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 error: result.success ? undefined : result.output,
                 compacted: (result as { compacted?: boolean }).compacted,
               })
+
+              if (toolName === "spawn_agent" && result.success && result.output) {
+                session.addMessage({
+                  role: "user",
+                  content: `Subtask completed.\n\n${result.output}`,
+                })
+              }
 
               lastToolName = toolName
               executedToolThisIteration = true
@@ -702,10 +706,31 @@ async function executeToolCall(
   }
 
   // Restricted modes (plan/ask): allow writes only to .nexus/plans/*.md|*.txt
-  if (ctx.config.modes && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
+  if (ctx.config.modes && ["write_to_file", "replace_in_file", "apply_patch", "batch"].includes(toolName)) {
     // We infer restricted modes by tool availability: execute_command is unavailable in plan/ask.
     const isRestrictedMode = !tools.some(t => t.name === "execute_command")
     if (isRestrictedMode) {
+      if (toolName === "batch") {
+        const replaces = toolInput["replaces"] as Array<{ path?: string }> | undefined
+        if (Array.isArray(replaces) && replaces.length > 0) {
+          for (const r of replaces) {
+            const targetPath = r?.path
+            if (!targetPath) {
+              return { success: false, output: "In the current mode, batch replace operations require paths under .nexus/plans/*.md or .txt." }
+            }
+            const rel = path.isAbsolute(targetPath) ? path.relative(ctx.cwd, targetPath) : targetPath
+            const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
+            if (!PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) {
+              const extMatch = normalized.match(/\.[a-zA-Z0-9]+$/)
+              const ext = extMatch ? extMatch[0].toLowerCase() : ""
+              if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
+                return { success: false, output: `In the current mode, you cannot modify source code files (${ext}). You may only write plan docs in .nexus/plans/*.md or .txt.` }
+              }
+              return { success: false, output: "In the current mode, you may only write plan documentation files under .nexus/plans/ (*.md or *.txt)." }
+            }
+          }
+        }
+      } else {
       const targetPath = extractWriteTargetPath(toolName, toolInput)
       if (!targetPath) {
         return {
@@ -728,6 +753,7 @@ async function executeToolCall(
           success: false,
           output: "In the current mode, you may only write plan documentation files under .nexus/plans/ (*.md or *.txt).",
         }
+      }
       }
     }
   }
@@ -1020,6 +1046,13 @@ function toolNeedsApproval(
   if (["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
     return !config.permissions.autoApproveWrite && !autoApproveActions.has("write")
   }
+  if (toolName === "batch") {
+    const replaces = toolInput["replaces"] as unknown[] | undefined
+    if (Array.isArray(replaces) && replaces.length > 0) {
+      return !config.permissions.autoApproveWrite && !autoApproveActions.has("write")
+    }
+    return false
+  }
   if (toolName === "execute_command") {
     return !config.permissions.autoApproveCommand && !autoApproveActions.has("execute")
   }
@@ -1027,6 +1060,16 @@ function toolNeedsApproval(
 }
 
 function buildApprovalAction(toolName: string, toolInput: Record<string, unknown>): ApprovalAction {
+  if (toolName === "batch") {
+    const reads = (toolInput["reads"] as unknown[])?.length ?? 0
+    const searches = (toolInput["searches"] as unknown[])?.length ?? 0
+    const replaces = (toolInput["replaces"] as unknown[])?.length ?? 0
+    return {
+      type: replaces > 0 ? "write" : "read",
+      tool: toolName,
+      description: `Batch: ${reads} read(s), ${searches} search(es), ${replaces} replace(s)`,
+    }
+  }
   if (["write_to_file", "replace_in_file"].includes(toolName)) {
     return {
       type: "write",

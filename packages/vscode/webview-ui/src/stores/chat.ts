@@ -42,10 +42,6 @@ export interface NexusConfigState {
     baseUrl?: string
     temperature?: number
   }
-  maxMode: {
-    enabled: boolean
-    tokenBudgetMultiplier: number
-  }
   embeddings?: {
     provider: "openai" | "openai-compatible" | "ollama" | "local"
     model: string
@@ -121,7 +117,6 @@ interface SessionPreview {
 interface ChatState {
   messages: SessionMessage[]
   mode: Mode
-  maxMode: boolean
   isRunning: boolean
   awaitingApproval: boolean
   model: string
@@ -153,7 +148,6 @@ interface ChatState {
   setInputValue: (v: string) => void
   appendToInput: (v: string) => void
   setMode: (mode: Mode) => void
-  setMaxMode: (enabled: boolean) => void
   setProfile: (profileName: string) => void
   sendMessage: (content: string) => void
   abort: () => void
@@ -193,7 +187,6 @@ export type AgentEvent =
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   mode: "agent",
-  maxMode: false,
   isRunning: false,
   awaitingApproval: false,
   model: "claude-sonnet-4-5",
@@ -217,7 +210,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   reasoningStartTime: null,
   serverUrl: "",
 
-  setView: (view) => set({ view }),
+  setView: (view) => {
+    set({ view })
+    if (view === "sessions") postMessage({ type: "getState" })
+  },
   setInputValue: (v) => set({ inputValue: v }),
 
   appendToInput: (v) => set((prev) => ({
@@ -229,10 +225,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     postMessage({ type: "setMode", mode })
   },
 
-  setMaxMode: (enabled) => {
-    set({ maxMode: enabled })
-    postMessage({ type: "setMaxMode", enabled })
-  },
   setProfile: (profileName) => {
     set({ selectedProfile: profileName })
     postMessage({ type: "setProfile", profile: profileName })
@@ -300,7 +292,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   handleConfigLoaded: (config) => {
     set({
       config,
-      maxMode: config.maxMode.enabled,
       provider: config.model.provider,
       model: config.model.id,
     })

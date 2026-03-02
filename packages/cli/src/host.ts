@@ -9,18 +9,27 @@ const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
 
 /**
  * CLI host adapter — terminal-based approvals, output, and security guards.
+ * When tuiApprovalRef is provided, showApprovalDialog does NOT use readline (TUI handles input).
  */
 export class CliHost implements IHost {
   readonly cwd: string
   private eventEmitter: (event: AgentEvent) => void
   private autoApprove: boolean
+  /** When set, approval is resolved via this ref (TUI mode — no readline). */
+  private tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
   /** Remember "always approve" decisions per tool type for this session */
   private alwaysApproved = new Set<string>()
 
-  constructor(cwd: string, onEvent: (event: AgentEvent) => void, autoApprove = false) {
+  constructor(
+    cwd: string,
+    onEvent: (event: AgentEvent) => void,
+    autoApprove = false,
+    tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
+  ) {
     this.cwd = cwd
     this.eventEmitter = onEvent
     this.autoApprove = autoApprove
+    this.tuiApprovalRef = tuiApprovalRef
   }
 
   async readFile(filePath: string): Promise<string> {
@@ -80,6 +89,19 @@ export class CliHost implements IHost {
     const alwaysKey = `${action.type}:${action.tool}`
     if (this.alwaysApproved.has(alwaysKey)) return { approved: true }
 
+    // TUI mode: don't use readline — return Promise resolved by TUI when user types y/n/a/s
+    if (this.tuiApprovalRef) {
+      return new Promise<PermissionResult>(resolve => {
+        this.tuiApprovalRef!.current = (result: PermissionResult) => {
+          this.tuiApprovalRef!.current = null
+          if (result.alwaysApprove) this.alwaysApproved.add(alwaysKey)
+          if (result.skipAll) this.autoApprove = true
+          resolve(result)
+        }
+      })
+    }
+
+    // Non-TUI: use readline (e.g. --print or headless)
     return new Promise(resolve => {
       const lines: string[] = [""]
 
@@ -126,7 +148,7 @@ export class CliHost implements IHost {
           this.autoApprove = true
         }
 
-        resolve({ approved, alwaysApprove })
+        resolve({ approved, alwaysApprove, skipAll })
       })
 
       // Non-TTY (CI/pipe) — default approve with warning

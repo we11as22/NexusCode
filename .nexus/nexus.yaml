@@ -4,9 +4,6 @@ model:
   apiKey: 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
   baseUrl: https://openrouter.ai/api/v1
   temperature: 0
-maxMode:
-  enabled: false
-  tokenBudgetMultiplier: 2
 modes:
   agent:
     autoApprove:
