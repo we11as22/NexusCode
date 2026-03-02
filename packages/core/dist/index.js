@@ -20,7 +20,7 @@ var cohere = require('@ai-sdk/cohere');
 var togetherai = require('@ai-sdk/togetherai');
 var perplexity = require('@ai-sdk/perplexity');
 var crypto = require('crypto');
-var fs11 = require('fs/promises');
+var fs12 = require('fs/promises');
 var glob = require('glob');
 var diff = require('diff');
 var execa = require('execa');
@@ -60,7 +60,7 @@ var path6__namespace = /*#__PURE__*/_interopNamespace(path6);
 var os5__namespace = /*#__PURE__*/_interopNamespace(os5);
 var yaml__namespace = /*#__PURE__*/_interopNamespace(yaml);
 var crypto__namespace = /*#__PURE__*/_interopNamespace(crypto);
-var fs11__namespace = /*#__PURE__*/_interopNamespace(fs11);
+var fs12__namespace = /*#__PURE__*/_interopNamespace(fs12);
 var stripAnsi__default = /*#__PURE__*/_interopDefault(stripAnsi);
 var TurndownService__default = /*#__PURE__*/_interopDefault(TurndownService);
 var Database__default = /*#__PURE__*/_interopDefault(Database);
@@ -137,7 +137,6 @@ var NexusConfigSchema = zod.z.object({
   modes: zod.z.object({
     agent: modeConfigSchema.optional(),
     plan: modeConfigSchema.optional(),
-    debug: modeConfigSchema.optional(),
     ask: modeConfigSchema.optional()
   }).catchall(modeConfigSchema.optional()).default({}),
   indexing: zod.z.object({
@@ -184,7 +183,8 @@ var NexusConfigSchema = zod.z.object({
   checkpoint: zod.z.object({
     enabled: zod.z.boolean().default(true),
     timeoutMs: zod.z.number().int().positive().default(15e3),
-    createOnWrite: zod.z.boolean().default(true)
+    createOnWrite: zod.z.boolean().default(true),
+    doubleCheckCompletion: zod.z.boolean().default(false)
   }).default({}),
   mcp: zod.z.object({
     servers: zod.z.array(mcpServerSchema).default([])
@@ -206,6 +206,19 @@ var NexusConfigSchema = zod.z.object({
   }).default({}),
   parallelAgents: zod.z.object({
     maxParallel: zod.z.number().int().positive().default(4)
+  }).default({}),
+  /** Optional overrides for agent loop limits (OpenCode-style: allow enough tools/iterations to finish). */
+  agentLoop: zod.z.object({
+    toolCallBudget: zod.z.object({
+      ask: zod.z.number().int().positive().optional(),
+      plan: zod.z.number().int().positive().optional(),
+      agent: zod.z.number().int().positive().optional()
+    }).optional(),
+    maxIterations: zod.z.object({
+      ask: zod.z.number().int().positive().optional(),
+      plan: zod.z.number().int().positive().optional(),
+      agent: zod.z.number().int().positive().optional()
+    }).optional()
   }).default({}),
   rules: zod.z.object({
     files: zod.z.array(zod.z.string()).default(["CLAUDE.md", "AGENTS.md", ".nexus/rules/**"])
@@ -1046,11 +1059,11 @@ function getSessionsDir(cwd) {
 }
 async function saveSession(session) {
   const dir = getSessionsDir(session.cwd);
-  await fs11__namespace.mkdir(dir, { recursive: true });
+  await fs12__namespace.mkdir(dir, { recursive: true });
   const filePath = path6__namespace.join(dir, `${session.id}.jsonl`);
   const lines = session.messages.map((m) => JSON.stringify(m)).join("\n");
   const meta = JSON.stringify({ id: session.id, cwd: session.cwd, ts: session.ts, title: session.title });
-  await fs11__namespace.writeFile(filePath, `${meta}
+  await fs12__namespace.writeFile(filePath, `${meta}
 ${lines}
 `, "utf8");
 }
@@ -1058,7 +1071,7 @@ async function loadSession(sessionId, cwd) {
   const dir = getSessionsDir(cwd);
   const filePath = path6__namespace.join(dir, `${sessionId}.jsonl`);
   if (!fs__namespace.existsSync(filePath)) return null;
-  const content = await fs11__namespace.readFile(filePath, "utf8");
+  const content = await fs12__namespace.readFile(filePath, "utf8");
   const lines = content.split("\n").filter(Boolean);
   if (lines.length === 0) return null;
   const meta = JSON.parse(lines[0]);
@@ -1068,12 +1081,12 @@ async function loadSession(sessionId, cwd) {
 async function listSessions(cwd) {
   const dir = getSessionsDir(cwd);
   if (!fs__namespace.existsSync(dir)) return [];
-  const files = await fs11__namespace.readdir(dir).catch(() => []);
+  const files = await fs12__namespace.readdir(dir).catch(() => []);
   const sessions = [];
   for (const file of files) {
     if (!file.endsWith(".jsonl")) continue;
     try {
-      const content = await fs11__namespace.readFile(path6__namespace.join(dir, file), "utf8");
+      const content = await fs12__namespace.readFile(path6__namespace.join(dir, file), "utf8");
       const lines = content.split("\n").filter(Boolean);
       if (lines.length === 0) continue;
       const meta = JSON.parse(lines[0]);
@@ -1375,6 +1388,10 @@ function buildRoleBlock(ctx) {
   }
   lines.push(CORE_PRINCIPLES);
   lines.push("");
+  lines.push(TONE_AND_OBJECTIVITY);
+  lines.push("");
+  lines.push(DOING_TASKS);
+  lines.push("");
   lines.push(EDITING_FILES_GUIDE);
   lines.push("");
   lines.push(TOOL_USE_GUIDE);
@@ -1405,7 +1422,8 @@ You have complete access: read/write files, run shell commands, search the codeb
 - Prefer \`replace_in_file\` over \`write_to_file\` for existing files
 - Verify your changes compile/run and don't break existing functionality
 - Use parallel tool calls for independent operations
-- Call \`attempt_completion\` when the task is fully done`,
+- Call \`attempt_completion\` when the task is fully done
+- **Always end your turn with a text reply to the user** (or attempt_completion). After using tools, summarize what you did. Never end with only tool calls.`,
     plan: `## PLAN Mode \u2014 Research & Planning
 
 You can READ files and explore the codebase, but MUST NOT modify source code files. Create detailed plans as markdown files in \`.nexus/plans/\`.
@@ -1415,25 +1433,14 @@ You can READ files and explore the codebase, but MUST NOT modify source code fil
 - Create a concrete, step-by-step implementation plan
 - Include file paths, function signatures, and architecture decisions
 - Identify risks, dependencies, and edge cases
-- When plan is complete, call \`attempt_completion\` with a summary`,
-    debug: `## DEBUG Mode \u2014 Systematic Problem Diagnosis
-
-Diagnose and fix bugs using a structured approach:
-
-1. **Reproduce** \u2014 Understand exactly what's failing and when
-2. **Isolate** \u2014 Narrow down the failing component (add targeted logging if needed)
-3. **Root cause** \u2014 Identify the actual underlying cause (don't guess)
-4. **Minimal fix** \u2014 Make the smallest correct change to fix the issue
-5. **Verify** \u2014 Confirm the fix works and nothing else broke
-
-- Reflect on 3-5 possible causes before committing to one
-- Read the code before diagnosing; never assume
-- Prefer minimal targeted fixes over broad refactors`,
+- When plan is complete, call \`plan_exit\` with a short summary (or \`attempt_completion\`)
+- **Always end your turn with a text reply to the user** (or plan_exit/attempt_completion). After using tools, summarize what you found. Never end with only tool calls.`,
     ask: `## ASK Mode \u2014 Questions & Explanations
 
 Answer questions, explain code, and analyze implementations. You CAN read files but MUST NOT modify anything.
 
 - Give thorough, accurate, technically precise answers
+- **After using tools (list_files, read_file, codebase_search, etc.) you MUST respond with a concise text summary for the user. Never end your turn with only tool calls \u2014 always add a short answer or summary.**
 - Use Mermaid diagrams when they clarify architecture
 - If implementation is needed, suggest switching to agent mode
 - Support your answers with actual code evidence (read files to verify)`
@@ -1458,6 +1465,18 @@ var CORE_PRINCIPLES = `## Core Principles
 - **Verify your work** \u2014 After changes, check for errors, test failures, and regressions.
 - **Professional tone** \u2014 Be direct, objective, technically precise. No unnecessary praise.
 - **Complete tasks** \u2014 Never leave tasks half-done. If blocked, explain why clearly.`;
+var TONE_AND_OBJECTIVITY = `## Tone & Objectivity
+
+- **Objectivity** \u2014 Prioritize technical accuracy over validating the user. Disagree when needed; honest correction is more useful than false agreement. No superlatives or excessive praise ("You're absolutely right!", "Great question!").
+- **No time estimates** \u2014 Do not say how long something will take ("a few minutes", "quick fix", "2\u20133 weeks"). Describe what you will do; let the user judge timing.
+- **Output** \u2014 All text you write is shown to the user. Do not use tool calls or code comments to communicate; write directly. Do not put a colon before a tool call (e.g. "Reading the file." not "Reading the file:").
+- **Files** \u2014 Never create files (including markdown) unless necessary for the task. Prefer editing existing files. Never guess or fabricate URLs; use only URLs from the user or from tool results.`;
+var DOING_TASKS = `## Doing Tasks
+
+- **Read before editing** \u2014 Never propose or apply changes to code you have not read. Use read_file (or codebase_search + read_file) first. Understand existing code and style before modifying.
+- **Minimal change** \u2014 Only change what is requested or clearly necessary. A bug fix does not require refactoring nearby code. Do not add docstrings, comments, or type annotations to code you did not change; add comments only where logic is non-obvious.
+- **No over-engineering** \u2014 Do not add error handling, fallbacks, or validation for scenarios that cannot happen. Validate at boundaries (user input, external APIs). Do not introduce helpers or abstractions for one-off operations. Prefer a few repeated lines over premature abstraction.
+- **Unused code** \u2014 If something is unused, delete it. Do not leave re-exports, \`// removed\` comments, or compatibility shims unless explicitly required.`;
 var EDITING_FILES_GUIDE = `## Editing Files
 
 Two tools to modify files: **write_to_file** and **replace_in_file**.
@@ -1478,6 +1497,8 @@ Two tools to modify files: **write_to_file** and **replace_in_file**.
 Editor may auto-format files after writing. Tool response includes post-format content \u2014 always use that as reference for next edits.`;
 var TOOL_USE_GUIDE = `## Tool Usage
 
+- **Always end with a reply** \u2014 In every mode you MUST end your turn with a clear text response to the user. After using any tools (read_file, list_files, codebase_search, etc.) provide a short summary or answer. Never end your turn with only tool calls \u2014 the user always expects a reply.
+- **Context window** \u2014 Check the Environment block for "Context: X / Y tokens (Z%)". When usage is high (e.g. >80%), use the \`condense\` tool to summarize the conversation and free tokens before continuing.
 - **Parallel reads** \u2014 When fetching multiple independent files/results, call all tools in parallel in a single response. This is significantly faster.
 - **Sequential when dependent** \u2014 If tool B needs tool A's output, run them in order.
 - **Specialized tools** \u2014 Use \`read_file\` instead of \`execute_command\` with cat. Use \`search_files\` instead of execute+grep. Reserve \`execute_command\` for actual shell operations.
@@ -1501,6 +1522,7 @@ Use \`update_todo_list\` frequently to track progress on complex tasks:
 - Call \`update_todo_list\` silently \u2014 don't announce it`;
 var RESPONSE_STYLE = `## Response Style
 
+- **Always give a final answer** \u2014 Every turn must end with a text response to the user. After tool use, summarize what you did or found. In agent/plan use \`attempt_completion\` when the task is done; otherwise reply in text. Never end with only tool calls.
 - **Concise**: Be direct and to the point. Match verbosity to task complexity.
 - **No preamble**: Don't start with "Great!", "Sure!", "Certainly!". Go straight to the answer/action.
 - **No postamble**: Don't end with "Let me know if you need anything!", "Feel free to ask!", etc.
@@ -1554,6 +1576,12 @@ function buildSystemInfoBlock(ctx) {
   const lines = [];
   lines.push(`## Environment`);
   lines.push(`<env>`);
+  if (ctx.contextLimitTokens != null && ctx.contextLimitTokens > 0) {
+    const used = ctx.contextUsedTokens ?? 0;
+    const limit = ctx.contextLimitTokens;
+    const pct = ctx.contextPercent ?? (limit > 0 ? Math.min(100, Math.round(used / limit * 100)) : 0);
+    lines.push(`  Context: ${used.toLocaleString()} / ${limit.toLocaleString()} tokens (${pct}%) \u2014 manage length by using condense when the conversation is long.`);
+  }
   lines.push(`  Working directory: ${ctx.cwd}`);
   lines.push(`  Platform: ${os5__namespace.platform()} ${os5__namespace.arch()}`);
   lines.push(`  Date: ${(/* @__PURE__ */ new Date()).toISOString().split("T")[0]}`);
@@ -1575,6 +1603,11 @@ function buildSystemInfoBlock(ctx) {
     }
   }
   lines.push(`</env>`);
+  if (ctx.initialProjectContext?.trim()) {
+    lines.push(``);
+    lines.push(`## Project layout (initial context)`);
+    lines.push(ctx.initialProjectContext);
+  }
   if (ctx.todoList?.trim()) {
     lines.push(``);
     lines.push(`## Current Todo List`);
@@ -1630,20 +1663,54 @@ function buildSystemPrompt(ctx) {
   }
   return { blocks, cacheableCount };
 }
+var KEY_FILES = /* @__PURE__ */ new Set([
+  "package.json",
+  "README.md",
+  "README",
+  "Cargo.toml",
+  "pyproject.toml",
+  "go.mod",
+  "Makefile",
+  ".env.example",
+  ".gitignore"
+]);
+var MAX_TOP_LEVEL = 40;
+async function getInitialProjectContext(cwd) {
+  try {
+    const entries = await fs12__namespace.readdir(cwd, { withFileTypes: true });
+    const dirs = [];
+    const files = [];
+    for (const e of entries) {
+      if (e.name.startsWith(".") && e.name !== ".env.example" && e.name !== ".gitignore") continue;
+      if (e.isDirectory()) {
+        dirs.push(`${e.name}/`);
+      } else if (e.isFile() && KEY_FILES.has(e.name)) {
+        files.push(e.name);
+      }
+    }
+    dirs.sort();
+    files.sort();
+    const all = [...dirs, ...files].slice(0, MAX_TOP_LEVEL);
+    if (all.length === 0) return "";
+    return [
+      "Project root (top-level):",
+      all.join(" ")
+    ].join("\n");
+  } catch {
+    return "";
+  }
+}
 
 // src/agent/modes.ts
 var MODE_TOOL_GROUPS = {
-  agent: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents"],
-  plan: ["always", "read", "write", "search", "skills"],
-  // write allowed but restricted to docs
-  debug: ["always", "read", "write", "execute", "search", "skills"],
-  ask: ["always", "read", "search"]
+  agent: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents", "context"],
+  plan: ["always", "read", "write", "search", "skills", "context", "plan_exit"],
+  ask: ["always", "read", "search", "context"]
 };
 var MODE_BLOCKED_TOOLS = {
-  agent: [],
+  agent: ["plan_exit"],
   plan: ["execute_command", "browser_action"],
-  debug: [],
-  ask: ["write_to_file", "replace_in_file", "apply_patch", "execute_command", "browser_action", "spawn_agent", "create_rule"]
+  ask: ["write_to_file", "replace_in_file", "apply_patch", "execute_command", "browser_action", "spawn_agent", "create_rule", "plan_exit"]
 };
 var PLAN_MODE_BLOCKED_EXTENSIONS = /* @__PURE__ */ new Set([
   ".ts",
@@ -1683,7 +1750,9 @@ var TOOL_GROUP_MEMBERS = {
   mcp: [],
   // populated dynamically from MCP registry
   skills: ["use_skill"],
-  agents: ["spawn_agent"]
+  agents: ["spawn_agent"],
+  context: ["condense", "summarize_task"],
+  plan_exit: ["plan_exit"]
 };
 var PLAN_MODE_ALLOWED_WRITE_PATTERN = /^\.nexus[\\/]plans[\\/].+\.(md|txt)$/i;
 var READ_ONLY_TOOLS = /* @__PURE__ */ new Set([
@@ -1694,7 +1763,9 @@ var READ_ONLY_TOOLS = /* @__PURE__ */ new Set([
   "codebase_search",
   "web_fetch",
   "web_search",
-  "use_skill"
+  "use_skill",
+  "condense",
+  "summarize_task"
 ]);
 function getBuiltinToolsForMode(mode) {
   const groups = MODE_TOOL_GROUPS[mode];
@@ -1714,7 +1785,6 @@ function getAutoApproveActions(mode, modeConfig) {
   const defaults = {
     agent: ["read"],
     plan: ["read"],
-    debug: ["read"],
     ask: ["read"]
   };
   const configured = modeConfig?.autoApprove ?? defaults[mode];
@@ -1830,7 +1900,7 @@ async function resolveMention(type, arg, cwd, host) {
     case "file": {
       const absPath = path6__namespace.resolve(cwd, arg);
       try {
-        const content = await fs11__namespace.readFile(absPath, "utf8");
+        const content = await fs12__namespace.readFile(absPath, "utf8");
         const lines = content.split("\n");
         const truncated = lines.length > 200 ? lines.slice(0, 200).join("\n") + "\n[...truncated]" : content;
         const relPath = path6__namespace.relative(cwd, absPath);
@@ -1905,13 +1975,13 @@ async function listDirRecursive(dir, cwd, maxEntries) {
   const entries = [];
   async function walk(d, prefix) {
     if (entries.length >= maxEntries) return;
-    const items = await fs11__namespace.readdir(d).catch(() => []);
+    const items = await fs12__namespace.readdir(d).catch(() => []);
     for (const item of items) {
       if (entries.length >= maxEntries) break;
       if (item === "node_modules" || item === ".git") continue;
       const full = path6__namespace.join(d, item);
       path6__namespace.relative(cwd, full);
-      const st = await fs11__namespace.stat(full).catch(() => null);
+      const st = await fs12__namespace.stat(full).catch(() => null);
       if (!st) continue;
       entries.push(prefix + item + (st.isDirectory() ? "/" : ""));
       if (st.isDirectory()) await walk(full, prefix + "  ");
@@ -1922,10 +1992,9 @@ async function listDirRecursive(dir, cwd, maxEntries) {
 }
 var DOOM_LOOP_THRESHOLD = 3;
 var BASE_TOOL_CALL_BUDGET_BY_MODE = {
-  ask: 24,
-  plan: 40,
-  agent: 120,
-  debug: 120
+  ask: 80,
+  plan: 80,
+  agent: 200
 };
 async function runAgentLoop(opts) {
   const {
@@ -1972,25 +2041,48 @@ async function runAgentLoop(opts) {
     session,
     config,
     indexer,
-    signal
+    signal,
+    compactSession: async () => {
+      host.emit({ type: "compaction_start" });
+      await handleCompaction(session, activeClient, config, host, compaction, signal);
+      host.emit({ type: "compaction_end" });
+    }
   };
   const autoApproveActions = getAutoApproveActions(mode, config.modes[mode]);
   const mentionsContext = await resolveMentionsContext(session, host);
+  const initialProjectContext = await getInitialProjectContext(host.cwd);
   let consecutiveInvalidToolCalls = 0;
   const MAX_CONSECUTIVE_INVALID = 3;
   let loopIterations = 0;
   const baseMaxIterationsByMode = {
-    ask: 10,
-    plan: 16,
-    agent: 32,
-    debug: 32
+    ask: 24,
+    plan: 24,
+    agent: 48
   };
-  const maxIterations = config.maxMode.enabled ? Math.floor(baseMaxIterationsByMode[mode] * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2)))) : baseMaxIterationsByMode[mode];
+  const toolBudgetFromConfig = config.agentLoop?.toolCallBudget;
+  const iterFromConfig = config.agentLoop?.maxIterations;
+  const effectiveToolBudget = {
+    ask: toolBudgetFromConfig?.ask ?? BASE_TOOL_CALL_BUDGET_BY_MODE.ask,
+    plan: toolBudgetFromConfig?.plan ?? BASE_TOOL_CALL_BUDGET_BY_MODE.plan,
+    agent: toolBudgetFromConfig?.agent ?? BASE_TOOL_CALL_BUDGET_BY_MODE.agent
+  };
+  const effectiveMaxIterations = {
+    ask: iterFromConfig?.ask ?? baseMaxIterationsByMode.ask,
+    plan: iterFromConfig?.plan ?? baseMaxIterationsByMode.plan,
+    agent: iterFromConfig?.agent ?? baseMaxIterationsByMode.agent
+  };
   const toolBudgetMultiplier = config.maxMode.enabled ? Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2))) : 1;
-  const toolCallBudget = Math.max(8, Math.floor(BASE_TOOL_CALL_BUDGET_BY_MODE[mode] * toolBudgetMultiplier));
+  const maxIterations = config.maxMode.enabled ? Math.floor((effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode]) * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2)))) : effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode];
+  const toolCallBudget = Math.max(8, Math.floor((effectiveToolBudget[mode] ?? BASE_TOOL_CALL_BUDGET_BY_MODE[mode]) * toolBudgetMultiplier));
   let executedToolCallsTotal = 0;
   let forceFinalAnswerNext = false;
   let lastAssistantMessageId = "";
+  const doubleCheckCompletion = config.checkpoint?.doubleCheckCompletion === true;
+  const completionState = {
+    doubleCheckEnabled: doubleCheckCompletion,
+    pending: { current: false },
+    checkpoint: opts.checkpoint
+  };
   const emitContextUsage = () => {
     const limitTokens = getContextLimit(activeClient.modelId);
     const usedTokens = session.getTokenEstimate();
@@ -2001,14 +2093,20 @@ async function runAgentLoop(opts) {
   while (!signal.aborted) {
     loopIterations++;
     if (loopIterations > maxIterations) {
-      host.emit({
-        type: "error",
-        error: `Agent loop stopped after ${maxIterations} iterations in ${mode} mode (safety limit).`,
-        fatal: true
-      });
-      break;
+      if (!forceFinalAnswerNext) {
+        host.emit({
+          type: "error",
+          error: `Agent loop stopped after ${maxIterations} iterations in ${mode} mode (safety limit).`,
+          fatal: true
+        });
+        break;
+      }
     }
-    const isFinalIteration = forceFinalAnswerNext || loopIterations === maxIterations;
+    const isFinalIteration = forceFinalAnswerNext || loopIterations >= maxIterations;
+    const diagnostics = host.getProblems ? await host.getProblems() : [];
+    const limitTokens = getContextLimit(activeClient.modelId);
+    const usedTokens = session.getTokenEstimate();
+    const contextPercent = limitTokens > 0 ? Math.min(100, Math.round(usedTokens / limitTokens * 100)) : 0;
     const promptCtx = {
       mode,
       maxMode: config.maxMode.enabled,
@@ -2021,11 +2119,18 @@ async function runAgentLoop(opts) {
       gitBranch,
       todoList: session.getTodo(),
       compactionSummary: getCompactionSummary(session),
-      mentionsContext
+      mentionsContext,
+      initialProjectContext,
+      diagnostics: diagnostics.length > 0 ? diagnostics : void 0,
+      contextUsedTokens: usedTokens,
+      contextLimitTokens: limitTokens > 0 ? limitTokens : void 0,
+      contextPercent: limitTokens > 0 ? contextPercent : void 0
     };
     const { blocks, cacheableCount } = buildSystemPrompt(promptCtx);
     if (isFinalIteration) {
-      blocks.push("FINAL ITERATION: do not call tools. Return a concise final answer from gathered context.");
+      blocks.push(
+        "CRITICAL \u2014 MAXIMUM STEPS REACHED\n\nThe maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.\n\nSTRICT REQUIREMENTS:\n1. Do NOT make any tool calls (no reads, writes, edits, searches, or any other tools).\n2. MUST provide a text response summarizing work done so far.\n3. Include: what was accomplished, any remaining tasks, and what should be done next.\nAny attempt to use tools is a critical violation. Respond with text ONLY."
+      );
     }
     const systemPrompt = blocks.join("\n\n---\n\n");
     const llmTools = (isFinalIteration ? [] : resolvedTools).map((t) => ({
@@ -2038,6 +2143,11 @@ async function runAgentLoop(opts) {
       messages.push({
         role: "user",
         content: "Provide the final answer now in plain text only. Do not emit tool-call markup, XML, or JSON function calls."
+      });
+    } else if (loopIterations > 1 && messages.length > 0 && messages[messages.length - 1]?.role === "tool") {
+      messages.push({
+        role: "user",
+        content: "Based on the tool results above, provide a concise text response to the user (summarize what you found or did)."
       });
     }
     const newMessageId = session.addMessage({
@@ -2067,7 +2177,7 @@ async function runAgentLoop(opts) {
     const flushPendingReads = async () => {
       if (pendingReads.length === 0) return;
       const tasks = pendingReads.map(
-        (tc) => executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host).catch((err) => ({ success: false, output: `Error: ${err.message}` }))
+        (tc) => executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState).catch((err) => ({ success: false, output: `Error: ${err.message}` }))
       );
       const results = await Promise.all(tasks);
       for (let i = 0; i < pendingReads.length; i++) {
@@ -2145,7 +2255,7 @@ async function runAgentLoop(opts) {
               input: toolInput,
               timeStart: Date.now()
             });
-            host.emit({ type: "tool_start", tool: toolName, partId, messageId: newMessageId });
+            host.emit({ type: "tool_start", tool: toolName, partId, messageId: newMessageId, input: toolInput });
             if (toolInput["task_progress"] && typeof toolInput["task_progress"] === "string") {
               session.updateTodo(toolInput["task_progress"]);
             }
@@ -2180,7 +2290,8 @@ async function runAgentLoop(opts) {
                 config,
                 host,
                 session,
-                newMessageId
+                newMessageId,
+                completionState
               );
               session.updateToolPart(newMessageId, partId, {
                 status: result.success ? "completed" : "error",
@@ -2192,12 +2303,15 @@ async function runAgentLoop(opts) {
                 tool: toolName,
                 partId,
                 messageId: newMessageId,
-                success: result.success
+                success: result.success,
+                output: result.output,
+                error: result.success ? void 0 : result.output,
+                compacted: result.compacted
               });
               lastToolName = toolName;
               executedToolThisIteration = true;
               executedToolCallsTotal++;
-              if (toolName === "attempt_completion") {
+              if (toolName === "attempt_completion" || toolName === "plan_exit") {
                 attemptedCompletionThisIteration = true;
               }
             }
@@ -2269,7 +2383,7 @@ async function runAgentLoop(opts) {
             input: call.toolInput,
             timeStart: Date.now()
           });
-          host.emit({ type: "tool_start", tool: call.toolName, partId, messageId: newMessageId });
+          host.emit({ type: "tool_start", tool: call.toolName, partId, messageId: newMessageId, input: call.toolInput });
           if (call.toolInput["task_progress"] && typeof call.toolInput["task_progress"] === "string") {
             session.updateTodo(call.toolInput["task_progress"]);
           }
@@ -2285,7 +2399,11 @@ async function runAgentLoop(opts) {
             toolCtx,
             autoApproveActions,
             config,
-            host);
+            host,
+            session,
+            newMessageId,
+            completionState
+          );
           session.updateToolPart(newMessageId, partId, {
             status: result.success ? "completed" : "error",
             output: result.output,
@@ -2296,12 +2414,15 @@ async function runAgentLoop(opts) {
             tool: call.toolName,
             partId,
             messageId: newMessageId,
-            success: result.success
+            success: result.success,
+            output: result.output,
+            error: result.success ? void 0 : result.output,
+            compacted: result.compacted
           });
           lastToolName = call.toolName;
           executedToolThisIteration = true;
           executedToolCallsTotal++;
-          if (call.toolName === "attempt_completion") {
+          if (call.toolName === "attempt_completion" || call.toolName === "plan_exit") {
             attemptedCompletionThisIteration = true;
           }
         }
@@ -2316,7 +2437,7 @@ async function runAgentLoop(opts) {
       emitContextUsage();
       continue;
     }
-    if (attemptedCompletionThisIteration || lastToolName === "attempt_completion") break;
+    if (attemptedCompletionThisIteration || lastToolName === "attempt_completion" || lastToolName === "plan_exit") break;
     if (finishReason === "stop" && !executedToolThisIteration) break;
     if (signal.aborted) break;
     const tokenCount = session.getTokenEstimate();
@@ -2386,13 +2507,20 @@ function parseLooseValue(value) {
   }
   return value;
 }
-async function executeToolCall(toolCallId, toolName, toolInput, tools, ctx, autoApproveActions, config, host, session, messageId) {
+async function executeToolCall(toolCallId, toolName, toolInput, tools, ctx, autoApproveActions, config, host, session, messageId, completionState) {
   const tool = tools.find((t) => t.name === toolName);
   if (!tool) {
     const availableList = tools.map((t) => t.name).join(", ");
     return {
       success: false,
       output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use execute_command. To present final results, use attempt_completion.`
+    };
+  }
+  if (toolName === "attempt_completion" && completionState?.doubleCheckEnabled && !completionState.pending.current) {
+    completionState.pending.current = true;
+    return {
+      success: false,
+      output: "Before completing, re-verify your work against the original task. Check that: (1) All requested changes were made, (2) No steps were skipped, (3) Edge cases are addressed, (4) The solution matches what was asked. If everything checks out, call attempt_completion again with your final result."
     };
   }
   if (ctx.config.modes && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
@@ -2463,6 +2591,21 @@ async function executeToolCall(toolCallId, toolName, toolInput, tools, ctx, auto
   }
   try {
     const result = await tool.execute(validatedArgs, ctx);
+    if (toolName === "attempt_completion" && result.success && completionState) {
+      completionState.pending.current = false;
+      if (completionState.checkpoint) {
+        try {
+          const hash = await completionState.checkpoint.commit("attempt_completion");
+          result.output += `
+
+Checkpoint saved: ${hash}`;
+        } catch (e) {
+          result.output += `
+
+Checkpoint save failed: ${e.message}`;
+        }
+      }
+    }
     if (result.success && ctx.indexer && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
       const targetPath = extractWriteTargetPath(toolName, validatedArgs);
       const refreshFile = ctx.indexer.refreshFile;
@@ -2804,10 +2947,10 @@ ${content}`);
 }
 async function readFileSafe(filePath) {
   try {
-    const stat8 = await fs11__namespace.stat(filePath);
+    const stat8 = await fs12__namespace.stat(filePath);
     if (!stat8.isFile()) return null;
     if (stat8.size > 100 * 1024) return null;
-    return await fs11__namespace.readFile(filePath, "utf8");
+    return await fs12__namespace.readFile(filePath, "utf8");
   } catch {
     return null;
   }
@@ -2862,7 +3005,7 @@ async function collectSkillFiles(cfgPath, seen, skills, cwd) {
     }
     return;
   }
-  const stat8 = await fs11__namespace.stat(cfgPath).catch(() => null);
+  const stat8 = await fs12__namespace.stat(cfgPath).catch(() => null);
   if (!stat8) return;
   if (stat8.isFile()) {
     if (seen.has(cfgPath)) return;
@@ -2879,7 +3022,7 @@ async function collectSkillFiles(cfgPath, seen, skills, cwd) {
     ];
     for (const c of candidates) {
       if (seen.has(c)) continue;
-      const cStat = await fs11__namespace.stat(c).catch(() => null);
+      const cStat = await fs12__namespace.stat(c).catch(() => null);
       if (cStat?.isFile()) {
         seen.add(c);
         const skill = await loadSkillFile(c);
@@ -2900,7 +3043,7 @@ async function collectSkillFiles(cfgPath, seen, skills, cwd) {
 }
 async function loadSkillFile(filePath, _cwd) {
   try {
-    const content = await fs11__namespace.readFile(filePath, "utf8");
+    const content = await fs12__namespace.readFile(filePath, "utf8");
     if (!content.trim()) return null;
     const dirName = path6__namespace.basename(path6__namespace.dirname(filePath));
     const fileName = path6__namespace.basename(filePath, path6__namespace.extname(filePath));
@@ -2923,18 +3066,25 @@ var schema = zod.z.object({
 });
 var readFileTool = {
   name: "read_file",
-  description: `Read the contents of a file.
-Returns the file content with line numbers prefixed as "LINE_NUM|CONTENT".
-For large files, use start_line and end_line to read specific sections.
-Binary files return metadata only (size, type).
-Maximum: ${MAX_FILE_SIZE / 1024}KB or ${MAX_LINES} lines per read.`,
+  description: `Read file contents with optional line range. Output format: "LINE_NUM|CONTENT".
+
+When to use:
+- After codebase_search or search_files: use path and start_line/end_line from results to load only the relevant section (saves context).
+- Reading config, README, or known paths.
+- Inspecting implementation before editing.
+
+When NOT to use:
+- Searching content: use codebase_search or search_files first.
+- Listing directory: use list_files.
+
+Limits: ${MAX_FILE_SIZE / 1024}KB or ${MAX_LINES} lines per read. Large files without start_line/end_line return head+tail. Binary files return metadata only.`,
   parameters: schema,
   readOnly: true,
   async execute({ path: filePath, start_line, end_line }, ctx) {
     const absPath = path6__namespace.resolve(ctx.cwd, filePath);
     let stat8;
     try {
-      stat8 = await fs11__namespace.stat(absPath);
+      stat8 = await fs12__namespace.stat(absPath);
     } catch {
       return { success: false, output: `File not found: ${filePath}` };
     }
@@ -2950,12 +3100,12 @@ Cannot read binary content.`
       };
     }
     if (stat8.size > MAX_FILE_SIZE && !start_line) {
-      const content2 = await fs11__namespace.readFile(absPath, "utf8");
+      const content2 = await fs12__namespace.readFile(absPath, "utf8");
       return truncateWithHeadTail(content2, filePath);
     }
     let content;
     try {
-      content = await fs11__namespace.readFile(absPath, "utf8");
+      content = await fs12__namespace.readFile(absPath, "utf8");
     } catch (err) {
       return { success: false, output: `Failed to read ${filePath}: ${err.message}` };
     }
@@ -2991,7 +3141,7 @@ ${numbered}
 };
 async function isBinaryFile(filePath) {
   try {
-    const handle = await fs11__namespace.open(filePath, "r");
+    const handle = await fs12__namespace.open(filePath, "r");
     const buffer = Buffer.alloc(512);
     const { bytesRead } = await handle.read(buffer, 0, 512, 0);
     await handle.close();
@@ -3034,23 +3184,30 @@ var schema2 = zod.z.object({
 });
 var writeFileTool = {
   name: "write_to_file",
-  description: `Create a new file or completely overwrite an existing file.
-Use this for: creating new files, generating boilerplate, completely restructuring a file.
-For small targeted changes to existing files, prefer replace_in_file.
-WARNING: This replaces the entire file content. Provide the complete final content.`,
+  description: `Create a new file or overwrite an existing file entirely. Use only when replace_in_file is not suitable.
+
+When to use:
+- New files, boilerplate, or full rewrites.
+- When the change affects more than half of the file.
+
+When NOT to use:
+- Small or targeted edits: use replace_in_file (faster, less error-prone).
+- Appending or patching: use replace_in_file with search/replace.
+
+WARNING: Replaces entire file content. Provide complete final content. Creates parent directories if needed.`,
   parameters: schema2,
   requiresApproval: true,
   async execute({ path: filePath, content }, ctx) {
     const absPath = path6__namespace.resolve(ctx.cwd, filePath);
     const dirPath = path6__namespace.dirname(absPath);
-    await fs11__namespace.mkdir(dirPath, { recursive: true });
+    await fs12__namespace.mkdir(dirPath, { recursive: true });
     const tmpPath = `${absPath}.nexus_tmp_${Date.now()}`;
     try {
-      await fs11__namespace.writeFile(tmpPath, content, "utf8");
-      await fs11__namespace.rename(tmpPath, absPath);
+      await fs12__namespace.writeFile(tmpPath, content, "utf8");
+      await fs12__namespace.rename(tmpPath, absPath);
     } catch (err) {
       try {
-        await fs11__namespace.unlink(tmpPath);
+        await fs12__namespace.unlink(tmpPath);
       } catch {
       }
       return { success: false, output: `Failed to write ${filePath}: ${err.message}` };
@@ -3080,27 +3237,28 @@ var schema3 = zod.z.object({
 });
 var replaceInFileTool = {
   name: "replace_in_file",
-  description: `Make targeted edits to an existing file using SEARCH/REPLACE blocks.
+  description: `Make targeted edits with SEARCH/REPLACE blocks. Preferred over write_to_file for existing files.
 
-For each block:
-- "search": the EXACT text currently in the file (whitespace and indentation must match)
-- "replace": the text to replace it with
+When to use:
+- Bug fixes, adding/changing functions, updating imports, small edits.
+- Multiple related edits in one file (stack several blocks in one call).
+- When you know the exact text to change (read the file first if unsure).
 
-You can provide multiple blocks to make several changes in one call.
-This is the preferred tool for modifying existing files \u2014 faster and less error-prone than write_to_file.
+When NOT to use:
+- New files or >50% of file changing: use write_to_file.
+- Unclear exact content: read_file first to get exact text and indentation.
 
-IMPORTANT:
-- Read the file first if you're unsure about the exact content
-- The search must match exactly (including whitespace/indentation)
-- If the search block appears multiple times, only the first occurrence is replaced
-- Blocks are applied top-to-bottom in order`,
+Rules:
+- search must match exactly (whitespace and indentation). Blocks applied in order.
+- Tool returns full updated content \u2014 use it as reference for next edits.
+- If search appears multiple times, only the first occurrence is replaced.`,
   parameters: schema3,
   requiresApproval: true,
   async execute({ path: filePath, diff }, ctx) {
     const absPath = path6__namespace.resolve(ctx.cwd, filePath);
     let content;
     try {
-      content = await fs11__namespace.readFile(absPath, "utf8");
+      content = await fs12__namespace.readFile(absPath, "utf8");
     } catch {
       return { success: false, output: `File not found: ${filePath}` };
     }
@@ -3125,11 +3283,11 @@ Hint: Read the file first to verify the exact content.`
     }
     const tmpPath = `${absPath}.nexus_tmp_${Date.now()}`;
     try {
-      await fs11__namespace.writeFile(tmpPath, content, "utf8");
-      await fs11__namespace.rename(tmpPath, absPath);
+      await fs12__namespace.writeFile(tmpPath, content, "utf8");
+      await fs12__namespace.rename(tmpPath, absPath);
     } catch (err) {
       try {
-        await fs11__namespace.unlink(tmpPath);
+        await fs12__namespace.unlink(tmpPath);
       } catch {
       }
       return { success: false, output: `Failed to write: ${err.message}` };
@@ -3160,10 +3318,16 @@ var schema4 = zod.z.object({
 });
 var applyPatchTool = {
   name: "apply_patch",
-  description: `Apply a unified diff patch to a file.
-The patch must be in standard unified diff format (--- a/file +++ b/file).
-Useful when the model generates a patch format naturally.
-Prefer replace_in_file for targeted edits \u2014 it's more reliable.`,
+  description: `Apply a unified diff patch (e.g. from a model or git diff). Patch must be standard unified format (--- a/file +++ b/file).
+
+When to use:
+- Model outputs a patch naturally; you have a ready-made diff.
+- Applying an external patch file.
+
+When NOT to use:
+- Targeted edits: prefer replace_in_file (more reliable, no patch parsing).
+- Multiple unrelated edits: use replace_in_file with multiple blocks.
+If the patch fails to apply (content mismatch), use replace_in_file instead.`,
   parameters: schema4,
   requiresApproval: true,
   async execute({ patch, path: overridePath }, ctx) {
@@ -3180,7 +3344,7 @@ Prefer replace_in_file for targeted edits \u2014 it's more reliable.`,
     const absPath = path6__namespace.resolve(ctx.cwd, filePath);
     let originalContent = "";
     try {
-      originalContent = await fs11__namespace.readFile(absPath, "utf8");
+      originalContent = await fs12__namespace.readFile(absPath, "utf8");
     } catch {
     }
     const patched = diff.applyPatch(originalContent, patch);
@@ -3191,14 +3355,14 @@ Prefer replace_in_file for targeted edits \u2014 it's more reliable.`,
       };
     }
     const dirPath = path6__namespace.dirname(absPath);
-    await fs11__namespace.mkdir(dirPath, { recursive: true });
+    await fs12__namespace.mkdir(dirPath, { recursive: true });
     const tmpPath = `${absPath}.nexus_tmp_${Date.now()}`;
     try {
-      await fs11__namespace.writeFile(tmpPath, patched, "utf8");
-      await fs11__namespace.rename(tmpPath, absPath);
+      await fs12__namespace.writeFile(tmpPath, patched, "utf8");
+      await fs12__namespace.rename(tmpPath, absPath);
     } catch (err) {
       try {
-        await fs11__namespace.unlink(tmpPath);
+        await fs12__namespace.unlink(tmpPath);
       } catch {
       }
       return { success: false, output: `Failed to write: ${err.message}` };
@@ -3227,17 +3391,18 @@ var schema5 = zod.z.object({
 });
 var executeCommandTool = {
   name: "execute_command",
-  description: `Execute a shell command in the project directory.
-Returns stdout, stderr, and exit code.
-Output is capped at 50KB (head + tail shown if larger).
-Progress bars and ANSI escape sequences are stripped.
-Timeout default: 120 seconds (max: 600).
+  description: `Run a shell command in the project (or specified cwd). Use for real system/terminal operations only.
 
-Best practices:
-- Use for: running tests, build tools, installing packages, git operations
-- Prefer other tools when available (read_file, write_to_file, search_files)
-- For long-running servers, check if they start successfully then stop monitoring
-- Chain commands with && for sequential execution`,
+When to use:
+- Tests, builds, package installs, git, linters, formatters.
+- Commands that cannot be done with read_file, search_files, or write tools.
+
+When NOT to use:
+- Reading files: use read_file (not cat/head/tail).
+- Searching content: use search_files (not grep/rg).
+- Editing files: use replace_in_file or write_to_file (not sed/awk/echo).
+
+Output: stdout+stderr, exit code; capped at 50KB (head+tail if larger). ANSI and progress bars stripped. Timeout: default 120s, max 600s. Chain sequential steps with &&.`,
   parameters: schema5,
   requiresApproval: true,
   async execute({ command, cwd: cmdCwd, timeout_seconds }, ctx) {
@@ -3439,10 +3604,23 @@ var listSchema = zod.z.object({
 });
 var listFilesTool = {
   name: "list_files",
-  description: `List files and directories.
-Shows a tree-like structure with files and subdirectories.
-Use recursive=true to list all files in a directory tree.
-Maximum 2000 entries.`,
+  description: `List files and directories. Tree-like structure; respects .gitignore and common ignores.
+
+When to use:
+- Discover project layout before searching or reading.
+- Find file names or directory structure.
+- Check presence of config files, scripts, or modules.
+
+When NOT to use:
+- Finding by content: use codebase_search or search_files.
+- Reading a file: use read_file.
+- Glob by extension: use path + include (e.g. include="*.ts").
+
+Parameters:
+- path: directory to list (default: project root). Relative to cwd.
+- recursive: include subdirectories (default: false for root, true for subdirs).
+- include: glob to filter entries (e.g. "*.ts").
+- max_entries: cap output (default 200, max 5000).`,
   parameters: listSchema,
   readOnly: true,
   async execute({ path: listPath, recursive, include, max_entries }, ctx) {
@@ -3450,23 +3628,26 @@ Maximum 2000 entries.`,
     const maxEntries = max_entries ?? 200;
     const maxActual = Math.min(maxEntries, 2e3);
     try {
-      const { readdir: readdir4, stat: stat8 } = await import('fs/promises');
+      const { readdir: readdir5, stat: stat8 } = await import('fs/promises');
       const ignoreMod = await import('ignore');
       const ignoreFactory = ignoreMod.default ?? ignoreMod;
       let ig = ignoreFactory();
-      try {
-        const gitignoreContent = await import('fs/promises').then(
-          (f) => f.readFile(path6__namespace.join(ctx.cwd, ".gitignore"), "utf8").catch(() => "")
-        );
-        ig = ig.add(gitignoreContent);
-      } catch {
+      const useGitignore = !listPath || listPath === ".";
+      if (useGitignore) {
+        try {
+          const gitignoreContent = await import('fs/promises').then(
+            (f) => f.readFile(path6__namespace.join(ctx.cwd, ".gitignore"), "utf8").catch(() => "")
+          );
+          ig = ig.add(gitignoreContent);
+        } catch {
+        }
       }
       ig.add([".git", "node_modules", ".nexus/index", ".nexus/checkpoints"]);
       const entries = [];
       async function walk(dir, prefix, depth) {
         if (entries.length >= maxActual) return;
         if (depth > (recursive ? 10 : 1)) return;
-        const items = await readdir4(dir).catch(() => []);
+        const items = await readdir5(dir).catch(() => []);
         for (const item of items.sort()) {
           if (entries.length >= maxActual) break;
           const fullPath = path6__namespace.join(dir, item);
@@ -3509,16 +3690,25 @@ var schema6 = zod.z.object({
 });
 var listDefinitionsTool = {
   name: "list_code_definitions",
-  description: `Extract top-level code definitions (classes, functions, methods, interfaces, types) from a file or directory.
-Returns a compact view of the code structure without full implementation details.
-Supports: TypeScript, JavaScript, Python, Rust, Go, Java, C, C++.
-Useful for understanding codebase structure before diving into details.`,
+  description: `List top-level code definitions (classes, functions, methods, interfaces, types) for a file or directory. No full bodies \u2014 structure only.
+
+When to use:
+- Understand file or module structure before reading or searching.
+- Find where a symbol is defined (then use read_file or codebase_search for details).
+- Quick overview of many files in a directory.
+
+When NOT to use:
+- Semantic search: use codebase_search.
+- Exact pattern in content: use search_files.
+- Reading implementation: use read_file.
+
+Supports: TS/JS, Python, Rust, Go, Java, C/C++. Returns path and line (e.g. "function foo (L42)").`,
   parameters: schema6,
   readOnly: true,
   async execute({ path: targetPath }, ctx) {
     const absPath = path6__namespace.resolve(ctx.cwd, targetPath);
     try {
-      const stat8 = await fs11__namespace.stat(absPath);
+      const stat8 = await fs12__namespace.stat(absPath);
       if (stat8.isDirectory()) {
         return extractFromDirectory(absPath, ctx.cwd);
       }
@@ -3536,7 +3726,7 @@ async function extractFromFile(absPath, cwd) {
   }
   let content;
   try {
-    content = await fs11__namespace.readFile(absPath, "utf8");
+    content = await fs12__namespace.readFile(absPath, "utf8");
   } catch {
     return { success: false, output: `Cannot read ${relPath}` };
   }
@@ -3549,25 +3739,25 @@ ${definitions.map((d) => `  ${d}`).join("\n")}`;
   return { success: true, output };
 }
 async function extractFromDirectory(absDir, cwd) {
-  const { readdir: readdir4 } = await import('fs/promises');
+  const { readdir: readdir5 } = await import('fs/promises');
   const results = [];
   const ignoreMod = await import('ignore');
   const ignoreFactory = ignoreMod.default ?? ignoreMod;
   let ig = ignoreFactory();
   try {
-    const gi = await fs11__namespace.readFile(path6__namespace.join(cwd, ".gitignore"), "utf8").catch(() => "");
+    const gi = await fs12__namespace.readFile(path6__namespace.join(cwd, ".gitignore"), "utf8").catch(() => "");
     ig = ignoreFactory().add(gi);
   } catch {
   }
   ig.add([".git", "node_modules", "dist", "build"]);
   async function processDir(dir, depth) {
     if (depth > 3) return;
-    const items = await readdir4(dir).catch(() => []);
+    const items = await readdir5(dir).catch(() => []);
     for (const item of items.sort()) {
       const fullPath = path6__namespace.join(dir, item);
       const relPath = path6__namespace.relative(cwd, fullPath);
       if (ig.ignores(relPath)) continue;
-      const st = await fs11__namespace.stat(fullPath).catch(() => null);
+      const st = await fs12__namespace.stat(fullPath).catch(() => null);
       if (!st) continue;
       if (st.isDirectory()) {
         await processDir(fullPath, depth + 1);
@@ -3652,11 +3842,23 @@ var schema7 = zod.z.object({
 });
 var codebaseSearchTool = {
   name: "codebase_search",
-  description: `Search the indexed codebase by semantic meaning or keyword.
-Finds relevant classes, functions, methods, types, and code sections.
-Searches by symbol name, docstrings, and content.
-If vector search is enabled, uses semantic similarity.
-Requires the codebase to be indexed (runs automatically on startup).`,
+  description: `Semantic search over the indexed codebase. Finds code by meaning, not exact text.
+
+When to use:
+- Explore unfamiliar codebases; ask "how / where / what" questions.
+- Find code by intent (e.g. "where is auth validated", "error handling for API calls").
+- After narrowing a directory, re-run with path/paths to limit scope.
+
+When NOT to use:
+- Exact text or symbol name: use search_files (regex) instead.
+- Reading a known file: use read_file.
+- Single identifier lookup: use search_files or list_code_definitions.
+
+Usage:
+- Prefer one clear query; use queries[] for multiple independent questions in one call.
+- path/paths: single directory or file to scope (optional). Omit to search whole repo.
+- kind: filter by symbol type (class, function, interface, etc.).
+- limit: max results per query (default 10). Use read_file with path:line from results to load only relevant sections and save context.`,
   parameters: schema7,
   readOnly: true,
   async execute({ query, queries, path: path19, paths, kind, limit }, ctx) {
@@ -3685,16 +3887,31 @@ Requires the codebase to be indexed (runs automatically on startup).`,
       const normalizedScopes = Array.from(new Set(
         scopeCandidates.map((p) => normalizeScopePath(p, ctx.cwd)).filter(Boolean)
       ));
-      const sections = [];
+      const scopesToUse = normalizedScopes.length > 0 ? normalizedScopes : [""];
+      const effectiveLimit = limit ?? 10;
+      const effectiveKind = kind === "any" ? void 0 : kind;
+      const pairs = [];
       for (const q of allQueries) {
-        const raw = await ctx.indexer.search(q, {
-          limit: limit ?? 10,
-          kind: kind === "any" ? void 0 : kind,
-          semantic: true
-        });
+        for (const s of scopesToUse) {
+          pairs.push({ q, scope: s });
+        }
+      }
+      const allRaw = await Promise.all(
+        pairs.map(
+          ({ q, scope }) => ctx.indexer.search(q, {
+            limit: effectiveLimit,
+            kind: effectiveKind,
+            semantic: true,
+            pathScope: scope || void 0
+          })
+        )
+      );
+      const sections = [];
+      let idx = 0;
+      for (const q of allQueries) {
         const scopedSections = [];
-        const scopesToUse = normalizedScopes.length > 0 ? normalizedScopes : [""];
         for (const scope of scopesToUse) {
+          const raw = allRaw[idx++] ?? [];
           const isFileScope = scope ? /\.[a-z0-9]+$/i.test(scope) : false;
           const filtered = scope ? raw.filter((r) => {
             const p = r.path.replace(/\\/g, "/");
@@ -3706,7 +3923,7 @@ Requires the codebase to be indexed (runs automatically on startup).`,
             continue;
           }
           const formatted = filtered.map((r, i) => {
-            const loc = r.startLine ? `:${r.startLine}` : "";
+            const loc = r.startLine != null ? r.endLine != null && r.endLine !== r.startLine ? `:${r.startLine}-${r.endLine}` : `:${r.startLine}` : "";
             const parent = r.parent ? ` (in ${r.parent})` : "";
             const kindStr = r.kind ? `[${r.kind}]` : "";
             return `${i + 1}. ${r.path}${loc} ${kindStr}${parent}
@@ -3744,11 +3961,16 @@ var schema8 = zod.z.object({
 });
 var webFetchTool = {
   name: "web_fetch",
-  description: `Fetch and read content from a URL.
-HTML pages are converted to clean markdown.
-JSON/text/code is returned as-is.
-Maximum 100KB content.
-Useful for: reading documentation, fetching API specs, checking URLs.`,
+  description: `Fetch content from a URL. HTML is converted to markdown; JSON/text returned as-is. Read-only.
+
+When to use:
+- Documentation, API specs, project URLs the user provided.
+- Checking external references or dependencies.
+
+When NOT to use:
+- Do not guess or fabricate URLs; use only user-provided or discovered URLs.
+- Large binaries or non-text: tool caps at 100KB and is text-oriented.
+Requires a valid, fully-formed URL. Timeout ~30s.`,
   parameters: schema8,
   readOnly: true,
   async execute({ url, max_length }, _ctx) {
@@ -3820,10 +4042,15 @@ var webSearchSchema = zod.z.object({
 });
 var webSearchTool = {
   name: "web_search",
-  description: `Search the web using Brave Search or Serper API.
-Returns titles, URLs, and snippets for the top results.
-Requires BRAVE_API_KEY or SERPER_API_KEY environment variable.
-Use web_fetch to read full content of specific results.`,
+  description: `Search the web (Brave or Serper). Returns titles, URLs, snippets. Use web_fetch to read full pages. Requires BRAVE_API_KEY or SERPER_API_KEY.
+
+When to use:
+- Current docs, versions, or info beyond training data.
+- Verifying APIs, dependencies, or recent changes.
+
+When NOT to use:
+- Codebase questions: use codebase_search or search_files.
+- User-provided URL: use web_fetch directly.`,
   parameters: webSearchSchema,
   readOnly: true,
   async execute({ query, max_results }, _ctx) {
@@ -3903,9 +4130,15 @@ var schema9 = zod.z.object({
 });
 var useSkillTool = {
   name: "use_skill",
-  description: `Read and activate a skill to gain specialized knowledge or capabilities.
-Skills are markdown files with instructions, patterns, and domain knowledge.
-Use when the task requires specialized knowledge documented in a skill.`,
+  description: `Load a skill's content (markdown) for specialized knowledge. Skills live in .nexus/skills/ or ~/.nexus/skills/.
+
+When to use:
+- Task matches a skill's domain (e.g. testing, deployment, framework).
+- You need patterns or instructions from a project skill file.
+
+When NOT to use:
+- General coding: skills are optional and add context.
+- If the skill name is unknown: list .nexus/skills/ or rely on classifier-selected skills.`,
   parameters: schema9,
   readOnly: true,
   async execute({ skill }, ctx) {
@@ -3970,10 +4203,15 @@ var browserSchema = zod.z.object({
 });
 var browserActionTool = {
   name: "browser_action",
-  description: `Control a headless browser for web automation and testing.
-Actions: launch (open URL), navigate, click, type, scroll, screenshot, get_content, close.
-Screenshots are returned as base64 images.
-Requires puppeteer to be installed: npm install puppeteer`,
+  description: `Control a headless browser (Puppeteer). Actions: launch, navigate, click, type, scroll, screenshot, get_content, close. Screenshots as base64. Requires: npm install puppeteer.
+
+When to use:
+- E2E testing, scraping a known URL, checking rendered output.
+- User asks to "open" or "check" a web page.
+
+When NOT to use:
+- Fetching API or docs: use web_fetch.
+- General web search: use web_search.`,
   parameters: browserSchema,
   requiresApproval: true,
   async execute({ action, url, selector, text, scroll_direction, scroll_amount }, ctx) {
@@ -4017,6 +4255,69 @@ Page title: ${title}`,
     return { success: false, output: `Action '${action}' requires an active browser session.` };
   }
 };
+var condenseSchema = zod.z.object({
+  reason: zod.z.string().optional().describe("Brief reason for condensing (e.g. context getting long)"),
+  task_progress: zod.z.string().optional()
+});
+var condenseTool = {
+  name: "condense",
+  description: `Request conversation context compaction. Prior messages are summarized so you can continue within the context window.
+
+When to use:
+- Context usage is high (check Environment "Context: X / Y tokens") and the dialogue is long.
+- You want to free tokens while keeping task context; then continue the task.
+
+When NOT to use:
+- Short conversations or when context is not near the limit.
+- When you need exact prior code or output \u2014 compaction loses detail; use for high-level summary only.`,
+  parameters: condenseSchema,
+  readOnly: true,
+  async execute(_args, ctx) {
+    if (!ctx.compactSession) {
+      return { success: false, output: "Context compaction is not available in this session." };
+    }
+    await ctx.compactSession();
+    return { success: true, output: "Context has been condensed. A summary of the conversation has been added; you can continue with the task." };
+  }
+};
+var summarizeTaskSchema = zod.z.object({
+  task_progress: zod.z.string().optional()
+});
+var summarizeTaskTool = {
+  name: "summarize_task",
+  description: `Request a summary of the current task and conversation state. Triggers compaction and adds a summary to context.
+
+When to use:
+- Long conversation and you need a refreshed view of goal and progress.
+- Before a long chain of tool calls to keep context manageable.
+
+When NOT to use:
+- Short sessions or when you have clear recent context.`,
+  parameters: summarizeTaskSchema,
+  readOnly: true,
+  async execute(_args, ctx) {
+    if (!ctx.compactSession) {
+      return { success: false, output: "Summarization is not available in this session." };
+    }
+    await ctx.compactSession();
+    return { success: true, output: "Task summary has been generated and added to the conversation context." };
+  }
+};
+var planExitSchema = zod.z.object({
+  summary: zod.z.string().describe("Brief summary of the plan for the user"),
+  task_progress: zod.z.string().optional()
+});
+var planExitTool = {
+  name: "plan_exit",
+  description: `Signal that planning is complete (plan mode only). Call after writing the plan to .nexus/plans/ and present a short summary to the user. Ends the turn like attempt_completion in agent mode.`,
+  parameters: planExitSchema,
+  modes: ["plan"],
+  async execute({ summary }, ctx) {
+    return { success: true, output: `Plan complete.
+
+${summary}` };
+  }
+};
 var schema10 = zod.z.object({
   result: zod.z.string().describe("Summary of what was accomplished"),
   command: zod.z.string().optional().describe("Optional command to run to demonstrate the result (e.g., 'npm run dev', 'open index.html')"),
@@ -4024,21 +4325,49 @@ var schema10 = zod.z.object({
 });
 var attemptCompletionTool = {
   name: "attempt_completion",
-  description: `Signal that the task is complete and present the result to the user.
-Call this when you have finished the task and want to present the outcome.
-Include a clear summary of what was accomplished.
-Optionally include a command that demonstrates the result.
-This ends the current agent loop.`,
+  description: `Signal that the task is complete and present the result. Call when the user's request is fully done.
+
+When to use:
+- All requested changes are implemented and verified.
+- You have a clear summary and, if useful, a demo command.
+
+When NOT to use:
+- Task only partially done: continue with tools and then call attempt_completion.
+- Plan mode: use plan_exit instead.
+
+Provide a concise summary in result. Optionally give a command to run (e.g. npm run dev, pytest). This ends the current agent turn.`,
   parameters: schema10,
   async execute({ result, command }, ctx) {
     let output = result;
     if (command) {
-      output += `
+      const approval = await ctx.host.showApprovalDialog({
+        type: "execute",
+        tool: "attempt_completion",
+        description: `Run demo command: ${command}`
+      });
+      if (approval.approved) {
+        try {
+          const run = await ctx.host.runCommand(command, ctx.cwd, ctx.signal);
+          const out = [run.stdout, run.stderr].filter(Boolean).join("\n").trim();
+          output += `
+
+Demo command output:
+\`\`\`
+${out || "(no output)"}
+\`\`\``;
+        } catch (e) {
+          output += `
+
+Demo command failed: ${e.message}`;
+        }
+      } else {
+        output += `
 
 To see the result, run:
 \`\`\`
 ${command}
 \`\`\``;
+      }
     }
     return { success: true, output };
   }
@@ -4050,9 +4379,16 @@ var askSchema = zod.z.object({
 });
 var askFollowupTool = {
   name: "ask_followup_question",
-  description: `Ask the user a clarifying question when you need more information to proceed.
-Use this sparingly \u2014 only when you genuinely cannot proceed without the information.
-Don't ask obvious questions. Don't ask multiple questions in one call.`,
+  description: `Ask the user a clarifying question when you cannot proceed without their input.
+
+When to use:
+- Genuinely blocked (e.g. choice between options, missing config, ambiguous requirement).
+- After doing all non-blocked work; ask one focused question.
+
+When NOT to use:
+- Info you can get via tools (read config, search codebase).
+- Obvious or multiple questions; prefer making a reasonable choice and stating it.
+- Permission prompts ("Should I run tests?"); just run them if relevant.`,
   parameters: askSchema,
   async execute({ question, options }, ctx) {
     const optionsStr = options && options.length > 0 ? `
@@ -4076,10 +4412,17 @@ var todoSchema = zod.z.object({
 });
 var updateTodoTool = {
   name: "update_todo_list",
-  description: `Update the current task's todo/checklist.
-Use markdown format: "- [ ] item" for pending, "- [x] item" for done.
-Update this frequently to show your progress.
-Keep it concise \u2014 focus on meaningful milestones, not micro-steps.`,
+  description: `Update the task checklist. Use frequently on multi-step tasks so the user sees progress.
+
+When to use:
+- Complex tasks (3+ steps): start with a checklist, update as you complete items.
+- Scope changes: rewrite the list to match new steps.
+
+When NOT to use:
+- Trivial 1\u20132 step tasks: optional.
+- Do not put exploratory steps (e.g. "search codebase") as todo items; focus on deliverable milestones.
+
+Format: Markdown "- [ ]" pending, "- [x]" done. Keep items concise; update silently.`,
   parameters: todoSchema,
   async execute({ todo }, ctx) {
     ctx.session.updateTodo(todo);
@@ -4093,9 +4436,15 @@ var createRuleSchema = zod.z.object({
 });
 var createRuleTool = {
   name: "create_rule",
-  description: `Create a new rule in .nexus/rules/ to guide future interactions.
-Rules are automatically loaded in future sessions.
-Use this to codify project conventions, preferences, or important context.`,
+  description: `Create a rule in .nexus/rules/ (or ~/.nexus/rules/ if global) to guide future sessions. Rules are loaded automatically in later conversations.
+
+When to use:
+- Codify project conventions, preferred patterns, or tooling (e.g. "always use pnpm", "tests go in __tests__").
+- Save important context that should apply to many future tasks.
+
+When NOT to use:
+- One-off task context: use @mentions or include in the message instead.
+- Secrets or env-specific paths: avoid; use docs or env vars.`,
   parameters: createRuleSchema,
   async execute({ content, filename, global: isGlobal }, ctx) {
     const { writeFile: writeFile6, mkdir: mkdir7 } = await import('fs/promises');
@@ -4135,6 +4484,10 @@ function getAllBuiltinTools() {
     webSearchTool,
     // Browser group
     browserActionTool,
+    // Context (Cline-style)
+    condenseTool,
+    summarizeTaskTool,
+    planExitTool,
     // Skills group
     useSkillTool
   ];
@@ -4187,9 +4540,9 @@ var ToolRegistry = class {
    */
   async loadFromDirectory(dir) {
     try {
-      const { readdir: readdir4 } = await import('fs/promises');
+      const { readdir: readdir5 } = await import('fs/promises');
       const { join: join13 } = await import('path');
-      const files = await readdir4(dir).catch(() => []);
+      const files = await readdir5(dir).catch(() => []);
       for (const file of files) {
         if (!file.endsWith(".js") && !file.endsWith(".ts")) continue;
         try {
@@ -4323,7 +4676,7 @@ var ParallelAgentManager = class {
 };
 var spawnSchema = zod.z.object({
   description: zod.z.string().describe("What should the sub-agent do? Provide a clear, self-contained task description."),
-  mode: zod.z.enum(["agent", "plan", "debug", "ask", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
+  mode: zod.z.enum(["agent", "plan", "ask", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
   task_progress: zod.z.string().optional()
 });
 function createSpawnAgentTool(manager, config) {
@@ -4332,7 +4685,7 @@ function createSpawnAgentTool(manager, config) {
     description: `Launch a parallel sub-agent to work on a specific task concurrently.
 Use for independent subtasks that don't depend on each other.
 The sub-agent has full capabilities based on the specified mode.
-Returns the sub-agent's final output when done.
+**The sub-agent must call attempt_completion when the task is done**; its result is returned to you.
 Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: spawnSchema,
     modes: ["agent"],
@@ -4791,19 +5144,19 @@ async function* walkDir(root, excludePatterns = []) {
   ig.add(DEFAULT_EXCLUDE);
   ig.add(excludePatterns);
   try {
-    const gitignoreContent = await fs11__namespace.readFile(path6__namespace.join(root, ".gitignore"), "utf8");
+    const gitignoreContent = await fs12__namespace.readFile(path6__namespace.join(root, ".gitignore"), "utf8");
     ig.add(gitignoreContent);
   } catch {
   }
   try {
-    const nexusignoreContent = await fs11__namespace.readFile(path6__namespace.join(root, ".nexusignore"), "utf8");
+    const nexusignoreContent = await fs12__namespace.readFile(path6__namespace.join(root, ".nexusignore"), "utf8");
     ig.add(nexusignoreContent);
   } catch {
   }
   async function* walkInternal(dir) {
     let entries;
     try {
-      entries = await fs11__namespace.readdir(dir);
+      entries = await fs12__namespace.readdir(dir);
     } catch {
       return;
     }
@@ -4813,7 +5166,7 @@ async function* walkDir(root, excludePatterns = []) {
       if (ig.ignores(relPath)) continue;
       let stat8;
       try {
-        stat8 = await fs11__namespace.stat(absPath);
+        stat8 = await fs12__namespace.stat(absPath);
       } catch {
         continue;
       }
@@ -4841,14 +5194,14 @@ async function* walkDir(root, excludePatterns = []) {
 async function hashFile(filePath, size) {
   if (size < 8192) {
     try {
-      const content = await fs11__namespace.readFile(filePath);
+      const content = await fs12__namespace.readFile(filePath);
       return crypto__namespace.createHash("md5").update(content).digest("hex");
     } catch {
       return `${size}_0`;
     }
   }
   try {
-    const fd = await fs11__namespace.open(filePath, "r");
+    const fd = await fs12__namespace.open(filePath, "r");
     const buf = Buffer.alloc(4096);
     const { bytesRead } = await fd.read(buf, 0, 4096, 0);
     await fd.close();
@@ -5318,7 +5671,7 @@ var ProjectRegistry = class _ProjectRegistry {
   static async load() {
     const registry = new _ProjectRegistry();
     try {
-      const content = await fs11__namespace.readFile(REGISTRY_PATH, "utf8");
+      const content = await fs12__namespace.readFile(REGISTRY_PATH, "utf8");
       const data = JSON.parse(content);
       for (const p of data) {
         registry.projects.set(p.root, p);
@@ -5336,7 +5689,7 @@ var ProjectRegistry = class _ProjectRegistry {
     }
     const hash = crypto__namespace.createHash("sha1").update(root).digest("hex").slice(0, 16);
     const indexDir = path6__namespace.join(INDEX_BASE_DIR, hash);
-    await fs11__namespace.mkdir(indexDir, { recursive: true });
+    await fs12__namespace.mkdir(indexDir, { recursive: true });
     const info = {
       root,
       hash,
@@ -5360,7 +5713,7 @@ var ProjectRegistry = class _ProjectRegistry {
     const info = this.projects.get(root);
     if (info) {
       try {
-        await fs11__namespace.rm(info.indexDir, { recursive: true, force: true });
+        await fs12__namespace.rm(info.indexDir, { recursive: true, force: true });
       } catch {
       }
       this.projects.delete(root);
@@ -5377,8 +5730,8 @@ var ProjectRegistry = class _ProjectRegistry {
   async save() {
     try {
       const dir = path6__namespace.dirname(REGISTRY_PATH);
-      await fs11__namespace.mkdir(dir, { recursive: true });
-      await fs11__namespace.writeFile(REGISTRY_PATH, JSON.stringify(this.listProjects(), null, 2), "utf8");
+      await fs12__namespace.mkdir(dir, { recursive: true });
+      await fs12__namespace.writeFile(REGISTRY_PATH, JSON.stringify(this.listProjects(), null, 2), "utf8");
     } catch {
     }
   }
@@ -5537,7 +5890,7 @@ var CodebaseIndexer = class {
       if (unchanged && !this.forceVectorBackfill) continue;
       let content;
       try {
-        content = await fs11__namespace.readFile(file.absPath, "utf8");
+        content = await fs12__namespace.readFile(file.absPath, "utf8");
       } catch {
         continue;
       }
@@ -5605,19 +5958,26 @@ var CodebaseIndexer = class {
   async search(query, opts) {
     const limit = opts?.limit ?? 10;
     const kind = opts?.kind;
+    const pathScope = opts?.pathScope;
+    const prefixes = pathScope ? (Array.isArray(pathScope) ? pathScope : [pathScope]).map((p) => p.replace(/\\/g, "/").replace(/\/+$/, "")).filter(Boolean) : [];
+    const matchesPath = (p) => {
+      if (prefixes.length === 0) return true;
+      const normalized = p.replace(/\\/g, "/");
+      return prefixes.some((pre) => normalized === pre || normalized.startsWith(`${pre}/`));
+    };
     const results = [];
     if (this.config.indexing.fts) {
-      const symbolResults = this.fts.searchSymbols(query, limit, kind);
-      results.push(...symbolResults);
-      if (results.length < limit) {
-        const chunkResults = this.fts.searchChunks(query, limit - results.length);
-        results.push(...chunkResults);
-      }
+      const symbolResults = this.fts.searchSymbols(query, prefixes.length > 0 ? limit * 3 : limit, kind);
+      const chunkResults = this.fts.searchChunks(query, prefixes.length > 0 ? limit * 3 : limit);
+      const ftsFiltered = [...symbolResults, ...chunkResults].filter((r) => matchesPath(r.path)).sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, limit);
+      results.push(...ftsFiltered);
     }
     if (this.vector && this.config.indexing.vector && opts?.semantic !== false) {
-      const vecResults = await this.vector.search(query, limit, kind);
+      const requestLimit = prefixes.length > 0 ? limit * 3 : limit;
+      const vecResults = await this.vector.search(query, requestLimit, kind);
+      const vecFiltered = vecResults.filter((r) => matchesPath(r.path));
       const seen = new Set(results.map((r) => `${r.path}:${r.startLine}`));
-      for (const r of vecResults) {
+      for (const r of vecFiltered) {
         const key = `${r.path}:${r.startLine}`;
         if (!seen.has(key)) {
           seen.add(key);
@@ -5659,14 +6019,14 @@ var CodebaseIndexer = class {
 };
 async function buildFileInfo(absPath, root) {
   try {
-    const s = await fs11__namespace.stat(absPath);
+    const s = await fs12__namespace.stat(absPath);
     if (!s.isFile()) return null;
     if (s.size > 1024 * 1024) return null;
     const relPath = path6__namespace.relative(root, absPath);
     if (!relPath || relPath.startsWith("..")) return null;
     const ext = path6__namespace.extname(absPath).toLowerCase();
     if (!SUPPORTED_INDEX_EXTENSIONS.has(ext)) return null;
-    const content = await fs11__namespace.readFile(absPath);
+    const content = await fs12__namespace.readFile(absPath);
     const hash = crypto__namespace.createHash("md5").update(content).digest("hex");
     return {
       path: relPath,
@@ -5755,7 +6115,7 @@ async function tryStartLocalBinary(port, log) {
   }
   try {
     const storagePath = path6__namespace.join(os5__namespace.homedir(), ".nexus", "qdrant", "storage");
-    await fs11.mkdir(storagePath, { recursive: true });
+    await fs12.mkdir(storagePath, { recursive: true });
     const child = child_process.spawn("qdrant", [], {
       detached: true,
       stdio: "ignore",
@@ -5794,7 +6154,7 @@ async function tryStartDocker(port, log) {
       }
     }
     const storagePath = path6__namespace.join(os5__namespace.homedir(), ".nexus", "qdrant", "docker-storage");
-    await fs11.mkdir(storagePath, { recursive: true });
+    await fs12.mkdir(storagePath, { recursive: true });
     const result = await execa.execa(
       "docker",
       [
@@ -5994,12 +6354,16 @@ var CheckpointTracker = class {
     this.taskId = taskId;
     this.workspaceRoot = workspaceRoot;
     this.shadowRoot = path6__namespace.join(os5__namespace.homedir(), ".nexus", "checkpoints", taskId);
-    this.git = simpleGit.simpleGit(this.shadowRoot);
   }
-  git;
+  git = null;
   shadowRoot;
   initialized = false;
   entries = [];
+  /** Lazy git instance — only after init() has created shadowRoot (simple-git requires dir to exist). */
+  getGit() {
+    if (!this.git) throw new Error("CheckpointTracker not initialized");
+    return this.git;
+  }
   /**
    * Initialize the shadow git repository.
    * Returns false if workspace is too large or git unavailable.
@@ -6026,7 +6390,8 @@ var CheckpointTracker = class {
     }
   }
   async initInternal() {
-    await fs11__namespace.mkdir(this.shadowRoot, { recursive: true });
+    await fs12__namespace.mkdir(this.shadowRoot, { recursive: true });
+    this.git = simpleGit.simpleGit(this.shadowRoot);
     try {
       await this.git.status();
     } catch {
@@ -6034,10 +6399,14 @@ var CheckpointTracker = class {
       await this.git.addConfig("user.email", "nexus@local");
       await this.git.addConfig("user.name", "NexusCode");
     }
-    await this.syncWorkspace();
-    await this.git.add(".");
     try {
-      await this.git.commit("initial checkpoint", { "--allow-empty": null });
+      await fs12__namespace.access(this.workspaceRoot);
+      await this.syncWorkspace();
+    } catch {
+    }
+    await this.getGit().add(".");
+    try {
+      await this.getGit().commit("initial checkpoint", { "--allow-empty": null });
     } catch {
     }
   }
@@ -6046,27 +6415,31 @@ var CheckpointTracker = class {
       await this.init();
     }
     if (!this.initialized) throw new Error("Checkpoint not initialized");
-    await this.syncWorkspace();
-    await this.git.add(".");
+    try {
+      await fs12__namespace.access(this.workspaceRoot);
+      await this.syncWorkspace();
+    } catch {
+    }
+    await this.getGit().add(".");
     let hash;
     try {
-      const result = await this.git.commit(description ?? `checkpoint ${Date.now()}`, { "--allow-empty": null });
+      const result = await this.getGit().commit(description ?? `checkpoint ${Date.now()}`, { "--allow-empty": null });
       hash = result.commit;
     } catch {
-      hash = await this.git.revparse(["HEAD"]);
+      hash = await this.getGit().revparse(["HEAD"]);
     }
     this.entries.push({ hash: hash.trim(), ts: Date.now(), description, messageId: "" });
     return hash.trim();
   }
   async resetHead(hash) {
     if (!this.initialized) throw new Error("Checkpoint not initialized");
-    await this.git.checkout([hash, "--", "."]);
+    await this.getGit().checkout([hash, "--", "."]);
     await this.restoreToWorkspace();
   }
   async getDiff(fromHash, toHash) {
     if (!this.initialized) return [];
     try {
-      const diff = await this.git.diff([
+      const diff = await this.getGit().diff([
         "--name-status",
         fromHash,
         toHash ?? "HEAD"
@@ -6079,11 +6452,11 @@ var CheckpointTracker = class {
         let before = "";
         let after = "";
         try {
-          before = await this.git.show([`${fromHash}:${filePath}`]).catch(() => "");
+          before = await this.getGit().show([`${fromHash}:${filePath}`]).catch(() => "");
         } catch {
         }
         try {
-          after = await this.git.show([`${toHash ?? "HEAD"}:${filePath}`]).catch(() => "");
+          after = await this.getGit().show([`${toHash ?? "HEAD"}:${filePath}`]).catch(() => "");
         } catch {
         }
         files.push({
@@ -6112,9 +6485,9 @@ var CheckpointTracker = class {
   }
 };
 async function copyDir(src, dest, ignoreNames) {
-  const { readdir: readdir4, copyFile, mkdir: mkdir7, stat: stat8 } = await import('fs/promises');
+  const { readdir: readdir5, copyFile, mkdir: mkdir7, stat: stat8 } = await import('fs/promises');
   await mkdir7(dest, { recursive: true });
-  const items = await readdir4(src).catch(() => []);
+  const items = await readdir5(src).catch(() => []);
   await Promise.all(
     items.map(async (item) => {
       if (ignoreNames.has(item)) return;

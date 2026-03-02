@@ -10,10 +10,17 @@ const schema = z.object({
 
 export const writeFileTool: ToolDef<z.infer<typeof schema>> = {
   name: "write_to_file",
-  description: `Create a new file or completely overwrite an existing file.
-Use this for: creating new files, generating boilerplate, completely restructuring a file.
-For small targeted changes to existing files, prefer replace_in_file.
-WARNING: This replaces the entire file content. Provide the complete final content.`,
+  description: `Create a new file or overwrite an existing file entirely. Use only when replace_in_file is not suitable.
+
+When to use:
+- New files, boilerplate, or full rewrites.
+- When the change affects more than half of the file.
+
+When NOT to use:
+- Small or targeted edits: use replace_in_file (faster, less error-prone).
+- Appending or patching: use replace_in_file with search/replace.
+
+WARNING: Replaces entire file content. Provide complete final content. Creates parent directories if needed.`,
   parameters: schema,
   requiresApproval: true,
 

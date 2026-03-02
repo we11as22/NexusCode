@@ -1,2 +1,4 @@
 #!/usr/bin/env sh
+# NexusCode requires Node 20+ (better-sqlite3 native module). Check before running.
+node -e 'const m=parseInt(process.versions.node.split(".")[0],10); if(m<20){console.error("NexusCode requires Node.js 20+. You have "+process.version+". Run: nvm use 20"); process.exit(1);}'
 exec node "$(dirname "$0")/index.js" "$@"

@@ -8,9 +8,15 @@ const schema = z.object({
 
 export const useSkillTool: ToolDef<z.infer<typeof schema>> = {
   name: "use_skill",
-  description: `Read and activate a skill to gain specialized knowledge or capabilities.
-Skills are markdown files with instructions, patterns, and domain knowledge.
-Use when the task requires specialized knowledge documented in a skill.`,
+  description: `Load a skill's content (markdown) for specialized knowledge. Skills live in .nexus/skills/ or ~/.nexus/skills/.
+
+When to use:
+- Task matches a skill's domain (e.g. testing, deployment, framework).
+- You need patterns or instructions from a project skill file.
+
+When NOT to use:
+- General coding: skills are optional and add context.
+- If the skill name is unknown: list .nexus/skills/ or rely on classifier-selected skills.`,
   parameters: schema,
   readOnly: true,
 
@@ -82,10 +88,15 @@ const browserSchema = z.object({
 
 export const browserActionTool: ToolDef<z.infer<typeof browserSchema>> = {
   name: "browser_action",
-  description: `Control a headless browser for web automation and testing.
-Actions: launch (open URL), navigate, click, type, scroll, screenshot, get_content, close.
-Screenshots are returned as base64 images.
-Requires puppeteer to be installed: npm install puppeteer`,
+  description: `Control a headless browser (Puppeteer). Actions: launch, navigate, click, type, scroll, screenshot, get_content, close. Screenshots as base64. Requires: npm install puppeteer.
+
+When to use:
+- E2E testing, scraping a known URL, checking rendered output.
+- User asks to "open" or "check" a web page.
+
+When NOT to use:
+- Fetching API or docs: use web_fetch.
+- General web search: use web_search.`,
   parameters: browserSchema,
   requiresApproval: true,
 

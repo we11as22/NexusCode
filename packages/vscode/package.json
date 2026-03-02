@@ -59,6 +59,21 @@
         "category": "NexusCode"
       },
       {
+        "command": "nexuscode.explainSelection",
+        "title": "Explain Selection",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.improveSelection",
+        "title": "Improve Selection",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.fixSelection",
+        "title": "Fix (Diagnostics)",
+        "category": "NexusCode"
+      },
+      {
         "command": "nexuscode.compact",
         "title": "Compact Conversation History",
         "category": "NexusCode"
@@ -85,6 +100,21 @@
           "command": "nexuscode.addToChat",
           "group": "nexuscode",
           "when": "editorHasSelection"
+        },
+        {
+          "command": "nexuscode.explainSelection",
+          "group": "nexuscode",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "nexuscode.improveSelection",
+          "group": "nexuscode",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "nexuscode.fixSelection",
+          "group": "nexuscode",
+          "when": "editorTextFocus"
         }
       ]
     },
@@ -117,6 +147,11 @@
           "type": "string",
           "default": "",
           "description": "API key for the provider (overrides env and YAML; leave empty to use env)"
+        },
+        "nexuscode.serverUrl": {
+          "type": "string",
+          "default": "",
+          "description": "NexusCode server URL (e.g. http://127.0.0.1:4097). When set, the extension uses the server for sessions and agent runs instead of running in-process."
         },
         "nexuscode.baseUrl": {
           "type": "string",

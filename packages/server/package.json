@@ -1,0 +1,37 @@
+{
+  "name": "@nexuscode/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NexusCode session server — CLI and extension connect via HTTP/SSE",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/cli.ts --format esm --dts --target node18 --outDir dist",
+    "dev": "tsup src/index.ts --format esm --dts --target node18 --outDir dist --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@nexuscode/core": "workspace:*",
+    "@hono/node-server": "^1.13.0",
+    "execa": "^9.5.0",
+    "hono": "^4.6.0",
+    "better-sqlite3": "^11.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "tsup": "^8.3.0",
+    "typescript": "^5.5.0",
+    "@types/better-sqlite3": "^7.6.11"
+  },
+  "bin": {
+    "nexus-serve": "./dist/cli.js"
+  }
+}

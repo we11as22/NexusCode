@@ -12,10 +12,16 @@ const schema = z.object({
 
 export const applyPatchTool: ToolDef<z.infer<typeof schema>> = {
   name: "apply_patch",
-  description: `Apply a unified diff patch to a file.
-The patch must be in standard unified diff format (--- a/file +++ b/file).
-Useful when the model generates a patch format naturally.
-Prefer replace_in_file for targeted edits — it's more reliable.`,
+  description: `Apply a unified diff patch (e.g. from a model or git diff). Patch must be standard unified format (--- a/file +++ b/file).
+
+When to use:
+- Model outputs a patch naturally; you have a ready-made diff.
+- Applying an external patch file.
+
+When NOT to use:
+- Targeted edits: prefer replace_in_file (more reliable, no patch parsing).
+- Multiple unrelated edits: use replace_in_file with multiple blocks.
+If the patch fails to apply (content mismatch), use replace_in_file instead.`,
   parameters: schema,
   requiresApproval: true,
 

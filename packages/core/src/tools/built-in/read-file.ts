@@ -14,11 +14,18 @@ const schema = z.object({
 
 export const readFileTool: ToolDef<z.infer<typeof schema>> = {
   name: "read_file",
-  description: `Read the contents of a file.
-Returns the file content with line numbers prefixed as "LINE_NUM|CONTENT".
-For large files, use start_line and end_line to read specific sections.
-Binary files return metadata only (size, type).
-Maximum: ${MAX_FILE_SIZE / 1024}KB or ${MAX_LINES} lines per read.`,
+  description: `Read file contents with optional line range. Output format: "LINE_NUM|CONTENT".
+
+When to use:
+- After codebase_search or search_files: use path and start_line/end_line from results to load only the relevant section (saves context).
+- Reading config, README, or known paths.
+- Inspecting implementation before editing.
+
+When NOT to use:
+- Searching content: use codebase_search or search_files first.
+- Listing directory: use list_files.
+
+Limits: ${MAX_FILE_SIZE / 1024}KB or ${MAX_LINES} lines per read. Large files without start_line/end_line return head+tail. Binary files return metadata only.`,
   parameters: schema,
   readOnly: true,
 

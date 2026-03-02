@@ -1,6 +1,6 @@
 import type { Mode, PermissionAction, ModeConfig } from "../types.js"
 
-export type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "mcp" | "skills" | "agents" | "always"
+export type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit"
 
 /**
  * Core built-in tool groups per mode.
@@ -8,10 +8,9 @@ export type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "m
  * Classifier only applies to MCP/custom tools when count exceeds threshold.
  */
 export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
-  agent: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents"],
-  plan:  ["always", "read", "write", "search", "skills"],   // write allowed but restricted to docs
-  debug: ["always", "read", "write", "execute", "search", "skills"],
-  ask:   ["always", "read", "search"],
+  agent: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents", "context"],
+  plan:  ["always", "read", "write", "search", "skills", "context", "plan_exit"],
+  ask:   ["always", "read", "search", "context"],
 }
 
 /**
@@ -20,10 +19,9 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
  * Ask mode is fully read-only.
  */
 export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
-  agent: [],
+  agent: ["plan_exit"],
   plan:  ["execute_command", "browser_action"],
-  debug: [],
-  ask:   ["write_to_file", "replace_in_file", "apply_patch", "execute_command", "browser_action", "spawn_agent", "create_rule"],
+  ask:   ["write_to_file", "replace_in_file", "apply_patch", "execute_command", "browser_action", "spawn_agent", "create_rule", "plan_exit"],
 }
 
 /**
@@ -52,6 +50,8 @@ export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   mcp:     [], // populated dynamically from MCP registry
   skills:  ["use_skill"],
   agents:  ["spawn_agent"],
+  context: ["condense", "summarize_task"],
+  plan_exit: ["plan_exit"],
 }
 
 /**
@@ -72,6 +72,8 @@ export const READ_ONLY_TOOLS = new Set([
   "web_fetch",
   "web_search",
   "use_skill",
+  "condense",
+  "summarize_task",
 ])
 
 /**
@@ -112,7 +114,6 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
   const defaults: Record<Mode, PermissionAction[]> = {
     agent: ["read"],
     plan:  ["read"],
-    debug: ["read"],
     ask:   ["read"],
   }
   const configured = modeConfig?.autoApprove ?? defaults[mode]
@@ -125,6 +126,5 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
 export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   agent: "AGENT mode: full access to read/write files, run commands, search codebase, browser, MCP, and spawn sub-agents. Complete tasks autonomously end-to-end.",
   plan:  "PLAN mode: read-only access + codebase search. MUST NOT modify source code. Write plan files to .nexus/plans/ directory only. When plan is complete, call attempt_completion.",
-  debug: "DEBUG mode: full access like agent mode, but focused on finding and fixing bugs. Use systematic diagnosis: reproduce → isolate → root cause → minimal fix → verify.",
   ask:   "ASK mode: read-only. Answer questions, explain code, analyze implementations. MUST NOT modify any files or run commands.",
 }

@@ -19,6 +19,7 @@ import type {
 } from "../types.js"
 import type { LLMStreamEvent, LLMMessage, LLMToolDef } from "../provider/types.js"
 import { buildSystemPrompt, type PromptContext } from "./prompts/components/index.js"
+import { getInitialProjectContext } from "./prompts/initial-context.js"
 import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN } from "./modes.js"
 import { classifyTools, classifySkills } from "./classifier.js"
 import { estimateTokens } from "../context/condense.js"
@@ -27,11 +28,11 @@ import type { SessionCompaction } from "../session/compaction.js"
 import * as path from "node:path"
 
 const DOOM_LOOP_THRESHOLD = 3
+/** OpenCode-style: generous tool budgets so "study codebase" and multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
-  ask: 24,
-  plan: 40,
-  agent: 120,
-  debug: 120,
+  ask: 80,
+  plan: 80,
+  agent: 200,
 }
 
 export interface AgentLoopOptions {
@@ -47,6 +48,8 @@ export interface AgentLoopOptions {
   compaction: SessionCompaction
   signal: AbortSignal
   gitBranch?: string
+  /** When set, commit on attempt_completion and optionally double-check (Cline-style). */
+  checkpoint?: { commit(description?: string): Promise<string> }
 }
 
 /**
@@ -106,10 +109,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     config,
     indexer,
     signal,
+    compactSession: async () => {
+      host.emit({ type: "compaction_start" })
+      await handleCompaction(session, activeClient, config, host, compaction, signal)
+      host.emit({ type: "compaction_end" })
+    },
   }
 
   const autoApproveActions = getAutoApproveActions(mode, config.modes[mode])
   const mentionsContext = await resolveMentionsContext(session, host)
+  const initialProjectContext = await getInitialProjectContext(host.cwd)
   /**
    * Keep tracking across outer iterations; otherwise one invalid tool call per turn
    * can bypass the threshold forever.
@@ -118,21 +127,38 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const MAX_CONSECUTIVE_INVALID = 3
   let loopIterations = 0
   const baseMaxIterationsByMode: Record<Mode, number> = {
-    ask: 10,
-    plan: 16,
-    agent: 32,
-    debug: 32,
+    ask: 24,
+    plan: 24,
+    agent: 48,
   }
-  const maxIterations = config.maxMode.enabled
-    ? Math.floor(baseMaxIterationsByMode[mode] * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2))))
-    : baseMaxIterationsByMode[mode]
+  const toolBudgetFromConfig = config.agentLoop?.toolCallBudget
+  const iterFromConfig = config.agentLoop?.maxIterations
+  const effectiveToolBudget: Record<Mode, number> = {
+    ask: toolBudgetFromConfig?.ask ?? BASE_TOOL_CALL_BUDGET_BY_MODE.ask,
+    plan: toolBudgetFromConfig?.plan ?? BASE_TOOL_CALL_BUDGET_BY_MODE.plan,
+    agent: toolBudgetFromConfig?.agent ?? BASE_TOOL_CALL_BUDGET_BY_MODE.agent,
+  }
+  const effectiveMaxIterations: Record<Mode, number> = {
+    ask: iterFromConfig?.ask ?? baseMaxIterationsByMode.ask,
+    plan: iterFromConfig?.plan ?? baseMaxIterationsByMode.plan,
+    agent: iterFromConfig?.agent ?? baseMaxIterationsByMode.agent,
+  }
   const toolBudgetMultiplier = config.maxMode.enabled
     ? Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2)))
     : 1
-  const toolCallBudget = Math.max(8, Math.floor(BASE_TOOL_CALL_BUDGET_BY_MODE[mode] * toolBudgetMultiplier))
+  const maxIterations = config.maxMode.enabled
+    ? Math.floor((effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode]) * Math.max(1, Math.min(3, Number(config.maxMode.tokenBudgetMultiplier || 2))))
+    : (effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode])
+  const toolCallBudget = Math.max(8, Math.floor((effectiveToolBudget[mode] ?? BASE_TOOL_CALL_BUDGET_BY_MODE[mode]) * toolBudgetMultiplier))
   let executedToolCallsTotal = 0
   let forceFinalAnswerNext = false
   let lastAssistantMessageId = ""
+  const doubleCheckCompletion = config.checkpoint?.doubleCheckCompletion === true
+  const completionState = {
+    doubleCheckEnabled: doubleCheckCompletion,
+    pending: { current: false },
+    checkpoint: opts.checkpoint,
+  }
   const emitContextUsage = () => {
     const limitTokens = getContextLimit(activeClient.modelId)
     const usedTokens = session.getTokenEstimate()
@@ -144,16 +170,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   while (!signal.aborted) {
     loopIterations++
     if (loopIterations > maxIterations) {
-      host.emit({
-        type: "error",
-        error: `Agent loop stopped after ${maxIterations} iterations in ${mode} mode (safety limit).`,
-        fatal: true,
-      })
-      break
+      if (!forceFinalAnswerNext) {
+        host.emit({
+          type: "error",
+          error: `Agent loop stopped after ${maxIterations} iterations in ${mode} mode (safety limit).`,
+          fatal: true,
+        })
+        break
+      }
     }
-    const isFinalIteration = forceFinalAnswerNext || loopIterations === maxIterations
+    const isFinalIteration = forceFinalAnswerNext || loopIterations >= maxIterations
 
     // 3. Build system prompt (cache-aware)
+    const diagnostics = host.getProblems ? await host.getProblems() : []
+    const limitTokens = getContextLimit(activeClient.modelId)
+    const usedTokens = session.getTokenEstimate()
+    const contextPercent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
     const promptCtx: PromptContext = {
       mode,
       maxMode: config.maxMode.enabled,
@@ -168,11 +200,24 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       todoList: session.getTodo(),
       compactionSummary: getCompactionSummary(session),
       mentionsContext,
+      initialProjectContext,
+      diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
+      contextUsedTokens: usedTokens,
+      contextLimitTokens: limitTokens > 0 ? limitTokens : undefined,
+      contextPercent: limitTokens > 0 ? contextPercent : undefined,
     }
 
     const { blocks, cacheableCount } = buildSystemPrompt(promptCtx)
     if (isFinalIteration) {
-      blocks.push("FINAL ITERATION: do not call tools. Return a concise final answer from gathered context.")
+      blocks.push(
+        "CRITICAL — MAXIMUM STEPS REACHED\n\n" +
+        "The maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.\n\n" +
+        "STRICT REQUIREMENTS:\n" +
+        "1. Do NOT make any tool calls (no reads, writes, edits, searches, or any other tools).\n" +
+        "2. MUST provide a text response summarizing work done so far.\n" +
+        "3. Include: what was accomplished, any remaining tasks, and what should be done next.\n" +
+        "Any attempt to use tools is a critical violation. Respond with text ONLY."
+      )
     }
     const systemPrompt = blocks.join("\n\n---\n\n")
 
@@ -190,8 +235,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         role: "user",
         content: "Provide the final answer now in plain text only. Do not emit tool-call markup, XML, or JSON function calls.",
       })
+    } else if (loopIterations > 1 && messages.length > 0 && messages[messages.length - 1]?.role === "tool") {
+      // Previous turn had tool calls but no text reply — prompt for a summary
+      messages.push({
+        role: "user",
+        content: "Based on the tool results above, provide a concise text response to the user (summarize what you found or did).",
+      })
     }
-
     // 6. Start streaming
     const newMessageId = session.addMessage({
       role: "assistant",
@@ -224,7 +274,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       if (pendingReads.length === 0) return
 
       const tasks = pendingReads.map(tc =>
-        executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId)
+        executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState)
           .catch(err => ({ success: false, output: `Error: ${err.message}` }))
       )
 
@@ -323,7 +373,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               timeStart: Date.now(),
             })
 
-            host.emit({ type: "tool_start", tool: toolName, partId, messageId: newMessageId })
+            host.emit({ type: "tool_start", tool: toolName, partId, messageId: newMessageId, input: toolInput })
 
             // Inform host of available tools list so UI/user knows context
             // Check task_progress parameter
@@ -360,7 +410,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
               const result = await executeToolCall(
                 toolCallId, toolName, toolInput,
-                resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId
+                resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState
               )
 
               session.updateToolPart(newMessageId, partId, {
@@ -375,12 +425,15 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 partId,
                 messageId: newMessageId,
                 success: result.success,
+                output: result.output,
+                error: result.success ? undefined : result.output,
+                compacted: (result as { compacted?: boolean }).compacted,
               })
 
               lastToolName = toolName
               executedToolThisIteration = true
               executedToolCallsTotal++
-              if (toolName === "attempt_completion") {
+              if (toolName === "attempt_completion" || toolName === "plan_exit") {
                 attemptedCompletionThisIteration = true
               }
             }
@@ -461,7 +514,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             input: call.toolInput,
             timeStart: Date.now(),
           })
-          host.emit({ type: "tool_start", tool: call.toolName, partId, messageId: newMessageId })
+          host.emit({ type: "tool_start", tool: call.toolName, partId, messageId: newMessageId, input: call.toolInput })
 
           if (call.toolInput["task_progress"] && typeof call.toolInput["task_progress"] === "string") {
             session.updateTodo(call.toolInput["task_progress"])
@@ -482,7 +535,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             config,
             host,
             session,
-            newMessageId
+            newMessageId,
+            completionState
           )
 
           session.updateToolPart(newMessageId, partId, {
@@ -497,12 +551,15 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             partId,
             messageId: newMessageId,
             success: result.success,
+            output: result.output,
+            error: result.success ? undefined : result.output,
+            compacted: (result as { compacted?: boolean }).compacted,
           })
 
           lastToolName = call.toolName
           executedToolThisIteration = true
           executedToolCallsTotal++
-          if (call.toolName === "attempt_completion") {
+          if (call.toolName === "attempt_completion" || call.toolName === "plan_exit") {
             attemptedCompletionThisIteration = true
           }
         }
@@ -522,7 +579,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
 
     // Check if done
-    if (attemptedCompletionThisIteration || lastToolName === "attempt_completion") break
+    if (attemptedCompletionThisIteration || lastToolName === "attempt_completion" || lastToolName === "plan_exit") break
     if (finishReason === "stop" && !executedToolThisIteration) break
     if (signal.aborted) break
 
@@ -614,7 +671,12 @@ async function executeToolCall(
   config: NexusConfig,
   host: IHost,
   session: ISession,
-  messageId: string
+  messageId: string,
+  completionState?: {
+    doubleCheckEnabled: boolean
+    pending: { current: boolean }
+    checkpoint?: { commit(description?: string): Promise<string> }
+  }
 ): Promise<{ success: boolean; output: string }> {
   const tool = tools.find(t => t.name === toolName)
   if (!tool) {
@@ -622,6 +684,20 @@ async function executeToolCall(
     return {
       success: false,
       output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use execute_command. To present final results, use attempt_completion.`,
+    }
+  }
+
+  // Cline-style double-check: first attempt_completion is rejected; model must re-verify and call again
+  if (
+    toolName === "attempt_completion" &&
+    completionState?.doubleCheckEnabled &&
+    !completionState.pending.current
+  ) {
+    completionState.pending.current = true
+    return {
+      success: false,
+      output:
+        "Before completing, re-verify your work against the original task. Check that: (1) All requested changes were made, (2) No steps were skipped, (3) Edge cases are addressed, (4) The solution matches what was asked. If everything checks out, call attempt_completion again with your final result.",
     }
   }
 
@@ -706,6 +782,19 @@ async function executeToolCall(
   // Execute
   try {
     const result = await tool.execute(validatedArgs as Record<string, unknown>, ctx)
+
+    // On successful attempt_completion: save checkpoint (Cline-style) and clear double-check state
+    if (toolName === "attempt_completion" && result.success && completionState) {
+      completionState.pending.current = false
+      if (completionState.checkpoint) {
+        try {
+          const hash = await completionState.checkpoint.commit("attempt_completion")
+          result.output += `\n\nCheckpoint saved: ${hash}`
+        } catch (e) {
+          result.output += `\n\nCheckpoint save failed: ${(e as Error).message}`
+        }
+      }
+    }
 
     // Keep code index fresh after successful file edits in both CLI and VSCode hosts.
     if (result.success && ctx.indexer && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {

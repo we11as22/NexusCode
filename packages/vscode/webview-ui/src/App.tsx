@@ -1,15 +1,18 @@
 import React, { useEffect, useMemo, useState } from "react"
 import { useChatStore, type NexusConfigState } from "./stores/chat.js"
+import type { MessagePart } from "./stores/chat.js"
 import { MessageList } from "./components/MessageList.js"
 import { InputBar } from "./components/InputBar.js"
 import { ModeSelector } from "./components/ModeSelector.js"
+import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
+import { ThoughtBlock } from "./components/ThoughtBlock.js"
 import { postMessage } from "./vscode.js"
 import type { ExtensionMessage } from "./types/messages.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
   "p-1.5 rounded-md text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-const MODEL_PROVIDER_OPTIONS = ["anthropic", "openai", "google", "openai-compatible", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]
+const MODEL_PROVIDER_OPTIONS = ["anthropic", "openai", "google", "openai-compatible", "openrouter", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]
 const EMB_PROVIDER_OPTIONS = ["openai", "openai-compatible", "ollama", "local"]
 
 export function App() {
@@ -32,6 +35,9 @@ export function App() {
           break
         case "sessionList":
           store.handleSessionList(msg.sessions)
+          break
+        case "sessionListLoading":
+          store.handleSessionListLoading(msg.loading)
           break
         case "configLoaded":
           store.handleConfigLoaded(msg.config)
@@ -135,46 +141,74 @@ function ChatView() {
         ? "text-yellow-300"
         : "text-emerald-300"
 
+  const lastReasoningText = useMemo(() => {
+    const msgs = store.messages
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i]
+      if (m?.role !== "assistant") continue
+      const parts = Array.isArray(m.content) ? (m.content as MessagePart[]) : []
+      for (let j = parts.length - 1; j >= 0; j--) {
+        const p = parts[j]
+        if (p?.type === "reasoning") return (p as { text: string }).text
+      }
+    }
+    return ""
+  }, [store.messages])
+
+  const todoHeader = useMemo(() => {
+    const user = [...store.messages].reverse().find((m) => m.role === "user")
+    const content = user?.content
+    if (typeof content === "string") return content.slice(0, 120)
+    if (Array.isArray(content)) {
+      const text = (content as MessagePart[]).filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("")
+      return text.slice(0, 120)
+    }
+    return ""
+  }, [store.messages])
+
+  const referencedFiles = useMemo(() => {
+    const paths = new Set<string>()
+    for (const msg of store.messages) {
+      if (!Array.isArray(msg.content)) continue
+      for (const p of msg.content as MessagePart[]) {
+        if (p.type === "tool" && (p as { input?: Record<string, unknown> }).input?.path) {
+          paths.add(String((p as { input: { path?: string } }).input.path))
+        }
+      }
+    }
+    return Array.from(paths)
+  }, [store.messages])
+
   return (
     <>
-      <div className="flex-shrink-0 border-b border-[var(--vscode-panel-border)]">
-        <ModeSelector />
-      </div>
-
       {store.isCompacting && (
         <div className="flex-shrink-0 px-3 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-badge-background)] text-[10px] text-[var(--vscode-descriptionForeground)]">
           Compacting conversation...
         </div>
       )}
 
-      {store.todo && (
-        <details className="flex-shrink-0 border-b border-[var(--vscode-panel-border)] group">
-          <summary className="px-3 py-1.5 cursor-pointer list-none flex items-center justify-between text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] text-xs font-medium select-none">
-            <span>Progress</span>
-            <span className="text-[10px] group-open:rotate-180 transition-transform">▼</span>
-          </summary>
-          <div className="px-3 pb-2 pt-0 text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap font-mono leading-relaxed border-t border-[var(--vscode-panel-border)]">
-            {store.todo.split("\n").map((line, i) => {
-              const isDone = line.trim().startsWith("- [x]")
-              const isPending = line.trim().startsWith("- [ ]")
-              return (
-                <div
-                  key={i}
-                  className={
-                    isDone
-                      ? "text-[var(--vscode-descriptionForeground)] line-through"
-                      : isPending
-                        ? ""
-                        : "font-medium"
-                  }
-                >
-                  {line}
-                </div>
-              )
-            })}
-          </div>
-        </details>
+      {store.isCompacting === false && store.messages.some((m) => m.summary) && (
+        <div className="flex-shrink-0 px-3 py-1.5 border-b border-[var(--vscode-panel-border)] text-[10px] text-[var(--vscode-descriptionForeground)]">
+          Summarized Chat context summarized.
+        </div>
       )}
+
+      {store.awaitingApproval && (
+        <div className="nexus-approval-banner">
+          <span className="nexus-approval-icon">⚠</span>
+          <span>Action awaiting your approval — check the VS Code notification (Allow / Allow Always / Deny).</span>
+        </div>
+      )}
+
+      {store.todo && (
+        <ProgressTodoBlock todo={store.todo} isRunning={store.isRunning} header={todoHeader} />
+      )}
+
+      <ThoughtBlock
+        reasoningText={lastReasoningText}
+        startTime={store.reasoningStartTime}
+        isRunning={store.isRunning}
+      />
 
       <div className="chat-view">
         {store.subagents.length > 0 && <SubagentStrip />}
@@ -204,20 +238,78 @@ function ChatView() {
         </div>
 
         <div className="chat-input">
-          <InputBar />
+          <ChatBottomBar referencedFiles={referencedFiles} />
         </div>
       </div>
     </>
   )
 }
 
+function ChatBottomBar({ referencedFiles }: { referencedFiles: string[] }) {
+  const store = useChatStore()
+  const [filesOpen, setFilesOpen] = useState(false)
+  const fileCount = referencedFiles.length
+
+  return (
+    <div className="chat-bottom-bar">
+      <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
+        {fileCount > 0 && (
+          <details
+            open={filesOpen}
+            onToggle={(e) => setFilesOpen((e.target as HTMLDetailsElement).open)}
+            className="flex-shrink-0 relative"
+          >
+            <summary className="list-none cursor-pointer text-[10px] text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] py-1 px-1.5 rounded hover:bg-[var(--vscode-list-hoverBackground)]">
+              &gt; {fileCount} Files
+            </summary>
+            <div className="absolute bottom-full left-0 mb-1 max-h-48 overflow-y-auto rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] shadow-lg py-1 min-w-[200px] z-10">
+              {referencedFiles.slice(0, 50).map((path, i) => (
+                <div key={i} className="px-2 py-1 text-[10px] font-mono truncate text-[var(--vscode-foreground)]">
+                  {path}
+                </div>
+              ))}
+              {referencedFiles.length > 50 && (
+                <div className="px-2 py-1 text-[10px] text-[var(--vscode-descriptionForeground)]">
+                  +{referencedFiles.length - 50} more
+                </div>
+              )}
+            </div>
+          </details>
+        )}
+        <div className="hidden sm:flex items-center gap-1 flex-shrink-0">
+          <ModeSelector />
+        </div>
+      </div>
+      <div className="flex-1 min-w-0 flex items-center gap-2">
+        <InputBar />
+        <button
+          type="button"
+          onClick={() => store.setView("settings")}
+          title="Settings"
+          className={BTN_CLASS}
+        >
+          <GearIcon className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function SessionsView() {
-  const { sessions, sessionId, switchSession } = useChatStore()
+  const { sessions, sessionId, switchSession, sessionsLoading } = useChatStore()
 
   return (
     <div className="nexus-pane">
       <div className="nexus-pane-title">Session History</div>
-      {sessions.length === 0 && (
+      {sessionsLoading && (
+        <div className="nexus-loading-dots flex items-center gap-2 py-4 text-[var(--vscode-descriptionForeground)] text-sm">
+          <span className="nexus-dot" />
+          <span className="nexus-dot" />
+          <span className="nexus-dot" />
+          <span className="ml-1">Loading...</span>
+        </div>
+      )}
+      {!sessionsLoading && sessions.length === 0 && (
         <div className="nexus-muted text-xs">No saved sessions yet.</div>
       )}
 
@@ -310,16 +402,19 @@ interface SettingsDraft {
   claudeMdPath: string
   agentInstructions: string
   planInstructions: string
-  debugInstructions: string
   askInstructions: string
   profilesJson: string
 }
 
 function SettingsView() {
-  const { config, provider, model, saveConfig } = useChatStore()
+  const { config, provider, model, saveConfig, serverUrl } = useChatStore()
   const [draft, setDraft] = useState<SettingsDraft | null>(null)
+  const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
   const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles">("llm")
 
+  useEffect(() => {
+    setServerUrlLocal(serverUrl)
+  }, [serverUrl])
   useEffect(() => {
     if (!config) return
     setDraft(toDraft(config, provider, model))
@@ -345,6 +440,22 @@ function SettingsView() {
   return (
     <div className="nexus-pane">
       <div className="nexus-pane-title">Agent Settings</div>
+
+      <section className="nexus-section mt-2">
+        <h3 className="nexus-section-title">NexusCode Server</h3>
+        <p className="nexus-muted text-[10px] mb-2">
+          When set, the extension uses this server for sessions and agent runs (DB-backed, paginated). Leave empty to run in-process.
+        </p>
+        <SettingsInput
+          label="Server URL (e.g. http://127.0.0.1:4097)"
+          value={serverUrlLocal}
+          onChange={(v) => {
+            setServerUrlLocal(v)
+            postMessage({ type: "setServerUrl", url: v })
+          }}
+        />
+      </section>
+
       <div className="flex flex-wrap gap-1.5 mt-2 mb-2">
         <TabPill id="llm" tab={tab} setTab={setTab} label="LLM" />
         <TabPill id="embeddings" tab={tab} setTab={setTab} label="Embeddings" />
@@ -517,12 +628,6 @@ function SettingsView() {
           rows={3}
         />
         <SettingsTextarea
-          label="Debug custom instructions"
-          value={draft.debugInstructions}
-          onChange={(v) => setDraft({ ...draft, debugInstructions: v })}
-          rows={3}
-        />
-        <SettingsTextarea
           label="Ask custom instructions"
           value={draft.askInstructions}
           onChange={(v) => setDraft({ ...draft, askInstructions: v })}
@@ -560,6 +665,9 @@ function SettingsView() {
         >
           Reset
         </button>
+        <span className="text-[10px] text-[var(--vscode-descriptionForeground)] ml-2">
+          Saved to .nexus/nexus.yaml in project root.
+        </span>
       </div>
     </div>
   )
@@ -589,11 +697,14 @@ function TabPill({
 }
 
 function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackModel: string): SettingsDraft {
+  const provider = config.model.provider ?? fallbackProvider
+  const baseUrl = config.model.baseUrl ?? ""
+  const isOpenRouter = baseUrl.includes("openrouter.ai")
   return {
-    modelProvider: config.model.provider ?? fallbackProvider,
+    modelProvider: isOpenRouter ? "openrouter" : provider,
     modelId: config.model.id ?? fallbackModel,
     modelApiKey: config.model.apiKey ?? "",
-    modelBaseUrl: config.model.baseUrl ?? "",
+    modelBaseUrl: isOpenRouter && baseUrl ? baseUrl : (config.model.baseUrl ?? ""),
     modelTemperature: toInputNumber(config.model.temperature),
     maxEnabled: Boolean(config.maxMode.enabled),
     maxTokenBudgetMultiplier: toInputNumber(config.maxMode.tokenBudgetMultiplier ?? 2),
@@ -621,7 +732,6 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     claudeMdPath: (config.rules?.files ?? []).find((f) => /CLAUDE\.md$/i.test(f)) ?? "CLAUDE.md",
     agentInstructions: config.modes?.agent?.customInstructions ?? "",
     planInstructions: config.modes?.plan?.customInstructions ?? "",
-    debugInstructions: config.modes?.debug?.customInstructions ?? "",
     askInstructions: config.modes?.ask?.customInstructions ?? "",
     profilesJson: JSON.stringify(config.profiles ?? {}, null, 2),
   }
@@ -631,9 +741,10 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
   const modelProviderRaw = draft.modelProvider.trim() || "anthropic"
   const modelProvider = modelProviderRaw === "openrouter" ? "openai-compatible" : modelProviderRaw
   const modelBaseUrl = draft.modelBaseUrl.trim()
-  const normalizedBaseUrl = modelProviderRaw === "openrouter"
-    ? (modelBaseUrl || "https://openrouter.ai/api/v1")
-    : (modelBaseUrl || undefined)
+  const normalizedBaseUrl =
+    modelProviderRaw === "openrouter"
+      ? (modelBaseUrl || "https://openrouter.ai/api/v1")
+      : (modelBaseUrl || undefined)
   const modelTemperature = parseNumber(draft.modelTemperature)
   const maxTokenBudgetMultiplier = parseMaxMultiplier(draft.maxTokenBudgetMultiplier)
   const embDimensions = parseIntOrUndefined(draft.embDimensions)
@@ -701,7 +812,6 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
     modes: {
       agent: { customInstructions: draft.agentInstructions.trim() || undefined },
       plan: { customInstructions: draft.planInstructions.trim() || undefined },
-      debug: { customInstructions: draft.debugInstructions.trim() || undefined },
       ask: { customInstructions: draft.askInstructions.trim() || undefined },
     },
     profiles: parsedProfiles,

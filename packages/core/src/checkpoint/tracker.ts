@@ -12,7 +12,7 @@ const CHECKPOINT_WARN_MS = 7_000
  * to snapshot the workspace state without interfering with the project's git.
  */
 export class CheckpointTracker {
-  private git: SimpleGit
+  private git: SimpleGit | null = null
   private readonly shadowRoot: string
   private initialized = false
   private entries: CheckpointEntry[] = []
@@ -22,7 +22,12 @@ export class CheckpointTracker {
     private readonly workspaceRoot: string
   ) {
     this.shadowRoot = path.join(os.homedir(), ".nexus", "checkpoints", taskId)
-    this.git = simpleGit(this.shadowRoot)
+  }
+
+  /** Lazy git instance — only after init() has created shadowRoot (simple-git requires dir to exist). */
+  private getGit(): SimpleGit {
+    if (!this.git) throw new Error("CheckpointTracker not initialized")
+    return this.git
   }
 
   /**
@@ -55,6 +60,7 @@ export class CheckpointTracker {
 
   private async initInternal(): Promise<void> {
     await fs.mkdir(this.shadowRoot, { recursive: true })
+    this.git = simpleGit(this.shadowRoot)
 
     // Init git repo if not exists
     try {
@@ -65,13 +71,18 @@ export class CheckpointTracker {
       await this.git.addConfig("user.name", "NexusCode")
     }
 
-    // Copy workspace files to shadow root
-    await this.syncWorkspace()
+    // Copy workspace files to shadow root (skip if workspace does not exist)
+    try {
+      await fs.access(this.workspaceRoot)
+      await this.syncWorkspace()
+    } catch {
+      // Workspace dir does not exist — leave shadow empty, no checkpoint copy
+    }
 
     // Initial commit
-    await this.git.add(".")
+    await this.getGit().add(".")
     try {
-      await this.git.commit("initial checkpoint", { "--allow-empty": null })
+      await this.getGit().commit("initial checkpoint", { "--allow-empty": null })
     } catch {}
   }
 
@@ -81,15 +92,20 @@ export class CheckpointTracker {
     }
     if (!this.initialized) throw new Error("Checkpoint not initialized")
 
-    await this.syncWorkspace()
-    await this.git.add(".")
+    try {
+      await fs.access(this.workspaceRoot)
+      await this.syncWorkspace()
+    } catch {
+      // Workspace missing — skip copy, commit current shadow state
+    }
+    await this.getGit().add(".")
 
     let hash: string
     try {
-      const result = await this.git.commit(description ?? `checkpoint ${Date.now()}`, { "--allow-empty": null })
+      const result = await this.getGit().commit(description ?? `checkpoint ${Date.now()}`, { "--allow-empty": null })
       hash = result.commit
     } catch {
-      hash = await this.git.revparse(["HEAD"])
+      hash = await this.getGit().revparse(["HEAD"])
     }
 
     this.entries.push({ hash: hash.trim(), ts: Date.now(), description, messageId: "" })
@@ -100,7 +116,7 @@ export class CheckpointTracker {
     if (!this.initialized) throw new Error("Checkpoint not initialized")
 
     // Restore files from checkpoint
-    await this.git.checkout([hash, "--", "."])
+    await this.getGit().checkout([hash, "--", "."])
 
     // Copy restored files back to workspace
     await this.restoreToWorkspace()
@@ -110,7 +126,7 @@ export class CheckpointTracker {
     if (!this.initialized) return []
 
     try {
-      const diff = await this.git.diff([
+      const diff = await this.getGit().diff([
         "--name-status",
         fromHash,
         toHash ?? "HEAD",
@@ -126,11 +142,11 @@ export class CheckpointTracker {
         let after = ""
 
         try {
-          before = await this.git.show([`${fromHash}:${filePath}`]).catch(() => "")
+          before = await this.getGit().show([`${fromHash}:${filePath}`]).catch(() => "")
         } catch {}
 
         try {
-          after = await this.git.show([`${toHash ?? "HEAD"}:${filePath}`]).catch(() => "")
+          after = await this.getGit().show([`${toHash ?? "HEAD"}:${filePath}`]).catch(() => "")
         } catch {}
 
         files.push({

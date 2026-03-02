@@ -105,19 +105,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
-        debug: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
         ask: z.ZodOptional<z.ZodObject<{
             autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
             systemPrompt: z.ZodOptional<z.ZodString>;
@@ -170,19 +157,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
-        debug: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
         ask: z.ZodOptional<z.ZodObject<{
             autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
             systemPrompt: z.ZodOptional<z.ZodString>;
@@ -223,19 +197,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             customInstructions?: string | undefined;
         }>>;
         plan: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        debug: z.ZodOptional<z.ZodObject<{
             autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
             systemPrompt: z.ZodOptional<z.ZodString>;
             customInstructions: z.ZodOptional<z.ZodString>;
@@ -380,14 +341,17 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         timeoutMs: z.ZodDefault<z.ZodNumber>;
         createOnWrite: z.ZodDefault<z.ZodBoolean>;
+        doubleCheckCompletion: z.ZodDefault<z.ZodBoolean>;
     }, "strip", z.ZodTypeAny, {
         enabled: boolean;
         timeoutMs: number;
         createOnWrite: boolean;
+        doubleCheckCompletion: boolean;
     }, {
         enabled?: boolean | undefined;
         timeoutMs?: number | undefined;
         createOnWrite?: boolean | undefined;
+        doubleCheckCompletion?: boolean | undefined;
     }>>;
     mcp: z.ZodDefault<z.ZodObject<{
         servers: z.ZodDefault<z.ZodArray<z.ZodObject<{
@@ -473,6 +437,57 @@ declare const NexusConfigSchema: z.ZodObject<{
     }, {
         maxParallel?: number | undefined;
     }>>;
+    /** Optional overrides for agent loop limits (OpenCode-style: allow enough tools/iterations to finish). */
+    agentLoop: z.ZodDefault<z.ZodObject<{
+        toolCallBudget: z.ZodOptional<z.ZodObject<{
+            ask: z.ZodOptional<z.ZodNumber>;
+            plan: z.ZodOptional<z.ZodNumber>;
+            agent: z.ZodOptional<z.ZodNumber>;
+        }, "strip", z.ZodTypeAny, {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        }, {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        }>>;
+        maxIterations: z.ZodOptional<z.ZodObject<{
+            ask: z.ZodOptional<z.ZodNumber>;
+            plan: z.ZodOptional<z.ZodNumber>;
+            agent: z.ZodOptional<z.ZodNumber>;
+        }, "strip", z.ZodTypeAny, {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        }, {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        }>>;
+    }, "strip", z.ZodTypeAny, {
+        toolCallBudget?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        } | undefined;
+        maxIterations?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        } | undefined;
+    }, {
+        toolCallBudget?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        } | undefined;
+        maxIterations?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        } | undefined;
+    }>>;
     rules: z.ZodDefault<z.ZodObject<{
         files: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
     }, "strip", z.ZodTypeAny, {
@@ -548,11 +563,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         } | undefined;
-        debug?: {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        } | undefined;
         ask?: {
             autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
             systemPrompt?: string | undefined;
@@ -604,6 +614,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled: boolean;
         timeoutMs: number;
         createOnWrite: boolean;
+        doubleCheckCompletion: boolean;
     };
     skills: string[];
     tools: {
@@ -622,6 +633,18 @@ declare const NexusConfigSchema: z.ZodObject<{
     };
     parallelAgents: {
         maxParallel: number;
+    };
+    agentLoop: {
+        toolCallBudget?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        } | undefined;
+        maxIterations?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        } | undefined;
     };
     profiles: Record<string, {
         provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
@@ -713,19 +736,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
-        debug: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
         ask: z.ZodOptional<z.ZodObject<{
             autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
             systemPrompt: z.ZodOptional<z.ZodString>;
@@ -791,6 +801,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled?: boolean | undefined;
         timeoutMs?: number | undefined;
         createOnWrite?: boolean | undefined;
+        doubleCheckCompletion?: boolean | undefined;
     } | undefined;
     skills?: string[] | undefined;
     tools?: {
@@ -810,6 +821,18 @@ declare const NexusConfigSchema: z.ZodObject<{
     parallelAgents?: {
         maxParallel?: number | undefined;
     } | undefined;
+    agentLoop?: {
+        toolCallBudget?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        } | undefined;
+        maxIterations?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+        } | undefined;
+    } | undefined;
     profiles?: Record<string, {
         provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         id?: string | undefined;
@@ -823,7 +846,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     }> | undefined;
 }>;
 
-type Mode = "agent" | "plan" | "debug" | "ask";
+type Mode = "agent" | "plan" | "ask";
 type PermissionAction = "read" | "write" | "execute" | "mcp" | "browser" | "search";
 interface PermissionResult {
     approved: boolean;
@@ -861,6 +884,8 @@ interface ToolContext {
     config: NexusConfig;
     indexer?: IIndexer;
     signal: AbortSignal;
+    /** Optional: trigger context compaction (condense/summarize_task tools). */
+    compactSession?: () => Promise<void>;
 }
 interface ApprovalAction {
     type: "write" | "execute" | "mcp" | "browser" | "read" | "doom_loop";
@@ -885,6 +910,12 @@ interface IHost {
     emit(event: AgentEvent): void;
     resolveAtMention?(mention: string): Promise<string | null>;
     getProblems?(): Promise<DiagnosticItem[]>;
+    /** Restore workspace to a checkpoint (Cline-style). Optional if host has no checkpoint. */
+    restoreCheckpoint?(hash: string): Promise<void>;
+    /** List checkpoint entries for UI. */
+    getCheckpointEntries?(): Promise<CheckpointEntry[]>;
+    /** Get diff between two checkpoints for preview. */
+    getCheckpointDiff?(fromHash: string, toHash?: string): Promise<ChangedFile[]>;
 }
 interface DiagnosticItem {
     file: string;
@@ -959,6 +990,8 @@ interface IndexSearchOptions {
     limit?: number;
     kind?: SymbolKind;
     semantic?: boolean;
+    /** Scope search to paths under this prefix (relative to project root). Can be multiple. */
+    pathScope?: string | string[];
 }
 interface IndexSearchResult {
     path: string;
@@ -1001,12 +1034,16 @@ type AgentEvent = {
     tool: string;
     partId: string;
     messageId: string;
+    input?: Record<string, unknown>;
 } | {
     type: "tool_end";
     tool: string;
     partId: string;
     messageId: string;
     success: boolean;
+    output?: string;
+    error?: string;
+    compacted?: boolean;
 } | {
     type: "subagent_start";
     subagentId: string;
@@ -1103,7 +1140,6 @@ interface NexusConfig {
     modes: {
         agent?: ModeConfig;
         plan?: ModeConfig;
-        debug?: ModeConfig;
         ask?: ModeConfig;
         [key: string]: ModeConfig | undefined;
     };
@@ -1132,6 +1168,8 @@ interface NexusConfig {
         enabled: boolean;
         timeoutMs: number;
         createOnWrite: boolean;
+        /** When true, first attempt_completion is rejected; model must re-verify and call again (Cline-style). */
+        doubleCheckCompletion?: boolean;
     };
     mcp: {
         servers: McpServerConfig[];
@@ -1153,6 +1191,11 @@ interface NexusConfig {
     };
     parallelAgents: {
         maxParallel: number;
+    };
+    /** Optional overrides for agent loop limits (tool budget and max iterations per mode). */
+    agentLoop?: {
+        toolCallBudget?: Partial<Record<Mode, number>>;
+        maxIterations?: Partial<Record<Mode, number>>;
     };
     rules: {
         files: string[];
@@ -1369,6 +1412,10 @@ interface AgentLoopOptions {
     compaction: SessionCompaction;
     signal: AbortSignal;
     gitBranch?: string;
+    /** When set, commit on attempt_completion and optionally double-check (Cline-style). */
+    checkpoint?: {
+        commit(description?: string): Promise<string>;
+    };
 }
 /**
  * Main agent loop — runs until completion, abort, or doom loop.
@@ -1376,7 +1423,7 @@ interface AgentLoopOptions {
  */
 declare function runAgentLoop(opts: AgentLoopOptions): Promise<void>;
 
-type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "mcp" | "skills" | "agents" | "always";
+type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit";
 /**
  * Core built-in tool groups per mode.
  * These are ALWAYS active if the mode permits — no classifier applied.
@@ -1423,6 +1470,12 @@ interface PromptContext {
     gitBranch?: string;
     todoList?: string;
     diagnostics?: DiagnosticItem[];
+    /** Short project layout (top-level dirs and key files) at start */
+    initialProjectContext?: string;
+    /** Context window usage (shown at start of system info so model sees token budget) */
+    contextUsedTokens?: number;
+    contextLimitTokens?: number;
+    contextPercent?: number;
 }
 /**
  * Assemble the full system prompt from blocks.
@@ -1639,6 +1692,8 @@ declare class CheckpointTracker {
     private initialized;
     private entries;
     constructor(taskId: string, workspaceRoot: string);
+    /** Lazy git instance — only after init() has created shadowRoot (simple-git requires dir to exist). */
+    private getGit;
     /**
      * Initialize the shadow git repository.
      * Returns false if workspace is too large or git unavailable.

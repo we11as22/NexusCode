@@ -15,6 +15,7 @@ import {
 } from "@nexuscode/core"
 import { App } from "./tui/App.js"
 import { CliHost } from "./host.js"
+import { NexusServerClient } from "./server-client.js"
 
 const argv = await yargs(hideBin(process.argv))
   .usage("$0 [mode] [message...]")
@@ -52,6 +53,10 @@ const argv = await yargs(hideBin(process.argv))
     type: "string",
     describe: "Session ID to resume",
   })
+  .option("server", {
+    type: "string",
+    describe: "NexusCode server URL (e.g. http://127.0.0.1:4097); uses NEXUS_SERVER_URL env if set",
+  })
   .option("continue", {
     alias: "c",
     type: "boolean",
@@ -85,6 +90,7 @@ if (argv["nexus-version"]) {
 
 const cwd = argv.project ? path.resolve(argv.project) : process.cwd()
 const indexEnabledFlag = Boolean((argv as Record<string, unknown>)["index"])
+const serverUrl = (argv as Record<string, string>)["server"] || process.env.NEXUS_SERVER_URL || ""
 
 // Load config
 let config = await loadConfig(cwd)
@@ -131,18 +137,56 @@ const initialMessage = messageArgs.join(" ").trim() || undefined
 
 // Init session
 let session: Session
-if (argv.continue) {
-  const sessions = await listSessions(cwd)
-  const lastSession = sessions[0]
-  if (lastSession) {
-    session = await Session.resume(lastSession.id, cwd) ?? Session.create(cwd)
+let initialMessagesForApp: typeof session.messages
+
+if (serverUrl) {
+  const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
+  let sessionId: string
+  if (argv.continue) {
+    const sessions = await serverClient.listSessions()
+    sessionId = sessions[0]?.id ?? (await serverClient.createSession()).id
+  } else if (argv.session) {
+    sessionId = argv.session
+  } else {
+    sessionId = (await serverClient.createSession()).id
+  }
+  // Load only last 100 messages to avoid OOM on long dialogs
+  const PAGE_SIZE = 100
+  const meta = await serverClient.getSession(sessionId)
+  const offset = Math.max(0, meta.messageCount - PAGE_SIZE)
+  initialMessagesForApp = await serverClient.getMessages(sessionId, { limit: PAGE_SIZE, offset })
+  session = {
+    id: sessionId,
+    get messages() {
+      return initialMessagesForApp
+    },
+    addMessage(msg: { role: "user" | "assistant" | "system" | "tool"; content: string }) {
+      initialMessagesForApp.push({
+        ...msg,
+        id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        ts: Date.now(),
+      })
+      // Keep only last 100 in memory to avoid OOM on long dialogs
+      if (initialMessagesForApp.length > 120) {
+        initialMessagesForApp = initialMessagesForApp.slice(-100)
+      }
+    },
+  } as unknown as Session
+} else {
+  if (argv.continue) {
+    const sessions = await listSessions(cwd)
+    const lastSession = sessions[0]
+    if (lastSession) {
+      session = await Session.resume(lastSession.id, cwd) ?? Session.create(cwd)
+    } else {
+      session = Session.create(cwd)
+    }
+  } else if (argv.session) {
+    session = await Session.resume(argv.session, cwd) ?? Session.create(cwd)
   } else {
     session = Session.create(cwd)
   }
-} else if (argv.session) {
-  session = await Session.resume(argv.session, cwd) ?? Session.create(cwd)
-} else {
-  session = Session.create(cwd)
+  initialMessagesForApp = session.messages
 }
 
 // Non-interactive mode
@@ -261,15 +305,19 @@ const toolRegistry = new ToolRegistry()
 const mcpClient = new McpClient()
 setMcpClientInstance(mcpClient)
 
+if (!serverUrl) {
 if (config.mcp.servers.length > 0) {
   await mcpClient.connectAll(config.mcp.servers)
   for (const tool of mcpClient.getTools()) {
     toolRegistry.register(tool)
   }
 }
+}
 
 const parallelManager = new ParallelAgentManager()
-toolRegistry.register(createSpawnAgentTool(parallelManager, config))
+if (!serverUrl) {
+  toolRegistry.register(createSpawnAgentTool(parallelManager, config))
+}
 
 let rulesContent = await loadRules(cwd, config.rules.files).catch(() => "")
 let skills = await loadSkills(config.skills, cwd).catch(() => [])
@@ -298,7 +346,9 @@ async function rebuildIndexer(): Promise<void> {
   indexer.startIndexing().catch(console.warn)
 }
 
-await rebuildIndexer()
+if (!serverUrl) {
+  await rebuildIndexer()
+}
 
 let currentAbortController: AbortController | null = null
 
@@ -435,6 +485,28 @@ async function runMessage(content: string, msgMode: Mode) {
     pushEvent({ type: "error", error: `Timed out after ${Math.round(timeoutMs / 60000)} minutes.` })
   }, timeoutMs)
 
+  if (serverUrl) {
+    const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
+    try {
+      for await (const event of serverClient.streamMessage(
+        session.id,
+        content,
+        msgMode,
+        currentAbortController.signal
+      )) {
+        pushEvent(event)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!msg.includes("abort") && !msg.includes("AbortError")) {
+        pushEvent({ type: "error", error: msg })
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
+    return
+  }
+
   try {
     await refreshIndexerFromGit(indexer, cwd).catch(() => {})
     await runAgentLoop({
@@ -523,6 +595,7 @@ const { unmount } = render(
       config.maxMode.enabled = enabled
     },
     events: eventIterable,
+    initialMessages: session.messages,
     initialModel: config.model.id,
     initialProvider: config.model.provider,
     initialMode: mode,
@@ -547,7 +620,7 @@ const { unmount } = render(
       }
       client = createLLMClient(config.model)
     },
-    noIndex: !indexEnabledFlag,
+    noIndex: !indexEnabledFlag || !!serverUrl,
     configSnapshot: {
       model: { provider: config.model.provider, id: config.model.id, temperature: config.model.temperature },
       maxMode: {
@@ -569,7 +642,6 @@ const { unmount } = render(
       modes: {
         agent: { customInstructions: config.modes?.agent?.customInstructions },
         plan: { customInstructions: config.modes?.plan?.customInstructions },
-        debug: { customInstructions: config.modes?.debug?.customInstructions },
         ask: { customInstructions: config.modes?.ask?.customInstructions },
       },
       profiles: config.profiles ?? {},

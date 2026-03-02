@@ -9,17 +9,38 @@ const schema = z.object({
 
 export const attemptCompletionTool: ToolDef<z.infer<typeof schema>> = {
   name: "attempt_completion",
-  description: `Signal that the task is complete and present the result to the user.
-Call this when you have finished the task and want to present the outcome.
-Include a clear summary of what was accomplished.
-Optionally include a command that demonstrates the result.
-This ends the current agent loop.`,
+  description: `Signal that the task is complete and present the result. Call when the user's request is fully done.
+
+When to use:
+- All requested changes are implemented and verified.
+- You have a clear summary and, if useful, a demo command.
+
+When NOT to use:
+- Task only partially done: continue with tools and then call attempt_completion.
+- Plan mode: use plan_exit instead.
+
+Provide a concise summary in result. Optionally give a command to run (e.g. npm run dev, pytest). This ends the current agent turn.`,
   parameters: schema,
 
   async execute({ result, command }, ctx: ToolContext) {
     let output = result
     if (command) {
-      output += `\n\nTo see the result, run:\n\`\`\`\n${command}\n\`\`\``
+      const approval = await ctx.host.showApprovalDialog({
+        type: "execute",
+        tool: "attempt_completion",
+        description: `Run demo command: ${command}`,
+      })
+      if (approval.approved) {
+        try {
+          const run = await ctx.host.runCommand(command, ctx.cwd, ctx.signal)
+          const out = [run.stdout, run.stderr].filter(Boolean).join("\n").trim()
+          output += `\n\nDemo command output:\n\`\`\`\n${out || "(no output)"}\n\`\`\``
+        } catch (e) {
+          output += `\n\nDemo command failed: ${(e as Error).message}`
+        }
+      } else {
+        output += `\n\nTo see the result, run:\n\`\`\`\n${command}\n\`\`\``
+      }
     }
     return { success: true, output }
   },
@@ -33,9 +54,16 @@ const askSchema = z.object({
 
 export const askFollowupTool: ToolDef<z.infer<typeof askSchema>> = {
   name: "ask_followup_question",
-  description: `Ask the user a clarifying question when you need more information to proceed.
-Use this sparingly — only when you genuinely cannot proceed without the information.
-Don't ask obvious questions. Don't ask multiple questions in one call.`,
+  description: `Ask the user a clarifying question when you cannot proceed without their input.
+
+When to use:
+- Genuinely blocked (e.g. choice between options, missing config, ambiguous requirement).
+- After doing all non-blocked work; ask one focused question.
+
+When NOT to use:
+- Info you can get via tools (read config, search codebase).
+- Obvious or multiple questions; prefer making a reasonable choice and stating it.
+- Permission prompts ("Should I run tests?"); just run them if relevant.`,
   parameters: askSchema,
 
   async execute({ question, options }, ctx: ToolContext) {
@@ -64,10 +92,17 @@ const todoSchema = z.object({
 
 export const updateTodoTool: ToolDef<z.infer<typeof todoSchema>> = {
   name: "update_todo_list",
-  description: `Update the current task's todo/checklist.
-Use markdown format: "- [ ] item" for pending, "- [x] item" for done.
-Update this frequently to show your progress.
-Keep it concise — focus on meaningful milestones, not micro-steps.`,
+  description: `Update the task checklist. Use frequently on multi-step tasks so the user sees progress.
+
+When to use:
+- Complex tasks (3+ steps): start with a checklist, update as you complete items.
+- Scope changes: rewrite the list to match new steps.
+
+When NOT to use:
+- Trivial 1–2 step tasks: optional.
+- Do not put exploratory steps (e.g. "search codebase") as todo items; focus on deliverable milestones.
+
+Format: Markdown "- [ ]" pending, "- [x]" done. Keep items concise; update silently.`,
   parameters: todoSchema,
 
   async execute({ todo }, ctx: ToolContext) {
@@ -84,9 +119,15 @@ const createRuleSchema = z.object({
 
 export const createRuleTool: ToolDef<z.infer<typeof createRuleSchema>> = {
   name: "create_rule",
-  description: `Create a new rule in .nexus/rules/ to guide future interactions.
-Rules are automatically loaded in future sessions.
-Use this to codify project conventions, preferences, or important context.`,
+  description: `Create a rule in .nexus/rules/ (or ~/.nexus/rules/ if global) to guide future sessions. Rules are loaded automatically in later conversations.
+
+When to use:
+- Codify project conventions, preferred patterns, or tooling (e.g. "always use pnpm", "tests go in __tests__").
+- Save important context that should apply to many future tasks.
+
+When NOT to use:
+- One-off task context: use @mentions or include in the message instead.
+- Secrets or env-specific paths: avoid; use docs or env vars.`,
   parameters: createRuleSchema,
 
   async execute({ content, filename, global: isGlobal }, ctx: ToolContext) {

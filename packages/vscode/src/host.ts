@@ -1,6 +1,6 @@
 import * as vscode from "vscode"
 import * as path from "path"
-import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticItem } from "@nexuscode/core"
+import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticItem, CheckpointEntry, ChangedFile } from "@nexuscode/core"
 
 /**
  * VS Code host adapter — bridges the core agent with VS Code APIs.
@@ -9,10 +9,30 @@ export class VsCodeHost implements IHost {
   private eventEmitter: (event: AgentEvent) => void
   readonly cwd: string
   private alwaysApproved = new Set<string>()
+  private checkpointTracker?: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> }
 
   constructor(cwd: string, onEvent: (event: AgentEvent) => void) {
     this.cwd = cwd
     this.eventEmitter = onEvent
+  }
+
+  setCheckpoint(tracker: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> } | undefined): void {
+    this.checkpointTracker = tracker
+  }
+
+  async restoreCheckpoint(hash: string): Promise<void> {
+    if (!this.checkpointTracker?.resetHead) return
+    const t = this.checkpointTracker as { resetHead(hash: string): Promise<void> }
+    await t.resetHead(hash)
+  }
+
+  async getCheckpointEntries(): Promise<CheckpointEntry[]> {
+    return this.checkpointTracker?.getEntries() ?? []
+  }
+
+  async getCheckpointDiff(fromHash: string, toHash?: string): Promise<ChangedFile[]> {
+    if (!this.checkpointTracker?.getDiff) return []
+    return (this.checkpointTracker as { getDiff(from: string, to?: string): Promise<ChangedFile[]> }).getDiff(fromHash, toHash)
   }
 
   async readFile(filePath: string): Promise<string> {
@@ -136,9 +156,12 @@ export class VsCodeHost implements IHost {
   async getProblems(): Promise<DiagnosticItem[]> {
     const diagnostics: DiagnosticItem[] = []
     const allDiagnostics = vscode.languages.getDiagnostics()
+    const cwdResolved = path.resolve(this.cwd)
 
     for (const [uri, diags] of allDiagnostics) {
-      const filePath = path.relative(this.cwd, uri.fsPath)
+      const rel = path.relative(cwdResolved, uri.fsPath)
+      if (rel.startsWith("..") || path.isAbsolute(rel)) continue
+      const filePath = rel.replace(/\\/g, "/")
       for (const d of diags) {
         diagnostics.push({
           file: filePath,
@@ -146,7 +169,7 @@ export class VsCodeHost implements IHost {
           col: d.range.start.character + 1,
           severity: d.severity === vscode.DiagnosticSeverity.Error ? "error"
             : d.severity === vscode.DiagnosticSeverity.Warning ? "warning" : "info",
-          message: d.message,
+          message: typeof d.message === "string" ? d.message : (d.message as { value: string }).value,
           source: d.source,
         })
       }

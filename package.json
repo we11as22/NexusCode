@@ -1,25 +1,31 @@
 {
-  "name": "nexuscode",
-  "version": "0.1.0",
-  "private": true,
-  "description": "NexusCode — AI coding agent combining best practices from all vibe-coding tools",
-  "workspaces": [
-    "packages/*",
-    "packages/vscode/webview-ui"
-  ],
-  "scripts": {
-    "build": "pnpm -r --stream build",
-    "build:core": "pnpm --filter @nexuscode/core build",
-    "build:vscode": "pnpm --filter nexuscode build",
-    "build:cli": "pnpm --filter @nexuscode/cli build",
-    "package:vscode": "pnpm build && pnpm --filter nexuscode package",
-    "dev:core": "pnpm --filter @nexuscode/core dev",
-    "dev:cli": "pnpm --filter @nexuscode/cli dev",
-    "typecheck": "pnpm -r --stream typecheck",
-    "clean": "pnpm -r --stream clean && rm -rf node_modules"
-  },
-  "devDependencies": {
-    "typescript": "^5.5.0",
-    "tsup": "^8.3.0"
-  }
+    "name": "nexuscode",
+    "version": "0.1.0",
+    "private": true,
+    "description": "NexusCode — AI coding agent combining best practices from all vibe-coding tools",
+    "workspaces": [
+        "packages/*",
+        "packages/vscode/webview-ui"
+    ],
+    "scripts": {
+        "build": "pnpm -r --stream build",
+        "build:core": "pnpm --filter @nexuscode/core build",
+        "build:vscode": "pnpm --filter nexuscode build",
+        "build:cli": "pnpm --filter @nexuscode/cli build",
+        "package:vscode": "pnpm build && pnpm --filter nexuscode package",
+        "dev:core": "pnpm --filter @nexuscode/core dev",
+        "dev:cli": "pnpm --filter @nexuscode/cli dev",
+        "typecheck": "pnpm -r --stream typecheck",
+        "clean": "pnpm -r --stream clean && rm -rf node_modules",
+        "build:server": "pnpm --filter @nexuscode/server build",
+        "serve": "node scripts/check-node.js && node packages/server/dist/cli.js",
+        "setup:native": "node scripts/setup-native.js",
+        "setup": "pnpm install && pnpm run setup:native && pnpm build",
+        "fullbuild": "pnpm run setup && pnpm --filter nexuscode package",
+        "ready": "pnpm run fullbuild && cd packages/cli && npm link && cd ../.."
+    },
+    "devDependencies": {
+        "typescript": "^5.5.0",
+        "tsup": "^8.3.0"
+    }
 }

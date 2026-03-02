@@ -1,7 +1,7 @@
 import { create } from "zustand"
 import { postMessage } from "../vscode.js"
 
-export type Mode = "agent" | "plan" | "debug" | "ask"
+export type Mode = "agent" | "plan" | "ask"
 export type AppView = "chat" | "sessions" | "settings"
 
 export type IndexStatusKind =
@@ -94,7 +94,6 @@ export interface NexusConfigState {
   modes: {
     agent?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     plan?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
-    debug?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     ask?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     [key: string]: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string } | undefined
   }
@@ -124,6 +123,7 @@ interface ChatState {
   mode: Mode
   maxMode: boolean
   isRunning: boolean
+  awaitingApproval: boolean
   model: string
   provider: string
   sessionId: string
@@ -136,10 +136,17 @@ interface ChatState {
   inputValue: string
   view: AppView
   sessions: SessionPreview[]
+  /** True while session list is being fetched (e.g. from server). */
+  sessionsLoading: boolean
   config: NexusConfigState | null
   isCompacting: boolean
   subagents: SubAgentState[]
   selectedProfile: string
+  projectDir: string
+  /** When the current reasoning block started (for "Thought for Xs" display) */
+  reasoningStartTime: number | null
+  /** NexusCode server URL (nexuscode.serverUrl). When set, extension uses server for sessions and runs. */
+  serverUrl: string
 
   // Actions
   setView: (view: AppView) => void
@@ -162,17 +169,19 @@ interface ChatState {
   handleAgentEvent: (event: AgentEvent) => void
   handleIndexStatus: (status: IndexStatusKind) => void
   handleSessionList: (sessions: SessionPreview[]) => void
+  handleSessionListLoading: (loading: boolean) => void
 }
 
 export type AgentEvent =
   | { type: "text_delta"; delta: string; messageId: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
-  | { type: "tool_start"; tool: string; partId: string; messageId: string }
-  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean }
+  | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
+  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
   | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string }
+  | { type: "tool_approval_needed"; action: ApprovalAction; partId: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
   | { type: "index_update"; status: IndexStatusKind }
@@ -186,6 +195,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   mode: "agent",
   maxMode: false,
   isRunning: false,
+  awaitingApproval: false,
   model: "claude-sonnet-4-5",
   provider: "anthropic",
   sessionId: "",
@@ -198,10 +208,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   inputValue: "",
   view: "chat",
   sessions: [],
+  sessionsLoading: false,
   config: null,
   isCompacting: false,
   subagents: [],
   selectedProfile: "",
+  projectDir: "",
+  reasoningStartTime: null,
+  serverUrl: "",
 
   setView: (view) => set({ view }),
   setInputValue: (v) => set({ inputValue: v }),
@@ -269,12 +283,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   reindex: () => {
     postMessage({ type: "reindex" })
-    set({ indexStatus: { state: "indexing", progress: 0, total: 0 } })
   },
 
   clearIndex: () => {
     postMessage({ type: "clearIndex" })
-    set({ indexStatus: { state: "indexing", progress: 0, total: 0 } })
   },
 
   saveConfig: (patch) => {
@@ -304,70 +316,67 @@ export const useChatStore = create<ChatState>((set, get) => ({
   handleSessionList: (sessions) => {
     set({ sessions })
   },
+  handleSessionListLoading: (loading) => {
+    set({ sessionsLoading: loading })
+  },
 
   handleAgentEvent: (event) => {
     const { messages } = get()
 
     switch (event.type) {
       case "text_delta": {
-        const lastMsg = messages[messages.length - 1]
-        if (lastMsg?.role === "assistant") {
-          const updated = { ...lastMsg }
-          if (typeof updated.content === "string") {
-            updated.content = sanitizeAssistantText(updated.content + event.delta)
-          } else {
-            const parts = [...(updated.content as MessagePart[])]
-            const lastPart = parts[parts.length - 1]
-            if (lastPart?.type === "text") {
-              parts[parts.length - 1] = { ...lastPart, text: sanitizeAssistantText(lastPart.text + event.delta) } as TextPart
-            } else {
-              const cleaned = sanitizeAssistantText(event.delta)
-              if (cleaned) {
-                parts.push({ type: "text", text: cleaned })
-              }
-            }
-            updated.content = parts
-          }
-          set({ messages: [...messages.slice(0, -1), updated] })
+        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const target = baseList[index]
+        if (!target) break
+        const updated = { ...target }
+        if (typeof updated.content === "string") {
+          updated.content = sanitizeAssistantText(updated.content + event.delta)
         } else {
-          const cleaned = sanitizeAssistantText(event.delta)
-          if (!cleaned) break
-          set({
-            messages: [
-              ...messages,
-              {
-                id: `msg_${Date.now()}`,
-                ts: Date.now(),
-                role: "assistant" as const,
-                content: cleaned,
-              },
-            ],
-          })
+          const parts = [...(updated.content as MessagePart[])]
+          const lastPart = parts[parts.length - 1]
+          if (lastPart?.type === "text") {
+            parts[parts.length - 1] = { ...lastPart, text: sanitizeAssistantText(lastPart.text + event.delta) } as TextPart
+          } else {
+            const cleaned = sanitizeAssistantText(event.delta)
+            if (cleaned) {
+              parts.push({ type: "text", text: cleaned })
+            }
+          }
+          updated.content = parts
         }
+        set({
+          messages: [
+            ...baseList.slice(0, index),
+            updated,
+            ...baseList.slice(index + 1),
+          ],
+        })
         break
       }
 
       case "tool_start": {
-        const msgs = [...messages]
-        const lastMsg = msgs[msgs.length - 1]
-        if (lastMsg?.role === "assistant") {
-          const parts = Array.isArray(lastMsg.content)
-            ? [...(lastMsg.content as MessagePart[])]
-            : [{ type: "text" as const, text: lastMsg.content as string }]
-          parts.push({
-            type: "tool",
-            id: event.partId,
-            tool: event.tool,
-            status: "running",
-            timeStart: Date.now(),
-          } as ToolPart)
-          msgs[msgs.length - 1] = { ...lastMsg, content: parts }
-          set({ messages: msgs })
-        }
+        const ev = event as { input?: Record<string, unknown> }
+        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const target = baseList[index]
+        if (!target) break
+        const parts = Array.isArray(target.content)
+          ? [...(target.content as MessagePart[])]
+          : [{ type: "text" as const, text: target.content as string }]
+        parts.push({
+          type: "tool",
+          id: event.partId,
+          tool: event.tool,
+          status: "running",
+          input: ev.input,
+          timeStart: Date.now(),
+        } as ToolPart)
+        baseList[index] = { ...target, content: parts }
+        set({ messages: baseList })
         break
       }
 
       case "tool_end": {
+        const ev = event as { output?: string; error?: string; compacted?: boolean }
         const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg
           const parts = (msg.content as MessagePart[]).map((p) => {
@@ -376,15 +385,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...(p as ToolPart),
                 status: event.success ? "completed" : "error",
                 timeEnd: Date.now(),
+                output: ev.output,
+                error: ev.error,
+                compacted: ev.compacted,
               } as ToolPart
             }
             return p
           })
           return { ...msg, content: parts }
         })
-        set({ messages: msgs })
+        set({ messages: msgs, awaitingApproval: false })
         break
       }
+
+      case "tool_approval_needed":
+        set({ awaitingApproval: true })
+        break
 
       case "subagent_start": {
         const prev = get().subagents.filter((a) => a.id !== event.subagentId)
@@ -440,21 +456,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "reasoning_delta": {
-        const lastMsg = messages[messages.length - 1]
-        if (lastMsg?.role === "assistant") {
-          const updated = { ...lastMsg }
-          const parts = Array.isArray(updated.content)
-            ? [...(updated.content as MessagePart[])]
-            : [{ type: "text" as const, text: updated.content as string }]
-          const lastPart = parts[parts.length - 1]
-          if (lastPart?.type === "reasoning") {
-            parts[parts.length - 1] = { ...lastPart, text: lastPart.text + event.delta } as ReasoningPart
-          } else {
-            parts.push({ type: "reasoning", text: event.delta })
-          }
-          updated.content = parts
-          set({ messages: [...messages.slice(0, -1), updated] })
+        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const target = baseList[index]
+        if (!target) break
+        set((s) => ({ ...s, reasoningStartTime: s.reasoningStartTime ?? Date.now() }))
+        const updated = { ...target }
+        const parts = Array.isArray(updated.content)
+          ? [...(updated.content as MessagePart[])]
+          : [{ type: "text" as const, text: updated.content as string }]
+        const lastPart = parts[parts.length - 1]
+        if (lastPart?.type === "reasoning") {
+          parts[parts.length - 1] = { ...lastPart, text: lastPart.text + event.delta } as ReasoningPart
+        } else {
+          parts.push({ type: "reasoning", text: event.delta })
         }
+        updated.content = parts
+        set({
+          messages: [
+            ...baseList.slice(0, index),
+            updated,
+            ...baseList.slice(index + 1),
+          ],
+        })
         break
       }
 
@@ -533,14 +556,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {
             messages: msgs,
             isRunning: false,
+            awaitingApproval: false,
             subagents: state.subagents.filter((a) => a.status === "running"),
+            reasoningStartTime: null,
           }
         })
         break
 
       case "error":
         set((state) => ({
+          ...state,
           isRunning: false,
+          awaitingApproval: false,
+          reasoningStartTime: null,
           subagents: state.subagents.map((a) =>
             a.status === "running"
               ? { ...a, status: "error", finishedAt: Date.now(), error: "Parent agent failed" }
@@ -563,6 +591,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 }))
+
+function ensureAssistantMessage(messages: SessionMessage[], messageId?: string): { list: SessionMessage[]; index: number } {
+  const id = messageId || `msg_${Date.now()}`
+  const idx = messages.findIndex((m) => m.id === id && m.role === "assistant")
+  if (idx >= 0) {
+    return { list: [...messages], index: idx }
+  }
+
+  const lastIdx = messages.length - 1
+  if (lastIdx >= 0 && messages[lastIdx]?.role === "assistant") {
+    const existing = messages[lastIdx]!
+    if (existing.id !== id) {
+      return {
+        list: [...messages.slice(0, lastIdx), { ...existing, id }],
+        index: lastIdx,
+      }
+    }
+    return { list: [...messages], index: lastIdx }
+  }
+
+  const list: SessionMessage[] = [
+    ...messages,
+    {
+      id,
+      ts: Date.now(),
+      role: "assistant",
+      content: "",
+    },
+  ]
+  return { list, index: list.length - 1 }
+}
 
 function stripToolCallMarkup(value: string): string {
   if (!value) return value

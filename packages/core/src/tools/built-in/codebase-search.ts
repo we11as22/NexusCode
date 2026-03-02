@@ -14,11 +14,23 @@ const schema = z.object({
 
 export const codebaseSearchTool: ToolDef<z.infer<typeof schema>> = {
   name: "codebase_search",
-  description: `Search the indexed codebase by semantic meaning or keyword.
-Finds relevant classes, functions, methods, types, and code sections.
-Searches by symbol name, docstrings, and content.
-If vector search is enabled, uses semantic similarity.
-Requires the codebase to be indexed (runs automatically on startup).`,
+  description: `Semantic search over the indexed codebase. Finds code by meaning, not exact text.
+
+When to use:
+- Explore unfamiliar codebases; ask "how / where / what" questions.
+- Find code by intent (e.g. "where is auth validated", "error handling for API calls").
+- After narrowing a directory, re-run with path/paths to limit scope.
+
+When NOT to use:
+- Exact text or symbol name: use search_files (regex) instead.
+- Reading a known file: use read_file.
+- Single identifier lookup: use search_files or list_code_definitions.
+
+Usage:
+- Prefer one clear query; use queries[] for multiple independent questions in one call.
+- path/paths: single directory or file to scope (optional). Omit to search whole repo.
+- kind: filter by symbol type (class, function, interface, etc.).
+- limit: max results per query (default 10). Use read_file with path:line from results to load only relevant sections and save context.`,
   parameters: schema,
   readOnly: true,
 
@@ -53,18 +65,34 @@ Requires the codebase to be indexed (runs automatically on startup).`,
           .map((p) => normalizeScopePath(p, ctx.cwd))
           .filter(Boolean)
       ))
-      const sections: string[] = []
+      const scopesToUse = normalizedScopes.length > 0 ? normalizedScopes : [""]
+      const effectiveLimit = limit ?? 10
+      const effectiveKind = kind === "any" ? undefined : (kind as any)
 
+      // Run all (query, scope) searches in parallel
+      const pairs: Array<{ q: string; scope: string }> = []
       for (const q of allQueries) {
-        const raw = await ctx.indexer.search(q, {
-          limit: limit ?? 10,
-          kind: kind === "any" ? undefined : kind as any,
-          semantic: true,
-        })
-        const scopedSections: string[] = []
-        const scopesToUse = normalizedScopes.length > 0 ? normalizedScopes : [""]
+        for (const s of scopesToUse) {
+          pairs.push({ q, scope: s })
+        }
+      }
+      const allRaw = await Promise.all(
+        pairs.map(({ q, scope }) =>
+          ctx.indexer!.search(q, {
+            limit: effectiveLimit,
+            kind: effectiveKind,
+            semantic: true,
+            pathScope: scope || undefined,
+          })
+        )
+      )
 
+      const sections: string[] = []
+      let idx = 0
+      for (const q of allQueries) {
+        const scopedSections: string[] = []
         for (const scope of scopesToUse) {
+          const raw = allRaw[idx++] ?? []
           const isFileScope = scope ? /\.[a-z0-9]+$/i.test(scope) : false
           const filtered = scope
             ? raw.filter((r) => {
@@ -79,14 +107,15 @@ Requires the codebase to be indexed (runs automatically on startup).`,
           }
 
           const formatted = filtered.map((r, i) => {
-            const loc = r.startLine ? `:${r.startLine}` : ""
+            const loc = r.startLine != null
+              ? (r.endLine != null && r.endLine !== r.startLine ? `:${r.startLine}-${r.endLine}` : `:${r.startLine}`)
+              : ""
             const parent = r.parent ? ` (in ${r.parent})` : ""
             const kindStr = r.kind ? `[${r.kind}]` : ""
             return `${i + 1}. ${r.path}${loc} ${kindStr}${parent}\n   ${r.content.slice(0, 200).replace(/\n/g, " ")}`
           }).join("\n\n")
           scopedSections.push(`${scope ? `Scope: ${scope}\n` : ""}${formatted}`)
         }
-
         sections.push(`Query: "${q}"\n${scopedSections.join("\n\n")}`)
       }
 

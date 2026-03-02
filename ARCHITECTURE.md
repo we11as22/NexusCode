@@ -10,6 +10,13 @@ NexusCode has three runtime layers:
 
 Both UI hosts call the same `runAgentLoop` in `core`, so behavior remains consistent across VS Code and CLI.
 
+### Extension: Cline-style Controller
+**Status:** active  
+**Context:** Port Cline’s extension architecture (single Controller owning task/session state) into NexusCode.  
+**Decision:** `packages/vscode` uses a **Controller** (`src/controller.ts`) that owns session, config, run state, indexer, MCP, and checkpoint. The **NexusProvider** only owns webview(s) and delegates all messages to `controller.handleWebviewMessage()`. State is pushed via `controller.postStateToWebview()` / `getStateToPostToWebview()`. Agent runs use `runAgentLoop` (local) or NexusCode server (sessions, pagination).  
+**Rationale:** Clear separation of concerns, easier to add Cline-like features (task history, approvals, checkpoints) later.  
+**Trade-offs:** Controller depends on VS Code API for `getCwd()` and config overrides; postMessage is passed in so Controller stays testable.
+
 ## Key Decisions
 
 ### Unified Config Flow Across Hosts
@@ -46,16 +53,18 @@ Both UI hosts call the same `runAgentLoop` in `core`, so behavior remains consis
 - Built-in tool set remains always available per mode; filtering applies to dynamic/MCP/custom sets by threshold.
 - If vector prerequisites are invalid, agent must remain functional with FTS-only search.
 - Host UI changes must not change `runAgentLoop` contracts.
+- When the tool-call budget is exceeded, the loop allows one extra iteration with tools disabled so the model can emit a final text-only answer (no silent truncation).
+- Optional `config.agentLoop.toolCallBudget` and `config.agentLoop.maxIterations` override default per-mode limits when set.
 
 ## Data Flow
 
 1. User message enters VS Code webview or CLI TUI.
-2. Host persists message into session storage.
-3. Core assembles prompt blocks (role/rules/skills/system/mentions/compaction).
+2. **Without server:** host persists message into local session storage (JSONL). **With server:** message is sent to NexusCode server; session and messages live in server SQLite DB.
+3. Core (in-process or on server) assembles prompt blocks (role/rules/skills/system/mentions/compaction).
 4. Model streams text + tool calls.
 5. Tools execute via host adapter with permissions.
-6. Session/tool traces are saved and surfaced back to UI.
-7. Index updates run in background and publish status events.
+6. Session/tool traces are saved (locally or on server) and surfaced back to UI. Extension and CLI can list/switch sessions when using the server; messages are loaded in pages to avoid OOM.
+7. Index updates run in background and publish status events (in-process mode only; server mode does not run indexer in extension).
 
 ## External Dependencies
 

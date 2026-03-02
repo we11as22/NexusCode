@@ -1,5 +1,27 @@
 import React, { useState } from "react"
+import { postMessage } from "../vscode.js"
 import type { ToolPart } from "../stores/chat.js"
+
+/** Extract path:line pairs from search/codebase output for "Open in editor" links */
+function extractPathLinePairs(output: string): Array<{ path: string; line: number }> {
+  const seen = new Set<string>()
+  const out: Array<{ path: string; line: number }> = []
+  // Match path-like (with / or .ext) then :digits (e.g. src/foo.ts:42 or path/to/file:10)
+  const re = /\b([a-zA-Z0-9_][a-zA-Z0-9_./-]*):(\d+)(?=[:\s\n]|$)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(output)) !== null) {
+    const path = m[1]!
+    const line = parseInt(m[2]!, 10)
+    if (path.includes("/") || /\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|c|cpp|h|md|json|yaml|yml)$/i.test(path)) {
+      const key = `${path}:${line}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        out.push({ path, line })
+      }
+    }
+  }
+  return out.slice(0, 12)
+}
 
 interface Props {
   part: ToolPart
@@ -89,11 +111,11 @@ export function ToolCallCard({ part }: Props) {
           )}
           {part.output && (
             <div>
-              <div className="text-[var(--vscode-descriptionForeground)] mb-0.5">Output:</div>
-              <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-48 overflow-y-auto">
-                {part.compacted ? "[output pruned for context efficiency]" : part.output.slice(0, 2000)}
-                {!part.compacted && (part.output.length > 2000) ? "\n... (truncated)" : ""}
-              </pre>
+              <div className="flex items-center justify-between gap-2 mb-0.5">
+                <span className="text-[var(--vscode-descriptionForeground)]">Output:</span>
+                <OpenAtLineLinks output={part.output} />
+              </div>
+              <ToolOutputBlock output={part.output} compacted={part.compacted} />
             </div>
           )}
           {part.error && (
@@ -102,6 +124,74 @@ export function ToolCallCard({ part }: Props) {
         </div>
       )}
     </div>
+  )
+}
+
+function OpenAtLineLinks({ output }: { output: string }) {
+  const pairs = extractPathLinePairs(output)
+  if (pairs.length === 0) return null
+  return (
+    <div className="flex flex-wrap gap-1">
+      {pairs.map(({ path, line }, i) => (
+        <button
+          key={`${path}-${line}-${i}`}
+          type="button"
+          onClick={() => postMessage({ type: "openFileAtLocation", path, line })}
+          className="text-[10px] font-medium text-[var(--nexus-accent)] hover:underline"
+        >
+          Open {path.split("/").pop()}:{line}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ToolOutputBlock({ output, compacted }: { output: string; compacted?: boolean }) {
+  if (compacted) {
+    return (
+      <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 text-[10px] text-[var(--vscode-descriptionForeground)]">
+        [output pruned for context efficiency]
+      </pre>
+    )
+  }
+  const fileMatch = output.match(/<file_content\s+path="([^"]+)"\s+lines="([^"]+)"\s+total="([^"]+)">\s*([\s\S]*?)<\/file_content>/)
+  if (fileMatch) {
+    const [, path, lines, total, content] = fileMatch
+    return (
+      <div className="space-y-1">
+        <div className="text-[10px] text-[var(--vscode-descriptionForeground)] font-mono">
+          {path} (lines {lines}, total {total})
+        </div>
+        <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-64 overflow-y-auto font-mono">
+          {content.trim()}
+        </pre>
+      </div>
+    )
+  }
+  const lines = output.split("\n")
+  const looksLikeDiff = lines.filter((l) => l.startsWith("+") || l.startsWith("-")).length >= 3
+  if (looksLikeDiff) {
+    return (
+      <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-64 overflow-y-auto font-mono diff-output">
+        {lines.map((line, i) => {
+          if (line.startsWith("+") && !line.startsWith("+++")) {
+            return <div key={i} className="text-green-500 bg-green-500/10">{line}</div>
+          }
+          if (line.startsWith("-") && !line.startsWith("---")) {
+            return <div key={i} className="text-red-400 bg-red-500/10">{line}</div>
+          }
+          return <div key={i} className="text-[var(--vscode-foreground)]">{line}</div>
+        })}
+      </pre>
+    )
+  }
+  const maxShow = 8000
+  const truncated = output.length > maxShow
+  return (
+    <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-64 overflow-y-auto">
+      {truncated ? output.slice(0, maxShow) : output}
+      {truncated ? "\n... (truncated)" : ""}
+    </pre>
   )
 }
 

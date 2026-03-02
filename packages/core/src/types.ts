@@ -2,9 +2,9 @@ import type { z } from "zod"
 
 // ─── Modes ───────────────────────────────────────────────────────────────────
 
-export type Mode = "agent" | "plan" | "debug" | "ask"
+export type Mode = "agent" | "plan" | "ask"
 
-export const MODES: Mode[] = ["agent", "plan", "debug", "ask"]
+export const MODES: Mode[] = ["agent", "plan", "ask"]
 
 // ─── Permissions ─────────────────────────────────────────────────────────────
 
@@ -58,6 +58,8 @@ export interface ToolContext {
   config: NexusConfig
   indexer?: IIndexer
   signal: AbortSignal
+  /** Optional: trigger context compaction (condense/summarize_task tools). */
+  compactSession?: () => Promise<void>
 }
 
 // ─── Host Interface ───────────────────────────────────────────────────────────
@@ -86,6 +88,12 @@ export interface IHost {
   emit(event: AgentEvent): void
   resolveAtMention?(mention: string): Promise<string | null>
   getProblems?(): Promise<DiagnosticItem[]>
+  /** Restore workspace to a checkpoint (Cline-style). Optional if host has no checkpoint. */
+  restoreCheckpoint?(hash: string): Promise<void>
+  /** List checkpoint entries for UI. */
+  getCheckpointEntries?(): Promise<CheckpointEntry[]>
+  /** Get diff between two checkpoints for preview. */
+  getCheckpointDiff?(fromHash: string, toHash?: string): Promise<ChangedFile[]>
 }
 
 export interface DiagnosticItem {
@@ -169,6 +177,8 @@ export interface IndexSearchOptions {
   limit?: number
   kind?: SymbolKind
   semantic?: boolean
+  /** Scope search to paths under this prefix (relative to project root). Can be multiple. */
+  pathScope?: string | string[]
 }
 
 export interface IndexSearchResult {
@@ -204,8 +214,8 @@ export type IndexStatus =
 export type AgentEvent =
   | { type: "text_delta"; delta: string; messageId: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
-  | { type: "tool_start"; tool: string; partId: string; messageId: string }
-  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean }
+  | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
+  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
@@ -287,7 +297,6 @@ export interface NexusConfig {
   modes: {
     agent?: ModeConfig
     plan?: ModeConfig
-    debug?: ModeConfig
     ask?: ModeConfig
     [key: string]: ModeConfig | undefined
   }
@@ -316,6 +325,8 @@ export interface NexusConfig {
     enabled: boolean
     timeoutMs: number
     createOnWrite: boolean
+    /** When true, first attempt_completion is rejected; model must re-verify and call again (Cline-style). */
+    doubleCheckCompletion?: boolean
   }
   mcp: {
     servers: McpServerConfig[]
@@ -337,6 +348,11 @@ export interface NexusConfig {
   }
   parallelAgents: {
     maxParallel: number
+  }
+  /** Optional overrides for agent loop limits (tool budget and max iterations per mode). */
+  agentLoop?: {
+    toolCallBudget?: Partial<Record<Mode, number>>
+    maxIterations?: Partial<Record<Mode, number>>
   }
   rules: {
     files: string[]

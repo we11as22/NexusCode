@@ -17,17 +17,75 @@
 - **Shadow git checkpoints** with task/workspace restore
 - **Two-level context compaction** (prune output → LLM summary with OpenCode-style structure)
 - **MCP support** with OAuth and tool classification
-- Beautiful Claude Code–inspired interface
+- **Optional NexusCode Server**: DB-backed sessions and dialogs; extension and CLI can connect to the server, switch sessions, and avoid OOM on long chats (pagination)
+- Beautiful Cline/agent-style UI: thought progress ("Thought for Xs"), loading states, todo checklist, diff-style tool output
 
 ---
 
-## Сборка и установка
+## Установка в одну команду (как OpenCode)
+
+**Актуальная версия NexusCode — только из этого репо.** Одна и та же сборка поддерживает запуск без сервера и с сервером (`--server`). Если раньше ставили `nexus` глобально не отсюда — удали: `npm uninstall -g nexus 2>/dev/null || true`.
+
+Из корня репозитория, в среде с **Node.js 20** (например `nvm use`):
+
+```bash
+pnpm run ready
+```
+
+Одна команда делает: установка зависимостей → пресобранные бинарники **better-sqlite3** → полная сборка → упаковка расширения **.vsix** → глобальная команда `nexus`. После этого:
+
+- **CLI:** из любого каталога запускай `nexus`.
+- **Расширение:** установи в VS Code файл `packages/vscode/nexuscode-0.1.0.vsix` (**Extensions** → «…» → **Install from VSIX...**).
+
+Если pnpm выдаёт `Unexpected store location`, один раз задай store и снова запусти:  
+`pnpm config set store-dir <путь из ошибки> --global` → `pnpm run ready`.
+
+**Если при запуске `nexus` появляется ошибка про `NODE_MODULE_VERSION` или `ERR_DLOPEN_FAILED`** — в этом терминале используется Node 18, а сборка была под Node 20. Выполни в том же терминале: `nvm use 20`, затем снова `nexus`. Сервер (`pnpm run serve`) тоже нужно запускать с Node 20.
+
+---
+
+## Сборка и установка (по шагам)
+
+### Запуск за две команды (CLI)
+
+Из корня репозитория, в среде с **Node.js 20** (например `nvm use`):
+
+```bash
+pnpm run setup
+nexus
+```
+
+Команда `pnpm run setup` делает: `pnpm install` → загрузка пресобранных бинарников **better-sqlite3** (`setup:native`) → `pnpm build`. После этого `nexus` запускает CLI (если делал `npm link` из `packages/cli`), иначе: `node packages/cli/dist/index.js`.
+
+**Если pnpm выдаёт `Unexpected store location`** — один раз укажи store, откуда уже стоят пакеты (путь из сообщения об ошибке), затем снова запусти setup:
+
+```bash
+pnpm config set store-dir /root/.local/share/pnpm/store/v10 --global
+pnpm run setup
+nexus
+```
+
+**Если `setup:native` не находит пресобранный бинарь** (например, редкая платформа) — нужны инструменты сборки (python3, make, g++). Тогда после `pnpm install` выполни вручную: `pnpm rebuild better-sqlite3`, затем `pnpm build`.
+
+Запуск CLI после setup: `node packages/cli/dist/index.js` (или `nexus`, если сделал `cd packages/cli && npm link`).
+
+### Полный билд: глобальная команда `nexus` + .vsix для теста
+
+Проще всего — одна команда **`pnpm run ready`** (см. раздел выше). Вручную то же самое:
+
+```bash
+nvm use
+pnpm run fullbuild
+cd packages/cli && npm link && cd ../..
+```
+
+После этого: **CLI** — команда `nexus` доступна глобально; **расширение** — `packages/vscode/nexuscode-0.1.0.vsix` (установка: **Extensions** → «…» → **Install from VSIX...**). После следующих полных билдов достаточно снова выполнить `cd packages/cli && npm link`.
 
 ### Требования (версии)
 
 | Что | Версия | Заметка |
 |-----|--------|---------|
-| **Node.js** | **20+** | Для команды `pnpm package:vscode` обязателен Node 20+: в Node 18 `vsce` (undici) падает с `File is not defined` (нет глобального File API). Остальная сборка (`pnpm build`) работает на Node 18. |
+| **Node.js** | **20+** | Обязательно для сборки, **и для запуска** `nexus` и `pnpm run serve`: нативный модуль better-sqlite3 привязан к версии Node. Если в терминале Node 18 и вы видите ошибку `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED` — выполните в этом же терминале `nvm use 20` и снова запустите `nexus` или `pnpm run serve`. Для упаковки .vsix тоже нужен Node 20 (в Node 18 vsce падает). |
 | **pnpm** | актуальная | Рекомендуется: `npm install -g pnpm` |
 
 В репозитории есть **`.nvmrc`** с версией `20` — при использовании nvm достаточно выполнить в корне:
@@ -182,6 +240,45 @@ node /полный/путь/к/NexusCode/packages/cli/dist/index.js --help
 
 ## Installation (English)
 
+### Quick start (two commands)
+
+From the repo root with **Node.js 20** (e.g. `nvm use`):
+
+```bash
+pnpm run setup
+nexus
+```
+
+`pnpm run setup` runs: `pnpm install` → downloads prebuilt **better-sqlite3** binaries (`setup:native`) → `pnpm build`. Then `nexus` starts the CLI.
+
+If pnpm reports **Unexpected store location**, set the store once (path from the error), then run setup again:
+
+```bash
+pnpm config set store-dir /path/from/error/message --global
+pnpm run setup
+nexus
+```
+
+If **bindings file** is missing after setup, run `pnpm rebuild better-sqlite3` (requires build tools: python3, make, g++), then `pnpm build`.  
+Run CLI: `node packages/cli/dist/index.js` or `nexus` after `npm link` from `packages/cli`.
+
+### Full build: global `nexus` command + .vsix for testing
+
+To have the latest CLI as the global `nexus` command and a fresh VS Code extension file:
+
+```bash
+cd /path/to/NexusCode
+nvm use
+pnpm run fullbuild
+cd packages/cli && npm link && cd ../..
+```
+
+Then:
+- **CLI:** `nexus` is available globally and uses the newly built code (from any directory).
+- **Extension:** `packages/vscode/nexuscode-0.1.0.vsix` is the latest build for testing. Install via **Extensions** (Ctrl+Shift+X) → "..." → **Install from VSIX...** and select that file.
+
+If you already ran `npm link` from `packages/cli` before, run it again after each full build so the global `nexus` points to the new build.
+
 ### Requirements (versions)
 
 | Requirement | Version | Note |
@@ -295,6 +392,61 @@ model:
 ```
 
 See `.nexus/nexus.yaml` for the complete reference.
+
+---
+
+## NexusCode Server (optional)
+
+When you run the **NexusCode server**, sessions and messages are stored in a **SQLite database** (`~/.nexus/nexus-server.db`). The extension and CLI can connect to the server to use the same sessions, switch between them, and load messages in pages (no OOM on long dialogs).
+
+### 1. Start the server
+
+From the repo root:
+
+```bash
+pnpm build
+pnpm serve
+```
+
+Or from `packages/server`:
+
+```bash
+cd packages/server && pnpm build && node dist/cli.js
+```
+
+The server listens on **http://127.0.0.1:4097** by default. Set `NEXUS_SERVER_PORT` or `PORT` to change the port. If you see **EADDRINUSE** (port already in use), stop the other process (e.g. `lsof -i :4097` then `kill <pid>`) or run with another port: `NEXUS_SERVER_PORT=4098 pnpm run serve`.
+
+### 2. Extension: use the server
+
+1. Open **Settings** in the NexusCode sidebar (or **Chat** → gear icon).
+2. In **Agent Settings**, find the **NexusCode Server** section.
+3. Set **Server URL** to `http://127.0.0.1:4097` (or your host/port).
+4. Leave empty to run the agent in-process (no server).
+
+When the server URL is set:
+- **Sessions** tab loads the session list from the server (with a loading indicator).
+- You can switch between sessions; messages are loaded from the server (last 100 per session).
+- Each new message is sent to the server; replies are streamed back. All data is persisted in the server DB.
+
+### 3. CLI: use the server
+
+Set the server URL via option or env:
+
+```bash
+nexus --server http://127.0.0.1:4097
+# or
+NEXUS_SERVER_URL=http://127.0.0.1:4097 nexus
+```
+
+- `--continue` uses the most recent session from the server.
+- `--session <id>` resumes a specific session.
+- Only the last 100 messages are loaded into memory; the rest stay in the DB.
+
+### 4. Run order (extension + CLI with server)
+
+1. Start the server once: `pnpm serve`.
+2. In VS Code: set **Settings → NexusCode Server → Server URL** to `http://127.0.0.1:4097`.
+3. Use the extension (sessions and chat) or CLI (`nexus --server http://127.0.0.1:4097`) — they share the same DB and sessions.
 
 ---
 

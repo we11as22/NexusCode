@@ -262,24 +262,37 @@ export class CodebaseIndexer implements IIndexer {
   async search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]> {
     const limit = opts?.limit ?? 10
     const kind = opts?.kind
+    const pathScope = opts?.pathScope
+    const prefixes = pathScope
+      ? (Array.isArray(pathScope) ? pathScope : [pathScope])
+          .map((p) => p.replace(/\\/g, "/").replace(/\/+$/, ""))
+          .filter(Boolean)
+      : []
+
+    const matchesPath = (p: string): boolean => {
+      if (prefixes.length === 0) return true
+      const normalized = p.replace(/\\/g, "/")
+      return prefixes.some((pre) => normalized === pre || normalized.startsWith(`${pre}/`))
+    }
 
     const results: IndexSearchResult[] = []
 
     if (this.config.indexing.fts) {
-      const symbolResults = this.fts.searchSymbols(query, limit, kind)
-      results.push(...symbolResults)
-
-      if (results.length < limit) {
-        const chunkResults = this.fts.searchChunks(query, limit - results.length)
-        results.push(...chunkResults)
-      }
+      const symbolResults = this.fts.searchSymbols(query, prefixes.length > 0 ? limit * 3 : limit, kind)
+      const chunkResults = this.fts.searchChunks(query, prefixes.length > 0 ? limit * 3 : limit)
+      const ftsFiltered = [...symbolResults, ...chunkResults]
+        .filter((r) => matchesPath(r.path))
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+        .slice(0, limit)
+      results.push(...ftsFiltered)
     }
 
     if (this.vector && this.config.indexing.vector && opts?.semantic !== false) {
-      const vecResults = await this.vector.search(query, limit, kind)
-
-      const seen = new Set(results.map(r => `${r.path}:${r.startLine}`))
-      for (const r of vecResults) {
+      const requestLimit = prefixes.length > 0 ? limit * 3 : limit
+      const vecResults = await this.vector.search(query, requestLimit, kind)
+      const vecFiltered = vecResults.filter((r) => matchesPath(r.path))
+      const seen = new Set(results.map((r) => `${r.path}:${r.startLine}`))
+      for (const r of vecFiltered) {
         const key = `${r.path}:${r.startLine}`
         if (!seen.has(key)) {
           seen.add(key)

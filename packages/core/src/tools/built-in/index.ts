@@ -9,6 +9,7 @@ import { listDefinitionsTool } from "./list-definitions.js"
 import { codebaseSearchTool } from "./codebase-search.js"
 import { webFetchTool, webSearchTool } from "./web-fetch.js"
 import { useSkillTool, browserActionTool } from "./use-skill.js"
+import { condenseTool, summarizeTaskTool, planExitTool } from "./context-tools.js"
 import {
   attemptCompletionTool,
   askFollowupTool,
@@ -46,6 +47,11 @@ export function getAllBuiltinTools(): ToolDef[] {
     // Browser group
     browserActionTool,
 
+    // Context (Cline-style)
+    condenseTool,
+    summarizeTaskTool,
+    planExitTool,
+
     // Skills group
     useSkillTool,
   ]
@@ -69,4 +75,7 @@ export {
   askFollowupTool,
   updateTodoTool,
   createRuleTool,
+  condenseTool,
+  summarizeTaskTool,
+  planExitTool,
 }

@@ -48,6 +48,10 @@ interface AppState {
   awaitingApproval: boolean
   compacting: boolean
   currentStreaming: string
+  /** OpenCode-style: toggle reasoning block visibility */
+  showThinking: boolean
+  /** OpenCode-style: toggle tool execution details in chat */
+  showToolDetails: boolean
 }
 
 interface AppProps {
@@ -57,6 +61,8 @@ interface AppProps {
   onModeChange: (mode: Mode) => void
   onMaxModeChange: (enabled: boolean) => void
   events: AsyncIterable<AgentEvent>
+  /** Initial chat history (e.g. from resumed session) */
+  initialMessages?: SessionMessage[]
   initialModel: string
   initialProvider: string
   initialMode: Mode
@@ -78,7 +84,6 @@ interface AppProps {
     modes?: {
       agent?: { customInstructions?: string }
       plan?: { customInstructions?: string }
-      debug?: { customInstructions?: string }
       ask?: { customInstructions?: string }
     }
     profiles?: Record<string, Record<string, unknown>>
@@ -90,17 +95,18 @@ interface AppProps {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
+/** OpenCode-style: batch UI updates every 16ms to avoid re-render on every stream chunk */
+const EVENT_BATCH_MS = 16
+
 const MODE_ICONS: Record<Mode, string> = {
   agent: "⚡",
   plan: "📋",
-  debug: "🔍",
   ask: "💬",
 }
 
 const MODE_COLORS: Record<Mode, string> = {
   agent: "cyan",
   plan: "blue",
-  debug: "yellow",
   ask: "green",
 }
 
@@ -124,20 +130,22 @@ const TOOL_ICONS: Record<string, string> = {
   spawn_agent: "🤖",
 }
 
-const MODES: Mode[] = ["agent", "plan", "debug", "ask"]
+const MODES: Mode[] = ["agent", "plan", "ask"]
 const MODEL_PROVIDERS = ["anthropic", "openai", "google", "openai-compatible", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"] as const
 const EMBEDDING_PROVIDERS = ["openai", "openai-compatible", "ollama", "local"] as const
 
-/** Slash commands */
-type SlashAction = "clear" | "compact" | "max" | "help" | "settings" | "model" | "embeddings" | "index" | "advanced"
+/** Slash commands (OpenCode-style: /new, /sessions, /compact, /thinking, /details, etc.) */
+type SlashAction = "clear" | "compact" | "max" | "help" | "settings" | "model" | "embeddings" | "index" | "advanced" | "thinking" | "details"
 const SLASH_COMMANDS: Array<{ cmd: string; label: string; desc: string; mode?: Mode; action?: SlashAction }> = [
   { cmd: "agent", label: "/agent", desc: "Agent mode (code & tools)", mode: "agent" },
   { cmd: "plan", label: "/plan", desc: "Plan mode", mode: "plan" },
-  { cmd: "debug", label: "/debug", desc: "Debug mode", mode: "debug" },
   { cmd: "ask", label: "/ask", desc: "Ask mode (Q&A)", mode: "ask" },
   { cmd: "clear", label: "/clear", desc: "Clear chat", action: "clear" },
+  { cmd: "new", label: "/new", desc: "New session (clear chat)", action: "clear" },
   { cmd: "compact", label: "/compact", desc: "Compact context", action: "compact" },
   { cmd: "max", label: "/max", desc: "Toggle max mode", action: "max" },
+  { cmd: "thinking", label: "/thinking", desc: "Toggle reasoning visibility", action: "thinking" },
+  { cmd: "details", label: "/details", desc: "Toggle tool execution details", action: "details" },
   { cmd: "model", label: "/model", desc: "Configure LLM provider & model", action: "model" },
   { cmd: "embeddings", label: "/embeddings", desc: "Configure embeddings model", action: "embeddings" },
   { cmd: "index", label: "/index", desc: "Index status & reindex", action: "index" },
@@ -169,6 +177,7 @@ export function App({
   onModeChange,
   onMaxModeChange,
   events,
+  initialMessages,
   initialModel,
   initialProvider,
   initialMode,
@@ -187,7 +196,7 @@ export function App({
   type View = "chat" | "model" | "embeddings" | "settings" | "index" | "advanced" | "help"
   const [view, setView] = useState<View>("chat")
   const [state, setState] = useState<AppState>({
-    messages: [],
+    messages: initialMessages ?? [],
     liveTools: [],
     subAgents: [],
     reasoning: "",
@@ -208,6 +217,8 @@ export function App({
     awaitingApproval: false,
     compacting: false,
     currentStreaming: "",
+    showThinking: true,
+    showToolDetails: true,
   })
   const [input, setInput] = useState("")
   const [historyIdx, setHistoryIdx] = useState(-1)
@@ -223,7 +234,6 @@ export function App({
     rulesFilesText: "",
     agentInstructions: "",
     planInstructions: "",
-    debugInstructions: "",
     askInstructions: "",
     profilesJson: "{}",
   })
@@ -231,6 +241,9 @@ export function App({
   const [activeProfileIdx, setActiveProfileIdx] = useState(0)
   const [chatScrollLines, setChatScrollLines] = useState(0)
   const inputHistory = useRef<string[]>([])
+  const eventQueueRef = useRef<AgentEvent[]>([])
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSubmitRef = useRef<number>(0)
   const cols = process.stdout.columns ?? 100
   const rows = process.stdout.rows ?? 30
   const profileOptions = useMemo(() => ["default", ...profileNames], [profileNames])
@@ -282,7 +295,6 @@ export function App({
         rulesFilesText: allRules.filter((f) => !/CLAUDE\.md$/i.test(f)).join("\n"),
         agentInstructions: configSnapshot.modes?.agent?.customInstructions ?? "",
         planInstructions: configSnapshot.modes?.plan?.customInstructions ?? "",
-        debugInstructions: configSnapshot.modes?.debug?.customInstructions ?? "",
         askInstructions: configSnapshot.modes?.ask?.customInstructions ?? "",
         profilesJson: JSON.stringify(configSnapshot.profiles ?? {}, null, 2),
       })
@@ -290,12 +302,20 @@ export function App({
     }
   }, [view, configSnapshot])
 
-  // Process agent events
+  // Process agent events (OpenCode-style: batch every EVENT_BATCH_MS to reduce re-renders)
   useEffect(() => {
     let active = true
-    async function processEvents() {
-      for await (const event of events) {
-        if (!active) break
+
+    function flush() {
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
+      const batch = eventQueueRef.current.splice(0)
+      if (batch.length === 0) return
+      let resetScroll = false
+      for (const event of batch) {
+        if (event.type === "done") resetScroll = true
         switch (event.type) {
           case "text_delta":
             setState((s) => ({ ...s, currentStreaming: s.currentStreaming + (event.delta ?? "") }))
@@ -462,10 +482,31 @@ export function App({
           }))
         }
       }
+      if (resetScroll) setChatScrollLines(0)
+    }
+
+    async function processEvents() {
+      for await (const event of events) {
+        if (!active) break
+        eventQueueRef.current.push(event)
+        const immediate = event.type === "done" || event.type === "error"
+        if (immediate) {
+          flush()
+        } else if (!flushTimerRef.current) {
+          flushTimerRef.current = setTimeout(() => {
+            flushTimerRef.current = null
+            flush()
+          }, EVENT_BATCH_MS)
+        }
+      }
     }
     processEvents().catch(() => {})
     return () => {
       active = false
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
     }
   }, [events])
 
@@ -512,6 +553,14 @@ export function App({
       case "help":
         setView("help")
         return
+      case "thinking":
+        setState((s) => ({ ...s, showThinking: !s.showThinking }))
+        setView("chat")
+        return
+      case "details":
+        setState((s) => ({ ...s, showToolDetails: !s.showToolDetails }))
+        setView("chat")
+        return
       default:
         return
     }
@@ -554,6 +603,23 @@ export function App({
       setChatScrollLines((v) => Math.max(0, v - 12))
       return
     }
+    if (key.ctrl && inputChar === "b" && view === "chat") {
+      setChatScrollLines((v) => v + 24)
+      return
+    }
+    if (key.ctrl && inputChar === "f" && view === "chat") {
+      setChatScrollLines((v) => Math.max(0, v - 24))
+      return
+    }
+    if (view === "chat" && key.ctrl && inputChar === "g") {
+      setChatScrollLines(0)
+      return
+    }
+    if (view === "chat" && key.end) {
+      setChatScrollLines(0)
+      return
+    }
+
     if (view === "chat" && key.pageUp) {
       setChatScrollLines((v) => v + 24)
       return
@@ -702,10 +768,10 @@ export function App({
       }
       if (view === "advanced") {
         if (key.tab) {
-          setAdvancedFocus((f) => (f + 1) % 10)
+          setAdvancedFocus((f) => (f + 1) % 9)
           return
         }
-        if (advancedFocus === 9 && isEnter && saveConfig) {
+        if (advancedFocus === 8 && isEnter && saveConfig) {
           let mcpServers: Array<Record<string, unknown>> = []
           let profiles: Record<string, unknown> = {}
           try {
@@ -726,7 +792,6 @@ export function App({
             modes: {
               agent: { customInstructions: advancedForm.agentInstructions.trim() || undefined },
               plan: { customInstructions: advancedForm.planInstructions.trim() || undefined },
-              debug: { customInstructions: advancedForm.debugInstructions.trim() || undefined },
               ask: { customInstructions: advancedForm.askInstructions.trim() || undefined },
             },
             profiles,
@@ -741,21 +806,20 @@ export function App({
           "rulesFilesText",
           "agentInstructions",
           "planInstructions",
-          "debugInstructions",
           "askInstructions",
           "profilesJson",
         ] as const
-        if (advancedFocus < 9 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f")) {
+        if (advancedFocus < 8 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f")) {
           const k = keys[advancedFocus]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k].slice(0, -1) }))
           return
         }
-        if (advancedFocus < 9 && isEnter) {
+        if (advancedFocus < 8 && isEnter) {
           const k = keys[advancedFocus]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k] + "\n" }))
           return
         }
-        if (advancedFocus < 9 && inputChar && !key.ctrl && !key.meta) {
+        if (advancedFocus < 8 && inputChar && !key.ctrl && !key.meta) {
           const k = keys[advancedFocus]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k] + inputChar }))
           return
@@ -825,6 +889,9 @@ export function App({
 
     if (isEnter && !slashOpen) {
       if (input.trim() && !state.isRunning) {
+        const now = Date.now()
+        if (now - lastSubmitRef.current < 400) return
+        lastSubmitRef.current = now
         const content = input.trim()
         inputHistory.current.push(content)
         if (inputHistory.current.length > 50) inputHistory.current.shift()
@@ -1095,7 +1162,6 @@ function AdvancedConfigView({
     rulesFilesText: string
     agentInstructions: string
     planInstructions: string
-    debugInstructions: string
     askInstructions: string
     profilesJson: string
   }
@@ -1108,7 +1174,6 @@ function AdvancedConfigView({
     "Rules files (one per line)",
     "Agent instructions",
     "Plan instructions",
-    "Debug instructions",
     "Ask instructions",
     "Profiles JSON",
   ]
@@ -1119,7 +1184,6 @@ function AdvancedConfigView({
     "rulesFilesText",
     "agentInstructions",
     "planInstructions",
-    "debugInstructions",
     "askInstructions",
     "profilesJson",
   ] as const
@@ -1139,8 +1203,8 @@ function AdvancedConfigView({
         </Box>
       ))}
       <Box>
-        <Text color={focus === 9 ? "cyan" : "gray"}>{focus === 9 ? "▸ " : "  "}</Text>
-        <Text color={focus === 9 ? "green" : "gray"}>[Save] — press Enter</Text>
+        <Text color={focus === 8 ? "cyan" : "gray"}>{focus === 8 ? "▸ " : "  "}</Text>
+        <Text color={focus === 8 ? "green" : "gray"}>[Save] — press Enter</Text>
       </Box>
     </Box>
   )
@@ -1296,7 +1360,7 @@ function InputBar({
 }) {
   const borderColor = awaitingApproval ? "yellow" : isRunning ? "red" : "cyan"
   const prompt = awaitingApproval
-    ? "[AWAITING APPROVAL]"
+    ? "Allow? [y] Yes [n] No [a] Always [s] Skip — type below"
     : isRunning
       ? "[ABORT: Ctrl+C]"
       : `[${mode}]`
@@ -1555,7 +1619,7 @@ function Footer({
     Math.max(20, cols - 2)
   )
   const line2 = fitPad(
-    `/  /model  /embeddings  /advanced  /index  Tab  Ctrl+M  Ctrl+P(profile)  Ctrl+S  Ctrl+U/D(scroll)  PgUp/PgDn  Ctrl+K  Ctrl+C:${isRunning ? "abort" : "quit"}  ↑↓`,
+    `/  /model  /embeddings  /advanced  /index  Tab  Ctrl+M  Ctrl+P(profile)  Ctrl+S  Ctrl+G/End(latest)  Ctrl+U/D  PgUp/PgDn  Ctrl+K  Ctrl+C:${isRunning ? "abort" : "quit"}  ↑↓`,
     Math.max(20, cols - 2)
   )
   return (
@@ -1585,16 +1649,19 @@ function ChatViewport({
 }) {
   const width = Math.max(20, cols - 4)
   const allLines = buildChatLines(state, width)
-  const visibleHeight = Math.max(8, rows - 16)
+  const visibleHeight = Math.max(12, rows - 14)
   const maxScroll = Math.max(0, allLines.length - visibleHeight)
   const safeScroll = Math.max(0, Math.min(scrollLines, maxScroll))
   const start = Math.max(0, allLines.length - visibleHeight - safeScroll)
   const lines = allLines.slice(start, start + visibleHeight)
 
   return (
-    <Box flexDirection="column" flexGrow={1} overflowY="hidden" paddingX={1}>
+    <Box flexDirection="column" flexGrow={1} minHeight={visibleHeight} overflowY="hidden" paddingX={1}>
       {safeScroll > 0 && (
-        <Text color="gray">↑ history ({safeScroll} lines) — Ctrl+D to return</Text>
+        <Text color="gray">↑ Scroll up (PgUp / Ctrl+D) — {safeScroll} lines above · Ctrl+G or End = latest</Text>
+      )}
+      {safeScroll > 0 && state.isRunning && (
+        <Text color="cyan">↓ New content — Ctrl+G or End to jump to latest</Text>
       )}
       {lines.map((line, idx) => (
         <Text key={`${idx}_${line.text.slice(0, 20)}`} color={line.color ?? "white"} bold={line.bold}>
@@ -1608,6 +1675,59 @@ function ChatViewport({
 
 function buildChatLines(state: AppState, width: number): ChatLine[] {
   const out: ChatLine[] = []
+
+  // ─── Top: progress (OpenCode-style — tools and todo visible first) ─────────
+  if (state.todo.trim()) {
+    out.push({ text: "Todo", color: "yellow", bold: true })
+    for (const line of wrapToWidth(sanitizeText(state.todo), Math.max(10, width - 2)))
+      out.push({ text: `  ${line}`, color: "white" })
+    out.push({ text: "", color: "gray" })
+  }
+
+  const recentTools = state.liveTools.slice(-80)
+  if (recentTools.length > 0) {
+    out.push({ text: "Tools", color: "yellow", bold: true })
+    const groups: { tool: string; status: string; count: number; preview?: string }[] = []
+    for (const tool of recentTools) {
+      const status =
+        tool.status === "running" ? "…" : tool.status === "completed" ? "ok" : "err"
+      const previewRaw = tool.input?.["path"] ?? tool.input?.["command"] ?? tool.input?.["query"] ?? tool.input?.["url"] ?? ""
+      const preview = previewRaw ? sanitizeText(String(previewRaw)).slice(0, 64) : ""
+      const last = groups[groups.length - 1]
+      if (last && last.tool === tool.tool && last.status === status) {
+        last.count += 1
+        if (preview && !last.preview) last.preview = preview
+      } else {
+        groups.push({ tool: tool.tool, status, count: 1, preview: preview || undefined })
+      }
+    }
+    for (const g of groups) {
+      const label = g.count > 1 ? `${g.count}× ${sanitizeText(g.tool)}` : sanitizeText(g.tool)
+      const showPreview = state.showToolDetails && g.preview
+      const line = showPreview ? `  [${g.status}] ${label} :: ${g.preview}` : `  [${g.status}] ${label}`
+      for (const l of wrapToWidth(line, width)) {
+        out.push({
+          text: l,
+          color: g.status === "err" ? "red" : g.status === "ok" ? "gray" : "yellow",
+        })
+      }
+    }
+    out.push({ text: "", color: "gray" })
+  }
+
+  for (const sa of state.subAgents) {
+    const id = sanitizeText(sa?.id ?? "unknown")
+    const mode = sanitizeText(String(sa?.mode ?? "agent"))
+    const status = sa?.status === "running" ? "RUN" : sa?.status === "completed" ? "OK" : "ERR"
+    const rawTask = sanitizeText(sa?.task ?? "")
+    const task = rawTask.length > 120 ? `${rawTask.slice(0, 120)}...` : rawTask
+    for (const l of wrapToWidth(`[subagent ${id.slice(0, 8)} ${mode} ${status}] ${task}`, width)) out.push({ text: l, color: "cyan" })
+    if (sa?.currentTool) out.push({ text: `  tool: ${sanitizeText(sa.currentTool)}`, color: "gray" })
+    if (sa?.error) out.push({ text: `  error: ${sanitizeText(sa.error)}`, color: "red" })
+  }
+  if (state.subAgents.length > 0) out.push({ text: "", color: "gray" })
+
+  // ─── Chat messages ───────────────────────────────────────────────────────
   for (const msg of state.messages) {
     const raw = sanitizeText(typeof msg.content === "string" ? msg.content : "[complex message]")
     const content = msg.role === "assistant" ? cleanAssistantText(raw) : raw
@@ -1630,39 +1750,7 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
     }
   }
 
-  const recentTools = state.liveTools.slice(-12)
-  if (recentTools.length > 0) {
-    out.push({ text: "Tools", color: "yellow", bold: true })
-    for (const tool of recentTools) {
-      const status =
-        tool.status === "running" ? "…" : tool.status === "completed" ? "ok" : "err"
-      const previewRaw = tool.input?.["path"] ?? tool.input?.["command"] ?? tool.input?.["query"] ?? tool.input?.["url"] ?? ""
-      const preview = previewRaw ? sanitizeText(String(previewRaw)).slice(0, 64) : ""
-      const line = preview
-        ? `  [${status}] ${sanitizeText(tool.tool)} :: ${preview}`
-        : `  [${status}] ${sanitizeText(tool.tool)}`
-      for (const l of wrapToWidth(line, width)) {
-        out.push({
-          text: l,
-          color: tool.status === "error" ? "red" : tool.status === "completed" ? "gray" : "yellow",
-        })
-      }
-    }
-    out.push({ text: "", color: "gray" })
-  }
-
-  for (const sa of state.subAgents) {
-    const id = sanitizeText(sa?.id ?? "unknown")
-    const mode = sanitizeText(String(sa?.mode ?? "agent"))
-    const status = sa?.status === "running" ? "RUN" : sa?.status === "completed" ? "OK" : "ERR"
-    const rawTask = sanitizeText(sa?.task ?? "")
-    const task = rawTask.length > 120 ? `${rawTask.slice(0, 120)}...` : rawTask
-    for (const l of wrapToWidth(`[subagent ${id.slice(0, 8)} ${mode} ${status}] ${task}`, width)) out.push({ text: l, color: "cyan" })
-    if (sa?.currentTool) out.push({ text: `  tool: ${sanitizeText(sa.currentTool)}`, color: "gray" })
-    if (sa?.error) out.push({ text: `  error: ${sanitizeText(sa.error)}`, color: "red" })
-  }
-
-  if (state.isRunning && state.reasoning) {
+  if (state.isRunning && state.reasoning && state.showThinking) {
     out.push({ text: "Thinking...", color: "magenta" })
     const preview = sanitizeText(state.reasoning).slice(-800)
     for (const line of wrapToWidth(preview, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "magenta" })

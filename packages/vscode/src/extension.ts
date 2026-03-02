@@ -43,6 +43,34 @@ export function activate(context: vscode.ExtensionContext): void {
       provider?.addToChat(content)
     }),
 
+    vscode.commands.registerCommand("nexuscode.explainSelection", async () => {
+      const ctx = getEditorContext()
+      if (!ctx?.selectedText) {
+        await vscode.window.showInformationMessage("NexusCode: Select some code to explain.")
+        return
+      }
+      const prompt = `Explain the following code from **${ctx.relPath}**:\n\`\`\`${ctx.languageId}\n${ctx.selectedText}\n\`\`\``
+      await provider?.runAgentWithPrompt(prompt, "ask")
+    }),
+
+    vscode.commands.registerCommand("nexuscode.improveSelection", async () => {
+      const ctx = getEditorContext()
+      if (!ctx?.selectedText) {
+        await vscode.window.showInformationMessage("NexusCode: Select some code to improve.")
+        return
+      }
+      const prompt = `Improve the following code from **${ctx.relPath}** (e.g., suggest refactorings, optimizations, or better practices):\n\`\`\`${ctx.languageId}\n${ctx.selectedText}\n\`\`\``
+      await provider?.runAgentWithPrompt(prompt, "agent")
+    }),
+
+    vscode.commands.registerCommand("nexuscode.fixSelection", async () => {
+      const ctx = getEditorContext()
+      if (!ctx) return
+      const problems = getDiagnosticsString(ctx.uri)
+      const prompt = `Fix the following code in **${ctx.relPath}**\n\`\`\`\n${ctx.selectedText || ctx.documentText}\n\`\`\`\n\nProblems:\n${problems}`
+      await provider?.runAgentWithPrompt(prompt, "agent")
+    }),
+
     vscode.commands.registerCommand("nexuscode.compact", () => {
       vscode.commands.executeCommand("nexuscode.sidebar.focus")
     }),
@@ -73,4 +101,38 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   provider?.dispose()
   provider = undefined
+}
+
+function getEditorContext(): {
+  uri: vscode.Uri
+  relPath: string
+  languageId: string
+  selectedText: string
+  documentText: string
+} | undefined {
+  const editor = vscode.window.activeTextEditor
+  if (!editor) return undefined
+  const doc = editor.document
+  const selection = editor.selection
+  const selectedText = doc.getText(selection)
+  const documentText = doc.getText()
+  return {
+    uri: doc.uri,
+    relPath: vscode.workspace.asRelativePath(doc.uri),
+    languageId: doc.languageId,
+    selectedText,
+    documentText,
+  }
+}
+
+function getDiagnosticsString(uri: vscode.Uri): string {
+  const list = vscode.languages.getDiagnostics(uri)
+  if (list.length === 0) return "No problems reported."
+  return list
+    .map((d) => {
+      const severity = ["Error", "Warning", "Info", "Hint"][d.severity ?? 0] ?? "Info"
+      const range = `${d.range.start.line + 1}:${d.range.start.character}`
+      return `- [${severity}] ${range}: ${d.message}`
+    })
+    .join("\n")
 }

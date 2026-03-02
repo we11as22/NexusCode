@@ -16,17 +16,18 @@ const schema = z.object({
 
 export const executeCommandTool: ToolDef<z.infer<typeof schema>> = {
   name: "execute_command",
-  description: `Execute a shell command in the project directory.
-Returns stdout, stderr, and exit code.
-Output is capped at 50KB (head + tail shown if larger).
-Progress bars and ANSI escape sequences are stripped.
-Timeout default: 120 seconds (max: 600).
+  description: `Run a shell command in the project (or specified cwd). Use for real system/terminal operations only.
 
-Best practices:
-- Use for: running tests, build tools, installing packages, git operations
-- Prefer other tools when available (read_file, write_to_file, search_files)
-- For long-running servers, check if they start successfully then stop monitoring
-- Chain commands with && for sequential execution`,
+When to use:
+- Tests, builds, package installs, git, linters, formatters.
+- Commands that cannot be done with read_file, search_files, or write tools.
+
+When NOT to use:
+- Reading files: use read_file (not cat/head/tail).
+- Searching content: use search_files (not grep/rg).
+- Editing files: use replace_in_file or write_to_file (not sed/awk/echo).
+
+Output: stdout+stderr, exit code; capped at 50KB (head+tail if larger). ANSI and progress bars stripped. Timeout: default 120s, max 600s. Chain sequential steps with &&.`,
   parameters: schema,
   requiresApproval: true,
 

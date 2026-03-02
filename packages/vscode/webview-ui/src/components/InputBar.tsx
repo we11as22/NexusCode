@@ -10,7 +10,7 @@ const AT_MENTION_SUGGESTIONS = [
 ]
 
 export function InputBar() {
-  const { inputValue, isRunning, setInputValue, sendMessage, abort, config, selectedProfile, setProfile } = useChatStore()
+  const { inputValue, isRunning, awaitingApproval, setInputValue, sendMessage, abort, config, selectedProfile, setProfile } = useChatStore()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [suggestions, setSuggestions] = useState(AT_MENTION_SUGGESTIONS)
@@ -18,7 +18,7 @@ export function InputBar() {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      if (!isRunning && inputValue.trim()) {
+      if (!isRunning && !awaitingApproval && inputValue.trim()) {
         sendMessage(inputValue.trim())
       }
       return
@@ -108,13 +108,19 @@ export function InputBar() {
             value={inputValue}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
-            placeholder={isRunning ? "Running… (Esc to abort)" : "Ask NexusCode anything… (@ for context)"}
-            disabled={false}
-            rows={1}
-            className={`prompt-input flex-1 min-w-0 ${isRunning ? "opacity-70" : ""}`}
+          placeholder={
+            awaitingApproval
+              ? "Awaiting your approval (check VS Code notification)…"
+              : isRunning
+                ? "Running… (Esc to abort)"
+                : "Add a follow-up"
+          }
+          disabled={false}
+          rows={1}
+          className={`prompt-input flex-1 min-w-0 ${isRunning || awaitingApproval ? "opacity-70" : ""}`}
             style={{ height: "54px" }}
           />
-          {isRunning ? (
+          {isRunning || awaitingApproval ? (
             <button
               onClick={abort}
               title="Stop (Esc)"

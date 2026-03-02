@@ -13,11 +13,16 @@ const schema = z.object({
 
 export const webFetchTool: ToolDef<z.infer<typeof schema>> = {
   name: "web_fetch",
-  description: `Fetch and read content from a URL.
-HTML pages are converted to clean markdown.
-JSON/text/code is returned as-is.
-Maximum 100KB content.
-Useful for: reading documentation, fetching API specs, checking URLs.`,
+  description: `Fetch content from a URL. HTML is converted to markdown; JSON/text returned as-is. Read-only.
+
+When to use:
+- Documentation, API specs, project URLs the user provided.
+- Checking external references or dependencies.
+
+When NOT to use:
+- Do not guess or fabricate URLs; use only user-provided or discovered URLs.
+- Large binaries or non-text: tool caps at 100KB and is text-oriented.
+Requires a valid, fully-formed URL. Timeout ~30s.`,
   parameters: schema,
   readOnly: true,
 
@@ -100,10 +105,15 @@ const webSearchSchema = z.object({
 
 export const webSearchTool: ToolDef<z.infer<typeof webSearchSchema>> = {
   name: "web_search",
-  description: `Search the web using Brave Search or Serper API.
-Returns titles, URLs, and snippets for the top results.
-Requires BRAVE_API_KEY or SERPER_API_KEY environment variable.
-Use web_fetch to read full content of specific results.`,
+  description: `Search the web (Brave or Serper). Returns titles, URLs, snippets. Use web_fetch to read full pages. Requires BRAVE_API_KEY or SERPER_API_KEY.
+
+When to use:
+- Current docs, versions, or info beyond training data.
+- Verifying APIs, dependencies, or recent changes.
+
+When NOT to use:
+- Codebase questions: use codebase_search or search_files.
+- User-provided URL: use web_fetch directly.`,
   parameters: webSearchSchema,
   readOnly: true,
 

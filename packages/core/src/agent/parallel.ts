@@ -163,7 +163,7 @@ export class ParallelAgentManager {
 
 const spawnSchema = z.object({
   description: z.string().describe("What should the sub-agent do? Provide a clear, self-contained task description."),
-  mode: z.enum(["agent", "plan", "debug", "ask", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
+  mode: z.enum(["agent", "plan", "ask", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
   task_progress: z.string().optional(),
 })
 
@@ -173,7 +173,7 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
     description: `Launch a parallel sub-agent to work on a specific task concurrently.
 Use for independent subtasks that don't depend on each other.
 The sub-agent has full capabilities based on the specified mode.
-Returns the sub-agent's final output when done.
+**The sub-agent must call attempt_completion when the task is done**; its result is returned to you.
 Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: spawnSchema,
     modes: ["agent"],

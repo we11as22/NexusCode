@@ -124,10 +124,23 @@ const listSchema = z.object({
 
 export const listFilesTool: ToolDef<z.infer<typeof listSchema>> = {
   name: "list_files",
-  description: `List files and directories.
-Shows a tree-like structure with files and subdirectories.
-Use recursive=true to list all files in a directory tree.
-Maximum 2000 entries.`,
+  description: `List files and directories. Tree-like structure; respects .gitignore and common ignores.
+
+When to use:
+- Discover project layout before searching or reading.
+- Find file names or directory structure.
+- Check presence of config files, scripts, or modules.
+
+When NOT to use:
+- Finding by content: use codebase_search or search_files.
+- Reading a file: use read_file.
+- Glob by extension: use path + include (e.g. include="*.ts").
+
+Parameters:
+- path: directory to list (default: project root). Relative to cwd.
+- recursive: include subdirectories (default: false for root, true for subdirs).
+- include: glob to filter entries (e.g. "*.ts").
+- max_entries: cap output (default 200, max 5000).`,
   parameters: listSchema,
   readOnly: true,
 
@@ -141,14 +154,18 @@ Maximum 2000 entries.`,
       const ignoreMod = await import("ignore")
       const ignoreFactory = ((ignoreMod as any).default ?? ignoreMod) as (...args: unknown[]) => ReturnType<typeof import("ignore").default>
 
-      // Load .gitignore
       let ig = ignoreFactory()
-      try {
-        const gitignoreContent = await import("node:fs/promises").then(f =>
-          f.readFile(path.join(ctx.cwd, ".gitignore"), "utf8").catch(() => "")
-        )
-        ig = ig.add(gitignoreContent)
-      } catch {}
+      // When listing a specific subdirectory, do NOT use project .gitignore — otherwise
+      // listing e.g. "sources" would show nothing if sources/ is in .gitignore.
+      const useGitignore = !listPath || listPath === "."
+      if (useGitignore) {
+        try {
+          const gitignoreContent = await import("node:fs/promises").then(f =>
+            f.readFile(path.join(ctx.cwd, ".gitignore"), "utf8").catch(() => "")
+          )
+          ig = ig.add(gitignoreContent)
+        } catch {}
+      }
       ig.add([".git", "node_modules", ".nexus/index", ".nexus/checkpoints"])
 
       const entries: string[] = []

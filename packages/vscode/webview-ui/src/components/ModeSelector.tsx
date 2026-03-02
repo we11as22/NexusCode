@@ -4,7 +4,6 @@ import { useChatStore, type Mode } from "../stores/chat.js"
 const MODES: Array<{ id: Mode; label: string; icon: string; description: string }> = [
   { id: "agent", label: "Agent", icon: "A", description: "Full autonomous coding agent" },
   { id: "plan",  label: "Plan",  icon: "P", description: "Plan without modifying code" },
-  { id: "debug", label: "Debug", icon: "D", description: "Find and fix bugs" },
   { id: "ask",   label: "Ask",   icon: "Q", description: "Q&A without modifications" },
 ]
 

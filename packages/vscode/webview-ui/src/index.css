@@ -320,6 +320,22 @@ html, body, #root {
   border-top: 1px solid var(--vscode-panel-border);
 }
 
+.chat-bottom-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+  min-height: 0;
+}
+
+.chat-bottom-bar .prompt-input-container {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
 .nexus-subagent-strip {
   flex-shrink: 0;
   display: grid;
@@ -492,8 +508,43 @@ button, input, textarea {
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* Cline-style approval banner */
+.nexus-approval-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--vscode-editorWarning-border, rgba(255, 193, 7, 0.5));
+  background: var(--vscode-editorWarning-background, rgba(255, 193, 7, 0.15));
+  color: var(--vscode-editorWarning-foreground, #dcdcaa);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.nexus-approval-icon {
+  flex-shrink: 0;
+  font-size: 16px;
+}
+
 /* Focus — blue ring like Cursor */
 :focus-visible {
   outline: 2px solid var(--nexus-accent);
   outline-offset: 1px;
+}
+
+/* Loading dots (sessions, etc.) — like Cline / progress display */
+.nexus-loading-dots .nexus-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--nexus-accent);
+  animation: nexus-dot-pulse 1.2s ease-in-out infinite both;
+}
+.nexus-loading-dots .nexus-dot:nth-child(1) { animation-delay: 0s }
+.nexus-loading-dots .nexus-dot:nth-child(2) { animation-delay: 0.2s }
+.nexus-loading-dots .nexus-dot:nth-child(3) { animation-delay: 0.4s }
+@keyframes nexus-dot-pulse {
+  0%, 80%, 100% { opacity: 0.35; transform: scale(0.9) }
+  40% { opacity: 1; transform: scale(1.1) }
 }

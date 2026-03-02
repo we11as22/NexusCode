@@ -83,10 +83,10 @@ function MessageBubble({ message }: { message: SessionMessage }) {
 
   if (message.role === "user") {
     return (
-      <div className="flex justify-end w-full min-w-0">
+      <div className="flex justify-start w-full min-w-0">
         <div
-          className="max-w-[92%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm"
-          style={{ background: "var(--nexus-user-bubble)", border: "1px solid rgba(0, 120, 212, 0.2)" }}
+          className="max-w-[92%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm bg-[var(--vscode-editor-inactiveSelectionBackground)] border border-[var(--vscode-panel-border)]"
+          style={{ background: "var(--vscode-editor-inactiveSelectionBackground)", borderColor: "var(--vscode-panel-border)" }}
         >
           {typeof message.content === "string"
             ? message.content

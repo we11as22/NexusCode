@@ -10,10 +10,19 @@ const schema = z.object({
 
 export const listDefinitionsTool: ToolDef<z.infer<typeof schema>> = {
   name: "list_code_definitions",
-  description: `Extract top-level code definitions (classes, functions, methods, interfaces, types) from a file or directory.
-Returns a compact view of the code structure without full implementation details.
-Supports: TypeScript, JavaScript, Python, Rust, Go, Java, C, C++.
-Useful for understanding codebase structure before diving into details.`,
+  description: `List top-level code definitions (classes, functions, methods, interfaces, types) for a file or directory. No full bodies — structure only.
+
+When to use:
+- Understand file or module structure before reading or searching.
+- Find where a symbol is defined (then use read_file or codebase_search for details).
+- Quick overview of many files in a directory.
+
+When NOT to use:
+- Semantic search: use codebase_search.
+- Exact pattern in content: use search_files.
+- Reading implementation: use read_file.
+
+Supports: TS/JS, Python, Rust, Go, Java, C/C++. Returns path and line (e.g. "function foo (L42)").`,
   parameters: schema,
   readOnly: true,
 

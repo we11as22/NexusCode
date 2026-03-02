@@ -67,7 +67,6 @@ export const NexusConfigSchema = z.object({
   modes: z.object({
     agent: modeConfigSchema.optional(),
     plan: modeConfigSchema.optional(),
-    debug: modeConfigSchema.optional(),
     ask: modeConfigSchema.optional(),
   }).catchall(modeConfigSchema.optional()).default({}),
 
@@ -113,6 +112,7 @@ export const NexusConfigSchema = z.object({
     enabled: z.boolean().default(true),
     timeoutMs: z.number().int().positive().default(15000),
     createOnWrite: z.boolean().default(true),
+    doubleCheckCompletion: z.boolean().default(false),
   }).default({}),
 
   mcp: z.object({
@@ -141,6 +141,20 @@ export const NexusConfigSchema = z.object({
 
   parallelAgents: z.object({
     maxParallel: z.number().int().positive().default(4),
+  }).default({}),
+
+  /** Optional overrides for agent loop limits (OpenCode-style: allow enough tools/iterations to finish). */
+  agentLoop: z.object({
+    toolCallBudget: z.object({
+      ask: z.number().int().positive().optional(),
+      plan: z.number().int().positive().optional(),
+      agent: z.number().int().positive().optional(),
+    }).optional(),
+    maxIterations: z.object({
+      ask: z.number().int().positive().optional(),
+      plan: z.number().int().positive().optional(),
+      agent: z.number().int().positive().optional(),
+    }).optional(),
   }).default({}),
 
   rules: z.object({

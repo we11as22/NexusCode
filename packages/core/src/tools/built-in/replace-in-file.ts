@@ -15,20 +15,21 @@ const schema = z.object({
 
 export const replaceInFileTool: ToolDef<z.infer<typeof schema>> = {
   name: "replace_in_file",
-  description: `Make targeted edits to an existing file using SEARCH/REPLACE blocks.
+  description: `Make targeted edits with SEARCH/REPLACE blocks. Preferred over write_to_file for existing files.
 
-For each block:
-- "search": the EXACT text currently in the file (whitespace and indentation must match)
-- "replace": the text to replace it with
+When to use:
+- Bug fixes, adding/changing functions, updating imports, small edits.
+- Multiple related edits in one file (stack several blocks in one call).
+- When you know the exact text to change (read the file first if unsure).
 
-You can provide multiple blocks to make several changes in one call.
-This is the preferred tool for modifying existing files — faster and less error-prone than write_to_file.
+When NOT to use:
+- New files or >50% of file changing: use write_to_file.
+- Unclear exact content: read_file first to get exact text and indentation.
 
-IMPORTANT:
-- Read the file first if you're unsure about the exact content
-- The search must match exactly (including whitespace/indentation)
-- If the search block appears multiple times, only the first occurrence is replaced
-- Blocks are applied top-to-bottom in order`,
+Rules:
+- search must match exactly (whitespace and indentation). Blocks applied in order.
+- Tool returns full updated content — use it as reference for next edits.
+- If search appears multiple times, only the first occurrence is replaced.`,
   parameters: schema,
   requiresApproval: true,
 
