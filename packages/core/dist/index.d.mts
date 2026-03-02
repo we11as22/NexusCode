@@ -34,23 +34,27 @@ declare const NexusConfigSchema: z.ZodObject<{
         extra?: Record<string, unknown> | undefined;
     }>>;
     embeddings: z.ZodOptional<z.ZodObject<{
-        provider: z.ZodEnum<["openai", "openai-compatible", "ollama", "local"]>;
+        provider: z.ZodEnum<["openai", "openai-compatible", "openrouter", "ollama", "google", "mistral", "bedrock", "local"]>;
         model: z.ZodString;
         baseUrl: z.ZodOptional<z.ZodString>;
         apiKey: z.ZodOptional<z.ZodString>;
         dimensions: z.ZodOptional<z.ZodNumber>;
+        /** AWS region for Bedrock */
+        region: z.ZodOptional<z.ZodString>;
     }, "strip", z.ZodTypeAny, {
-        provider: "openai" | "ollama" | "openai-compatible" | "local";
+        provider: "openai" | "google" | "ollama" | "openai-compatible" | "bedrock" | "mistral" | "openrouter" | "local";
         model: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
+        region?: string | undefined;
     }, {
-        provider: "openai" | "ollama" | "openai-compatible" | "local";
+        provider: "openai" | "google" | "ollama" | "openai-compatible" | "bedrock" | "mistral" | "openrouter" | "local";
         model: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
+        region?: string | undefined;
     }>>;
     vectorDb: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
@@ -261,6 +265,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveWrite: z.ZodDefault<z.ZodBoolean>;
         autoApproveCommand: z.ZodDefault<z.ZodBoolean>;
         autoApproveReadPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
+        allowedCommands: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         denyPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         rules: z.ZodDefault<z.ZodArray<z.ZodObject<{
             tool: z.ZodOptional<z.ZodString>;
@@ -286,6 +292,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveWrite: boolean;
         autoApproveCommand: boolean;
         autoApproveReadPatterns: string[];
+        allowedCommands: string[];
         denyPatterns: string[];
         rules: {
             action: "ask" | "allow" | "deny";
@@ -299,6 +306,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveWrite?: boolean | undefined;
         autoApproveCommand?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
+        allowedCommands?: string[] | undefined;
         denyPatterns?: string[] | undefined;
         rules?: {
             action: "ask" | "allow" | "deny";
@@ -580,6 +588,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveWrite: boolean;
         autoApproveCommand: boolean;
         autoApproveReadPatterns: string[];
+        allowedCommands: string[];
         denyPatterns: string[];
         rules: {
             action: "ask" | "allow" | "deny";
@@ -644,11 +653,12 @@ declare const NexusConfigSchema: z.ZodObject<{
         extra?: Record<string, unknown> | undefined;
     }>;
     embeddings?: {
-        provider: "openai" | "ollama" | "openai-compatible" | "local";
+        provider: "openai" | "google" | "ollama" | "openai-compatible" | "bedrock" | "mistral" | "openrouter" | "local";
         model: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
+        region?: string | undefined;
     } | undefined;
     vectorDb?: {
         url: string;
@@ -679,11 +689,12 @@ declare const NexusConfigSchema: z.ZodObject<{
         }[] | undefined;
     } | undefined;
     embeddings?: {
-        provider: "openai" | "ollama" | "openai-compatible" | "local";
+        provider: "openai" | "google" | "ollama" | "openai-compatible" | "bedrock" | "mistral" | "openrouter" | "local";
         model: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
+        region?: string | undefined;
     } | undefined;
     vectorDb?: {
         url?: string | undefined;
@@ -763,6 +774,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveWrite?: boolean | undefined;
         autoApproveCommand?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
+        allowedCommands?: string[] | undefined;
         denyPatterns?: string[] | undefined;
         rules?: {
             action: "ask" | "allow" | "deny";
@@ -835,6 +847,8 @@ interface PermissionResult {
     alwaysApprove?: boolean;
     /** When true, host should set autoApprove for the rest of the session (e.g. "Skip all") */
     skipAll?: boolean;
+    /** For execute_command: add this command to the project allowlist so it is not asked again in this folder */
+    addToAllowedCommand?: string;
 }
 interface ToolDef<TArgs = Record<string, unknown>> {
     name: string;
@@ -866,6 +880,8 @@ interface ToolContext {
     host: IHost;
     session: ISession;
     config: NexusConfig;
+    /** Current loop mode (agent / plan / ask). Used e.g. by spawn_agent to set sub-agent permissions. */
+    mode?: Mode;
     indexer?: IIndexer;
     signal: AbortSignal;
     /** Optional: trigger context compaction (condense/summarize_task tools). */
@@ -892,6 +908,8 @@ interface IHost {
     }>;
     showApprovalDialog(action: ApprovalAction): Promise<PermissionResult>;
     emit(event: AgentEvent): void;
+    /** Persist command to .nexus/allowed-commands.json for this cwd so it is not asked for approval again */
+    addAllowedCommand?(cwd: string, command: string): Promise<void>;
     resolveAtMention?(mention: string): Promise<string | null>;
     getProblems?(): Promise<DiagnosticItem[]>;
     /** Restore workspace to a checkpoint (Cline-style). Optional if host has no checkpoint. */
@@ -1075,6 +1093,9 @@ type AgentEvent = {
     type: "done";
     messageId: string;
 } | {
+    type: "todo_updated";
+    todo: string;
+} | {
     type: "doom_loop_detected";
     tool: string;
 };
@@ -1097,11 +1118,12 @@ interface ProviderConfig {
 }
 type ProviderName = "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
 interface EmbeddingConfig {
-    provider: "openai" | "openai-compatible" | "ollama" | "local";
+    provider: "openai" | "openai-compatible" | "openrouter" | "ollama" | "google" | "mistral" | "bedrock" | "local";
     model: string;
     baseUrl?: string;
     apiKey?: string;
     dimensions?: number;
+    region?: string;
 }
 interface NexusConfig {
     model: ProviderConfig;
@@ -1134,6 +1156,8 @@ interface NexusConfig {
         autoApproveWrite: boolean;
         autoApproveCommand: boolean;
         autoApproveReadPatterns: string[];
+        /** Commands allowed without approval for this project (from .nexus/allowed-commands.json) */
+        allowedCommands: string[];
         denyPatterns: string[];
         /** Fine-grained permission rules evaluated in order, first match wins */
         rules: PermissionRule[];
@@ -1341,8 +1365,11 @@ declare function listSessions(cwd: string): Promise<Array<{
     title?: string;
     messageCount: number;
 }>>;
+declare function deleteSession(sessionId: string, cwd: string): Promise<boolean>;
 declare function generateSessionId(): string;
 
+/** Derive session title from first user message (Cline-style). */
+declare function deriveSessionTitle(messages: SessionMessage[]): string;
 /**
  * In-memory session implementation backed by JSONL storage.
  */
@@ -1401,8 +1428,8 @@ declare function runAgentLoop(opts: AgentLoopOptions): Promise<void>;
 type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit";
 /**
  * Core built-in tool groups per mode.
- * These are ALWAYS active if the mode permits — no classifier applied.
- * Classifier only applies to MCP/custom tools when count exceeds threshold.
+ * Access control is enforced in the backend (getBuiltinToolsForMode + getBlockedToolsForMode in loop);
+ * prompts only describe behaviour — they do not grant or revoke tool access.
  */
 declare const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]>;
 /**
@@ -1488,6 +1515,10 @@ interface SubAgentResult {
  */
 declare class ParallelAgentManager {
     private running;
+    /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns (Cline-style guard). */
+    private recentSpawnTasks;
+    private static readonly RECENT_SPAWN_CAP;
+    private static readonly TASK_KEY_LEN;
     spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string): Promise<SubAgentResult>;
     private runSubAgent;
     /** How many agents are currently running */
@@ -1682,4 +1713,4 @@ declare class CheckpointTracker {
     private restoreToWorkspace;
 }
 
-export { type AgentEvent, type ApprovalAction, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProviderConfig, READ_ONLY_TOOLS, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, listSessions, loadConfig, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, writeConfig, writeGlobalProfiles };
+export { type AgentEvent, type ApprovalAction, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProviderConfig, READ_ONLY_TOOLS, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, listSessions, loadConfig, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, writeConfig, writeGlobalProfiles };

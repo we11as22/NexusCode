@@ -2,12 +2,12 @@ import type { ToolDef } from "../../types.js"
 import { readFileTool } from "./read-file.js"
 import { writeFileTool } from "./write-file.js"
 import { replaceInFileTool } from "./replace-in-file.js"
-import { applyPatchTool } from "./apply-patch.js"
 import { executeCommandTool } from "./execute-command.js"
 import { searchFilesTool, listFilesTool } from "./search-files.js"
 import { listDefinitionsTool } from "./list-definitions.js"
 import { codebaseSearchTool } from "./codebase-search.js"
 import { webFetchTool, webSearchTool } from "./web-fetch.js"
+import { exaWebSearchTool, exaCodeSearchTool } from "./exa-search.js"
 import { useSkillTool, browserActionTool } from "./use-skill.js"
 import { condenseTool, summarizeTaskTool, planExitTool } from "./context-tools.js"
 import {
@@ -16,7 +16,8 @@ import {
   updateTodoTool,
   createRuleTool,
 } from "./attempt-completion.js"
-import { batchTool } from "./batch.js"
+import { thinkingPreambleTool } from "./thinking-preamble.js"
+import { batchTool, getBatchToolForMode } from "./batch.js"
 
 export function getAllBuiltinTools(): ToolDef[] {
   return [
@@ -24,6 +25,7 @@ export function getAllBuiltinTools(): ToolDef[] {
     attemptCompletionTool,
     askFollowupTool,
     updateTodoTool,
+    thinkingPreambleTool,
 
     // Read group
     readFileTool,
@@ -33,7 +35,6 @@ export function getAllBuiltinTools(): ToolDef[] {
     // Write group
     writeFileTool,
     replaceInFileTool,
-    applyPatchTool,
     createRuleTool,
     batchTool,
 
@@ -45,6 +46,8 @@ export function getAllBuiltinTools(): ToolDef[] {
     codebaseSearchTool,
     webFetchTool,
     webSearchTool,
+    exaWebSearchTool,
+    exaCodeSearchTool,
 
     // Browser group
     browserActionTool,
@@ -63,7 +66,6 @@ export {
   readFileTool,
   writeFileTool,
   replaceInFileTool,
-  applyPatchTool,
   executeCommandTool,
   searchFilesTool,
   listFilesTool,
@@ -71,6 +73,8 @@ export {
   codebaseSearchTool,
   webFetchTool,
   webSearchTool,
+  exaWebSearchTool,
+  exaCodeSearchTool,
   browserActionTool,
   useSkillTool,
   attemptCompletionTool,
@@ -80,5 +84,7 @@ export {
   condenseTool,
   summarizeTaskTool,
   planExitTool,
+  thinkingPreambleTool,
   batchTool,
+  getBatchToolForMode,
 }

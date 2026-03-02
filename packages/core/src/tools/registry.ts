@@ -1,5 +1,6 @@
 import type { ToolDef, Mode, NexusConfig } from "../types.js"
 import { getBuiltinToolsForMode } from "../agent/modes.js"
+import { getBatchToolForMode } from "./built-in/batch.js"
 import { getAllBuiltinTools } from "./built-in/index.js"
 
 /**
@@ -46,7 +47,11 @@ export class ToolRegistry {
 
     for (const tool of this.tools.values()) {
       if (builtinNames.has(tool.name)) {
-        builtin.push(tool)
+        if (tool.name === "batch") {
+          builtin.push(getBatchToolForMode(mode))
+        } else {
+          builtin.push(tool)
+        }
       } else {
         dynamic.push(tool)
       }

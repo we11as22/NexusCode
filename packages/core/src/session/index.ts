@@ -3,6 +3,23 @@ import type { ISession, SessionMessage, ToolPart, MessagePart } from "../types.j
 import { saveSession, loadSession, generateSessionId, type StoredSession } from "./storage.js"
 import { estimateTokens } from "../context/condense.js"
 
+const SESSION_TITLE_MAX_LEN = 80
+
+/** Derive session title from first user message (Cline-style). */
+export function deriveSessionTitle(messages: SessionMessage[]): string {
+  const user = messages.find((m) => m.role === "user")
+  if (!user) return ""
+  let text = ""
+  if (typeof user.content === "string") {
+    text = user.content
+  } else if (Array.isArray(user.content)) {
+    const part = (user.content as MessagePart[]).find((p) => p.type === "text")
+    if (part && "text" in part) text = part.text
+  }
+  const firstLine = text.trim().split(/\r?\n/)[0]?.trim() ?? ""
+  return firstLine.slice(0, SESSION_TITLE_MAX_LEN)
+}
+
 /**
  * In-memory session implementation backed by JSONL storage.
  */
@@ -41,7 +58,7 @@ export class Session implements ISession {
   addToolPart(messageId: string, part: ToolPart): void {
     const msg = this._messages.find(m => m.id === messageId)
     if (!msg) return
-
+    // Append in chronological order (text, then each tool_call as it is emitted — including MCP)
     if (typeof msg.content === "string") {
       const textPart: MessagePart = { type: "text", text: msg.content }
       msg.content = [textPart, part]
@@ -104,10 +121,12 @@ export class Session implements ISession {
   }
 
   async save(): Promise<void> {
+    const title = deriveSessionTitle(this._messages)
     const stored: StoredSession = {
       id: this.id,
       cwd: this.cwd,
       ts: Date.now(),
+      title: title || undefined,
       messages: this._messages,
     }
     await saveSession(stored)
@@ -131,4 +150,4 @@ export class Session implements ISession {
   }
 }
 
-export { generateSessionId, listSessions } from "./storage.js"
+export { generateSessionId, listSessions, deleteSession } from "./storage.js"

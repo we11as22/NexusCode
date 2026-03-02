@@ -1,5 +1,6 @@
 import { z } from "zod"
 import type { ToolDef, ToolContext } from "../../types.js"
+import { loadSkills } from "../../skills/manager.js"
 
 const schema = z.object({
   skill: z.string().describe("Name of the skill to activate"),
@@ -8,7 +9,7 @@ const schema = z.object({
 
 export const useSkillTool: ToolDef<z.infer<typeof schema>> = {
   name: "use_skill",
-  description: `Load a skill's content (markdown) for specialized knowledge. Skills live in .nexus/skills/ or ~/.nexus/skills/.
+  description: `Load a skill's content (markdown) for specialized knowledge. Skills live in .nexus/skills/ or ~/.nexus/skills/ (same resolution as classifier).
 
 When to use:
 - Task matches a skill's domain (e.g. testing, deployment, framework).
@@ -21,54 +22,27 @@ When NOT to use:
   readOnly: true,
 
   async execute({ skill }, ctx: ToolContext) {
-    // Look up skill in skills config
-    const skills = ctx.config.skills
+    const skillPaths = ctx.config.skills ?? []
+    const loaded = await loadSkills(skillPaths, ctx.cwd).catch(() => [])
 
-    // Try to find by name
-    const skillPaths = [...skills]
+    const nameLower = skill.trim().toLowerCase()
+    const found = loaded.find(
+      (s) => s.name.toLowerCase() === nameLower
+    )
 
-    // Check each path
-    const { readFile } = await import("node:fs/promises")
-    const { resolve, basename, join } = await import("node:path")
-    const { glob } = await import("glob")
-
-    // Expand skill paths to find matching skill
-    const allSkillFiles = await glob(skills.length > 0 ? skills : [".nexus/skills/**/*.md", "~/.nexus/skills/**/*.md"], {
-      cwd: ctx.cwd,
-      absolute: true,
-    })
-
-    // Also check standard locations
-    const standardPaths = [
-      join(ctx.cwd, ".nexus", "skills", skill, "SKILL.md"),
-      join(ctx.cwd, ".nexus", "skills", `${skill}.md`),
-    ]
-
-    let skillContent: string | null = null
-    let skillPath: string | null = null
-
-    for (const p of [...standardPaths, ...allSkillFiles]) {
-      const name = basename(p, ".md").toLowerCase()
-      const parentDir = basename(resolve(p, "..")).toLowerCase()
-      if (name === skill.toLowerCase() || parentDir === skill.toLowerCase()) {
-        try {
-          skillContent = await readFile(p, "utf8")
-          skillPath = p
-          break
-        } catch {}
-      }
-    }
-
-    if (!skillContent) {
+    if (!found) {
+      const available = loaded.length > 0
+        ? loaded.map((s) => s.name).slice(0, 20).join(", ")
+        : "none (add paths in config or create .nexus/skills/<name>/SKILL.md)"
       return {
         success: false,
-        output: `Skill "${skill}" not found. Available skill locations: .nexus/skills/, ~/.nexus/skills/`,
+        output: `Skill "${skill}" not found. Available skills: ${available}.`,
       }
     }
 
     return {
       success: true,
-      output: `<skill name="${skill}">\n${skillContent}\n</skill>`,
+      output: `<skill name="${found.name}">\n${found.content}\n</skill>`,
     }
   },
 }

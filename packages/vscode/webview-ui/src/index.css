@@ -50,11 +50,13 @@ html, body, #root {
   background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, 0.7));
 }
 
-/* Prose markdown — blue accent for links/code */
+/* Prose markdown — blue accent for links/code; safe for streaming (partial content) */
 .prose-nexus {
   color: var(--vscode-foreground, #cccccc);
   font-size: 13px;
   line-height: 1.6;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 .prose-nexus a {
   color: var(--nexus-accent);
@@ -66,6 +68,55 @@ html, body, #root {
 .prose-nexus strong {
   color: var(--vscode-foreground, #cccccc);
   font-weight: 600;
+}
+
+/* Markdown GFM tables */
+.nexus-markdown-table-wrap {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+}
+
+.nexus-markdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.nexus-markdown-thead {
+  background: color-mix(in srgb, var(--vscode-editor-background) 85%, var(--vscode-panel-border) 15%);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-markdown-th {
+  text-align: left;
+  padding: 8px 10px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  border-right: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-markdown-th:last-child {
+  border-right: none;
+}
+
+.nexus-markdown-tr {
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-markdown-tr:last-child {
+  border-bottom: none;
+}
+
+.nexus-markdown-td {
+  padding: 6px 10px;
+  color: var(--vscode-foreground);
+  border-right: 1px solid var(--vscode-panel-border);
+  vertical-align: top;
+}
+
+.nexus-markdown-td:last-child {
+  border-right: none;
 }
 
 .nexus-header {
@@ -180,11 +231,62 @@ html, body, #root {
 
 .nexus-session-item {
   width: 100%;
-  text-align: left;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   border: 1px solid var(--vscode-panel-border);
   border-radius: 10px;
-  padding: 8px;
+  padding: 0;
   background: color-mix(in srgb, var(--vscode-editor-background) 82%, #000 18%);
+}
+
+.nexus-session-item-btn {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 8px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.nexus-session-item-btn:hover {
+  background: transparent;
+}
+
+.nexus-session-item-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--vscode-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexus-session-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.nexus-session-delete {
+  flex-shrink: 0;
+  padding: 6px;
+  margin: 4px 4px 0 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-session-delete:hover {
+  color: var(--vscode-errorForeground, #f14c4c);
+  background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.15));
 }
 
 .nexus-session-item:hover {
@@ -290,6 +392,9 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   height: 100%;
+  width: 100%;
+  min-height: 0;
+  min-width: 0;
   overflow: hidden;
   position: relative;
 }
@@ -299,6 +404,7 @@ html, body, #root {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -307,12 +413,17 @@ html, body, #root {
   flex: 1;
   overflow: hidden;
   min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .chat-messages {
   height: 100%;
-  overflow: hidden;
   min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .chat-input {
@@ -463,14 +574,45 @@ html, body, #root {
   font-style: italic;
 }
 
+.nexus-retry-bar {
+  flex-shrink: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: color-mix(in srgb, var(--vscode-editorWarning-background, rgba(255, 193, 7, 0.12)) 80%, transparent);
+}
+
+.nexus-retry-btn {
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.nexus-retry-btn:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
 .message-list-container {
   position: relative;
   height: 100%;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .message-list {
+  flex: 1;
+  min-height: 0;
   height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 12px;
   background: var(--nexus-chat-bg);
 }
@@ -525,6 +667,16 @@ html, body, #root {
 
 .message-list-empty p {
   margin: 0;
+}
+
+/* Thinking preamble & reasoning: always normal (UI) font, not monospace */
+.nexus-thinking-preamble-block,
+.nexus-reasoning-block {
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif) !important;
+}
+.nexus-thinking-preamble-block *:not(code):not(pre),
+.nexus-reasoning-block *:not(code):not(pre) {
+  font-family: inherit;
 }
 
 .prompt-input-container {

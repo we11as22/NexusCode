@@ -13,7 +13,16 @@ const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
   "p-1.5 rounded-md text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
 const MODEL_PROVIDER_OPTIONS = ["anthropic", "openai", "google", "openai-compatible", "openrouter", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]
-const EMB_PROVIDER_OPTIONS = ["openai", "openai-compatible", "ollama", "local"]
+const EMB_PROVIDER_OPTIONS = [
+  "openai",
+  "openai-compatible",
+  "openrouter",
+  "ollama",
+  "google",
+  "mistral",
+  "bedrock",
+  "local",
+]
 
 export function App() {
   const store = useChatStore()
@@ -216,6 +225,29 @@ function ChatView() {
         <div className="chat-messages-wrapper">
           <div className="chat-messages">
             <MessageList messages={store.messages} />
+            {(() => {
+              const msgs = store.messages
+              const last = msgs[msgs.length - 1]
+              const isLlmError =
+                last?.role === "system"
+                && typeof last.content === "string"
+                && last.content.startsWith("Error:")
+              if (!isLlmError || msgs.length < 2) return null
+              const lastUser = [...msgs].reverse().find((m) => m.role === "user")
+              const lastUserContent = lastUser && typeof lastUser.content === "string" ? lastUser.content : (lastUser?.content as Array<{ type: string; text?: string }>)?.find((p) => p.type === "text")?.text ?? ""
+              if (!lastUserContent.trim()) return null
+              return (
+                <div className="nexus-retry-bar">
+                  <button
+                    type="button"
+                    onClick={() => store.sendMessage(lastUserContent)}
+                    className="nexus-retry-btn"
+                  >
+                    Retry (LLM error)
+                  </button>
+                </div>
+              )
+            })()}
           </div>
         </div>
 
@@ -296,7 +328,14 @@ function ChatBottomBar({ referencedFiles }: { referencedFiles: string[] }) {
 }
 
 function SessionsView() {
-  const { sessions, sessionId, switchSession, sessionsLoading } = useChatStore()
+  const { sessions, sessionId, switchSession, deleteSession, sessionsLoading } = useChatStore()
+
+  const handleDelete = (e: React.MouseEvent, s: { id: string; title?: string }) => {
+    e.stopPropagation()
+    const label = s.title?.trim() || s.id.slice(0, 12)
+    if (!window.confirm(`Delete session "${label}"? This cannot be undone.`)) return
+    deleteSession(s.id)
+  }
 
   return (
     <div className="nexus-pane">
@@ -316,20 +355,37 @@ function SessionsView() {
       <div className="flex flex-col gap-2 mt-2">
         {sessions.map((s) => {
           const isActive = s.id === sessionId
-          const date = new Date(s.ts).toLocaleString()
+          const date = new Date(s.ts).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })
+          const title = (s.title?.trim() || "Untitled session").slice(0, 80)
           return (
-            <button
+            <div
               key={s.id}
               className={`nexus-session-item ${isActive ? "nexus-session-item-active" : ""}`}
-              onClick={() => switchSession(s.id)}
             >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[11px] truncate">{s.id}</span>
-                <span className="text-[10px] nexus-muted flex-shrink-0">{s.messageCount} msgs</span>
-              </div>
-              <div className="text-[10px] nexus-muted mt-0.5 truncate">{s.title ?? "Untitled session"}</div>
-              <div className="text-[10px] nexus-muted mt-0.5">{date}</div>
-            </button>
+              <button
+                type="button"
+                className="nexus-session-item-btn"
+                onClick={() => switchSession(s.id)}
+              >
+                <div className="nexus-session-item-title">{title}</div>
+                <div className="nexus-session-item-meta">
+                  <span className="text-[10px] nexus-muted">{date}</span>
+                  <span className="text-[10px] nexus-muted">{s.messageCount} messages</span>
+                </div>
+                <div className="font-mono text-[10px] nexus-muted truncate mt-0.5" title={s.id}>
+                  {s.id}
+                </div>
+              </button>
+              <button
+                type="button"
+                className="nexus-session-delete"
+                onClick={(e) => handleDelete(e, s)}
+                title="Delete session"
+                aria-label="Delete session"
+              >
+                <TrashIcon className="w-3.5 h-3.5" />
+              </button>
+            </div>
           )
         })}
       </div>
@@ -383,10 +439,11 @@ function toolToActionLabel(tool: string): string {
     codebase_search: "Searching codebase",
     write_to_file: "Writing file",
     replace_in_file: "Editing file",
-    apply_patch: "Applying patch",
-    execute_command: "Running command",
+    execute_command: "Bash",
     web_fetch: "Fetching URL",
     web_search: "Web search",
+    exa_web_search: "Exa web search",
+    exa_code_search: "Exa code search",
     browser_action: "Browser action",
     use_skill: "Using skill",
     attempt_completion: "Completing",
@@ -440,6 +497,7 @@ function SettingsView() {
   const [draft, setDraft] = useState<SettingsDraft | null>(null)
   const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
   const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles">("llm")
+  const [integTab, setIntegTab] = useState<"mcp" | "skills" | "rules">("mcp")
 
   useEffect(() => {
     setServerUrlLocal(serverUrl)
@@ -606,47 +664,75 @@ function SettingsView() {
       {tab === "integrations" && (
       <section className="nexus-section">
         <h3 className="nexus-section-title">MCP, Skills, Rules & Instructions</h3>
-        <SettingsTextarea
-          label="MCP servers (JSON array)"
-          value={draft.mcpServersJson}
-          onChange={(v) => setDraft({ ...draft, mcpServersJson: v })}
-          rows={4}
-        />
-        <SettingsTextarea
-          label="Skills paths (one per line)"
-          value={draft.skillsText}
-          onChange={(v) => setDraft({ ...draft, skillsText: v })}
-          rows={3}
-        />
-        <SettingsInput
-          label="CLAUDE.md path in rules (empty = disabled)"
-          value={draft.claudeMdPath}
-          onChange={(v) => setDraft({ ...draft, claudeMdPath: v })}
-        />
-        <SettingsTextarea
-          label="Additional rules files (one per line)"
-          value={draft.rulesFilesText}
-          onChange={(v) => setDraft({ ...draft, rulesFilesText: v })}
-          rows={3}
-        />
-        <SettingsTextarea
-          label="Agent custom instructions"
-          value={draft.agentInstructions}
-          onChange={(v) => setDraft({ ...draft, agentInstructions: v })}
-          rows={3}
-        />
-        <SettingsTextarea
-          label="Plan custom instructions"
-          value={draft.planInstructions}
-          onChange={(v) => setDraft({ ...draft, planInstructions: v })}
-          rows={3}
-        />
-        <SettingsTextarea
-          label="Ask custom instructions"
-          value={draft.askInstructions}
-          onChange={(v) => setDraft({ ...draft, askInstructions: v })}
-          rows={3}
-        />
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          <button
+            type="button"
+            className={`nexus-tab-btn ${integTab === "mcp" ? "nexus-tab-btn-active" : ""}`}
+            onClick={() => setIntegTab("mcp")}
+          >
+            MCP Servers
+          </button>
+          <button
+            type="button"
+            className={`nexus-tab-btn ${integTab === "skills" ? "nexus-tab-btn-active" : ""}`}
+            onClick={() => setIntegTab("skills")}
+          >
+            Skills
+          </button>
+          <button
+            type="button"
+            className={`nexus-tab-btn ${integTab === "rules" ? "nexus-tab-btn-active" : ""}`}
+            onClick={() => setIntegTab("rules")}
+          >
+            Rules & Instructions
+          </button>
+        </div>
+
+        {integTab === "mcp" && (
+          <IntegrationsMcpView
+            draft={draft}
+            setDraft={setDraft}
+          />
+        )}
+        {integTab === "skills" && (
+          <IntegrationsSkillsView
+            draft={draft}
+            setDraft={setDraft}
+          />
+        )}
+        {integTab === "rules" && (
+          <>
+            <SettingsInput
+              label="CLAUDE.md path in rules (empty = disabled)"
+              value={draft.claudeMdPath}
+              onChange={(v) => setDraft({ ...draft, claudeMdPath: v })}
+            />
+            <SettingsTextarea
+              label="Additional rules files (one per line)"
+              value={draft.rulesFilesText}
+              onChange={(v) => setDraft({ ...draft, rulesFilesText: v })}
+              rows={3}
+            />
+            <SettingsTextarea
+              label="Agent custom instructions"
+              value={draft.agentInstructions}
+              onChange={(v) => setDraft({ ...draft, agentInstructions: v })}
+              rows={3}
+            />
+            <SettingsTextarea
+              label="Plan custom instructions"
+              value={draft.planInstructions}
+              onChange={(v) => setDraft({ ...draft, planInstructions: v })}
+              rows={3}
+            />
+            <SettingsTextarea
+              label="Ask custom instructions"
+              value={draft.askInstructions}
+              onChange={(v) => setDraft({ ...draft, askInstructions: v })}
+              rows={3}
+            />
+          </>
+        )}
       </section>
       )}
 
@@ -683,6 +769,210 @@ function SettingsView() {
           Saved to .nexus/nexus.yaml in project root.
         </span>
       </div>
+    </div>
+  )
+}
+
+/** MCP server list + marketplace link (Cline-style integrations sub-tab). */
+function IntegrationsMcpView({
+  draft,
+  setDraft,
+}: {
+  draft: SettingsDraft
+  setDraft: React.Dispatch<React.SetStateAction<SettingsDraft>>
+}) {
+  const servers = parseJsonArray(draft.mcpServersJson)
+  const [showRaw, setShowRaw] = useState(false)
+
+  const updateServers = (next: Array<Record<string, unknown>>) => {
+    setDraft((d) => ({ ...d, mcpServersJson: JSON.stringify(next, null, 2) }))
+  }
+
+  const removeAt = (index: number) => {
+    const next = servers.filter((_, i) => i !== index)
+    updateServers(next)
+  }
+
+  const setEnabled = (index: number, enabled: boolean) => {
+    const next = servers.map((s, i) => (i === index ? { ...s, enabled } : s))
+    updateServers(next)
+  }
+
+  const addServer = () => {
+    updateServers([...servers, { name: "New server", command: "", enabled: true }])
+  }
+
+  const serverName = (s: Record<string, unknown>) =>
+    (s.name as string) || (s.command as string) || "Unnamed"
+  const serverCommand = (s: Record<string, unknown>) =>
+    [s.command, (s.args as string[])?.join(" ")].filter(Boolean).join(" ") ||
+    (s.url as string) ||
+    "—"
+
+  return (
+    <div className="nexus-integrations-block">
+      <p className="nexus-muted text-[10px] mb-2">
+        MCP servers run as separate processes or remote URLs. Add entries below or edit raw JSON.
+      </p>
+      <div className="flex flex-col gap-2 mb-2">
+        {servers.length === 0 ? (
+          <div className="nexus-muted text-xs">No MCP servers configured.</div>
+        ) : (
+          servers.map((s, i) => (
+            <div
+              key={i}
+              className="flex items-center gap-2 flex-wrap rounded border border-[var(--vscode-panel-border)] p-2 bg-[var(--vscode-editor-inactiveSelectionBackground)]/30"
+            >
+              <label className="flex items-center gap-1.5 flex-shrink-0">
+                <input
+                  type="checkbox"
+                  checked={s.enabled !== false}
+                  onChange={(e) => setEnabled(i, e.target.checked)}
+                />
+                <span className="text-xs font-medium truncate max-w-[120px]" title={serverName(s)}>
+                  {serverName(s)}
+                </span>
+              </label>
+              <span className="text-[10px] font-mono text-[var(--vscode-descriptionForeground)] truncate flex-1 min-w-0" title={serverCommand(s)}>
+                {serverCommand(s)}
+              </span>
+              <button
+                type="button"
+                className="nexus-secondary-btn text-xs py-0.5 px-1.5"
+                onClick={() => removeAt(i)}
+                title="Remove server"
+              >
+                Remove
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+      <div className="flex flex-wrap gap-2 mb-2">
+        <button type="button" className="nexus-secondary-btn text-xs" onClick={addServer}>
+          Add server
+        </button>
+        <a
+          href="https://github.com/modelcontextprotocol/servers"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-[var(--vscode-textLink-foreground)] hover:underline"
+        >
+          Marketplace — browse MCP servers
+        </a>
+      </div>
+      <label className="nexus-field">
+        <span
+          className="text-xs cursor-pointer text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
+          onClick={() => setShowRaw((r) => !r)}
+        >
+          {showRaw ? "Hide" : "Edit"} raw JSON
+        </span>
+        {showRaw && (
+          <textarea
+            value={draft.mcpServersJson}
+            rows={6}
+            onChange={(e) => setDraft((d) => ({ ...d, mcpServersJson: e.target.value }))}
+            className="nexus-input mt-1 w-full font-mono text-[10px]"
+            style={{ fontFamily: "var(--vscode-editor-font-family)" }}
+          />
+        )}
+      </label>
+    </div>
+  )
+}
+
+/** Skills list + browse link (Cline-style integrations sub-tab). */
+function IntegrationsSkillsView({
+  draft,
+  setDraft,
+}: {
+  draft: SettingsDraft
+  setDraft: React.Dispatch<React.SetStateAction<SettingsDraft>>
+}) {
+  const skills = draft.skillsText.split("\n")
+  const [showRaw, setShowRaw] = useState(false)
+
+  const updateSkills = (lines: string[]) => {
+    setDraft((d) => ({ ...d, skillsText: lines.join("\n") }))
+  }
+
+  const removeAt = (index: number) => {
+    updateSkills(skills.filter((_, i) => i !== index))
+  }
+
+  const addPath = () => {
+    updateSkills([...skills, ""])
+  }
+
+  const setLine = (index: number, value: string) => {
+    const next = [...skills]
+    next[index] = value
+    updateSkills(next)
+  }
+
+  return (
+    <div className="nexus-integrations-block">
+      <p className="nexus-muted text-[10px] mb-2">
+        Skills are loaded from paths (files or directories). One path per line.
+      </p>
+      <div className="flex flex-col gap-2 mb-2">
+        {skills.length === 0 ? (
+          <div className="nexus-muted text-xs">No skill paths.</div>
+        ) : (
+          skills.map((path, i) => (
+            <div
+              key={i}
+              className="flex items-center gap-2 rounded border border-[var(--vscode-panel-border)] p-2 bg-[var(--vscode-editor-inactiveSelectionBackground)]/30"
+            >
+              <input
+                type="text"
+                value={path}
+                onChange={(e) => setLine(i, e.target.value)}
+                placeholder="Path to skill (e.g. .cursor/skills/foo/SKILL.md)"
+                className="nexus-input flex-1 min-w-0 text-xs font-mono"
+              />
+              <button
+                type="button"
+                className="nexus-secondary-btn text-xs py-0.5 px-1.5 flex-shrink-0"
+                onClick={() => removeAt(i)}
+                title="Remove"
+              >
+                Remove
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+      <div className="flex flex-wrap gap-2 mb-2">
+        <button type="button" className="nexus-secondary-btn text-xs" onClick={addPath}>
+          Add skill path
+        </button>
+        <a
+          href="https://cursor.com/docs/context/skills"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-[var(--vscode-textLink-foreground)] hover:underline"
+        >
+          Browse skills documentation
+        </a>
+      </div>
+      <label className="nexus-field">
+        <span
+          className="text-xs cursor-pointer text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
+          onClick={() => setShowRaw((r) => !r)}
+        >
+          {showRaw ? "Hide" : "Edit"} raw list
+        </span>
+        {showRaw && (
+          <SettingsTextarea
+            label=""
+            value={draft.skillsText}
+            onChange={(v) => setDraft((d) => ({ ...d, skillsText: v }))}
+            rows={4}
+          />
+        )}
+      </label>
     </div>
   )
 }
@@ -760,11 +1050,14 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
   const modelTemperature = parseNumber(draft.modelTemperature)
   const embDimensions = parseIntOrUndefined(draft.embDimensions)
   const embProviderRaw = draft.embProvider.trim() || "openai"
-  const embProvider = embProviderRaw === "openrouter" ? "openai-compatible" : embProviderRaw
+  const embProvider = embProviderRaw
   const embBaseUrlRaw = draft.embBaseUrl.trim()
-  const embBaseUrl = embProvider === "openai-compatible"
-    ? (isLikelyHttpUrl(embBaseUrlRaw) ? embBaseUrlRaw : "https://openrouter.ai/api/v1")
-    : (embBaseUrlRaw || undefined)
+  const embBaseUrl =
+    embProvider === "openrouter"
+      ? (isLikelyHttpUrl(embBaseUrlRaw) ? embBaseUrlRaw : "https://openrouter.ai/api/v1")
+      : embProvider === "openai-compatible"
+        ? (isLikelyHttpUrl(embBaseUrlRaw) ? embBaseUrlRaw : undefined)
+        : (embBaseUrlRaw || undefined)
   const toolThresholdRaw = parsePositiveInt(draft.toolClassifyThreshold, 15)
   const skillThresholdRaw = parsePositiveInt(draft.skillClassifyThreshold, 8)
   const mcpServers = parseJsonArray(draft.mcpServersJson)
@@ -783,7 +1076,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
     },
     embeddings: draft.embModel.trim()
       ? {
-          provider: embProvider as "openai" | "openai-compatible" | "ollama" | "local",
+          provider: embProvider as "openai" | "openai-compatible" | "openrouter" | "ollama" | "google" | "mistral" | "bedrock" | "local",
           model: draft.embModel.trim(),
           apiKey: draft.embApiKey.trim() || undefined,
           baseUrl: embBaseUrl,
@@ -1074,6 +1367,17 @@ function DatabaseOffIcon({ className }: { className?: string }) {
       <path d="M3 5v14a9 3 0 0018 0V5" />
       <path d="M3 12a9 3 0 006 2.25 9 3 0 006-2.25" />
       <line x1="3" y1="3" x2="21" y2="21" />
+    </svg>
+  )
+}
+
+function TrashIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
     </svg>
   )
 }

@@ -73,6 +73,17 @@ export async function listSessions(cwd: string): Promise<Array<{ id: string; ts:
   return sessions.sort((a, b) => b.ts - a.ts)
 }
 
+export async function deleteSession(sessionId: string, cwd: string): Promise<boolean> {
+  const dir = getSessionsDir(cwd)
+  const filePath = path.join(dir, `${sessionId}.jsonl`)
+  try {
+    await fsp.unlink(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function generateSessionId(): string {
   return `session_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`
 }

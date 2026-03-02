@@ -18,7 +18,7 @@ export { createLLMClient, createEmbeddingClient } from "./provider/index.js"
 export type { LLMClient, EmbeddingClient } from "./provider/types.js"
 
 // Session
-export { Session, generateSessionId, listSessions } from "./session/index.js"
+export { Session, generateSessionId, listSessions, deleteSession, deriveSessionTitle } from "./session/index.js"
 export { createCompaction } from "./session/compaction.js"
 
 // Agent

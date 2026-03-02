@@ -18,11 +18,13 @@
         "typecheck": "pnpm -r --stream typecheck",
         "clean": "pnpm -r --stream clean && rm -rf node_modules",
         "build:server": "pnpm --filter @nexuscode/server build",
+        "rebuild:native": "pnpm rebuild",
         "serve": "node scripts/check-node.js && node packages/server/dist/cli.js",
-        "setup:native": "node scripts/setup-native.js",
-        "setup": "pnpm install && pnpm run setup:native && pnpm build",
-        "fullbuild": "pnpm run setup && pnpm --filter nexuscode package",
-        "ready": "pnpm run fullbuild && cd packages/cli && npm link && cd ../.."
+    "setup:native": "node scripts/setup-native.js",
+    "setup": "pnpm install && pnpm run setup:native && pnpm build",
+    "one": "node scripts/one-install.js",
+    "fullbuild": "pnpm run setup && pnpm --filter nexuscode package",
+    "ready": "node scripts/one-install.js && pnpm --filter nexuscode package && cd packages/cli && npm link && cd ../.."
     },
     "devDependencies": {
         "typescript": "^5.5.0",

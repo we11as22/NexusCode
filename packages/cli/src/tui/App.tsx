@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from "react"
 import { Box, Text, useInput, useApp } from "ink"
 import Spinner from "ink-spinner"
-import type { AgentEvent, Mode, SessionMessage, IndexStatus, PermissionResult } from "@nexuscode/core"
+import stringWidth from "string-width"
+import type { AgentEvent, Mode, SessionMessage, MessagePart, IndexStatus, PermissionResult, ApprovalAction } from "@nexuscode/core"
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,8 @@ interface AppState {
   contextPercent: number
   lastError: string | null
   awaitingApproval: boolean
+  /** Pending action to approve (Cline/Opencode-style: show what is being approved) */
+  pendingApprovalAction: ApprovalAction | null
   compacting: boolean
   currentStreaming: string
   /** OpenCode-style: toggle reasoning block visibility */
@@ -53,6 +56,8 @@ interface AppState {
   showToolDetails: boolean
   /** Plan mode: plan_exit was called; show Approve / Revise / Abandon */
   planCompleted: boolean
+  /** Accumulated parts of the current assistant reply (text, tools, reasoning) for chronological display */
+  currentAssistantParts: MessagePart[]
 }
 
 interface AppProps {
@@ -114,20 +119,32 @@ const TOOL_ICONS: Record<string, string> = {
   read_file: "📄",
   write_to_file: "✏️",
   replace_in_file: "🔧",
-  execute_command: "⚡",
+  execute_command: "⌨️",
   search_files: "🔍",
   list_files: "📂",
   list_code_definitions: "🏗️",
   codebase_search: "🔎",
   web_fetch: "🌐",
   web_search: "🔍",
-  apply_patch: "📝",
+  exa_web_search: "◈",
+  exa_code_search: "◇",
   attempt_completion: "✅",
   ask_followup_question: "❓",
   update_todo_list: "📋",
+  thinking_preamble: "💭",
   use_skill: "🎯",
   browser_action: "🌍",
   spawn_agent: "🤖",
+}
+
+/** Display name for tools (e.g. execute_command → bash) */
+const TOOL_LABELS: Record<string, string> = {
+  execute_command: "bash",
+  exa_web_search: "Exa Web Search",
+  exa_code_search: "Exa Code Search",
+}
+function toolDisplayName(tool: string): string {
+  return TOOL_LABELS[tool] ?? tool
 }
 
 const MODES: Mode[] = ["agent", "plan", "ask"]
@@ -212,11 +229,13 @@ export function App({
     contextPercent: 0,
     lastError: null,
     awaitingApproval: false,
+    pendingApprovalAction: null,
     compacting: false,
     currentStreaming: "",
     showThinking: true,
     showToolDetails: true,
     planCompleted: false,
+    currentAssistantParts: [],
   })
   const [input, setInput] = useState("")
   const [historyIdx, setHistoryIdx] = useState(-1)
@@ -238,12 +257,51 @@ export function App({
   const [advancedFocus, setAdvancedFocus] = useState(0)
   const [activeProfileIdx, setActiveProfileIdx] = useState(0)
   const [chatScrollLines, setChatScrollLines] = useState(0)
+  const [dimensions, setDimensions] = useState({
+    cols: process.stdout.columns ?? 80,
+    rows: process.stdout.rows ?? 24,
+  })
   const inputHistory = useRef<string[]>([])
   const eventQueueRef = useRef<AgentEvent[]>([])
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSubmitRef = useRef<number>(0)
-  const cols = process.stdout.columns ?? 100
-  const rows = process.stdout.rows ?? 30
+  const cols = dimensions.cols
+  const rows = dimensions.rows
+
+  // React to terminal resize so layout stays stable (OpenCode-style)
+  useEffect(() => {
+    const onResize = () => {
+      const c = process.stdout.columns ?? 80
+      const r = process.stdout.rows ?? 24
+      setDimensions((prev) => {
+        if (prev.cols === c && prev.rows === r) return prev
+        return { cols: c, rows: r }
+      })
+    }
+    process.stdout.on("resize", onResize)
+    return () => {
+      process.stdout.removeListener("resize", onResize)
+    }
+  }, [])
+
+  // Clamp scroll when terminal is resized so we don't show invalid offset
+  useEffect(() => {
+    setChatScrollLines((prev) => {
+      const width = Math.max(20, dimensions.cols - 4)
+      const visibleHeight = Math.max(12, dimensions.rows - 14)
+      const allLines = buildChatLines(state, width)
+      const maxScroll = Math.max(0, allLines.length - visibleHeight)
+      return Math.min(prev, maxScroll)
+    })
+  }, [dimensions.cols, dimensions.rows])
+  // Enable mouse wheel (SGR) for scroll — disable on unmount
+  useEffect(() => {
+    if (!process.stdout.isTTY) return
+    process.stdout.write("\x1b[?1006h")
+    return () => {
+      process.stdout.write("\x1b[?1006l")
+    }
+  }, [])
   const profileOptions = useMemo(() => ["default", ...profileNames], [profileNames])
 
   const slashOpen = input.startsWith("/")
@@ -318,34 +376,62 @@ export function App({
           case "text_delta":
             setState((s) => ({ ...s, currentStreaming: s.currentStreaming + (event.delta ?? "") }))
             break
-          case "reasoning_delta":
-            setState((s) => ({ ...s, reasoning: s.reasoning + (event.delta ?? "") }))
+          case "reasoning_delta": {
+            const delta = (event as { delta?: string }).delta ?? ""
+            setState((s) => {
+              const flushed = s.currentStreaming.trim() ? [...s.currentAssistantParts, { type: "text" as const, text: s.currentStreaming }] : s.currentAssistantParts
+              const prev = flushed.filter((p) => p.type === "reasoning").pop() as { type: "reasoning"; text: string } | undefined
+              const reasoningParts = flushed.filter((p) => p.type !== "reasoning")
+              if (prev) reasoningParts.push({ type: "reasoning", text: prev.text + delta })
+              else reasoningParts.push({ type: "reasoning", text: delta })
+              return { ...s, currentAssistantParts: reasoningParts, currentStreaming: "", reasoning: s.reasoning + delta }
+            })
             break
-          case "tool_start":
+          }
+          case "tool_start": {
+            const ev = event as { partId: string; tool: string; input?: Record<string, unknown> }
+            setState((s) => {
+              const flushed = s.currentStreaming.trim()
+                ? [...s.currentAssistantParts, { type: "text" as const, text: s.currentStreaming }]
+                : s.currentAssistantParts
+              const toolPart: MessagePart = {
+                type: "tool",
+                id: ev.partId,
+                tool: ev.tool,
+                status: "running",
+                input: ev.input ?? {},
+                timeStart: Date.now(),
+              }
+              return {
+                ...s,
+                currentAssistantParts: [...flushed, toolPart],
+                currentStreaming: "",
+                liveTools: [
+                  ...s.liveTools,
+                  { id: ev.partId, tool: ev.tool, status: "running" as const, timeStart: Date.now() },
+                ].slice(-64),
+              }
+            })
+            break
+          }
+          case "tool_end": {
+            const ev = event as { partId: string; tool: string; success: boolean; output?: string; error?: string }
             setState((s) => ({
               ...s,
-              liveTools: [
-                ...s.liveTools,
-                {
-                  id: event.partId,
-                  tool: event.tool,
-                  status: "running" as const,
-                  timeStart: Date.now(),
-                },
-              ].slice(-64),
-            }))
-            break
-          case "tool_end":
-            setState((s) => ({
-              ...s,
+              currentAssistantParts: s.currentAssistantParts.map((p) =>
+                p.type === "tool" && p.id === ev.partId
+                  ? { ...p, status: ev.success ? "completed" : "error", output: ev.output, error: ev.error, timeEnd: Date.now() }
+                  : p
+              ),
               liveTools: s.liveTools.map((lt) =>
-                lt.id === event.partId
-                  ? { ...lt, status: event.success ? "completed" : "error", timeEnd: Date.now() }
+                lt.id === ev.partId
+                  ? { ...lt, status: ev.success ? "completed" : "error", timeEnd: Date.now() }
                   : lt
               ),
-              ...(event.tool === "plan_exit" && event.success ? { planCompleted: true } : {}),
+              ...(ev.tool === "plan_exit" && ev.success ? { planCompleted: true } : {}),
             }))
             break
+          }
           case "subagent_start":
             setState((s) => {
               const next = s.subAgents.filter((a) => a.id !== event.subagentId)
@@ -399,27 +485,34 @@ export function App({
               ),
             }))
             break
-          case "tool_approval_needed":
-            setState((s) => ({ ...s, awaitingApproval: true }))
+          case "tool_approval_needed": {
+            const ev = event as { type: "tool_approval_needed"; action: ApprovalAction }
+            setState((s) => ({ ...s, awaitingApproval: true, pendingApprovalAction: ev.action ?? null }))
             break
+          }
           case "done":
             setState((s) => {
               const text = stripToolCallMarkup(s.currentStreaming)
-              const hasText = text.trim().length > 0
-              const newMsg: SessionMessage | null = hasText
+              const parts = [...s.currentAssistantParts]
+              if (text.trim()) parts.push({ type: "text", text })
+              const hasContent = parts.length > 0
+              const newMsg: SessionMessage | null = hasContent
                 ? {
                     id: `r_${Date.now()}`,
                     ts: Date.now(),
                     role: "assistant",
-                    content: text,
+                    content: parts,
                   }
                 : null
-              const noFinalTextMsg: SessionMessage | null = !hasText && s.liveTools.length > 0
+              const noFinalTextMsg: SessionMessage | null = !hasContent && s.liveTools.length > 0
                 ? {
                     id: `sys_${Date.now()}`,
                     ts: Date.now(),
                     role: "system",
-                    content: "No final text response was produced. Retry with a narrower prompt or switch to agent mode.",
+                    content:
+                      s.liveTools.every((t) => t.tool === "update_todo_list") && s.todo.trim()
+                        ? "Todo list updated. No text reply — use agent mode to run the steps, or ask a follow-up."
+                        : "No final text response was produced. Retry with a narrower prompt or switch to agent mode.",
                   }
                 : null
               return {
@@ -427,11 +520,13 @@ export function App({
                 messages: newMsg
                   ? [...s.messages, newMsg]
                   : (noFinalTextMsg ? [...s.messages, noFinalTextMsg] : s.messages),
+                currentAssistantParts: [],
                 subAgents: s.subAgents.filter((a) => a.status === "running"),
                 reasoning: "",
                 currentStreaming: "",
                 isRunning: false,
                 awaitingApproval: false,
+                pendingApprovalAction: null,
                 lastError: null,
               }
             })
@@ -439,8 +534,11 @@ export function App({
           case "error":
             setState((s) => ({
               ...s,
-              isRunning: s.awaitingApproval ? s.isRunning : false,
-              lastError: event.error,
+                isRunning: s.awaitingApproval ? s.isRunning : false,
+                lastError: event.error,
+                awaitingApproval: false,
+                pendingApprovalAction: null,
+                currentAssistantParts: [],
               liveTools: s.liveTools.map((lt) =>
                 lt.status === "running" ? { ...lt, status: "error", timeEnd: Date.now() } : lt
               ),
@@ -463,6 +561,9 @@ export function App({
             } else {
               setState((s) => ({ ...s, indexStatus: event.status }))
             }
+            break
+          case "todo_updated":
+            setState((s) => ({ ...s, todo: (event as { type: "todo_updated"; todo: string }).todo ?? "" }))
             break
           case "doom_loop_detected":
             setState((s) => ({
@@ -560,10 +661,20 @@ export function App({
 
   useInput((inputChar, key) => {
     const isEnter = key.return || inputChar === "\r" || inputChar === "\n"
+    // Mouse wheel (SGR): 64 = scroll down, 65 = scroll up
+    if (typeof inputChar === "string" && inputChar.startsWith("\x1b[<")) {
+      const m = inputChar.match(/\x1b\[<(\d+)/)
+      if (m) {
+        const code = parseInt(m[1]!, 10)
+        if (code === 64) setChatScrollLines((v) => Math.max(0, v - 4))
+        else if (code === 65) setChatScrollLines((v) => v + 4)
+      }
+      return
+    }
     if (key.ctrl && inputChar === "c") {
       if (state.isRunning) {
         onAbort()
-        setState((s) => ({ ...s, isRunning: false, liveTools: [], subAgents: [], awaitingApproval: false }))
+        setState((s) => ({ ...s, isRunning: false, liveTools: [], subAgents: [], awaitingApproval: false, pendingApprovalAction: null }))
       } else {
         exit()
       }
@@ -641,6 +752,16 @@ export function App({
     }
     if (view === "chat" && key.pageDown) {
       setChatScrollLines((v) => Math.max(0, v - 24))
+      return
+    }
+
+    // Arrow keys scroll chat when input is empty (OpenCode-style)
+    if (view === "chat" && !input.trim() && key.upArrow) {
+      setChatScrollLines((v) => v + 4)
+      return
+    }
+    if (view === "chat" && !input.trim() && key.downArrow) {
+      setChatScrollLines((v) => Math.max(0, v - 4))
       return
     }
 
@@ -905,14 +1026,23 @@ export function App({
     if (isEnter && !slashOpen) {
       if (state.awaitingApproval && onResolveApproval) {
         const raw = input.trim().toLowerCase()
-        if (["y", "yes", "n", "no", "a", "always", "s", "skip"].includes(raw)) {
-          const approved = ["y", "yes", "a", "always", "s", "skip"].includes(raw)
+        const isExecute = state.pendingApprovalAction?.type === "execute"
+        const addToAllowed = isExecute && (raw === "e" || raw === "add")
+        const allowedKeys = ["y", "yes", "n", "no", "a", "always", "s", "skip"]
+        if (allowedKeys.includes(raw) || addToAllowed) {
+          const approved = ["y", "yes", "a", "always", "s", "skip"].includes(raw) || addToAllowed
           const alwaysApprove = raw === "a" || raw === "always"
           const skipAll = raw === "s" || raw === "skip"
+          const addToAllowedCommand = addToAllowed ? state.pendingApprovalAction?.content : undefined
           setInput("")
           setChatScrollLines(0)
-          setState((s) => ({ ...s, awaitingApproval: false }))
-          onResolveApproval({ approved, alwaysApprove, skipAll })
+          setState((s) => ({ ...s, awaitingApproval: false, pendingApprovalAction: null }))
+          onResolveApproval({
+            approved,
+            alwaysApprove,
+            skipAll,
+            addToAllowedCommand: typeof addToAllowedCommand === "string" ? addToAllowedCommand : undefined,
+          })
           return
         }
       }
@@ -1042,15 +1172,21 @@ export function App({
 
       {/* ── Input bar (hidden when editing /model, /embeddings, etc.) ───────── */}
       {view === "chat" ? (
-        <InputBar
-          input={input}
-          cols={cols}
-          mode={state.mode}
-          modeColor={modeColor}
-          isRunning={state.isRunning}
-          awaitingApproval={state.awaitingApproval}
-          indexReady={state.indexReady}
-        />
+        <>
+          {state.awaitingApproval && state.pendingApprovalAction && (
+            <ApprovalBanner action={state.pendingApprovalAction} cols={cols} />
+          )}
+          <InputBar
+            input={input}
+            cols={cols}
+            mode={state.mode}
+            modeColor={modeColor}
+            isRunning={state.isRunning}
+            awaitingApproval={state.awaitingApproval}
+            pendingApprovalAction={state.pendingApprovalAction}
+            indexReady={state.indexReady}
+          />
+        </>
       ) : (
         <Box paddingX={1} paddingY={0}>
           <Text color="cyan">{view === "settings" || view === "help" || view === "index" ? "Use shortcuts shown above." : "Edit the form above."}</Text>
@@ -1378,6 +1514,51 @@ function SlashPopup({
 
 // ─── Input bar ──────────────────────────────────────────────────────────────
 
+function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number }) {
+  const width = Math.max(20, cols - 4)
+  const lines: string[] = []
+  if (action.type === "write") {
+    lines.push("✏ File write")
+    lines.push(`  ${action.description}`)
+    if (action.content) {
+      const preview = action.content.split("\n").slice(0, 12).join("\n")
+      lines.push("  Content preview:")
+      for (const line of preview.split("\n")) {
+        lines.push("    " + (line.length > width - 6 ? line.slice(0, width - 7) + "…" : line))
+      }
+    }
+    if (action.diff) {
+      const diffPreview = action.diff.split("\n").slice(0, 8).join("\n")
+      lines.push("  Diff preview:")
+      for (const line of diffPreview.split("\n")) {
+        lines.push("    " + (line.length > width - 6 ? line.slice(0, width - 7) + "…" : line))
+      }
+    }
+  } else if (action.type === "execute") {
+    const cmd = action.content || action.description.replace(/^Run:\s*/i, "")
+    lines.push("⌨️  Bash")
+    lines.push(`  ${cmd}`)
+  } else if (action.type === "mcp") {
+    lines.push("🔌 MCP tool call")
+    lines.push(`  ${action.description}`)
+  } else if (action.type === "doom_loop") {
+    lines.push("⚠ Potential infinite loop")
+    lines.push(`  ${action.description}`)
+  } else {
+    lines.push(`Allow: ${action.tool}`)
+    lines.push(`  ${action.description}`)
+  }
+  return (
+    <Box borderStyle="single" borderColor="yellow" paddingX={1} marginBottom={0}>
+      {lines.map((line, i) => (
+        <Text key={i} color={i === 0 ? "yellow" : "white"} bold={i === 0}>
+          {line}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
 function InputBar({
   input,
   cols,
@@ -1385,6 +1566,7 @@ function InputBar({
   modeColor,
   isRunning,
   awaitingApproval,
+  pendingApprovalAction,
   indexReady,
 }: {
   input: string
@@ -1393,11 +1575,16 @@ function InputBar({
   modeColor: string
   isRunning: boolean
   awaitingApproval: boolean
+  pendingApprovalAction: ApprovalAction | null
   indexReady: boolean
 }) {
   const borderColor = awaitingApproval ? "yellow" : isRunning ? "red" : "cyan"
+  const approvalPrompt =
+    pendingApprovalAction?.type === "execute"
+      ? "Allow? y/n a/s e(allow for folder)"
+      : "Allow? y/n a/s"
   const prompt = awaitingApproval
-    ? "Allow? [y] Yes [n] No [a] Always [s] Skip — type below"
+    ? approvalPrompt
     : isRunning
       ? "[ABORT: Ctrl+C]"
       : `[${mode}]`
@@ -1524,6 +1711,7 @@ function StreamingText({ text, cols }: { text: string; cols: number }) {
 
 function LiveToolCard({ tool }: { tool: LiveTool }) {
   const icon = TOOL_ICONS[tool.tool] ?? "🔧"
+  const displayName = toolDisplayName(tool.tool)
   const elapsed = tool.timeStart ? `${((Date.now() - tool.timeStart) / 1000).toFixed(1)}s` : ""
   let preview = ""
   if (tool.input) {
@@ -1538,10 +1726,10 @@ function LiveToolCard({ tool }: { tool: LiveTool }) {
       </Text>
       <Text color="yellow">
         {" "}
-        {icon} {tool.tool}
+        {icon} {displayName}
       </Text>
       {preview && (
-        <Text color="gray"> {preview}</Text>
+        <Text color="gray"> — {preview}</Text>
       )}
       {elapsed && (
         <Text color="gray" dimColor>
@@ -1678,7 +1866,7 @@ function Footer({
     Math.max(20, cols - 2)
   )
   const line2 = fitPad(
-    `/  /model  /embeddings  /advanced  /index  Tab  Ctrl+M  Ctrl+P(profile)  Ctrl+S  Ctrl+G/End(latest)  Ctrl+U/D  PgUp/PgDn  Ctrl+K  Ctrl+C:${isRunning ? "abort" : "quit"}  ↑↓`,
+    `/  /model  /embeddings  /advanced  /index  Tab  Ctrl+M  Ctrl+P(profile)  Ctrl+S  Ctrl+G/End(latest)  Ctrl+U/D  PgUp/PgDn  wheel  ↑↓  Ctrl+K  Ctrl+C:${isRunning ? "abort" : "quit"}`,
     Math.max(20, cols - 2)
   )
   return (
@@ -1717,7 +1905,7 @@ function ChatViewport({
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={visibleHeight} overflowY="hidden" paddingX={1}>
       {safeScroll > 0 && (
-        <Text color="gray">↑ Scroll up (PgUp / Ctrl+D) — {safeScroll} lines above · Ctrl+G or End = latest</Text>
+        <Text color="gray">↑ Scroll: wheel / ↑↓ / PgUp/Dn · Ctrl+G or End = latest</Text>
       )}
       {safeScroll > 0 && state.isRunning && (
         <Text color="cyan">↓ New content — Ctrl+G or End to jump to latest</Text>
@@ -1749,6 +1937,8 @@ function formatToolPreview(tool: LiveTool): string {
     const dir = pathStr || "."
     const short = dir.length > 36 ? dir.slice(0, 33) + "…" : dir
     parts.push(`folder ${short}`)
+  } else if (tool.tool === "execute_command" && command && typeof command === "string") {
+    parts.push((command.length > 48 ? command.slice(0, 45) + "…" : command).replace(/\s+/g, " "))
   } else if (tool.tool === "batch") {
     const reads = (tool.input?.["reads"] as unknown[])?.length ?? 0
     const searches = (tool.input?.["searches"] as unknown[])?.length ?? 0
@@ -1759,6 +1949,9 @@ function formatToolPreview(tool: LiveTool): string {
   } else if (tool.tool === "spawn_agent") {
     const desc = tool.input?.["description"]
     if (desc && typeof desc === "string") parts.push((desc.length > 40 ? desc.slice(0, 37) + "…" : desc).replace(/\s+/g, " "))
+  } else if (tool.tool === "exa_web_search" || tool.tool === "exa_code_search") {
+    const q = tool.input?.["query"]
+    if (q && typeof q === "string") parts.push((q.length > 40 ? q.slice(0, 37) + "…" : q).replace(/\s+/g, " "))
   } else if (pathStr) {
     const base = pathStr.split("/").pop() ?? pathStr
     const short = base.length > 36 ? base.slice(0, 33) + "…" : base
@@ -1770,8 +1963,8 @@ function formatToolPreview(tool: LiveTool): string {
   if (Array.isArray(pathsArr) && pathsArr.length > 0) parts.push(pathsArr.slice(0, 2).join(", "))
   if (pattern && typeof pattern === "string") parts.push((pattern.length > 24 ? pattern.slice(0, 21) + "…" : pattern).replace(/\s+/g, " "))
   if (Array.isArray(patterns) && patterns.length > 0) parts.push(`pat:${patterns.length}`)
-  if (command && typeof command === "string") parts.push((command.length > 32 ? command.slice(0, 29) + "…" : command).replace(/\s+/g, " "))
-  if (query && typeof query === "string") parts.push((query.length > 28 ? query.slice(0, 25) + "…" : query).replace(/\s+/g, " "))
+  if (tool.tool !== "execute_command" && command && typeof command === "string") parts.push((command.length > 32 ? command.slice(0, 29) + "…" : command).replace(/\s+/g, " "))
+  if (query && typeof query === "string" && !["exa_web_search", "exa_code_search"].includes(tool.tool)) parts.push((query.length > 28 ? query.slice(0, 25) + "…" : query).replace(/\s+/g, " "))
   if (url && typeof url === "string") parts.push((url.length > 36 ? url.slice(0, 33) + "…" : url))
   return parts.length > 0 ? parts.join(" · ") : ""
 }
@@ -1826,36 +2019,256 @@ function splitMessageBlocks(content: string): MessageSegment[] {
 
 function buildChatLines(state: AppState, width: number): ChatLine[] {
   const out: ChatLine[] = []
+  const messages = state.messages
+  let lastUserIdx = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === "user") {
+      lastUserIdx = i
+      break
+    }
+  }
 
-  // ─── Chat messages first (chronological) ───────────────────────────────────
+  function pushRunProgress() {
+    if (state.isRunning && state.currentAssistantParts.length > 0) {
+      out.push({ text: "NexusCode", color: "green", bold: true })
+      const wrapW = Math.max(10, width - 2)
+      const parts = state.currentAssistantParts
+      let i = 0
+      while (i < parts.length) {
+        const part = parts[i]!
+        if (part.type === "text") {
+          const t = cleanAssistantText(sanitizeText((part as { text: string }).text))
+          if (t.trim()) for (const line of wrapToWidth(t, wrapW)) out.push({ text: `  ${line}`, color: "white" })
+          i++
+        } else if (part.type === "tool") {
+          const tp = part as { tool: string; status: string; input?: Record<string, unknown> }
+          if (tp.tool === "thinking_preamble") {
+            const userMsg = (tp.input?.user_message as string)?.trim()
+            const reasoning = (tp.input?.reasoning_and_next_actions as string)?.trim()
+            const show = userMsg || reasoning
+            if (show) for (const line of wrapToWidth(sanitizeText(userMsg || reasoning.slice(0, 200)), wrapW)) out.push({ text: `  — ${line}`, color: "gray" })
+            else out.push({ text: `  [${tp.status}] ${toolDisplayName(tp.tool)}`, color: "gray" })
+            i++
+          } else {
+            const toolGroups: { tool: string; status: string; count: number; preview: string }[] = []
+            while (i < parts.length && (parts[i] as { type: string }).type === "tool") {
+              const t = parts[i] as { tool: string; status: string; input?: Record<string, unknown> }
+              if (t.tool === "thinking_preamble") break
+              const last = toolGroups[toolGroups.length - 1]
+              const preview = formatToolPreview({ id: "", tool: t.tool, status: t.status as "running" | "completed" | "error", input: t.input, timeStart: 0 })
+              if (last && last.tool === t.tool && last.status === t.status) {
+                last.count += 1
+                if (preview && !last.preview) last.preview = preview
+              } else {
+                toolGroups.push({ tool: t.tool, status: t.status, count: 1, preview })
+              }
+              i++
+            }
+            for (const g of toolGroups) {
+              const icon = TOOL_ICONS[g.tool] ?? "🔧"
+              const status = g.status === "completed" ? "ok" : g.status === "error" ? "err" : "…"
+              const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
+              const line = g.preview ? `  [${status}] ${icon} ${label} — ${g.preview}` : `  [${status}] ${icon} ${label}`
+              for (const l of wrapToWidth(line, width)) out.push({ text: l, color: "gray" })
+            }
+          }
+        } else if (part.type === "reasoning" && state.showThinking) {
+          const r = sanitizeText((part as { text: string }).text)
+          if (r.trim()) {
+            out.push({ text: "  Thinking…", color: "magenta" })
+            for (const line of wrapToWidth(r.slice(-400), wrapW)) out.push({ text: `  ${line}`, color: "magenta" })
+          }
+          i++
+        } else {
+          i++
+        }
+      }
+      out.push({ text: "", color: "gray" })
+    }
+    const recentTools = state.liveTools.slice(-80)
+    if (recentTools.length > 0 && state.isRunning) {
+      out.push({ text: "Tools", color: "yellow", bold: true })
+      const groups: { tool: string; status: string; count: number; preview?: string }[] = []
+      for (const tool of recentTools) {
+        const status =
+          tool.status === "running" ? "…" : tool.status === "completed" ? "ok" : "err"
+        const preview = formatToolPreview(tool)
+        const last = groups[groups.length - 1]
+        if (last && last.tool === tool.tool && last.status === status) {
+          last.count += 1
+          if (preview && !last.preview) last.preview = preview
+        } else {
+          groups.push({ tool: tool.tool, status, count: 1, preview: preview || undefined })
+        }
+      }
+      for (const g of groups) {
+        const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
+        const showPreview = state.showToolDetails && g.preview
+        const line = showPreview ? `  [${g.status}] ${label} — ${g.preview}` : `  [${g.status}] ${label}`
+        for (const l of wrapToWidth(line, width)) {
+          out.push({
+            text: l,
+            color: g.status === "err" ? "red" : g.status === "ok" ? "gray" : "yellow",
+          })
+        }
+      }
+      out.push({ text: "", color: "gray" })
+    }
+    for (const sa of state.subAgents) {
+      const id = sanitizeText(sa?.id ?? "unknown")
+      const mode = sanitizeText(String(sa?.mode ?? "agent"))
+      const status = sa?.status === "running" ? "RUN" : sa?.status === "completed" ? "OK" : "ERR"
+      const rawTask = sanitizeText(sa?.task ?? "")
+      const task = rawTask.length > 120 ? `${rawTask.slice(0, 120)}...` : rawTask
+      for (const l of wrapToWidth(`[subagent ${id.slice(0, 8)} ${mode} ${status}] ${task}`, width)) out.push({ text: l, color: "cyan" })
+      if (sa?.currentTool) out.push({ text: `  tool: ${sanitizeText(sa.currentTool)}`, color: "gray" })
+      if (sa?.error) out.push({ text: `  error: ${sanitizeText(sa.error)}`, color: "red" })
+    }
+    if (state.subAgents.length > 0) out.push({ text: "", color: "gray" })
+    if (state.todo.trim()) {
+      out.push({ text: "Plan", color: "yellow", bold: true })
+      const runningTool = state.liveTools.find((t) => t.status === "running")
+      if (state.isRunning && runningTool) {
+        const preview = formatToolPreview(runningTool)
+        const line = preview
+          ? `  ▶ Working on: ${toolDisplayName(runningTool.tool)} — ${preview}`
+          : `  ▶ Working on: ${toolDisplayName(runningTool.tool)}`
+        for (const l of wrapToWidth(line, Math.max(10, width - 2))) out.push({ text: l, color: "cyan" })
+      }
+      const items = parseTodoItems(state.todo)
+      for (const item of items) {
+        const bullet = item.done ? "  ● " : "  ○ "
+        const text = sanitizeText(item.text)
+        const wrapped = wrapToWidth(text, Math.max(10, width - 4))
+        wrapped.forEach((line, i) => {
+          out.push({
+            text: (i === 0 ? bullet : "    ") + line,
+            color: item.done ? "gray" : "white",
+          })
+        })
+      }
+      if (items.length === 0) {
+        for (const line of wrapToWidth(sanitizeText(state.todo), Math.max(10, width - 2)))
+          out.push({ text: `  ${line}`, color: "white" })
+      }
+      out.push({ text: "", color: "gray" })
+    }
+    if (state.isRunning && state.reasoning && state.showThinking) {
+      out.push({ text: "Thinking...", color: "magenta" })
+      const preview = sanitizeText(state.reasoning).slice(-800)
+      for (const line of wrapToWidth(preview, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "magenta" })
+      out.push({ text: "", color: "gray" })
+    }
+    if (state.isRunning && state.currentStreaming) {
+      const streamed = cleanAssistantText(sanitizeText(state.currentStreaming))
+      if (streamed.trim().length > 0) {
+        out.push({ text: "NexusCode (streaming)", color: "green", bold: true })
+        for (const line of wrapToWidth(streamed, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
+        out.push({ text: "", color: "gray" })
+      }
+    }
+    if (state.compacting) out.push({ text: "Compacting context...", color: "blue" })
+    if (state.lastError) for (const l of wrapToWidth(`Error: ${sanitizeText(state.lastError)}`, width)) out.push({ text: l, color: "red" })
+  }
+
   let prevUserContent: string | undefined
-  for (const msg of state.messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!
     const raw = sanitizeText(typeof msg.content === "string" ? msg.content : "[complex message]")
     const content = msg.role === "assistant" ? cleanAssistantText(raw) : raw
     if (msg.role === "user") {
-      if (prevUserContent === content) continue
+      if (prevUserContent === content) {
+        if (i === lastUserIdx) pushRunProgress()
+        continue
+      }
       prevUserContent = content
       out.push({ text: "You", color: "cyan", bold: true })
       for (const line of wrapToWidth(content, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
       out.push({ text: "", color: "gray" })
+      if (i === lastUserIdx) pushRunProgress()
       continue
     }
     prevUserContent = undefined
     if (msg.role === "assistant") {
       out.push({ text: "NexusCode", color: "green", bold: true })
-      const segments = splitMessageBlocks(content)
       const wrapW = Math.max(10, width - 2)
-      for (const seg of segments) {
-        if (seg.type === "text") {
-          for (const line of wrapToWidth(seg.content, wrapW)) out.push({ text: `  ${line}`, color: "white" })
-        } else {
-          const codeLines = seg.content.split("\n")
-          const borderW = Math.max(12, Math.min(width - 4, 58))
-          out.push({ text: "  ┌" + "─".repeat(Math.max(0, borderW - 2)) + "┐", color: "gray" })
-          for (const codeLine of codeLines) {
-            for (const l of wrapToWidth(codeLine, borderW - 4)) out.push({ text: `  │ ${l}`, color: "gray" })
+      if (Array.isArray(msg.content)) {
+        const contentParts = msg.content as MessagePart[]
+        let idx = 0
+        while (idx < contentParts.length) {
+          const part = contentParts[idx]!
+          if (part.type === "text") {
+            const t = cleanAssistantText(sanitizeText((part as { text: string }).text))
+            if (t.trim()) for (const line of wrapToWidth(t, wrapW)) out.push({ text: `  ${line}`, color: "white" })
+            idx++
+          } else if (part.type === "tool") {
+            const tp = part as { tool: string; status: string; input?: Record<string, unknown>; output?: string }
+            if (tp.tool === "thinking_preamble") {
+              const userMsg = (tp.input?.user_message as string)?.trim()
+              const reasoning = (tp.input?.reasoning_and_next_actions as string)?.trim()
+              const show = userMsg || reasoning
+              if (show) {
+                for (const line of wrapToWidth(sanitizeText(userMsg || reasoning.slice(0, 200)), wrapW)) out.push({ text: `  — ${line}`, color: "gray" })
+              } else {
+                out.push({ text: `  [${tp.status}] ${toolDisplayName(tp.tool)}`, color: "gray" })
+              }
+              idx++
+            } else {
+              const toolGroups: { tool: string; status: string; count: number; preview: string }[] = []
+              while (idx < contentParts.length && (contentParts[idx] as { type: string }).type === "tool") {
+                const t = contentParts[idx] as { tool: string; status: string; input?: Record<string, unknown>; output?: string }
+                if (t.tool === "thinking_preamble") break
+                const preview = formatToolPreview({
+                  id: "",
+                  tool: t.tool,
+                  status: t.status as "running" | "completed" | "error",
+                  input: t.input,
+                  output: t.output,
+                  timeStart: 0,
+                })
+                const last = toolGroups[toolGroups.length - 1]
+                if (last && last.tool === t.tool && last.status === t.status) {
+                  last.count += 1
+                  if (preview && !last.preview) last.preview = preview
+                } else {
+                  toolGroups.push({ tool: t.tool, status: t.status, count: 1, preview })
+                }
+                idx++
+              }
+              for (const g of toolGroups) {
+                const icon = TOOL_ICONS[g.tool] ?? "🔧"
+                const status = g.status === "completed" ? "ok" : g.status === "error" ? "err" : "…"
+                const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
+                const line = g.preview ? `  [${status}] ${icon} ${label} — ${g.preview}` : `  [${status}] ${icon} ${label}`
+                for (const l of wrapToWidth(line, width)) out.push({ text: l, color: g.status === "error" ? "red" : "gray" })
+              }
+            }
+          } else if (part.type === "reasoning") {
+            const r = sanitizeText((part as { text: string }).text)
+            if (r.trim() && state.showThinking) {
+              out.push({ text: "  Thinking", color: "magenta" })
+              for (const line of wrapToWidth(r.slice(-600), wrapW)) out.push({ text: `  ${line}`, color: "magenta" })
+            }
+            idx++
+          } else {
+            idx++
           }
-          out.push({ text: "  └" + "─".repeat(Math.max(0, borderW - 2)) + "┘", color: "gray" })
+        }
+      } else {
+        const content = cleanAssistantText(sanitizeText(typeof msg.content === "string" ? msg.content : ""))
+        const segments = splitMessageBlocks(content)
+        for (const seg of segments) {
+          if (seg.type === "text") {
+            for (const line of wrapToWidth(seg.content, wrapW)) out.push({ text: `  ${line}`, color: "white" })
+          } else {
+            const codeLines = seg.content.split("\n")
+            const borderW = Math.max(12, Math.min(width - 4, 58))
+            out.push({ text: "  ┌" + "─".repeat(Math.max(0, borderW - 2)) + "┐", color: "gray" })
+            for (const codeLine of codeLines) {
+              for (const l of wrapToWidth(codeLine, borderW - 4)) out.push({ text: `  │ ${l}`, color: "gray" })
+            }
+            out.push({ text: "  └" + "─".repeat(Math.max(0, borderW - 2)) + "┘", color: "gray" })
+          }
         }
       }
       out.push({ text: "", color: "gray" })
@@ -1868,96 +2281,10 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
     }
   }
 
-  // ─── Tools (chronological: right after messages, with file/line detail) ──────
-  const recentTools = state.liveTools.slice(-80)
-  if (recentTools.length > 0) {
-    out.push({ text: "Tools", color: "yellow", bold: true })
-    const groups: { tool: string; status: string; count: number; preview?: string }[] = []
-    for (const tool of recentTools) {
-      const status =
-        tool.status === "running" ? "…" : tool.status === "completed" ? "ok" : "err"
-      const preview = formatToolPreview(tool)
-      const last = groups[groups.length - 1]
-      if (last && last.tool === tool.tool && last.status === status) {
-        last.count += 1
-        if (preview && !last.preview) last.preview = preview
-      } else {
-        groups.push({ tool: tool.tool, status, count: 1, preview: preview || undefined })
-      }
-    }
-    for (const g of groups) {
-      const label = g.count > 1 ? `${g.count}× ${sanitizeText(g.tool)}` : sanitizeText(g.tool)
-      const showPreview = state.showToolDetails && g.preview
-      const line = showPreview ? `  [${g.status}] ${label} — ${g.preview}` : `  [${g.status}] ${label}`
-      for (const l of wrapToWidth(line, width)) {
-        out.push({
-          text: l,
-          color: g.status === "err" ? "red" : g.status === "ok" ? "gray" : "yellow",
-        })
-      }
-    }
-    out.push({ text: "", color: "gray" })
+  // If no user message yet but we have progress/error, show it at end (e.g. initial load)
+  if (lastUserIdx === -1 && (state.liveTools.length > 0 || state.subAgents.length > 0 || state.todo.trim() || state.reasoning || state.currentStreaming || state.compacting || state.lastError)) {
+    pushRunProgress()
   }
-
-  for (const sa of state.subAgents) {
-    const id = sanitizeText(sa?.id ?? "unknown")
-    const mode = sanitizeText(String(sa?.mode ?? "agent"))
-    const status = sa?.status === "running" ? "RUN" : sa?.status === "completed" ? "OK" : "ERR"
-    const rawTask = sanitizeText(sa?.task ?? "")
-    const task = rawTask.length > 120 ? `${rawTask.slice(0, 120)}...` : rawTask
-    for (const l of wrapToWidth(`[subagent ${id.slice(0, 8)} ${mode} ${status}] ${task}`, width)) out.push({ text: l, color: "cyan" })
-    if (sa?.currentTool) out.push({ text: `  tool: ${sanitizeText(sa.currentTool)}`, color: "gray" })
-    if (sa?.error) out.push({ text: `  error: ${sanitizeText(sa.error)}`, color: "red" })
-  }
-  if (state.subAgents.length > 0) out.push({ text: "", color: "gray" })
-
-  // ─── Todo / plan items (at bottom, above input) ─────────────────────────────
-  if (state.todo.trim()) {
-    out.push({ text: "Plan", color: "yellow", bold: true })
-    const runningTool = state.liveTools.find((t) => t.status === "running")
-    if (state.isRunning && runningTool) {
-      const preview = formatToolPreview(runningTool)
-      const line = preview
-        ? `  ▶ Working on: ${sanitizeText(runningTool.tool)} — ${preview}`
-        : `  ▶ Working on: ${sanitizeText(runningTool.tool)}`
-      for (const l of wrapToWidth(line, Math.max(10, width - 2))) out.push({ text: l, color: "cyan" })
-    }
-    const items = parseTodoItems(state.todo)
-    for (const item of items) {
-      const bullet = item.done ? "  ● " : "  ○ "
-      const text = sanitizeText(item.text)
-      const wrapped = wrapToWidth(text, Math.max(10, width - 4))
-      wrapped.forEach((line, i) => {
-        out.push({
-          text: (i === 0 ? bullet : "    ") + line,
-          color: item.done ? "gray" : "white",
-        })
-      })
-    }
-    if (items.length === 0) {
-      for (const line of wrapToWidth(sanitizeText(state.todo), Math.max(10, width - 2)))
-        out.push({ text: `  ${line}`, color: "white" })
-    }
-    out.push({ text: "", color: "gray" })
-  }
-
-  if (state.isRunning && state.reasoning && state.showThinking) {
-    out.push({ text: "Thinking...", color: "magenta" })
-    const preview = sanitizeText(state.reasoning).slice(-800)
-    for (const line of wrapToWidth(preview, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "magenta" })
-    out.push({ text: "", color: "gray" })
-  }
-  if (state.isRunning && state.currentStreaming) {
-    const streamed = cleanAssistantText(sanitizeText(state.currentStreaming))
-    if (streamed.trim().length > 0) {
-      out.push({ text: "NexusCode (streaming)", color: "green", bold: true })
-      for (const line of wrapToWidth(streamed, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
-      out.push({ text: "", color: "gray" })
-    }
-  }
-
-  if (state.compacting) out.push({ text: "Compacting context...", color: "blue" })
-  if (state.lastError) for (const l of wrapToWidth(`Error: ${sanitizeText(state.lastError)}`, width)) out.push({ text: l, color: "red" })
 
   return out
 }
@@ -1968,16 +2295,35 @@ function wrapToWidth(text: string, width: number): string[] {
   const lines: string[] = []
   for (const raw of safe.split("\n")) {
     const line = raw || ""
-    if (line.length <= width) {
+    if (stringWidth(line) <= width) {
       lines.push(line)
       continue
     }
     let rest = line
-    while (rest.length > width) {
-      lines.push(rest.slice(0, width))
-      rest = rest.slice(width)
+    while (rest.length > 0) {
+      let w = 0
+      let cut = 0
+      for (let i = 0; i < rest.length; i++) {
+        const cw = stringWidth(rest[i]!)
+        if (w + cw > width && cut > 0) break
+        w += cw
+        cut = i + 1
+      }
+      if (cut >= rest.length) {
+        lines.push(rest)
+        break
+      }
+      const segment = rest.slice(0, cut)
+      const lastSpace = Math.max(segment.lastIndexOf(" "), segment.lastIndexOf("\t"))
+      const breakAt = lastSpace >= 0 ? lastSpace : cut
+      const chunk = rest.slice(0, breakAt).trimEnd()
+      if (chunk) lines.push(chunk)
+      rest = (breakAt < rest.length ? rest.slice(breakAt) : "").trimStart()
+      if (rest.length > 0 && stringWidth(rest) <= width) {
+        lines.push(rest)
+        break
+      }
     }
-    lines.push(rest)
   }
   return lines
 }

@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import { stream } from "hono/streaming"
-import { Session } from "@nexuscode/core"
+import { Session, deriveSessionTitle } from "@nexuscode/core"
 import type { AgentEvent } from "@nexuscode/core"
 import {
   createSession as dbCreateSession,
@@ -9,6 +9,8 @@ import {
   getMessages as dbGetMessages,
   getRecentMessages,
   appendMessages,
+  deleteSession as dbDeleteSession,
+  updateSessionTitle as dbUpdateSessionTitle,
 } from "../db.js"
 import { runSession } from "../run-session.js"
 
@@ -81,6 +83,15 @@ sessionRoutes.post("/:id/abort", async (c) => {
   return c.json(true)
 })
 
+// DELETE /session/:id — delete session and its messages
+sessionRoutes.delete("/:id", async (c) => {
+  const cwd = getCwd(c)
+  const id = c.req.param("id")
+  const deleted = dbDeleteSession(id, cwd)
+  if (!deleted) return c.json({ error: "Session not found" }, 404)
+  return c.json({ ok: true })
+})
+
 // POST /session/:id/message — send message, stream AgentEvents as NDJSON
 // Loads last RECENT_MESSAGES_FOR_RUN messages from DB into memory, runs agent, persists only new messages to DB.
 sessionRoutes.post("/:id/message", async (c) => {
@@ -120,6 +131,10 @@ sessionRoutes.post("/:id/message", async (c) => {
       const newMessages = session.messages.slice(messageCountBeforeRun)
       if (newMessages.length > 0) {
         appendMessages(id, newMessages)
+        if (messageCountBeforeRun === 0) {
+          const title = deriveSessionTitle(session.messages)
+          if (title) dbUpdateSessionTitle(id, cwd, title)
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

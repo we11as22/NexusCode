@@ -230,8 +230,10 @@ function normalizeProviderAliases(config: Record<string, unknown>): void {
   const embeddings = asRecord(config["embeddings"])
   if (embeddings) {
     if (String(embeddings["provider"] ?? "") === "openrouter") {
-      embeddings["provider"] = "openai-compatible"
       if (!isNonEmptyString(embeddings["baseUrl"])) embeddings["baseUrl"] = OPENROUTER_BASE_URL
+      if (!isNonEmptyString(embeddings["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
+        embeddings["apiKey"] = process.env["OPENROUTER_API_KEY"]
+      }
     }
     if (String(embeddings["provider"] ?? "") === "openai-compatible" && isOpenRouterBaseUrl(embeddings["baseUrl"])) {
       if (!isNonEmptyString(embeddings["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {

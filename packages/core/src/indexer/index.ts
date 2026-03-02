@@ -85,9 +85,8 @@ export class CodebaseIndexer implements IIndexer {
     if (this.vector) {
       try {
         await this.vector.init()
-        // If vector collection is empty (for example after enabling vector on an existing FTS index),
-        // force a one-pass embedding backfill even for unchanged files.
         this.forceVectorBackfill = await this.vector.isEmpty()
+        await this.vector.markIndexingIncomplete()
       } catch (err) {
         console.warn("[nexus] Vector index init failed:", err)
         this.vector = undefined
@@ -155,6 +154,10 @@ export class CodebaseIndexer implements IIndexer {
         this.fts.deleteFile(filePath)
         await this.vector?.deleteByPath(filePath)
       }
+    }
+
+    if (this.vector && this.config.indexing.vector) {
+      await this.vector.markIndexingComplete()
     }
 
     const stats = this.fts.getStats()
@@ -275,28 +278,46 @@ export class CodebaseIndexer implements IIndexer {
       return prefixes.some((pre) => normalized === pre || normalized.startsWith(`${pre}/`))
     }
 
+    /** One result per path:startLine; keeps entry with best score when deduplicating. */
+    const dedupeByPathLine = (items: IndexSearchResult[]): IndexSearchResult[] => {
+      const byKey = new Map<string, IndexSearchResult>()
+      for (const r of items) {
+        const key = `${r.path}:${r.startLine ?? ""}`
+        const existing = byKey.get(key)
+        if (!existing || (r.score ?? 0) > (existing.score ?? 0)) {
+          byKey.set(key, r)
+        }
+      }
+      return Array.from(byKey.values())
+    }
+
     const results: IndexSearchResult[] = []
 
     if (this.config.indexing.fts) {
-      const symbolResults = this.fts.searchSymbols(query, prefixes.length > 0 ? limit * 3 : limit, kind)
-      const chunkResults = this.fts.searchChunks(query, prefixes.length > 0 ? limit * 3 : limit)
-      const ftsFiltered = [...symbolResults, ...chunkResults]
+      const requestLimit = prefixes.length > 0 ? limit * 3 : limit
+      const symbolResults = this.fts.searchSymbols(query, requestLimit, kind, prefixes.length > 0 ? prefixes : undefined)
+      const chunkResults = this.fts.searchChunks(query, requestLimit, prefixes.length > 0 ? prefixes : undefined)
+      const ftsMerged = [...symbolResults, ...chunkResults]
         .filter((r) => matchesPath(r.path))
         .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-        .slice(0, limit)
-      results.push(...ftsFiltered)
+      const ftsDeduped = dedupeByPathLine(ftsMerged)
+      results.push(...ftsDeduped.slice(0, limit))
     }
 
     if (this.vector && this.config.indexing.vector && opts?.semantic !== false) {
-      const requestLimit = prefixes.length > 0 ? limit * 3 : limit
-      const vecResults = await this.vector.search(query, requestLimit, kind)
-      const vecFiltered = vecResults.filter((r) => matchesPath(r.path))
-      const seen = new Set(results.map((r) => `${r.path}:${r.startLine}`))
-      for (const r of vecFiltered) {
-        const key = `${r.path}:${r.startLine}`
-        if (!seen.has(key)) {
-          seen.add(key)
-          results.push(r)
+      const vectorReady = await this.vector.hasIndexedData()
+      if (vectorReady) {
+        const requestLimit = prefixes.length > 0 ? limit * 3 : limit
+        const pathScopeForVector = prefixes.length > 0 ? prefixes[0] : (Array.isArray(pathScope) ? pathScope[0] : pathScope)
+        const vecResults = await this.vector.search(query, requestLimit, kind, pathScopeForVector)
+        const vecFiltered = vecResults.filter((r) => matchesPath(r.path))
+        const seen = new Set(results.map((r) => `${r.path}:${r.startLine ?? ""}`))
+        for (const r of vecFiltered) {
+          const key = `${r.path}:${r.startLine ?? ""}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            results.push(r)
+          }
         }
       }
     }

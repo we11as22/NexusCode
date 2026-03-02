@@ -3,9 +3,27 @@ import type { IndexSearchResult, SymbolKind } from "../types.js"
 import type { EmbeddingClient } from "../provider/types.js"
 import crypto from "node:crypto"
 
+/** Deterministic point id for indexing metadata (indexing_complete marker). */
+function getIndexingMetadataPointId(): string {
+  const hex = crypto.createHash("md5").update("__nexus_indexing_metadata__").digest("hex")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+}
+
+/** Build pathSegments payload for Qdrant filter (indexed by pathSegments.0 .. pathSegments.4). */
+function pathToSegments(filePath: string): Record<string, string> {
+  const normalized = filePath.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/|\/$/g, "")
+  const segments = normalized.split("/").filter(Boolean)
+  const out: Record<string, string> = {}
+  for (let i = 0; i < Math.min(segments.length, 5); i++) {
+    out[String(i)] = segments[i]!
+  }
+  return out
+}
+
 /**
  * Qdrant vector store for semantic code search.
  * One collection per project, named nexus_{project_hash}.
+ * Uses pathSegments in payload for server-side path filtering (Roo-Code style).
  */
 export class VectorIndex {
   private client: QdrantClient
@@ -62,6 +80,7 @@ export class VectorIndex {
         })
       }
 
+      await this.ensurePayloadIndexes()
       this.initialized = true
     } catch (err) {
       throw new Error(`Failed to initialize Qdrant collection: ${(err as Error).message}`)
@@ -98,6 +117,34 @@ export class VectorIndex {
     const vectors = params?.["vectors"] as Record<string, unknown> | undefined
     const size = vectors?.["size"]
     return typeof size === "number" && Number.isFinite(size) ? size : null
+  }
+
+  /** Create payload indexes for pathSegments (server-side path filter) and type (metadata). */
+  private async ensurePayloadIndexes(): Promise<void> {
+    try {
+      await this.client.createPayloadIndex(this.collectionName, {
+        field_name: "type",
+        field_schema: "keyword",
+      })
+    } catch (e: unknown) {
+      const msg = (e as Error)?.message ?? ""
+      if (!msg.toLowerCase().includes("already exists")) {
+        console.warn("[nexus] Vector payload index type:", (e as Error)?.message)
+      }
+    }
+    for (let i = 0; i <= 4; i++) {
+      try {
+        await this.client.createPayloadIndex(this.collectionName, {
+          field_name: `pathSegments.${i}`,
+          field_schema: "keyword",
+        })
+      } catch (e: unknown) {
+        const msg = (e as Error)?.message ?? ""
+        if (!msg.toLowerCase().includes("already exists")) {
+          console.warn(`[nexus] Vector payload index pathSegments.${i}:`, (e as Error)?.message)
+        }
+      }
+    }
   }
 
   async upsertSymbols(symbols: Array<{
@@ -146,18 +193,22 @@ export class VectorIndex {
       await this.recreateCollection(observedSize)
     }
 
-    const points = symbols.map((s, i) => ({
-      id: toPointId(s.id),
-      vector: vectors[i]!,
-      payload: {
-        path: s.path,
-        name: s.name,
-        kind: s.kind ?? "chunk",
-        parent: s.parent ?? null,
-        startLine: s.startLine ?? 0,
-        content: s.content.slice(0, 1000),
-      },
-    })).filter(p => Array.isArray(p.vector) && p.vector.length === this.vectorSize)
+    const points = symbols.map((s, i) => {
+      const pathSegments = pathToSegments(s.path)
+      return {
+        id: toPointId(s.id),
+        vector: vectors[i]!,
+        payload: {
+          path: s.path,
+          pathSegments,
+          name: s.name,
+          kind: s.kind ?? "chunk",
+          parent: s.parent ?? null,
+          startLine: s.startLine ?? 0,
+          content: s.content.slice(0, 1000),
+        },
+      }
+    }).filter(p => Array.isArray(p.vector) && p.vector.length === this.vectorSize)
 
     if (points.length === 0) return
 
@@ -184,16 +235,27 @@ export class VectorIndex {
   async deleteByPath(filePath: string): Promise<void> {
     if (!this.initialized) return
     try {
-      await this.client.delete(this.collectionName, {
-        filter: { must: [{ key: "path", match: { value: filePath } }] },
-      })
+      const segments = pathToSegments(filePath)
+      const keys = Object.keys(segments)
+      if (keys.length === 0) {
+        await this.client.delete(this.collectionName, {
+          filter: { must: [{ key: "path", match: { value: filePath } }] },
+        })
+        return
+      }
+      const must = keys.map(i => ({
+        key: `pathSegments.${i}`,
+        match: { value: segments[i]! },
+      }))
+      await this.client.delete(this.collectionName, { filter: { must } })
     } catch {}
   }
 
   async search(
     query: string,
     limit: number,
-    kind?: SymbolKind
+    kind?: SymbolKind,
+    pathScope?: string | string[]
   ): Promise<IndexSearchResult[]> {
     if (!this.initialized) return []
 
@@ -201,9 +263,25 @@ export class VectorIndex {
       const [vector] = await this.embeddings.embed([query])
       if (!vector) return []
 
-      const filter = kind
-        ? { must: [{ key: "kind", match: { value: kind } }] }
-        : undefined
+      const must: Array<{ key: string; match: { value: string } }> = []
+      if (kind) {
+        must.push({ key: "kind", match: { value: kind } })
+      }
+
+      const prefix = Array.isArray(pathScope) ? pathScope[0] : pathScope
+      if (prefix && prefix.trim()) {
+        const normalized = prefix.replace(/\\/g, "/").replace(/^\.\/|\/+$/g, "").trim()
+        if (normalized && normalized !== ".") {
+          const segments = normalized.split("/").filter(Boolean)
+          for (let i = 0; i < segments.length; i++) {
+            must.push({ key: `pathSegments.${i}`, match: { value: segments[i]! } })
+          }
+        }
+      }
+
+      const filter: { must?: Array<{ key: string; match: { value: string } }>; must_not?: Array<{ key: string; match: { value: string } }> } =
+        must.length > 0 ? { must } : {}
+      filter.must_not = [{ key: "type", match: { value: "metadata" } }]
 
       const results = await this.client.search(this.collectionName, {
         vector,
@@ -246,6 +324,61 @@ export class VectorIndex {
       return typeof pointsCount !== "number" || pointsCount <= 0
     } catch {
       return true
+    }
+  }
+
+  /**
+   * True if collection has data and indexing has been marked complete (Roo-Code style).
+   * Used to avoid treating in-progress or stale index as ready.
+   */
+  async hasIndexedData(): Promise<boolean> {
+    if (!this.initialized) return false
+    try {
+      const info = await this.client.getCollection(this.collectionName) as Record<string, unknown>
+      const result = info["result"] as Record<string, unknown> | undefined
+      const pointsCount = result?.["points_count"]
+      if (typeof pointsCount !== "number" || pointsCount <= 0) return false
+
+      const metaId = getIndexingMetadataPointId()
+      const points = await this.client.retrieve(this.collectionName, { ids: [metaId] })
+      if (points.length > 0 && points[0]?.payload?.indexing_complete === true) {
+        return true
+      }
+      return pointsCount > 0
+    } catch {
+      return false
+    }
+  }
+
+  async markIndexingIncomplete(): Promise<void> {
+    if (!this.initialized) return
+    try {
+      const metaId = getIndexingMetadataPointId()
+      await this.client.upsert(this.collectionName, {
+        points: [{
+          id: metaId,
+          vector: new Array(this.vectorSize).fill(0),
+          payload: { type: "metadata", indexing_complete: false, started_at: Date.now() },
+        }],
+      })
+    } catch (e) {
+      console.warn("[nexus] markIndexingIncomplete failed:", (e as Error)?.message)
+    }
+  }
+
+  async markIndexingComplete(): Promise<void> {
+    if (!this.initialized) return
+    try {
+      const metaId = getIndexingMetadataPointId()
+      await this.client.upsert(this.collectionName, {
+        points: [{
+          id: metaId,
+          vector: new Array(this.vectorSize).fill(0),
+          payload: { type: "metadata", indexing_complete: true, completed_at: Date.now() },
+        }],
+      })
+    } catch (e) {
+      console.warn("[nexus] markIndexingComplete failed:", (e as Error)?.message)
     }
   }
 

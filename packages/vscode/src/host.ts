@@ -128,29 +128,63 @@ export class VsCodeHost implements IHost {
     }
 
     // For write/execute, show an inline notification
-    const actionStr = action.type === "write" ? "Write" : "Execute"
-    const detail = action.content
-      ? `\n\n${action.content.slice(0, 200)}`
-      : action.description
+    const actionStr = action.type === "write" ? "Write" : "Bash"
+    const buttons: string[] =
+      action.type === "execute"
+        ? ["Allow", "Add to allowed for this folder", "Allow Always", "Deny"]
+        : ["Allow", "Allow Always", "Deny"]
+
+    const message =
+      action.type === "execute"
+        ? (action.content ? `NexusCode wants to run: ${action.content}` : `NexusCode: ${action.description}`)
+        : `NexusCode wants to ${actionStr}: ${action.description}`
 
     const choice = await vscode.window.showInformationMessage(
-      `NexusCode wants to ${actionStr}: ${action.description}`,
+      message,
       { modal: false },
-      "Allow",
-      "Allow Always",
-      "Deny"
+      ...buttons
     )
 
-    const approved = choice === "Allow" || choice === "Allow Always"
+    const approved = choice === "Allow" || choice === "Allow Always" || (action.type === "execute" && choice === "Add to allowed for this folder")
     const alwaysApprove = choice === "Allow Always"
+    const addToAllowedCommand =
+      action.type === "execute" && choice === "Add to allowed for this folder" && action.content
+        ? action.content
+        : undefined
     if (alwaysApprove) {
       this.alwaysApproved.add(alwaysKey)
     }
-    return { approved, alwaysApprove }
+    return { approved, alwaysApprove, addToAllowedCommand }
   }
 
   emit(event: AgentEvent): void {
     this.eventEmitter(event)
+  }
+
+  async addAllowedCommand(cwd: string, command: string): Promise<void> {
+    const normalized = command.trim().replace(/\s+/g, " ")
+    if (!normalized) return
+    const dirUri = vscode.Uri.file(path.join(cwd, ".nexus"))
+    const fileUri = vscode.Uri.file(path.join(cwd, ".nexus", "allowed-commands.json"))
+    let commands: string[] = []
+    try {
+      const data = await vscode.workspace.fs.readFile(fileUri)
+      const parsed = JSON.parse(Buffer.from(data).toString("utf8")) as { commands?: string[] }
+      if (Array.isArray(parsed?.commands)) commands = [...parsed.commands]
+    } catch {
+      // File missing or invalid
+    }
+    if (commands.includes(normalized)) return
+    commands.push(normalized)
+    try {
+      await vscode.workspace.fs.createDirectory(dirUri)
+    } catch {
+      // Dir may exist
+    }
+    await vscode.workspace.fs.writeFile(
+      fileUri,
+      new TextEncoder().encode(JSON.stringify({ commands }, null, 2))
+    )
   }
 
   async getProblems(): Promise<DiagnosticItem[]> {

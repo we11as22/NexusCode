@@ -19,11 +19,13 @@ const providerSchema = z.object({
 })
 
 const embeddingSchema = z.object({
-  provider: z.enum(["openai", "openai-compatible", "ollama", "local"]),
+  provider: z.enum(["openai", "openai-compatible", "openrouter", "ollama", "google", "mistral", "bedrock", "local"]),
   model: z.string().min(1),
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),
   dimensions: z.number().int().positive().optional(),
+  /** AWS region for Bedrock */
+  region: z.string().optional(),
 })
 
 const modeConfigSchema = z.object({
@@ -43,8 +45,9 @@ const mcpServerSchema = z.object({
 
 export const NexusConfigSchema = z.object({
   model: providerSchema.default({
-    provider: "anthropic",
-    id: "claude-sonnet-4-5",
+    provider: "openai-compatible",
+    id: "minimax/minimax-m2:free",
+    baseUrl: "https://openrouter.ai/api/v1",
   }),
 
   embeddings: embeddingSchema.optional(),
@@ -82,6 +85,8 @@ export const NexusConfigSchema = z.object({
     autoApproveWrite: z.boolean().default(false),
     autoApproveCommand: z.boolean().default(false),
     autoApproveReadPatterns: z.array(z.string()).default([]),
+    /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
+    allowedCommands: z.array(z.string()).default([]),
     denyPatterns: z.array(z.string()).default(["**/.env", "**/secrets/**", "**/*.key", "**/*.pem"]),
     rules: z.array(z.object({
       tool: z.string().optional(),

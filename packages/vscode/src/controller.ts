@@ -12,6 +12,7 @@ import {
   writeGlobalProfiles,
   Session,
   listSessions,
+  deleteSession,
   createLLMClient,
   ToolRegistry,
   loadSkills,
@@ -42,6 +43,7 @@ export type WebviewMessage =
   | { type: "saveConfig"; config: Partial<NexusConfig> }
   | { type: "switchSession"; sessionId: string }
   | { type: "forkSession"; messageId: string }
+  | { type: "deleteSession"; sessionId: string }
   | { type: "reindex" }
   | { type: "clearIndex" }
   | { type: "openFileAtLocation"; path: string; line?: number; endLine?: number }
@@ -229,6 +231,18 @@ export class Controller {
       if (!this.config) {
         this.config = NexusConfigSchema.parse({}) as NexusConfig
       }
+      // Merge project allowlist from .nexus/allowed-commands.json
+      try {
+        const allowPath = path.join(cwd, ".nexus", "allowed-commands.json")
+        const uri = vscode.Uri.file(allowPath)
+        const data = await vscode.workspace.fs.readFile(uri)
+        const parsed = JSON.parse(Buffer.from(data).toString("utf8")) as { commands?: string[] }
+        if (Array.isArray(parsed?.commands)) {
+          this.config.permissions.allowedCommands = parsed.commands
+        }
+      } catch {
+        // No file or invalid — keep default
+      }
       this.applyVscodeOverrides(this.config)
       this.defaultModelProfile = { ...this.config.model }
       try {
@@ -320,6 +334,9 @@ export class Controller {
         break
       case "switchSession":
         await this.switchSession(msg.sessionId)
+        break
+      case "deleteSession":
+        await this.deleteSession(msg.sessionId)
         break
       case "forkSession":
         if (this.session && msg.messageId) {
@@ -547,6 +564,10 @@ export class Controller {
         this.isRunning = false
         this.postStateToWebview()
       }
+      // Sync full state after tool_end so webview gets latest todo (update_todo_list) and messages
+      if (event.type === "tool_end") {
+        this.postStateToWebview()
+      }
     })
 
     const timeoutMs = 10 * 60_000
@@ -731,6 +752,48 @@ export class Controller {
       this.checkpoint = undefined
       this.postStateToWebview()
     }
+  }
+
+  private async deleteSession(sessionId: string): Promise<void> {
+    const cwd = this.getCwd()
+    const serverUrl = this.getServerUrl()
+    if (serverUrl) {
+      try {
+        const res = await fetch(
+          `${serverUrl.replace(/\/$/, "")}/session/${sessionId}?directory=${encodeURIComponent(cwd)}`,
+          { method: "DELETE", headers: { "x-nexus-directory": cwd } }
+        )
+        if (!res.ok) return
+      } catch {
+        return
+      }
+    } else {
+      const ok = await deleteSession(sessionId, cwd)
+      if (!ok) return
+    }
+    if (this.session?.id === sessionId) {
+      if (serverUrl) {
+        try {
+          const createRes = await fetch(`${serverUrl.replace(/\/$/, "")}/session`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
+            body: "{}",
+          })
+          if (!createRes.ok) return
+          const created = (await createRes.json()) as { id: string }
+          this.session = new Session(created.id, cwd, [])
+          this.serverSessionId = created.id
+        } catch {
+          return
+        }
+      } else {
+        this.session = Session.create(cwd)
+        this.serverSessionId = undefined
+      }
+      this.checkpoint = undefined
+      this.postStateToWebview()
+    }
+    await this.sendSessionList()
   }
 
   private applyVscodeOverrides(config: NexusConfig): void {

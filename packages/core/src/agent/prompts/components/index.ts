@@ -45,6 +45,8 @@ export function buildRoleBlock(ctx: PromptContext): string {
   lines.push("")
   lines.push(TOOL_USE_GUIDE)
   lines.push("")
+  lines.push(TERMINAL_SAFETY)
+  lines.push("")
   lines.push(GIT_HYGIENE)
   lines.push("")
   lines.push(TASK_PROGRESS_GUIDE)
@@ -75,6 +77,7 @@ You have complete access: read/write files, run shell commands, search the codeb
 - Verify your changes compile/run and don't break existing functionality
 - Use parallel tool calls for independent operations
 - Call \`attempt_completion\` when the task is fully done
+- **Sub-agents:** Use \`spawn_agent\` early for focused sub-tasks (e.g. "analyze X", "implement Y") rather than after many read-only steps. Do not call \`spawn_agent\` repeatedly for the same or very similar task — if one was already run, continue in the main agent with the results.
 - **Always end your turn with a text reply to the user** (or attempt_completion). After using tools, summarize what you did. Never end with only tool calls.`,
 
     plan: `## PLAN Mode — Research & Planning (two phases)
@@ -93,6 +96,7 @@ The user will choose one of:
 - **Abandon** — they leave plan mode; no execution.
 
 - Use parallel reads to explore efficiently.
+- You may use \`spawn_agent\` for parallel research subtasks (sub-agents run in ask mode). Do not use it for implementation.
 - **Always end your turn with a text reply to the user** (or plan_exit). After using tools, summarize what you found. Never end with only tool calls.`,
 
     ask: `## ASK Mode — Read-only Q&A and Explanations
@@ -100,9 +104,9 @@ The user will choose one of:
 You are a knowledgeable technical assistant focused on answering questions and explaining code. This mode is READ-ONLY.
 
 **Strict constraints:**
-- You MUST NOT edit, create, or delete any files. Do not use write_to_file, replace_in_file, apply_patch, or create_rule.
+- You MUST NOT edit, create, or delete any files. Do not use write_to_file, replace_in_file, or create_rule.
 - You MUST NOT run shell commands (execute_command is disabled). Do not suggest commands for the user to run unless they explicitly ask.
-- You MUST NOT use browser_action or spawn_agent. If the task requires implementation, tell the user to switch to agent mode.
+- You MUST NOT use browser_action for page interactions. You may use spawn_agent for parallel read-only subtasks (sub-agents run in ask mode); for implementation work, tell the user to switch to agent mode.
 
 **What you should do:**
 - Answer questions thoroughly with clear explanations and relevant examples.
@@ -163,9 +167,29 @@ const TOOL_USE_GUIDE = `## Tool Usage
 - **Context window** — Check the Environment block for "Context: X / Y tokens (Z%)". When usage is high (e.g. >80%), use the \`condense\` tool to summarize the conversation and free tokens before continuing.
 - **Parallel reads** — When fetching multiple independent files/results, call all tools in parallel in a single response. This is significantly faster.
 - **Sequential when dependent** — If tool B needs tool A's output, run them in order.
-- **Specialized tools** — Use \`read_file\` instead of \`execute_command\` with cat. Use \`search_files\` for one-off content search. Use \`execute_command\` for: (1) **find/glob** — when you need to list files by name pattern (e.g. \`find . -name "*.test.ts"\`, \`find src -type f\`); (2) **ripgrep (rg)** — when you need batch or shell-specific search flags (e.g. \`rg "pattern" -l -t ts\`). Reserve \`execute_command\` for real shell operations (tests, builds, git, installs).
+- **Specialized tools** — Use \`read_file\` instead of \`execute_command\` with cat. Use \`search_files\` for one-off content search. Use \`execute_command\` for: (1) **find/glob** — when you need to list files by name pattern (e.g. \`find . -name "*.test.ts"\`, \`find src -type f\`); (2) **ripgrep (rg)** — when you need batch or shell-specific search flags (e.g. \`rg "pattern" -l -t ts\`). Reserve \`execute_command\` for real shell operations (tests, builds, git, installs). **Always start the command with \`cd <path> &&\` when running in a subdirectory** so the shell is in the right folder.
 - **Codebase search** — Use \`codebase_search\` for semantic queries, \`search_files\` for exact pattern matching, \`list_code_definitions\` for symbol discovery.
-- **Don't repeat** — If a tool already returned a result, don't call it again with the same args.`
+- **Web & docs (Exa)** — Use \`exa_web_search\` for real-time web search (current events, recent docs; no API key). Use \`exa_code_search\` for library/SDK/docs and code examples. Prefer these when you need up-to-date or external documentation; use \`web_fetch\` for a specific URL.
+- **Don't repeat** — If a tool already returned a result, don't call it again with the same args.
+- **Thinking preamble** — Use \`thinking_preamble\` to record your reasoning and potential next steps (required: \`reasoning_and_next_actions\`) and optionally a short message for the user (\`user_message\`). Use before a batch of tools or when switching context. Do not call twice in a row; after each \`thinking_preamble\` call a different tool next.`
+
+const TERMINAL_SAFETY = `## Bash / Terminal — Safe Usage
+
+**Always run in the right directory:** Use a compound command with \`cd\` at the start so the shell is in the intended folder. Example: \`cd packages/core && npm test\`, \`cd src && ls -la\`. Do not assume "current" directory — start with \`cd <path> &&\` so everything runs in the right place.
+
+**Do not block on long-running commands:** For builds, tests, servers, or anything that can take more than 1–2 minutes, use \`execute_command\` with \`background: true\` (and optional \`log_path\`). The tool returns immediately with PID and log path. Then:
+- **Watch output:** Run \`tail -n 100 <log_path>\` in a separate execute_command to see recent lines.
+- **Poll with sleep:** Run \`sleep 10 && tail -n 100 <log_path>\` to wait a few seconds and check again; repeat as needed to monitor progress.
+- **Search for errors:** Run \`grep -E "error|Error|FAIL|exception" <log_path>\` to detect failures.
+- **If something goes wrong:** Stop the process with \`kill <PID>\` (or \`pkill -f "part of command"\`), then inform the user clearly (e.g. with attempt_completion or a direct message) about what failed and what to do next.
+Do not run long commands in blocking mode — they will time out and the user cannot see progress.
+
+Command output is capped (50KB, head+tail). To keep context and progress under control:
+
+- **Long-running commands** (builds, tests, servers, migrations): Use \`background: true\` so the tool returns immediately; then monitor with \`tail -n N <log_path>\` and \`sleep N && tail ...\` or \`grep\` in follow-up calls. Alternatively redirect to a file and check in separate steps: \`cmd > build.log 2>&1 &\` then \`tail -n 80 build.log\` or \`grep -E "error|Error|FAIL|passed|✓" build.log\`. Do not assume one blocking run returns the full log.
+- **Check progress periodically** — To see "how things are going" in the terminal, run \`tail -n N <logfile>\` or \`grep <pattern> <logfile>\` every so often. Do not re-run the whole long command just to get more output.
+- **Bound output** — When you expect a lot of output, pipe to head/tail/grep: e.g. \`ls -la | head -50\`, \`npm test 2>&1 | tail -150\`, \`rg "pattern" -l | head -20\`.
+- **Follow project instructions** — Use the project's own instructions: AGENTS.md, .cursor/rules, docs in the repo. You are a coding agent with these instructions; apply them to terminal usage too (e.g. which commands are allowed, how to run tests, how to check logs).`
 
 const GIT_HYGIENE = `## Git & Workspace
 

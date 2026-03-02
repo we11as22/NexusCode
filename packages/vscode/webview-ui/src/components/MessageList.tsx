@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { ToolCallCard } from "./ToolCallCard.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 
@@ -74,7 +75,7 @@ function MessageBubble({ message }: { message: SessionMessage }) {
     return (
       <div className="rounded-xl border border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)] px-4 py-3 text-xs">
         <div className="text-[var(--vscode-descriptionForeground)] mb-1.5 font-medium">📝 Conversation compacted</div>
-        <ReactMarkdown className="prose-nexus text-xs">
+        <ReactMarkdown className="prose-nexus text-xs" remarkPlugins={[remarkGfm]}>
           {typeof message.content === "string" ? message.content : ""}
         </ReactMarkdown>
       </div>
@@ -121,9 +122,10 @@ function MessageBubble({ message }: { message: SessionMessage }) {
 
 function AssistantText({ text }: { text: string }) {
   return (
-    <div className="text-sm text-[var(--vscode-foreground)]">
+    <div className="text-sm text-[var(--vscode-foreground)] min-w-0 break-words">
       <ReactMarkdown
         className="prose-nexus"
+        remarkPlugins={[remarkGfm]}
         components={{
           code({ className, children, ...props }) {
             const isInline = !className
@@ -158,6 +160,24 @@ function AssistantText({ text }: { text: string }) {
           blockquote({ children }) {
             return <blockquote className="border-l-4 border-[var(--nexus-accent)] pl-3 py-0.5 my-2 text-[var(--vscode-descriptionForeground)] bg-[var(--nexus-accent-muted)] rounded-r">{children}</blockquote>
           },
+          table({ children }) {
+            return <div className="nexus-markdown-table-wrap my-2 overflow-x-auto"><table className="nexus-markdown-table">{children}</table></div>
+          },
+          thead({ children }) {
+            return <thead className="nexus-markdown-thead">{children}</thead>
+          },
+          tbody({ children }) {
+            return <tbody className="nexus-markdown-tbody">{children}</tbody>
+          },
+          tr({ children }) {
+            return <tr className="nexus-markdown-tr">{children}</tr>
+          },
+          th({ children }) {
+            return <th className="nexus-markdown-th">{children}</th>
+          },
+          td({ children }) {
+            return <td className="nexus-markdown-td">{children}</td>
+          },
         }}
       >
         {text}
@@ -176,7 +196,14 @@ function AssistantParts({ parts }: { parts: MessagePart[] }) {
           return <AssistantText key={i} text={text} />
         }
         if (part.type === "tool") {
-          return <ToolCallCard key={i} part={part as ToolPart} />
+          const toolPart = part as ToolPart
+          if (toolPart.tool === "thinking_preamble") {
+            const userMsg = (toolPart.input?.user_message as string)?.trim()
+            const reasoning = (toolPart.input?.reasoning_and_next_actions as string) || ""
+            if (userMsg || reasoning) return <ThinkingPreambleBlock key={i} userMessage={userMsg} reasoning={reasoning} />
+            return <ToolCallCard key={i} part={toolPart} />
+          }
+          return <ToolCallCard key={i} part={toolPart} />
         }
         if (part.type === "reasoning") {
           const reasoningText = (part as { text: string }).text
@@ -191,6 +218,42 @@ function AssistantParts({ parts }: { parts: MessagePart[] }) {
   )
 }
 
+/** Thinking preamble: reasoning (required) + optional user-visible message — chronological with text and tools */
+function ThinkingPreambleBlock({ userMessage, reasoning }: { userMessage: string; reasoning: string }) {
+  const [showReasoning, setShowReasoning] = useState(false)
+  const hasReasoning = reasoning.trim().length > 0
+  return (
+    <div className="nexus-thinking-preamble-block rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden my-1 font-sans">
+      <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)]">
+        <span className="text-[10px] font-semibold text-[var(--vscode-descriptionForeground)] uppercase tracking-wide">
+          —
+        </span>
+      </div>
+      {userMessage ? (
+        <div className="px-2.5 py-2 text-sm text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
+          {userMessage}
+        </div>
+      ) : null}
+      {hasReasoning && (
+        <>
+          <button
+            type="button"
+            onClick={() => setShowReasoning(!showReasoning)}
+            className="w-full px-2.5 py-1 text-[10px] text-[var(--nexus-accent)] hover:bg-[var(--vscode-list-hoverBackground)] border-t border-[var(--vscode-panel-border)]"
+          >
+            {showReasoning ? "Hide reasoning" : "Show reasoning"}
+          </button>
+          {showReasoning && (
+            <div className="px-2.5 py-2 text-xs text-[var(--vscode-descriptionForeground)] whitespace-pre-wrap break-words border-t border-[var(--vscode-panel-border)] font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
+              {reasoning}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 /** Inline reasoning/thinking block in message — chronological with text and tools, Cline-style */
 function ReasoningPartBlock({ text }: { text: string }) {
   const [collapsed, setCollapsed] = useState(false)
@@ -198,13 +261,13 @@ function ReasoningPartBlock({ text }: { text: string }) {
   const displayText = collapsed && isLong ? text.slice(0, 600) + "\n…" : text
 
   return (
-    <div className="nexus-reasoning-block rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
+    <div className="nexus-reasoning-block rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden font-sans">
       <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)]">
         <span className="text-[10px] font-semibold text-[var(--vscode-descriptionForeground)] uppercase tracking-wide">
           Thinking
         </span>
       </div>
-      <div className="px-2.5 py-2 text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed">
+      <div className="px-2.5 py-2 text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
         {displayText}
       </div>
       {isLong && (

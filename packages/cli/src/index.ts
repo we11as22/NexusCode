@@ -4,6 +4,7 @@ import React from "react"
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 import * as path from "node:path"
+import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import { execa } from "execa"
 import {
@@ -89,6 +90,17 @@ const serverUrl = (argv as Record<string, string>)["server"] || process.env.NEXU
 
 // Load config
 let config = await loadConfig(cwd)
+// Merge project allowlist from .nexus/allowed-commands.json
+try {
+  const allowPath = path.join(cwd, ".nexus", "allowed-commands.json")
+  const raw = await fs.readFile(allowPath, "utf8")
+  const parsed = JSON.parse(raw) as { commands?: string[] }
+  if (Array.isArray(parsed?.commands)) {
+    config.permissions.allowedCommands = parsed.commands
+  }
+} catch {
+  // No file or invalid JSON — keep default []
+}
 
 // Apply --model override
 if (argv.model) {

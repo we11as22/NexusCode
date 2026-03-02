@@ -112,11 +112,26 @@ export class FTSIndex {
     this.db.prepare("DELETE FROM chunks").run()
   }
 
-  searchSymbols(query: string, limit: number, kind?: SymbolKind): IndexSearchResult[] {
+  /**
+   * Search symbols by FTS query, optionally restricted to paths under the given prefixes.
+   * When pathPrefixes is non-empty, filtering is done in the DB (same best practice as vector pathSegments).
+   */
+  searchSymbols(query: string, limit: number, kind?: SymbolKind, pathPrefixes?: string[]): IndexSearchResult[] {
+    const pathCondition = buildPathCondition(pathPrefixes)
     let sql: string
     let params: (string | number)[]
 
-    if (kind) {
+    if (kind && pathCondition) {
+      sql = `
+        SELECT path, name, kind, parent, start_line, end_line, docstring, content,
+          rank as score
+        FROM symbols
+        WHERE symbols MATCH ? AND kind = ? AND ${pathCondition.sql}
+        ORDER BY rank
+        LIMIT ?
+      `
+      params = [escapeQuery(query), kind, ...pathCondition.params, limit]
+    } else if (kind) {
       sql = `
         SELECT path, name, kind, parent, start_line, end_line, docstring, content,
           rank as score
@@ -126,6 +141,16 @@ export class FTSIndex {
         LIMIT ?
       `
       params = [escapeQuery(query), kind, limit]
+    } else if (pathCondition) {
+      sql = `
+        SELECT path, name, kind, parent, start_line, end_line, docstring, content,
+          rank as score
+        FROM symbols
+        WHERE symbols MATCH ? AND ${pathCondition.sql}
+        ORDER BY rank
+        LIMIT ?
+      `
+      params = [escapeQuery(query), ...pathCondition.params, limit]
     } else {
       sql = `
         SELECT path, name, kind, parent, start_line, end_line, docstring, content,
@@ -159,8 +184,28 @@ export class FTSIndex {
     }
   }
 
-  searchChunks(query: string, limit: number): IndexSearchResult[] {
+  /**
+   * Search chunks by FTS query, optionally restricted to paths under the given prefixes.
+   * When pathPrefixes is non-empty, filtering is done in the DB (same best practice as vector pathSegments).
+   */
+  searchChunks(query: string, limit: number, pathPrefixes?: string[]): IndexSearchResult[] {
+    const pathCondition = buildPathCondition(pathPrefixes)
     try {
+      if (pathCondition) {
+        const rows = this.db.prepare(`
+          SELECT path, offset, content, rank as score
+          FROM chunks
+          WHERE chunks MATCH ? AND ${pathCondition.sql}
+          ORDER BY rank
+          LIMIT ?
+        `).all(escapeQuery(query), ...pathCondition.params, limit) as Array<{ path: string; offset: number; content: string; score: number }>
+        return rows.map(r => ({
+          path: r.path,
+          startLine: r.offset,
+          content: r.content,
+          score: r.score,
+        }))
+      }
       const rows = this.db.prepare(`
         SELECT path, offset, content, rank as score
         FROM chunks
@@ -210,4 +255,14 @@ function escapeQuery(query: string): string {
     .filter(Boolean)
     .map(word => `"${word}"`)
     .join(" ")
+}
+
+/** Build SQL condition for path under any of the given prefixes (server-side path filter). */
+function buildPathCondition(pathPrefixes?: string[]): { sql: string; params: string[] } | null {
+  if (!pathPrefixes || pathPrefixes.length === 0) return null
+  const normalized = pathPrefixes.map((p) => p.replace(/\\/g, "/").replace(/\/+$/, "")).filter(Boolean)
+  if (normalized.length === 0) return null
+  const clauses = normalized.map(() => "(path = ? OR path LIKE ?)")
+  const params = normalized.flatMap((pre) => [pre, `${pre}/%`])
+  return { sql: `(${clauses.join(" OR ")})`, params }
 }

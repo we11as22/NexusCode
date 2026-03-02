@@ -119,6 +119,17 @@ export function getSession(sessionId: string, cwd: string): SessionMeta | null {
   }
 }
 
+export function deleteSession(sessionId: string, cwd: string): boolean {
+  const database = openDb()
+  const result = database.prepare("DELETE FROM sessions WHERE id = ? AND cwd = ?").run(sessionId, cwd)
+  return result.changes > 0
+}
+
+export function updateSessionTitle(sessionId: string, cwd: string, title: string): void {
+  const database = openDb()
+  database.prepare("UPDATE sessions SET title = ?, ts = ? WHERE id = ? AND cwd = ?").run(title, Date.now(), sessionId, cwd)
+}
+
 export function getMessageCount(sessionId: string): number {
   const database = openDb()
   const row = database.prepare("SELECT COUNT(*) AS c FROM messages WHERE session_id = ?").get(sessionId) as { c: number }

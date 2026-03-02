@@ -23,23 +23,25 @@
 
 ## Установка в одну команду (как OpenCode)
 
-**Актуальная версия NexusCode — только из этого репо.** Одна и та же сборка поддерживает запуск без сервера и с сервером (`--server`). Если раньше ставили `nexus` глобально не отсюда — удали: `npm uninstall -g nexus 2>/dev/null || true`.
+**Актуальная версия NexusCode — только из этого репо.** В проекте включён **локальный store** (`.npmrc` → `store-dir=.pnpm-store`), поэтому конфликта с глобальным pnpm не будет.
 
-Из корня репозитория, в среде с **Node.js 20** (например `nvm use`):
+Из корня репозитория, в среде с **Node.js 20** (например `nvm use 20`):
+
+```bash
+pnpm run one
+```
+
+Одна команда: удаляет `node_modules` и `.pnpm-store` → ставит зависимости → нативные модули **better-sqlite3** → полная сборка. После неё запускай CLI: `node packages/cli/dist/index.js` (или сделай глобальную команду: `cd packages/cli && npm link`).
+
+**Вариант «всё сразу» (CLI глобально + .vsix расширения):**
 
 ```bash
 pnpm run ready
 ```
 
-Одна команда делает: установка зависимостей → пресобранные бинарники **better-sqlite3** → полная сборка → упаковка расширения **.vsix** → глобальная команда `nexus`. После этого:
+Делает то же, что `pnpm run one`, плюс упаковка расширения и `npm link` для команды `nexus`. Дальше: **CLI** — `nexus` из любого каталога; **расширение** — установи `packages/vscode/nexuscode-0.1.0.vsix` в VS Code (Extensions → «…» → Install from VSIX).
 
-- **CLI:** из любого каталога запускай `nexus`.
-- **Расширение:** установи в VS Code файл `packages/vscode/nexuscode-0.1.0.vsix` (**Extensions** → «…» → **Install from VSIX...**).
-
-Если pnpm выдаёт `Unexpected store location`, один раз задай store и снова запусти:  
-`pnpm config set store-dir <путь из ошибки> --global` → `pnpm run ready`.
-
-**Если при запуске `nexus` появляется ошибка про `NODE_MODULE_VERSION` или `ERR_DLOPEN_FAILED`** — в этом терминале используется Node 18, а сборка была под Node 20. Выполни в том же терминале: `nvm use 20`, затем снова `nexus`. Сервер (`pnpm run serve`) тоже нужно запускать с Node 20.
+**Если при запуске `nexus` ошибка `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`** — запускаешь под другой версией Node, чем при сборке. Включи Node 20 (`nvm use 20`), в корне репо выполни `pnpm run one` и снова запускай `nexus`.
 
 ---
 
@@ -54,15 +56,7 @@ pnpm run setup
 nexus
 ```
 
-Команда `pnpm run setup` делает: `pnpm install` → загрузка пресобранных бинарников **better-sqlite3** (`setup:native`) → `pnpm build`. После этого `nexus` запускает CLI (если делал `npm link` из `packages/cli`), иначе: `node packages/cli/dist/index.js`.
-
-**Если pnpm выдаёт `Unexpected store location`** — один раз укажи store, откуда уже стоят пакеты (путь из сообщения об ошибке), затем снова запусти setup:
-
-```bash
-pnpm config set store-dir /root/.local/share/pnpm/store/v10 --global
-pnpm run setup
-nexus
-```
+Команда `pnpm run setup` делает: `pnpm install` → загрузка пресобранных бинарников **better-sqlite3** (`setup:native`) → `pnpm build`. Для установки без возни с store лучше использовать **`pnpm run one`** (чистая установка в локальный store).
 
 **Если `setup:native` не находит пресобранный бинарь** (например, редкая платформа) — нужны инструменты сборки (python3, make, g++). Тогда после `pnpm install` выполни вручную: `pnpm rebuild better-sqlite3`, затем `pnpm build`.
 
@@ -348,7 +342,26 @@ nexus --help
 
 ## Configuration
 
-Create `.nexus/nexus.yaml` in your project root:
+By default NexusCode uses **OpenRouter** with the free model `minimax/minimax-m2:free` (same idea as Kilo Code — free MiniMax M2, no cost, good for coding). Set your API key once (free at [openrouter.ai](https://openrouter.ai)):
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+```
+
+Override the model in `.nexus/nexus.yaml` in your project root, or use Settings in the extension / `--model` in CLI.
+
+Example — keep default (OpenRouter free):
+
+```yaml
+# Optional: only if you want to override defaults
+model:
+  provider: openai-compatible
+  id: minimax/minimax-m2:free
+  baseUrl: https://openrouter.ai/api/v1
+  # apiKey: from OPENROUTER_API_KEY env var
+```
+
+Example — use another OpenRouter model or your own provider:
 
 ```yaml
 model:
@@ -356,28 +369,9 @@ model:
   id: claude-sonnet-4-5
   temperature: 0.2
   # apiKey: from ANTHROPIC_API_KEY env var
-
-embeddings:
-  provider: openai
-  model: text-embedding-3-small
-
-indexing:
-  enabled: true
-  vector: false
-  symbolExtract: true
-
-vectorDb:
-  enabled: false
-  url: http://127.0.0.1:6333
-  autoStart: true
-
-permissions:
-  autoApproveRead: true
-  autoApproveWrite: false
-  autoApproveCommand: false
 ```
 
-OpenRouter should be configured as OpenAI-compatible:
+Or OpenRouter with a different model:
 
 ```yaml
 model:

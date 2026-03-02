@@ -155,6 +155,7 @@ interface ChatState {
   clearChat: () => void
   forkSession: (messageId: string) => void
   switchSession: (sessionId: string) => void
+  deleteSession: (sessionId: string) => void
   reindex: () => void
   clearIndex: () => void
   saveConfig: (patch: Record<string, unknown>) => void
@@ -182,6 +183,7 @@ export type AgentEvent =
   | { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
   | { type: "error"; error: string; fatal?: boolean }
   | { type: "done"; messageId: string }
+  | { type: "todo_updated"; todo: string }
   | { type: "doom_loop_detected"; tool: string }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -271,6 +273,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   switchSession: (sessionId) => {
     postMessage({ type: "switchSession", sessionId })
     set({ view: "chat" })
+  },
+
+  deleteSession: (sessionId) => {
+    postMessage({ type: "deleteSession", sessionId })
   },
 
   reindex: () => {
@@ -388,6 +394,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ messages: msgs, awaitingApproval: false })
         break
       }
+
+      case "todo_updated":
+        set({ todo: (event as { type: "todo_updated"; todo: string }).todo ?? "" })
+        break
 
       case "tool_approval_needed":
         set({ awaitingApproval: true })
@@ -535,12 +545,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 : (latestAssistant.content as MessagePart[]).some((p) => p.type === "text" && p.text.trim().length > 0)
             )
 
+          // Always provide a text response when needed: add assistant fallback if model produced no final text
           if (!hasAssistantText && state.messages.length > 0) {
+            const fallbackText = buildFallbackSummary(msgs)
             msgs.push({
-              id: `system_done_${Date.now()}`,
+              id: `assistant_fallback_${Date.now()}`,
               ts: Date.now(),
-              role: "system",
-              content: "No final text response was produced. Retry with a narrower prompt or switch mode.",
+              role: "assistant",
+              content: fallbackText,
             })
           }
 
@@ -548,7 +560,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             messages: msgs,
             isRunning: false,
             awaitingApproval: false,
-            subagents: state.subagents.filter((a) => a.status === "running"),
+            subagents: [],
             reasoningStartTime: null,
           }
         })
@@ -560,11 +572,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           isRunning: false,
           awaitingApproval: false,
           reasoningStartTime: null,
-          subagents: state.subagents.map((a) =>
-            a.status === "running"
-              ? { ...a, status: "error", finishedAt: Date.now(), error: "Parent agent failed" }
-              : a
-          ),
+          subagents: [],
         }))
         if (event.error) {
           const msgs = [
@@ -623,6 +631,24 @@ function stripToolCallMarkup(value: string): string {
     .replace(/<parameter=[^>]+>/gi, "")
     .replace(/<\/parameter>/gi, "")
     .trim()
+}
+
+/** Build fallback assistant text when the model produced no final message (so user always sees a text response). */
+function buildFallbackSummary(messages: SessionMessage[]): string {
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant")
+  if (!lastAssistant || typeof lastAssistant.content !== "object" || !Array.isArray(lastAssistant.content)) {
+    return "The agent completed without a final message. You can rephrase your request or switch mode and try again."
+  }
+  const parts = lastAssistant.content as MessagePart[]
+  const toolNames = parts
+    .filter((p): p is ToolPart => p.type === "tool")
+    .map((p) => p.tool)
+  if (toolNames.length === 0) {
+    return "The agent completed without a final message. You can rephrase your request or switch mode and try again."
+  }
+  const unique = [...new Set(toolNames)]
+  const list = unique.slice(0, 15).join(", ") + (unique.length > 15 ? ` (+${unique.length - 15} more)` : "")
+  return `The agent completed without a final text summary. Actions performed: ${list}. You can ask a follow-up or rephrase your request.`
 }
 
 function sanitizeAssistantText(value: string): string {

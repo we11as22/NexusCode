@@ -65,8 +65,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
   const activeClient = client
 
-  // 1. Resolve tools: built-ins always active + MCP/custom classified if >threshold
-  //    Hard-blocked tools for this mode are NEVER included (even if sent as dynamic tools)
+  // 1. Resolve tools: built-ins by mode + dynamic (MCP/custom); blocked tools NEVER included.
+  //    Access control is enforced here (backend), not in prompts — only resolvedTools go to the LLM.
   const blockedTools = getBlockedToolsForMode(mode)
   const builtinToolNames = new Set(getBuiltinToolsForMode(mode))
   const builtinTools = tools.filter(t => builtinToolNames.has(t.name) && !blockedTools.has(t.name))
@@ -107,6 +107,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     host,
     session,
     config,
+    mode,
     indexer,
     signal,
     compactSession: async () => {
@@ -250,6 +251,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     lastAssistantMessageId = newMessageId
 
     let currentText = ""
+    let currentReasoning = ""
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
     let lastToolName = ""
     let sawNativeToolCall = false
@@ -268,6 +270,18 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         error: `Tool-call budget reached (${toolCallBudget}). Forcing final answer without additional tools.`,
         fatal: false,
       })
+    }
+
+    /** Persist reasoning + text + tool parts to session (for reasoning/thinking models — Kilo Code style). */
+    const flushAssistantContent = () => {
+      const msg = session.messages.find((m) => m.id === newMessageId)
+      const existingParts = msg && Array.isArray(msg.content) ? (msg.content as MessagePart[]) : []
+      const toolParts = existingParts.filter((p): p is ToolPart => p.type === "tool")
+      const parts: MessagePart[] = []
+      if (currentReasoning) parts.push({ type: "reasoning", text: currentReasoning } as ReasoningPart)
+      if (currentText) parts.push({ type: "text", text: currentText } as TextPart)
+      parts.push(...toolParts)
+      session.updateMessage(newMessageId, { content: parts.length > 0 ? parts : currentText || "" })
     }
 
     const flushPendingReads = async () => {
@@ -299,6 +313,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           messageId: newMessageId,
           success: result.success,
         })
+        if (tc.toolName === "update_todo_list") {
+          host.emit({ type: "todo_updated", todo: session.getTodo() })
+        }
         executedToolThisIteration = true
         executedToolCallsTotal++
       }
@@ -308,6 +325,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     try {
       const maxTokens = 8192
+
+      // So UI shows current todo (e.g. after load or from previous turn)
+      const currentTodo = session.getTodo()
+      if (currentTodo.trim()) host.emit({ type: "todo_updated", todo: currentTodo })
 
       streamLoop: for await (const event of activeClient.stream({
         messages,
@@ -324,13 +345,15 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           case "text_delta":
             if (event.delta) {
               currentText += event.delta
-              session.updateMessage(newMessageId, { content: currentText })
+              flushAssistantContent()
               host.emit({ type: "text_delta", delta: event.delta, messageId: newMessageId })
             }
             break
 
           case "reasoning_delta":
             if (event.delta) {
+              currentReasoning += event.delta
+              flushAssistantContent()
               host.emit({ type: "reasoning_delta", delta: event.delta, messageId: newMessageId })
             }
             break
@@ -427,6 +450,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 compacted: (result as { compacted?: boolean }).compacted,
               })
 
+              if (toolName === "update_todo_list") {
+                host.emit({ type: "todo_updated", todo: session.getTodo() })
+              }
+
               if (toolName === "spawn_agent" && result.success && result.output) {
                 session.addMessage({
                   role: "user",
@@ -499,7 +526,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         const cleaned = stripTextualToolCalls(currentText).trim()
         if (cleaned !== currentText) {
           currentText = cleaned
-          session.updateMessage(newMessageId, { content: currentText })
+          flushAssistantContent()
         }
 
         for (let i = 0; i < textualCalls.length; i++) {
@@ -559,6 +586,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             error: result.success ? undefined : result.output,
             compacted: (result as { compacted?: boolean }).compacted,
           })
+
+          if (call.toolName === "update_todo_list") {
+            host.emit({ type: "todo_updated", todo: session.getTodo() })
+          }
 
           lastToolName = call.toolName
           executedToolThisIteration = true
@@ -706,7 +737,7 @@ async function executeToolCall(
   }
 
   // Restricted modes (plan/ask): allow writes only to .nexus/plans/*.md|*.txt
-  if (ctx.config.modes && ["write_to_file", "replace_in_file", "apply_patch", "batch"].includes(toolName)) {
+  if (ctx.config.modes && ["write_to_file", "replace_in_file", "batch"].includes(toolName)) {
     // We infer restricted modes by tool availability: execute_command is unavailable in plan/ask.
     const isRestrictedMode = !tools.some(t => t.name === "execute_command")
     if (isRestrictedMode) {
@@ -794,6 +825,16 @@ async function executeToolCall(
       if (!approval.approved) {
         return { success: false, output: `User denied ${toolName}` }
       }
+      if (approval.addToAllowedCommand != null && toolName === "execute_command") {
+        const toAdd = normalizeCommand(approval.addToAllowedCommand)
+        if (toAdd) {
+          await host.addAllowedCommand?.(ctx.cwd, toAdd)
+          if (!config.permissions.allowedCommands) config.permissions.allowedCommands = []
+          if (!config.permissions.allowedCommands.includes(toAdd)) {
+            config.permissions.allowedCommands.push(toAdd)
+          }
+        }
+      }
     }
   }
 
@@ -823,7 +864,7 @@ async function executeToolCall(
     }
 
     // Keep code index fresh after successful file edits in both CLI and VSCode hosts.
-    if (result.success && ctx.indexer && ["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
+    if (result.success && ctx.indexer && ["write_to_file", "replace_in_file"].includes(toolName)) {
       const targetPath = extractWriteTargetPath(toolName, validatedArgs as Record<string, unknown>)
       const refreshFile = ctx.indexer.refreshFile
       const refreshFileNow = ctx.indexer.refreshFileNow
@@ -969,6 +1010,10 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
       // Assistant message with tool calls
       const assistantContent: Array<Record<string, unknown>> = []
 
+      // Include reasoning first (for reasoning/thinking models — Kilo Code style)
+      for (const rp of reasoningParts) {
+        if (rp.text?.trim()) assistantContent.push({ type: "reasoning", text: rp.text })
+      }
       if (textContent) {
         assistantContent.push({ type: "text", text: textContent })
       }
@@ -995,9 +1040,18 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
         }))
         messages.push({ role: "tool" as SessionRole, content: toolResultContent as LLMMessage["content"] })
       }
-    } else if (textContent) {
-      // Pure text response (no tool calls)
-      messages.push({ role: "assistant", content: textContent })
+    } else if (textContent || reasoningParts.length > 0) {
+      // Pure text or reasoning-only response (no tool calls)
+      const assistantContent: Array<Record<string, unknown>> = []
+      for (const rp of reasoningParts) {
+        if (rp.text?.trim()) assistantContent.push({ type: "reasoning", text: rp.text })
+      }
+      if (textContent) assistantContent.push({ type: "text", text: textContent })
+      const content: LLMMessage["content"] =
+        assistantContent.length === 1 && assistantContent[0]!.type === "text"
+          ? (assistantContent[0] as { type: "text"; text: string }).text
+          : (assistantContent as LLMMessage["content"])
+      messages.push({ role: "assistant", content })
     }
   }
 
@@ -1027,6 +1081,10 @@ async function resolveMentionsContext(session: ISession, host: IHost): Promise<s
 }
 
 
+function normalizeCommand(command: string): string {
+  return command.trim().replace(/\s+/g, " ")
+}
+
 function toolNeedsApproval(
   toolName: string,
   toolInput: Record<string, unknown>,
@@ -1043,7 +1101,7 @@ function toolNeedsApproval(
     }
     return !config.permissions.autoApproveRead
   }
-  if (["write_to_file", "replace_in_file", "apply_patch"].includes(toolName)) {
+  if (["write_to_file", "replace_in_file"].includes(toolName)) {
     return !config.permissions.autoApproveWrite && !autoApproveActions.has("write")
   }
   if (toolName === "batch") {
@@ -1054,6 +1112,10 @@ function toolNeedsApproval(
     return false
   }
   if (toolName === "execute_command") {
+    const cmd = typeof toolInput["command"] === "string" ? toolInput["command"] : ""
+    const normalized = normalizeCommand(cmd)
+    const allowed = config.permissions.allowedCommands ?? []
+    if (normalized && allowed.some((c) => normalizeCommand(c) === normalized)) return false
     return !config.permissions.autoApproveCommand && !autoApproveActions.has("execute")
   }
   return false
@@ -1083,6 +1145,7 @@ function buildApprovalAction(toolName: string, toolInput: Record<string, unknown
       type: "execute",
       tool: toolName,
       description: `Run: ${toolInput["command"]}`,
+      content: typeof toolInput["command"] === "string" ? toolInput["command"] : undefined,
     }
   }
   return {
@@ -1213,13 +1276,6 @@ function isContextOverflowError(message: string): boolean {
 function extractWriteTargetPath(toolName: string, toolInput: Record<string, unknown>): string | undefined {
   if (typeof toolInput["path"] === "string" && toolInput["path"]) {
     return toolInput["path"] as string
-  }
-  if (toolName === "apply_patch" && typeof toolInput["patch"] === "string") {
-    const patch = toolInput["patch"] as string
-    const match = patch.match(/^(?:---|\+\+\+)\s+(?:a\/|b\/)?(.+?)(?:\t.*)?$/m)
-    if (match?.[1] && match[1] !== "/dev/null") {
-      return match[1]
-    }
   }
   return undefined
 }

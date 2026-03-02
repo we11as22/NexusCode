@@ -102,7 +102,18 @@ export class BaseLLMClient implements LLMClient {
           break
 
         case "reasoning":
-          yield { type: "reasoning_delta", delta: (part as Record<string, string>)["textDelta"] ?? "" }
+          // Support both textDelta (streaming) and text (chunk) for reasoning/thinking models (OpenRouter, o1, DeepSeek R1, etc.)
+          yield {
+            type: "reasoning_delta",
+            delta:
+              (part as Record<string, string>)["textDelta"] ??
+              (part as Record<string, string>)["text"] ??
+              "",
+          }
+          break
+
+        case "reasoning-part-finish":
+          // End of reasoning block — no delta to emit
           break
 
         case "tool-call":

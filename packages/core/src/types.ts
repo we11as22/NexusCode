@@ -21,6 +21,8 @@ export interface PermissionResult {
   alwaysApprove?: boolean
   /** When true, host should set autoApprove for the rest of the session (e.g. "Skip all") */
   skipAll?: boolean
+  /** For execute_command: add this command to the project allowlist so it is not asked again in this folder */
+  addToAllowedCommand?: string
 }
 
 // ─── Tool Types ───────────────────────────────────────────────────────────────
@@ -58,6 +60,8 @@ export interface ToolContext {
   host: IHost
   session: ISession
   config: NexusConfig
+  /** Current loop mode (agent / plan / ask). Used e.g. by spawn_agent to set sub-agent permissions. */
+  mode?: Mode
   indexer?: IIndexer
   signal: AbortSignal
   /** Optional: trigger context compaction (condense/summarize_task tools). */
@@ -88,6 +92,8 @@ export interface IHost {
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>
   showApprovalDialog(action: ApprovalAction): Promise<PermissionResult>
   emit(event: AgentEvent): void
+  /** Persist command to .nexus/allowed-commands.json for this cwd so it is not asked for approval again */
+  addAllowedCommand?(cwd: string, command: string): Promise<void>
   resolveAtMention?(mention: string): Promise<string | null>
   getProblems?(): Promise<DiagnosticItem[]>
   /** Restore workspace to a checkpoint (Cline-style). Optional if host has no checkpoint. */
@@ -230,6 +236,7 @@ export type AgentEvent =
   | { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
   | { type: "error"; error: string; fatal?: boolean }
   | { type: "done"; messageId: string }
+  | { type: "todo_updated"; todo: string }
   | { type: "doom_loop_detected"; tool: string }
 
 // ─── Config Types ─────────────────────────────────────────────────────────────
@@ -270,11 +277,12 @@ export type ProviderName =
   | "perplexity"
 
 export interface EmbeddingConfig {
-  provider: "openai" | "openai-compatible" | "ollama" | "local"
+  provider: "openai" | "openai-compatible" | "openrouter" | "ollama" | "google" | "mistral" | "bedrock" | "local"
   model: string
   baseUrl?: string
   apiKey?: string
   dimensions?: number
+  region?: string
 }
 
 export interface NexusConfig {
@@ -308,6 +316,8 @@ export interface NexusConfig {
     autoApproveWrite: boolean
     autoApproveCommand: boolean
     autoApproveReadPatterns: string[]
+    /** Commands allowed without approval for this project (from .nexus/allowed-commands.json) */
+    allowedCommands: string[]
     denyPatterns: string[]
     /** Fine-grained permission rules evaluated in order, first match wins */
     rules: PermissionRule[]

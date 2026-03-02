@@ -27,6 +27,10 @@ export interface SubAgentResult {
  */
 export class ParallelAgentManager {
   private running = new Map<string, Promise<SubAgentResult>>()
+  /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns (Cline-style guard). */
+  private recentSpawnTasks: string[] = []
+  private static readonly RECENT_SPAWN_CAP = 3
+  private static readonly TASK_KEY_LEN = 80
 
   async spawn(
     description: string,
@@ -38,6 +42,24 @@ export class ParallelAgentManager {
     emit?: (event: AgentEvent) => void,
     contextSummary?: string,
   ): Promise<SubAgentResult> {
+    const taskKey = description.trim().slice(0, ParallelAgentManager.TASK_KEY_LEN).toLowerCase()
+    const isDuplicate = this.recentSpawnTasks.some(
+      (t) => t === taskKey || taskKey.startsWith(t) || t.startsWith(taskKey)
+    )
+    if (isDuplicate) {
+      return {
+        subagentId: `skip_${Date.now()}`,
+        sessionId: "",
+        success: true,
+        output:
+          "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call spawn_agent again for the same task.",
+      }
+    }
+    this.recentSpawnTasks.push(taskKey)
+    if (this.recentSpawnTasks.length > ParallelAgentManager.RECENT_SPAWN_CAP) {
+      this.recentSpawnTasks.shift()
+    }
+
     // Wait for a concurrency slot
     while (this.running.size >= maxParallel) {
       await Promise.race([...this.running.values()]).catch(() => {})
@@ -177,19 +199,25 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
   return {
     name: "spawn_agent",
     description: `Launch a parallel sub-agent to work on a specific task concurrently.
-Use for independent subtasks that don't depend on each other.
+Use for independent subtasks that don't depend on each other. You can run several in parallel.
 Optionally pass \`context_summary\` (new_task style) to give the sub-agent brief background before the task.
-The sub-agent has full capabilities based on the specified mode.
-**The sub-agent must call attempt_completion when the task is done**; its result is returned to you.
+**When the main agent is in plan or ask mode**, sub-agents always run with ask (read-only) permissions.
+**When the main agent is in agent mode**, sub-agents can run in agent/plan/ask based on \`mode\` parameter.
+The sub-agent must call attempt_completion when the task is done; its result is returned to you.
 Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: spawnSchema,
-    modes: ["agent"],
+    // Available in all modes; sub-agent permissions follow parent (plan/ask → ask, agent → agent/plan/ask)
 
     async execute(args: { description: string; context_summary?: string; mode?: Mode | "search" | "explore"; task_progress?: string }, ctx: ToolContext) {
       const { description, context_summary } = args
-      const normalizedMode: Mode = args.mode === "search" || args.mode === "explore"
-        ? "ask"
-        : ((args.mode ?? "agent") as Mode)
+      const parentMode = ctx.mode ?? "agent"
+      // In plan/ask, sub-agents always run with ask (read-only) permissions
+      const normalizedMode: Mode =
+        parentMode === "plan" || parentMode === "ask"
+          ? "ask"
+          : args.mode === "search" || args.mode === "explore"
+            ? "ask"
+            : ((args.mode ?? "agent") as Mode)
       const result = await manager.spawn(
         description,
         normalizedMode,

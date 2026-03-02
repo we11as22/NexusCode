@@ -133,7 +133,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       "connect-src http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*",
       `img-src ${webview.cspSource} data: https:`,
     ].join("; ")
-    const extraStyles = ".container { height: 100%; display: flex; flex-direction: column; min-height: 0; }"
+    const extraStyles = ".container { height: 100%; width: 100%; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }"
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -145,13 +145,13 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   <title>NexusCode</title>
   <style>
     html { scrollbar-color: auto; }
-    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+    html, body { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; box-sizing: border-box; }
     body {
       background-color: var(--vscode-editor-background);
       color: var(--vscode-foreground);
       font-family: var(--vscode-font-family);
     }
-    #root { height: 100%; }
+    #root { height: 100%; width: 100%; min-height: 0; display: flex; flex-direction: column; }
     #root .loading-msg { display: flex; align-items: center; justify-content: center; flex: 1; }
     #root.loaded .loading-msg { display: none; }
     ${extraStyles}

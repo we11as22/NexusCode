@@ -106,8 +106,9 @@ export class CliHost implements IHost {
       const lines: string[] = [""]
 
       if (action.type === "execute") {
-        lines.push(`\x1b[1;33m⚡ Command execution requested:\x1b[0m`)
-        lines.push(`  \x1b[36m${action.description}\x1b[0m`)
+        lines.push(`\x1b[1;33m⌨️  Bash\x1b[0m`)
+        const cmd = action.content || action.description.replace(/^Run:\s*/i, "")
+        lines.push(`  \x1b[36m${cmd}\x1b[0m`)
       } else if (action.type === "write") {
         lines.push(`\x1b[1;32m✏ File write requested:\x1b[0m`)
         lines.push(`  \x1b[36m${action.description}\x1b[0m`)
@@ -123,7 +124,11 @@ export class CliHost implements IHost {
         lines.push(`  \x1b[31m${action.description}\x1b[0m`)
       }
 
-      lines.push(`\x1b[90m[y] Yes  [n] No  [a] Always  [s] Skip all\x1b[0m`)
+      const optionsLine =
+        action.type === "execute"
+          ? `\x1b[90m[y]es [n]o [a]lways [s]kip [e] allow for folder\x1b[0m`
+          : `\x1b[90m[y]es [n]o [a]lways [s]kip all\x1b[0m`
+      lines.push(optionsLine)
       lines.push("")
       process.stdout.write(lines.join("\n"))
       process.stdout.write(`\x1b[1mAllow? \x1b[0m`)
@@ -137,7 +142,8 @@ export class CliHost implements IHost {
       rl.once("line", (answer: string) => {
         rl.close()
         const lower = answer.trim().toLowerCase()
-        const approved = ["y", "yes", "a", "always", "s", "skip"].includes(lower)
+        const addToAllowed = action.type === "execute" && (lower === "e" || lower === "add")
+        const approved = ["y", "yes", "a", "always", "s", "skip"].includes(lower) || addToAllowed
         const alwaysApprove = lower === "a" || lower === "always"
         const skipAll = lower === "s" || lower === "skip"
 
@@ -148,7 +154,12 @@ export class CliHost implements IHost {
           this.autoApprove = true
         }
 
-        resolve({ approved, alwaysApprove, skipAll })
+        resolve({
+          approved,
+          alwaysApprove,
+          skipAll,
+          addToAllowedCommand: addToAllowed && action.content ? action.content : undefined,
+        })
       })
 
       // Non-TTY (CI/pipe) — default approve with warning
@@ -162,6 +173,25 @@ export class CliHost implements IHost {
 
   emit(event: AgentEvent): void {
     this.eventEmitter(event)
+  }
+
+  async addAllowedCommand(cwd: string, command: string): Promise<void> {
+    const dir = path.join(cwd, ".nexus")
+    const filePath = path.join(dir, "allowed-commands.json")
+    const normalized = command.trim().replace(/\s+/g, " ")
+    if (!normalized) return
+    let commands: string[] = []
+    try {
+      const raw = await fs.readFile(filePath, "utf8")
+      const parsed = JSON.parse(raw) as { commands?: string[] }
+      if (Array.isArray(parsed?.commands)) commands = [...parsed.commands]
+    } catch {
+      // File missing or invalid — start fresh
+    }
+    if (commands.includes(normalized)) return
+    commands.push(normalized)
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(filePath, JSON.stringify({ commands }, null, 2), "utf8")
   }
 
   async getProblems(): Promise<DiagnosticItem[]> {

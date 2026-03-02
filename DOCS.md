@@ -148,6 +148,24 @@ nexus agent --print "Что делает функция parseConfig?"
 
 ### Минимальный пример `.nexus/nexus.yaml`
 
+По умолчанию используется бесплатная модель OpenRouter (`minimax/minimax-m2:free`, как в Kilo Code). Достаточно задать ключ:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+```
+
+Чтобы переопределить модель, создайте конфиг:
+
+```yaml
+model:
+  provider: openai-compatible
+  id: minimax/minimax-m2:free
+  baseUrl: https://openrouter.ai/api/v1
+  # apiKey задаётся через OPENROUTER_API_KEY
+```
+
+Или своя модель, например Anthropic:
+
 ```yaml
 model:
   provider: anthropic
@@ -159,8 +177,8 @@ model:
 
 | Секция | Ключ | Тип | По умолчанию | Описание |
 |--------|------|-----|--------------|----------|
-| **model** | provider | string | anthropic | Провайдер LLM: anthropic, openai, google, ollama, azure, bedrock, groq, mistral, xai, deepinfra, cerebras, cohere, togetherai, perplexity, openai-compatible (OpenRouter через openai-compatible + baseUrl) |
-| | id | string | claude-sonnet-4-5 | Идентификатор модели |
+| **model** | provider | string | openai-compatible | Провайдер LLM: anthropic, openai, google, ollama, azure, bedrock, groq, mistral, xai, deepinfra, cerebras, cohere, togetherai, perplexity, openai-compatible (OpenRouter через openai-compatible + baseUrl) |
+| | id | string | minimax/minimax-m2:free | Идентификатор модели (по умолчанию — бесплатная MiniMax M2 на OpenRouter, как в Kilo Code) |
 | | apiKey | string | — | API-ключ (можно не указывать, если задан в env) |
 | | baseUrl | string | — | Кастомный URL API (для openai-compatible) |
 | **indexing** | enabled | boolean | true | Включить индексацию кодовой базы |
@@ -257,13 +275,16 @@ model:
 | **read_file** | Чтение файла с опциональным диапазоном строк (start_line, end_line). Для больших файлов — обрезка по размеру/строкам. | agent, plan, debug, ask |
 | **write_to_file** | Создание/перезапись файла | agent, debug |
 | **replace_in_file** | Несколько search/replace блоков в одном вызове | agent, debug |
-| **apply_patch** | Применение унифицированного патча | agent, debug |
+| **batch** | Пакетное чтение и/или поиск (все режимы); в режиме **agent** дополнительно — пакетные правки (replaces). В plan и ask доступны только \`reads\` и \`searches\`, без изменения файлов. | agent, plan, ask |
 | **execute_command** | Выполнение shell-команды (таймаут, обрезка вывода) | agent, debug |
 | **search_files** | Поиск по содержимому (ripgrep), regex | agent, plan, debug, ask |
 | **list_files** | Список файлов/папок с опциональным glob include | все |
 | **list_code_definitions** | Список определений кода в файле/папке | все |
 | **codebase_search** | Семантический/ключевой поиск по индексу (FTS + опционально вектор) | все при включённом индексе |
 | **web_fetch** | GET-запрос по URL | agent, plan, debug, ask |
+| **web_search** | Поиск в интернете (Brave/Serper; нужны BRAVE_API_KEY или SERPER_API_KEY) | agent, plan, debug, ask |
+| **exa_web_search** | Поиск в интернете через Exa AI (без API-ключа, MCP endpoint) | agent, plan, ask |
+| **exa_code_search** | Поиск документации и примеров кода по библиотекам/SDK через Exa (без API-ключа) | agent, plan, ask |
 | **use_skill** | Подключение навыка из SKILL.md | agent, plan, debug |
 | **spawn_agent** | Запуск параллельного сабагента с описанием задачи и режимом | agent |
 | **attempt_completion** | Финализация ответа пользователю | все |

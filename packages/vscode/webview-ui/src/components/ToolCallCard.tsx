@@ -31,22 +31,31 @@ const TOOL_ICONS: Record<string, string> = {
   read_file: "📄",
   write_to_file: "✍️",
   replace_in_file: "✏️",
-  apply_patch: "🔧",
-  execute_command: "⚙️",
+  execute_command: "⌨️",
   search_files: "🔍",
   list_files: "📁",
   list_code_definitions: "🏗️",
   codebase_search: "🔎",
   web_fetch: "🌐",
   web_search: "🌍",
+  exa_web_search: "◈",
+  exa_code_search: "◇",
   browser_action: "🖥️",
   spawn_agent: "🤖",
   use_skill: "💡",
   attempt_completion: "✅",
   ask_followup_question: "❓",
   update_todo_list: "📝",
+  thinking_preamble: "💭",
   create_rule: "📏",
   batch: "📦",
+}
+
+function toolDisplayName(tool: string): string {
+  if (tool === "execute_command") return "bash"
+  if (tool === "exa_web_search") return "Exa Web Search"
+  if (tool === "exa_code_search") return "Exa Code Search"
+  return tool
 }
 
 const STATUS_STYLES = {
@@ -78,7 +87,7 @@ function getDiffStats(output: string): { add: number; del: number } {
 }
 
 function isFileEditTool(part: ToolPart): boolean {
-  return ["read_file", "write_to_file", "replace_in_file", "apply_patch"].includes(part.tool)
+  return ["read_file", "write_to_file", "replace_in_file"].includes(part.tool)
 }
 
 function getFileEditPath(part: ToolPart): string | null {
@@ -149,8 +158,6 @@ function formatToolInputPreview(part: ToolPart): string {
     case "write_to_file":
     case "replace_in_file":
       return pathStr ? short(pathStr, 56) : ""
-    case "apply_patch":
-      return pathStr ? short(pathStr, 56) : "patch"
     case "search_files": {
       const pat = Array.isArray(patterns) && patterns.length
         ? `patterns(${patterns.length})`
@@ -176,6 +183,9 @@ function formatToolInputPreview(part: ToolPart): string {
     case "web_fetch":
     case "web_search":
       return url && typeof url === "string" ? short(String(url), 52) : ""
+    case "exa_web_search":
+    case "exa_code_search":
+      return query && typeof query === "string" ? short(String(query).replace(/\s+/g, " "), 48) : ""
     case "list_code_definitions":
       return pathStr ? short(pathStr, 56) : ""
     case "batch": {
@@ -187,6 +197,13 @@ function formatToolInputPreview(part: ToolPart): string {
     case "spawn_agent": {
       const desc = inp["description"]
       return desc && typeof desc === "string" ? short(desc.replace(/\s+/g, " "), 48) : "subtask"
+    }
+    case "thinking_preamble": {
+      const msg = inp["user_message"]
+      const reasoning = inp["reasoning_and_next_actions"]
+      if (msg && typeof msg === "string") return short(String(msg).replace(/\s+/g, " "), 52)
+      if (reasoning && typeof reasoning === "string") return short(String(reasoning).replace(/\s+/g, " "), 52)
+      return "thinking"
     }
     default:
       return Object.entries(inp)
@@ -220,7 +237,7 @@ export function ToolCallCard({ part }: Props) {
         className="w-full flex items-center gap-2 px-2 py-1 text-left hover:opacity-80 transition-opacity"
       >
         <span className="flex-shrink-0">{icon}</span>
-        <span className="font-mono text-[var(--vscode-foreground)] flex-shrink-0">{part.tool}</span>
+        <span className="font-mono text-[var(--vscode-foreground)] flex-shrink-0">{toolDisplayName(part.tool)}</span>
         {inputPreview && (
           <span className="text-[var(--vscode-descriptionForeground)] truncate flex-1 min-w-0">{inputPreview}</span>
         )}
@@ -237,7 +254,27 @@ export function ToolCallCard({ part }: Props) {
           {isFileEditTool(part) && part.output && (
             <FileEditBlock part={part} />
           )}
-          {part.input && Object.keys(part.input).length > 0 && !(isFileEditTool(part) && part.output) && (
+          {part.tool === "thinking_preamble" && part.input && (
+            <div className="space-y-2 font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
+              {(part.input.user_message as string)?.trim() && (
+                <div>
+                  <div className="text-[var(--vscode-descriptionForeground)] mb-0.5 text-[10px]">Message</div>
+                  <div className="text-sm text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed bg-[var(--vscode-editor-background)] rounded p-1.5">
+                    {(part.input.user_message as string).trim()}
+                  </div>
+                </div>
+              )}
+              {(part.input.reasoning_and_next_actions as string)?.trim() && (
+                <div>
+                  <div className="text-[var(--vscode-descriptionForeground)] mb-0.5 text-[10px]">Reasoning</div>
+                  <div className="text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed bg-[var(--vscode-editor-background)] rounded p-1.5 max-h-48 overflow-y-auto">
+                    {(part.input.reasoning_and_next_actions as string).trim()}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {part.input && Object.keys(part.input).length > 0 && !(isFileEditTool(part) && part.output) && part.tool !== "thinking_preamble" && (
             <div>
               <div className="text-[var(--vscode-descriptionForeground)] mb-0.5">Input:</div>
               <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-32 overflow-y-auto">

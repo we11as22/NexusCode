@@ -4,24 +4,25 @@ export type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "m
 
 /**
  * Core built-in tool groups per mode.
- * These are ALWAYS active if the mode permits — no classifier applied.
- * Classifier only applies to MCP/custom tools when count exceeds threshold.
+ * Access control is enforced in the backend (getBuiltinToolsForMode + getBlockedToolsForMode in loop);
+ * prompts only describe behaviour — they do not grant or revoke tool access.
  */
 export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
   agent: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents", "context"],
-  plan:  ["always", "read", "write", "search", "skills", "context", "plan_exit"],
-  ask:   ["always", "read", "search", "context"],
+  plan:  ["always", "read", "write", "search", "browser", "mcp", "skills", "agents", "context", "plan_exit"],
+  ask:   ["always", "read", "search", "browser", "mcp", "skills", "agents", "context"],
 }
 
 /**
  * Tools that are explicitly BLOCKED per mode (even if passed as dynamic tools).
- * Plan mode allows writing .md plan files but blocks code files and commands.
- * Ask mode is fully read-only.
+ * Enforced in the agent loop: blocked tools are never included in resolvedTools and never sent to the LLM.
+ * Plan: only write to .nexus/plans/*.md|.txt; no execute.
+ * Ask: read-only + no plan work — no write, no execute, no plan_exit (spawn_agent allowed with ask permissions).
  */
 export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   agent: ["plan_exit"],
-  plan:  ["execute_command", "browser_action"],
-  ask:   ["write_to_file", "replace_in_file", "apply_patch", "execute_command", "browser_action", "spawn_agent", "create_rule", "plan_exit", "batch"],
+  plan:  ["execute_command"],
+  ask:   ["write_to_file", "replace_in_file", "execute_command", "create_rule", "plan_exit"],
 }
 
 /**
@@ -41,11 +42,11 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
  * Tools in "always" group are available in every mode.
  */
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
-  always:  ["attempt_completion", "ask_followup_question", "update_todo_list"],
-  read:    ["read_file", "list_files", "list_code_definitions"],
-  write:   ["write_to_file", "replace_in_file", "apply_patch", "create_rule", "batch"],
+  always:  ["attempt_completion", "ask_followup_question", "update_todo_list", "thinking_preamble"],
+  read:    ["read_file", "list_files", "list_code_definitions", "batch"],
+  write:   ["write_to_file", "replace_in_file", "create_rule", "batch"],
   execute: ["execute_command"],
-  search:  ["search_files", "codebase_search", "web_fetch", "web_search"],
+  search:  ["search_files", "codebase_search", "web_fetch", "web_search", "exa_web_search", "exa_code_search"],
   browser: ["browser_action"],
   mcp:     [], // populated dynamically from MCP registry
   skills:  ["use_skill"],
@@ -71,6 +72,8 @@ export const READ_ONLY_TOOLS = new Set([
   "codebase_search",
   "web_fetch",
   "web_search",
+  "exa_web_search",
+  "exa_code_search",
   "use_skill",
   "condense",
   "summarize_task",
@@ -124,7 +127,7 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
  * Mode descriptions for system prompt.
  */
 export const MODE_DESCRIPTIONS: Record<Mode, string> = {
-  agent: "AGENT mode: full access to read/write files, run commands, search codebase, browser, MCP, and spawn sub-agents. Complete tasks autonomously end-to-end.",
-  plan:  "PLAN mode: two phases. (1) Thoroughly study the codebase and produce a detailed step-by-step plan; write only to .nexus/plans/. (2) Call plan_exit when done; user may then approve (execute in agent), revise (send message), or abandon.",
-  ask:   "ASK mode: read-only. Answer questions, explain code, analyze implementations. MUST NOT modify any files or run commands.",
+  agent: "AGENT mode: full access — read/write files, run commands, search, browser, MCP, skills, spawn sub-agents (with full agent permissions). Execute tasks end-to-end. After plan approval, run with the approved plan and a detailed todo (fuller task descriptions).",
+  plan:  "PLAN mode: (1) Study the task thoroughly — read codebase, search, browser, MCP, skills; write only the plan to .nexus/plans/*.md. (2) You may use spawn_agent for parallel research subtasks (sub-agents run in ask mode). (3) Call plan_exit when the plan is ready; user may approve (then execution continues in agent mode with the plan and detailed todo), revise, or abandon.",
+  ask:   "ASK mode: read-only. Answer questions, explain code, analyze — use read, search, browser, MCP, skills. You may use spawn_agent for parallel read-only subtasks (sub-agents run in ask mode). Do NOT modify files, run commands, or use plan_exit.",
 }
