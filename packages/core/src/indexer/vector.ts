@@ -3,6 +3,14 @@ import type { IndexSearchResult, SymbolKind } from "../types.js"
 import type { EmbeddingClient } from "../provider/types.js"
 import crypto from "node:crypto"
 
+/** Thrown when vector upsert fails due to missing/invalid embeddings API key; indexer should disable vector for this run. */
+export class VectorAuthError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "VectorAuthError"
+  }
+}
+
 /** Deterministic point id for indexing metadata (indexing_complete marker). */
 function getIndexingMetadataPointId(): string {
   const hex = crypto.createHash("md5").update("__nexus_indexing_metadata__").digest("hex")
@@ -34,6 +42,7 @@ export class VectorIndex {
   private embeddingBatchSize: number
   private embeddingConcurrency: number
   readonly dimensions: number
+  private authErrorLogged = false
 
   constructor(
     url: string,
@@ -167,6 +176,17 @@ export class VectorIndex {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      const isAuthError = /auth|api.?key|401|403|missing.*header/i.test(message)
+      if (isAuthError) {
+        if (!this.authErrorLogged) {
+          this.authErrorLogged = true
+          if (process.env["NEXUS_DEBUG"]) {
+            console.warn(`[nexus] Vector upsert failed (embeddings API key missing/invalid): ${message}`)
+            console.warn(`[nexus] Disabling vector index for this run.`)
+          }
+        }
+        throw new VectorAuthError(message)
+      }
       console.warn(`[nexus] Vector upsert failed: ${message}`)
     }
   }
@@ -362,7 +382,9 @@ export class VectorIndex {
         }],
       })
     } catch (e) {
-      console.warn("[nexus] markIndexingIncomplete failed:", (e as Error)?.message)
+      if (process.env["NEXUS_DEBUG"]) {
+        console.warn("[nexus] markIndexingIncomplete failed:", (e as Error)?.message)
+      }
     }
   }
 

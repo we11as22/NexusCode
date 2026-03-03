@@ -3,6 +3,15 @@
     "version": "0.1.0",
     "private": true,
     "description": "NexusCode — AI coding agent combining best practices from all vibe-coding tools",
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "pnpm": {
+        "overrides": {
+            "react": "^19.0.0",
+            "react-dom": "^19.0.0"
+        }
+    },
     "workspaces": [
         "packages/*",
         "packages/vscode/webview-ui"
@@ -24,7 +33,9 @@
     "setup": "pnpm install && pnpm run setup:native && pnpm build",
     "one": "node scripts/one-install.js",
     "fullbuild": "pnpm run setup && pnpm --filter nexuscode package",
-    "ready": "node scripts/one-install.js && pnpm --filter nexuscode package && cd packages/cli && npm link && cd ../.."
+    "ready": "node scripts/one-install.js && pnpm --filter nexuscode package && cd packages/cli && npm link && cd ../..",
+        "cli": "sh scripts/install-nexus-cli.sh",
+        "install-cli": "pnpm run cli"
     },
     "devDependencies": {
         "typescript": "^5.5.0",

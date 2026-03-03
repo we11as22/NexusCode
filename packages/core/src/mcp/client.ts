@@ -58,7 +58,49 @@ export class McpClient {
   }
 
   async connectAll(configs: McpServerConfig[]): Promise<void> {
-    await Promise.all(configs.map(c => this.connect(c)))
+    const enabled = configs.filter((c) => c.enabled !== false)
+    await Promise.all(enabled.map((c) => this.connect(c)))
+  }
+
+  /** Test each server and return status (ok or error message). Does not keep connections. */
+  async testServers(configs: McpServerConfig[]): Promise<Array<{ name: string; status: "ok" | "error"; error?: string }>> {
+    const results: Array<{ name: string; status: "ok" | "error"; error?: string }> = []
+    for (const config of configs) {
+      if (config.enabled === false) {
+        results.push({ name: config.name, status: "ok" })
+        continue
+      }
+      try {
+        const client = new Client({
+          name: "nexuscode",
+          version: "0.1.0",
+        })
+        let transport: StdioClientTransport | SSEClientTransport
+        if (config.url) {
+          transport = new SSEClientTransport(new URL(config.url))
+        } else if (config.command) {
+          transport = new StdioClientTransport({
+            command: config.command,
+            args: config.args ?? [],
+            env: { ...process.env, ...config.env } as Record<string, string>,
+          })
+        } else {
+          results.push({ name: config.name, status: "error", error: "Missing command or url" })
+          continue
+        }
+        await client.connect(transport)
+        await client.listTools()
+        await client.close()
+        results.push({ name: config.name, status: "ok" })
+      } catch (err) {
+        results.push({
+          name: config.name,
+          status: "error",
+          error: (err as Error).message ?? String(err),
+        })
+      }
+    }
+    return results
   }
 
   getTools(): ToolDef[] {
@@ -124,6 +166,14 @@ const McpClientRegistry = new McpClientRegistryClass()
 
 export function setMcpClientInstance(client: McpClient): void {
   McpClientRegistry.instance = client
+}
+
+/** Standalone test of MCP server configs (does not keep connections). */
+export async function testMcpServers(
+  configs: McpServerConfig[]
+): Promise<Array<{ name: string; status: "ok" | "error"; error?: string }>> {
+  const client = new McpClient()
+  return client.testServers(configs)
 }
 
 function buildZodSchema(inputSchema: Record<string, unknown>): z.ZodType {

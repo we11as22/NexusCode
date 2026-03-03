@@ -25,6 +25,23 @@ export function activate(context: vscode.ExtensionContext): void {
       await provider?.openPanel()
     }),
 
+    vscode.commands.registerCommand("nexuscode.sidebar.focus", () => {
+      void vscode.commands.executeCommand("workbench.view.extension.nexuscode-activitybar")
+    }),
+
+    vscode.commands.registerCommand("nexuscode.chatClicked", () => {
+      provider?.switchView("chat")
+      vscode.commands.executeCommand("nexuscode.sidebar.focus").catch(() => {})
+    }),
+    vscode.commands.registerCommand("nexuscode.sessionsClicked", () => {
+      provider?.switchView("sessions")
+      vscode.commands.executeCommand("nexuscode.sidebar.focus").catch(() => {})
+    }),
+    vscode.commands.registerCommand("nexuscode.settingsClicked", () => {
+      provider?.switchView("settings")
+      vscode.commands.executeCommand("nexuscode.sidebar.focus").catch(() => {})
+    }),
+
     vscode.commands.registerCommand("nexuscode.newTask", () => {
       vscode.commands.executeCommand("nexuscode.sidebar.focus")
     }),

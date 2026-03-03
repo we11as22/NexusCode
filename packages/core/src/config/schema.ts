@@ -41,13 +41,14 @@ const mcpServerSchema = z.object({
   env: z.record(z.string()).optional(),
   url: z.string().optional(),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
+  enabled: z.boolean().optional().default(true),
 })
 
 export const NexusConfigSchema = z.object({
   model: providerSchema.default({
     provider: "openai-compatible",
-    id: "minimax/minimax-m2:free",
-    baseUrl: "https://openrouter.ai/api/v1",
+    id: "minimax/minimax-m2.5:free",
+    baseUrl: "https://api.kilo.ai/api/gateway",
   }),
 
   embeddings: embeddingSchema.optional(),
@@ -72,7 +73,6 @@ export const NexusConfigSchema = z.object({
       "*.lock", ".next/**", ".nuxt/**", "coverage/**",
     ]),
     symbolExtract: z.boolean().default(true),
-    fts: z.boolean().default(true),
     vector: z.boolean().default(false),
     batchSize: z.number().int().positive().default(50),
     embeddingBatchSize: z.number().int().positive().default(60),
@@ -87,6 +87,10 @@ export const NexusConfigSchema = z.object({
     autoApproveReadPatterns: z.array(z.string()).default([]),
     /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
     allowedCommands: z.array(z.string()).default([]),
+    /** Command patterns from .nexus/settings.json + settings.local.json */
+    allowCommandPatterns: z.array(z.string()).default([]),
+    denyCommandPatterns: z.array(z.string()).default([]),
+    askCommandPatterns: z.array(z.string()).default([]),
     denyPatterns: z.array(z.string()).default(["**/.env", "**/secrets/**", "**/*.key", "**/*.pem"]),
     rules: z.array(z.object({
       tool: z.string().optional(),
@@ -116,7 +120,10 @@ export const NexusConfigSchema = z.object({
     servers: z.array(mcpServerSchema).default([]),
   }).default({}),
 
-  skills: z.array(z.string()).default([]),
+  skills: z.array(z.union([
+    z.string(),
+    z.object({ path: z.string(), enabled: z.boolean().optional() }),
+  ])).default([]),
 
   tools: z.object({
     custom: z.array(z.string()).default([]),

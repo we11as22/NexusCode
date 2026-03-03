@@ -8,6 +8,36 @@ import type { EmbeddingClient } from "./types.js"
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
+/**
+ * Returns true if this embedding config requires an API key and it is missing.
+ * When true, we should not create the embedding client (so nexus starts without vector; key can be added later).
+ */
+export function isEmbeddingApiKeyMissing(config: EmbeddingConfig): boolean {
+  const key =
+    config.apiKey
+    ?? process.env["OPENAI_API_KEY"]
+    ?? process.env["OPENROUTER_API_KEY"]
+    ?? process.env["NEXUS_API_KEY"]
+    ?? ""
+  if (typeof key === "string" && key.trim() !== "") return false
+  switch (config.provider) {
+    case "ollama":
+    case "local":
+      return false
+    case "openai-compatible":
+      return !isLocalBaseUrl(config.baseUrl)
+    case "openrouter":
+      return true
+    case "openai":
+    case "google":
+    case "mistral":
+    case "bedrock":
+      return true
+    default:
+      return true
+  }
+}
+
 export function createEmbeddingClient(config: EmbeddingConfig): EmbeddingClient {
   switch (config.provider) {
     case "openai":

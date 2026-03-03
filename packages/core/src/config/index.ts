@@ -11,6 +11,7 @@ const CONFIG_FILE_NAMES = [".nexus/nexus.yaml", ".nexus/nexus.yml", ".nexusrc.ya
 const GLOBAL_CONFIG_DIR = path.join(os.homedir(), ".nexus")
 const GLOBAL_CONFIG_PATH = path.join(GLOBAL_CONFIG_DIR, "nexus.yaml")
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+const DEFAULT_FREE_MODELS_BASE_URL = "https://api.kilo.ai/api/gateway"
 
 /**
  * Load config by walking up from cwd.
@@ -26,6 +27,7 @@ export async function loadConfig(cwd?: string): Promise<NexusConfig> {
 
   // 2. Walk up and find project config
   let projectRaw: NexusConfigInput | null = null
+  let projectDir: string | null = null
   let dir = startDir
   let maxUp = 20
   while (maxUp-- > 0) {
@@ -34,6 +36,7 @@ export async function loadConfig(cwd?: string): Promise<NexusConfig> {
       const raw = readConfigFile(candidate)
       if (raw) {
         projectRaw = raw
+        projectDir = dir
         break
       }
     }
@@ -46,6 +49,23 @@ export async function loadConfig(cwd?: string): Promise<NexusConfig> {
   // 3. Merge global + project
   const merged = deepMerge(globalRaw ?? {}, projectRaw ?? {})
 
+  // 3b. If project has .nexus/mcp-servers.json, use it for mcp.servers
+  if (projectDir) {
+    const mcpJsonPath = path.join(projectDir, ".nexus", "mcp-servers.json")
+    if (fs.existsSync(mcpJsonPath)) {
+      try {
+        const mcpContent = fs.readFileSync(mcpJsonPath, "utf8")
+        const mcpData = JSON.parse(mcpContent)
+        const servers = Array.isArray(mcpData) ? mcpData : (mcpData?.servers ?? mcpData?.mcp?.servers)
+        if (Array.isArray(servers) && servers.length > 0) {
+          (merged as Record<string, unknown>).mcp = { ...(merged.mcp as object), servers }
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   // 4. Apply env overrides
   applyEnvOverrides(merged)
   normalizeProviderAliases(merged)
@@ -54,11 +74,26 @@ export async function loadConfig(cwd?: string): Promise<NexusConfig> {
   const result = NexusConfigSchema.safeParse(merged)
   if (!result.success) {
     console.warn("[nexus] Config validation warnings:", result.error.issues.map(i => i.message).join(", "))
-    // Return with defaults on validation error
-    return NexusConfigSchema.parse({})
+    return normalizeToNexusConfig(NexusConfigSchema.parse({}) as Record<string, unknown>)
   }
+  return normalizeToNexusConfig(result.data as Record<string, unknown>)
+}
 
-  return result.data as NexusConfig
+function normalizeToNexusConfig(parsed: Record<string, unknown>): NexusConfig {
+  const rawSkills = (parsed.skills as (string | { path: string; enabled?: boolean })[]) ?? []
+  const skillsConfig: Array<{ path: string; enabled: boolean }> = rawSkills.map(
+    (item: string | { path: string; enabled?: boolean }) => {
+      if (typeof item === "string") return { path: item, enabled: true }
+      return { path: item.path, enabled: item.enabled !== false }
+    }
+  )
+  const skills = skillsConfig.filter((s) => s.enabled).map((s) => s.path)
+  return {
+    ...parsed,
+    skillsConfig,
+    skills,
+    mcp: (parsed.mcp as NexusConfig["mcp"]) ?? { servers: [] },
+  } as NexusConfig
 }
 
 function loadEnvFileFromTree(startDir: string): void {
@@ -149,6 +184,14 @@ function applyEnvOverrides(config: Record<string, unknown>) {
   if (!config.model || typeof config.model !== "object") config.model = {}
   const model = config.model as Record<string, unknown>
 
+  // When nothing is configured in project (and no global model), use same defaults as schema
+  // so we can fill apiKey from env (OPENROUTER_API_KEY etc.) — like OpenCode/KiloCode "works out of the box"
+  if (!isNonEmptyString(model["provider"]) && !isNonEmptyString(model["id"])) {
+    model["provider"] = "openai-compatible"
+    model["id"] = "minimax/minimax-m2.5:free"
+    model["baseUrl"] = DEFAULT_FREE_MODELS_BASE_URL
+  }
+
   // Universal NEXUS_API_KEY
   const nexusKey = process.env["NEXUS_API_KEY"]
   if (nexusKey && !model["apiKey"]) model["apiKey"] = nexusKey
@@ -224,6 +267,16 @@ function normalizeProviderAliases(config: Record<string, unknown>): void {
       if (!isNonEmptyString(model["id"]) && process.env["OPENROUTER_MODEL"]) {
         model["id"] = process.env["OPENROUTER_MODEL"]
       }
+    }
+    const normalizedProvider = String(model["provider"] ?? "")
+    const normalizedId = String(model["id"] ?? "")
+    const baseUrl = String(model["baseUrl"] ?? "")
+    if (
+      normalizedProvider === "openai-compatible" &&
+      normalizedId.endsWith(":free") &&
+      (!isNonEmptyString(baseUrl) || isOpenRouterBaseUrl(baseUrl))
+    ) {
+      model["baseUrl"] = DEFAULT_FREE_MODELS_BASE_URL
     }
   }
 
@@ -329,3 +382,43 @@ export function ensureGlobalConfigDir() {
 
 export { NexusConfigSchema }
 export type { NexusConfig }
+
+/** Format like .claude: { permissions: { allow: string[], deny: string[], ask: string[] } } */
+export interface ProjectSettings {
+  permissions?: {
+    allow?: string[]
+    deny?: string[]
+    ask?: string[]
+  }
+}
+
+/**
+ * Load .nexus/settings.json and .nexus/settings.local.json (local overrides), merge and return.
+ * Same structure as .claude: permissions.allow, permissions.deny, permissions.ask.
+ */
+export function loadProjectSettings(cwd: string): ProjectSettings {
+  const basePath = path.join(cwd, ".nexus", "settings.json")
+  const localPath = path.join(cwd, ".nexus", "settings.local.json")
+  let base: ProjectSettings = {}
+  let local: ProjectSettings = {}
+  try {
+    if (fs.existsSync(basePath)) {
+      const raw = JSON.parse(fs.readFileSync(basePath, "utf8"))
+      if (raw && typeof raw === "object") base = raw
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    if (fs.existsSync(localPath)) {
+      const raw = JSON.parse(fs.readFileSync(localPath, "utf8"))
+      if (raw && typeof raw === "object") local = raw
+    }
+  } catch {
+    // ignore
+  }
+  const allow = [...(base.permissions?.allow ?? []), ...(local.permissions?.allow ?? [])]
+  const deny = [...(base.permissions?.deny ?? []), ...(local.permissions?.deny ?? [])]
+  const ask = [...(base.permissions?.ask ?? []), ...(local.permissions?.ask ?? [])]
+  return { permissions: { allow, deny, ask } }
+}

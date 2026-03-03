@@ -1,5 +1,6 @@
 import { create } from "zustand"
 import { postMessage } from "../vscode.js"
+import type { ModelsCatalogFromCore } from "../types/messages.js"
 
 export type Mode = "agent" | "plan" | "ask"
 export type AppView = "chat" | "sessions" | "settings"
@@ -81,8 +82,11 @@ export interface NexusConfigState {
       env?: Record<string, string>
       url?: string
       transport?: "stdio" | "http" | "sse"
+      enabled?: boolean
     }>
   }
+  /** For UI: path + enabled. skills is derived (enabled only). */
+  skillsConfig?: Array<{ path: string; enabled: boolean }>
   skills: string[]
   rules: {
     files: string[]
@@ -92,6 +96,11 @@ export interface NexusConfigState {
     plan?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     ask?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     [key: string]: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string } | undefined
+  }
+  permissions?: {
+    autoApproveRead: boolean
+    autoApproveWrite: boolean
+    autoApproveCommand: boolean
   }
   profiles: Record<string, Partial<{ provider: string; id: string; apiKey: string; baseUrl: string; temperature: number }>>
 }
@@ -142,6 +151,16 @@ interface ChatState {
   reasoningStartTime: number | null
   /** NexusCode server URL (nexuscode.serverUrl). When set, extension uses server for sessions and runs. */
   serverUrl: string
+  /** MCP server test results: name -> status (ok/error) and optional error message */
+  mcpStatus: Array<{ name: string; status: "ok" | "error"; error?: string }>
+  /** When set, show in-webview approval bar (Allow / Deny) instead of only VS Code notification */
+  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
+
+  /** Models catalog from models.dev (for Select model in Settings). Same shape as core ModelsCatalog. */
+  modelsCatalog: ModelsCatalogFromCore | null
+  modelsCatalogLoading: boolean
+  requestModelsCatalog: () => void
+  handleModelsCatalog: (catalog: ModelsCatalogFromCore) => void
 
   // Actions
   setView: (view: AppView) => void
@@ -163,6 +182,9 @@ interface ChatState {
   handleConfigLoaded: (config: NexusConfigState) => void
   handleAgentEvent: (event: AgentEvent) => void
   handleIndexStatus: (status: IndexStatusKind) => void
+  handleMcpServerStatus: (results: Array<{ name: string; status: "ok" | "error"; error?: string }>) => void
+  handlePendingApproval: (partId: string, action: { type: string; tool: string; description: string; content?: string }) => void
+  resolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string) => void
   handleSessionList: (sessions: SessionPreview[]) => void
   handleSessionListLoading: (loading: boolean) => void
 }
@@ -211,6 +233,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   projectDir: "",
   reasoningStartTime: null,
   serverUrl: "",
+  mcpStatus: [],
+  pendingApproval: null,
+
+  modelsCatalog: null,
+  modelsCatalogLoading: false,
+  requestModelsCatalog: () => {
+    set({ modelsCatalogLoading: true })
+    postMessage({ type: "getModelsCatalog" })
+  },
+  handleModelsCatalog: (catalog: ModelsCatalogFromCore) => {
+    set({ modelsCatalog: catalog, modelsCatalogLoading: false })
+  },
 
   setView: (view) => {
     set({ view })
@@ -317,6 +351,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ sessionsLoading: loading })
   },
 
+  handleMcpServerStatus: (results) => {
+    set({ mcpStatus: results })
+  },
+
+  handlePendingApproval: (partId, action) => {
+    set({ pendingApproval: { partId, action }, awaitingApproval: true })
+  },
+
+  resolveApproval: (approved, alwaysApprove, addToAllowedCommand) => {
+    const { pendingApproval } = get()
+    if (pendingApproval) {
+      postMessage({
+        type: "approvalResponse",
+        partId: pendingApproval.partId,
+        approved,
+        alwaysApprove,
+        addToAllowedCommand,
+      })
+      set({ pendingApproval: null, awaitingApproval: false })
+    }
+  },
+
   handleAgentEvent: (event) => {
     const { messages } = get()
 
@@ -374,6 +430,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "tool_end": {
         const ev = event as { output?: string; error?: string; compacted?: boolean }
+        set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
         const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg
           const parts = (msg.content as MessagePart[]).map((p) => {
@@ -560,6 +617,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             messages: msgs,
             isRunning: false,
             awaitingApproval: false,
+            pendingApproval: null,
             subagents: [],
             reasoningStartTime: null,
           }
@@ -571,6 +629,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...state,
           isRunning: false,
           awaitingApproval: false,
+          pendingApproval: null,
           reasoningStartTime: null,
           subagents: [],
         }))

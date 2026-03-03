@@ -28,9 +28,9 @@ export const executeCommandTool: ToolDef<z.infer<typeof schema>> = {
 
 When to use:
 - Tests, builds, package installs, git, linters, formatters.
-- **Finding files by name (glob/find):** when you need to list files matching a pattern (e.g. all *.test.ts, or paths under a dir), use execute_command with \`find\` or \`ls\` (e.g. \`find . -name "*.test.ts"\`, \`find src -type f -name "*.ts"\`). Prefer this when search_files would require multiple rounds.
-- **Ripgrep (rg):** when you need a single quick content search with rich options (e.g. -l, -c, -A/-B, multiple patterns), you may use execute_command with \`rg\` (e.g. \`rg "pattern" --type-add 'ts:*.ts' -t ts -l\`). Prefer the search_files tool for one-off content search; use execute_command with rg when batching or when you need shell-specific flags.
-- Commands that cannot be done with read_file, search_files, or write tools.
+- **Finding files by name (glob/find):** when you need to list files matching a pattern, use execute_command with \`find\` or \`ls\`. Prefer this when grep would require multiple rounds.
+- **Ripgrep (rg):** when you need a single quick content search with rich options (e.g. -l, -c, -A/-B, multiple patterns), you may use execute_command with \`rg\` (e.g. \`rg "pattern" --type-add 'ts:*.ts' -t ts -l\`). Prefer the \`grep\` tool for content search; use execute_command with rg when you need shell-specific flags.
+- Commands that cannot be done with read_file, grep, or write tools.
 
 When NOT to use:
 - Reading a single file: use read_file (not cat/head/tail).

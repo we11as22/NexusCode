@@ -22,9 +22,9 @@ import { buildSystemPrompt, type PromptContext } from "./prompts/components/inde
 import { getInitialProjectContext } from "./prompts/initial-context.js"
 import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN } from "./modes.js"
 import { classifyTools, classifySkills } from "./classifier.js"
-import { estimateTokens } from "../context/condense.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
+import { estimateTokens } from "../context/condense.js"
 import * as path from "node:path"
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -86,7 +86,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     resolvedDynamicTools = dynamicTools
   }
 
-  const resolvedTools = [...builtinTools, ...resolvedDynamicTools]
+  const blockedFallbackTools: ToolDef[] = []
+  for (const blockedName of blockedTools) {
+    if (builtinTools.some((t) => t.name === blockedName) || resolvedDynamicTools.some((t) => t.name === blockedName)) continue
+    const original = tools.find((t) => t.name === blockedName)
+    if (!original) continue
+    blockedFallbackTools.push({
+      ...original,
+      description: `${original.description} (disabled in ${mode} mode)`,
+      execute: async () => ({
+        success: false,
+        output: `ERROR: Tool "${blockedName}" is disabled in ${mode} mode. Use only tools allowed in this mode.`,
+      }),
+    })
+  }
+
+  const resolvedTools = [...builtinTools, ...resolvedDynamicTools, ...blockedFallbackTools]
 
   // 2. Resolve skills: classify if >threshold
   let resolvedSkills: SkillDef[]
@@ -155,9 +170,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     pending: { current: false },
     checkpoint: opts.checkpoint,
   }
-  const emitContextUsage = () => {
+  /** Emit context usage. When systemPrompt is provided, include it in usedTokens (Cline/OpenCode-style: UI shows real request size). */
+  const emitContextUsage = (systemPromptText?: string) => {
     const limitTokens = getContextLimit(activeClient.modelId)
-    const usedTokens = session.getTokenEstimate()
+    const sessionTokens = session.getTokenEstimate()
+    const systemTokens = systemPromptText ? estimateTokens(systemPromptText) : 0
+    const usedTokens = sessionTokens + systemTokens
     const percent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
     host.emit({ type: "context_usage", usedTokens, limitTokens, percent })
   }
@@ -165,6 +183,23 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
   while (!signal.aborted) {
     loopIterations++
+
+    // Proactive context management (Cline/OpenCode-style): prune/compact before building prompt when near limit
+    const limitForCompaction = getContextLimit(activeClient.modelId)
+    if (limitForCompaction > 0 && loopIterations > 1) {
+      let sessionTokens = session.getTokenEstimate()
+      const threshold = config.summarization?.threshold ?? 0.75
+      if (compaction.isOverflow(sessionTokens, limitForCompaction, threshold)) {
+        compaction.prune(session)
+        sessionTokens = session.getTokenEstimate()
+        if (compaction.isOverflow(sessionTokens, limitForCompaction, threshold)) {
+          host.emit({ type: "compaction_start" })
+          await handleCompaction(session, activeClient, config, host, compaction, signal)
+          host.emit({ type: "compaction_end" })
+        }
+      }
+    }
+
     if (loopIterations > maxIterations) {
       if (!forceFinalAnswerNext) {
         host.emit({
@@ -216,11 +251,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
     const systemPrompt = blocks.join("\n\n---\n\n")
 
-    // Emit context usage including system prompt (so UI shows real total, e.g. ask mode)
-    const systemTokens = estimateTokens(systemPrompt)
-    const totalUsed = session.getTokenEstimate() + systemTokens
-    const totalPercent = limitTokens > 0 ? Math.min(100, Math.round((totalUsed / limitTokens) * 100)) : 0
-    host.emit({ type: "context_usage", usedTokens: totalUsed, limitTokens, percent: totalPercent })
+    // Emit context usage including system prompt so UI shows real request size (Cline/OpenCode-style)
+    emitContextUsage(systemPrompt)
 
     // 4. Build LLM tool definitions
     const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedTools).map(t => ({
@@ -737,31 +769,9 @@ async function executeToolCall(
   }
 
   // Restricted modes (plan/ask): allow writes only to .nexus/plans/*.md|*.txt
-  if (ctx.config.modes && ["write_to_file", "replace_in_file", "batch"].includes(toolName)) {
-    // We infer restricted modes by tool availability: execute_command is unavailable in plan/ask.
+  if (ctx.config.modes && ["write_to_file", "replace_in_file"].includes(toolName)) {
     const isRestrictedMode = !tools.some(t => t.name === "execute_command")
     if (isRestrictedMode) {
-      if (toolName === "batch") {
-        const replaces = toolInput["replaces"] as Array<{ path?: string }> | undefined
-        if (Array.isArray(replaces) && replaces.length > 0) {
-          for (const r of replaces) {
-            const targetPath = r?.path
-            if (!targetPath) {
-              return { success: false, output: "In the current mode, batch replace operations require paths under .nexus/plans/*.md or .txt." }
-            }
-            const rel = path.isAbsolute(targetPath) ? path.relative(ctx.cwd, targetPath) : targetPath
-            const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
-            if (!PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) {
-              const extMatch = normalized.match(/\.[a-zA-Z0-9]+$/)
-              const ext = extMatch ? extMatch[0].toLowerCase() : ""
-              if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
-                return { success: false, output: `In the current mode, you cannot modify source code files (${ext}). You may only write plan docs in .nexus/plans/*.md or .txt.` }
-              }
-              return { success: false, output: "In the current mode, you may only write plan documentation files under .nexus/plans/ (*.md or *.txt)." }
-            }
-          }
-        }
-      } else {
       const targetPath = extractWriteTargetPath(toolName, toolInput)
       if (!targetPath) {
         return {
@@ -784,7 +794,6 @@ async function executeToolCall(
           success: false,
           output: "In the current mode, you may only write plan documentation files under .nexus/plans/ (*.md or *.txt).",
         }
-      }
       }
     }
   }
@@ -950,7 +959,10 @@ async function handleCompaction(
  *
  * This function converts our session format (assistant messages that contain
  * both the text AND tool call parts) into that interleaved format.
+ * Tool outputs are capped per result (Cline/OpenCode-style) to avoid one read_file filling context.
  */
+const MAX_TOOL_OUTPUT_CHARS = 16_000 // ~4k tokens per tool result
+
 function buildMessagesFromSession(session: ISession): LLMMessage[] {
   const messages: LLMMessage[] = []
 
@@ -1029,15 +1041,24 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
 
       // Tool results as a "tool" role message (AI SDK format)
       if (completedToolParts.length > 0) {
-        const toolResultContent = completedToolParts.map(tp => ({
-          type: "tool-result",
-          toolCallId: tp.id,
-          toolName: tp.tool,
-          result: tp.compacted
-            ? "[output pruned for context efficiency]"
-            : (tp.output ?? ""),
-          isError: tp.status === "error",
-        }))
+        const toolResultContent = completedToolParts.map(tp => {
+          let result: string
+          if (tp.compacted) {
+            result = "[output pruned for context efficiency]"
+          } else {
+            const raw = tp.output ?? ""
+            result = raw.length <= MAX_TOOL_OUTPUT_CHARS
+              ? raw
+              : raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + "\n\n[... output truncated for context ...]"
+          }
+          return {
+            type: "tool-result",
+            toolCallId: tp.id,
+            toolName: tp.tool,
+            result,
+            isError: tp.status === "error",
+          }
+        })
         messages.push({ role: "tool" as SessionRole, content: toolResultContent as LLMMessage["content"] })
       }
     } else if (textContent || reasoningParts.length > 0) {
@@ -1085,6 +1106,23 @@ function normalizeCommand(command: string): string {
   return command.trim().replace(/\s+/g, " ")
 }
 
+/** Match normalized command against a pattern. Supports "prefix*" and exact; also "Bash(cmd:*)" for .claude compatibility. */
+function commandMatchesPattern(normalizedCommand: string, pattern: string): boolean {
+  const p = pattern.trim()
+  if (!p) return false
+  // .claude style: Bash(npm run build:*)
+  const bashMatch = p.match(/^Bash\((.+):\*\)$/)
+  if (bashMatch) {
+    const prefix = normalizeCommand(bashMatch[1]!)
+    return normalizedCommand === prefix || normalizedCommand.startsWith(prefix + " ")
+  }
+  if (p.endsWith("*")) {
+    const prefix = p.slice(0, -1).trim()
+    return normalizedCommand === prefix || normalizedCommand.startsWith(prefix + " ")
+  }
+  return normalizedCommand === p
+}
+
 function toolNeedsApproval(
   toolName: string,
   toolInput: Record<string, unknown>,
@@ -1104,34 +1142,23 @@ function toolNeedsApproval(
   if (["write_to_file", "replace_in_file"].includes(toolName)) {
     return !config.permissions.autoApproveWrite && !autoApproveActions.has("write")
   }
-  if (toolName === "batch") {
-    const replaces = toolInput["replaces"] as unknown[] | undefined
-    if (Array.isArray(replaces) && replaces.length > 0) {
-      return !config.permissions.autoApproveWrite && !autoApproveActions.has("write")
-    }
-    return false
-  }
   if (toolName === "execute_command") {
     const cmd = typeof toolInput["command"] === "string" ? toolInput["command"] : ""
     const normalized = normalizeCommand(cmd)
+    const denyPatterns = config.permissions.denyCommandPatterns ?? []
+    const allowPatterns = config.permissions.allowCommandPatterns ?? []
+    const askPatterns = config.permissions.askCommandPatterns ?? []
     const allowed = config.permissions.allowedCommands ?? []
+    if (normalized && denyPatterns.some((p) => commandMatchesPattern(normalized, p))) return true
+    if (normalized && allowPatterns.some((p) => commandMatchesPattern(normalized, p))) return false
     if (normalized && allowed.some((c) => normalizeCommand(c) === normalized)) return false
+    if (normalized && askPatterns.some((p) => commandMatchesPattern(normalized, p))) return true
     return !config.permissions.autoApproveCommand && !autoApproveActions.has("execute")
   }
   return false
 }
 
 function buildApprovalAction(toolName: string, toolInput: Record<string, unknown>): ApprovalAction {
-  if (toolName === "batch") {
-    const reads = (toolInput["reads"] as unknown[])?.length ?? 0
-    const searches = (toolInput["searches"] as unknown[])?.length ?? 0
-    const replaces = (toolInput["replaces"] as unknown[])?.length ?? 0
-    return {
-      type: replaces > 0 ? "write" : "read",
-      tool: toolName,
-      description: `Batch: ${reads} read(s), ${searches} search(es), ${replaces} replace(s)`,
-    }
-  }
   if (["write_to_file", "replace_in_file"].includes(toolName)) {
     return {
       type: "write",

@@ -6,10 +6,12 @@
 import * as vscode from "vscode"
 import * as path from "path"
 import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
+import type { ApprovalAction, PermissionResult } from "@nexuscode/core"
 import {
   loadConfig,
   writeConfig,
   writeGlobalProfiles,
+  loadProjectSettings,
   Session,
   listSessions,
   deleteSession,
@@ -19,6 +21,7 @@ import {
   loadRules,
   McpClient,
   setMcpClientInstance,
+  testMcpServers,
   createCompaction,
   ParallelAgentManager,
   createSpawnAgentTool,
@@ -27,6 +30,7 @@ import {
   CodebaseIndexer,
   createCodebaseIndexer,
   NexusConfigSchema,
+  getModelsCatalog,
 } from "@nexuscode/core"
 import { VsCodeHost } from "./host.js"
 
@@ -48,6 +52,16 @@ export type WebviewMessage =
   | { type: "clearIndex" }
   | { type: "openFileAtLocation"; path: string; line?: number; endLine?: number }
   | { type: "setServerUrl"; url: string }
+  | { type: "openNexusConfigFolder"; scope: "global" | "project" }
+  | { type: "openCursorignore" }
+  | { type: "openMcpConfig" }
+  | { type: "testMcpServers" }
+  | { type: "openSkillFolder"; path: string }
+  | { type: "approvalResponse"; partId: string; approved: boolean; alwaysApprove?: boolean; addToAllowedCommand?: string }
+  | { type: "openExternal"; url: string }
+  | { type: "showConfirm"; id: string; message: string }
+  | { type: "openNexusignore" }
+  | { type: "getModelsCatalog" }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
@@ -57,6 +71,11 @@ export type ExtensionMessage =
   | { type: "indexStatus"; status: IndexStatus }
   | { type: "configLoaded"; config: NexusConfig }
   | { type: "addToChatContent"; content: string }
+  | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings" }
+  | { type: "mcpServerStatus"; results: Array<{ name: string; status: "ok" | "error"; error?: string }> }
+  | { type: "pendingApproval"; partId: string; action: ApprovalAction }
+  | { type: "confirmResult"; id: string; ok: boolean }
+  | { type: "modelsCatalog"; catalog: import("@nexuscode/core").ModelsCatalog }
 
 export interface WebviewState {
   messages: SessionMessage[]
@@ -101,6 +120,7 @@ export class Controller {
   private initPromise?: Promise<void>
   private indexStatusUnsubscribe?: () => void
   private disposables: vscode.Disposable[] = []
+  private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -243,6 +263,21 @@ export class Controller {
       } catch {
         // No file or invalid — keep default
       }
+      // Merge .nexus/settings.json + settings.local.json (like .claude)
+      try {
+        const settings = loadProjectSettings(cwd)
+        const perms = settings.permissions
+        if (perms) {
+          if (!this.config.permissions.allowCommandPatterns) this.config.permissions.allowCommandPatterns = []
+          if (!this.config.permissions.denyCommandPatterns) this.config.permissions.denyCommandPatterns = []
+          if (!this.config.permissions.askCommandPatterns) this.config.permissions.askCommandPatterns = []
+          if (Array.isArray(perms.allow)) this.config.permissions.allowCommandPatterns = perms.allow
+          if (Array.isArray(perms.deny)) this.config.permissions.denyCommandPatterns = perms.deny
+          if (Array.isArray(perms.ask)) this.config.permissions.askCommandPatterns = perms.ask
+        }
+      } catch {
+        // ignore
+      }
       this.applyVscodeOverrides(this.config)
       this.defaultModelProfile = { ...this.config.model }
       try {
@@ -314,6 +349,15 @@ export class Controller {
         if (this.config) this.postMessageToWebview({ type: "configLoaded", config: this.config })
         await this.sendSessionList()
         break
+      case "getModelsCatalog": {
+        try {
+          const catalog = await getModelsCatalog()
+          this.postMessageToWebview({ type: "modelsCatalog", catalog })
+        } catch {
+          this.postMessageToWebview({ type: "modelsCatalog", catalog: { providers: [], recommended: [] } })
+        }
+        break
+      }
       case "webviewDidLaunch":
         this.postStateToWebview()
         this.sendIndexStatus()
@@ -376,6 +420,133 @@ export class Controller {
         this.postStateToWebview()
         break
       }
+      case "openNexusConfigFolder": {
+        const os = await import("os")
+        const scope = msg.scope === "project" ? "project" : "global"
+        if (scope === "global") {
+          const dir = path.join(os.homedir(), ".nexus")
+          const uri = vscode.Uri.file(dir)
+          try { await vscode.workspace.fs.createDirectory(uri).catch(() => {}) } catch { /* noop */ }
+          await vscode.commands.executeCommand("revealInExplorer", uri)
+        } else {
+          const cwd = this.getCwd()
+          const dir = path.join(cwd, ".nexus")
+          const dirUri = vscode.Uri.file(dir)
+          try { await vscode.workspace.fs.createDirectory(dirUri).catch(() => {}) } catch { /* noop */ }
+          const configPath = path.join(cwd, ".nexus", "nexus.yaml")
+          const uri = vscode.Uri.file(configPath)
+          const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
+          if (doc) {
+            await vscode.window.showTextDocument(doc, { preview: false })
+          } else {
+            await vscode.commands.executeCommand("revealInExplorer", dirUri)
+          }
+        }
+        break
+      }
+      case "openCursorignore": {
+        const cwd = this.getCwd()
+        const filePath = path.join(cwd, ".cursorignore")
+        const uri = vscode.Uri.file(filePath)
+        const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
+        if (doc) {
+          await vscode.window.showTextDocument(doc, { preview: false })
+        } else {
+          const wsEdit = new vscode.WorkspaceEdit()
+          wsEdit.createFile(uri, { ignoreIfExists: true })
+          await vscode.workspace.applyEdit(wsEdit)
+          const newDoc = await vscode.workspace.openTextDocument(uri)
+          await vscode.window.showTextDocument(newDoc, { preview: false })
+        }
+        break
+      }
+      case "openMcpConfig": {
+        const cwd = this.getCwd()
+        const mcpPath = path.join(cwd, ".nexus", "mcp-servers.json")
+        const uri = vscode.Uri.file(mcpPath)
+        const doc = await vscode.workspace.openTextDocument(uri).catch(async () => {
+          const dir = path.join(cwd, ".nexus")
+          try {
+            await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir))
+          } catch {}
+          const defaultContent = JSON.stringify([], null, 2)
+          await vscode.workspace.fs.writeFile(uri, Buffer.from(defaultContent, "utf8"))
+          return vscode.workspace.openTextDocument(uri)
+        })
+        await vscode.window.showTextDocument(doc, { preview: false })
+        break
+      }
+      case "testMcpServers": {
+        if (!this.config?.mcp.servers.length) {
+          this.postMessageToWebview({
+            type: "mcpServerStatus",
+            results: [],
+          })
+          break
+        }
+        try {
+          const results = await testMcpServers(this.config.mcp.servers)
+          this.postMessageToWebview({ type: "mcpServerStatus", results })
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          this.postMessageToWebview({
+            type: "mcpServerStatus",
+            results: this.config.mcp.servers.map((s) => ({ name: s.name, status: "error" as const, error: message })),
+          })
+        }
+        break
+      }
+      case "openSkillFolder": {
+        const cwd = this.getCwd()
+        const absPath = path.isAbsolute(msg.path) ? msg.path : path.resolve(cwd, msg.path)
+        const uri = vscode.Uri.file(absPath)
+        const stat = await vscode.workspace.fs.stat(uri).catch(() => null)
+        if (stat?.type === vscode.FileType.File) {
+          const dirUri = vscode.Uri.file(path.dirname(absPath))
+          await vscode.commands.executeCommand("revealInExplorer", dirUri)
+        } else {
+          await vscode.commands.executeCommand("revealInExplorer", uri)
+        }
+        break
+      }
+      case "approvalResponse": {
+        const resolve = this.approvalResolveRef.current
+        if (resolve) {
+          resolve({
+            approved: msg.approved,
+            alwaysApprove: msg.alwaysApprove,
+            addToAllowedCommand: msg.addToAllowedCommand,
+          })
+        }
+        break
+      }
+      case "openExternal": {
+        if (typeof msg.url === "string" && msg.url.startsWith("http")) {
+          await vscode.env.openExternal(vscode.Uri.parse(msg.url))
+        }
+        break
+      }
+      case "showConfirm": {
+        const choice = await vscode.window.showWarningMessage(msg.message, { modal: true }, "Yes", "No")
+        this.postMessageToWebview({ type: "confirmResult", id: msg.id, ok: choice === "Yes" })
+        break
+      }
+      case "openNexusignore": {
+        const cwd = this.getCwd()
+        const filePath = path.join(cwd, ".nexusignore")
+        const uri = vscode.Uri.file(filePath)
+        const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
+        if (doc) {
+          await vscode.window.showTextDocument(doc, { preview: false })
+        } else {
+          const wsEdit = new vscode.WorkspaceEdit()
+          wsEdit.createFile(uri, { ignoreIfExists: true })
+          await vscode.workspace.applyEdit(wsEdit)
+          const newDoc = await vscode.workspace.openTextDocument(uri)
+          await vscode.window.showTextDocument(newDoc, { preview: false })
+        }
+        break
+      }
     }
   }
 
@@ -412,8 +583,15 @@ export class Controller {
       this.postStateToWebview()
       return
     }
+    const toWrite = { ...this.config } as Record<string, unknown>
+    if (toWrite.skillsConfig && Array.isArray(toWrite.skillsConfig)) {
+      toWrite.skills = (toWrite.skillsConfig as Array<{ path: string; enabled: boolean }>).map((s) =>
+        s.enabled ? s.path : { path: s.path, enabled: false }
+      )
+      delete toWrite.skillsConfig
+    }
     try {
-      writeConfig(this.config, cwd)
+      writeConfig(toWrite as NexusConfig, cwd)
       vscode.window.showInformationMessage("NexusCode: Settings saved.", { modal: false })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -560,6 +738,13 @@ export class Controller {
 
     const host = new VsCodeHost(cwd, (event: AgentEvent) => {
       this.postMessageToWebview({ type: "agentEvent", event })
+      if (event.type === "tool_approval_needed") {
+        this.postMessageToWebview({
+          type: "pendingApproval",
+          partId: event.partId,
+          action: event.action,
+        })
+      }
       if (event.type === "error") {
         this.isRunning = false
         this.postStateToWebview()
@@ -568,7 +753,7 @@ export class Controller {
       if (event.type === "tool_end") {
         this.postStateToWebview()
       }
-    })
+    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef })
 
     const timeoutMs = 10 * 60_000
     const timeout = setTimeout(() => {
@@ -602,7 +787,11 @@ export class Controller {
       if (this.checkpoint) {
         host.setCheckpoint(this.checkpoint)
       }
-      await this.refreshIndexerFromGit(cwd)
+      try {
+        await this.refreshIndexerFromGit(cwd)
+      } catch {
+        // Git not available or not a repo — skip incremental refresh
+      }
       await runAgentLoop({
         session: this.session,
         client,
@@ -642,6 +831,15 @@ export class Controller {
     await this.mcpClient.connectAll(this.config.mcp.servers).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err)
       this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
+    })
+    const status = this.mcpClient.getStatus()
+    this.postMessageToWebview({
+      type: "mcpServerStatus",
+      results: this.config.mcp.servers.map((s) => ({
+        name: s.name,
+        status: status[s.name] === "connected" ? ("ok" as const) : ("error" as const),
+        error: status[s.name] === "connected" ? undefined : "Not connected",
+      })),
     })
   }
 

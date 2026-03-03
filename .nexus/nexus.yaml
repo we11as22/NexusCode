@@ -11,10 +11,10 @@ modes:
   plan:
     autoApprove:
       - read
-  debug:
+  ask:
     autoApprove:
       - read
-  ask:
+  debug:
     autoApprove:
       - read
 indexing:
@@ -28,7 +28,6 @@ indexing:
     - .next/**
     - coverage/**
   symbolExtract: true
-  fts: true
   vector: false
   batchSize: 50
   embeddingBatchSize: 60
@@ -39,6 +38,10 @@ permissions:
   autoApproveWrite: false
   autoApproveCommand: false
   autoApproveReadPatterns: []
+  allowedCommands: []
+  allowCommandPatterns: []
+  denyCommandPatterns: []
+  askCommandPatterns: []
   denyPatterns:
     - '**/.env'
     - '**/secrets/**'
@@ -60,6 +63,7 @@ checkpoint:
   enabled: true
   timeoutMs: 15000
   createOnWrite: true
+  doubleCheckCompletion: false
 mcp:
   servers: []
 skills: []
@@ -77,6 +81,7 @@ summarization:
   model: ''
 parallelAgents:
   maxParallel: 4
+agentLoop: {}
 rules:
   files:
     - CLAUDE.md
@@ -90,3 +95,4 @@ profiles:
     provider: ollama
     id: qwen2.5-coder:32b
     baseUrl: http://localhost:11434/v1
+skillsConfig: []

@@ -4,16 +4,25 @@ import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticIte
 
 /**
  * VS Code host adapter — bridges the core agent with VS Code APIs.
+ * When useWebviewApproval is true, showApprovalDialog defers to webview (no native dialog).
  */
 export class VsCodeHost implements IHost {
   private eventEmitter: (event: AgentEvent) => void
   readonly cwd: string
   private alwaysApproved = new Set<string>()
   private checkpointTracker?: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> }
+  private useWebviewApproval: boolean
+  private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } | null = null
 
-  constructor(cwd: string, onEvent: (event: AgentEvent) => void) {
+  constructor(
+    cwd: string,
+    onEvent: (event: AgentEvent) => void,
+    options?: { useWebviewApproval?: boolean; approvalResolveRef?: { current: ((r: PermissionResult) => void) | null } }
+  ) {
     this.cwd = cwd
     this.eventEmitter = onEvent
+    this.useWebviewApproval = options?.useWebviewApproval ?? false
+    this.approvalResolveRef = options?.approvalResolveRef ?? null
   }
 
   setCheckpoint(tracker: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> } | undefined): void {
@@ -127,7 +136,17 @@ export class VsCodeHost implements IHost {
       return { approved: true, alwaysApprove: true }
     }
 
-    // For write/execute, show an inline notification
+    if (this.useWebviewApproval && this.approvalResolveRef) {
+      return new Promise<PermissionResult>((resolve) => {
+        this.approvalResolveRef!.current = (result: PermissionResult) => {
+          if (result.alwaysApprove) this.alwaysApproved.add(alwaysKey)
+          this.approvalResolveRef!.current = null
+          resolve(result)
+        }
+      })
+    }
+
+    // Native dialog fallback
     const actionStr = action.type === "write" ? "Write" : "Bash"
     const buttons: string[] =
       action.type === "execute"
@@ -185,6 +204,29 @@ export class VsCodeHost implements IHost {
       fileUri,
       new TextEncoder().encode(JSON.stringify({ commands }, null, 2))
     )
+
+    // Also append to .nexus/settings.local.json (like .claude) so the allowlist is visible
+    const settingsLocalPath = path.join(cwd, ".nexus", "settings.local.json")
+    let settings: { permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } } = {}
+    try {
+      const settingsUri = vscode.Uri.file(settingsLocalPath)
+      const data = await vscode.workspace.fs.readFile(settingsUri)
+      settings = JSON.parse(Buffer.from(data).toString("utf8")) as typeof settings
+    } catch {
+      // File missing or invalid
+    }
+    if (!settings.permissions) settings.permissions = {}
+    const allow = settings.permissions.allow ?? []
+    if (!allow.includes(normalized)) {
+      allow.push(normalized)
+      settings.permissions.allow = allow
+      if (!settings.permissions.deny) settings.permissions.deny = []
+      if (!settings.permissions.ask) settings.permissions.ask = []
+      await vscode.workspace.fs.writeFile(
+        vscode.Uri.file(settingsLocalPath),
+        new TextEncoder().encode(JSON.stringify(settings, null, 2))
+      )
+    }
   }
 
   async getProblems(): Promise<DiagnosticItem[]> {

@@ -19,7 +19,7 @@ When to use:
 
 When NOT to use:
 - Semantic search: use codebase_search.
-- Exact pattern in content: use search_files.
+- Exact pattern in content: use grep.
 - Reading implementation: use read_file.
 
 Supports: TS/JS, Python, Rust, Go, Java, C/C++. Returns path and line (e.g. "function foo (L42)").`,

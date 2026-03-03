@@ -6,7 +6,8 @@ import { InputBar } from "./components/InputBar.js"
 import { ModeSelector } from "./components/ModeSelector.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import { ThoughtBlock } from "./components/ThoughtBlock.js"
-import { postMessage } from "./vscode.js"
+import { AutoApproveDropdown } from "./components/AutoApproveDropdown.js"
+import { postMessage, confirmAsync, resolveConfirm } from "./vscode.js"
 import type { ExtensionMessage } from "./types/messages.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
@@ -51,8 +52,25 @@ export function App() {
         case "configLoaded":
           store.handleConfigLoaded(msg.config)
           break
+        case "mcpServerStatus":
+          if ("results" in msg) store.handleMcpServerStatus(msg.results)
+          break
+        case "pendingApproval":
+          if ("partId" in msg && "action" in msg) store.handlePendingApproval(msg.partId, msg.action)
+          break
+        case "confirmResult":
+          if ("id" in msg && "ok" in msg) resolveConfirm(msg.id, msg.ok)
+          break
         case "addToChatContent":
           store.appendToInput(msg.content)
+          break
+        case "modelsCatalog":
+          if ("catalog" in msg) store.handleModelsCatalog(msg.catalog as import("./types/messages.js").ModelsCatalogFromCore)
+          break
+        case "action":
+          if (msg.action === "switchView" && msg.view) {
+            store.setView(msg.view)
+          }
           break
       }
     }
@@ -70,6 +88,11 @@ export function App() {
           <span className="nexus-logo-dot" />
           <span className="text-sm font-semibold text-[var(--vscode-foreground)] truncate">NexusCode</span>
           <IndexBadge status={store.indexStatus} />
+          {(!store.projectDir || store.projectDir === "") && (
+            <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate" title="Open a workspace folder for full features">
+              No workspace folder
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-0.5 flex-shrink-0">
@@ -102,8 +125,8 @@ export function App() {
           </button>
           <button
             type="button"
-            onClick={() => {
-              if (window.confirm("Clear the entire codebase index and rebuild from scratch?")) {
+            onClick={async () => {
+              if (await confirmAsync("Clear the entire codebase index and rebuild from scratch?")) {
                 store.clearIndex()
               }
             }}
@@ -124,7 +147,8 @@ export function App() {
         </div>
       </header>
 
-      <div className="nexus-nav">
+      {/* Roo-Code style: view switched via sidebar title icons; optional in-webview nav for quick switch */}
+      <div className="nexus-nav nexus-nav-minimal">
         <TabButton active={store.view === "chat"} onClick={() => store.setView("chat")} label="Chat" />
         <TabButton active={store.view === "sessions"} onClick={() => store.setView("sessions")} label="Sessions" />
         <TabButton active={store.view === "settings"} onClick={() => store.setView("settings")} label="Settings" />
@@ -134,9 +158,11 @@ export function App() {
         <IndexProgress status={store.indexStatus} />
       )}
 
+      <div className="nexus-main flex-1 min-h-0 overflow-hidden flex flex-col">
       {store.view === "chat" && <ChatView />}
       {store.view === "sessions" && <SessionsView />}
       {store.view === "settings" && <SettingsView />}
+      </div>
     </div>
   )
 }
@@ -202,10 +228,63 @@ function ChatView() {
         </div>
       )}
 
-      {store.awaitingApproval && (
+      {store.awaitingApproval && !store.pendingApproval && (
         <div className="nexus-approval-banner">
           <span className="nexus-approval-icon">⚠</span>
           <span>Action awaiting your approval — check the VS Code notification (Allow / Allow Always / Deny).</span>
+        </div>
+      )}
+
+      {store.pendingApproval && (
+        <div className="nexus-approval-bar">
+          <span className="nexus-approval-bar-icon">⚠</span>
+          <span className="nexus-approval-bar-text">
+            {store.pendingApproval.action.type === "execute"
+              ? (store.pendingApproval.action.content
+                  ? `Run: ${store.pendingApproval.action.content}`
+                  : store.pendingApproval.action.description)
+              : store.pendingApproval.action.type === "write"
+                ? `Write: ${store.pendingApproval.action.description}`
+                : store.pendingApproval.action.description}
+          </span>
+          <div className="nexus-approval-bar-buttons">
+            <button
+              type="button"
+              className="nexus-approval-btn nexus-approval-btn-allow"
+              onClick={() => store.resolveApproval(true)}
+            >
+              Allow
+            </button>
+            {store.pendingApproval.action.type === "execute" && (
+              <button
+                type="button"
+                className="nexus-approval-btn nexus-approval-btn-allow"
+                onClick={() =>
+                  store.resolveApproval(
+                    true,
+                    false,
+                    store.pendingApproval!.action.content
+                  )
+                }
+              >
+                Add to allowed for this folder
+              </button>
+            )}
+            <button
+              type="button"
+              className="nexus-approval-btn nexus-approval-btn-always"
+              onClick={() => store.resolveApproval(true, true)}
+            >
+              Allow Always
+            </button>
+            <button
+              type="button"
+              className="nexus-approval-btn nexus-approval-btn-deny"
+              onClick={() => store.resolveApproval(false)}
+            >
+              Deny
+            </button>
+          </div>
         </div>
       )}
 
@@ -284,7 +363,7 @@ function ChatBottomBar({ referencedFiles }: { referencedFiles: string[] }) {
 
   return (
     <div className="chat-bottom-bar">
-      <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
+      <div className="flex items-center gap-2 min-w-0 overflow-hidden">
         {fileCount > 0 && (
           <details
             open={filesOpen}
@@ -308,7 +387,8 @@ function ChatBottomBar({ referencedFiles }: { referencedFiles: string[] }) {
             </div>
           </details>
         )}
-        <div className="hidden sm:flex items-center gap-1 flex-shrink-0">
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <AutoApproveDropdown />
           <ModeSelector />
         </div>
       </div>
@@ -330,10 +410,10 @@ function ChatBottomBar({ referencedFiles }: { referencedFiles: string[] }) {
 function SessionsView() {
   const { sessions, sessionId, switchSession, deleteSession, sessionsLoading } = useChatStore()
 
-  const handleDelete = (e: React.MouseEvent, s: { id: string; title?: string }) => {
+  const handleDelete = async (e: React.MouseEvent, s: { id: string; title?: string }) => {
     e.stopPropagation()
     const label = s.title?.trim() || s.id.slice(0, 12)
-    if (!window.confirm(`Delete session "${label}"? This cannot be undone.`)) return
+    if (!(await confirmAsync(`Delete session "${label}"? This cannot be undone.`))) return
     deleteSession(s.id)
   }
 
@@ -458,6 +538,111 @@ function toolToActionLabel(tool: string): string {
   return labels[tool] ?? `Running ${tool}`
 }
 
+/** Modal for selecting model from models.dev catalog (same as KiloCode CLI). Free models shown first. */
+function ModelPickerModal({
+  catalog,
+  loading,
+  query,
+  onQueryChange,
+  onSelect,
+  onClose,
+}: {
+  catalog: import("./types/messages.js").ModelsCatalogFromCore | null
+  loading: boolean
+  query: string
+  onQueryChange: (q: string) => void
+  onSelect: (providerId: string, modelId: string, baseUrl: string) => void
+  onClose: () => void
+}) {
+  const options = useMemo(() => {
+    if (!catalog) return []
+    const q = query.trim().toLowerCase()
+    const rec = catalog.recommended.map((r) => ({ ...r, category: r.free ? "Free (Recommended)" as const : "Recommended" as const }))
+    const rest: Array<{ providerId: string; modelId: string; name: string; free: boolean; category: string }> = []
+    for (const prov of catalog.providers) {
+      for (const m of prov.models) {
+        if (rec.some((r) => r.providerId === prov.id && r.modelId === m.id)) continue
+        rest.push({
+          providerId: prov.id,
+          modelId: m.id,
+          name: m.name,
+          free: m.free,
+          category: prov.name,
+        })
+      }
+    }
+    const all = [...rec, ...rest]
+    if (!q) return all
+    return all.filter((o) => o.name.toLowerCase().includes(q) || o.modelId.toLowerCase().includes(q))
+  }, [catalog, query])
+
+  const provById = useMemo(() => {
+    const m = new Map<string, { baseUrl: string }>()
+    if (catalog) for (const p of catalog.providers) m.set(p.id, { baseUrl: p.baseUrl })
+    return m
+  }, [catalog])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onClose}
+      role="dialog"
+      aria-label="Select model"
+    >
+      <div
+        className="bg-[var(--vscode-editor-background)] border border-[var(--vscode-panel-border)] rounded-lg shadow-xl max-w-lg w-full max-h-[70vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--vscode-panel-border)]">
+          <h3 className="text-sm font-semibold text-[var(--vscode-foreground)]">Select model</h3>
+          <button type="button" onClick={onClose} className={BTN_CLASS} aria-label="Close">
+            ×
+          </button>
+        </div>
+        <p className="px-3 py-1.5 text-[10px] text-[var(--vscode-descriptionForeground)] border-b border-[var(--vscode-panel-border)]">
+          Free models (OpenRouter) at top — no API key or get one at openrouter.ai
+        </p>
+        <div className="p-2 border-b border-[var(--vscode-panel-border)]">
+          <input
+            type="text"
+            placeholder="Search models..."
+            value={query}
+            onChange={(e) => onQueryChange(e.target.value)}
+            className="nexus-input w-full text-sm"
+          />
+        </div>
+        <div className="flex-1 overflow-y-auto p-2 min-h-0">
+          {loading && <div className="nexus-muted text-xs py-2">Loading catalog from models.dev…</div>}
+          {!loading && !catalog && <div className="nexus-muted text-xs py-2">Could not load catalog.</div>}
+          {!loading && catalog && (
+            <>
+              {options.length === 0 && <div className="nexus-muted text-xs py-2">No models match.</div>}
+              {options.slice(0, 50).map((opt) => {
+                const baseUrl = provById.get(opt.providerId)?.baseUrl ?? "https://openrouter.ai/api/v1"
+                return (
+                  <button
+                    key={`${opt.providerId}/${opt.modelId}`}
+                    type="button"
+                    className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-[var(--vscode-list-hoverBackground)] flex items-center justify-between gap-2"
+                    onClick={() => onSelect(opt.providerId, opt.modelId, baseUrl)}
+                  >
+                    <span className="truncate text-[var(--vscode-foreground)]">
+                      {opt.name}
+                      {opt.free ? " (free)" : ""}
+                    </span>
+                    <span className="text-[10px] text-[var(--vscode-descriptionForeground)] flex-shrink-0">{opt.category}</span>
+                  </button>
+                )
+              })}
+              {options.length > 50 && <div className="nexus-muted text-[10px] py-1">… and {options.length - 50} more. Narrow search.</div>}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 interface SettingsDraft {
   modelProvider: string
   modelId: string
@@ -483,6 +668,8 @@ interface SettingsDraft {
   parallelReads: boolean
   maxParallelReads: string
   mcpServersJson: string
+  /** For Rules & Skills panel: path + enabled. skillsText is derived for raw edit. */
+  skillsConfig?: Array<{ path: string; enabled: boolean }>
   skillsText: string
   rulesFilesText: string
   claudeMdPath: string
@@ -493,11 +680,15 @@ interface SettingsDraft {
 }
 
 function SettingsView() {
-  const { config, provider, model, saveConfig, serverUrl } = useChatStore()
+  const { config, provider, model, saveConfig, serverUrl, modelsCatalog, modelsCatalogLoading, requestModelsCatalog } = useChatStore()
   const [draft, setDraft] = useState<SettingsDraft | null>(null)
   const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
   const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles">("llm")
-  const [integTab, setIntegTab] = useState<"mcp" | "skills" | "rules">("mcp")
+  const [integTab, setIntegTab] = useState<"rules-skills" | "mcp" | "rules-instructions">("rules-skills")
+  const [rulesFilter, setRulesFilter] = useState<"all" | "user" | "projects">("all")
+  const [includeThirdParty, setIncludeThirdParty] = useState(true)
+  const [modelPickerOpen, setModelPickerOpen] = useState(false)
+  const [modelPickerQuery, setModelPickerQuery] = useState("")
 
   useEffect(() => {
     setServerUrlLocal(serverUrl)
@@ -528,6 +719,25 @@ function SettingsView() {
     <div className="nexus-pane">
       <div className="nexus-pane-title">Agent Settings</div>
 
+      <div className="nexus-settings-config-bar">
+        <span className="nexus-settings-config-label">Config:</span>
+        <button
+          type="button"
+          className="nexus-settings-config-link"
+          onClick={() => postMessage({ type: "openNexusConfigFolder", scope: "global" })}
+        >
+          Open ~/.nexus
+        </button>
+        <span className="nexus-settings-config-sep">·</span>
+        <button
+          type="button"
+          className="nexus-settings-config-link"
+          onClick={() => postMessage({ type: "openNexusConfigFolder", scope: "project" })}
+        >
+          Open project .nexus
+        </button>
+      </div>
+
       <section className="nexus-section mt-2">
         <h3 className="nexus-section-title">NexusCode Server</h3>
         <p className="nexus-muted text-[10px] mb-2">
@@ -548,7 +758,7 @@ function SettingsView() {
         <TabPill id="embeddings" tab={tab} setTab={setTab} label="Embeddings" />
         <TabPill id="index" tab={tab} setTab={setTab} label="Index" />
         <TabPill id="tools" tab={tab} setTab={setTab} label="Tools" />
-        <TabPill id="integrations" tab={tab} setTab={setTab} label="MCP/Rules" />
+        <TabPill id="integrations" tab={tab} setTab={setTab} label="MCP &amp; Skills" />
         <TabPill id="profiles" tab={tab} setTab={setTab} label="Profiles" />
       </div>
 
@@ -556,6 +766,42 @@ function SettingsView() {
         <>
           <section className="nexus-section">
             <h3 className="nexus-section-title">LLM</h3>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <button
+                type="button"
+                className="nexus-secondary-btn text-xs"
+                onClick={() => {
+                  setModelPickerOpen(true)
+                  setModelPickerQuery("")
+                  requestModelsCatalog()
+                }}
+              >
+                Select model (free models from models.dev)
+              </button>
+              <span className="text-[10px] text-[var(--vscode-descriptionForeground)]">
+                Same catalog as KiloCode — free models first; OpenRouter base URL. No key required for free tier.
+              </span>
+            </div>
+            {modelPickerOpen && (
+              <ModelPickerModal
+                catalog={modelsCatalog}
+                loading={modelsCatalogLoading}
+                query={modelPickerQuery}
+                onQueryChange={setModelPickerQuery}
+                onSelect={(providerId, modelId, baseUrl) => {
+                  if (draft) {
+                    setDraft({
+                      ...draft,
+                      modelProvider: "openrouter",
+                      modelId,
+                      modelBaseUrl: baseUrl || "https://openrouter.ai/api/v1",
+                    })
+                  }
+                  setModelPickerOpen(false)
+                }}
+                onClose={() => setModelPickerOpen(false)}
+              />
+            )}
             <SettingsSelect
               label="Provider"
               value={draft.modelProvider}
@@ -588,41 +834,18 @@ function SettingsView() {
       )}
 
       {tab === "index" && (
-      <section className="nexus-section">
-        <h3 className="nexus-section-title">Index & Vector DB</h3>
-        <SettingsToggle
-          label="Indexing enabled"
-          checked={draft.indexingEnabled}
-          onChange={(checked) => setDraft({ ...draft, indexingEnabled: checked })}
-        />
-        <SettingsToggle
-          label="Vector index enabled"
-          checked={draft.indexingVector}
-          onChange={(checked) => setDraft({ ...draft, indexingVector: checked })}
-        />
-        <SettingsInput
-          label="Embedding batch size"
-          value={draft.embeddingBatchSize}
-          onChange={(v) => setDraft({ ...draft, embeddingBatchSize: v })}
-        />
-        <SettingsInput
-          label="Embedding concurrency"
-          value={draft.embeddingConcurrency}
-          onChange={(v) => setDraft({ ...draft, embeddingConcurrency: v })}
-        />
-        <SettingsToggle
-          label="Vector DB enabled"
-          checked={draft.vectorDbEnabled}
-          onChange={(checked) => setDraft({ ...draft, vectorDbEnabled: checked })}
-        />
-        <SettingsToggle
-          label="Vector DB auto-start"
-          checked={draft.vectorDbAutoStart}
-          onChange={(checked) => setDraft({ ...draft, vectorDbAutoStart: checked })}
-        />
-        <SettingsInput label="Vector DB URL" value={draft.vectorDbUrl} onChange={(v) => setDraft({ ...draft, vectorDbUrl: v })} />
-        <div className="nexus-muted text-[10px]">{vectorHint}</div>
-      </section>
+      <IndexingAndDocsView
+        draft={draft}
+        setDraft={setDraft}
+        onReindex={() => postMessage({ type: "reindex" })}
+        onDeleteIndex={async () => {
+          if (await confirmAsync("Delete the codebase index? You can re-sync later.")) {
+            postMessage({ type: "clearIndex" })
+          }
+        }}
+        onOpenCursorignore={() => postMessage({ type: "openCursorignore" })}
+        onOpenNexusignore={() => postMessage({ type: "openNexusignore" })}
+      />
       )}
 
       {tab === "tools" && (
@@ -663,8 +886,14 @@ function SettingsView() {
 
       {tab === "integrations" && (
       <section className="nexus-section">
-        <h3 className="nexus-section-title">MCP, Skills, Rules & Instructions</h3>
         <div className="flex flex-wrap gap-1.5 mb-2">
+          <button
+            type="button"
+            className={`nexus-tab-btn ${integTab === "rules-skills" ? "nexus-tab-btn-active" : ""}`}
+            onClick={() => setIntegTab("rules-skills")}
+          >
+            Skills
+          </button>
           <button
             type="button"
             className={`nexus-tab-btn ${integTab === "mcp" ? "nexus-tab-btn-active" : ""}`}
@@ -674,33 +903,31 @@ function SettingsView() {
           </button>
           <button
             type="button"
-            className={`nexus-tab-btn ${integTab === "skills" ? "nexus-tab-btn-active" : ""}`}
-            onClick={() => setIntegTab("skills")}
+            className={`nexus-tab-btn ${integTab === "rules-instructions" ? "nexus-tab-btn-active" : ""}`}
+            onClick={() => setIntegTab("rules-instructions")}
           >
-            Skills
-          </button>
-          <button
-            type="button"
-            className={`nexus-tab-btn ${integTab === "rules" ? "nexus-tab-btn-active" : ""}`}
-            onClick={() => setIntegTab("rules")}
-          >
-            Rules & Instructions
+            Instructions
           </button>
         </div>
 
+        {integTab === "rules-skills" && (
+          <RulesSkillsSubagentsView
+            draft={draft}
+            setDraft={setDraft}
+            rulesFilter={rulesFilter}
+            setRulesFilter={setRulesFilter}
+            includeThirdParty={includeThirdParty}
+            setIncludeThirdParty={setIncludeThirdParty}
+            onOpenRulesInstructions={() => setIntegTab("rules-instructions")}
+          />
+        )}
         {integTab === "mcp" && (
           <IntegrationsMcpView
             draft={draft}
             setDraft={setDraft}
           />
         )}
-        {integTab === "skills" && (
-          <IntegrationsSkillsView
-            draft={draft}
-            setDraft={setDraft}
-          />
-        )}
-        {integTab === "rules" && (
+        {integTab === "rules-instructions" && (
           <>
             <SettingsInput
               label="CLAUDE.md path in rules (empty = disabled)"
@@ -711,6 +938,12 @@ function SettingsView() {
               label="Additional rules files (one per line)"
               value={draft.rulesFilesText}
               onChange={(v) => setDraft({ ...draft, rulesFilesText: v })}
+              rows={3}
+            />
+            <SettingsTextarea
+              label="Skill paths (one per line)"
+              value={draft.skillsText}
+              onChange={(v) => setDraft({ ...draft, skillsText: v })}
               rows={3}
             />
             <SettingsTextarea
@@ -773,7 +1006,322 @@ function SettingsView() {
   )
 }
 
-/** MCP server list + marketplace link (Cline-style integrations sub-tab). */
+/** Indexing & Docs panel (reference layout). */
+function IndexingAndDocsView({
+  draft,
+  setDraft,
+  onReindex,
+  onDeleteIndex,
+  onOpenCursorignore,
+}: {
+  draft: SettingsDraft
+  setDraft: React.Dispatch<React.SetStateAction<SettingsDraft>>
+  onReindex: () => void
+  onDeleteIndex: () => void
+  onOpenCursorignore: () => void
+  onOpenNexusignore: () => void
+}) {
+  const indexStatus = useChatStore((s) => s.indexStatus)
+  const filesTotal = indexStatus.state === "indexing" ? indexStatus.total : 0
+  const filesDone = indexStatus.state === "indexing" ? indexStatus.progress : 0
+  const chunksTotal = indexStatus.state === "indexing" && typeof indexStatus.chunksTotal === "number" ? indexStatus.chunksTotal : 0
+  const chunksDone = indexStatus.state === "indexing" && typeof indexStatus.chunksProcessed === "number" ? indexStatus.chunksProcessed : 0
+  const filesPct = filesTotal > 0 ? Math.round((filesDone / filesTotal) * 100) : 0
+  const chunksPct = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0
+  const progressPct =
+    indexStatus.state === "ready"
+      ? 100
+      : indexStatus.state === "indexing" && filesTotal > 0
+        ? filesPct
+        : 0
+  const fileCount = indexStatus.state === "ready" ? indexStatus.files : 0
+  const chunkCount = indexStatus.state === "ready" && typeof indexStatus.chunks === "number" ? indexStatus.chunks : 0
+
+  return (
+    <div className="nexus-section">
+      <h3 className="nexus-section-title">Indexing &amp; Docs</h3>
+
+      <div className="nexus-panel-block">
+        <h4 className="nexus-panel-section-title">
+          Codebase Indexing
+          <span className="nexus-info-icon" title="Embed codebase for context">ⓘ</span>
+        </h4>
+        <p className="nexus-panel-section-desc">
+          Embed codebase for improved contextual understanding. Embeddings and metadata are stored locally (or in vector DB when enabled).
+        </p>
+        <div className="nexus-index-progress-wrap">
+          {indexStatus.state === "indexing" && (
+            <>
+              <div className="flex items-center justify-between text-[11px] text-[var(--vscode-descriptionForeground)] mb-1">
+                <span>Full-text (files)</span>
+                <span>{filesDone.toLocaleString()} / {filesTotal > 0 ? filesTotal.toLocaleString() : "…"} ({filesPct}%)</span>
+              </div>
+              <div className="nexus-index-progress-bar">
+                <div className="nexus-index-progress-fill" style={{ width: `${filesTotal > 0 ? filesPct : 0}%` }} />
+              </div>
+              {chunksTotal > 0 && (
+                <>
+                  <div className="flex items-center justify-between text-[11px] text-[var(--vscode-descriptionForeground)] mb-1 mt-2">
+                    <span>Chunks (FTS + vector)</span>
+                    <span>{chunksDone.toLocaleString()} / {chunksTotal.toLocaleString()} ({chunksPct}%)</span>
+                  </div>
+                  <div className="nexus-index-progress-bar">
+                    <div className="nexus-index-progress-fill nexus-index-progress-fill-chunks" style={{ width: `${chunksPct}%` }} />
+                  </div>
+                </>
+              )}
+            </>
+          )}
+          {(indexStatus.state === "idle" || indexStatus.state === "ready" || indexStatus.state === "error") && (
+            <>
+              <div className="nexus-index-progress-bar">
+                <div className="nexus-index-progress-fill" style={{ width: `${progressPct}%` }} />
+              </div>
+              <div className="nexus-muted text-[11px] mt-1">
+                {indexStatus.state === "ready"
+                  ? `${fileCount.toLocaleString()} files${chunkCount > 0 ? `, ${chunkCount.toLocaleString()} chunks` : ""} indexed`
+                  : indexStatus.state === "error"
+                    ? `Error: ${indexStatus.error ?? "unknown"}`
+                    : "No index. Click Sync to build."}
+              </div>
+            </>
+          )}
+        </div>
+        <div className="nexus-index-actions">
+          <button type="button" className="nexus-secondary-btn text-xs" onClick={onReindex}>
+            Sync
+          </button>
+          <button type="button" className="nexus-secondary-btn text-xs" onClick={onDeleteIndex}>
+            Delete Index
+          </button>
+        </div>
+      </div>
+
+      <div className="nexus-panel-block mt-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h4 className="nexus-panel-section-title">Index new folders</h4>
+            <p className="nexus-panel-section-desc">Automatically index new folders with fewer than 50,000 files.</p>
+          </div>
+          <SettingsToggle
+            label=""
+            checked={draft.indexingEnabled}
+            onChange={(checked) => setDraft({ ...draft, indexingEnabled: checked })}
+          />
+        </div>
+      </div>
+
+      <div className="nexus-panel-block mt-3">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div>
+            <h4 className="nexus-panel-section-title">Ignore files (.cursorignore and .nexusignore)</h4>
+            <p className="nexus-panel-section-desc">Files to exclude from indexing in addition to .gitignore. <button type="button" className="text-[var(--vscode-textLink-foreground)] hover:underline" onClick={onOpenCursorignore}>Edit .cursorignore</button> · <button type="button" className="text-[var(--vscode-textLink-foreground)] hover:underline" onClick={onOpenNexusignore}>Edit .nexusignore</button></p>
+          </div>
+          <div className="flex gap-1">
+            <button type="button" className="nexus-secondary-btn text-xs" onClick={onOpenCursorignore}>
+              .cursorignore
+            </button>
+            <button type="button" className="nexus-secondary-btn text-xs" onClick={onOpenNexusignore}>
+              .nexusignore
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="nexus-panel-block mt-3">
+        <h4 className="nexus-panel-section-title">
+          Docs
+          <button type="button" className="nexus-secondary-btn text-xs ml-auto">
+            + Add Doc
+          </button>
+        </h4>
+        <p className="nexus-panel-section-desc">Crawl and index custom resources and developer docs.</p>
+        <div className="nexus-no-docs-placeholder">
+          <div className="mb-2">No Docs Added</div>
+          <p className="text-[11px] mb-2">Add documentation to use as context. You can also use @ in chat to reference docs.</p>
+          <button type="button" className="nexus-secondary-btn text-xs">
+            Add Doc
+          </button>
+        </div>
+      </div>
+
+      <details className="mt-3">
+        <summary className="nexus-muted text-xs cursor-pointer">Vector DB &amp; advanced</summary>
+        <div className="mt-2 space-y-2">
+          <SettingsToggle label="Vector index enabled" checked={draft.indexingVector} onChange={(checked) => setDraft({ ...draft, indexingVector: checked })} />
+          <SettingsInput label="Embedding batch size" value={draft.embeddingBatchSize} onChange={(v) => setDraft({ ...draft, embeddingBatchSize: v })} />
+          <SettingsToggle label="Vector DB enabled" checked={draft.vectorDbEnabled} onChange={(checked) => setDraft({ ...draft, vectorDbEnabled: checked })} />
+          <SettingsInput label="Vector DB URL" value={draft.vectorDbUrl} onChange={(v) => setDraft({ ...draft, vectorDbUrl: v })} />
+        </div>
+      </details>
+    </div>
+  )
+}
+
+/** Rules, Skills, Subagents panel (reference layout). */
+function RulesSkillsSubagentsView({
+  draft,
+  setDraft,
+  rulesFilter,
+  setRulesFilter,
+  includeThirdParty,
+  setIncludeThirdParty,
+  onOpenRulesInstructions,
+}: {
+  draft: SettingsDraft
+  setDraft: React.Dispatch<React.SetStateAction<SettingsDraft>>
+  rulesFilter: "all" | "user" | "projects"
+  setRulesFilter: (f: "all" | "user" | "projects") => void
+  includeThirdParty: boolean
+  setIncludeThirdParty: (v: boolean) => void
+  onOpenRulesInstructions?: () => void
+}) {
+  const rulesFiles = useMemo(() => {
+    const fromClaude = draft.claudeMdPath.trim() ? [draft.claudeMdPath.trim()] : []
+    const fromText = draft.rulesFilesText.split("\n").map((s) => s.trim()).filter(Boolean)
+    return [...fromClaude, ...fromText]
+  }, [draft.claudeMdPath, draft.rulesFilesText])
+
+  const skillsList = useMemo(
+    () => draft.skillsConfig ?? draft.skillsText.split("\n").map((s) => s.trim()).filter(Boolean).map((p) => ({ path: p, enabled: true })),
+    [draft.skillsConfig, draft.skillsText]
+  )
+
+  const removeRule = (index: number) => {
+    if (index === 0 && draft.claudeMdPath.trim()) {
+      setDraft({ ...draft, claudeMdPath: "" })
+      return
+    }
+    const fileIndex = index - (draft.claudeMdPath.trim() ? 1 : 0)
+    const lines = draft.rulesFilesText.split("\n").filter((s) => s.trim())
+    lines.splice(fileIndex, 1)
+    setDraft({ ...draft, rulesFilesText: lines.join("\n") })
+  }
+
+  const removeSkill = (index: number) => {
+    const next = skillsList.filter((_, i) => i !== index)
+    setDraft({
+      ...draft,
+      skillsConfig: next,
+      skillsText: next.map((s) => (typeof s === "string" ? s : s.path)).join("\n"),
+    })
+  }
+
+  const setSkillEnabled = (index: number, enabled: boolean) => {
+    const next = skillsList.map((s, i) =>
+      i === index ? { path: typeof s === "string" ? s : s.path, enabled } : (typeof s === "string" ? { path: s, enabled: true } : s)
+    )
+    setDraft({
+      ...draft,
+      skillsConfig: next,
+      skillsText: next.map((s) => s.path).join("\n"),
+    })
+  }
+
+  const addRule = () => {
+    const lines = draft.rulesFilesText.split("\n").filter((s) => s.trim())
+    setDraft({ ...draft, rulesFilesText: [...lines, ""].join("\n") })
+  }
+
+  const addSkill = () => {
+    const next = [...skillsList, { path: "", enabled: true }]
+    setDraft({
+      ...draft,
+      skillsConfig: next,
+      skillsText: next.map((s) => (typeof s === "string" ? s : s.path)).join("\n"),
+    })
+  }
+
+  const RULES_SHOW = 5
+  const SKILLS_SHOW = 5
+  const rulesVisible = rulesFilter === "all" ? rulesFiles : rulesFiles.slice(0, RULES_SHOW)
+  const rulesMore = rulesFiles.length - RULES_SHOW
+  const skillsVisible = skillsList.slice(0, SKILLS_SHOW)
+  const skillsMore = skillsList.length - SKILLS_SHOW
+  const skillPath = (s: string | { path: string; enabled: boolean }) => (typeof s === "string" ? s : s.path)
+  const skillEnabled = (s: string | { path: string; enabled: boolean }) => (typeof s === "string" ? true : s.enabled)
+
+  return (
+    <div className="nexus-integrations-block">
+      <h3 className="nexus-section-title text-base font-semibold">Skills</h3>
+      <p className="nexus-panel-section-desc">Provide domain-specific knowledge and workflows for the agent.</p>
+
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div>
+          <p className="text-xs font-medium">Include third-party Plugins, Skills, and other configs</p>
+          <p className="nexus-muted text-[10px]">Automatically import agent configs from other tools.</p>
+        </div>
+        <label className="nexus-toggle flex-shrink-0">
+          <input
+            type="checkbox"
+            checked={includeThirdParty}
+            onChange={(e) => setIncludeThirdParty(e.target.checked)}
+          />
+          <span />
+        </label>
+      </div>
+
+      <div className="nexus-panel-block mt-3">
+        <div className="nexus-panel-section-title">
+          Skills
+          <button type="button" className="nexus-secondary-btn text-xs" onClick={addSkill}>
+            + New
+          </button>
+        </div>
+        <p className="nexus-panel-section-desc">
+          Skills are specialized capabilities that help the agent accomplish specific tasks. Skills will be invoked when relevant or can be triggered manually with / in chat.
+        </p>
+        <div className="flex flex-col gap-1.5">
+          {skillsVisible.length === 0 ? (
+            <div className="nexus-muted text-xs">No skills configured. Add paths in MCP &amp; Skills or edit raw list in Instructions.</div>
+          ) : (
+            skillsVisible.map((item, i) => {
+              const path = skillPath(item)
+              const name = path.split("/").filter(Boolean).pop() || path
+              const enabled = skillEnabled(item)
+              return (
+                <div
+                  key={i}
+                  className="flex items-center justify-between gap-2 rounded border border-[var(--vscode-panel-border)] px-2 py-1.5 bg-[var(--vscode-editor-inactiveSelectionBackground)]/20"
+                >
+                  <label className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      onChange={(e) => setSkillEnabled(i, e.target.checked)}
+                      className="flex-shrink-0"
+                    />
+                    <div
+                      className="min-w-0 flex-1 truncate"
+                      onClick={() => postMessage({ type: "openSkillFolder", path })}
+                      title="Open folder"
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => e.key === "Enter" && postMessage({ type: "openSkillFolder", path })}
+                    >
+                      <div className="text-xs font-medium truncate">{name}</div>
+                      <div className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">{path}</div>
+                    </div>
+                  </label>
+                  <button type="button" className="p-1 text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] flex-shrink-0" onClick={() => removeSkill(i)} title="Remove" aria-label="Remove">
+                    <TrashIcon className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )
+            })
+          )}
+          {skillsMore > 0 && (
+            <button type="button" className="text-xs text-[var(--vscode-textLink-foreground)] hover:underline self-start">
+              Show all ({skillsMore} more)
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** MCP server list + marketplace (Cline-style: Marketplace | Remote Servers | Configure). */
 function IntegrationsMcpView({
   draft,
   setDraft,
@@ -781,8 +1329,12 @@ function IntegrationsMcpView({
   draft: SettingsDraft
   setDraft: React.Dispatch<React.SetStateAction<SettingsDraft>>
 }) {
-  const servers = parseJsonArray(draft.mcpServersJson)
+  const mcpStatus = useChatStore((s) => s.mcpStatus)
   const [showRaw, setShowRaw] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [mcpTab, setMcpTab] = useState<"marketplace" | "remote" | "configure">("marketplace")
+  const servers = parseJsonArray(draft.mcpServersJson)
+  const statusByName = Object.fromEntries(mcpStatus.map((r) => [r.name, r]))
 
   const updateServers = (next: Array<Record<string, unknown>>) => {
     setDraft((d) => ({ ...d, mcpServersJson: JSON.stringify(next, null, 2) }))
@@ -811,55 +1363,156 @@ function IntegrationsMcpView({
 
   return (
     <div className="nexus-integrations-block">
+      <div className="flex gap-1 border-b border-[var(--vscode-panel-border)] mb-3 pb-0" style={{ marginBottom: "-1px" }}>
+        <button
+          type="button"
+          className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${mcpTab === "marketplace" ? "border-[var(--vscode-foreground)] text-[var(--vscode-foreground)]" : "border-transparent text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"}`}
+          onClick={() => setMcpTab("marketplace")}
+        >
+          Marketplace
+        </button>
+        <button
+          type="button"
+          className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${mcpTab === "remote" ? "border-[var(--vscode-foreground)] text-[var(--vscode-foreground)]" : "border-transparent text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"}`}
+          onClick={() => setMcpTab("remote")}
+        >
+          Remote Servers
+        </button>
+        <button
+          type="button"
+          className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${mcpTab === "configure" ? "border-[var(--vscode-foreground)] text-[var(--vscode-foreground)]" : "border-transparent text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"}`}
+          onClick={() => setMcpTab("configure")}
+        >
+          Configure
+        </button>
+      </div>
+
+      {mcpTab === "marketplace" && (
+        <div className="space-y-3">
+          <p className="nexus-muted text-[11px]">Browse and add MCP servers from official and community sources.</p>
+          <div className="flex flex-col gap-2">
+            <button
+              type="button"
+              onClick={() => postMessage({ type: "openExternal", url: "https://github.com/modelcontextprotocol/servers" })}
+              className="text-left px-3 py-2 rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 hover:bg-[var(--vscode-list-hoverBackground)] text-xs"
+            >
+              <span className="font-medium text-[var(--vscode-foreground)]">GitHub — MCP Servers</span>
+              <span className="block text-[10px] text-[var(--vscode-descriptionForeground)] mt-0.5">Browse community servers</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => postMessage({ type: "openExternal", url: "https://registry.modelcontextprotocol.io" })}
+              className="text-left px-3 py-2 rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 hover:bg-[var(--vscode-list-hoverBackground)] text-xs"
+            >
+              <span className="font-medium text-[var(--vscode-foreground)]">MCP Registry</span>
+              <span className="block text-[10px] text-[var(--vscode-descriptionForeground)] mt-0.5">Official registry</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mcpTab === "remote" && (
+        <div className="space-y-3">
+          <p className="nexus-muted text-[11px]">Add a remote MCP server by URL. Then enable it in Configure.</p>
+          <p className="text-[11px] text-[var(--vscode-foreground)]">
+            Add an entry in <button type="button" className="text-[var(--vscode-textLink-foreground)] hover:underline" onClick={() => setMcpTab("configure")}>Configure</button> with <code className="px-1 py-0.5 rounded bg-[var(--vscode-textCodeBlock-background)] text-[10px]">url</code> set to your server URL (e.g. <code className="px-1 py-0.5 rounded bg-[var(--vscode-textCodeBlock-background)] text-[10px]">https://...</code> or <code className="px-1 py-0.5 rounded bg-[var(--vscode-textCodeBlock-background)] text-[10px]">sse://...</code>).
+          </p>
+        </div>
+      )}
+
+      {mcpTab === "configure" && (
+        <>
       <p className="nexus-muted text-[10px] mb-2">
         MCP servers run as separate processes or remote URLs. Add entries below or edit raw JSON.
       </p>
+      <div className="flex flex-wrap gap-2 mb-2">
+        <button
+          type="button"
+          className="nexus-secondary-btn text-xs"
+          onClick={() => postMessage({ type: "openMcpConfig" })}
+          title="Open .nexus/mcp-servers.json in editor"
+        >
+          Open MCP JSON
+        </button>
+        <button
+          type="button"
+          className="nexus-secondary-btn text-xs"
+          disabled={testing || servers.length === 0}
+          onClick={async () => {
+            setTesting(true)
+            postMessage({ type: "testMcpServers" })
+            setTimeout(() => setTesting(false), 8000)
+          }}
+          title="Test connectivity of each server"
+        >
+          {testing ? "Testing…" : "Test servers"}
+        </button>
+        <button
+          type="button"
+          onClick={() => postMessage({ type: "openExternal", url: "https://github.com/modelcontextprotocol/servers" })}
+          className="text-xs text-[var(--vscode-textLink-foreground)] hover:underline bg-transparent border-none cursor-pointer p-0"
+        >
+          Marketplace — browse MCP servers
+        </button>
+        <button
+          type="button"
+          onClick={() => postMessage({ type: "openExternal", url: "https://registry.modelcontextprotocol.io" })}
+          className="text-xs text-[var(--vscode-textLink-foreground)] hover:underline bg-transparent border-none cursor-pointer p-0"
+          title="Official MCP Registry"
+        >
+          MCP Registry
+        </button>
+      </div>
       <div className="flex flex-col gap-2 mb-2">
         {servers.length === 0 ? (
-          <div className="nexus-muted text-xs">No MCP servers configured.</div>
+          <div className="nexus-muted text-xs">No MCP servers configured. Add entries or open .nexus/mcp-servers.json.</div>
         ) : (
-          servers.map((s, i) => (
-            <div
-              key={i}
-              className="flex items-center gap-2 flex-wrap rounded border border-[var(--vscode-panel-border)] p-2 bg-[var(--vscode-editor-inactiveSelectionBackground)]/30"
-            >
-              <label className="flex items-center gap-1.5 flex-shrink-0">
-                <input
-                  type="checkbox"
-                  checked={s.enabled !== false}
-                  onChange={(e) => setEnabled(i, e.target.checked)}
-                />
-                <span className="text-xs font-medium truncate max-w-[120px]" title={serverName(s)}>
-                  {serverName(s)}
-                </span>
-              </label>
-              <span className="text-[10px] font-mono text-[var(--vscode-descriptionForeground)] truncate flex-1 min-w-0" title={serverCommand(s)}>
-                {serverCommand(s)}
-              </span>
-              <button
-                type="button"
-                className="nexus-secondary-btn text-xs py-0.5 px-1.5"
-                onClick={() => removeAt(i)}
-                title="Remove server"
+          servers.map((s, i) => {
+            const name = serverName(s)
+            const status = statusByName[name]
+            return (
+              <div
+                key={i}
+                className="flex items-center gap-2 flex-wrap rounded border border-[var(--vscode-panel-border)] p-2 bg-[var(--vscode-editor-inactiveSelectionBackground)]/30"
               >
-                Remove
-              </button>
-            </div>
-          ))
+                <label className="flex items-center gap-1.5 flex-shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={(s as Record<string, unknown>).enabled !== false}
+                    onChange={(e) => setEnabled(i, e.target.checked)}
+                  />
+                  <span className="text-xs font-medium truncate max-w-[120px]" title={name}>
+                    {name}
+                  </span>
+                </label>
+                {status && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded ${status.status === "ok" ? "bg-green-500/20 text-green-600 dark:text-green-400" : "bg-red-500/20 text-red-600 dark:text-red-400"}`}
+                    title={status.error}
+                  >
+                    {status.status === "ok" ? "OK" : "Error"}
+                  </span>
+                )}
+                <span className="text-[10px] font-mono text-[var(--vscode-descriptionForeground)] truncate flex-1 min-w-0" title={serverCommand(s)}>
+                  {serverCommand(s)}
+                </span>
+                <button
+                  type="button"
+                  className="nexus-secondary-btn text-xs py-0.5 px-1.5"
+                  onClick={() => removeAt(i)}
+                  title="Remove server"
+                >
+                  Remove
+                </button>
+              </div>
+            )
+          })
         )}
       </div>
       <div className="flex flex-wrap gap-2 mb-2">
         <button type="button" className="nexus-secondary-btn text-xs" onClick={addServer}>
           Add server
         </button>
-        <a
-          href="https://github.com/modelcontextprotocol/servers"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-xs text-[var(--vscode-textLink-foreground)] hover:underline"
-        >
-          Marketplace — browse MCP servers
-        </a>
       </div>
       <label className="nexus-field">
         <span
@@ -878,6 +1531,8 @@ function IntegrationsMcpView({
           />
         )}
       </label>
+        </>
+      )}
     </div>
   )
 }
@@ -1029,7 +1684,8 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     parallelReads: Boolean(config.tools.parallelReads),
     maxParallelReads: String(config.tools.maxParallelReads ?? 5),
     mcpServersJson: JSON.stringify(config.mcp?.servers ?? [], null, 2),
-    skillsText: (config.skills ?? []).join("\n"),
+    skillsConfig: config.skillsConfig ?? (config.skills ?? []).map((p) => ({ path: p, enabled: true })),
+    skillsText: (config.skillsConfig ?? (config.skills ?? []).map((p) => ({ path: p, enabled: true }))).map((s) => s.path).join("\n"),
     rulesFilesText: (config.rules?.files ?? []).filter((f) => !/CLAUDE\.md$/i.test(f)).join("\n"),
     claudeMdPath: (config.rules?.files ?? []).find((f) => /CLAUDE\.md$/i.test(f)) ?? "CLAUDE.md",
     agentInstructions: config.modes?.agent?.customInstructions ?? "",
@@ -1061,7 +1717,8 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
   const toolThresholdRaw = parsePositiveInt(draft.toolClassifyThreshold, 15)
   const skillThresholdRaw = parsePositiveInt(draft.skillClassifyThreshold, 8)
   const mcpServers = parseJsonArray(draft.mcpServersJson)
-  const skills = linesToList(draft.skillsText)
+  const skillsConfig = draft.skillsConfig ?? linesToList(draft.skillsText).map((p) => ({ path: p, enabled: true }))
+  const skills = skillsConfig.filter((s) => s.enabled).map((s) => s.path)
   const ruleFiles = linesToList(draft.rulesFilesText)
   const claudePath = draft.claudeMdPath.trim()
   const parsedProfiles = parseJsonObject(draft.profilesJson)
@@ -1105,6 +1762,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
     mcp: {
       servers: mcpServers,
     },
+    skillsConfig,
     skills,
     rules: {
       files: [...(claudePath ? [claudePath] : []), ...ruleFiles],
@@ -1290,24 +1948,36 @@ function IndexProgress({
 }) {
   const progress = status.progress
   const total = status.total
-  const pct = total > 0 ? Math.max(0, Math.min(100, Math.floor((progress / total) * 100))) : 0
+  const filesPct = total > 0 ? Math.max(0, Math.min(100, Math.floor((progress / total) * 100))) : 0
+  const chunksTotal = typeof status.chunksTotal === "number" ? status.chunksTotal : 0
+  const chunksDone = typeof status.chunksProcessed === "number" ? status.chunksProcessed : 0
+  const chunksPct = chunksTotal > 0 ? Math.max(0, Math.min(100, Math.floor((chunksDone / chunksTotal) * 100))) : 0
   return (
     <div className="px-3 py-1 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
       <div className="flex items-center justify-between text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
-        <span>Indexing codebase...</span>
-        <span>{progress}/{total}</span>
+        <span>Full-text (files)</span>
+        <span>{progress}/{total} ({filesPct}%)</span>
       </div>
-      {typeof status.chunksProcessed === "number" && typeof status.chunksTotal === "number" && (
-        <div className="text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
-          Chunks: {status.chunksProcessed}/{status.chunksTotal}
-        </div>
-      )}
       <div className="w-full h-1 rounded-full bg-[var(--vscode-progressBar-background)]/30 overflow-hidden">
         <div
           className="h-full bg-[var(--nexus-accent)] transition-all duration-200"
-          style={{ width: `${pct}%` }}
+          style={{ width: `${filesPct}%` }}
         />
       </div>
+      {chunksTotal > 0 && (
+        <>
+          <div className="flex items-center justify-between text-[10px] text-[var(--vscode-descriptionForeground)] mt-1 mb-1">
+            <span>Chunks (FTS + vector)</span>
+            <span>{chunksDone}/{chunksTotal} ({chunksPct}%)</span>
+          </div>
+          <div className="w-full h-1 rounded-full bg-[var(--vscode-progressBar-background)]/30 overflow-hidden">
+            <div
+              className="h-full transition-all duration-200"
+              style={{ width: `${chunksPct}%`, background: "var(--vscode-charts-green, #89d185)" }}
+            />
+          </div>
+        </>
+      )}
     </div>
   )
 }

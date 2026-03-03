@@ -3,7 +3,7 @@ import { readFileTool } from "./read-file.js"
 import { writeFileTool } from "./write-file.js"
 import { replaceInFileTool } from "./replace-in-file.js"
 import { executeCommandTool } from "./execute-command.js"
-import { searchFilesTool, listFilesTool } from "./search-files.js"
+import { grepTool, listFilesTool } from "./search-files.js"
 import { listDefinitionsTool } from "./list-definitions.js"
 import { codebaseSearchTool } from "./codebase-search.js"
 import { webFetchTool, webSearchTool } from "./web-fetch.js"
@@ -17,32 +17,21 @@ import {
   createRuleTool,
 } from "./attempt-completion.js"
 import { thinkingPreambleTool } from "./thinking-preamble.js"
-import { batchTool, getBatchToolForMode } from "./batch.js"
 
 export function getAllBuiltinTools(): ToolDef[] {
   return [
-    // Always available
     attemptCompletionTool,
     askFollowupTool,
     updateTodoTool,
     thinkingPreambleTool,
-
-    // Read group
     readFileTool,
     listFilesTool,
     listDefinitionsTool,
-
-    // Write group
     writeFileTool,
     replaceInFileTool,
     createRuleTool,
-    batchTool,
-
-    // Execute group
     executeCommandTool,
-
-    // Search group
-    searchFilesTool,
+    grepTool,
     codebaseSearchTool,
     webFetchTool,
     webSearchTool,
@@ -67,7 +56,7 @@ export {
   writeFileTool,
   replaceInFileTool,
   executeCommandTool,
-  searchFilesTool,
+  grepTool,
   listFilesTool,
   listDefinitionsTool,
   codebaseSearchTool,
@@ -85,6 +74,4 @@ export {
   summarizeTaskTool,
   planExitTool,
   thinkingPreambleTool,
-  batchTool,
-  getBatchToolForMode,
 }

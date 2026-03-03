@@ -49,6 +49,29 @@
         "icon": "$(robot)"
       },
       {
+        "command": "nexuscode.sidebar.focus",
+        "title": "Focus NexusCode Sidebar",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.chatClicked",
+        "title": "Chat",
+        "category": "NexusCode",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "nexuscode.sessionsClicked",
+        "title": "Sessions",
+        "category": "NexusCode",
+        "icon": "$(history)"
+      },
+      {
+        "command": "nexuscode.settingsClicked",
+        "title": "Settings",
+        "category": "NexusCode",
+        "icon": "$(settings-gear)"
+      },
+      {
         "command": "nexuscode.newTask",
         "title": "New Task",
         "category": "NexusCode"
@@ -95,6 +118,23 @@
       }
     ],
     "menus": {
+      "view/title": [
+        {
+          "command": "nexuscode.chatClicked",
+          "group": "navigation@1",
+          "when": "view == nexuscode.sidebar"
+        },
+        {
+          "command": "nexuscode.settingsClicked",
+          "group": "navigation@2",
+          "when": "view == nexuscode.sidebar"
+        },
+        {
+          "command": "nexuscode.sessionsClicked",
+          "group": "overflow@1",
+          "when": "view == nexuscode.sidebar"
+        }
+      ],
       "editor/context": [
         {
           "command": "nexuscode.addToChat",

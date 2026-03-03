@@ -32,7 +32,7 @@ Use when switching context, before a batch of tools, or to record your plan. Do 
         return {
           success: false,
           output:
-            "[BLOCKED] Do not call thinking_preamble twice in a row. Your next action MUST be a different tool (read_file, search_files, write_to_file, etc.).",
+            "[BLOCKED] Do not call thinking_preamble twice in a row. Your next action MUST be a different tool (read_file, grep, write_to_file, etc.).",
         }
       }
     }

@@ -148,6 +148,144 @@ html, body, #root {
   background: var(--vscode-editor-background);
 }
 
+.nexus-nav-minimal {
+  padding: 4px 8px;
+  min-height: 0;
+}
+
+.nexus-settings-config-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-top: 6px;
+  border-radius: 6px;
+  background: var(--vscode-editor-inactiveSelectionBackground);
+  font-size: 12px;
+}
+
+.nexus-settings-config-label {
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-settings-config-link {
+  color: var(--vscode-textLink-foreground);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font-size: inherit;
+  text-decoration: none;
+}
+
+.nexus-settings-config-link:hover {
+  text-decoration: underline;
+}
+
+.nexus-settings-config-sep {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.7;
+}
+
+.nexus-panel-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.nexus-panel-section-desc {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+
+.nexus-filter-pills {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.nexus-filter-pill {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid var(--vscode-panel-border);
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+}
+
+.nexus-filter-pill:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-filter-pill-active {
+  background: var(--nexus-accent-muted);
+  border-color: var(--nexus-accent);
+  color: var(--vscode-foreground);
+}
+
+.nexus-index-progress-wrap {
+  margin: 8px 0;
+}
+
+.nexus-index-progress-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--vscode-progressBar-background);
+  overflow: hidden;
+  margin: 8px 0;
+}
+
+.nexus-index-progress-fill {
+  height: 100%;
+  background: var(--nexus-accent);
+  transition: width 0.2s ease;
+}
+
+.nexus-index-progress-fill-chunks {
+  background: var(--vscode-charts-green, #89d185);
+}
+
+.nexus-index-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.nexus-no-docs-placeholder {
+  border: 1px dashed var(--vscode-panel-border);
+  border-radius: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.nexus-panel-block {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-panel-block:last-child {
+  border-bottom: none;
+}
+
+.nexus-info-icon {
+  font-size: 12px;
+  opacity: 0.7;
+  cursor: help;
+}
+
 .nexus-tab-btn {
   border: 1px solid transparent;
   border-radius: 10px;
@@ -212,7 +350,10 @@ html, body, #root {
 .nexus-pane {
   padding: 12px;
   overflow-y: auto;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--vscode-editor-background) 95%, #000 5%), var(--vscode-editor-background));
 }
@@ -408,6 +549,11 @@ html, body, #root {
   overflow: hidden;
 }
 
+.nexus-main > .chat-view {
+  flex: 1;
+  min-height: 0;
+}
+
 .chat-messages-wrapper {
   position: relative;
   flex: 1;
@@ -428,6 +574,7 @@ html, body, #root {
 
 .chat-input {
   flex-shrink: 0;
+  min-width: 0;
   border-top: 1px solid var(--vscode-panel-border);
 }
 
@@ -439,12 +586,15 @@ html, body, #root {
   border-top: 1px solid var(--vscode-panel-border);
   background: var(--vscode-editor-background);
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .chat-bottom-bar .prompt-input-container {
   margin: 0;
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .nexus-subagent-strip {
@@ -696,6 +846,7 @@ html, body, #root {
   display: flex;
   gap: 8px;
   align-items: flex-end;
+  min-width: 0;
 }
 
 .prompt-input {
@@ -743,6 +894,82 @@ button, input, textarea {
 .nexus-approval-icon {
   flex-shrink: 0;
   font-size: 16px;
+}
+
+/* In-webview approval bar (Roo-Code style: Allow / Deny in panel) */
+.nexus-approval-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--vscode-editorWarning-border, rgba(255, 193, 7, 0.5));
+  background: var(--vscode-editorWarning-background, rgba(255, 193, 7, 0.15));
+  color: var(--vscode-editorWarning-foreground, #dcdcaa);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.nexus-approval-bar-icon {
+  flex-shrink: 0;
+  font-size: 16px;
+}
+
+.nexus-approval-bar-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexus-approval-bar-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.nexus-approval-btn {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.nexus-approval-btn-allow {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border-color: var(--vscode-button-border);
+}
+
+.nexus-approval-btn-allow:hover {
+  opacity: 0.9;
+  background: var(--vscode-button-hoverBackground);
+}
+
+.nexus-approval-btn-always {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border-color: var(--vscode-button-secondaryBorder);
+}
+
+.nexus-approval-btn-always:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.nexus-approval-btn-deny {
+  background: rgba(244, 67, 54, 0.2);
+  color: var(--vscode-errorForeground, #f44336);
+  border-color: var(--vscode-errorForeground, #f44336);
+}
+
+.nexus-approval-btn-deny:hover {
+  background: rgba(244, 67, 54, 0.35);
 }
 
 /* Focus — blue ring like Cursor */

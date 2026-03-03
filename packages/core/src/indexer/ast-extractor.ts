@@ -1,4 +1,4 @@
-import type { SymbolEntry } from "./fts.js"
+import type { SymbolEntry } from "../types.js"
 import type { SymbolKind } from "../types.js"
 
 /**

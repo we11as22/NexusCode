@@ -13,28 +13,37 @@ const DEFAULT_CODE_GLOBS = [
 ]
 
 const searchSchema = z.object({
-  pattern: z.string().optional().describe("Regex pattern to search for"),
-  patterns: z.array(z.string()).min(1).max(20).optional().describe("Multiple regex patterns to search in one call"),
-  path: z.string().optional().describe("Directory or file to search in (relative to project root)"),
+  pattern: z.string().optional().describe("Regex pattern to search for (ripgrep syntax; escape special chars or use raw string)"),
+  patterns: z.array(z.string()).min(1).max(20).optional().describe("Multiple regex patterns in one call"),
+  path: z.string().optional().describe("Directory or file to search in (relative to project root); use to restrict scope"),
   paths: z.array(z.string()).min(1).max(20).optional().describe("Multiple directories/files to search in"),
-  include: z.string().optional().describe("File glob pattern to include, e.g. '*.ts' or '**/*.{ts,tsx}'"),
-  exclude: z.string().optional().describe("File glob pattern to exclude"),
+  include: z.string().optional().describe("File glob to include, e.g. '*.ts' or '**/*.{ts,tsx}'"),
+  exclude: z.string().optional().describe("File glob to exclude"),
   context_lines: z.number().int().min(0).max(10).optional().describe("Lines of context around matches (0-10)"),
   case_sensitive: z.boolean().optional().describe("Case sensitive search (default: false)"),
-  max_results: z.number().int().positive().max(2000).optional().describe("Max total matches across all patterns/paths (default: 500)"),
+  max_results: z.number().int().positive().max(2000).optional().describe("Max total matches (default: 500)"),
   task_progress: z.string().optional(),
 })
 
-export const searchFilesTool: ToolDef<z.infer<typeof searchSchema>> = {
-  name: "search_files",
-  description: `Search file contents using regex patterns (powered by ripgrep).
-Returns matching lines with file path and line numbers.
-Maximum ${MAX_RESULTS} results.
+export const grepTool: ToolDef<z.infer<typeof searchSchema>> = {
+  name: "grep",
+  description: `Search file contents with regex (ripgrep). Use for exact text, identifiers, or complex patterns.
 
-Examples:
-- Find all TODO comments: pattern="TODO|FIXME"
-- Find function definitions: pattern="^(export )?function \\w+", include="*.ts"
-- Find class usages: pattern="new MyClass\\("`,
+When to use:
+- Find exact strings, identifiers, or regex patterns in the codebase.
+- Complex patterns (e.g. "function\\\\s+\\\\w+", "class\\\\s+[A-Z]\\\\w*", "TODO|FIXME").
+- Restrict to a folder (path/paths), file types (include), or exclude files (exclude).
+
+Parameters:
+- pattern / patterns: regex (ripgrep syntax). Escape or use raw string for special chars.
+- path / paths: directory or file to search (relative to project root). Omit for whole repo.
+- include: glob for file types (e.g. "*.ts"). Default: common code/md extensions.
+- exclude: glob to exclude.
+- context_lines: lines before/after match (0-10).
+- case_sensitive: default false.
+- max_results: cap total matches (default 500, max 2000).
+
+Use codebase_search for semantic/meaning-based search when vector index is available.`,
   parameters: searchSchema,
   readOnly: true,
 
@@ -108,7 +117,7 @@ Examples:
       // rg not found — fallback
       return {
         success: false,
-        output: `Search failed: ${(err as Error).message}. Install ripgrep (rg) for search support.`,
+        output: `Search failed: ${(err as Error).message}. Install ripgrep (rg) for grep support.`,
       }
     }
   },
@@ -132,7 +141,7 @@ When to use:
 - Check presence of config files, scripts, or modules.
 
 When NOT to use:
-- Finding by content: use codebase_search or search_files.
+- Finding by content: use codebase_search (semantic) or grep (regex).
 - Reading a file: use read_file.
 - Glob by extension: use path + include (e.g. include="*.ts").
 

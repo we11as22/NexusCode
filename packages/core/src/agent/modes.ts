@@ -43,10 +43,10 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
  */
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   always:  ["attempt_completion", "ask_followup_question", "update_todo_list", "thinking_preamble"],
-  read:    ["read_file", "list_files", "list_code_definitions", "batch"],
-  write:   ["write_to_file", "replace_in_file", "create_rule", "batch"],
+  read:    ["read_file", "list_files", "list_code_definitions"],
+  write:   ["write_to_file", "replace_in_file", "create_rule"],
   execute: ["execute_command"],
-  search:  ["search_files", "codebase_search", "web_fetch", "web_search", "exa_web_search", "exa_code_search"],
+  search:  ["grep", "codebase_search", "web_fetch", "web_search", "exa_web_search", "exa_code_search"],
   browser: ["browser_action"],
   mcp:     [], // populated dynamically from MCP registry
   skills:  ["use_skill"],
@@ -68,7 +68,7 @@ export const READ_ONLY_TOOLS = new Set([
   "read_file",
   "list_files",
   "list_code_definitions",
-  "search_files",
+  "grep",
   "codebase_search",
   "web_fetch",
   "web_search",

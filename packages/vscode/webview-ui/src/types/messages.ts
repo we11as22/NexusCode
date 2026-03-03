@@ -1,5 +1,16 @@
 import type { IndexStatusKind, Mode, NexusConfigState, SessionMessage } from "../stores/chat.js"
 
+/** Same shape as @nexuscode/core ModelsCatalog (used by extension host) */
+export interface ModelsCatalogFromCore {
+  providers: Array<{
+    id: string
+    name: string
+    baseUrl: string
+    models: Array<{ id: string; name: string; free: boolean; recommendedIndex?: number }>
+  }>
+  recommended: Array<{ providerId: string; modelId: string; name: string; free: boolean }>
+}
+
 export interface WebviewState {
   messages: SessionMessage[]
   mode: Mode
@@ -26,3 +37,8 @@ export type ExtensionMessage =
   | { type: "indexStatus"; status: IndexStatusKind }
   | { type: "configLoaded"; config: NexusConfigState }
   | { type: "addToChatContent"; content: string }
+  | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings" }
+  | { type: "mcpServerStatus"; results: Array<{ name: string; status: "ok" | "error"; error?: string }> }
+  | { type: "pendingApproval"; partId: string; action: { type: string; tool: string; description: string; content?: string } }
+  | { type: "confirmResult"; id: string; ok: boolean }
+  | { type: "modelsCatalog"; catalog: ModelsCatalogFromCore }

@@ -192,6 +192,25 @@ export class CliHost implements IHost {
     commands.push(normalized)
     await fs.mkdir(dir, { recursive: true })
     await fs.writeFile(filePath, JSON.stringify({ commands }, null, 2), "utf8")
+
+    // Also append to .nexus/settings.local.json (like .claude)
+    const settingsLocalPath = path.join(dir, "settings.local.json")
+    let settings: { permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } } = {}
+    try {
+      const raw = await fs.readFile(settingsLocalPath, "utf8")
+      settings = JSON.parse(raw) as typeof settings
+    } catch {
+      // File missing or invalid
+    }
+    if (!settings.permissions) settings.permissions = {}
+    const allow = settings.permissions.allow ?? []
+    if (!allow.includes(normalized)) {
+      allow.push(normalized)
+      settings.permissions.allow = allow
+      if (!settings.permissions.deny) settings.permissions.deny = []
+      if (!settings.permissions.ask) settings.permissions.ask = []
+      await fs.writeFile(settingsLocalPath, JSON.stringify(settings, null, 2), "utf8")
+    }
   }
 
   async getProblems(): Promise<DiagnosticItem[]> {

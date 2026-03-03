@@ -14,23 +14,20 @@ const schema = z.object({
 
 export const codebaseSearchTool: ToolDef<z.infer<typeof schema>> = {
   name: "codebase_search",
-  description: `Semantic search over the indexed codebase. Finds code by meaning, not exact text.
+  description: `Semantic (vector) search over the indexed codebase. Finds code by meaning, not exact text.
+Only available when the vector index is built and ready (indexing.enabled + vectorDb + embeddings configured).
 
 When to use:
-- Explore unfamiliar codebases; ask "how / where / what" questions.
-- Find code by intent (e.g. "where is auth validated", "error handling for API calls").
-- After narrowing a directory, re-run with path/paths to limit scope.
+- Explore codebase by intent: "where is auth validated", "error handling for API calls", "how does caching work".
+- Use the query field for natural-language descriptions of what you want to find.
+- path/paths: optional scope (directory or file). Omit to search whole repo.
+- kind: filter by symbol type (class, function, interface, etc.).
+- limit: max results (default 10). Use read_file with path:line from results to load only relevant sections.
 
 When NOT to use:
-- Exact text or symbol name: use search_files (regex) instead.
+- Exact text or regex: use grep instead.
 - Reading a known file: use read_file.
-- Single identifier lookup: use search_files or list_code_definitions.
-
-Usage:
-- Prefer one clear query; use queries[] for multiple independent questions in one call.
-- path/paths: single directory or file to scope (optional). Omit to search whole repo.
-- kind: filter by symbol type (class, function, interface, etc.).
-- limit: max results per query (default 10). Use read_file with path:line from results to load only relevant sections and save context.`,
+- Single identifier: use grep or list_code_definitions.`,
   parameters: schema,
   readOnly: true,
 
@@ -38,13 +35,13 @@ Usage:
     if (!ctx.indexer) {
       return {
         success: false,
-        output: "Codebase indexing is not enabled or not ready. Enable it in .nexus/nexus.yaml (indexing.enabled: true).",
+        output: "Vector codebase search is not enabled or index is not ready. Enable indexing.vector and vectorDb in .nexus/nexus.yaml and set embeddings (model + API key). Wait for indexing to complete.",
       }
     }
 
     const status = ctx.indexer.status()
     if (status.state === "idle") {
-      return { success: false, output: "Codebase index is not yet built. Wait for indexing to complete." }
+      return { success: false, output: "Vector index is not yet built. Wait for indexing to complete or enable vectorDb + embeddings in config." }
     }
     if (status.state === "error") {
       return { success: false, output: `Index error: ${(status as any).error}` }

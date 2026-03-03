@@ -1,8 +1,12 @@
 import React, { useState, useEffect, useRef, useMemo } from "react"
-import { Box, Text, useInput, useApp } from "ink"
-import Spinner from "ink-spinner"
+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
+import "opentui-spinner/react"
 import stringWidth from "string-width"
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
+import * as os from "node:os"
 import type { AgentEvent, Mode, SessionMessage, MessagePart, IndexStatus, PermissionResult, ApprovalAction } from "@nexuscode/core"
+import { getModelsCatalog, catalogSelectionToModel, deriveSessionTitle, type ModelsCatalog } from "@nexuscode/core"
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +65,7 @@ interface AppState {
 }
 
 interface AppProps {
+  onExit?: () => void
   onMessage: (content: string, mode: Mode) => void
   onAbort: () => void
   onCompact: () => void
@@ -94,8 +99,23 @@ interface AppProps {
   saveConfig?: (updates: Record<string, unknown>) => void
   onReindex?: () => void
   onIndexStop?: () => void
+  onIndexDelete?: () => void | Promise<void>
   /** Resolve pending tool approval (y/n/a/s). Called when user submits during awaitingApproval. */
   onResolveApproval?: (result: PermissionResult) => void
+  /** KiloCode-style: list sessions for switching (server or local). */
+  getSessionList?: () => Promise<Array<{ id: string; ts?: number; title?: string; messageCount: number }>>
+  onSwitchSession?: (sessionId: string) => Promise<void>
+}
+
+interface AgentPreset {
+  name: string
+  modelProvider?: string
+  modelId?: string
+  vector: boolean
+  skills: string[]
+  mcpServers: string[]
+  rulesFiles: string[]
+  createdAt: number
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -110,10 +130,25 @@ const MODE_ICONS: Record<Mode, string> = {
 }
 
 const MODE_COLORS: Record<Mode, string> = {
-  agent: "cyan",
-  plan: "blue",
-  ask: "green",
+  agent: "#3ca0ff",
+  plan: "#faf74f",
+  ask: "#cccccc",
 }
+
+const THEME = {
+  primary: "#faf74f",
+  accent: "#3ca0ff",
+  muted: "#858585",
+  success: "#4CAF50",
+  warning: "#cca700",
+  danger: "#f48771",
+  panel: "#252526",
+  panel2: "#2d2d30",
+  text: "#cccccc",
+  textMuted: "#858585",
+} as const
+
+const CLI_VERSION = "0.1.0"
 
 const TOOL_ICONS: Record<string, string> = {
   read_file: "📄",
@@ -152,41 +187,139 @@ const MODEL_PROVIDERS = ["anthropic", "openai", "google", "openai-compatible", "
 const EMBEDDING_PROVIDERS = ["openai", "openai-compatible", "ollama", "local"] as const
 
 /** Slash commands (OpenCode-style: /new, /sessions, /compact, /thinking, /details, etc.) */
-type SlashAction = "clear" | "compact" | "help" | "settings" | "model" | "embeddings" | "index" | "advanced" | "thinking" | "details"
+type SlashAction =
+  | "clear"
+  | "compact"
+  | "help"
+  | "settings"
+  | "connect"
+  | "model"
+  | "embeddings"
+  | "index"
+  | "advanced"
+  | "thinking"
+  | "details"
+  | "sessions"
+  | "agentConfigs"
+  | "exit"
+  | "review"
+  | "localReview"
+  | "localReviewUncommitted"
+  | "init"
 const SLASH_COMMANDS: Array<{ cmd: string; label: string; desc: string; mode?: Mode; action?: SlashAction }> = [
-  { cmd: "agent", label: "/agent", desc: "Agent mode (code & tools)", mode: "agent" },
+  { cmd: "agents", label: "/agents", desc: "Switch agent", action: "agentConfigs" },
+  { cmd: "connect", label: "/connect", desc: "Connect provider", action: "connect" },
+  { cmd: "editor", label: "/editor", desc: "Open editor", action: "advanced" },
+  { cmd: "exit", label: "/exit", desc: "Exit the app", action: "exit" },
+  { cmd: "help", label: "/help", desc: "Help", action: "help" },
+  { cmd: "init", label: "/init", desc: "Create/update AGENTS.md", action: "init" },
+  { cmd: "local-review", label: "/local-review", desc: "Local review (current branch)", action: "localReview" },
+  {
+    cmd: "local-review-uncommitted",
+    label: "/local-review-uncommitted",
+    desc: "Local review (uncommitted changes)",
+    action: "localReviewUncommitted",
+  },
+  { cmd: "mcps", label: "/mcps", desc: "Toggle MCPs", action: "advanced" },
+  { cmd: "models", label: "/models", desc: "Switch model", action: "model" },
+  { cmd: "new", label: "/new", desc: "New session", action: "clear" },
+  { cmd: "review", label: "/review", desc: "Review changes", action: "review" },
+  { cmd: "index", label: "/index", desc: "Index status and controls", action: "index" },
+  { cmd: "agent-config", label: "/agent-config", desc: "Agent configurations", action: "agentConfigs" },
+  { cmd: "sessions", label: "/sessions", desc: "List sessions", action: "sessions" },
+  { cmd: "agent", label: "/agent", desc: "Agent mode (tools & execution)", mode: "agent" },
   { cmd: "plan", label: "/plan", desc: "Plan mode", mode: "plan" },
   { cmd: "ask", label: "/ask", desc: "Ask mode (Q&A)", mode: "ask" },
-  { cmd: "clear", label: "/clear", desc: "Clear chat", action: "clear" },
-  { cmd: "new", label: "/new", desc: "New session (clear chat)", action: "clear" },
   { cmd: "compact", label: "/compact", desc: "Compact context", action: "compact" },
-  { cmd: "thinking", label: "/thinking", desc: "Toggle reasoning visibility", action: "thinking" },
-  { cmd: "details", label: "/details", desc: "Toggle tool execution details", action: "details" },
   { cmd: "model", label: "/model", desc: "Configure LLM provider & model", action: "model" },
   { cmd: "embeddings", label: "/embeddings", desc: "Configure embeddings model", action: "embeddings" },
-  { cmd: "index", label: "/index", desc: "Index status & reindex", action: "index" },
   { cmd: "advanced", label: "/advanced", desc: "MCP / skills / rules / profiles", action: "advanced" },
-  { cmd: "help", label: "/help", desc: "Show shortcuts", action: "help" },
+  { cmd: "thinking", label: "/thinking", desc: "Toggle reasoning visibility", action: "thinking" },
+  { cmd: "details", label: "/details", desc: "Toggle tool execution details", action: "details" },
+  { cmd: "debug", label: "/debug", desc: "Toggle debug tool details", action: "details" },
+  { cmd: "clear", label: "/clear", desc: "Clear chat", action: "clear" },
   { cmd: "settings", label: "/settings", desc: "Full agent settings", action: "settings" },
 ]
 
-// ─── Logo (в рамке, по центру) ───────────────────────────────────────────────
+// ─── Logo (одна строка, как в opencode — без лишнего объёма) ─────────────────
 
-const LOGO_TEXT = "NexusCode CLI · Agent Hub"
-const LOGO_WIDTH = LOGO_TEXT.length
+const NEXUS_LOGO = [
+  "███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗",
+  "████╗  ██║██╔════╝╚██╗██╔╝██║   ██║██╔════╝",
+  "██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║███████╗",
+  "██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║╚════██║",
+  "██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║",
+  "╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
+]
+const NEXUS_SUB = "Nexus agent runtime"
 
 function Logo({ cols }: { cols: number }) {
-  const pad = Math.max(0, Math.floor((cols - LOGO_WIDTH) / 2))
+  if (cols < 60) {
+    const text = "Nexus CLI"
+    const padSmall = Math.max(0, Math.floor((cols - text.length) / 2))
+    return (
+      <box paddingLeft={padSmall}>
+        <text fg={THEME.accent} bold>{text}</text>
+      </box>
+    )
+  }
+  const pad = Math.max(0, Math.floor((cols - NEXUS_LOGO[0]!.length) / 2))
+  const padSub = Math.max(0, Math.floor((cols - NEXUS_SUB.length) / 2))
   return (
-    <Box paddingBottom={1} paddingLeft={pad}>
-      <Text color="cyan" bold>{LOGO_TEXT}</Text>
-    </Box>
+    <box flexDirection="column" flexShrink={0}>
+      {NEXUS_LOGO.map((line, idx) => (
+        <box key={`logo-${idx}`} paddingLeft={pad}>
+          <text fg={THEME.accent}>{line}</text>
+        </box>
+      ))}
+      <box paddingLeft={padSub}>
+        <text fg={THEME.textMuted} bold>{NEXUS_SUB}</text>
+      </box>
+    </box>
+  )
+}
+
+// ─── Header (opencode-style: заголовок + одна строка контекста, без склейки) ─
+
+function HeaderBar({
+  provider,
+  model,
+  projectDir,
+  noIndex,
+  indexReady,
+  cols,
+  contextUsedTokens,
+  contextLimitTokens,
+  contextPercent,
+}: {
+  provider: string
+  model: string
+  projectDir?: string
+  noIndex: boolean
+  indexReady: boolean
+  cols: number
+  contextUsedTokens: number
+  contextLimitTokens: number
+  contextPercent: number
+}) {
+  const indexLabel = noIndex ? "Vector index: off" : indexReady ? "Vector index: ready" : "Vector index: building"
+  const maxW = Math.max(40, cols - 4)
+  const ctxStr = `Context: ${formatTokens(contextUsedTokens)}/${formatTokens(contextLimitTokens)} (${contextPercent}%)`
+  const modelStr = `${provider}/${model}`
+  const pathStr = projectDir ? fit(projectDir, 20) : ""
+  const line = fit(`${modelStr} · ${indexLabel} · ${ctxStr}${pathStr ? ` · ${pathStr}` : ""}`, maxW)
+  const indexColor = noIndex ? THEME.muted : indexReady ? THEME.success : THEME.warning
+  return (
+    <box flexShrink={0} flexDirection="column" paddingTop={0} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={0}>
+      <text fg={indexColor as "green" | "yellow" | "gray"}>{line}</text>
+    </box>
   )
 }
 
 // ─── Main App ────────────────────────────────────────────────────────────────
 
 export function App({
+  onExit,
   onMessage,
   onAbort,
   onCompact,
@@ -205,10 +338,16 @@ export function App({
   saveConfig,
   onReindex,
   onIndexStop,
+  onIndexDelete,
   onResolveApproval,
+  getSessionList,
+  onSwitchSession,
 }: AppProps) {
-  const { exit } = useApp()
-  type View = "chat" | "model" | "embeddings" | "settings" | "index" | "advanced" | "help"
+  const dims = useTerminalDimensions()
+  const renderer = useRenderer()
+  const cols = Math.max(40, Math.min(256, dims?.width ?? 80))
+  const rows = Math.max(16, Math.min(120, dims?.height ?? 24))
+  type View = "chat" | "model" | "embeddings" | "settings" | "index" | "advanced" | "help" | "sessions" | "agentConfigs"
   const [view, setView] = useState<View>("chat")
   const [state, setState] = useState<AppState>({
     messages: initialMessages ?? [],
@@ -242,6 +381,11 @@ export function App({
   const [slashSelected, setSlashSelected] = useState(0)
   const [modelForm, setModelForm] = useState({ provider: "", id: "", apiKey: "", baseUrl: "", temperature: "" })
   const [modelFocus, setModelFocus] = useState(0)
+  const [modelCatalog, setModelCatalog] = useState<ModelsCatalog | null>(null)
+  const [modelCatalogLoading, setModelCatalogLoading] = useState(false)
+  const [modelPickerIndex, setModelPickerIndex] = useState(0)
+  const [modelPickerQuery, setModelPickerQuery] = useState("")
+  const [modelViewMode, setModelViewMode] = useState<"picker" | "manual">("picker")
   const [embeddingsForm, setEmbeddingsForm] = useState({ provider: "openai", model: "", apiKey: "", baseUrl: "", dimensions: "" })
   const [embeddingsFocus, setEmbeddingsFocus] = useState(0)
   const [advancedForm, setAdvancedForm] = useState({
@@ -257,43 +401,38 @@ export function App({
   const [advancedFocus, setAdvancedFocus] = useState(0)
   const [activeProfileIdx, setActiveProfileIdx] = useState(0)
   const [chatScrollLines, setChatScrollLines] = useState(0)
-  const [dimensions, setDimensions] = useState({
-    cols: process.stdout.columns ?? 80,
-    rows: process.stdout.rows ?? 24,
-  })
+  const [sessionList, setSessionList] = useState<Array<{ id: string; ts?: number; title?: string; messageCount: number }>>([])
+  const [sessionListSelected, setSessionListSelected] = useState(0)
+  const [sessionListLoading, setSessionListLoading] = useState(false)
+  const [agentPresets, setAgentPresets] = useState<AgentPreset[]>([])
+  const [agentPresetSelected, setAgentPresetSelected] = useState(0)
+  const [agentPresetLoading, setAgentPresetLoading] = useState(false)
+  const [agentPresetCreateMode, setAgentPresetCreateMode] = useState(false)
+  const [agentPresetName, setAgentPresetName] = useState("")
+  const [agentPresetOptionIndex, setAgentPresetOptionIndex] = useState(0)
+  const [availableSkills, setAvailableSkills] = useState<string[]>([])
+  const [availableRules, setAvailableRules] = useState<string[]>([])
+  const [selectedPresetSkills, setSelectedPresetSkills] = useState<string[]>([])
+  const [selectedPresetMcp, setSelectedPresetMcp] = useState<string[]>([])
+  const [selectedPresetRules, setSelectedPresetRules] = useState<string[]>([])
+  const [selectedPresetVector, setSelectedPresetVector] = useState(Boolean(configSnapshot?.indexing?.vector))
+  const [vectorIndexEnabled, setVectorIndexEnabled] = useState(Boolean(configSnapshot?.indexing?.vector))
+  const [indexingEnabled, setIndexingEnabled] = useState(Boolean(configSnapshot?.indexing?.enabled ?? true))
   const inputHistory = useRef<string[]>([])
   const eventQueueRef = useRef<AgentEvent[]>([])
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSubmitRef = useRef<number>(0)
-  const cols = dimensions.cols
-  const rows = dimensions.rows
-
-  // React to terminal resize so layout stays stable (OpenCode-style)
-  useEffect(() => {
-    const onResize = () => {
-      const c = process.stdout.columns ?? 80
-      const r = process.stdout.rows ?? 24
-      setDimensions((prev) => {
-        if (prev.cols === c && prev.rows === r) return prev
-        return { cols: c, rows: r }
-      })
-    }
-    process.stdout.on("resize", onResize)
-    return () => {
-      process.stdout.removeListener("resize", onResize)
-    }
-  }, [])
 
   // Clamp scroll when terminal is resized so we don't show invalid offset
   useEffect(() => {
     setChatScrollLines((prev) => {
-      const width = Math.max(20, dimensions.cols - 4)
-      const visibleHeight = Math.max(12, dimensions.rows - 14)
+      const width = Math.max(20, cols - 4)
+      const visibleHeight = Math.max(8, rows - (view === "chat" ? 20 : 14))
       const allLines = buildChatLines(state, width)
       const maxScroll = Math.max(0, allLines.length - visibleHeight)
       return Math.min(prev, maxScroll)
     })
-  }, [dimensions.cols, dimensions.rows])
+  }, [cols, rows, view])
   // Enable mouse wheel (SGR) for scroll — disable on unmount
   useEffect(() => {
     if (!process.stdout.isTTY) return
@@ -302,7 +441,101 @@ export function App({
       process.stdout.write("\x1b[?1006l")
     }
   }, [])
+  useEffect(() => {
+    if (!process.stdin.isTTY) return
+    const onData = (chunk: Buffer | string) => {
+      if (view !== "chat") return
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8")
+      if (!text.includes("\u001b[<")) return
+      const matches = text.matchAll(/\u001b\[<(\d+);(\d+);(\d+)([mM])/g)
+      for (const match of matches) {
+        const code = Number(match[1] ?? "")
+        if (code === 64) {
+          setChatScrollLines((v) => v + 3)
+        } else if (code === 65) {
+          setChatScrollLines((v) => Math.max(0, v - 3))
+        }
+      }
+    }
+    process.stdin.on("data", onData)
+    return () => {
+      process.stdin.off("data", onData)
+    }
+  }, [view])
   const profileOptions = useMemo(() => ["default", ...profileNames], [profileNames])
+  const sessionTitle = useMemo(() => deriveSessionTitle(state.messages), [state.messages])
+  const mcpServersCount = configSnapshot?.mcp?.servers?.length ?? 0
+  const namedMcpServers = useMemo(() => {
+    return (configSnapshot?.mcp?.servers ?? []).map((server, idx) => {
+      const raw = server?.name
+      const cmd = server?.command
+      const url = server?.url
+      const name =
+        (typeof raw === "string" && raw.trim()) ||
+        (typeof cmd === "string" && cmd.trim()) ||
+        (typeof url === "string" && url.trim()) ||
+        `server-${idx + 1}`
+      return { name, server }
+    })
+  }, [configSnapshot])
+  const mcpServerNames = useMemo(() => namedMcpServers.map((item) => item.name), [namedMcpServers])
+  const showSidebar = view === "chat" && cols >= 120
+
+  useEffect(() => {
+    setVectorIndexEnabled(Boolean(configSnapshot?.indexing?.vector))
+    setIndexingEnabled(Boolean(configSnapshot?.indexing?.enabled ?? true))
+    setSelectedPresetVector(Boolean(configSnapshot?.indexing?.vector))
+  }, [configSnapshot])
+
+  useEffect(() => {
+    if (!projectDir) return
+    let active = true
+    setAgentPresetLoading(true)
+    readAgentPresets(projectDir)
+      .then((list) => {
+        if (!active) return
+        setAgentPresets(list)
+      })
+      .finally(() => {
+        if (active) setAgentPresetLoading(false)
+      })
+    discoverSkillPaths(projectDir)
+      .then((skills) => {
+        if (!active) return
+        const merged = dedupeList([...(configSnapshot?.skills ?? []), ...skills])
+        setAvailableSkills(merged)
+      })
+      .catch(() => {
+        if (!active) return
+        setAvailableSkills(configSnapshot?.skills ?? [])
+      })
+
+    return () => {
+      active = false
+    }
+  }, [projectDir, configSnapshot?.skills])
+
+  useEffect(() => {
+    if (!projectDir) {
+      const rules = dedupeList(["AGENTS.md", "CLAUDE.md", ...(configSnapshot?.rules?.files ?? [])])
+      setAvailableRules(rules)
+      return
+    }
+    let active = true
+    discoverRuleFiles(projectDir)
+      .then((rules) => {
+        if (!active) return
+        const merged = dedupeList([...(configSnapshot?.rules?.files ?? []), ...rules, "AGENTS.md", "CLAUDE.md"])
+        setAvailableRules(merged)
+      })
+      .catch(() => {
+        if (!active) return
+        setAvailableRules(dedupeList(["AGENTS.md", "CLAUDE.md", ...(configSnapshot?.rules?.files ?? [])]))
+      })
+    return () => {
+      active = false
+    }
+  }, [projectDir, configSnapshot?.rules?.files])
 
   const slashOpen = input.startsWith("/")
   const slashQuery = slashOpen ? input.slice(1).toLowerCase().trim() : ""
@@ -314,6 +547,38 @@ export function App({
   }, [slashQuery])
   const selectedCmd = filteredCommands[Math.min(slashSelected, filteredCommands.length - 1)]
 
+  // Model picker: flat list (Recommended first, then OpenRouter), filtered by query
+  const modelPickerOptions = useMemo(() => {
+    if (!modelCatalog) return []
+    const q = modelPickerQuery.trim().toLowerCase()
+    const rec = modelCatalog.recommended.map((r) => ({
+      ...r,
+      category: r.free ? "Free (Recommended)" : "Recommended",
+    }))
+    const rest: Array<{ providerId: string; modelId: string; name: string; free: boolean; category: string }> = []
+    for (const prov of modelCatalog.providers) {
+      for (const m of prov.models) {
+        if (rec.some((r) => r.providerId === prov.id && r.modelId === m.id)) continue
+        rest.push({
+          providerId: prov.id,
+          modelId: m.id,
+          name: m.name,
+          free: m.free,
+          category: prov.name,
+        })
+      }
+    }
+    const all = [...rec, ...rest]
+    if (!q) return all
+    return all.filter(
+      (o) =>
+        o.name.toLowerCase().includes(q) ||
+        o.modelId.toLowerCase().includes(q)
+    )
+  }, [modelCatalog, modelPickerQuery])
+
+  const modelPickerSelected = modelPickerOptions[Math.min(modelPickerIndex, Math.max(0, modelPickerOptions.length - 1))]
+
   // Sync slashSelected when filter changes
   useEffect(() => {
     setSlashSelected(0)
@@ -322,6 +587,9 @@ export function App({
   // Init form from config when opening a config view
   useEffect(() => {
     if (view === "model" && configSnapshot) {
+      setModelViewMode("picker")
+      setModelPickerQuery("")
+      setModelPickerIndex(0)
       setModelForm({
         provider: configSnapshot.model?.provider ?? "anthropic",
         id: configSnapshot.model?.id ?? "",
@@ -356,7 +624,68 @@ export function App({
       })
       setAdvancedFocus(0)
     }
-  }, [view, configSnapshot])
+    if (view === "agentConfigs") {
+      setAgentPresetCreateMode(false)
+      setAgentPresetOptionIndex(0)
+      setAgentPresetName("")
+      setSelectedPresetVector(Boolean(configSnapshot?.indexing?.vector))
+      setSelectedPresetSkills(dedupeList(configSnapshot?.skills ?? []))
+      setSelectedPresetMcp(dedupeList(mcpServerNames))
+      setSelectedPresetRules(dedupeList(configSnapshot?.rules?.files ?? ["AGENTS.md", "CLAUDE.md"]))
+    }
+  }, [view, configSnapshot, mcpServerNames])
+
+  // Load session list when opening sessions view (KiloCode-style)
+  useEffect(() => {
+    if (view !== "sessions" || !getSessionList) return
+    setSessionListLoading(true)
+    getSessionList()
+      .then((list) => {
+        setSessionList(list)
+        setSessionListSelected(0)
+      })
+      .catch(() => setSessionList([]))
+      .finally(() => setSessionListLoading(false))
+  }, [view, getSessionList])
+
+  useEffect(() => {
+    if (view !== "agentConfigs" || !projectDir) return
+    let cancelled = false
+    setAgentPresetLoading(true)
+    readAgentPresets(projectDir)
+      .then((list) => {
+        if (cancelled) return
+        setAgentPresets(list)
+        setAgentPresetSelected(0)
+      })
+      .finally(() => {
+        if (!cancelled) setAgentPresetLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [view, projectDir])
+
+  // Load models catalog when opening model view (same source as KiloCode: models.dev)
+  useEffect(() => {
+    if (view !== "model" || modelViewMode !== "picker") return
+    let cancelled = false
+    setModelCatalogLoading(true)
+    getModelsCatalog()
+      .then((catalog) => {
+        if (!cancelled) {
+          setModelCatalog(catalog)
+          setModelPickerIndex(0)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setModelCatalog(null)
+      })
+      .finally(() => {
+        if (!cancelled) setModelCatalogLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [view, modelViewMode])
 
   // Process agent events (OpenCode-style: batch every EVENT_BATCH_MS to reduce re-renders)
   useEffect(() => {
@@ -496,6 +825,12 @@ export function App({
               const parts = [...s.currentAssistantParts]
               if (text.trim()) parts.push({ type: "text", text })
               const hasContent = parts.length > 0
+              const lastMessage = s.messages[s.messages.length - 1]
+              const duplicateAssistant =
+                hasContent &&
+                lastMessage?.role === "assistant" &&
+                Array.isArray(lastMessage.content) &&
+                JSON.stringify(lastMessage.content) === JSON.stringify(parts)
               const newMsg: SessionMessage | null = hasContent
                 ? {
                     id: `r_${Date.now()}`,
@@ -517,7 +852,7 @@ export function App({
                 : null
               return {
                 ...s,
-                messages: newMsg
+                messages: newMsg && !duplicateAssistant
                   ? [...s.messages, newMsg]
                   : (noFinalTextMsg ? [...s.messages, noFinalTextMsg] : s.messages),
                 currentAssistantParts: [],
@@ -610,6 +945,95 @@ export function App({
     }
   }, [events])
 
+  const appendUserEcho = (content: string, makeRunning = false) => {
+    const trimmed = content.trim()
+    if (!trimmed) return
+    setState((s) => {
+      const last = s.messages[s.messages.length - 1]
+      if (
+        last &&
+        last.role === "user" &&
+        typeof last.content === "string" &&
+        last.content.trim() === trimmed &&
+        Date.now() - last.ts < 1000
+      ) {
+        return s
+      }
+      return {
+        ...s,
+        isRunning: makeRunning ? true : s.isRunning,
+        lastError: makeRunning ? null : s.lastError,
+        liveTools: makeRunning ? [] : s.liveTools,
+        planCompleted: makeRunning ? false : s.planCompleted,
+        messages: [
+          ...s.messages,
+          {
+            id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            ts: Date.now(),
+            role: "user",
+            content: trimmed,
+          },
+        ],
+      }
+    })
+    setChatScrollLines(0)
+  }
+
+  const submitChatInput = () => {
+    if (view !== "chat") return
+
+    if (slashOpen) {
+      const typed = input.slice(1).trim().toLowerCase()
+      const exact = typed
+        ? SLASH_COMMANDS.find((cmd) => cmd.cmd.toLowerCase() === typed || cmd.label.slice(1).toLowerCase() === typed)
+        : undefined
+      if (exact) {
+        applySlashCommand(exact)
+        return
+      }
+      if (selectedCmd) {
+        applySlashCommand(selectedCmd)
+      }
+      return
+    }
+
+    if (state.awaitingApproval && onResolveApproval) {
+      const raw = input.trim().toLowerCase()
+      const isExecute = state.pendingApprovalAction?.type === "execute"
+      const addToAllowed = isExecute && (raw === "e" || raw === "add")
+      const allowedKeys = ["y", "yes", "n", "no", "a", "always", "s", "skip"]
+      if (allowedKeys.includes(raw) || addToAllowed) {
+        const approved = ["y", "yes", "a", "always", "s", "skip"].includes(raw) || addToAllowed
+        const alwaysApprove = raw === "a" || raw === "always"
+        const skipAll = raw === "s" || raw === "skip"
+        const addToAllowedCommand = addToAllowed ? state.pendingApprovalAction?.content : undefined
+        setInput("")
+        setChatScrollLines(0)
+        setState((s) => ({ ...s, awaitingApproval: false, pendingApprovalAction: null }))
+        onResolveApproval({
+          approved,
+          alwaysApprove,
+          skipAll,
+          addToAllowedCommand: typeof addToAllowedCommand === "string" ? addToAllowedCommand : undefined,
+        })
+      }
+      return
+    }
+
+    if (input.trim() && !state.isRunning) {
+      const now = Date.now()
+      if (now - lastSubmitRef.current < 400) return
+      lastSubmitRef.current = now
+      const content = input.trim()
+      inputHistory.current.push(content)
+      if (inputHistory.current.length > 50) inputHistory.current.shift()
+      setHistoryIdx(-1)
+      setInput("")
+      appendUserEcho(content, true)
+      onMessage(content, state.mode)
+    }
+  }
+
   const applySlashCommand = (cmd: (typeof SLASH_COMMANDS)[0]) => {
     setInput("")
     setSlashSelected(0)
@@ -625,10 +1049,19 @@ export function App({
         setView("chat")
         return
       case "compact":
-        if (!state.isRunning) onCompact()
+        if (!state.isRunning) {
+          appendUserEcho("/compact")
+          onCompact()
+        }
         setView("chat")
         return
+      case "connect":
+        setModelViewMode("manual")
+        setModelFocus(0)
+        setView("model")
+        return
       case "model":
+        setModelViewMode("picker")
         setView("model")
         return
       case "embeddings":
@@ -636,6 +1069,12 @@ export function App({
         return
       case "index":
         setView("index")
+        return
+      case "sessions":
+        setView("sessions")
+        return
+      case "agentConfigs":
+        setView("agentConfigs")
         return
       case "advanced":
         setView("advanced")
@@ -654,29 +1093,283 @@ export function App({
         setState((s) => ({ ...s, showToolDetails: !s.showToolDetails }))
         setView("chat")
         return
+      case "review":
+        if (!state.isRunning) {
+          appendUserEcho("/review", true)
+          setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
+          onModeChange("agent")
+          onMessage("Run a repository review for the current branch. Report findings ordered by severity with exact file:line references and concrete fixes.", "agent")
+        }
+        setView("chat")
+        return
+      case "localReview":
+        if (!state.isRunning) {
+          appendUserEcho("/local-review", true)
+          setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
+          onModeChange("agent")
+          onMessage("Run a local review for the current branch only (no remote PR). Report findings by severity with file:line references.", "agent")
+        }
+        setView("chat")
+        return
+      case "localReviewUncommitted":
+        if (!state.isRunning) {
+          appendUserEcho("/local-review-uncommitted", true)
+          setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
+          onModeChange("agent")
+          onMessage("Review uncommitted changes in the working tree and report findings by severity with file:line references.", "agent")
+        }
+        setView("chat")
+        return
+      case "init":
+        if (!state.isRunning) {
+          appendUserEcho("/init", true)
+          setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
+          onModeChange("agent")
+          onMessage("Create or update AGENTS.md for this repository using the current project structure and conventions. Keep it concise and practical.", "agent")
+        }
+        setView("chat")
+        return
+      case "exit":
+        onExit?.()
+        return
       default:
         return
     }
   }
 
-  useInput((inputChar, key) => {
-    const isEnter = key.return || inputChar === "\r" || inputChar === "\n"
-    // Mouse wheel (SGR): 64 = scroll down, 65 = scroll up
-    if (typeof inputChar === "string" && inputChar.startsWith("\x1b[<")) {
-      const m = inputChar.match(/\x1b\[<(\d+)/)
-      if (m) {
-        const code = parseInt(m[1]!, 10)
-        if (code === 64) setChatScrollLines((v) => Math.max(0, v - 4))
-        else if (code === 65) setChatScrollLines((v) => v + 4)
-      }
+  const agentPresetOptions = useMemo(() => {
+    const options: Array<{ kind: "vector" | "skill" | "mcp" | "rule"; value: string; label: string }> = [
+      { kind: "vector", value: "vector", label: "Enable vector index" },
+    ]
+    for (const skill of availableSkills) {
+      options.push({ kind: "skill", value: skill, label: `Skill: ${skill}` })
+    }
+    for (const mcp of mcpServerNames) {
+      options.push({ kind: "mcp", value: mcp, label: `MCP: ${mcp}` })
+    }
+    for (const rule of availableRules) {
+      options.push({ kind: "rule", value: rule, label: `Rule file: ${rule}` })
+    }
+    return options
+  }, [availableSkills, mcpServerNames, availableRules])
+
+  const selectedPreset = agentPresets[Math.min(agentPresetSelected, Math.max(0, agentPresets.length - 1))]
+
+  const startPresetCreate = () => {
+    setAgentPresetCreateMode(true)
+    setAgentPresetOptionIndex(0)
+    setAgentPresetName(`preset-${new Date().toISOString().slice(0, 10)}`)
+    setSelectedPresetVector(Boolean(configSnapshot?.indexing?.vector))
+    setSelectedPresetSkills(dedupeList(configSnapshot?.skills ?? []))
+    setSelectedPresetMcp(dedupeList(mcpServerNames))
+    setSelectedPresetRules(dedupeList(configSnapshot?.rules?.files ?? ["AGENTS.md", "CLAUDE.md"]))
+  }
+
+  const togglePresetOption = (option: { kind: "vector" | "skill" | "mcp" | "rule"; value: string }) => {
+    if (option.kind === "vector") {
+      setSelectedPresetVector((v) => !v)
       return
     }
-    if (key.ctrl && inputChar === "c") {
+    if (option.kind === "skill") {
+      setSelectedPresetSkills((prev) => toggleInList(prev, option.value))
+      return
+    }
+    if (option.kind === "mcp") {
+      setSelectedPresetMcp((prev) => toggleInList(prev, option.value))
+      return
+    }
+    setSelectedPresetRules((prev) => toggleInList(prev, option.value))
+  }
+
+  const savePresetDraft = async () => {
+    if (!projectDir) return
+    const name = agentPresetName.trim()
+    if (!name) return
+    const draft: AgentPreset = {
+      name,
+      modelProvider: state.provider,
+      modelId: state.model,
+      vector: selectedPresetVector,
+      skills: dedupeList(selectedPresetSkills),
+      mcpServers: dedupeList(selectedPresetMcp),
+      rulesFiles: dedupeList(selectedPresetRules),
+      createdAt: Date.now(),
+    }
+    const filtered = agentPresets.filter((p) => p.name !== draft.name)
+    const next = [draft, ...filtered]
+    setAgentPresets(next)
+    setAgentPresetCreateMode(false)
+    setAgentPresetSelected(0)
+    await writeAgentPresets(projectDir, next).catch(() => {})
+  }
+
+  const applyPreset = (preset: AgentPreset | undefined) => {
+    if (!preset || !saveConfig) return
+    const selectedServers = namedMcpServers
+      .filter((item) => preset.mcpServers.includes(item.name))
+      .map((item) => item.server)
+    const updates: Record<string, unknown> = {
+      indexing: {
+        enabled: indexingEnabled,
+        vector: preset.vector,
+      },
+      skills: preset.skills,
+      mcp: { servers: selectedServers },
+      rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["AGENTS.md", "CLAUDE.md"] },
+    }
+    if (preset.modelProvider && preset.modelId) {
+      updates.model = { provider: preset.modelProvider, id: preset.modelId }
+      setState((s) => ({ ...s, provider: preset.modelProvider!, model: preset.modelId! }))
+    }
+    saveConfig(updates)
+    setVectorIndexEnabled(Boolean(preset.vector))
+    setSelectedPresetVector(Boolean(preset.vector))
+    setView("chat")
+  }
+
+  const deletePreset = async () => {
+    if (!projectDir || agentPresets.length === 0) return
+    const current = agentPresets[Math.min(agentPresetSelected, agentPresets.length - 1)]
+    if (!current) return
+    const next = agentPresets.filter((preset) => preset.name !== current.name)
+    setAgentPresets(next)
+    setAgentPresetSelected((idx) => Math.max(0, Math.min(idx, next.length - 1)))
+    await writeAgentPresets(projectDir, next).catch(() => {})
+  }
+
+  function extractInputTextFromEvent(evt: { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean }): string {
+    if (evt.ctrl || evt.meta) return ""
+    let text = typeof evt.sequence === "string" ? evt.sequence : ""
+    if (!text && typeof evt.name === "string") {
+      const lowered = evt.name.toLowerCase()
+      if (lowered === "space") text = " "
+      else if (evt.name.length === 1) text = evt.name
+    }
+    if (!text) return ""
+    text = text.replace(/\u001b\[200~|\u001b\[201~/g, "")
+    text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    if (text.includes("\u001b")) return ""
+    return text.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, "")
+  }
+
+  const toSingleLineInput = (text: string): string =>
+    text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n+/g, " ").replace(/\t/g, " ")
+
+  const appendTextToActiveField = (raw: string): boolean => {
+    const typed = toSingleLineInput(raw)
+    if (!typed) return false
+    if (view === "chat") {
+      setInput((s) => s + typed)
+      return true
+    }
+    if (view === "model") {
+      if (modelViewMode === "picker") {
+        setModelPickerQuery((q) => q + typed)
+        setModelPickerIndex(0)
+        return true
+      }
+      if (modelFocus >= 0 && modelFocus < 5) {
+        const k = ["provider", "id", "apiKey", "baseUrl", "temperature"][modelFocus] as "provider" | "id" | "apiKey" | "baseUrl" | "temperature"
+        setModelForm((f) => ({ ...f, [k]: f[k] + typed }))
+        return true
+      }
+    }
+    if (view === "embeddings" && embeddingsFocus >= 0 && embeddingsFocus < 5) {
+      const k = ["provider", "model", "apiKey", "baseUrl", "dimensions"][embeddingsFocus] as "provider" | "model" | "apiKey" | "baseUrl" | "dimensions"
+      setEmbeddingsForm((f) => ({ ...f, [k]: (f[k] as string) + typed }))
+      return true
+    }
+    if (view === "advanced" && advancedFocus >= 0 && advancedFocus < 8) {
+      const keys = [
+        "mcpServersJson",
+        "skillsText",
+        "claudeMdPath",
+        "rulesFilesText",
+        "agentInstructions",
+        "planInstructions",
+        "askInstructions",
+        "profilesJson",
+      ] as const
+      const k = keys[advancedFocus]!
+      setAdvancedForm((f) => ({ ...f, [k]: f[k] + typed }))
+      return true
+    }
+    if (view === "agentConfigs" && agentPresetCreateMode) {
+      setAgentPresetName((name) => name + typed)
+      return true
+    }
+    return false
+  }
+
+  useEffect(() => {
+    const keyInput = renderer.keyInput as { on?: (ev: string, cb: (evt: { text?: string }) => void) => void; off?: (ev: string, cb: (evt: { text?: string }) => void) => void }
+    if (!keyInput?.on) return
+    const onPaste = (evt: { text?: string }) => {
+      // Chat input is handled by OpenTUI InputRenderable (prevents duplicate paste).
+      if (view === "chat") return
+      const text = typeof evt?.text === "string" ? evt.text : ""
+      if (!text) return
+      appendTextToActiveField(text)
+    }
+    keyInput.on("paste", onPaste)
+    return () => {
+      keyInput.off?.("paste", onPaste)
+    }
+  }, [renderer, view, modelViewMode, modelFocus, embeddingsFocus, advancedFocus, agentPresetCreateMode])
+
+  useKeyboard((evt) => {
+    const name = (evt.name ?? "").toLowerCase()
+    const isEnter = name === "return" || name === "enter"
+    const extracted = extractInputTextFromEvent(evt)
+    const inputText = extracted || (name === "space" ? " " : "")
+    const inputChar = inputText.length === 1 ? inputText : ""
+    const key = {
+      return: isEnter,
+      escape: name === "escape",
+      ctrl: !!evt.ctrl,
+      meta: !!evt.meta,
+      shift: !!evt.shift,
+      upArrow: name === "up",
+      downArrow: name === "down",
+      backspace: name === "backspace",
+      delete: name === "delete",
+      tab: name === "tab",
+      pageUp: name === "pageup",
+      pageDown: name === "pagedown",
+      end: name === "end",
+    }
+    handleKey(inputText, inputChar, key, name)
+  })
+
+  function handleKey(
+    inputText: string,
+    inputChar: string,
+    key: { return: boolean; escape: boolean; ctrl: boolean; meta: boolean; shift: boolean; upArrow: boolean; downArrow: boolean; backspace: boolean; delete: boolean; tab: boolean; pageUp: boolean; pageDown: boolean; end: boolean },
+    evtName: string
+  ) {
+    const ctrlKey = evtName.length === 1 ? evtName : (evtName.startsWith("ctrl+") ? evtName.slice(5) : "")
+    const plainChar = inputChar || (evtName.length === 1 ? evtName : "")
+    const lowerChar = plainChar.toLowerCase()
+    const isEnter = key.return || inputChar === "\r" || inputChar === "\n"
+    if (renderer.hasSelection) {
+      if (key.ctrl && ctrlKey === "c") {
+        const selectedText = renderer.getSelection()?.getSelectedText() ?? ""
+        if (selectedText) renderer.copyToClipboardOSC52(selectedText)
+        renderer.clearSelection()
+        return
+      }
+      if (key.escape) {
+        renderer.clearSelection()
+        return
+      }
+    }
+    // Ctrl+C: при raw mode inputChar пустой (evt.ctrl=true), ловим по evt.name === "c"
+    if (key.ctrl && ctrlKey === "c") {
       if (state.isRunning) {
         onAbort()
         setState((s) => ({ ...s, isRunning: false, liveTools: [], subAgents: [], awaitingApproval: false, pendingApprovalAction: null }))
       } else {
-        exit()
+        onExit?.()
       }
       return
     }
@@ -687,9 +1380,9 @@ export function App({
       state.mode === "plan" &&
       state.planCompleted &&
       !state.isRunning &&
-      (inputChar === "a" || inputChar === "A" || inputChar === "r" || inputChar === "R" || inputChar === "d" || inputChar === "D")
+      (lowerChar === "a" || lowerChar === "r" || lowerChar === "d")
     ) {
-      const action = inputChar.toLowerCase()
+      const action = lowerChar
       if (action === "a") {
         setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
         onModeChange("agent")
@@ -710,34 +1403,34 @@ export function App({
       }
     }
 
-    if (key.ctrl && inputChar === "k") {
+    if (key.ctrl && ctrlKey === "k") {
       setState((s) => ({ ...s, messages: [], todo: "", lastError: null, liveTools: [], subAgents: [] }))
       setChatScrollLines(0)
       return
     }
 
-    if (key.ctrl && inputChar === "s") {
+    if (key.ctrl && ctrlKey === "s") {
       if (!state.isRunning) onCompact()
       return
     }
 
-    if (key.ctrl && inputChar === "u" && view === "chat") {
+    if (key.ctrl && ctrlKey === "u" && view === "chat") {
       setChatScrollLines((v) => v + 12)
       return
     }
-    if (key.ctrl && inputChar === "d" && view === "chat") {
+    if (key.ctrl && ctrlKey === "d" && view === "chat") {
       setChatScrollLines((v) => Math.max(0, v - 12))
       return
     }
-    if (key.ctrl && inputChar === "b" && view === "chat") {
+    if (key.ctrl && ctrlKey === "b" && view === "chat") {
       setChatScrollLines((v) => v + 24)
       return
     }
-    if (key.ctrl && inputChar === "f" && view === "chat") {
+    if (key.ctrl && ctrlKey === "f" && view === "chat") {
       setChatScrollLines((v) => Math.max(0, v - 24))
       return
     }
-    if (view === "chat" && key.ctrl && inputChar === "g") {
+    if (view === "chat" && key.ctrl && ctrlKey === "g") {
       setChatScrollLines(0)
       return
     }
@@ -765,7 +1458,13 @@ export function App({
       return
     }
 
-    if (key.ctrl && inputChar === "p") {
+    if (key.ctrl && ctrlKey === "p" && view === "chat") {
+      setInput("/")
+      setSlashSelected(0)
+      return
+    }
+
+    if (key.ctrl && ctrlKey === "o") {
       if (profileOptions.length <= 1) return
       const nextIdx = (activeProfileIdx + 1) % profileOptions.length
       setActiveProfileIdx(nextIdx)
@@ -776,11 +1475,59 @@ export function App({
 
     // When in config views, handle Tab / Enter / Backspace / type here first (so they don't change mode or send message)
     if (view !== "chat") {
-      if (key.escape) {
+      if (key.escape && view !== "agentConfigs") {
         setView("chat")
         return
       }
       if (view === "model") {
+        if (modelViewMode === "picker") {
+          if (key.upArrow || key.downArrow) {
+            const len = modelPickerOptions.length
+            if (len === 0) return
+            setModelPickerIndex((i) => {
+              const next = key.downArrow ? i + 1 : i - 1
+              return ((next % len) + len) % len
+            })
+            return
+          }
+          if (isEnter && modelPickerSelected && saveConfig && modelCatalog) {
+            const resolved = catalogSelectionToModel(
+              modelPickerSelected.providerId,
+              modelPickerSelected.modelId,
+              modelCatalog
+            )
+            const modelPatch: Record<string, unknown> = {
+              provider: resolved.provider,
+              id: resolved.id,
+              baseUrl: resolved.baseUrl,
+            }
+            if (typeof configSnapshot?.model?.temperature === "number") {
+              modelPatch.temperature = configSnapshot.model.temperature
+            }
+            saveConfig({
+              model: modelPatch,
+            })
+            setView("chat")
+            setState((s) => ({ ...s, provider: resolved.provider, model: resolved.id }))
+            return
+          }
+          if (key.tab) {
+            setModelViewMode("manual")
+            return
+          }
+          if (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f" || inputChar === "\u0008") {
+            setModelPickerQuery((q) => q.slice(0, -1))
+            setModelPickerIndex(0)
+            return
+          }
+          const typed = toSingleLineInput(inputText)
+          if (typed) {
+            setModelPickerQuery((q) => q + typed)
+            setModelPickerIndex(0)
+            return
+          }
+          return
+        }
         if (modelFocus === 0 && (key.upArrow || key.downArrow)) {
           const currentIdx = Math.max(0, MODEL_PROVIDERS.findIndex((p) => p === modelForm.provider))
           const nextIdx = key.downArrow
@@ -789,8 +1536,22 @@ export function App({
           setModelForm((f) => ({ ...f, provider: MODEL_PROVIDERS[nextIdx]! }))
           return
         }
+        if ((key.upArrow || key.downArrow) && modelFocus > 0 && modelFocus < 5) {
+          setModelFocus((f) =>
+            key.downArrow ? Math.min(5, f + 1) : Math.max(0, f - 1)
+          )
+          return
+        }
         if (key.tab) {
-          setModelFocus((f) => (f + 1) % 6)
+          if (key.shift && modelFocus > 0) {
+            setModelFocus((f) => Math.max(0, f - 1))
+            return
+          }
+          if (modelFocus === 0) {
+            setModelViewMode("picker")
+          } else {
+            setModelFocus((f) => (f + 1) % 6)
+          }
           return
         }
         if (isEnter && modelFocus < 5) {
@@ -812,14 +1573,15 @@ export function App({
           setState((s) => ({ ...s, provider: modelForm.provider, model: modelForm.id }))
           return
         }
-        if (modelFocus > 0 && modelFocus < 5 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f" || inputChar === "\u0008")) {
+        if (modelFocus >= 0 && modelFocus < 5 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f" || inputChar === "\u0008")) {
           const k = ["provider", "id", "apiKey", "baseUrl", "temperature"][modelFocus] as "provider" | "id" | "apiKey" | "baseUrl" | "temperature"
           setModelForm((f) => ({ ...f, [k]: f[k].slice(0, -1) }))
           return
         }
-        if (modelFocus > 0 && modelFocus < 5 && inputChar && !key.ctrl && !key.meta) {
+        const typedModel = toSingleLineInput(inputText)
+        if (modelFocus >= 0 && modelFocus < 5 && typedModel) {
           const k = ["provider", "id", "apiKey", "baseUrl", "temperature"][modelFocus] as "provider" | "id" | "apiKey" | "baseUrl" | "temperature"
-          setModelForm((f) => ({ ...f, [k]: f[k] + inputChar }))
+          setModelForm((f) => ({ ...f, [k]: f[k] + typedModel }))
           return
         }
         return
@@ -833,7 +1595,17 @@ export function App({
           setEmbeddingsForm((f) => ({ ...f, provider: EMBEDDING_PROVIDERS[nextIdx]! }))
           return
         }
+        if ((key.upArrow || key.downArrow) && embeddingsFocus > 0 && embeddingsFocus < 5) {
+          setEmbeddingsFocus((f) =>
+            key.downArrow ? Math.min(5, f + 1) : Math.max(0, f - 1)
+          )
+          return
+        }
         if (key.tab) {
+          if (key.shift && embeddingsFocus > 0) {
+            setEmbeddingsFocus((f) => Math.max(0, f - 1))
+            return
+          }
           setEmbeddingsFocus((f) => (f + 1) % 6)
           return
         }
@@ -855,14 +1627,15 @@ export function App({
           setView("chat")
           return
         }
-        if (embeddingsFocus > 0 && embeddingsFocus < 5 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f" || inputChar === "\u0008")) {
+        if (embeddingsFocus >= 0 && embeddingsFocus < 5 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f" || inputChar === "\u0008")) {
           const k = ["provider", "model", "apiKey", "baseUrl", "dimensions"][embeddingsFocus] as "provider" | "model" | "apiKey" | "baseUrl" | "dimensions"
           setEmbeddingsForm((f) => ({ ...f, [k]: (f[k] as string).slice(0, -1) }))
           return
         }
-        if (embeddingsFocus > 0 && embeddingsFocus < 5 && inputChar && !key.ctrl && !key.meta) {
+        const typedEmbeddings = toSingleLineInput(inputText)
+        if (embeddingsFocus >= 0 && embeddingsFocus < 5 && typedEmbeddings) {
           const k = ["provider", "model", "apiKey", "baseUrl", "dimensions"][embeddingsFocus] as "provider" | "model" | "apiKey" | "baseUrl" | "dimensions"
-          setEmbeddingsForm((f) => ({ ...f, [k]: (f[k] as string) + inputChar }))
+          setEmbeddingsForm((f) => ({ ...f, [k]: (f[k] as string) + typedEmbeddings }))
           return
         }
         return
@@ -877,15 +1650,30 @@ export function App({
           return
         }
         if (inputChar === "3") {
-          setView("index")
+          const nextVectorState = !vectorIndexEnabled
+          setVectorIndexEnabled(nextVectorState)
+          saveConfig?.({
+            indexing: {
+              enabled: indexingEnabled,
+              vector: nextVectorState,
+            },
+          })
           return
         }
         if (inputChar === "4") {
-          setView("advanced")
+          setView("index")
           return
         }
         if (inputChar === "5") {
+          setView("advanced")
+          return
+        }
+        if (inputChar === "6") {
           setView("help")
+          return
+        }
+        if (inputChar === "7") {
+          setView("agentConfigs")
           return
         }
         if (isEnter) {
@@ -894,16 +1682,111 @@ export function App({
         }
         return
       }
+      if (view === "agentConfigs") {
+        if (key.escape) {
+          if (agentPresetCreateMode) {
+            setAgentPresetCreateMode(false)
+          } else {
+            setView("chat")
+          }
+          return
+        }
+        if (agentPresetCreateMode) {
+          if (key.upArrow) {
+            setAgentPresetOptionIndex((i) => Math.max(0, i - 1))
+            return
+          }
+          if (key.downArrow) {
+            setAgentPresetOptionIndex((i) => Math.min(Math.max(0, agentPresetOptions.length - 1), i + 1))
+            return
+          }
+          if (inputChar === " " || evtName === "space") {
+            const option = agentPresetOptions[Math.min(agentPresetOptionIndex, Math.max(0, agentPresetOptions.length - 1))]
+            if (option) togglePresetOption(option)
+            return
+          }
+          if (isEnter) {
+            savePresetDraft().catch(() => {})
+            return
+          }
+          if (key.backspace || key.delete) {
+            setAgentPresetName((name) => name.slice(0, -1))
+            return
+          }
+          const typedPresetName = toSingleLineInput(inputText)
+          if (typedPresetName) {
+            setAgentPresetName((name) => name + typedPresetName)
+            return
+          }
+          return
+        }
+
+        if (key.upArrow) {
+          setAgentPresetSelected((i) => (i <= 0 ? Math.max(0, agentPresets.length - 1) : i - 1))
+          return
+        }
+        if (key.downArrow) {
+          setAgentPresetSelected((i) => (i >= agentPresets.length - 1 ? 0 : i + 1))
+          return
+        }
+        if (isEnter || lowerChar === "a") {
+          applyPreset(selectedPreset)
+          return
+        }
+        if (lowerChar === "c") {
+          startPresetCreate()
+          return
+        }
+        if (lowerChar === "d") {
+          deletePreset().catch(() => {})
+          return
+        }
+        return
+      }
+      if (view === "sessions") {
+        if (key.upArrow) {
+          setSessionListSelected((i) => (i <= 0 ? Math.max(0, sessionList.length - 1) : i - 1))
+          return
+        }
+        if (key.downArrow) {
+          setSessionListSelected((i) => (i >= sessionList.length - 1 ? 0 : i + 1))
+          return
+        }
+        if (isEnter && onSwitchSession && sessionList[sessionListSelected]) {
+          const id = sessionList[sessionListSelected]!.id
+          onSwitchSession(id).then(() => setView("chat")).catch(() => {})
+          return
+        }
+        if (key.escape) {
+          setView("chat")
+          return
+        }
+        return
+      }
       if (view === "index") {
         if (isEnter && state.indexStatus?.state !== "indexing" && onReindex) {
           onReindex()
-        } else if ((inputChar === "s" || inputChar === "S") && state.indexStatus?.state === "indexing" && onIndexStop) {
+        } else if (lowerChar === "s" && state.indexStatus?.state === "indexing" && onIndexStop) {
           onIndexStop()
+        } else if (lowerChar === "d" && state.indexStatus?.state !== "indexing" && onIndexDelete) {
+          Promise.resolve(onIndexDelete()).then(() => {}).catch(() => {})
         }
         return
       }
       if (view === "advanced") {
+        if (key.upArrow && advancedFocus > 0) {
+          setAdvancedFocus((f) => Math.max(0, f - 1))
+          return
+        }
+        if (key.downArrow && advancedFocus < 8) {
+          setAdvancedFocus((f) => Math.min(8, f + 1))
+          return
+        }
         if (key.tab) {
+          if (key.shift && advancedFocus > 0) {
+            setAdvancedFocus((f) => Math.max(0, f - 1))
+            return
+          }
           setAdvancedFocus((f) => (f + 1) % 9)
           return
         }
@@ -955,9 +1838,9 @@ export function App({
           setAdvancedForm((f) => ({ ...f, [k]: f[k] + "\n" }))
           return
         }
-        if (advancedFocus < 8 && inputChar && !key.ctrl && !key.meta) {
+        if (advancedFocus < 8 && inputText) {
           const k = keys[advancedFocus]!
-          setAdvancedForm((f) => ({ ...f, [k]: f[k] + inputChar }))
+          setAdvancedForm((f) => ({ ...f, [k]: f[k] + inputText }))
           return
         }
         return
@@ -972,7 +1855,7 @@ export function App({
       return
     }
 
-    // Slash popup: Up/Down to select, Enter to apply, Escape to close
+    // Slash popup: Up/Down to select, Esc to close (Enter via InputRenderable submit).
     if (slashOpen) {
       if (key.upArrow) {
         setSlashSelected((i) => (i <= 0 ? filteredCommands.length - 1 : i - 1))
@@ -980,10 +1863,6 @@ export function App({
       }
       if (key.downArrow) {
         setSlashSelected((i) => (i >= filteredCommands.length - 1 ? 0 : i + 1))
-        return
-      }
-      if (isEnter && selectedCmd) {
-        applySlashCommand(selectedCmd)
         return
       }
       if (key.escape) {
@@ -1023,107 +1902,52 @@ export function App({
       return
     }
 
-    if (isEnter && !slashOpen) {
-      if (state.awaitingApproval && onResolveApproval) {
-        const raw = input.trim().toLowerCase()
-        const isExecute = state.pendingApprovalAction?.type === "execute"
-        const addToAllowed = isExecute && (raw === "e" || raw === "add")
-        const allowedKeys = ["y", "yes", "n", "no", "a", "always", "s", "skip"]
-        if (allowedKeys.includes(raw) || addToAllowed) {
-          const approved = ["y", "yes", "a", "always", "s", "skip"].includes(raw) || addToAllowed
-          const alwaysApprove = raw === "a" || raw === "always"
-          const skipAll = raw === "s" || raw === "skip"
-          const addToAllowedCommand = addToAllowed ? state.pendingApprovalAction?.content : undefined
-          setInput("")
-          setChatScrollLines(0)
-          setState((s) => ({ ...s, awaitingApproval: false, pendingApprovalAction: null }))
-          onResolveApproval({
-            approved,
-            alwaysApprove,
-            skipAll,
-            addToAllowedCommand: typeof addToAllowedCommand === "string" ? addToAllowedCommand : undefined,
-          })
-          return
-        }
-      }
-      if (input.trim() && !state.isRunning) {
-        const now = Date.now()
-        if (now - lastSubmitRef.current < 400) return
-        lastSubmitRef.current = now
-        const content = input.trim()
-        // Dedupe: avoid adding the same user message twice (e.g. double Enter or echo)
-        const lastMsg = state.messages[state.messages.length - 1]
-        if (lastMsg?.role === "user" && typeof lastMsg.content === "string" && lastMsg.content.trim() === content) {
-          setInput("")
-          return
-        }
-        inputHistory.current.push(content)
-        if (inputHistory.current.length > 50) inputHistory.current.shift()
-        setHistoryIdx(-1)
-        setInput("")
-        setState((s) => ({
-          ...s,
-          isRunning: true,
-          lastError: null,
-          liveTools: [],
-          planCompleted: false,
-          messages: [
-            ...s.messages,
-            {
-              id: `u_${Date.now()}`,
-              ts: Date.now(),
-              role: "user",
-              content,
-            },
-          ],
-        }))
-        setChatScrollLines(0)
-        onMessage(content, state.mode)
-      }
-      return
-    }
-
-    if (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f" || inputChar === "\u0008") {
-      setInput((s) => s.slice(0, -1))
-      return
-    }
-
-    if (inputChar && !key.ctrl && !key.meta) {
-      setInput((s) => s + inputChar)
-    }
-  })
+    if (view === "chat") return
+    appendTextToActiveField(inputText)
+  }
 
   const modeColor = MODE_COLORS[state.mode]
+  const isHomeView = view === "chat" && state.messages.length === 0
+  const shellW = Math.max(48, Math.min(Math.max(48, cols - 2), Math.max(92, Math.floor(cols * 0.82))))
+  const shellPad = Math.max(0, Math.floor((cols - shellW) / 2))
+  const chatViewportRows = Math.max(8, rows - 20)
+  const topLine = fit(
+    `${state.provider}/${state.model} · Vector index: ${noIndex ? "off" : state.indexReady ? "ready" : "building"} · Context: ${formatTokens(state.contextUsedTokens)}/${formatTokens(state.contextLimitTokens)} (${state.contextPercent}%)${projectDir ? ` · ${projectDir}` : ""}`,
+    Math.max(20, cols - 4),
+  )
 
   return (
-    <Box flexDirection="column" height={rows}>
-      {/* ── Logo ─────────────────────────────────────────────────────────────── */}
-      <Logo cols={cols} />
+    <box flexDirection="column" style={{ height: rows, width: cols }}>
+      {view === "chat" && !isHomeView && (
+        <box flexShrink={0} paddingTop={1} paddingLeft={2} paddingRight={2}>
+          <text fg={state.indexReady ? THEME.success : THEME.warning}>{topLine}</text>
+        </box>
+      )}
 
-      {/* ── Status bar (model, index, project, hint) ─────────────────────────── */}
-      <WelcomeBar
-        provider={state.provider}
-        model={state.model}
-        projectDir={projectDir}
-        noIndex={noIndex}
-        indexReady={state.indexReady}
-        cols={cols}
-        contextUsedTokens={state.contextUsedTokens}
-        contextLimitTokens={state.contextLimitTokens}
-        contextPercent={state.contextPercent}
-      />
-
-      {/* ── Chat area or Config view ───────────────────────────────────────── */}
       {view !== "chat" ? (
-        <Box flexDirection="column" flexGrow={1} overflowY="hidden" paddingX={1}>
+        <box flexDirection="column" flexGrow={1} minHeight={0} flexShrink={1} style={{ overflowY: "hidden", paddingLeft: shellPad, paddingRight: shellPad }}>
           {view === "settings" && (
-            <SettingsHubView />
+            <SettingsHubView
+              indexingEnabled={!noIndex && indexingEnabled}
+              vectorIndexEnabled={vectorIndexEnabled}
+            />
           )}
           {view === "model" && (
-            <ModelConfigView form={modelForm} focus={modelFocus} cols={cols} />
+            modelViewMode === "picker" ? (
+              <ModelPickerView
+                catalog={modelCatalog}
+                loading={modelCatalogLoading}
+                options={modelPickerOptions}
+                selectedIndex={modelPickerIndex}
+                query={modelPickerQuery}
+                cols={shellW}
+              />
+            ) : (
+              <ModelConfigView form={modelForm} focus={modelFocus} cols={shellW} />
+            )
           )}
           {view === "embeddings" && (
-            <EmbeddingsConfigView form={embeddingsForm} focus={embeddingsFocus} cols={cols} />
+            <EmbeddingsConfigView form={embeddingsForm} focus={embeddingsFocus} cols={shellW} />
           )}
           {view === "advanced" && (
             <AdvancedConfigView form={advancedForm} focus={advancedFocus} />
@@ -1133,7 +1957,18 @@ export function App({
               indexStatus={state.indexStatus}
               onReindex={onReindex}
               onIndexStop={onIndexStop}
+              onIndexDelete={onIndexDelete}
               noIndex={noIndex ?? false}
+              cols={shellW}
+            />
+          )}
+          {view === "sessions" && (
+            <SessionsListView
+              sessionList={sessionList}
+              sessionListLoading={sessionListLoading}
+              sessionListSelected={sessionListSelected}
+              currentSessionId={sessionId}
+              cols={shellW}
             />
           )}
           {view === "help" && (
@@ -1146,97 +1981,243 @@ export function App({
               noIndex={noIndex}
               indexReady={state.indexReady}
               configSnapshot={configSnapshot}
-              cols={cols}
+              cols={shellW}
             />
           )}
-        </Box>
-      ) : (
-      <ChatViewport state={state} cols={cols} rows={rows} scrollLines={chatScrollLines} />
-      )}
-
-
-      {state.todo && <TodoBar todo={state.todo} cols={cols} />}
-
-      {view === "chat" && state.mode === "plan" && state.planCompleted && !state.isRunning && (
-        <PlanActionsBar cols={cols} />
-      )}
-
-      {/* ── Slash command popup (above input) ────────────────────────────────── */}
-      {slashOpen && filteredCommands.length > 0 && (
-        <SlashPopup
-          commands={filteredCommands}
-          selectedIndex={slashSelected}
-          cols={cols}
-        />
-      )}
-
-      {/* ── Input bar (hidden when editing /model, /embeddings, etc.) ───────── */}
-      {view === "chat" ? (
-        <>
-          {state.awaitingApproval && state.pendingApprovalAction && (
-            <ApprovalBanner action={state.pendingApprovalAction} cols={cols} />
+          {view === "agentConfigs" && (
+            <AgentConfigView
+              presets={agentPresets}
+              selectedIndex={agentPresetSelected}
+              loading={agentPresetLoading}
+              createMode={agentPresetCreateMode}
+              presetName={agentPresetName}
+              options={agentPresetOptions}
+              optionIndex={agentPresetOptionIndex}
+              selectedVector={selectedPresetVector}
+              selectedSkills={selectedPresetSkills}
+              selectedMcp={selectedPresetMcp}
+              selectedRules={selectedPresetRules}
+            />
           )}
-          <InputBar
-            input={input}
-            cols={cols}
-            mode={state.mode}
-            modeColor={modeColor}
-            isRunning={state.isRunning}
-            awaitingApproval={state.awaitingApproval}
-            pendingApprovalAction={state.pendingApprovalAction}
-            indexReady={state.indexReady}
-          />
-        </>
+        </box>
+      ) : isHomeView ? (
+        <HomeLanding
+          cols={cols}
+          rows={rows}
+          shellW={shellW}
+          shellPad={shellPad}
+          input={input}
+          mode={state.mode}
+          modeColor={modeColor}
+          provider={state.provider}
+          model={state.model}
+          slashOpen={slashOpen}
+          filteredCommands={filteredCommands}
+          slashSelected={slashSelected}
+          isRunning={state.isRunning}
+          awaitingApproval={state.awaitingApproval}
+          pendingApprovalAction={state.pendingApprovalAction}
+          indexReady={state.indexReady}
+          onInputChange={(value) => setInput(value)}
+          onSubmit={submitChatInput}
+        />
       ) : (
-        <Box paddingX={1} paddingY={0}>
-          <Text color="cyan">{view === "settings" || view === "help" || view === "index" ? "Use shortcuts shown above." : "Edit the form above."}</Text>
-          <Text color="gray">
-            {view === "settings"
-              ? "1:model 2:emb 3:index 4:adv 5:help Esc-back"
-              : view === "help"
-                ? "Esc — back"
-                : view === "index"
-                  ? "Enter — reindex, S — stop indexing, Esc — back"
-                  : "Tab — next field, Enter — newline/save, Esc — back"}
-          </Text>
-        </Box>
+        <box flexDirection="column" flexGrow={1} minHeight={0}>
+          <ChatViewport
+            state={state}
+            cols={cols}
+            viewportRows={chatViewportRows}
+            scrollLines={chatScrollLines}
+          />
+          {view === "chat" && state.mode === "plan" && state.planCompleted && !state.isRunning && (
+            <box flexShrink={0}>
+              <PlanActionsBar cols={cols} />
+            </box>
+          )}
+          <box flexShrink={0} paddingLeft={shellPad} paddingRight={shellPad}>
+            {slashOpen && filteredCommands.length > 0 && (
+            <SlashPopup
+              commands={filteredCommands}
+              selectedIndex={slashSelected}
+              cols={shellW}
+              rows={rows}
+            />
+            )}
+            {state.awaitingApproval && state.pendingApprovalAction && (
+              <ApprovalBanner action={state.pendingApprovalAction} cols={shellW} />
+            )}
+            <InputBar
+              input={input}
+              cols={shellW}
+              mode={state.mode}
+              modeColor={modeColor}
+              isRunning={state.isRunning}
+              awaitingApproval={state.awaitingApproval}
+              pendingApprovalAction={state.pendingApprovalAction}
+              indexReady={state.indexReady}
+              provider={state.provider}
+              model={state.model}
+              onInputChange={(value) => setInput(value)}
+              onSubmit={submitChatInput}
+            />
+          </box>
+        </box>
       )}
 
-      {/* ── Footer / Help ───────────────────────────────────────────────────── */}
-      <Footer
-        isRunning={state.isRunning}
-        provider={state.provider}
-        model={state.model}
-        sessionId={sessionId}
-        activeProfile={profileOptions[activeProfileIdx] ?? "default"}
-        cols={cols}
-        contextUsedTokens={state.contextUsedTokens}
-        contextLimitTokens={state.contextLimitTokens}
-      />
-    </Box>
+      {view !== "chat" && (
+        <box flexShrink={0} paddingLeft={shellPad} paddingRight={shellPad}>
+          <text fg={THEME.primary}>{view === "settings" || view === "help" || view === "index" || view === "sessions" || view === "agentConfigs" ? "Use shortcuts shown above." : "Edit the form above."}</text>
+          <text fg={THEME.textMuted}>
+            {view === "model"
+              ? (modelViewMode === "picker"
+                ? "↑↓ select  Enter apply  Tab manual form  Esc back"
+                : "Tab model list  ↑↓ provider  Enter save  Esc back")
+              : view === "settings"
+              ? "1:model 2:emb 3:vector 4:index 5:adv 6:help 7:agent-configs Esc-back"
+              : view === "help"
+                ? "Esc back"
+                : view === "index"
+                  ? "Enter Sync  D Delete  S Stop  Esc back"
+                  : view === "sessions"
+                  ? "↑↓ select  Enter switch  Esc back"
+                  : view === "agentConfigs"
+                  ? (agentPresetCreateMode
+                    ? "Type name  ↑↓ option  Space toggle  Enter save  Esc cancel"
+                    : "↑↓ select  Enter/A apply  C create  D delete  Esc back")
+                  : "Tab next field, Enter newline/save, Esc back"}
+          </text>
+        </box>
+      )}
+
+      <box flexShrink={0}>
+        <Footer
+          isRunning={state.isRunning}
+          provider={state.provider}
+          model={state.model}
+          sessionId={sessionId}
+          sessionTitle={sessionTitle}
+          mcpServersCount={mcpServersCount}
+          activeProfile={profileOptions[activeProfileIdx] ?? "default"}
+          cols={cols}
+          contextUsedTokens={state.contextUsedTokens}
+          contextLimitTokens={state.contextLimitTokens}
+          noIndex={noIndex}
+          vectorIndexEnabled={vectorIndexEnabled}
+          projectDir={projectDir}
+          compact={isHomeView}
+        />
+      </box>
+    </box>
   )
 }
 
 // ─── Config views (Model, Embeddings, Settings, Index) ────────────────────────
 
-function SettingsHubView() {
+function SettingsHubView({
+  indexingEnabled,
+  vectorIndexEnabled,
+}: {
+  indexingEnabled: boolean
+  vectorIndexEnabled: boolean
+}) {
+  const vectorState = !indexingEnabled ? "disabled" : vectorIndexEnabled ? "enabled" : "disabled"
   const items = [
     "1) Model & LLM",
     "2) Embeddings",
-    "3) Index & Vector DB",
-    "4) Advanced (MCP, skills, rules, mode prompts, profiles)",
-    "5) Help",
+    `3) Vector index: ${vectorState} (toggle)`,
+    "4) Index sync & Vector DB",
+    "5) Advanced (MCP, skills, rules, mode prompts, profiles)",
+    "6) Help",
+    "7) Agent configs (/agent-config): select/create presets",
   ]
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold> Settings Hub</Text>
-      <Text color="gray"> Open section by number. Enter opens Model. Esc — back.</Text>
+    <box flexDirection="column" borderStyle="single" borderColor={THEME.primary} paddingLeft={1} paddingRight={1}>
+      <text fg={THEME.primary} bold> Settings Hub</text>
+      <text fg={THEME.muted}> Open section by number. Enter opens Model. Esc — back.</text>
       {items.map((item) => (
-        <Box key={item}>
-          <Text color="white"> {item}</Text>
-        </Box>
+        <box key={item}>
+          <text fg="white"> {item}</text>
+        </box>
       ))}
-    </Box>
+    </box>
+  )
+}
+
+function ModelPickerView({
+  catalog,
+  loading,
+  options,
+  selectedIndex,
+  query,
+  cols,
+}: {
+  catalog: ModelsCatalog | null
+  loading: boolean
+  options: Array<{ providerId: string; modelId: string; name: string; free: boolean; category: string }>
+  selectedIndex: number
+  query: string
+  cols: number
+}) {
+  const maxName = Math.max(12, cols - 28)
+  const rowWidth = Math.max(34, cols - 6)
+  const catWidth = Math.min(18, Math.max(10, Math.floor(rowWidth * 0.28)))
+  const nameWidth = Math.max(12, rowWidth - 5 - catWidth)
+  const windowSize = 12
+  const start = Math.max(0, Math.min(Math.max(0, options.length - windowSize), selectedIndex - Math.floor(windowSize / 2)))
+  const visible = options.slice(start, start + windowSize)
+  return (
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Select model</text>
+      <text fg="gray"> From models.dev - free models at top. Tab - manual provider/model.</text>
+      {loading && (
+        <box><text fg="yellow">Loading catalog...</text></box>
+      )}
+      {!loading && !catalog && (
+        <box><text fg="yellow">Could not load catalog. Use Tab for manual entry.</text></box>
+      )}
+      {!loading && catalog && (
+        <>
+          {query ? (
+            <box paddingTop={1}><text fg="gray">Search: </text><text fg="white">{query}</text></box>
+          ) : null}
+          <box flexDirection="column" paddingTop={1}>
+            {options.length === 0 ? (
+              <text fg="gray">No models match. Clear search or use Tab for manual.</text>
+            ) : (
+              visible.map((opt, i) => {
+                const absolute = start + i
+                const selected = absolute === selectedIndex
+                const hasFreeLabel = /\(free\)/i.test(opt.name)
+                const displayName = opt.free && !hasFreeLabel ? `${opt.name} (free)` : opt.name
+                const name = padToWidth(fit(displayName, Math.min(nameWidth, maxName)), nameWidth)
+                const cat = padToWidth(fit(opt.category, catWidth), catWidth)
+                const row = padToWidth(fit(`${selected ? "> " : "  "}${name} - ${cat}`, rowWidth), rowWidth)
+                return (
+                  <box key={`${opt.providerId}/${opt.modelId}`} width={rowWidth}>
+                    <text fg={selected ? "white" : "gray"}>{row}</text>
+                  </box>
+                )
+              })
+            )}
+          </box>
+          {options.length > windowSize && (
+            <box paddingTop={1}>
+              <text fg="gray">
+                {padToWidth(fit(
+                  `Showing ${start + 1}-${Math.min(start + windowSize, options.length)} of ${options.length}. Use up/down to scroll.`,
+                  rowWidth
+                ), rowWidth)}
+              </text>
+            </box>
+          )}
+          {options.length > 30 && (
+            <box paddingTop={1}>
+              <text fg="gray">{padToWidth(fit(`... and ${options.length - 30} more. Type to filter.`, rowWidth), rowWidth)}</text>
+            </box>
+          )}
+        </>
+      )}
+    </box>
   )
 }
 
@@ -1253,33 +2234,33 @@ function ModelConfigView({
   const keys = ["provider", "id", "apiKey", "baseUrl", "temperature"] as const
   const valueWidth = Math.max(18, cols - 34)
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold> Model — LLM provider & model</Text>
-      <Text color="gray"> Tab — next field, Enter — save, Esc — back. Provider via ↑↓.</Text>
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Model — LLM provider & model</text>
+      <text fg="gray"> Tab — next field, Enter — save, Esc — back. Provider via ↑↓.</text>
       {labels.map((label, i) => (
-        <Box key={label}>
-          <Text color={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </Text>
-          <Text color="white">
+        <box key={label}>
+          <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </text>
+          <text fg="white">
             {fit(
               keys[i] === "apiKey"
                 ? maskSecret((form[keys[i]] as string) || "")
                 : ((form[keys[i]] as string) || ""),
               valueWidth
             )}
-          </Text>
-          {focus === i && <Text color="cyan">│</Text>}
-        </Box>
+          </text>
+          {focus === i && <text fg="cyan">│</text>}
+        </box>
       ))}
       {focus === 0 && (
-        <Box paddingLeft={2}>
-          <Text color="gray"> Provider: {form.provider} (↑↓ to change)</Text>
-        </Box>
+        <box paddingLeft={2}>
+          <text fg="gray"> Provider: {form.provider} (↑↓ to change)</text>
+        </box>
       )}
-      <Box>
-        <Text color={focus === 5 ? "cyan" : "gray"}>{focus === 5 ? "▸ " : "  "}</Text>
-        <Text color={focus === 5 ? "green" : "gray"}>[Save] — press Enter</Text>
-      </Box>
-    </Box>
+      <box>
+        <text fg={focus === 5 ? "cyan" : "gray"}>{focus === 5 ? "▸ " : "  "}</text>
+        <text fg={focus === 5 ? "green" : "gray"}>[Save] — press Enter</text>
+      </box>
+    </box>
   )
 }
 
@@ -1296,33 +2277,33 @@ function EmbeddingsConfigView({
   const keys = ["provider", "model", "apiKey", "baseUrl", "dimensions"] as const
   const valueWidth = Math.max(18, cols - 40)
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold> Embeddings — model for vector search</Text>
-      <Text color="gray"> Tab — next field, Enter — save, Esc — back. Provider via ↑↓.</Text>
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Embeddings — model for vector search</text>
+      <text fg="gray"> Tab — next field, Enter — save, Esc — back. Provider via ↑↓.</text>
       {labels.map((label, i) => (
-        <Box key={label}>
-          <Text color={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </Text>
-          <Text color="white">
+        <box key={label}>
+          <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </text>
+          <text fg="white">
             {fit(
               keys[i] === "apiKey"
                 ? maskSecret((form[keys[i]] as string) || "")
                 : ((form[keys[i]] as string) || ""),
               valueWidth
             )}
-          </Text>
-          {focus === i && <Text color="cyan">│</Text>}
-        </Box>
+          </text>
+          {focus === i && <text fg="cyan">│</text>}
+        </box>
       ))}
       {focus === 0 && (
-        <Box paddingLeft={2}>
-          <Text color="gray"> Provider: {form.provider} (↑↓ to change)</Text>
-        </Box>
+        <box paddingLeft={2}>
+          <text fg="gray"> Provider: {form.provider} (↑↓ to change)</text>
+        </box>
       )}
-      <Box>
-        <Text color={focus === 5 ? "cyan" : "gray"}>{focus === 5 ? "▸ " : "  "}</Text>
-        <Text color={focus === 5 ? "green" : "gray"}>[Save] — press Enter</Text>
-      </Box>
-    </Box>
+      <box>
+        <text fg={focus === 5 ? "cyan" : "gray"}>{focus === 5 ? "▸ " : "  "}</text>
+        <text fg={focus === 5 ? "green" : "gray"}>[Save] — press Enter</text>
+      </box>
+    </box>
   )
 }
 
@@ -1363,25 +2344,67 @@ function AdvancedConfigView({
     "profilesJson",
   ] as const
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold> Advanced — MCP, skills, rules, mode prompts, profiles</Text>
-      <Text color="gray"> Tab — next field, Enter in field adds newline, Enter on [Save] persists.</Text>
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Advanced — MCP, skills, rules, mode prompts, profiles</text>
+      <text fg="gray"> Tab — next field, Enter in field adds newline, Enter on [Save] persists.</text>
       {labels.map((label, i) => (
-        <Box key={label} flexDirection="column">
-          <Box>
-            <Text color={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </Text>
-          </Box>
-          <Box paddingLeft={2}>
-            <Text color="white">{(form[keys[i]] as string).slice(0, 1600)}</Text>
-            {focus === i && <Text color="cyan">│</Text>}
-          </Box>
-        </Box>
+        <box key={label} flexDirection="column">
+          <box>
+            <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </text>
+          </box>
+          <box paddingLeft={2}>
+            <text fg="white">{(form[keys[i]] as string).slice(0, 1600)}</text>
+            {focus === i && <text fg="cyan">│</text>}
+          </box>
+        </box>
       ))}
-      <Box>
-        <Text color={focus === 8 ? "cyan" : "gray"}>{focus === 8 ? "▸ " : "  "}</Text>
-        <Text color={focus === 8 ? "green" : "gray"}>[Save] — press Enter</Text>
-      </Box>
-    </Box>
+      <box>
+        <text fg={focus === 8 ? "cyan" : "gray"}>{focus === 8 ? "▸ " : "  "}</text>
+        <text fg={focus === 8 ? "green" : "gray"}>[Save] — press Enter</text>
+      </box>
+    </box>
+  )
+}
+
+function SessionsListView({
+  sessionList,
+  sessionListLoading,
+  sessionListSelected,
+  currentSessionId,
+  cols,
+}: {
+  sessionList: Array<{ id: string; ts?: number; title?: string; messageCount: number }>
+  sessionListLoading: boolean
+  sessionListSelected: number
+  currentSessionId?: string
+  cols: number
+}) {
+  const width = Math.max(40, cols - 4)
+  return (
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Sessions</text>
+      <text fg="gray"> ↑↓ select  Enter — switch  Esc — back</text>
+      {sessionListLoading ? (
+        <box><text fg="yellow"> Loading…</text></box>
+      ) : sessionList.length === 0 ? (
+        <box><text fg="gray"> No sessions</text></box>
+      ) : (
+        <box flexDirection="column" marginTop={1}>
+          {sessionList.map((s, i) => {
+            const title = (s.title || s.id).slice(0, width - 12)
+            const isCurrent = s.id === currentSessionId
+            const isSelected = i === sessionListSelected
+            return (
+              <box key={s.id}>
+                <text fg={isCurrent ? "green" : isSelected ? "cyan" : "white"}>
+                  {isSelected ? "▸ " : "  "}{title}{isCurrent ? " (current)" : ""} — {s.messageCount} msgs
+                </text>
+              </box>
+            )
+          })}
+        </box>
+      )}
+    </box>
   )
 }
 
@@ -1389,126 +2412,319 @@ function IndexManageView({
   indexStatus,
   onReindex,
   onIndexStop,
+  onIndexDelete,
   noIndex,
+  cols,
 }: {
   indexStatus: import("@nexuscode/core").IndexStatus | null
   onReindex?: () => void
   onIndexStop?: () => void
+  onIndexDelete?: () => void | Promise<void>
   noIndex: boolean
+  cols: number
 }) {
   if (noIndex) {
     return (
-      <Box flexDirection="column" borderStyle="single" borderColor="yellow" paddingX={1}>
-        <Text color="yellow" bold> Index — disabled</Text>
-        <Text color="gray"> Indexing is off (--no-index or indexing.enabled: false).</Text>
-      </Box>
+      <box flexDirection="column" borderStyle="single" borderColor="yellow" paddingLeft={1} paddingRight={1}>
+        <text fg="yellow" bold> Vector index — disabled</text>
+        <text fg="gray"> Indexing is off (--no-index or indexing.enabled: false).</text>
+      </box>
     )
   }
   const st = indexStatus ?? { state: "idle" as const }
+  const isIndexing = st.state === "indexing"
+  const total = typeof st.total === "number" && st.total > 0 ? st.total : 1
+  const progress = typeof st.progress === "number" ? st.progress : 0
+  const filePct = Math.min(100, Math.round((progress / total) * 100))
+  const chunksTotal = typeof st.chunksTotal === "number" && st.chunksTotal > 0 ? st.chunksTotal : 1
+  const chunksProcessed = typeof st.chunksProcessed === "number" ? st.chunksProcessed : 0
+  const chunkPct = Math.min(100, Math.round((chunksProcessed / chunksTotal) * 100))
+  const barWidth = Math.max(10, Math.min(40, cols - 20))
+  const filled = Math.round((chunkPct / 100) * barWidth)
+  const barFilled = "█".repeat(filled)
+  const barEmpty = "░".repeat(barWidth - filled)
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold> Index — status & control</Text>
-      <Text color="gray"> Enter — reindex, Esc — back</Text>
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Index & embeddings — status & control</text>
+      <text fg="gray"> Enter — Sync (reindex)  D — Delete index  S — Stop  Esc — back</text>
       {st.state === "idle" && (
-        <Box><Text color="gray"> Status: </Text><Text color="gray">idle</Text></Box>
+        <box><text fg="gray"> Status: </text><text fg="gray">idle</text></box>
       )}
-      {st.state === "indexing" && (
-        <Box flexDirection="column">
-          <Text color="yellow"> Status: indexing</Text>
-          <Text color="white"> Progress: {st.progress} / {st.total} files</Text>
-          {typeof st.chunksProcessed === "number" && typeof st.chunksTotal === "number" && (
-            <Text color="gray"> Chunks: {st.chunksProcessed} / {st.chunksTotal}</Text>
-          )}
-          <Text color="gray"> S — stop indexing</Text>
-        </Box>
+      {isIndexing && (
+        <box flexDirection="column" marginTop={1}>
+          <text fg="yellow"> Status: indexing</text>
+          <text fg="white"> Files: {progress} / {total} — Chunks: {chunksProcessed} / {chunksTotal}</text>
+          <box flexDirection="row">
+            <text fg="green">{barFilled}</text>
+            <text fg="gray">{barEmpty}</text>
+            <text fg="white"> {chunkPct}%</text>
+          </box>
+          <text fg="gray"> S — stop indexing</text>
+        </box>
       )}
       {st.state === "ready" && (
-        <Box flexDirection="column">
-          <Text color="green"> Status: ready</Text>
-          <Text color="gray"> Files: {st.files}, symbols: {st.symbols}{typeof st.chunks === "number" ? `, chunks: ${st.chunks}` : ""}</Text>
-        </Box>
+        <box flexDirection="column">
+          <text fg="green"> Status: ready</text>
+          <text fg="gray"> Files: {st.files}, symbols: {st.symbols}{typeof st.chunks === "number" ? `, chunks: ${st.chunks}` : ""}</text>
+        </box>
       )}
       {st.state === "error" && (
-        <Box><Text color="red"> Error: {st.error}</Text></Box>
+        <box><text fg="red"> Error: {st.error}</text></box>
       )}
-      <Box marginTop={1}>
-        <Text color="cyan"> [Reindex] — Enter</Text>
-      </Box>
-    </Box>
+      <box marginTop={1} flexDirection="row">
+        <text fg="cyan"> [Sync] — Enter</text>
+        <text fg="gray"> </text>
+        <text fg="cyan"> [Delete] — D</text>
+      </box>
+    </box>
   )
 }
 
-// ─── Welcome / Status bar (under logo) ────────────────────────────────────────
+function AgentConfigView({
+  presets,
+  selectedIndex,
+  loading,
+  createMode,
+  presetName,
+  options,
+  optionIndex,
+  selectedVector,
+  selectedSkills,
+  selectedMcp,
+  selectedRules,
+}: {
+  presets: AgentPreset[]
+  selectedIndex: number
+  loading: boolean
+  createMode: boolean
+  presetName: string
+  options: Array<{ kind: "vector" | "skill" | "mcp" | "rule"; value: string; label: string }>
+  optionIndex: number
+  selectedVector: boolean
+  selectedSkills: string[]
+  selectedMcp: string[]
+  selectedRules: string[]
+}) {
+  if (createMode) {
+    const safeOptionIndex = Math.min(optionIndex, Math.max(0, options.length - 1))
+    return (
+      <box flexDirection="column" borderStyle="single" borderColor={THEME.primary} paddingLeft={1} paddingRight={1}>
+        <text fg={THEME.primary} bold> Agent config — create preset</text>
+        <text fg="gray"> Build from skills, MCP and AGENTS.md/CLAUDE.md rules</text>
+        <box marginTop={1}>
+          <text fg="gray">Name: </text>
+          <text fg="white">{presetName || "preset-name"}</text>
+          <text fg={THEME.primary}>│</text>
+        </box>
+        <box marginTop={1} flexDirection="column">
+          {options.map((option, idx) => {
+            const active =
+              option.kind === "vector"
+                ? selectedVector
+                : option.kind === "skill"
+                ? selectedSkills.includes(option.value)
+                : option.kind === "mcp"
+                ? selectedMcp.includes(option.value)
+                : selectedRules.includes(option.value)
+            return (
+              <box key={`${option.kind}:${option.value}`}>
+                <text fg={idx === safeOptionIndex ? THEME.primary : "gray"}>
+                  {idx === safeOptionIndex ? "▸ " : "  "}
+                </text>
+                <text fg={active ? "green" : "gray"}>{active ? "[x] " : "[ ] "}</text>
+                <text fg={active ? "white" : "gray"}>{option.label}</text>
+              </box>
+            )
+          })}
+        </box>
+      </box>
+    )
+  }
 
-function WelcomeBar({
+  return (
+    <box flexDirection="column" borderStyle="single" borderColor={THEME.primary} paddingLeft={1} paddingRight={1}>
+      <text fg={THEME.primary} bold> Agent configs</text>
+      <text fg="gray"> Presets compose model + vector + skills + MCP + AGENTS rules</text>
+      {loading ? (
+        <box marginTop={1}>
+          <text fg={THEME.warning}>Loading…</text>
+        </box>
+      ) : presets.length === 0 ? (
+        <box marginTop={1}>
+          <text fg="gray">No presets yet. Press C to create one.</text>
+        </box>
+      ) : (
+        <box marginTop={1} flexDirection="column">
+          {presets.map((preset, idx) => {
+            const selected = idx === selectedIndex
+            const summary = [
+              `${preset.modelProvider ?? "model?"}/${preset.modelId ?? "id?"}`,
+              `vector:${preset.vector ? "on" : "off"}`,
+              `skills:${preset.skills.length}`,
+              `mcp:${preset.mcpServers.length}`,
+              `rules:${preset.rulesFiles.length}`,
+            ].join(" · ")
+            return (
+              <box key={preset.name} flexDirection="column">
+                <box>
+                  <text fg={selected ? THEME.primary : "gray"}>{selected ? "▸ " : "  "}</text>
+                  <text fg={selected ? "white" : "gray"} bold={selected}>{preset.name}</text>
+                </box>
+                <box paddingLeft={2}>
+                  <text fg="gray">{summary}</text>
+                </box>
+              </box>
+            )
+          })}
+        </box>
+      )}
+    </box>
+  )
+}
+
+// ─── Home + prompt shell (Kilo-style center layout) ─────────────────────────
+
+function HomeLanding({
+  cols,
+  rows,
+  shellW,
+  shellPad,
+  input,
+  mode,
+  modeColor,
   provider,
   model,
-  projectDir,
-  noIndex,
+  slashOpen,
+  filteredCommands,
+  slashSelected,
+  isRunning,
+  awaitingApproval,
+  pendingApprovalAction,
   indexReady,
-  cols,
-  contextUsedTokens,
-  contextLimitTokens,
-  contextPercent,
+  onInputChange,
+  onSubmit,
 }: {
+  cols: number
+  rows: number
+  shellW: number
+  shellPad: number
+  input: string
+  mode: Mode
+  modeColor: string
   provider: string
   model: string
-  projectDir?: string
-  noIndex: boolean
+  slashOpen: boolean
+  filteredCommands: typeof SLASH_COMMANDS
+  slashSelected: number
+  isRunning: boolean
+  awaitingApproval: boolean
+  pendingApprovalAction: ApprovalAction | null
   indexReady: boolean
-  cols: number
-  contextUsedTokens: number
-  contextLimitTokens: number
-  contextPercent: number
+  onInputChange: (value: string) => void
+  onSubmit: () => void
 }) {
-  const indexLabel = noIndex ? "Index: off" : indexReady ? "Index: ● ready" : "Index: … building"
-  const shortPath = projectDir ? fit(projectDir, Math.max(20, Math.floor(cols * 0.45))) : ""
-  const modelLabel = fit(`${provider}/${model}`, Math.max(20, Math.floor(cols * 0.65)))
-  const line1 = fit(`Model ${modelLabel}`, Math.max(20, cols - 4))
-  const line2 = fitPad(shortPath ? `${indexLabel} · Project: ${shortPath}` : indexLabel, Math.max(20, cols - 4))
-  const line3 = fitPad("Type / for commands  /settings for all agent settings", Math.max(20, cols - 4))
-  const line4 = fitPad(
-    `Context: ${formatTokens(contextUsedTokens)} / ${formatTokens(contextLimitTokens)} (${contextPercent}%) · sys on`,
-    Math.max(20, cols - 4),
-  )
-  const indexColor = noIndex ? "gray" : indexReady ? "green" : "yellow"
+  const tips = [
+    "Press Tab to cycle between Agent, Plan and Ask modes.",
+    "Use /index to control vector index sync, stop and delete.",
+    "Use /agent-config to assemble presets from skills, MCP and AGENTS.md.",
+  ]
+  const tip = tips[(provider.length + model.length) % tips.length]!
   return (
-    <Box flexDirection="column" paddingX={1} paddingBottom={1} borderStyle="single" borderColor="gray">
-      <Text color="white">{fitPad(line1, Math.max(20, cols - 4))}</Text>
-      <Text color={indexColor as "green" | "yellow" | "gray"}>{line2}</Text>
-      <Text color="gray">{line3}</Text>
-      <Text color={contextPercent >= 90 ? "red" : contextPercent >= 75 ? "yellow" : "green"}>{line4}</Text>
-    </Box>
+    <box flexDirection="column" flexGrow={1} minHeight={0} paddingLeft={2} paddingRight={2}>
+      <box flexGrow={1} />
+      <Logo cols={cols} />
+      <box height={1} />
+      <box paddingLeft={shellPad} paddingRight={shellPad} flexDirection="column">
+        {slashOpen && filteredCommands.length > 0 && (
+              <SlashPopup
+                commands={filteredCommands}
+                selectedIndex={slashSelected}
+                cols={shellW}
+                rows={rows}
+              />
+        )}
+        {awaitingApproval && pendingApprovalAction && (
+          <ApprovalBanner action={pendingApprovalAction} cols={shellW} />
+        )}
+        <InputBar
+          input={input}
+          cols={shellW}
+          mode={mode}
+          modeColor={modeColor}
+          isRunning={isRunning}
+          awaitingApproval={awaitingApproval}
+          pendingApprovalAction={pendingApprovalAction}
+          indexReady={indexReady}
+          provider={provider}
+          model={model}
+          showPlaceholder
+          onInputChange={onInputChange}
+          onSubmit={onSubmit}
+        />
+      </box>
+      <box height={2} />
+      <box justifyContent="center">
+        <text fg={THEME.warning}>● Tip </text>
+        <text fg={THEME.textMuted}>{fit(tip, Math.max(24, cols - 20))}</text>
+      </box>
+      <box flexGrow={1} />
+    </box>
   )
 }
 
-// ─── Slash command popup (over chat: one line per command to avoid overlap) ─
+// ─── Slash command popup (Kilo-style command palette list) ──────────────────
 
 function SlashPopup({
   commands,
   selectedIndex,
   cols,
+  rows,
 }: {
   commands: typeof SLASH_COMMANDS
   selectedIndex: number
   cols: number
+  rows: number
 }) {
-  const maxLen = Math.max(40, cols - 4)
+  const lineWidth = Math.max(40, cols - 6)
+  const labelWidth = Math.min(36, Math.max(14, Math.floor(lineWidth * 0.34)))
+  const descWidth = Math.max(16, lineWidth - labelWidth - 5)
+  const rowWidth = lineWidth
+  // Keep command palette compact and always fully visible above input (Kilo-like behavior).
+  const maxVisibleByHeight = Math.max(5, Math.min(12, Math.floor(rows * 0.24)))
+  const windowSize = Math.min(maxVisibleByHeight, Math.max(1, commands.length))
+  const start = Math.max(0, Math.min(Math.max(0, commands.length - windowSize), selectedIndex - Math.floor(windowSize / 2)))
+  const visible = commands.slice(start, start + windowSize)
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1} marginBottom={1}>
-      <Text color="gray">Commands — ↑↓ choose, Enter select, Esc close</Text>
-      {commands.map((cmd, i) => {
-        const line = `${i === selectedIndex ? "▸ " : "  "}${cmd.label} — ${cmd.desc}`
-        const show = line.length > maxLen ? line.slice(0, maxLen - 1) + "…" : line
-        return (
-          <Box key={cmd.cmd}>
-            <Text color={i === selectedIndex ? "cyan" : "gray"} bold={i === selectedIndex}>
-              {show}
-            </Text>
-          </Box>
-        )
-      })}
-    </Box>
+    <box
+      flexDirection="column"
+      marginBottom={1}
+      borderStyle="single"
+      borderColor={THEME.accent}
+      paddingLeft={1}
+      paddingRight={1}
+      style={{ backgroundColor: THEME.panel }}
+    >
+      <text fg={THEME.textMuted}>Commands - ↑↓ choose, Enter select, Esc close</text>
+      <box flexDirection="column" style={{ maxHeight: windowSize + 1, overflowY: "hidden" }}>
+        {visible.map((cmd, i) => {
+          const absolute = start + i
+          const active = absolute === selectedIndex
+          const label = fit(cmd.label, labelWidth)
+          const desc = fit(cmd.desc, descWidth)
+          const row = padToWidth(`${active ? "> " : "  "}${padToWidth(label, labelWidth)} ${desc}`, rowWidth - 1)
+          return (
+            <box key={cmd.cmd} width={rowWidth} style={{ backgroundColor: active ? "#e6b188" : undefined }}>
+              <text fg={active ? "#000000" : THEME.textMuted} bold={active}>{row}</text>
+            </box>
+          )
+        })}
+      </box>
+      {commands.length > windowSize && (
+        <text fg={THEME.textMuted}>
+          Showing {start + 1}-{Math.min(start + windowSize, commands.length)} of {commands.length}
+        </text>
+      )}
+    </box>
   )
 }
 
@@ -1549,13 +2765,13 @@ function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number
     lines.push(`  ${action.description}`)
   }
   return (
-    <Box borderStyle="single" borderColor="yellow" paddingX={1} marginBottom={0}>
+    <box borderStyle="single" borderColor="yellow" paddingLeft={1} paddingRight={1} marginBottom={0}>
       {lines.map((line, i) => (
-        <Text key={i} color={i === 0 ? "yellow" : "white"} bold={i === 0}>
+        <text key={i} fg={i === 0 ? "yellow" : "white"} bold={i === 0}>
           {line}
-        </Text>
+        </text>
       ))}
-    </Box>
+    </box>
   )
 }
 
@@ -1568,6 +2784,11 @@ function InputBar({
   awaitingApproval,
   pendingApprovalAction,
   indexReady,
+  provider,
+  model,
+  showPlaceholder = false,
+  onInputChange,
+  onSubmit,
 }: {
   input: string
   cols: number
@@ -1577,8 +2798,13 @@ function InputBar({
   awaitingApproval: boolean
   pendingApprovalAction: ApprovalAction | null
   indexReady: boolean
+  provider: string
+  model: string
+  showPlaceholder?: boolean
+  onInputChange: (value: string) => void
+  onSubmit: () => void
 }) {
-  const borderColor = awaitingApproval ? "yellow" : isRunning ? "red" : "cyan"
+  const borderColor = awaitingApproval ? THEME.warning : isRunning ? THEME.danger : THEME.accent
   const approvalPrompt =
     pendingApprovalAction?.type === "execute"
       ? "Allow? y/n a/s e(allow for folder)"
@@ -1586,30 +2812,71 @@ function InputBar({
   const prompt = awaitingApproval
     ? approvalPrompt
     : isRunning
-      ? "[ABORT: Ctrl+C]"
-      : `[${mode}]`
-  const promptColor = awaitingApproval ? "yellow" : isRunning ? "red" : (modeColor as "cyan" | "blue" | "yellow" | "green")
-  const maxInputLen = Math.max(8, cols - 32)
-  const displayInput = input.length > maxInputLen ? `…${input.slice(-Math.max(1, maxInputLen - 1))}` : input
+      ? "[Abort: Ctrl+C]"
+      : mode === "agent" ? "Agent" : mode === "plan" ? "Plan" : "Ask"
+  const promptColor = awaitingApproval ? THEME.warning : isRunning ? THEME.danger : modeColor
+  const singleLineInput = input.replace(/\r\n/g, " ").replace(/\r/g, " ").replace(/\n/g, " ")
+  const placeholder = showPlaceholder
+    ? 'Ask anything... "Fix a TODO in the codebase"'
+    : ""
+  const metaWidth = Math.max(16, cols - prompt.length - 8)
+  const providerWidth = Math.max(8, Math.min(16, Math.floor(metaWidth * 0.3)))
+  const modelWidth = Math.max(8, metaWidth - providerWidth - 2)
+  const modelLabel = fit(model, modelWidth)
+  const providerLabel = fit(provider, providerWidth)
 
   return (
-    <Box borderStyle="single" borderColor={borderColor} paddingX={1}>
-      <Text color={promptColor} bold>
-        {prompt}
-      </Text>
-      {indexReady && (
-        <Text color="green" dimColor>
-          {" "}
-          ●
-        </Text>
-      )}
-      <Text color="gray">
-        {" "}
-        ›{" "}
-      </Text>
-      <Text color="white">{displayInput}</Text>
-      <Text color={isRunning ? "gray" : "cyan"}>█</Text>
-    </Box>
+    <box flexDirection="column" marginBottom={0}>
+      <box
+        flexDirection="row"
+        border={["left"]}
+        borderColor={borderColor}
+        paddingLeft={1}
+        paddingRight={1}
+        paddingTop={0}
+        paddingBottom={0}
+        style={{ backgroundColor: THEME.panel2 }}
+      >
+        <input
+          focused
+          value={singleLineInput}
+          maxLength={6000}
+          placeholder={placeholder}
+          onInput={(value: string) => onInputChange(value)}
+          onSubmit={() => onSubmit()}
+          textColor={THEME.text}
+          focusedTextColor={THEME.text}
+          placeholderColor={THEME.textMuted}
+          backgroundColor={THEME.panel2}
+          focusedBackgroundColor={THEME.panel2}
+          cursorColor={THEME.primary}
+        />
+      </box>
+      <box
+        flexDirection="row"
+        border={["left"]}
+        borderColor={borderColor}
+        paddingLeft={1}
+        paddingRight={1}
+        style={{ backgroundColor: THEME.panel2 }}
+      >
+        <text fg={promptColor} bold>{prompt}</text>
+        <text fg={THEME.text}> </text>
+        <text fg={THEME.text}>{modelLabel}</text>
+        <text fg={THEME.textMuted}> {providerLabel}</text>
+      </box>
+      <box flexDirection="row" justifyContent="flex-end" gap={2} paddingTop={1}>
+        <text fg={THEME.text}>
+          tab <span style={{ fg: THEME.textMuted }}>agents</span>
+        </text>
+        <text fg={THEME.text}>
+          ctrl+p <span style={{ fg: THEME.textMuted }}>commands</span>
+        </text>
+        <text fg={indexReady ? THEME.success : THEME.textMuted}>
+          {indexReady ? "index ready" : "index building"}
+        </text>
+      </box>
+    </box>
   )
 }
 
@@ -1620,19 +2887,19 @@ function MessageItem({ msg, cols }: { msg: SessionMessage; cols: number }) {
 
   if (msg.role === "user") {
     return (
-      <Box paddingX={1} paddingTop={1} flexDirection="column">
-        <Box>
-          <Text bold color="cyan">
+      <box paddingLeft={1} paddingRight={1} paddingTop={1} flexDirection="column">
+        <box>
+          <text bold fg="cyan">
             ▶ You
-          </Text>
-          <Text color="gray"> ─────────────────────────────────</Text>
-        </Box>
-        <Box paddingLeft={2}>
-          <Text wrap="wrap" color="white">
+          </text>
+          <text fg="gray"> ─────────────────────────────────</text>
+        </box>
+        <box paddingLeft={2}>
+          <text wrap="wrap" fg="white">
             {content}
-          </Text>
-        </Box>
-      </Box>
+          </text>
+        </box>
+      </box>
     )
   }
 
@@ -1642,38 +2909,38 @@ function MessageItem({ msg, cols }: { msg: SessionMessage; cols: number }) {
         ? content.slice(0, 1500) + "\n\n[...]\n\n" + content.slice(-800)
         : content
     return (
-      <Box paddingX={1} paddingTop={1} flexDirection="column">
-        <Box>
-          <Text bold color="green">
+      <box paddingLeft={1} paddingRight={1} paddingTop={1} flexDirection="column">
+        <box>
+          <text bold fg="green">
             ◀ NexusCode
-          </Text>
-          <Text color="gray"> ──────────────────────────────</Text>
-        </Box>
-        <Box paddingLeft={2}>
-          <Text wrap="wrap">{trimmed}</Text>
-        </Box>
-      </Box>
+          </text>
+          <text fg="gray"> ──────────────────────────────</text>
+        </box>
+        <box paddingLeft={2}>
+          <text wrap="wrap">{trimmed}</text>
+        </box>
+      </box>
     )
   }
 
   if (msg.summary) {
     return (
-      <Box paddingX={1} marginY={0} borderStyle="round" borderColor="gray">
-        <Text color="gray" bold>
+      <box paddingLeft={1} paddingRight={1} marginBottom={0} borderStyle="round" borderColor="gray">
+        <text fg="gray" bold>
           📝 Context summary
-        </Text>
-        <Text color="gray"> (compacted)</Text>
-      </Box>
+        </text>
+        <text fg="gray"> (compacted)</text>
+      </box>
     )
   }
 
   if (msg.role === "system") {
     return (
-      <Box paddingX={1}>
-        <Text color="red" dimColor>
+      <box paddingLeft={1} paddingRight={1}>
+        <text fg="red">
           ⚠ {content}
-        </Text>
-      </Box>
+        </text>
+      </box>
     )
   }
 
@@ -1684,16 +2951,16 @@ function ReasoningBlock({ text, cols }: { text: string; cols: number }) {
   const lines = text.split("\n")
   const preview = lines.slice(-5).join("\n")
   return (
-    <Box paddingX={1} paddingY={0} flexDirection="column">
-      <Text color="magenta" dimColor>
+    <box paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0} flexDirection="column">
+      <text fg="magenta">
         💭 Thinking...
-      </Text>
-      <Box paddingLeft={2} borderStyle="single" borderColor="magenta">
-        <Text color="magenta" dimColor wrap="wrap">
+      </text>
+      <box paddingLeft={2} borderStyle="single" borderColor="magenta">
+        <text fg="magenta" wrap="wrap">
           {preview.length > 400 ? "..." + preview.slice(-400) : preview}
-        </Text>
-      </Box>
-    </Box>
+        </text>
+      </box>
+    </box>
   )
 }
 
@@ -1701,11 +2968,11 @@ function StreamingText({ text, cols }: { text: string; cols: number }) {
   const maxLen = (cols - 4) * 15
   const display = text.length > maxLen ? text.slice(-maxLen) : text
   return (
-    <Box paddingX={1} paddingLeft={3} flexDirection="column">
-      <Text wrap="wrap" color="white">
+    <box paddingLeft={3} paddingRight={1} flexDirection="column">
+      <text wrap="wrap" fg="white">
         {display}
-      </Text>
-    </Box>
+      </text>
+    </box>
   )
 }
 
@@ -1720,24 +2987,24 @@ function LiveToolCard({ tool }: { tool: LiveTool }) {
   }
 
   return (
-    <Box paddingX={1} paddingLeft={2}>
-      <Text color="yellow">
-        <Spinner type="arc" />
-      </Text>
-      <Text color="yellow">
+    <box paddingLeft={2} paddingRight={1}>
+      <text fg="yellow">
+        <spinner name="arc" />
+      </text>
+      <text fg="yellow">
         {" "}
         {icon} {displayName}
-      </Text>
+      </text>
       {preview && (
-        <Text color="gray"> — {preview}</Text>
+        <text fg="gray"> — {preview}</text>
       )}
       {elapsed && (
-        <Text color="gray" dimColor>
+        <text fg="gray">
           {" "}
           ({elapsed})
-        </Text>
+        </text>
       )}
-    </Box>
+    </box>
   )
 }
 
@@ -1753,28 +3020,28 @@ function SubAgentCard({ agent }: { agent: SubAgentState }) {
   const task = agent.task.length > 100 ? `${agent.task.slice(0, 100)}…` : agent.task
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={statusColor} paddingX={1} marginBottom={1}>
-      <Box>
-        <Text color={statusColor} bold>Sub-agent </Text>
-        <Text color="white">{title}</Text>
-        <Text color="gray"> · {elapsed}s</Text>
-      </Box>
-      <Box>
-        <Text color="gray">Task: </Text>
-        <Text color="white">{task}</Text>
-      </Box>
+    <box flexDirection="column" borderStyle="round" borderColor={statusColor} paddingLeft={1} paddingRight={1} marginBottom={1}>
+      <box>
+        <text fg={statusColor} bold>Sub-agent </text>
+        <text fg="white">{title}</text>
+        <text fg="gray"> · {elapsed}s</text>
+      </box>
+      <box>
+        <text fg="gray">Task: </text>
+        <text fg="white">{task}</text>
+      </box>
       {agent.currentTool && (
-        <Box>
-          <Text color="gray">Tool: </Text>
-          <Text color="yellow">{agent.currentTool}</Text>
-        </Box>
+        <box>
+          <text fg="gray">Tool: </text>
+          <text fg="yellow">{agent.currentTool}</text>
+        </box>
       )}
       {agent.error && (
-        <Box>
-          <Text color="red">Error: {agent.error.slice(0, 120)}</Text>
-        </Box>
+        <box>
+          <text fg="red">Error: {agent.error.slice(0, 120)}</text>
+        </box>
       )}
-    </Box>
+    </box>
   )
 }
 
@@ -1792,51 +3059,133 @@ function TodoBar({ todo, cols }: { todo: string; cols: number }) {
       : todo.slice(0, cols - 24).trim()
 
   return (
-    <Box paddingX={1} borderStyle="single" borderColor="gray" flexDirection="row">
-      <Text color="gray">Plan </Text>
-      <Text color="cyan">
+    <box paddingLeft={1} paddingRight={1} borderStyle="single" borderColor="gray" flexDirection="row">
+      <text fg="gray">Plan </text>
+      <text fg="cyan">
         [{completed}/{total}]
-      </Text>
-      <Text color="gray"> {pct}% </Text>
-      <Text color="gray" dimColor>
+      </text>
+      <text fg="gray"> {pct}% </text>
+      <text fg="gray">
         {summary.length > cols - 24 ? summary.slice(0, cols - 27) + "…" : summary}
-      </Text>
-    </Box>
+      </text>
+    </box>
   )
 }
 
 function PlanActionsBar({ cols }: { cols: number }) {
   return (
-    <Box paddingX={1} paddingY={0} borderStyle="single" borderColor="yellow" flexDirection="column">
-      <Text color="yellow" bold>
+    <box paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0} borderStyle="single" borderColor="yellow" flexDirection="column">
+      <text fg="yellow" bold>
         Plan ready. Choose:
-      </Text>
-      <Box>
-        <Text color="cyan"> [A]</Text>
-        <Text color="gray"> Approve — run in agent mode and execute the plan</Text>
-      </Box>
-      <Box>
-        <Text color="cyan"> [R]</Text>
-        <Text color="gray"> Revise — type your message and press Enter to update the plan</Text>
-      </Box>
-      <Box>
-        <Text color="cyan"> [D]</Text>
-        <Text color="gray"> Abandon — switch to Ask mode</Text>
-      </Box>
-    </Box>
+      </text>
+      <box>
+        <text fg="cyan"> [A]</text>
+        <text fg="gray"> Approve — run in agent mode and execute the plan</text>
+      </box>
+      <box>
+        <text fg="cyan"> [R]</text>
+        <text fg="gray"> Revise — type your message and press Enter to update the plan</text>
+      </box>
+      <box>
+        <text fg="cyan"> [D]</text>
+        <text fg="gray"> Abandon — switch to Ask mode</text>
+      </box>
+    </box>
   )
 }
 
 function ErrorBanner({ message }: { message: string }) {
   return (
-    <Box paddingX={1} paddingY={0} borderStyle="single" borderColor="red">
-      <Text color="red" bold>
+    <box paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0} borderStyle="single" borderColor="red">
+      <text fg="red" bold>
         ✗ Error:{" "}
-      </Text>
-      <Text color="red" wrap="wrap">
+      </text>
+      <text fg="red" wrap="wrap">
         {message.slice(0, 200)}
-      </Text>
-    </Box>
+      </text>
+    </box>
+  )
+}
+
+function SessionSidebar({
+  provider,
+  model,
+  sessionTitle,
+  contextUsedTokens,
+  contextLimitTokens,
+  contextPercent,
+  mcpServersCount,
+  noIndex,
+  indexReady,
+  vectorIndexEnabled,
+  todo,
+}: {
+  provider: string
+  model: string
+  sessionTitle?: string
+  contextUsedTokens: number
+  contextLimitTokens: number
+  contextPercent: number
+  mcpServersCount?: number
+  noIndex: boolean
+  indexReady: boolean
+  vectorIndexEnabled: boolean
+  todo: string
+}) {
+  const indexState = noIndex ? "off" : indexReady ? "ready" : "building"
+  const vectorState = noIndex ? "off" : vectorIndexEnabled ? "on" : "off"
+  const todos = parseTodoItems(todo).slice(0, 6)
+  const activeTodos = todos.filter((item) => !item.done).length
+  const doneTodos = todos.filter((item) => item.done).length
+
+  return (
+    <box
+      flexDirection="column"
+      borderStyle="single"
+      borderColor={THEME.primary}
+      paddingLeft={1}
+      paddingRight={1}
+      paddingTop={0}
+      paddingBottom={0}
+      flexGrow={1}
+      minHeight={0}
+    >
+      <text fg={THEME.primary} bold> Session</text>
+      <text fg="white">{fit(sessionTitle || "Untitled session", 30)}</text>
+      <box paddingTop={1} flexDirection="column">
+        <text fg={THEME.accent}> Model</text>
+        <text fg={THEME.muted}>{fit(`${provider}/${model}`, 30)}</text>
+      </box>
+      <box paddingTop={1} flexDirection="column">
+        <text fg={THEME.accent}> Context</text>
+        <text fg={THEME.muted}>
+          {formatTokens(contextUsedTokens)} / {formatTokens(contextLimitTokens)} ({contextPercent}%)
+        </text>
+      </box>
+      <box paddingTop={1} flexDirection="column">
+        <text fg={THEME.accent}> Runtime</text>
+        <text fg={THEME.muted}>MCP: {mcpServersCount ?? 0}</text>
+        <text fg={indexState === "ready" ? THEME.success : indexState === "off" ? THEME.muted : THEME.warning}>
+          Index: {indexState}
+        </text>
+        <text fg={vectorState === "on" ? THEME.success : THEME.muted}>Vector index: {vectorState}</text>
+      </box>
+      <box paddingTop={1} flexDirection="column">
+        <text fg={THEME.accent}> Todo</text>
+        {todos.length === 0 ? (
+          <text fg={THEME.muted}>No tasks</text>
+        ) : (
+          <>
+            <text fg={THEME.muted}>Active: {activeTodos} · Done: {doneTodos}</text>
+            {todos.map((item, idx) => (
+              <text key={`${idx}-${item.text}`} fg={item.done ? THEME.muted : "white"}>
+                {item.done ? "✓" : "•"} {fit(item.text, 28)}
+              </text>
+            ))}
+          </>
+        )}
+      </box>
+    </box>
   )
 }
 
@@ -1845,39 +3194,62 @@ function Footer({
   provider,
   model,
   sessionId,
+  sessionTitle,
+  mcpServersCount,
   activeProfile,
   cols,
   contextUsedTokens,
   contextLimitTokens,
+  noIndex,
+  vectorIndexEnabled,
+  projectDir,
+  compact,
 }: {
   isRunning: boolean
   provider: string
   model: string
   sessionId?: string
+  sessionTitle?: string
+  mcpServersCount?: number
   activeProfile: string
   cols: number
   contextUsedTokens: number
   contextLimitTokens: number
+  noIndex: boolean
+  vectorIndexEnabled: boolean
+  projectDir?: string
+  compact?: boolean
 }) {
-  const shortModel = fit(model, 18)
-  const shortSession = sessionId ? (sessionId.slice(0, 8) + "…") : ""
-  const line1 = fitPad(
-    `profile: ${activeProfile} · ${provider}/${shortModel}${shortSession ? ` · session: ${shortSession}` : ""} · ctx: ${formatTokens(contextUsedTokens)}/${formatTokens(contextLimitTokens)}`,
-    Math.max(20, cols - 2)
-  )
-  const line2 = fitPad(
-    `/  /model  /embeddings  /advanced  /index  Tab  Ctrl+M  Ctrl+P(profile)  Ctrl+S  Ctrl+G/End(latest)  Ctrl+U/D  PgUp/PgDn  wheel  ↑↓  Ctrl+K  Ctrl+C:${isRunning ? "abort" : "quit"}`,
-    Math.max(20, cols - 2)
-  )
+  const shortSession = sessionId ? fit(sessionId, compact ? 10 : 14) : fit(sessionTitle ?? "untitled", compact ? 10 : 14)
+  const vector = noIndex ? "off" : vectorIndexEnabled ? "on" : "off"
+  const mcpPart = (mcpServersCount ?? 0) > 0 ? ` MCP:${mcpServersCount}` : " MCP:0"
+  const lineCols = Math.max(20, cols - 4)
+  const left = fit(projectDir ? shortenPath(projectDir, Math.max(18, Math.floor((compact ? 0.55 : 0.38) * lineCols))) : "~", Math.max(12, Math.floor((compact ? 0.55 : 0.38) * lineCols)))
+  const maxW = Math.max(20, lineCols)
+  const leftWidth = stringWidth(left)
+  const rightBudget = Math.max(12, maxW - leftWidth - 3)
+  const right = compact
+    ? fit(`${CLI_VERSION}`, rightBudget)
+    : fit(
+        `profile:${activeProfile} · session:${shortSession}${mcpPart} · vector:${vector} · Ctrl+C:${isRunning ? "abort" : "quit"}`,
+        rightBudget,
+      )
+  const rightWidth = stringWidth(right)
+  const fill = Math.max(1, lineCols - leftWidth - rightWidth)
   return (
-    <Box paddingX={1} flexDirection="column">
-      <Box>
-        <Text color="gray">{line1}</Text>
-      </Box>
-      <Box>
-        <Text color="gray">{line2}</Text>
-      </Box>
-    </Box>
+    <box
+      flexShrink={0}
+      paddingLeft={2}
+      paddingRight={2}
+      paddingTop={compact ? 0 : 1}
+      paddingBottom={compact ? 0 : 1}
+      style={{ backgroundColor: compact ? undefined : THEME.panel }}
+      flexDirection="row"
+    >
+      <text fg={THEME.textMuted}>{left}</text>
+      <text fg={THEME.textMuted}>{" ".repeat(fill)}</text>
+      <text fg={THEME.textMuted}>{right}</text>
+    </box>
   )
 }
 
@@ -1886,37 +3258,37 @@ type ChatLine = { text: string; color?: "white" | "gray" | "cyan" | "green" | "y
 function ChatViewport({
   state,
   cols,
-  rows,
+  viewportRows,
   scrollLines,
 }: {
   state: AppState
   cols: number
-  rows: number
+  viewportRows: number
   scrollLines: number
 }) {
   const width = Math.max(20, cols - 4)
-  const allLines = buildChatLines(state, width)
-  const visibleHeight = Math.max(12, rows - 14)
+  const allLines = useMemo(() => buildChatLines(state, width), [state, width])
+  const visibleHeight = Math.max(8, viewportRows)
   const maxScroll = Math.max(0, allLines.length - visibleHeight)
   const safeScroll = Math.max(0, Math.min(scrollLines, maxScroll))
   const start = Math.max(0, allLines.length - visibleHeight - safeScroll)
   const lines = allLines.slice(start, start + visibleHeight)
 
   return (
-    <Box flexDirection="column" flexGrow={1} minHeight={visibleHeight} overflowY="hidden" paddingX={1}>
+    <box flexDirection="column" flexGrow={1} minHeight={visibleHeight} overflowY="hidden" paddingLeft={1} paddingRight={1}>
       {safeScroll > 0 && (
-        <Text color="gray">↑ Scroll: wheel / ↑↓ / PgUp/Dn · Ctrl+G or End = latest</Text>
+        <text fg="gray">↑ Scroll: wheel / ↑↓ / PgUp/Dn · Ctrl+G or End = latest</text>
       )}
       {safeScroll > 0 && state.isRunning && (
-        <Text color="cyan">↓ New content — Ctrl+G or End to jump to latest</Text>
+        <text fg="cyan">↓ New content — Ctrl+G or End to jump to latest</text>
       )}
       {lines.map((line, idx) => (
-        <Text key={`${idx}_${line.text.slice(0, 20)}`} color={line.color ?? "white"} bold={line.bold}>
+        <text key={`${idx}_${line.text.slice(0, 20)}`} fg={line.color ?? "white"} bold={line.bold}>
           {line.text}
-        </Text>
+        </text>
       ))}
-      {lines.length === 0 && <Text color="gray">No messages yet.</Text>}
-    </Box>
+      {lines.length === 0 && <text fg="gray">No messages yet.</text>}
+    </box>
   )
 }
 
@@ -2085,35 +3457,7 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
       }
       out.push({ text: "", color: "gray" })
     }
-    const recentTools = state.liveTools.slice(-80)
-    if (recentTools.length > 0 && state.isRunning) {
-      out.push({ text: "Tools", color: "yellow", bold: true })
-      const groups: { tool: string; status: string; count: number; preview?: string }[] = []
-      for (const tool of recentTools) {
-        const status =
-          tool.status === "running" ? "…" : tool.status === "completed" ? "ok" : "err"
-        const preview = formatToolPreview(tool)
-        const last = groups[groups.length - 1]
-        if (last && last.tool === tool.tool && last.status === status) {
-          last.count += 1
-          if (preview && !last.preview) last.preview = preview
-        } else {
-          groups.push({ tool: tool.tool, status, count: 1, preview: preview || undefined })
-        }
-      }
-      for (const g of groups) {
-        const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
-        const showPreview = state.showToolDetails && g.preview
-        const line = showPreview ? `  [${g.status}] ${label} — ${g.preview}` : `  [${g.status}] ${label}`
-        for (const l of wrapToWidth(line, width)) {
-          out.push({
-            text: l,
-            color: g.status === "err" ? "red" : g.status === "ok" ? "gray" : "yellow",
-          })
-        }
-      }
-      out.push({ text: "", color: "gray" })
-    }
+    // Omit standalone "Tools" block — tools are already shown above from currentAssistantParts (with icons). Avoids duplication.
     for (const sa of state.subAgents) {
       const id = sanitizeText(sa?.id ?? "unknown")
       const mode = sanitizeText(String(sa?.mode ?? "agent"))
@@ -2171,27 +3515,21 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
     if (state.lastError) for (const l of wrapToWidth(`Error: ${sanitizeText(state.lastError)}`, width)) out.push({ text: l, color: "red" })
   }
 
-  let prevUserContent: string | undefined
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]!
     const raw = sanitizeText(typeof msg.content === "string" ? msg.content : "[complex message]")
     const content = msg.role === "assistant" ? cleanAssistantText(raw) : raw
     if (msg.role === "user") {
-      if (prevUserContent === content) {
-        if (i === lastUserIdx) pushRunProgress()
-        continue
-      }
-      prevUserContent = content
       out.push({ text: "You", color: "cyan", bold: true })
       for (const line of wrapToWidth(content, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
       out.push({ text: "", color: "gray" })
       if (i === lastUserIdx) pushRunProgress()
       continue
     }
-    prevUserContent = undefined
     if (msg.role === "assistant") {
       out.push({ text: "NexusCode", color: "green", bold: true })
       const wrapW = Math.max(10, width - 2)
+      const isLastMessageAndRunning = i === messages.length - 1 && state.isRunning
       if (Array.isArray(msg.content)) {
         const contentParts = msg.content as MessagePart[]
         let idx = 0
@@ -2214,7 +3552,7 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
               }
               idx++
             } else {
-              const toolGroups: { tool: string; status: string; count: number; preview: string }[] = []
+              const toolGroups: { tool: string; status: string; count: number; preview: string; output?: string }[] = []
               while (idx < contentParts.length && (contentParts[idx] as { type: string }).type === "tool") {
                 const t = contentParts[idx] as { tool: string; status: string; input?: Record<string, unknown>; output?: string }
                 if (t.tool === "thinking_preamble") break
@@ -2230,17 +3568,28 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
                 if (last && last.tool === t.tool && last.status === t.status) {
                   last.count += 1
                   if (preview && !last.preview) last.preview = preview
+                  if (t.output && !last.output) last.output = t.output
                 } else {
-                  toolGroups.push({ tool: t.tool, status: t.status, count: 1, preview })
+                  toolGroups.push({ tool: t.tool, status: t.status, count: 1, preview, output: t.output })
                 }
                 idx++
               }
-              for (const g of toolGroups) {
-                const icon = TOOL_ICONS[g.tool] ?? "🔧"
-                const status = g.status === "completed" ? "ok" : g.status === "error" ? "err" : "…"
-                const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
-                const line = g.preview ? `  [${status}] ${icon} ${label} — ${g.preview}` : `  [${status}] ${icon} ${label}`
-                for (const l of wrapToWidth(line, width)) out.push({ text: l, color: g.status === "error" ? "red" : "gray" })
+              if (!isLastMessageAndRunning) {
+                for (const g of toolGroups) {
+                  const icon = TOOL_ICONS[g.tool] ?? "🔧"
+                  const status = g.status === "completed" ? "ok" : g.status === "error" ? "err" : "…"
+                  const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
+                  const line = g.preview ? `  [${status}] ${icon} ${label} — ${g.preview}` : `  [${status}] ${icon} ${label}`
+                  for (const l of wrapToWidth(line, width)) out.push({ text: l, color: g.status === "error" ? "red" : "gray" })
+                }
+                const lastTool = toolGroups[toolGroups.length - 1]
+                if (lastTool?.tool === "attempt_completion" && lastTool.status === "completed" && lastTool.output?.trim()) {
+                  const answer = sanitizeText(lastTool.output).trim()
+                  if (answer.length > 0) {
+                    out.push({ text: "  —", color: "gray" })
+                    for (const line of wrapToWidth(answer, wrapW)) out.push({ text: `  ${line}`, color: "white" })
+                  }
+                }
               }
             }
           } else if (part.type === "reasoning") {
@@ -2330,15 +3679,50 @@ function wrapToWidth(text: string, width: number): string[] {
 
 function fit(value: string, max: number): string {
   if (max <= 0) return ""
-  if (value.length <= max) return value
+  if (stringWidth(value) <= max) return value
   if (max <= 1) return "…"
-  return `${value.slice(0, Math.max(0, max - 1))}…`
+  let out = ""
+  let width = 0
+  for (const ch of value) {
+    const chWidth = stringWidth(ch)
+    if (width + chWidth > max - 1) break
+    out += ch
+    width += chWidth
+  }
+  return `${out}…`
 }
 
-function fitPad(value: string, max: number): string {
-  const clipped = fit(value, max)
-  if (max <= 0) return clipped
-  return clipped.padEnd(max, " ")
+function padToWidth(value: string, width: number): string {
+  const trimmed = fit(value, width)
+  const pad = Math.max(0, width - stringWidth(trimmed))
+  return `${trimmed}${" ".repeat(pad)}`
+}
+
+function trimLeftToWidth(value: string, width: number): string {
+  if (width <= 0) return ""
+  if (stringWidth(value) <= width) return value
+  if (width === 1) return "…"
+  let out = ""
+  let w = 0
+  for (let i = value.length - 1; i >= 0; i--) {
+    const ch = value[i]!
+    const cw = stringWidth(ch)
+    if (w + cw > width - 1) break
+    out = ch + out
+    w += cw
+  }
+  return `…${out}`
+}
+
+function shortenPath(value: string, max: number): string {
+  if (!value) return "~"
+  const normalized = value.replace(os.homedir(), "~")
+  if (normalized.length <= max) return normalized
+  const parts = normalized.split("/").filter(Boolean)
+  if (parts.length <= 2) return fit(normalized, max)
+  const tail = parts.slice(-2).join("/")
+  const prefix = normalized.startsWith("~") ? "~/" : "/"
+  return fit(`${prefix}…/${tail}`, max)
 }
 
 function maskSecret(value: string): string {
@@ -2390,6 +3774,162 @@ function cleanAssistantText(value: string): string {
     .trim()
 }
 
+const AGENT_PRESETS_FILE = "agent-configs.json"
+
+async function readAgentPresets(projectDir: string): Promise<AgentPreset[]> {
+  const filePath = path.join(projectDir, ".nexus", AGENT_PRESETS_FILE)
+  try {
+    const raw = await fs.readFile(filePath, "utf8")
+    const parsed = JSON.parse(raw) as { presets?: unknown[]; configs?: unknown[] } | unknown[]
+    const list = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray((parsed as { presets?: unknown[] }).presets)
+      ? (parsed as { presets: unknown[] }).presets
+      : Array.isArray((parsed as { configs?: unknown[] }).configs)
+      ? (parsed as { configs: unknown[] }).configs
+      : []
+    const normalized = list
+      .map(normalizeAgentPreset)
+      .filter((preset): preset is AgentPreset => Boolean(preset))
+    return normalized
+  } catch {
+    return []
+  }
+}
+
+async function writeAgentPresets(projectDir: string, presets: AgentPreset[]): Promise<void> {
+  const dir = path.join(projectDir, ".nexus")
+  const filePath = path.join(dir, AGENT_PRESETS_FILE)
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(filePath, JSON.stringify({ presets }, null, 2), "utf8")
+}
+
+function normalizeAgentPreset(value: unknown): AgentPreset | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const name = typeof raw.name === "string" ? raw.name.trim() : ""
+  if (!name) return null
+  return {
+    name,
+    modelProvider: typeof raw.modelProvider === "string" ? raw.modelProvider : undefined,
+    modelId: typeof raw.modelId === "string" ? raw.modelId : undefined,
+    vector: Boolean(raw.vector),
+    skills: dedupeList(asStringList(raw.skills)),
+    mcpServers: dedupeList(asStringList(raw.mcpServers)),
+    rulesFiles: dedupeList(asStringList(raw.rulesFiles)),
+    createdAt: typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
+  }
+}
+
+function asStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+}
+
+function dedupeList(items: string[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const item of items) {
+    const value = item.trim()
+    if (!value || seen.has(value)) continue
+    seen.add(value)
+    out.push(value)
+  }
+  return out
+}
+
+function toggleInList(items: string[], value: string): string[] {
+  return items.includes(value) ? items.filter((item) => item !== value) : [...items, value]
+}
+
+async function discoverSkillPaths(projectDir: string): Promise<string[]> {
+  const roots = [
+    path.join(projectDir, ".nexus", "skills"),
+    path.join(projectDir, ".agents", "skills"),
+    path.join(os.homedir(), ".nexus", "skills"),
+    path.join(os.homedir(), ".agents", "skills"),
+  ]
+  const files: string[] = []
+  for (const root of roots) {
+    const fromRoot = await walkSkillFiles(root, 5).catch(() => [])
+    files.push(...fromRoot)
+  }
+  const fromAgents = await discoverSkillsFromAgentsMd(projectDir).catch(() => [])
+  const normalized = dedupeList([...files, ...fromAgents]).map((file) => toDisplayPath(file, projectDir))
+  return dedupeList(normalized)
+}
+
+async function walkSkillFiles(rootDir: string, maxDepth: number): Promise<string[]> {
+  if (maxDepth < 0) return []
+  const entries = await fs.readdir(rootDir, { withFileTypes: true })
+  const out: string[] = []
+  for (const entry of entries) {
+    const fullPath = path.join(rootDir, entry.name)
+    if (entry.isDirectory()) {
+      const nested = await walkSkillFiles(fullPath, maxDepth - 1).catch(() => [])
+      out.push(...nested)
+      continue
+    }
+    if (!entry.isFile()) continue
+    const lower = entry.name.toLowerCase()
+    if (lower === "skill.md") {
+      out.push(fullPath)
+    }
+  }
+  return out
+}
+
+async function discoverSkillsFromAgentsMd(projectDir: string): Promise<string[]> {
+  const rules = await discoverRuleFiles(projectDir)
+  const agentFiles = rules.filter((rule) => path.basename(rule).toLowerCase() === "agents.md")
+  const out: string[] = []
+  for (const file of agentFiles) {
+    const content = await fs.readFile(file, "utf8").catch(() => "")
+    if (!content) continue
+    const lines = content.split("\n")
+    for (const line of lines) {
+      const fileMatch = line.match(/\(file:\s*([^)]+)\)/i)
+      if (!fileMatch) continue
+      const candidate = fileMatch[1]!.trim()
+      if (!candidate) continue
+      out.push(candidate)
+    }
+  }
+  return dedupeList(out)
+}
+
+async function discoverRuleFiles(projectDir: string): Promise<string[]> {
+  const names = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]
+  const out: string[] = []
+  const visited = new Set<string>()
+  let current = path.resolve(projectDir)
+  const home = path.resolve(os.homedir())
+  while (true) {
+    if (visited.has(current)) break
+    visited.add(current)
+    for (const name of names) {
+      const file = path.join(current, name)
+      const stat = await fs.stat(file).catch(() => null)
+      if (stat?.isFile()) out.push(file)
+    }
+    if (current === path.dirname(current) || current === home) break
+    current = path.dirname(current)
+  }
+  for (const name of names) {
+    const file = path.join(home, name)
+    const stat = await fs.stat(file).catch(() => null)
+    if (stat?.isFile()) out.push(file)
+  }
+  return dedupeList(out)
+}
+
+function toDisplayPath(file: string, projectDir: string): string {
+  if (path.isAbsolute(file) && file.startsWith(projectDir)) {
+    return path.relative(projectDir, file) || file
+  }
+  return file
+}
+
 function HelpBox({
   provider,
   model,
@@ -2423,51 +3963,51 @@ function HelpBox({
   const sessionLine = fit(sessionId ?? "", Math.max(20, cols - 16))
   const profilesLine = fit((profileNames.length > 0 ? profileNames.join(", ") : "none"), Math.max(20, cols - 16))
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold> Help</Text>
-      <Text color="gray" dimColor> Esc — close</Text>
-      <Box flexDirection="column" paddingLeft={1}>
-        <Box>
-          <Text color="gray">Model: </Text>
-          <Text color="white">{modelLine}</Text>
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Help</text>
+      <text fg="gray"> Esc — close</text>
+      <box flexDirection="column" paddingLeft={1}>
+        <box>
+          <text fg="gray">Model: </text>
+          <text fg="white">{modelLine}</text>
           {typeof snap?.model?.temperature === "number" && (
-            <Text color="gray"> · temp {snap.model.temperature}</Text>
+            <text fg="gray"> · temp {snap.model.temperature}</text>
           )}
-        </Box>
-        <Box>
-          <Text color="gray">Embeddings: </Text>
+        </box>
+        <box>
+          <text fg="gray">Embeddings: </text>
           {snap?.embeddings ? (
-            <Text color="white"> {snap.embeddings.provider} / {snap.embeddings.model}</Text>
+            <text fg="white"> {snap.embeddings.provider} / {snap.embeddings.model}</text>
           ) : (
-            <Text color="gray" dimColor> not set (vector search off)</Text>
+            <text fg="gray"> not set (vector search off)</text>
           )}
           {snap?.embeddings?.dimensions && (
-            <Text color="gray"> · dim {snap.embeddings.dimensions}</Text>
+            <text fg="gray"> · dim {snap.embeddings.dimensions}</text>
           )}
-        </Box>
-        <Box>
-          <Text color="gray">Index: </Text>
-          <Text color={indexStatus === "ready" ? "green" : indexStatus === "off" ? "gray" : "yellow"}>{indexStatus}</Text>
-          {snap?.indexing?.vector && <Text color="gray"> · vector on</Text>}
-        </Box>
+        </box>
+        <box>
+          <text fg="gray">Index: </text>
+          <text fg={indexStatus === "ready" ? "green" : indexStatus === "off" ? "gray" : "yellow"}>{indexStatus}</text>
+          {snap?.indexing?.vector && <text fg="gray"> · vector on</text>}
+        </box>
         {snap?.vectorDb?.enabled && (
-          <Box>
-            <Text color="gray">Vector DB: </Text>
-            <Text color="white">{snap.vectorDb.url}</Text>
-          </Box>
+          <box>
+            <text fg="gray">Vector DB: </text>
+            <text fg="white">{snap.vectorDb.url}</text>
+          </box>
         )}
-        {sessionId && <Box><Text color="gray">Session: </Text><Text color="white">{sessionLine}</Text></Box>}
-        {projectDir && <Box><Text color="gray">Project: </Text><Text color="white">{projectLine}</Text></Box>}
-        <Box><Text color="gray">Profiles: </Text><Text color="white">{profilesLine}</Text></Box>
-      </Box>
+        {sessionId && <box><text fg="gray">Session: </text><text fg="white">{sessionLine}</text></box>}
+        {projectDir && <box><text fg="gray">Project: </text><text fg="white">{projectLine}</text></box>}
+        <box><text fg="gray">Profiles: </text><text fg="white">{profilesLine}</text></box>
+      </box>
 
-      <Text color="white" bold>{"\n"} Commands</Text>
-      <Text color="gray"> /settings  /model  /embeddings  /index  /advanced  /help</Text>
-      <Text color="white" bold>{"\n"} Shortcuts</Text>
-      <Text color="gray"> Tab mode · Ctrl+P profile · Ctrl+S compact · Ctrl+K clear · Ctrl+C abort/quit</Text>
-      <Text color="white" bold>{"\n"} Config files</Text>
-      <Text color="gray"> .nexus/nexus.yaml (project) · ~/.nexus/nexus.yaml (global)</Text>
-      <Text color="gray"> OpenRouter: provider `openai-compatible` + baseUrl `https://openrouter.ai/api/v1`</Text>
-    </Box>
+      <text fg="white" bold>{"\n"} Commands</text>
+      <text fg="gray"> /settings  /model  /embeddings  /index  /advanced  /sessions  /agent-config  /help</text>
+      <text fg="white" bold>{"\n"} Shortcuts</text>
+      <text fg="gray"> Tab mode · Ctrl+P profile · Ctrl+S compact · Ctrl+K clear · Ctrl+C abort/quit</text>
+      <text fg="white" bold>{"\n"} Config files</text>
+      <text fg="gray"> .nexus/nexus.yaml (project) · ~/.nexus/nexus.yaml (global)</text>
+      <text fg="gray"> Free models: provider `openai-compatible` + baseUrl `https://api.kilo.ai/api/gateway`</text>
+    </box>
   )
 }

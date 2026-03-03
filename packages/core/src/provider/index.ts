@@ -14,7 +14,7 @@ import { createCerebrasClient } from "./cerebras.js"
 import { createCohereClient } from "./cohere.js"
 import { createTogetherAIClient } from "./togetherai.js"
 import { createPerplexityClient } from "./perplexity.js"
-import { createEmbeddingClient } from "./embeddings.js"
+import { createEmbeddingClient, isEmbeddingApiKeyMissing } from "./embeddings.js"
 
 export function createLLMClient(config: ProviderConfig): LLMClient {
   switch (config.provider) {
@@ -53,6 +53,6 @@ export function createLLMClient(config: ProviderConfig): LLMClient {
   }
 }
 
-export { createEmbeddingClient }
+export { createEmbeddingClient, isEmbeddingApiKeyMissing }
 export type { LLMClient, EmbeddingClient }
 export * from "./types.js"

@@ -233,7 +233,6 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         excludePatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         symbolExtract: z.ZodDefault<z.ZodBoolean>;
-        fts: z.ZodDefault<z.ZodBoolean>;
         vector: z.ZodDefault<z.ZodBoolean>;
         batchSize: z.ZodDefault<z.ZodNumber>;
         embeddingBatchSize: z.ZodDefault<z.ZodNumber>;
@@ -243,7 +242,6 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled: boolean;
         excludePatterns: string[];
         symbolExtract: boolean;
-        fts: boolean;
         vector: boolean;
         batchSize: number;
         embeddingBatchSize: number;
@@ -253,7 +251,6 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled?: boolean | undefined;
         excludePatterns?: string[] | undefined;
         symbolExtract?: boolean | undefined;
-        fts?: boolean | undefined;
         vector?: boolean | undefined;
         batchSize?: number | undefined;
         embeddingBatchSize?: number | undefined;
@@ -267,6 +264,10 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveReadPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
         allowedCommands: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        /** Command patterns from .nexus/settings.json + settings.local.json */
+        allowCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        denyCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        askCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         denyPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         rules: z.ZodDefault<z.ZodArray<z.ZodObject<{
             tool: z.ZodOptional<z.ZodString>;
@@ -293,6 +294,9 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand: boolean;
         autoApproveReadPatterns: string[];
         allowedCommands: string[];
+        allowCommandPatterns: string[];
+        denyCommandPatterns: string[];
+        askCommandPatterns: string[];
         denyPatterns: string[];
         rules: {
             action: "ask" | "allow" | "deny";
@@ -307,6 +311,9 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
         allowedCommands?: string[] | undefined;
+        allowCommandPatterns?: string[] | undefined;
+        denyCommandPatterns?: string[] | undefined;
+        askCommandPatterns?: string[] | undefined;
         denyPatterns?: string[] | undefined;
         rules?: {
             action: "ask" | "allow" | "deny";
@@ -359,8 +366,10 @@ declare const NexusConfigSchema: z.ZodObject<{
             env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
             url: z.ZodOptional<z.ZodString>;
             transport: z.ZodOptional<z.ZodEnum<["stdio", "http", "sse"]>>;
+            enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
         }, "strip", z.ZodTypeAny, {
             name: string;
+            enabled: boolean;
             command?: string | undefined;
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
@@ -373,10 +382,12 @@ declare const NexusConfigSchema: z.ZodObject<{
             env?: Record<string, string> | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            enabled?: boolean | undefined;
         }>, "many">>;
     }, "strip", z.ZodTypeAny, {
         servers: {
             name: string;
+            enabled: boolean;
             command?: string | undefined;
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
@@ -391,9 +402,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             env?: Record<string, string> | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            enabled?: boolean | undefined;
         }[] | undefined;
     }>>;
-    skills: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+    skills: z.ZodDefault<z.ZodArray<z.ZodUnion<[z.ZodString, z.ZodObject<{
+        path: z.ZodString;
+        enabled: z.ZodOptional<z.ZodBoolean>;
+    }, "strip", z.ZodTypeAny, {
+        path: string;
+        enabled?: boolean | undefined;
+    }, {
+        path: string;
+        enabled?: boolean | undefined;
+    }>]>, "many">>;
     tools: z.ZodDefault<z.ZodObject<{
         custom: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         classifyThreshold: z.ZodDefault<z.ZodNumber>;
@@ -539,6 +560,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     mcp: {
         servers: {
             name: string;
+            enabled: boolean;
             command?: string | undefined;
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
@@ -573,7 +595,6 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled: boolean;
         excludePatterns: string[];
         symbolExtract: boolean;
-        fts: boolean;
         vector: boolean;
         batchSize: number;
         embeddingBatchSize: number;
@@ -589,6 +610,9 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand: boolean;
         autoApproveReadPatterns: string[];
         allowedCommands: string[];
+        allowCommandPatterns: string[];
+        denyCommandPatterns: string[];
+        askCommandPatterns: string[];
         denyPatterns: string[];
         rules: {
             action: "ask" | "allow" | "deny";
@@ -611,7 +635,10 @@ declare const NexusConfigSchema: z.ZodObject<{
         createOnWrite: boolean;
         doubleCheckCompletion: boolean;
     };
-    skills: string[];
+    skills: (string | {
+        path: string;
+        enabled?: boolean | undefined;
+    })[];
     tools: {
         custom: string[];
         classifyThreshold: number;
@@ -686,6 +713,7 @@ declare const NexusConfigSchema: z.ZodObject<{
             env?: Record<string, string> | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            enabled?: boolean | undefined;
         }[] | undefined;
     } | undefined;
     embeddings?: {
@@ -759,7 +787,6 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled?: boolean | undefined;
         excludePatterns?: string[] | undefined;
         symbolExtract?: boolean | undefined;
-        fts?: boolean | undefined;
         vector?: boolean | undefined;
         batchSize?: number | undefined;
         embeddingBatchSize?: number | undefined;
@@ -775,6 +802,9 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
         allowedCommands?: string[] | undefined;
+        allowCommandPatterns?: string[] | undefined;
+        denyCommandPatterns?: string[] | undefined;
+        askCommandPatterns?: string[] | undefined;
         denyPatterns?: string[] | undefined;
         rules?: {
             action: "ask" | "allow" | "deny";
@@ -797,7 +827,10 @@ declare const NexusConfigSchema: z.ZodObject<{
         createOnWrite?: boolean | undefined;
         doubleCheckCompletion?: boolean | undefined;
     } | undefined;
-    skills?: string[] | undefined;
+    skills?: (string | {
+        path: string;
+        enabled?: boolean | undefined;
+    })[] | undefined;
     tools?: {
         custom?: string[] | undefined;
         classifyThreshold?: number | undefined;
@@ -1144,7 +1177,6 @@ interface NexusConfig {
         enabled: boolean;
         excludePatterns: string[];
         symbolExtract: boolean;
-        fts: boolean;
         vector: boolean;
         batchSize: number;
         embeddingBatchSize: number;
@@ -1158,6 +1190,12 @@ interface NexusConfig {
         autoApproveReadPatterns: string[];
         /** Commands allowed without approval for this project (from .nexus/allowed-commands.json) */
         allowedCommands: string[];
+        /** Command patterns from .nexus/settings.json + settings.local.json (allow = no approval) */
+        allowCommandPatterns: string[];
+        /** Command patterns that always require approval (deny list) */
+        denyCommandPatterns: string[];
+        /** Command patterns that always ask (ask list) */
+        askCommandPatterns: string[];
         denyPatterns: string[];
         /** Fine-grained permission rules evaluated in order, first match wins */
         rules: PermissionRule[];
@@ -1173,6 +1211,11 @@ interface NexusConfig {
     mcp: {
         servers: McpServerConfig[];
     };
+    /** Normalized list for UI: path + enabled. skills is derived (enabled only). */
+    skillsConfig?: Array<{
+        path: string;
+        enabled: boolean;
+    }>;
     skills: string[];
     tools: {
         custom: string[];
@@ -1234,6 +1277,7 @@ interface McpServerConfig {
     env?: Record<string, string>;
     url?: string;
     transport?: "stdio" | "http" | "sse";
+    enabled?: boolean;
 }
 interface SkillDef {
     name: string;
@@ -1277,6 +1321,20 @@ declare function getGlobalConfigDir(): string;
  * Ensure global config directory exists with defaults
  */
 declare function ensureGlobalConfigDir(): void;
+
+/** Format like .claude: { permissions: { allow: string[], deny: string[], ask: string[] } } */
+interface ProjectSettings {
+    permissions?: {
+        allow?: string[];
+        deny?: string[];
+        ask?: string[];
+    };
+}
+/**
+ * Load .nexus/settings.json and .nexus/settings.local.json (local overrides), merge and return.
+ * Same structure as .claude: permissions.allow, permissions.deny, permissions.ask.
+ */
+declare function loadProjectSettings(cwd: string): ProjectSettings;
 
 interface LLMStreamEvent {
     type: "text_delta" | "reasoning_delta" | "reasoning_end" | "tool_input_start" | "tool_call" | "tool_result" | "finish" | "error";
@@ -1555,12 +1613,13 @@ declare class ToolRegistry {
 declare function getAllBuiltinTools(): ToolDef[];
 
 /**
- * Main codebase indexer. Manages FTS and optional vector index.
+ * Codebase indexer: vector-only (Qdrant). No FTS.
+ * When vector client is missing, indexing is no-op and search returns [].
  */
 declare class CodebaseIndexer implements IIndexer {
     private readonly projectRoot;
     private readonly config;
-    private fts;
+    private fileTracker;
     private vector?;
     private forceVectorBackfill;
     private _status;
@@ -1574,19 +1633,16 @@ declare class CodebaseIndexer implements IIndexer {
     private notifyStatus;
     startIndexing(): Promise<void>;
     private indexInBackground;
+    private extractEntries;
+    private processPreparedBatch;
     private processBatch;
     refreshFile(filePath: string): Promise<void>;
     refreshFileNow(filePath: string): Promise<void>;
     search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]>;
-    /**
-     * Clear all index data and restart indexing.
-     */
     reindex(): Promise<void>;
+    /** Clear index (vector + file tracker) without reindexing. */
+    deleteIndex(): Promise<void>;
     stop(): void;
-    /**
-     * Fully close the indexer — clears timers, closes SQLite.
-     * Call when the extension is deactivated or the indexer is no longer needed.
-     */
     close(): void;
 }
 
@@ -1616,8 +1672,8 @@ interface IndexerFactoryOptions {
     onWarning?: (message: string) => void;
 }
 /**
- * Creates a CodebaseIndexer with optional vector-search wiring.
- * If vector prerequisites are missing, falls back to FTS-only indexer.
+ * Creates a CodebaseIndexer with optional vector search (Qdrant).
+ * When vector prerequisites are missing, returns indexer without vector (no semantic search; agent works without codebase_search).
  */
 declare function createCodebaseIndexer(projectRoot: string, config: NexusConfig, options?: IndexerFactoryOptions): Promise<CodebaseIndexer>;
 
@@ -1678,11 +1734,70 @@ declare class McpClient {
     private tools;
     connect(config: McpServerConfig): Promise<void>;
     connectAll(configs: McpServerConfig[]): Promise<void>;
+    /** Test each server and return status (ok or error message). Does not keep connections. */
+    testServers(configs: McpServerConfig[]): Promise<Array<{
+        name: string;
+        status: "ok" | "error";
+        error?: string;
+    }>>;
     getTools(): ToolDef[];
     getStatus(): Record<string, "connected" | "disconnected">;
     disconnectAll(): Promise<void>;
 }
 declare function setMcpClientInstance(client: McpClient): void;
+/** Standalone test of MCP server configs (does not keep connections). */
+declare function testMcpServers(configs: McpServerConfig[]): Promise<Array<{
+    name: string;
+    status: "ok" | "error";
+    error?: string;
+}>>;
+
+/**
+ * Models catalog from models.dev (same source as KiloCode/OpenCode).
+ * Used by CLI and extension to show "Select model" with Recommended / free models.
+ * Free models (cost.input === 0) are sorted first so users can start without an API key (OpenRouter free tier).
+ */
+interface CatalogModel {
+    id: string;
+    name: string;
+    /** Zero-cost / free tier */
+    free: boolean;
+    /** Optional sort order for recommended (lower first) */
+    recommendedIndex?: number;
+}
+interface CatalogProvider {
+    id: string;
+    name: string;
+    baseUrl: string;
+    /** Nexus uses openai-compatible with this baseUrl */
+    models: CatalogModel[];
+}
+interface ModelsCatalog {
+    providers: CatalogProvider[];
+    /** Flat list: free models first (Recommended), then rest */
+    recommended: Array<{
+        providerId: string;
+        modelId: string;
+        name: string;
+        free: boolean;
+    }>;
+}
+declare function getModelsUrl(): string;
+declare function getModelsPath(): string | undefined;
+/**
+ * Load catalog: from NEXUS_MODELS_PATH file, or fetch from NEXUS_MODELS_URL (models.dev).
+ * Supported gateway providers are mapped to Nexus openai-compatible + baseUrl.
+ */
+declare function getModelsCatalog(): Promise<ModelsCatalog>;
+/**
+ * Resolve a catalog selection to Nexus model config (provider + id + baseUrl).
+ * Selection is from getModelsCatalog().recommended or .providers[].models.
+ */
+declare function catalogSelectionToModel(providerId: string, modelId: string, catalog: ModelsCatalog): {
+    provider: string;
+    id: string;
+    baseUrl: string;
+};
 
 /**
  * Shadow git repository for checkpoints.
@@ -1713,4 +1828,4 @@ declare class CheckpointTracker {
     private restoreToWorkspace;
 }
 
-export { type AgentEvent, type ApprovalAction, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProviderConfig, READ_ONLY_TOOLS, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, listSessions, loadConfig, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, writeConfig, writeGlobalProfiles };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, testMcpServers, writeConfig, writeGlobalProfiles };

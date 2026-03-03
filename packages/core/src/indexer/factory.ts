@@ -1,6 +1,6 @@
 import * as crypto from "node:crypto"
 import type { NexusConfig } from "../types.js"
-import { createEmbeddingClient } from "../provider/index.js"
+import { createEmbeddingClient, isEmbeddingApiKeyMissing } from "../provider/index.js"
 import { CodebaseIndexer } from "./index.js"
 import { ensureQdrantRunning } from "./qdrant-manager.js"
 
@@ -9,8 +9,8 @@ export interface IndexerFactoryOptions {
 }
 
 /**
- * Creates a CodebaseIndexer with optional vector-search wiring.
- * If vector prerequisites are missing, falls back to FTS-only indexer.
+ * Creates a CodebaseIndexer with optional vector search (Qdrant).
+ * When vector prerequisites are missing, returns indexer without vector (no semantic search; agent works without codebase_search).
  */
 export async function createCodebaseIndexer(
   projectRoot: string,
@@ -25,7 +25,12 @@ export async function createCodebaseIndexer(
   }
 
   if (!config.embeddings) {
-    warn("[nexus] Vector indexing is enabled but embeddings config is missing. Falling back to FTS-only index.")
+    warn("[nexus] Vector indexing is enabled but embeddings config is missing. Indexer will run without vector search.")
+    return new CodebaseIndexer(projectRoot, config)
+  }
+
+  if (isEmbeddingApiKeyMissing(config.embeddings)) {
+    warn("[nexus] Vector indexing is enabled but embeddings API key is missing. Nexus will run without vector search. Add embeddings.apiKey or set OPENROUTER_API_KEY / OPENAI_API_KEY to enable it later.")
     return new CodebaseIndexer(projectRoot, config)
   }
 
@@ -37,7 +42,7 @@ export async function createCodebaseIndexer(
     log: warn,
   })
   if (!qdrant.available) {
-    warn(qdrant.warning ?? "[nexus] Qdrant is unavailable. Falling back to FTS-only index.")
+    warn(qdrant.warning ?? "[nexus] Qdrant is unavailable. Indexer will run without vector search.")
     return new CodebaseIndexer(projectRoot, config)
   }
 
@@ -46,7 +51,7 @@ export async function createCodebaseIndexer(
     embeddingClient = createEmbeddingClient(config.embeddings)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    warn(`[nexus] Embeddings init failed (${msg}). Falling back to FTS-only index.`)
+    warn(`[nexus] Embeddings init failed (${msg}). Indexer will run without vector search. Set embeddings.apiKey or env (e.g. OPENROUTER_API_KEY) if using a remote embeddings API.`)
     return new CodebaseIndexer(projectRoot, config)
   }
   const projectHash = crypto.createHash("sha1").update(projectRoot).digest("hex").slice(0, 16)

@@ -1,5 +1,6 @@
 // Config
-export { loadConfig, writeConfig, writeGlobalProfiles, getGlobalConfigDir, ensureGlobalConfigDir } from "./config/index.js"
+export { loadConfig, writeConfig, writeGlobalProfiles, getGlobalConfigDir, ensureGlobalConfigDir, loadProjectSettings } from "./config/index.js"
+export type { ProjectSettings } from "./config/index.js"
 export { NexusConfigSchema } from "./config/schema.js"
 export type { NexusConfig, ProviderConfig, EmbeddingConfig, McpServerConfig, SkillDef, ModeConfig } from "./types.js"
 
@@ -47,7 +48,16 @@ export { estimateTokens } from "./context/condense.js"
 export { loadSkills } from "./skills/manager.js"
 
 // MCP
-export { McpClient, setMcpClientInstance } from "./mcp/client.js"
+export { McpClient, setMcpClientInstance, testMcpServers } from "./mcp/client.js"
+
+// Models catalog (models.dev — free/recommended models for CLI & extension)
+export {
+  getModelsCatalog,
+  getModelsUrl,
+  getModelsPath,
+  catalogSelectionToModel,
+} from "./models/catalog.js"
+export type { ModelsCatalog, CatalogProvider, CatalogModel } from "./models/catalog.js"
 
 // Checkpoint
 export { CheckpointTracker } from "./checkpoint/tracker.js"

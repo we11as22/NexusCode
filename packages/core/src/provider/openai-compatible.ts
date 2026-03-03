@@ -16,11 +16,12 @@ export function createOpenAICompatibleClient(config: ProviderConfig) {
     config.apiKey ??
     process.env["OPENAI_API_KEY"] ??
     process.env["OPENROUTER_API_KEY"] ??
+    process.env["KILO_API_KEY"] ??
     process.env["NEXUS_API_KEY"] ??
     "dummy"
-  if (apiKey === "dummy" && !isLocalBaseUrl(config.baseUrl)) {
+  if (apiKey === "dummy" && !isApiKeyOptionalBaseUrl(config.baseUrl)) {
     throw new Error(
-      "Missing API key for openai-compatible provider. Set model.apiKey or OPENROUTER_API_KEY/NEXUS_API_KEY."
+      "Missing API key for openai-compatible provider. Set model.apiKey or OPENAI_API_KEY/OPENROUTER_API_KEY/NEXUS_API_KEY."
     )
   }
   const openai = createOpenAI({
@@ -65,7 +66,11 @@ function detectProviderFromUrl(baseUrl: string): string {
   return "openai-compatible"
 }
 
-function isLocalBaseUrl(baseUrl: string): boolean {
+function isApiKeyOptionalBaseUrl(baseUrl: string): boolean {
   const url = baseUrl.toLowerCase()
-  return url.includes("localhost") || url.includes("127.0.0.1")
+  return (
+    url.includes("localhost") ||
+    url.includes("127.0.0.1") ||
+    url.includes("api.kilo.ai/api/gateway")
+  )
 }

@@ -1,6 +1,5 @@
-#!/usr/bin/env node
-import { render } from "ink"
-import React from "react"
+#!/usr/bin/env bun
+// @opentui/core uses bun:ffi — run with Bun (nexus wrapper or: bun path/to/dist/index.js).
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 import * as path from "node:path"
@@ -8,15 +7,42 @@ import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import { execa } from "execa"
 import {
-  loadConfig, writeConfig, Session, createLLMClient, ToolRegistry, loadSkills,
+  loadConfig, writeConfig, loadProjectSettings, Session, createLLMClient, ToolRegistry, loadSkills,
   loadRules, McpClient, setMcpClientInstance, createCompaction,
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
   CodebaseIndexer, createCodebaseIndexer, listSessions,
   type Mode, type AgentEvent, type IndexStatus, type PermissionResult,
 } from "@nexuscode/core"
-import { App } from "./tui/App.js"
 import { CliHost } from "./host.js"
 import { NexusServerClient } from "./server-client.js"
+
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+const FREE_MODELS_BASE_URL = "https://api.kilo.ai/api/gateway"
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0
+}
+
+function isOpenRouterBaseUrl(value: unknown): boolean {
+  return isNonEmptyString(value) && value.toLowerCase().includes("openrouter.ai")
+}
+
+function normalizeModelConfig<T extends { provider?: unknown; id?: unknown; baseUrl?: unknown }>(model: T): T {
+  const next = { ...model } as T & { provider?: unknown; id?: unknown; baseUrl?: unknown }
+  const provider = String(next.provider ?? "")
+  if (provider === "openrouter") {
+    next.provider = "openai-compatible"
+    if (!isNonEmptyString(next.baseUrl)) next.baseUrl = OPENROUTER_BASE_URL
+  }
+  const normalizedProvider = String(next.provider ?? "")
+  const modelId = String(next.id ?? "")
+  if (normalizedProvider === "openai-compatible" && modelId.endsWith(":free")) {
+    if (!isNonEmptyString(next.baseUrl) || isOpenRouterBaseUrl(next.baseUrl)) {
+      next.baseUrl = FREE_MODELS_BASE_URL
+    }
+  }
+  return next as T
+}
 
 const argv = await yargs(hideBin(process.argv))
   .usage("$0 [mode] [message...]")
@@ -102,6 +128,19 @@ try {
   // No file or invalid JSON — keep default []
 }
 
+// Merge .nexus/settings.json + settings.local.json (like .claude)
+try {
+  const settings = loadProjectSettings(cwd)
+  const perms = settings.permissions
+  if (perms) {
+    if (Array.isArray(perms.allow)) config.permissions.allowCommandPatterns = perms.allow
+    if (Array.isArray(perms.deny)) config.permissions.denyCommandPatterns = perms.deny
+    if (Array.isArray(perms.ask)) config.permissions.askCommandPatterns = perms.ask
+  }
+} catch {
+  // ignore
+}
+
 // Apply --model override
 if (argv.model) {
   const slashIdx = argv.model.indexOf("/")
@@ -110,7 +149,7 @@ if (argv.model) {
     const modelId = argv.model.slice(slashIdx + 1)
     if (provider === "openrouter") {
       config.model.provider = "openai-compatible"
-      config.model.baseUrl = config.model.baseUrl || "https://openrouter.ai/api/v1"
+      config.model.baseUrl = config.model.baseUrl || OPENROUTER_BASE_URL
     } else {
       config.model.provider = provider as any
     }
@@ -118,6 +157,7 @@ if (argv.model) {
   } else {
     config.model.id = argv.model
   }
+  config.model = normalizeModelConfig(config.model)
 }
 
 if (typeof argv.temperature === "number" && Number.isFinite(argv.temperature)) {
@@ -127,6 +167,7 @@ if (typeof argv.temperature === "number" && Number.isFinite(argv.temperature)) {
 // Apply profile override
 if (argv.profile && config.profiles[argv.profile]) {
   config.model = { ...config.model, ...config.profiles[argv.profile] } as any
+  config.model = normalizeModelConfig(config.model)
 }
 
 // Determine mode
@@ -137,9 +178,12 @@ const isPrintMode = argv.print
 const messageArgs = argv._.slice(1)
 const initialMessage = messageArgs.join(" ").trim() || undefined
 
-// Init session
+// Init session (refs allow switching session and re-rendering TUI)
+const PAGE_SIZE = 100
+type SessionMessage = { id: string; role: "user" | "assistant" | "system" | "tool"; content: string; ts: number }
+const currentSessionIdRef: { current: string } = { current: "" }
+let currentMessagesRef: { current: SessionMessage[] } = { current: [] }
 let session: Session
-let initialMessagesForApp: typeof session.messages
 
 if (serverUrl) {
   const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
@@ -152,24 +196,25 @@ if (serverUrl) {
   } else {
     sessionId = (await serverClient.createSession()).id
   }
-  // Load only last 100 messages to avoid OOM on long dialogs
-  const PAGE_SIZE = 100
+  currentSessionIdRef.current = sessionId
   const meta = await serverClient.getSession(sessionId)
   const offset = Math.max(0, meta.messageCount - PAGE_SIZE)
-  initialMessagesForApp = await serverClient.getMessages(sessionId, { limit: PAGE_SIZE, offset })
+  currentMessagesRef.current = await serverClient.getMessages(sessionId, { limit: PAGE_SIZE, offset })
   session = {
-    id: sessionId,
+    get id() {
+      return currentSessionIdRef.current
+    },
     get messages() {
-      return initialMessagesForApp
+      return currentMessagesRef.current
     },
     addMessage(msg: { role: "user" | "assistant" | "system" | "tool"; content: string }) {
-      initialMessagesForApp.push({
+      currentMessagesRef.current.push({
         ...msg,
         id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         ts: Date.now(),
       })
-      if (initialMessagesForApp.length > 120) {
-        initialMessagesForApp = initialMessagesForApp.slice(-100)
+      if (currentMessagesRef.current.length > 120) {
+        currentMessagesRef.current = currentMessagesRef.current.slice(-100)
       }
     },
     getTodo: () => "",
@@ -189,8 +234,9 @@ if (serverUrl) {
   } else {
     session = Session.create(cwd)
   }
-  initialMessagesForApp = session.messages
 }
+
+const sessionRef: { current: Session } = { current: session }
 
 // Non-interactive mode
 if (isPrintMode && initialMessage) {
@@ -376,7 +422,19 @@ async function rebuildIndexer(): Promise<void> {
 }
 
 if (!serverUrl) {
-  await rebuildIndexer()
+  try {
+    await rebuildIndexer()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error("[nexus] Indexer init failed:", msg)
+    process.exit(1)
+  }
+}
+
+// TUI requires an interactive terminal
+if (!process.stdout.isTTY || !process.stdin.isTTY) {
+  console.error("[nexus] Interactive TUI requires a TTY. Run 'nexus' from a terminal (not from a pipe or script).")
+  process.exit(1)
 }
 
 let currentAbortController: AbortController | null = null
@@ -431,11 +489,7 @@ function createEventStream() {
 
 function saveConfig(updates: Partial<typeof config>): void {
   if (updates.model) {
-    const nextModel = { ...config.model, ...updates.model }
-    if ((nextModel.provider as unknown as string) === "openrouter") {
-      nextModel.provider = "openai-compatible"
-      nextModel.baseUrl = nextModel.baseUrl || "https://openrouter.ai/api/v1"
-    }
+    const nextModel = normalizeModelConfig({ ...config.model, ...updates.model })
     config.model = nextModel
     defaultModelProfile = { ...config.model }
     client = createLLMClient(config.model)
@@ -444,7 +498,7 @@ function saveConfig(updates: Partial<typeof config>): void {
     const nextEmbeddings = { ...config.embeddings, ...updates.embeddings } as typeof config.embeddings
     if (nextEmbeddings && (nextEmbeddings.provider as unknown as string) === "openrouter") {
       nextEmbeddings.provider = "openai-compatible"
-      nextEmbeddings.baseUrl = nextEmbeddings.baseUrl || "https://openrouter.ai/api/v1"
+      nextEmbeddings.baseUrl = nextEmbeddings.baseUrl || OPENROUTER_BASE_URL
     }
     config.embeddings = nextEmbeddings
   }
@@ -506,7 +560,7 @@ process.on("unhandledRejection", onUnhandledRejection)
 process.on("uncaughtException", onUncaughtException)
 
 async function runMessage(content: string, msgMode: Mode) {
-  session.addMessage({ role: "user", content })
+  sessionRef.current.addMessage({ role: "user", content })
   currentAbortController = new AbortController()
   const timeoutMs = 10 * 60_000
   const timeout = setTimeout(() => {
@@ -518,7 +572,7 @@ async function runMessage(content: string, msgMode: Mode) {
     const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
     try {
       for await (const event of serverClient.streamMessage(
-        session.id,
+        sessionRef.current.id,
         content,
         msgMode,
         currentAbortController.signal
@@ -539,7 +593,7 @@ async function runMessage(content: string, msgMode: Mode) {
   try {
     await refreshIndexerFromGit(indexer, cwd).catch(() => {})
     await runAgentLoop({
-      session,
+      session: sessionRef.current,
       client,
       host,
       config,
@@ -551,7 +605,7 @@ async function runMessage(content: string, msgMode: Mode) {
       compaction,
       signal: currentAbortController.signal,
     })
-    await session.save().catch(() => {})
+    await sessionRef.current.save().catch(() => {})
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (!msg.includes("AbortError") && !msg.includes("Aborted")) {
@@ -604,81 +658,132 @@ async function refreshIndexerFromGit(indexer: CodebaseIndexer | undefined, proje
 // If initial message provided, run it
 const startMessage = initialMessage
 
-// Render TUI
-const { unmount } = render(
-  React.createElement(App, {
-    onMessage: (content, msgMode) => {
-      runMessage(content, msgMode).catch(console.error)
-    },
-    onAbort: () => currentAbortController?.abort(),
-    onCompact: async () => {
-      if (config) {
-        const llmClient = createLLMClient(config.model)
-        await compaction.compact(session, llmClient)
-      }
-    },
-    onModeChange: (newMode) => {
-      // Mode is managed in the App state
-    },
-    events: eventIterable,
-    initialMessages: session.messages,
-    initialModel: config.model.id,
-    initialProvider: config.model.provider,
-    initialMode: mode,
-    sessionId: session.id,
-    projectDir: cwd,
-    profileNames: Object.keys(config.profiles ?? {}),
-    onProfileSelect: (profileName) => {
-      if (!profileName) {
-        config.model = { ...defaultModelProfile }
-        client = createLLMClient(config.model)
-        return
-      }
-      const profile = config.profiles?.[profileName]
-      if (!profile) {
-        return
-      }
-      config.model = { ...config.model, ...profile } as typeof config.model
-      if ((config.model.provider as unknown as string) === "openrouter") {
-        config.model.provider = "openai-compatible"
-        config.model.baseUrl = config.model.baseUrl || "https://openrouter.ai/api/v1"
-      }
+// Render TUI (OpenTUI) — lazy load so Node can run --help/--print without Bun
+let renderer: Awaited<ReturnType<typeof import("@opentui/core")["createCliRenderer"]>>
+let root: ReturnType<typeof import("@opentui/react")["createRoot"]>
+let React: typeof import("react")
+let App: typeof import("./tui/App.js").App
+
+try {
+  // Load React first so @opentui/react and App use the same instance (avoids "ReactSharedInternals.S" / duplicate React).
+  const react = await import("react")
+  React = react.default
+  const opentuiCore = await import("@opentui/core")
+  const opentuiReact = await import("@opentui/react")
+  const appModule = await import("./tui/App.js")
+  const { createCliRenderer } = opentuiCore
+  const { createRoot } = opentuiReact
+  App = appModule.App
+  renderer = await createCliRenderer({ exitOnCtrlC: false })
+  root = createRoot(renderer)
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  const stack = err instanceof Error ? err.stack : ""
+  console.error("[nexus] TUI failed to start:", msg)
+  if (process.env["NEXUS_DEBUG"] && stack) console.error(stack)
+  process.exit(1)
+}
+
+async function getSessionList(): Promise<Array<{ id: string; ts?: number; title?: string; messageCount: number }>> {
+  if (serverUrl) {
+    const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
+    return serverClient.listSessions()
+  }
+  return listSessions(cwd)
+}
+
+async function onSwitchSession(sessionId: string): Promise<void> {
+  if (serverUrl) {
+    const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
+    const meta = await serverClient.getSession(sessionId)
+    const offset = Math.max(0, meta.messageCount - PAGE_SIZE)
+    const messages = await serverClient.getMessages(sessionId, { limit: PAGE_SIZE, offset })
+    currentSessionIdRef.current = sessionId
+    currentMessagesRef.current = messages
+    appProps.initialMessages = messages
+    appProps.sessionId = sessionId
+  } else {
+    const newSession = await Session.resume(sessionId, cwd)
+    if (!newSession) return
+    sessionRef.current = newSession
+    appProps.initialMessages = newSession.messages
+    appProps.sessionId = newSession.id
+  }
+  root.render(React.createElement(App, appProps))
+}
+
+const appProps = {
+  onExit: () => {
+    renderer.destroy()
+    process.exit(0)
+  },
+  onMessage: (content: string, msgMode: Mode) => {
+    runMessage(content, msgMode).catch(console.error)
+  },
+  onAbort: () => currentAbortController?.abort(),
+  onCompact: async () => {
+    if (config) {
+      const llmClient = createLLMClient(config.model)
+      await compaction.compact(sessionRef.current, llmClient)
+    }
+  },
+  onModeChange: (_newMode: Mode) => {},
+  events: eventIterable,
+  initialMessages: sessionRef.current.messages,
+  initialModel: config.model.id,
+  initialProvider: config.model.provider,
+  initialMode: mode,
+  sessionId: sessionRef.current.id,
+  projectDir: cwd,
+  profileNames: Object.keys(config.profiles ?? {}),
+  onProfileSelect: (profileName?: string) => {
+    if (!profileName) {
+      config.model = { ...defaultModelProfile }
       client = createLLMClient(config.model)
+      return
+    }
+    const profile = config.profiles?.[profileName]
+    if (!profile) return
+    config.model = { ...config.model, ...profile } as typeof config.model
+    config.model = normalizeModelConfig(config.model)
+    client = createLLMClient(config.model)
+  },
+  noIndex: !indexEnabledFlag || !!serverUrl,
+  configSnapshot: {
+    model: { provider: config.model.provider, id: config.model.id, temperature: config.model.temperature },
+    embeddings: config.embeddings
+      ? {
+          provider: config.embeddings.provider,
+          model: config.embeddings.model,
+          dimensions: config.embeddings.dimensions,
+        }
+      : undefined,
+    indexing: { enabled: config.indexing.enabled, vector: config.indexing.vector },
+    vectorDb: config.vectorDb ? { enabled: config.vectorDb.enabled, url: config.vectorDb.url } : undefined,
+    mcp: { servers: (config.mcp?.servers ?? []) as unknown as Array<Record<string, unknown>> },
+    skills: config.skills ?? [],
+    rules: { files: config.rules?.files ?? [] },
+    modes: {
+      agent: { customInstructions: config.modes?.agent?.customInstructions },
+      plan: { customInstructions: config.modes?.plan?.customInstructions },
+      ask: { customInstructions: config.modes?.ask?.customInstructions },
     },
-    noIndex: !indexEnabledFlag || !!serverUrl,
-    configSnapshot: {
-      model: { provider: config.model.provider, id: config.model.id, temperature: config.model.temperature },
-      embeddings: config.embeddings
-        ? {
-            provider: config.embeddings.provider,
-            model: config.embeddings.model,
-            dimensions: config.embeddings.dimensions,
-          }
-        : undefined,
-      indexing: { enabled: config.indexing.enabled, vector: config.indexing.vector },
-      vectorDb: config.vectorDb ? { enabled: config.vectorDb.enabled, url: config.vectorDb.url } : undefined,
-      mcp: { servers: (config.mcp?.servers ?? []) as unknown as Array<Record<string, unknown>> },
-      skills: config.skills ?? [],
-      rules: { files: config.rules?.files ?? [] },
-      modes: {
-        agent: { customInstructions: config.modes?.agent?.customInstructions },
-        plan: { customInstructions: config.modes?.plan?.customInstructions },
-        ask: { customInstructions: config.modes?.ask?.customInstructions },
-      },
-      profiles: config.profiles ?? {},
-    },
-    saveConfig,
-    onReindex: () => indexer?.reindex(),
-    onIndexStop: () => indexer?.stop(),
-    onResolveApproval: (result: PermissionResult) => {
-      if (approvalResolveRef.current) {
-        approvalResolveRef.current(result)
-        approvalResolveRef.current = null
-      }
-    },
-  }),
-  { exitOnCtrlC: false }
-)
+    profiles: config.profiles ?? {},
+  },
+  saveConfig,
+  onReindex: () => indexer?.reindex(),
+  onIndexStop: () => indexer?.stop(),
+  onIndexDelete: () => indexer?.deleteIndex(),
+  onResolveApproval: (result: PermissionResult) => {
+    if (approvalResolveRef.current) {
+      approvalResolveRef.current(result)
+      approvalResolveRef.current = null
+    }
+  },
+  getSessionList,
+  onSwitchSession,
+}
+root.render(React.createElement(App, appProps))
 
 // Auto-run initial message
 if (startMessage) {
@@ -693,7 +798,7 @@ process.on("SIGINT", () => {
   process.off("unhandledRejection", onUnhandledRejection)
   process.off("uncaughtException", onUncaughtException)
   setTimeout(() => {
-    unmount()
+    renderer.destroy()
     process.exit(0)
   }, 200)
 })

@@ -18,10 +18,46 @@
 - **MCP support** with OAuth and tool classification
 - **Optional NexusCode Server**: DB-backed sessions and dialogs; extension and CLI can connect to the server, switch sessions, and avoid OOM on long chats (pagination)
 - Beautiful Cline/agent-style UI: thought progress ("Thought for Xs"), loading states, todo checklist, diff-style tool output
+- CLI TUI refactored to KiloCode-style Home + Prompt shell: centered logo/prompt/tips, Kilo-like slash command palette, and `Vector index` + `/agent-config` in menu
 
 ---
 
-## Установка в одну команду (как OpenCode)
+## CLI в одну команду после клона (как OpenCode)
+
+Склонируй репо, затем **одна команда** — всё ставится, `nexus` потом вызывается из любого места.
+
+**Важно:** используй **Node 20** при установке и при запуске `nexus` (нативный модуль better-sqlite3 привязан к версии Node).
+Для TUI также нужен **Bun** (OpenTUI runtime): `curl -fsSL https://bun.sh/install | bash`.
+
+```bash
+git clone <repo> NexusCode && cd NexusCode
+nvm use 20          # или: nvm use (если есть .nvmrc)
+pnpm run cli        # одна команда: install → rebuild native → build → установка nexus в ~/bin
+```
+
+Один раз добавь в `~/.bashrc` (или `~/.profile`):
+
+```bash
+export PATH="$HOME/bin:$PATH"
+```
+
+Дальше в **любом** терминале и из **любой** директории:
+
+```bash
+nexus
+```
+
+Обновить после изменений в коде — снова (под той же Node 20):
+
+```bash
+cd NexusCode && nvm use 20 && pnpm run cli
+```
+
+Если при первом запуске `nexus` видишь `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED` — значит `nexus` запущен под другой версией Node, чем при установке. Выполни `nvm use 20` в этом терминале и снова запусти `nexus`. Обёртка в `~/bin/nexus` запоминает Node из шага установки; если переключил nvm после установки, переустанови: `pnpm run cli`.
+
+---
+
+## Установка в одну команду (полная переустановка)
 
 **Актуальная версия NexusCode — только из этого репо.** В проекте включён **локальный store** (`.npmrc` → `store-dir=.pnpm-store`), поэтому конфликта с глобальным pnpm не будет.
 
@@ -342,23 +378,29 @@ nexus --help
 
 ## Configuration
 
-By default NexusCode uses **OpenRouter** with the free model `minimax/minimax-m2:free` (same idea as Kilo Code — free MiniMax M2, no cost, good for coding). Set your API key once (free at [openrouter.ai](https://openrouter.ai)):
+By default NexusCode uses the **Nexus free-model gateway** with `minimax/minimax-m2.5:free`:
 
-```bash
-export OPENROUTER_API_KEY=sk-or-...
+```yaml
+model:
+  provider: openai-compatible
+  id: minimax/minimax-m2.5:free
+  baseUrl: https://api.kilo.ai/api/gateway
 ```
+
+No API key is required for the default free gateway route.
 
 Override the model in `.nexus/nexus.yaml` in your project root, or use Settings in the extension / `--model` in CLI.
 
-Example — keep default (OpenRouter free):
+**Free model selection:** In the extension open **Settings → LLM → Select model**. In CLI use **/model** and pick from the catalog; free models are listed first and validated against the live gateway model list.
+
+Example — keep default (free gateway):
 
 ```yaml
 # Optional: only if you want to override defaults
 model:
   provider: openai-compatible
-  id: minimax/minimax-m2:free
-  baseUrl: https://openrouter.ai/api/v1
-  # apiKey: from OPENROUTER_API_KEY env var
+  id: minimax/minimax-m2.5:free
+  baseUrl: https://api.kilo.ai/api/gateway
 ```
 
 Example — use another OpenRouter model or your own provider:
@@ -378,6 +420,7 @@ model:
   provider: openai-compatible
   id: anthropic/claude-sonnet-4
   baseUrl: https://openrouter.ai/api/v1
+  # apiKey: from OPENROUTER_API_KEY env var
 ```
 
 See `.nexus/nexus.yaml` for the complete reference.
@@ -480,6 +523,18 @@ nexus -p "Summarize this codebase"
 | Ctrl+S | Compact history |
 | Ctrl+K | Clear chat |
 | Ctrl+C | Abort / Quit |
+
+### Slash Commands (CLI TUI)
+| Command | Action |
+|---------|--------|
+| `/settings` | Open full settings hub |
+| `/model` | Open model picker/form |
+| `/embeddings` | Configure embeddings |
+| `/index` | Index sync/stop/delete |
+| `/sessions` | List and switch sessions |
+| `/agent-config` | Select/create agent presets from discovered `SKILL.md`, MCP servers, and AGENTS/CLAUDE rules |
+
+Agent presets are stored in `.nexus/agent-configs.json` and can be assembled from `AGENTS.md` skill file references plus local `.nexus/.agents` skill directories.
 
 ---
 

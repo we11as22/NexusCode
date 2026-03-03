@@ -217,6 +217,7 @@ function formatToolInputPreview(part: ToolPart): string {
 export function ToolCallCard({ part }: Props) {
   const [expanded, setExpanded] = useState(false)
   const icon = TOOL_ICONS[part.tool] ?? "🔧"
+  const isMcp = part.tool.includes("__")
   const elapsed = part.timeStart && part.timeEnd
     ? `${((part.timeEnd - part.timeStart) / 1000).toFixed(1)}s`
     : null
@@ -238,6 +239,11 @@ export function ToolCallCard({ part }: Props) {
       >
         <span className="flex-shrink-0">{icon}</span>
         <span className="font-mono text-[var(--vscode-foreground)] flex-shrink-0">{toolDisplayName(part.tool)}</span>
+        {isMcp && (
+          <span className="flex-shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-[var(--vscode-badge-background)] text-[var(--vscode-badge-foreground)]" title="MCP tool">
+            MCP
+          </span>
+        )}
         {inputPreview && (
           <span className="text-[var(--vscode-descriptionForeground)] truncate flex-1 min-w-0">{inputPreview}</span>
         )}

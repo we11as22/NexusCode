@@ -2,10 +2,10 @@ import * as path from "node:path"
 import * as fs from "node:fs/promises"
 import * as crypto from "node:crypto"
 import { mkdirSync } from "node:fs"
-import type { IIndexer, IndexStatus, IndexSearchOptions, IndexSearchResult, NexusConfig } from "../types.js"
+import type { IIndexer, IndexStatus, IndexSearchOptions, IndexSearchResult, NexusConfig, SymbolEntry } from "../types.js"
 import type { FileInfo } from "./scanner.js"
-import { FTSIndex } from "./fts.js"
-import { VectorIndex } from "./vector.js"
+import { FileTracker } from "./file-tracker.js"
+import { VectorIndex, VectorAuthError } from "./vector.js"
 import { walkDir } from "./scanner.js"
 import { extractSymbols, extractChunks } from "./ast-extractor.js"
 import { getIndexDir } from "./multi-project.js"
@@ -22,11 +22,19 @@ const SUPPORTED_INDEX_EXTENSIONS = new Set([
   ...SUPPORTED_MARKDOWN_EXTENSIONS,
 ])
 
+interface PreparedFile {
+  file: FileInfo
+  unchanged: boolean
+  shouldUpdateVector: boolean
+  extracted: SymbolEntry[]
+}
+
 /**
- * Main codebase indexer. Manages FTS and optional vector index.
+ * Codebase indexer: vector-only (Qdrant). No FTS.
+ * When vector client is missing, indexing is no-op and search returns [].
  */
 export class CodebaseIndexer implements IIndexer {
-  private fts: FTSIndex
+  private fileTracker: FileTracker
   private vector?: VectorIndex
   private forceVectorBackfill = false
   private _status: IndexStatus = { state: "idle" }
@@ -44,8 +52,7 @@ export class CodebaseIndexer implements IIndexer {
   ) {
     const indexDir = getIndexDir(projectRoot)
     mkdirSync(indexDir, { recursive: true })
-
-    this.fts = new FTSIndex(path.join(indexDir, "fts.db"))
+    this.fileTracker = new FileTracker(indexDir)
 
     if (config.vectorDb?.enabled && embeddingClient && vectorUrl && projectHash) {
       this.vector = new VectorIndex(vectorUrl, projectHash, embeddingClient, {
@@ -75,7 +82,6 @@ export class CodebaseIndexer implements IIndexer {
 
   async startIndexing(): Promise<void> {
     if (this.indexing) {
-      // If already indexing, restart cleanly
       this.stop()
       await new Promise<void>(r => setTimeout(r, 100))
     }
@@ -97,6 +103,7 @@ export class CodebaseIndexer implements IIndexer {
     }
 
     this.notifyStatus({ state: "indexing", progress: 0, total: 0, chunksProcessed: 0, chunksTotal: 0 })
+    await this.fileTracker.load()
 
     this.indexInBackground().catch(err => {
       console.warn("[nexus] Indexing error:", err)
@@ -106,41 +113,15 @@ export class CodebaseIndexer implements IIndexer {
   }
 
   private async indexInBackground(): Promise<void> {
-    const existing = this.fts.getFilesWithHashes()
+    const existing = this.fileTracker.getFilesWithHashes()
     const seen = new Set<string>()
-    let processed = 0
-    let total = 0
-    let chunksProcessed = 0
-    let chunksTotal = 0
+    const discovered: FileInfo[] = []
+    const batchSize = Math.max(1, this.config.indexing.batchSize ?? 50)
 
-    const batchSize = this.config.indexing.batchSize
-    let batch: FileInfo[] = []
-
-    // Single-pass: walk + process in one traversal
     for await (const file of walkDir(this.projectRoot, this.config.indexing.excludePatterns)) {
       if (this.abortController?.signal.aborted) break
-
-      total++
       seen.add(file.path)
-      batch.push(file)
-
-      if (batch.length >= batchSize) {
-        const stats = await this.processBatch(batch)
-        chunksTotal += stats.plannedChunks
-        chunksProcessed += stats.indexedChunks
-        processed += batch.length
-        this.notifyStatus({ state: "indexing", progress: processed, total, chunksProcessed, chunksTotal })
-        batch = []
-        // Yield to event loop between batches to avoid blocking
-        await new Promise<void>(r => setImmediate(r))
-      }
-    }
-
-    if (batch.length > 0 && !this.abortController?.signal.aborted) {
-      const stats = await this.processBatch(batch)
-      chunksTotal += stats.plannedChunks
-      chunksProcessed += stats.indexedChunks
-      processed += batch.length
+      discovered.push(file)
     }
 
     if (this.abortController?.signal.aborted) {
@@ -148,10 +129,51 @@ export class CodebaseIndexer implements IIndexer {
       return
     }
 
-    // Remove files that no longer exist
+    // Pre-count chunks first so UI always has stable chunksTotal before indexing progress starts.
+    const prepared: PreparedFile[] = []
+    let chunksTotal = 0
+    for (const file of discovered) {
+      if (this.abortController?.signal.aborted) break
+      const unchanged = this.fileTracker.isFileIndexed(file.path, file.mtime, file.hash)
+      const shouldUpdateVector = unchanged ? this.forceVectorBackfill : true
+      if (!shouldUpdateVector && unchanged) {
+        continue
+      }
+      const content = await fs.readFile(file.absPath, "utf8").catch(() => null)
+      if (content == null) continue
+      const extracted = this.extractEntries(file, content)
+      chunksTotal += extracted.length
+      prepared.push({
+        file,
+        unchanged,
+        shouldUpdateVector,
+        extracted,
+      })
+    }
+
+    let processed = 0
+    let chunksProcessed = 0
+    const total = prepared.length
+    this.notifyStatus({ state: "indexing", progress: 0, total, chunksProcessed, chunksTotal })
+
+    for (let i = 0; i < prepared.length; i += batchSize) {
+      if (this.abortController?.signal.aborted) break
+      const slice = prepared.slice(i, i + batchSize)
+      const stats = await this.processPreparedBatch(slice)
+      processed += stats.processedFiles
+      chunksProcessed += stats.indexedChunks
+      this.notifyStatus({ state: "indexing", progress: processed, total, chunksProcessed, chunksTotal })
+      await new Promise<void>(r => setImmediate(r))
+    }
+
+    if (this.abortController?.signal.aborted) {
+      this.indexing = false
+      return
+    }
+
     for (const [filePath] of existing) {
       if (!seen.has(filePath)) {
-        this.fts.deleteFile(filePath)
+        this.fileTracker.deleteFile(filePath)
         await this.vector?.deleteByPath(filePath)
       }
     }
@@ -160,56 +182,34 @@ export class CodebaseIndexer implements IIndexer {
       await this.vector.markIndexingComplete()
     }
 
-    const stats = this.fts.getStats()
-    this.notifyStatus({ state: "ready", files: stats.files, symbols: stats.symbols, chunks: stats.chunks })
+    await this.fileTracker.save()
+    this.notifyStatus({ state: "ready", files: seen.size, symbols: chunksProcessed, chunks: chunksProcessed })
     this.forceVectorBackfill = false
     this.indexing = false
   }
 
-  private async processBatch(files: FileInfo[]): Promise<{ plannedChunks: number; indexedChunks: number }> {
+  private extractEntries(file: FileInfo, content: string): SymbolEntry[] {
+    const supportsStructuredSymbols = SUPPORTED_CODE_EXTENSIONS.has(file.ext) && this.config.indexing.symbolExtract
+    const supportsMarkdownSections = SUPPORTED_MARKDOWN_EXTENSIONS.has(file.ext)
+    return (supportsStructuredSymbols || supportsMarkdownSections)
+      ? extractSymbols(content, file.path, file.ext)
+      : extractChunks(content, file.path)
+  }
+
+  private async processPreparedBatch(files: PreparedFile[]): Promise<{ processedFiles: number; indexedChunks: number }> {
     const vectorEntries: Parameters<VectorIndex["upsertSymbols"]>[0] = []
-    let plannedChunks = 0
     let indexedChunks = 0
 
-    for (const file of files) {
-      if (!file) continue
+    for (const entry of files) {
+      const { file, extracted, unchanged, shouldUpdateVector } = entry
+      indexedChunks += extracted.length
 
-      const unchanged = this.fts.isFileIndexed(file.path, file.mtime, file.hash)
-      if (unchanged && !this.forceVectorBackfill) continue
-
-      let content: string
-      try {
-        content = await fs.readFile(file.absPath, "utf8")
-      } catch {
-        continue
+      if (!unchanged || this.fileTracker.getChunks(file.path) == null) {
+        this.fileTracker.upsertFile(file.path, file.mtime, file.hash, extracted.length)
       }
 
-      if (!unchanged) {
-        this.fts.upsertFile(file.path, file.mtime, file.hash)
-      }
-
-      const shouldUpdateFts = !unchanged
-
-      const supportsStructuredSymbols = SUPPORTED_CODE_EXTENSIONS.has(file.ext) && this.config.indexing.symbolExtract
-      const supportsMarkdownSections = SUPPORTED_MARKDOWN_EXTENSIONS.has(file.ext)
-      const extracted = (supportsStructuredSymbols || supportsMarkdownSections)
-        ? extractSymbols(content, file.path, file.ext)
-        : extractChunks(content, file.path)
-
-      plannedChunks += extracted.length
-      if (extracted.length > 0) {
-        indexedChunks += extracted.length
-      }
-
-      for (const sym of extracted) {
-        if (shouldUpdateFts) {
-          if (sym.kind === "chunk") {
-            this.fts.insertChunk({ path: sym.path, offset: sym.startLine, content: sym.content })
-          } else {
-            this.fts.insertSymbol(sym)
-          }
-        }
-        if (this.vector && this.config.indexing.vector) {
+      if (this.vector && this.config.indexing.vector && shouldUpdateVector) {
+        for (const sym of extracted) {
           const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`
           vectorEntries.push({
             id,
@@ -224,8 +224,74 @@ export class CodebaseIndexer implements IIndexer {
       }
     }
 
-    if (vectorEntries.length > 0) {
-      await this.vector?.upsertSymbols(vectorEntries)
+    if (vectorEntries.length > 0 && this.vector) {
+      try {
+        await this.vector.upsertSymbols(vectorEntries)
+      } catch (err) {
+        if (err instanceof VectorAuthError) {
+          this.vector = undefined
+        } else {
+          throw err
+        }
+      }
+    }
+
+    return { processedFiles: files.length, indexedChunks }
+  }
+
+  private async processBatch(files: FileInfo[]): Promise<{ plannedChunks: number; indexedChunks: number }> {
+    const vectorEntries: Parameters<VectorIndex["upsertSymbols"]>[0] = []
+    let plannedChunks = 0
+    let indexedChunks = 0
+
+    for (const file of files) {
+      if (!file) continue
+
+      const unchanged = this.fileTracker.isFileIndexed(file.path, file.mtime, file.hash)
+      if (unchanged && !this.forceVectorBackfill) continue
+
+      let content: string
+      try {
+        content = await fs.readFile(file.absPath, "utf8")
+      } catch {
+        continue
+      }
+
+      const shouldUpdateVector = unchanged ? this.forceVectorBackfill : true
+      const extracted = this.extractEntries(file, content)
+
+      plannedChunks += extracted.length
+      indexedChunks += extracted.length
+      if (!unchanged || this.fileTracker.getChunks(file.path) == null) {
+        this.fileTracker.upsertFile(file.path, file.mtime, file.hash, extracted.length)
+      }
+
+      if (this.vector && this.config.indexing.vector && shouldUpdateVector) {
+        for (const sym of extracted) {
+          const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`
+          vectorEntries.push({
+            id,
+            path: file.path,
+            name: sym.name,
+            kind: sym.kind,
+            parent: sym.parent,
+            startLine: sym.startLine,
+            content: sym.content,
+          })
+        }
+      }
+    }
+
+    if (vectorEntries.length > 0 && this.vector) {
+      try {
+        await this.vector.upsertSymbols(vectorEntries)
+      } catch (err) {
+        if (err instanceof VectorAuthError) {
+          this.vector = undefined
+        } else {
+          throw err
+        }
+      }
     }
 
     return { plannedChunks, indexedChunks }
@@ -234,32 +300,27 @@ export class CodebaseIndexer implements IIndexer {
   async refreshFile(filePath: string): Promise<void> {
     const existing = this.debounceTimers.get(filePath)
     if (existing) clearTimeout(existing)
-
     const timer = setTimeout(async () => {
       this.debounceTimers.delete(filePath)
       try {
         await this.refreshFileNow(filePath)
-      } catch {
-        // Ignore late debounce callbacks during shutdown/rebuild windows.
-      }
+      } catch {}
     }, this.config.indexing.debounceMs)
-
     this.debounceTimers.set(filePath, timer)
   }
 
   async refreshFileNow(filePath: string): Promise<void> {
-    // Check if file still exists
     const fileInfo = await buildFileInfo(filePath, this.projectRoot)
     if (!fileInfo) {
-      // File deleted — remove from index
       const relPath = path.relative(this.projectRoot, filePath)
       if (!relPath || relPath.startsWith("..")) return
-      this.fts.deleteFile(relPath)
+      this.fileTracker.deleteFile(relPath)
       await this.vector?.deleteByPath(relPath)
       return
     }
-
+    await this.fileTracker.load()
     await this.processBatch([fileInfo])
+    await this.fileTracker.save()
   }
 
   async search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]> {
@@ -278,86 +339,51 @@ export class CodebaseIndexer implements IIndexer {
       return prefixes.some((pre) => normalized === pre || normalized.startsWith(`${pre}/`))
     }
 
-    /** One result per path:startLine; keeps entry with best score when deduplicating. */
-    const dedupeByPathLine = (items: IndexSearchResult[]): IndexSearchResult[] => {
-      const byKey = new Map<string, IndexSearchResult>()
-      for (const r of items) {
-        const key = `${r.path}:${r.startLine ?? ""}`
-        const existing = byKey.get(key)
-        if (!existing || (r.score ?? 0) > (existing.score ?? 0)) {
-          byKey.set(key, r)
-        }
-      }
-      return Array.from(byKey.values())
-    }
-
     const results: IndexSearchResult[] = []
 
-    if (this.config.indexing.fts) {
-      const requestLimit = prefixes.length > 0 ? limit * 3 : limit
-      const symbolResults = this.fts.searchSymbols(query, requestLimit, kind, prefixes.length > 0 ? prefixes : undefined)
-      const chunkResults = this.fts.searchChunks(query, requestLimit, prefixes.length > 0 ? prefixes : undefined)
-      const ftsMerged = [...symbolResults, ...chunkResults]
-        .filter((r) => matchesPath(r.path))
-        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-      const ftsDeduped = dedupeByPathLine(ftsMerged)
-      results.push(...ftsDeduped.slice(0, limit))
-    }
-
-    if (this.vector && this.config.indexing.vector && opts?.semantic !== false) {
+    if (this.vector && this.config.indexing.vector) {
       const vectorReady = await this.vector.hasIndexedData()
       if (vectorReady) {
         const requestLimit = prefixes.length > 0 ? limit * 3 : limit
         const pathScopeForVector = prefixes.length > 0 ? prefixes[0] : (Array.isArray(pathScope) ? pathScope[0] : pathScope)
         const vecResults = await this.vector.search(query, requestLimit, kind, pathScopeForVector)
         const vecFiltered = vecResults.filter((r) => matchesPath(r.path))
-        const seen = new Set(results.map((r) => `${r.path}:${r.startLine ?? ""}`))
-        for (const r of vecFiltered) {
-          const key = `${r.path}:${r.startLine ?? ""}`
-          if (!seen.has(key)) {
-            seen.add(key)
-            results.push(r)
-          }
-        }
+        results.push(...vecFiltered.slice(0, limit))
       }
     }
 
-    return results
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-      .slice(0, limit)
+    return results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, limit)
   }
 
-  /**
-   * Clear all index data and restart indexing.
-   */
   async reindex(): Promise<void> {
     this.stop()
-    this.fts.clear()
+    this.fileTracker.clear()
+    await this.fileTracker.save()
     await this.vector?.clearCollection()
     await this.startIndexing()
+  }
+
+  /** Clear index (vector + file tracker) without reindexing. */
+  async deleteIndex(): Promise<void> {
+    this.stop()
+    this.fileTracker.clear()
+    await this.fileTracker.save()
+    await this.vector?.clearCollection()
+    this.notifyStatus({ state: "idle" })
   }
 
   stop(): void {
     this.abortController?.abort()
     this.indexing = false
-
-    // Clear all pending debounce timers to prevent post-stop callbacks
     for (const timer of this.debounceTimers.values()) {
       clearTimeout(timer)
     }
     this.debounceTimers.clear()
   }
 
-  /**
-   * Fully close the indexer — clears timers, closes SQLite.
-   * Call when the extension is deactivated or the indexer is no longer needed.
-   */
   close(): void {
     this.stop()
     this.statusListeners = []
-    try {
-      this.fts.close()
-    } catch {}
   }
 }
 
@@ -365,17 +391,13 @@ async function buildFileInfo(absPath: string, root: string): Promise<FileInfo | 
   try {
     const s = await fs.stat(absPath)
     if (!s.isFile()) return null
-    if (s.size > 1024 * 1024) return null // keep parity with scanner
-
+    if (s.size > 1024 * 1024) return null
     const relPath = path.relative(root, absPath)
     if (!relPath || relPath.startsWith("..")) return null
-
     const ext = path.extname(absPath).toLowerCase()
     if (!SUPPORTED_INDEX_EXTENSIONS.has(ext)) return null
-
     const content = await fs.readFile(absPath)
     const hash = crypto.createHash("md5").update(content).digest("hex")
-
     return {
       path: relPath,
       absPath,

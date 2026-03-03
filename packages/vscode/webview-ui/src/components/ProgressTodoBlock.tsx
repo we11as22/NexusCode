@@ -1,4 +1,4 @@
-import React, { useState } from "react"
+import React, { useState, useRef, useEffect, useMemo } from "react"
 
 export interface TodoItem {
   id: number
@@ -35,6 +35,13 @@ export function useTodoWithProgress(todo: string, isRunning: boolean): { items: 
   }))
   const currentIndex = inProgressIndex >= 0 ? inProgressIndex + 1 : completedCount
   return { items: withProgress, currentIndex, total }
+}
+
+/** Current or first pending todo (for collapsed summary, Roo-style). */
+function getMostImportantTodo(items: TodoItem[]): TodoItem | null {
+  const inProgress = items.find((i) => i.inProgress)
+  if (inProgress) return inProgress
+  return items.find((i) => !i.done) ?? null
 }
 
 function CheckIcon({ className }: { className?: string }) {
@@ -79,70 +86,114 @@ interface Props {
 
 export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
   const [open, setOpen] = useState(true)
+  const listRef = useRef<HTMLUListElement>(null)
+  const itemRefs = useRef<(HTMLDivElement | null)[]>([])
   const { items, currentIndex, total } = useTodoWithProgress(todo, isRunning)
   const headerText = header?.trim() || "Progress"
+  const completedCount = items.filter((i) => i.done).length
+  const allCompleted = total > 0 && completedCount === total
+  const mostImportant = useMemo(() => getMostImportantTodo(items), [items])
+  const scrollIndex = items.findIndex((i) => i.inProgress) >= 0 ? items.findIndex((i) => i.inProgress) : items.findIndex((i) => !i.done)
+
+  useEffect(() => {
+    if (!open || scrollIndex < 0 || !listRef.current) return
+    const el = itemRefs.current[scrollIndex]
+    if (el && listRef.current) {
+      const list = listRef.current
+      const targetTop = el.offsetTop - list.offsetTop
+      const targetHeight = el.offsetHeight
+      const listHeight = list.clientHeight
+      list.scrollTop = Math.max(0, targetTop - (listHeight / 2 - targetHeight / 2))
+    }
+  }, [open, items, scrollIndex])
 
   if (items.length === 0) return null
 
   return (
-    <details
-      open={open}
-      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
-      className="flex-shrink-0 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]"
+    <div
+      data-todo-list
+      className="flex-shrink-0 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden"
     >
-      <summary className="list-none cursor-pointer select-none">
-        <div className="px-3 py-2 flex items-center justify-between gap-2 text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]">
-          <span className="font-medium truncate flex-1 min-w-0">{headerText}</span>
-          <span
-            className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform"
-            style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}
-          >
-            ▼
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => e.key === "Enter" && setOpen((o) => !o)}
+        className={`flex items-center gap-2 px-3 py-2 cursor-pointer select-none text-xs hover:bg-[var(--vscode-list-hoverBackground)] ${
+          mostImportant?.inProgress && !open ? "text-[var(--vscode-charts-yellow)]" : "text-[var(--vscode-foreground)]"
+        }`}
+      >
+        <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
+          {allCompleted ? (
+            <CheckIcon className="w-3.5 h-3.5 text-green-500" />
+          ) : (
+            <CircleIcon className="w-4 h-4 text-[var(--vscode-descriptionForeground)]" />
+          )}
+        </span>
+        <span className="flex-1 min-w-0 truncate">
+          {!open
+            ? allCompleted
+              ? `Complete (${completedCount})`
+              : mostImportant?.label ?? headerText
+            : `${completedCount}/${total} complete`}
+        </span>
+        {!open && !allCompleted && (
+          <span className="flex-shrink-0 text-[10px] text-[var(--vscode-descriptionForeground)]">
+            {completedCount}/{total}
           </span>
-        </div>
-      </summary>
-      <div className="px-3 pb-3 pt-0 space-y-1.5 border-t border-[var(--vscode-panel-border)]">
-        {items.map((item) => (
-          <div
-            key={item.id}
-            className="flex items-center gap-2 text-xs text-[var(--vscode-foreground)]"
-          >
-            <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
-              {item.done && (
-                <span className="text-green-500 flex items-center justify-center">
-                  <CheckIcon className="w-3.5 h-3.5" />
-                </span>
-              )}
-              {item.inProgress && (
-                <span className="text-[var(--nexus-accent)] flex items-center justify-center">
-                  <SpinnerIcon className="w-4 h-4" />
-                </span>
-              )}
-              {!item.done && !item.inProgress && (
-                <span className="text-[var(--vscode-descriptionForeground)]">
-                  <CircleIcon className="w-4 h-4" />
-                </span>
-              )}
-            </span>
-            <span
-              className={
-                item.done
-                  ? "text-[var(--vscode-descriptionForeground)] line-through flex-1 min-w-0 truncate"
-                  : item.inProgress
-                    ? "font-medium flex-1 min-w-0 truncate"
-                    : "flex-1 min-w-0 truncate"
-              }
-            >
-              {item.label}
-            </span>
-            {item.inProgress && total > 0 && (
-              <span className="flex-shrink-0 text-[10px] text-[var(--vscode-descriptionForeground)]">
-                {currentIndex}/{total}
-              </span>
-            )}
-          </div>
-        ))}
+        )}
+        <span
+          className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform"
+          style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}
+        >
+          ▼
+        </span>
       </div>
-    </details>
+      {open && (
+        <ul ref={listRef} className="list-none max-h-[300px] overflow-y-auto mt-0 py-2 px-3 border-t border-[var(--vscode-panel-border)] space-y-1.5">
+          {items.map((item, idx) => (
+            <div
+              key={item.id}
+              ref={(el) => { itemRefs.current[idx] = el }}
+              className={`flex items-center gap-2 text-xs min-h-[20px] leading-normal ${
+                item.inProgress ? "text-[var(--vscode-charts-yellow)]" : ""
+              } ${!item.done && !item.inProgress ? "opacity-70" : ""}`}
+            >
+              <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
+                {item.done && (
+                  <span className="text-green-500 flex items-center justify-center">
+                    <CheckIcon className="w-3.5 h-3.5" />
+                  </span>
+                )}
+                {item.inProgress && (
+                  <span className="text-[var(--vscode-charts-yellow)] flex items-center justify-center">
+                    <SpinnerIcon className="w-4 h-4" />
+                  </span>
+                )}
+                {!item.done && !item.inProgress && (
+                  <span className="text-[var(--vscode-descriptionForeground)]">
+                    <CircleIcon className="w-4 h-4" />
+                  </span>
+                )}
+              </span>
+              <span
+                className={
+                  item.done
+                    ? "text-[var(--vscode-descriptionForeground)] line-through flex-1 min-w-0 truncate"
+                    : "flex-1 min-w-0 truncate"
+                }
+              >
+                {item.label}
+              </span>
+              {item.inProgress && total > 0 && (
+                <span className="flex-shrink-0 text-[10px] text-[var(--vscode-descriptionForeground)]">
+                  {currentIndex}/{total}
+                </span>
+              )}
+            </div>
+          ))}
+        </ul>
+      )}
+    </div>
   )
 }

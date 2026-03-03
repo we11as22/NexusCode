@@ -211,6 +211,18 @@ export type SymbolKind =
   | "arrow"
   | "chunk"
 
+/** Used by AST extractor and vector indexer for symbol/chunk entries. */
+export interface SymbolEntry {
+  path: string
+  name: string
+  kind: SymbolKind
+  parent?: string
+  startLine: number
+  endLine: number
+  docstring?: string
+  content: string
+}
+
 export type IndexStatus =
   | { state: "idle" }
   | { state: "indexing"; progress: number; total: number; chunksProcessed?: number; chunksTotal?: number }
@@ -304,7 +316,6 @@ export interface NexusConfig {
     enabled: boolean
     excludePatterns: string[]
     symbolExtract: boolean
-    fts: boolean
     vector: boolean
     batchSize: number
     embeddingBatchSize: number
@@ -318,6 +329,12 @@ export interface NexusConfig {
     autoApproveReadPatterns: string[]
     /** Commands allowed without approval for this project (from .nexus/allowed-commands.json) */
     allowedCommands: string[]
+    /** Command patterns from .nexus/settings.json + settings.local.json (allow = no approval) */
+    allowCommandPatterns: string[]
+    /** Command patterns that always require approval (deny list) */
+    denyCommandPatterns: string[]
+    /** Command patterns that always ask (ask list) */
+    askCommandPatterns: string[]
     denyPatterns: string[]
     /** Fine-grained permission rules evaluated in order, first match wins */
     rules: PermissionRule[]
@@ -333,6 +350,8 @@ export interface NexusConfig {
   mcp: {
     servers: McpServerConfig[]
   }
+  /** Normalized list for UI: path + enabled. skills is derived (enabled only). */
+  skillsConfig?: Array<{ path: string; enabled: boolean }>
   skills: string[]
   tools: {
     custom: string[]
@@ -403,6 +422,7 @@ export interface McpServerConfig {
   env?: Record<string, string>
   url?: string
   transport?: "stdio" | "http" | "sse"
+  enabled?: boolean
 }
 
 // ─── Skill Types ───────────────────────────────────────────────────────────────

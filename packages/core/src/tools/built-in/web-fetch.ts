@@ -112,7 +112,7 @@ When to use:
 - Verifying APIs, dependencies, or recent changes.
 
 When NOT to use:
-- Codebase questions: use codebase_search or search_files.
+- Codebase questions: use codebase_search or grep.
 - User-provided URL: use web_fetch directly.`,
   parameters: webSearchSchema,
   readOnly: true,

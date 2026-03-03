@@ -6,7 +6,7 @@ NexusCode has three runtime layers:
 
 1. `packages/core` — agent runtime (LLM loop, modes, tool execution, permissions, MCP, skills, indexing).
 2. `packages/vscode` — VS Code host + React webview UI.
-3. `packages/cli` — terminal host + Ink TUI.
+3. `packages/cli` — terminal host + OpenTUI (React binding) TUI.
 
 Both UI hosts call the same `runAgentLoop` in `core`, so behavior remains consistent across VS Code and CLI.
 
@@ -55,6 +55,9 @@ Both UI hosts call the same `runAgentLoop` in `core`, so behavior remains consis
 - Host UI changes must not change `runAgentLoop` contracts.
 - When the tool-call budget is exceeded, the loop allows one extra iteration with tools disabled so the model can emit a final text-only answer (no silent truncation).
 - Optional `config.agentLoop.toolCallBudget` and `config.agentLoop.maxIterations` override default per-mode limits when set.
+- **Models catalog:** CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) plus live filtering for gateway models (`https://api.kilo.ai/api/gateway/models`) so unavailable free IDs are removed from picker results.
+- **CLI vs KiloCode TUI:** CLI uses the same OpenTUI stack (React binding instead of Solid) and is fully wired to the Nexus agent (runAgentLoop, config, modes, approval, compaction, indexer, MCP, profiles, plan, subagents). UI is refactored to Kilo-like centered Home/Prompt shell, Kilo-style slash command list (`ctrl+p`), and keeps Nexus settings/index/advanced screens behind slash navigation.
+- **CLI agent presets:** `/agent-config` manages preset bundles (model/vector/skills/MCP/rules) persisted in `.nexus/agent-configs.json`; skill candidates are discovered from local `SKILL.md` files and `AGENTS.md` file references, and applying a preset mutates active runtime config through host `saveConfig`.
 
 ## Data Flow
 
