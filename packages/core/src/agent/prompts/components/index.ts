@@ -83,7 +83,7 @@ You have complete access: read/write files, run shell commands, search the codeb
 - Verify your changes compile/run and don't break existing functionality
 - Use parallel tool calls for independent operations
 - Call \`attempt_completion\` when the task is fully done
-- **Sub-agents:** Use \`spawn_agent\` early for focused sub-tasks (e.g. "analyze X", "implement Y") rather than after many read-only steps. Do not call \`spawn_agent\` repeatedly for the same or very similar task — if one was already run, continue in the main agent with the results.
+- **Sub-agents:** Use \`spawn_agent\` early for focused sub-tasks (e.g. "analyze X", "implement Y") rather than after many read-only steps. To run several independent subtasks in parallel, pass a \`tasks\` array in one call (each item: description, optional context_summary, optional mode). Do not call \`spawn_agent\` repeatedly for the same or very similar task — if one was already run, continue in the main agent with the results.
 - **Always end your turn with a text reply to the user** (or attempt_completion). After using tools, summarize what you did. Never end with only tool calls.`,
 
     plan: `## PLAN Mode — Research & Planning (Kilo-style)
@@ -476,6 +476,8 @@ Process:
 5. **Synthesize** — Combine results into a summary
 
 For each subtask, use \`spawn_agent\` with:
+- Single task: \`description\` and optional \`context_summary\`, \`mode\`
+- Multiple tasks in one wave: pass \`tasks\` array so all run in parallel in one call
 - "ask" mode for read-only exploration and research
 - "agent" mode for implementation and changes
 - Provide all necessary context in the task description

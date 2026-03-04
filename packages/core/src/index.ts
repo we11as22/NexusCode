@@ -50,6 +50,8 @@ export { loadSkills } from "./skills/manager.js"
 
 // MCP
 export { McpClient, setMcpClientInstance, testMcpServers } from "./mcp/client.js"
+export { resolveBundledMcpServers } from "./mcp/resolve-bundled.js"
+export type { ResolveBundledOptions } from "./mcp/resolve-bundled.js"
 
 // Models catalog (models.dev — free/recommended models for CLI & extension)
 export {

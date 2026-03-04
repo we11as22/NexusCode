@@ -356,10 +356,12 @@ export interface NexusConfig {
   skills: string[]
   tools: {
     custom: string[]
+    classifyToolsEnabled: boolean
     classifyThreshold: number
     parallelReads: boolean
     maxParallelReads: number
   }
+  skillClassifyEnabled: boolean
   skillClassifyThreshold: number
   structuredOutput: "auto" | "always" | "never"
   summarization: {
@@ -370,6 +372,7 @@ export interface NexusConfig {
   }
   parallelAgents: {
     maxParallel: number
+    maxTasksPerCall?: number
   }
   /** Optional overrides for agent loop limits (tool budget and max iterations per mode). */
   agentLoop?: {
@@ -424,6 +427,8 @@ export interface McpServerConfig {
   url?: string
   transport?: "stdio" | "http" | "sse"
   enabled?: boolean
+  /** Resolve to a bundled MCP server (e.g. "context-mode") when nexusRoot is set by host */
+  bundle?: string
 }
 
 // ─── Skill Types ───────────────────────────────────────────────────────────────

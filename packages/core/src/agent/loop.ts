@@ -30,6 +30,8 @@ import { estimateTokens } from "../context/condense.js"
 import * as path from "node:path"
 
 const DOOM_LOOP_THRESHOLD = 3
+/** execute_command: allow more repeats so init/scripts can run same command a few times (e.g. retries) without triggering. */
+const DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND = 5
 /** OpenCode-style: generous tool budgets so "study codebase" and multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   ask: 80,
@@ -79,18 +81,38 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const builtinTools = tools.filter(t => builtinToolNames.has(t.name) && !blockedTools.has(t.name))
   const dynamicTools = tools.filter(t => !builtinToolNames.has(t.name) && !blockedTools.has(t.name))
 
-  let resolvedDynamicTools: ToolDef[]
-  if (dynamicTools.length > config.tools.classifyThreshold) {
-    const lastMessage = session.messages[session.messages.length - 1]
-    const taskDesc = typeof lastMessage?.content === "string"
-      ? lastMessage.content
-      : (lastMessage?.content as Array<{type: string; text?: string}>)?.find(p => p.type === "text")?.text ?? ""
+  const lastMessage = session.messages[session.messages.length - 1]
+  const taskDesc = typeof lastMessage?.content === "string"
+    ? lastMessage.content
+    : (lastMessage?.content as Array<{ type: string; text?: string }>)?.find(p => p.type === "text")?.text ?? ""
 
+  const needClassifyTools = config.tools.classifyToolsEnabled && dynamicTools.length > config.tools.classifyThreshold
+  const needClassifySkills = config.skillClassifyEnabled && skills.length > config.skillClassifyThreshold
+
+  let resolvedDynamicTools: ToolDef[]
+  let resolvedSkills: SkillDef[]
+  if (needClassifyTools && needClassifySkills) {
+    const [toolNames, skillResults] = await Promise.all([
+      classifyTools(dynamicTools, taskDesc, activeClient),
+      (() => {
+        const candidates = ftsTopSkills(skills, taskDesc, 20)
+        return classifySkills(candidates, taskDesc, activeClient)
+      })(),
+    ])
+    resolvedDynamicTools = dynamicTools.filter(t => new Set(toolNames).has(t.name))
+    resolvedSkills = skillResults
+  } else if (needClassifyTools) {
     const selectedNames = await classifyTools(dynamicTools, taskDesc, activeClient)
     const selectedSet = new Set(selectedNames)
     resolvedDynamicTools = dynamicTools.filter(t => selectedSet.has(t.name))
+    resolvedSkills = skills
+  } else if (needClassifySkills) {
+    resolvedDynamicTools = dynamicTools
+    const candidates = ftsTopSkills(skills, taskDesc, 20)
+    resolvedSkills = await classifySkills(candidates, taskDesc, activeClient)
   } else {
     resolvedDynamicTools = dynamicTools
+    resolvedSkills = skills
   }
 
   const blockedFallbackTools: ToolDef[] = []
@@ -109,20 +131,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
 
   const resolvedTools = [...builtinTools, ...resolvedDynamicTools, ...blockedFallbackTools]
-
-  // 2. Resolve skills: FTS top-20 by name/summary, then LLM classify if >threshold
-  let resolvedSkills: SkillDef[]
-  if (skills.length > config.skillClassifyThreshold) {
-    const lastMessage = session.messages[session.messages.length - 1]
-    const taskDesc = typeof lastMessage?.content === "string"
-      ? lastMessage.content
-      : (lastMessage?.content as Array<{type: string; text?: string}>)?.find(p => p.type === "text")?.text ?? ""
-
-    const candidates = ftsTopSkills(skills, taskDesc, 20)
-    resolvedSkills = await classifySkills(candidates, taskDesc, activeClient)
-  } else {
-    resolvedSkills = skills
-  }
 
   // Tool context
   const toolCtx: ToolContext = {
@@ -450,14 +458,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             if (await detectDoomLoop(session, toolName, toolInput)) {
               host.emit({ type: "doom_loop_detected", tool: toolName })
               // In non-interactive mode always abort to prevent infinite loops
-              if (!process.stdin.isTTY) {
-                throw new Error(`Doom loop: tool "${toolName}" called ${DOOM_LOOP_THRESHOLD} times with same arguments. Aborting.`)
+              const threshold = toolName === "execute_command" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
+              if (typeof process !== "undefined" && process.stdin && !process.stdin.isTTY) {
+                throw new Error(`Doom loop: tool "${toolName}" called ${threshold} times with same arguments. Aborting.`)
               }
-              const doomApproval = await host.showApprovalDialog({
+              const doomAction: ApprovalAction = {
                 type: "doom_loop",
                 tool: toolName,
-                description: `Potential infinite loop: "${toolName}" called ${DOOM_LOOP_THRESHOLD} times with same args.`,
-              })
+                description: `Potential infinite loop: "${toolName}" called ${threshold} times with same args. Continue anyway? [y]es [n]o (abort).`,
+              }
+              host.emit({ type: "tool_approval_needed", action: doomAction, partId })
+              const doomApproval = await Promise.race([
+                host.showApprovalDialog(doomAction),
+                new Promise<PermissionResult>((_, reject) =>
+                  setTimeout(() => reject(new Error("Doom loop approval timed out (no response). Aborting.")), 60_000)
+                ),
+              ])
               if (!doomApproval.approved) {
                 throw new Error(`User aborted doom loop for "${toolName}"`)
               }
@@ -939,19 +955,35 @@ async function detectDoomLoop(
   toolName: string,
   toolInput: Record<string, unknown>
 ): Promise<boolean> {
+  const threshold = toolName === "execute_command" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
   const allParts = session.messages
     .flatMap(m => {
       if (!Array.isArray(m.content)) return []
-      return (m.content as Array<{type: string; tool?: string; input?: Record<string, unknown>}>)
+      return (m.content as Array<{ type: string; tool?: string; input?: Record<string, unknown> }>)
         .filter(p => p.type === "tool" && p.tool === toolName)
         .map(p => p.input)
     })
-    .slice(-DOOM_LOOP_THRESHOLD)
+    .slice(-threshold)
 
-  if (allParts.length < DOOM_LOOP_THRESHOLD) return false
+  if (allParts.length < threshold) return false
 
-  const inputSig = JSON.stringify(toolInput)
-  return allParts.every(p => JSON.stringify(p) === inputSig)
+  const currentSig = getDoomLoopSignature(toolName, toolInput)
+  if (toolName === "execute_command" && currentSig === "") return false
+  return allParts.every(p => getDoomLoopSignature(toolName, (p ?? {}) as Record<string, unknown>) === currentSig)
+}
+
+/** Canonical signature for doom-loop comparison. For execute_command we compare only the command string so different commands are not treated as a loop. */
+function getDoomLoopSignature(toolName: string, input: Record<string, unknown>): string {
+  if (toolName === "execute_command") {
+    const cmd = input?.command != null ? String(input.command).trim() : ""
+    return cmd
+  }
+  return canonicalJson(input)
+}
+
+function canonicalJson(obj: Record<string, unknown>): string {
+  const keys = Object.keys(obj).sort()
+  return JSON.stringify(obj, keys as unknown as string[])
 }
 
 function getCompactionSummary(session: ISession): string | undefined {

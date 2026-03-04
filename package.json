@@ -17,7 +17,8 @@
         "packages/vscode/webview-ui"
     ],
     "scripts": {
-        "build": "pnpm -r --stream build",
+        "build": "pnpm run build:context-mode; pnpm -r --stream build",
+        "build:context-mode": "cd sources/claude-context-mode && (npm install --silent && npm run build && (npm run bundle || true)) || true",
         "build:core": "pnpm --filter @nexuscode/core build",
         "build:vscode": "pnpm --filter nexuscode build",
         "build:cli": "pnpm --filter @nexuscode/cli build",

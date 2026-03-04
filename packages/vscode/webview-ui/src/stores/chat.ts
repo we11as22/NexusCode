@@ -1,6 +1,6 @@
 import { create } from "zustand"
 import { postMessage } from "../vscode.js"
-import type { ModelsCatalogFromCore } from "../types/messages.js"
+import type { ModelsCatalogFromCore, AgentPresetFromCore } from "../types/messages.js"
 
 export type Mode = "agent" | "plan" | "ask" | "debug"
 export type AppView = "chat" | "sessions" | "settings"
@@ -171,6 +171,11 @@ interface ChatState {
   requestModelsCatalog: () => void
   handleModelsCatalog: (catalog: ModelsCatalogFromCore) => void
 
+  /** Agent presets from .nexus/agent-configs.json. */
+  agentPresets: AgentPresetFromCore[]
+  requestAgentPresets: () => void
+  handleAgentPresets: (presets: AgentPresetFromCore[]) => void
+
   // Actions
   setView: (view: AppView) => void
   setInputValue: (v: string) => void
@@ -255,6 +260,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   handleModelsCatalog: (catalog: ModelsCatalogFromCore) => {
     set({ modelsCatalog: catalog, modelsCatalogLoading: false })
+  },
+
+  agentPresets: [],
+  requestAgentPresets: () => {
+    postMessage({ type: "getAgentPresets" })
+  },
+  handleAgentPresets: (presets: AgentPresetFromCore[]) => {
+    set({ agentPresets: presets })
   },
 
   setView: (view) => {

@@ -13,10 +13,16 @@ import {
   createCodebaseIndexer,
   McpClient,
   setMcpClientInstance,
+  resolveBundledMcpServers,
   CheckpointTracker,
   NexusConfigSchema,
 } from "@nexuscode/core"
+import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 import { ServerHost } from "./host.js"
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const NEXUS_ROOT = path.resolve(__dirname, "..", "..")
 
 export interface RunSessionOptions {
   session: Session
@@ -50,7 +56,9 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     setMcpClientInstance(mcpClient)
     await mcpClient.disconnectAll().catch(() => {})
     if (config.mcp.servers.length > 0) {
-      await mcpClient.connectAll(config.mcp.servers).catch(() => {})
+      const resolved = resolveBundledMcpServers(config.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
+      process.env.CLAUDE_PROJECT_DIR = cwd
+      await mcpClient.connectAll(resolved).catch(() => {})
     }
     if (mcpClient) {
       for (const tool of mcpClient.getTools()) toolRegistry.register(tool)

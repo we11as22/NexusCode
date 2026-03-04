@@ -576,9 +576,20 @@ mcp:
         GITHUB_TOKEN: "${GITHUB_TOKEN}"
     - name: my-service
       url: "http://localhost:3100/mcp"
+    # Bundled: Context Mode (saves ~98% context — sandboxed execute, FTS5 search, batch_execute)
+    - name: context-mode
+      bundle: context-mode
 ```
 
 When many MCP tools are available, NexusCode automatically classifies which tools are relevant for the current task. Built-in tools are always available.
+
+### Context Mode (bundled)
+
+NexusCode includes **[claude-context-mode](sources/claude-context-mode)** (MCP + plugin for context compression). It reduces tool output in the context window by running code in a sandbox and returning only stdout, and provides FTS5/BM25 search, `batch_execute`, and session stats.
+
+- **Enable:** add `{ "name": "context-mode", "bundle": "context-mode" }` to `mcp.servers` in `.nexus/nexus.yaml` or `.nexus/mcp-servers.json`. When running from the NexusCode repo (CLI, server, or extension F5), the bundle is resolved to `sources/claude-context-mode/start.mjs` and `CLAUDE_PROJECT_DIR` is set to the project cwd.
+- **Build:** `pnpm build` runs `build:context-mode` (install + build + optional bundle in `sources/claude-context-mode`). Ensure Node 18+ there for `better-sqlite3`.
+- **Use cases:** large log/JSON/Playwright output → only summaries in context; multi-query search via `search(queries: [...])`; repo research via `batch_execute`. See [sources/claude-context-mode/README.md](sources/claude-context-mode/README.md) for tools and security (permissions).
 
 ---
 

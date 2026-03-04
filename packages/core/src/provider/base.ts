@@ -98,6 +98,9 @@ export class BaseLLMClient implements LLMClient {
     for await (const part of result.fullStream) {
       if (opts.signal?.aborted) break
 
+      // AI SDK may emit reasoning-part-finish; types may not include it yet
+      if ((part as { type: string }).type === "reasoning-part-finish") continue
+
       switch (part.type) {
         case "text-delta":
           yield { type: "text_delta", delta: part.textDelta }
@@ -112,10 +115,6 @@ export class BaseLLMClient implements LLMClient {
               (part as Record<string, string>)["text"] ??
               "",
           }
-          break
-
-        case "reasoning-part-finish":
-          // End of reasoning block — no delta to emit
           break
 
         case "tool-call":

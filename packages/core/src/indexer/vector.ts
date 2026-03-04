@@ -28,6 +28,9 @@ function pathToSegments(filePath: string): Record<string, string> {
   return out
 }
 
+const MAX_BATCH_RETRIES = 3
+const INITIAL_RETRY_DELAY_MS = 500
+
 /**
  * Qdrant vector store for semantic code search.
  * One collection per project, named nexus_{project_hash}.
@@ -85,8 +88,14 @@ export class VectorIndex {
           vectors: {
             size: resolvedSize,
             distance: "Cosine",
+            on_disk: true,
           },
-        })
+          hnsw_config: {
+            m: 64,
+            ef_construct: 512,
+            on_disk: true,
+          },
+        } as Record<string, unknown>)
       }
 
       await this.ensurePayloadIndexes()
@@ -164,7 +173,7 @@ export class VectorIndex {
     parent?: string
     startLine?: number
     content: string
-  }>): Promise<void> {
+  }>, onProgress?: (indexedCount: number) => void): Promise<void> {
     if (!this.initialized || symbols.length === 0) return
 
     try {
@@ -172,7 +181,25 @@ export class VectorIndex {
 
       for (let i = 0; i < batches.length; i += this.embeddingConcurrency) {
         const group = batches.slice(i, i + this.embeddingConcurrency)
-        await Promise.all(group.map(batch => this.upsertBatch(batch)))
+        let lastErr: Error | null = null
+        for (let attempt = 1; attempt <= MAX_BATCH_RETRIES; attempt++) {
+          try {
+            await Promise.all(group.map(batch => this.upsertBatch(batch)))
+            const count = group.reduce((s, b) => s + b.length, 0)
+            if (onProgress && count > 0) onProgress(count)
+            lastErr = null
+            break
+          } catch (err) {
+            lastErr = err instanceof Error ? err : new Error(String(err))
+            if (attempt < MAX_BATCH_RETRIES) {
+              const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1)
+              await new Promise(r => setTimeout(r, delay))
+            } else {
+              throw lastErr
+            }
+          }
+        }
+        if (lastErr) throw lastErr
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -425,8 +452,14 @@ export class VectorIndex {
       vectors: {
         size,
         distance: "Cosine",
+        on_disk: true,
       },
-    })
+      hnsw_config: {
+        m: 64,
+        ef_construct: 512,
+        on_disk: true,
+      },
+    } as Record<string, unknown>)
     this.vectorSize = size
     this.initialized = true
   }

@@ -2,6 +2,7 @@ import * as path from "node:path"
 import * as fs from "node:fs/promises"
 import * as crypto from "node:crypto"
 import { mkdirSync } from "node:fs"
+import pLimit from "p-limit"
 import type { IIndexer, IndexStatus, IndexSearchOptions, IndexSearchResult, NexusConfig, SymbolEntry } from "../types.js"
 import type { FileInfo } from "./scanner.js"
 import { FileTracker } from "./file-tracker.js"
@@ -21,6 +22,9 @@ const SUPPORTED_INDEX_EXTENSIONS = new Set([
   ...SUPPORTED_CODE_EXTENSIONS,
   ...SUPPORTED_MARKDOWN_EXTENSIONS,
 ])
+
+/** Concurrency for file parsing in Phase 1 (parallel read + extract). */
+const PARSE_CONCURRENCY = 10
 
 interface PreparedFile {
   file: FileInfo
@@ -116,7 +120,6 @@ export class CodebaseIndexer implements IIndexer {
     const existing = this.fileTracker.getFilesWithHashes()
     const seen = new Set<string>()
     const discovered: FileInfo[] = []
-    const batchSize = Math.max(1, this.config.indexing.batchSize ?? 50)
 
     for await (const file of walkDir(this.projectRoot, this.config.indexing.excludePatterns)) {
       if (this.abortController?.signal.aborted) break
@@ -129,40 +132,61 @@ export class CodebaseIndexer implements IIndexer {
       return
     }
 
-    // Pre-count chunks first so UI always has stable chunksTotal before indexing progress starts.
-    const prepared: PreparedFile[] = []
+    const hasExistingData = this.vector ? await this.vector.hasIndexedData() : false
+    const incrementalMode = Boolean(hasExistingData && !this.forceVectorBackfill)
+
+    this.notifyStatus({ state: "indexing", progress: 0, total: discovered.length, chunksProcessed: 0, chunksTotal: 0 })
+    const preparedAll: PreparedFile[] = []
     let chunksTotal = 0
-    for (const file of discovered) {
+    const parseLimit = pLimit(PARSE_CONCURRENCY)
+
+    for (let i = 0; i < discovered.length; i += PARSE_CONCURRENCY) {
       if (this.abortController?.signal.aborted) break
-      const unchanged = this.fileTracker.isFileIndexed(file.path, file.mtime, file.hash)
-      const shouldUpdateVector = unchanged ? this.forceVectorBackfill : true
-      if (!shouldUpdateVector && unchanged) {
-        continue
+      const chunk = discovered.slice(i, i + PARSE_CONCURRENCY)
+      const results = await Promise.all(
+        chunk.map((file) =>
+          parseLimit(async () => {
+            if (this.abortController?.signal.aborted) return null
+            const unchanged = this.fileTracker.isFileIndexed(file.path, file.mtime, file.hash)
+            const shouldUpdateVector = unchanged ? this.forceVectorBackfill : true
+            if (incrementalMode && unchanged) return null
+            const content = await fs.readFile(file.absPath, "utf8").catch(() => null)
+            if (content == null) return null
+            const extracted = this.extractEntries(file, content)
+            return { file, unchanged, shouldUpdateVector, extracted } as PreparedFile
+          })
+        )
+      )
+      for (const r of results) {
+        if (r) {
+          preparedAll.push(r)
+          chunksTotal += r.extracted.length
+        }
       }
-      const content = await fs.readFile(file.absPath, "utf8").catch(() => null)
-      if (content == null) continue
-      const extracted = this.extractEntries(file, content)
-      chunksTotal += extracted.length
-      prepared.push({
-        file,
-        unchanged,
-        shouldUpdateVector,
-        extracted,
-      })
     }
 
-    let processed = 0
+    const toIndex = preparedAll.filter((p) => p.shouldUpdateVector)
+    const totalFilesToIndex = toIndex.length
+    const batchSize = Math.max(1, this.config.indexing.batchSize ?? 50)
+    let processedFiles = 0
     let chunksProcessed = 0
-    const total = prepared.length
-    this.notifyStatus({ state: "indexing", progress: 0, total, chunksProcessed, chunksTotal })
+    this.notifyStatus({ state: "indexing", progress: 0, total: totalFilesToIndex, chunksProcessed, chunksTotal })
 
-    for (let i = 0; i < prepared.length; i += batchSize) {
+    if (this.abortController?.signal.aborted) {
+      this.indexing = false
+      return
+    }
+
+    for (let i = 0; i < toIndex.length; i += batchSize) {
       if (this.abortController?.signal.aborted) break
-      const slice = prepared.slice(i, i + batchSize)
-      const stats = await this.processPreparedBatch(slice)
-      processed += stats.processedFiles
-      chunksProcessed += stats.indexedChunks
-      this.notifyStatus({ state: "indexing", progress: processed, total, chunksProcessed, chunksTotal })
+      const slice = toIndex.slice(i, i + batchSize)
+      const onProgress = (delta: number) => {
+        chunksProcessed += delta
+        this.notifyStatus({ state: "indexing", progress: processedFiles, total: totalFilesToIndex, chunksProcessed, chunksTotal })
+      }
+      await this.processPreparedBatch(slice, onProgress)
+      processedFiles += slice.length
+      this.notifyStatus({ state: "indexing", progress: processedFiles, total: totalFilesToIndex, chunksProcessed, chunksTotal })
       await new Promise<void>(r => setImmediate(r))
     }
 
@@ -183,7 +207,7 @@ export class CodebaseIndexer implements IIndexer {
     }
 
     await this.fileTracker.save()
-    this.notifyStatus({ state: "ready", files: seen.size, symbols: chunksProcessed, chunks: chunksProcessed })
+    this.notifyStatus({ state: "ready", files: seen.size, symbols: chunksTotal, chunks: chunksTotal })
     this.forceVectorBackfill = false
     this.indexing = false
   }
@@ -196,13 +220,27 @@ export class CodebaseIndexer implements IIndexer {
       : extractChunks(content, file.path)
   }
 
-  private async processPreparedBatch(files: PreparedFile[]): Promise<{ processedFiles: number; indexedChunks: number }> {
+  private async processPreparedBatch(
+    files: PreparedFile[],
+    onProgress?: (indexedCount: number) => void
+  ): Promise<{ processedFiles: number }> {
+    if (this.vector && this.config.indexing.vector) {
+      const modifiedPaths: string[] = []
+      for (const entry of files) {
+        const { file, unchanged } = entry
+        if (!unchanged && this.fileTracker.getChunks(file.path) != null) {
+          modifiedPaths.push(file.path)
+        }
+      }
+      if (modifiedPaths.length > 0) {
+        await Promise.all(modifiedPaths.map((p) => this.vector!.deleteByPath(p)))
+      }
+    }
+
     const vectorEntries: Parameters<VectorIndex["upsertSymbols"]>[0] = []
-    let indexedChunks = 0
 
     for (const entry of files) {
       const { file, extracted, unchanged, shouldUpdateVector } = entry
-      indexedChunks += extracted.length
 
       if (!unchanged || this.fileTracker.getChunks(file.path) == null) {
         this.fileTracker.upsertFile(file.path, file.mtime, file.hash, extracted.length)
@@ -226,7 +264,7 @@ export class CodebaseIndexer implements IIndexer {
 
     if (vectorEntries.length > 0 && this.vector) {
       try {
-        await this.vector.upsertSymbols(vectorEntries)
+        await this.vector.upsertSymbols(vectorEntries, onProgress)
       } catch (err) {
         if (err instanceof VectorAuthError) {
           this.vector = undefined
@@ -236,7 +274,7 @@ export class CodebaseIndexer implements IIndexer {
       }
     }
 
-    return { processedFiles: files.length, indexedChunks }
+    return { processedFiles: files.length }
   }
 
   private async processBatch(files: FileInfo[]): Promise<{ plannedChunks: number; indexedChunks: number }> {
@@ -302,6 +340,10 @@ export class CodebaseIndexer implements IIndexer {
     if (existing) clearTimeout(existing)
     const timer = setTimeout(async () => {
       this.debounceTimers.delete(filePath)
+      if (this.indexing) {
+        this.refreshFile(filePath)
+        return
+      }
       try {
         await this.refreshFileNow(filePath)
       } catch {}
@@ -319,6 +361,10 @@ export class CodebaseIndexer implements IIndexer {
       return
     }
     await this.fileTracker.load()
+    // Delete existing vector points for this file before re-upserting (same as processPreparedBatch for modified files)
+    if (this.vector && this.config.indexing.vector && this.fileTracker.getChunks(fileInfo.path) != null) {
+      await this.vector.deleteByPath(fileInfo.path)
+    }
     await this.processBatch([fileInfo])
     await this.fileTracker.save()
   }

@@ -70,6 +70,9 @@ export function App() {
         case "modelsCatalog":
           if ("catalog" in msg) store.handleModelsCatalog(msg.catalog as import("./types/messages.js").ModelsCatalogFromCore)
           break
+        case "agentPresets":
+          if ("presets" in msg) store.handleAgentPresets(msg.presets as import("./types/messages.js").AgentPresetFromCore[])
+          break
         case "action":
           if (msg.action === "switchView" && msg.view) {
             store.setView(msg.view)
@@ -654,10 +657,10 @@ interface SettingsDraft {
 }
 
 function SettingsView() {
-  const { config, provider, model, saveConfig, serverUrl, modelsCatalog, modelsCatalogLoading, requestModelsCatalog } = useChatStore()
+  const { config, provider, model, saveConfig, serverUrl, modelsCatalog, modelsCatalogLoading, requestModelsCatalog, agentPresets, requestAgentPresets } = useChatStore()
   const [draft, setDraft] = useState<SettingsDraft>(() => getDefaultDraft())
   const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
-  const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles">("llm")
+  const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles" | "presets">("llm")
   const [integTab, setIntegTab] = useState<"rules-skills" | "mcp" | "rules-instructions">("rules-skills")
   const [rulesFilter, setRulesFilter] = useState<"all" | "user" | "projects">("all")
   const [includeThirdParty, setIncludeThirdParty] = useState(true)
@@ -673,6 +676,9 @@ function SettingsView() {
   useEffect(() => {
     requestModelsCatalog()
   }, [requestModelsCatalog])
+  useEffect(() => {
+    if (tab === "presets") requestAgentPresets()
+  }, [tab, requestAgentPresets])
 
   const canSave = Boolean(config && draft)
   const vectorHint = useMemo(() => {
@@ -737,6 +743,7 @@ function SettingsView() {
         <TabPill id="tools" tab={tab} setTab={setTab} label="Tools" />
         <TabPill id="integrations" tab={tab} setTab={setTab} label="MCP &amp; Skills" />
         <TabPill id="profiles" tab={tab} setTab={setTab} label="Profiles" />
+        <TabPill id="presets" tab={tab} setTab={setTab} label="Agent presets" />
       </div>
 
       {tab === "llm" && (
@@ -961,6 +968,39 @@ function SettingsView() {
           onChange={(v) => setDraft({ ...draft, profilesJson: v })}
           rows={5}
         />
+      </section>
+      )}
+
+      {tab === "presets" && (
+      <section className="nexus-section">
+        <h3 className="nexus-section-title">Agent presets</h3>
+        <p className="nexus-muted text-[10px] mb-2">
+          Presets bundle vector search, skills, MCP servers, and rules (from .nexus/agent-configs.json). Create and manage presets in the CLI; apply here.
+        </p>
+        {agentPresets.length === 0 ? (
+          <p className="nexus-muted text-xs">No presets found. Add presets in the project&apos;s .nexus/agent-configs.json (e.g. via CLI Settings → Agent configs).</p>
+        ) : (
+          <ul className="space-y-2">
+            {agentPresets.map((preset) => (
+              <li key={preset.name} className="flex items-center justify-between gap-2 rounded-md border border-[var(--vscode-panel-border)] p-2 bg-[var(--vscode-editor-inactiveSelectionBackground)]">
+                <div className="min-w-0">
+                  <span className="font-medium text-[var(--vscode-foreground)]">{preset.name}</span>
+                  <div className="text-[10px] text-[var(--vscode-descriptionForeground)] mt-0.5">
+                    vector: {preset.vector ? "on" : "off"} · skills: {preset.skills.length} · MCP: {preset.mcpServers.length} · rules: {preset.rulesFiles.length}
+                    {preset.modelProvider && preset.modelId && ` · ${preset.modelProvider}/${preset.modelId}`}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="nexus-secondary-btn flex-shrink-0"
+                  onClick={() => postMessage({ type: "applyAgentPreset", presetName: preset.name })}
+                >
+                  Apply
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
       )}
 
@@ -1661,9 +1701,9 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     vectorDbEnabled: Boolean(config.vectorDb?.enabled),
     vectorDbUrl: config.vectorDb?.url ?? "http://127.0.0.1:6333",
     vectorDbAutoStart: config.vectorDb?.autoStart ?? true,
-    filterTools: (config.tools.classifyThreshold ?? 15) < 9000,
+    filterTools: config.tools.classifyToolsEnabled === true,
     toolClassifyThreshold: String(config.tools.classifyThreshold ?? 15),
-    filterSkills: (config.skillClassifyThreshold ?? 8) < 9000,
+    filterSkills: config.skillClassifyEnabled === true,
     skillClassifyThreshold: String(config.skillClassifyThreshold ?? 8),
     parallelReads: Boolean(config.tools.parallelReads),
     maxParallelReads: String(config.tools.maxParallelReads ?? 5),
@@ -1699,9 +1739,9 @@ function getDefaultDraft(): SettingsDraft {
     vectorDbEnabled: false,
     vectorDbUrl: "http://127.0.0.1:6333",
     vectorDbAutoStart: true,
-    filterTools: true,
+    filterTools: false,
     toolClassifyThreshold: "15",
-    filterSkills: true,
+    filterSkills: false,
     skillClassifyThreshold: "8",
     parallelReads: true,
     maxParallelReads: "5",
@@ -1775,11 +1815,13 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       autoStart: draft.vectorDbAutoStart,
     },
     tools: {
+      classifyToolsEnabled: draft.filterTools,
       classifyThreshold: draft.filterTools ? toolThresholdRaw : 9999,
       parallelReads: draft.parallelReads,
       maxParallelReads: parsePositiveInt(draft.maxParallelReads, 5),
       custom: [],
     },
+    skillClassifyEnabled: draft.filterSkills,
     skillClassifyThreshold: draft.filterSkills ? skillThresholdRaw : 9999,
     mcp: {
       servers: mcpServers,

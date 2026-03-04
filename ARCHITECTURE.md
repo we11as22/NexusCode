@@ -58,6 +58,7 @@ Both UI hosts call the same `runAgentLoop` in `core`, so behavior remains consis
 - **Models catalog:** CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) plus live filtering for gateway models (`https://api.kilo.ai/api/gateway/models`) so unavailable free IDs are removed from picker results.
 - **CLI vs KiloCode TUI:** CLI uses the same OpenTUI stack (React binding instead of Solid) and is fully wired to the Nexus agent (runAgentLoop, config, modes, approval, compaction, indexer, MCP, profiles, plan, subagents). UI is refactored to Kilo-like centered Home/Prompt shell, Kilo-style slash command list (`ctrl+p`), and keeps Nexus settings/index/advanced screens behind slash navigation.
 - **CLI agent presets:** `/agent-config` manages preset bundles (model/vector/skills/MCP/rules) persisted in `.nexus/agent-configs.json`; skill candidates are discovered from local `SKILL.md` files and `AGENTS.md` file references, and applying a preset mutates active runtime config through host `saveConfig`.
+- **Bundled MCP (context-mode):** The repo ships `sources/claude-context-mode` (Context Mode MCP). Config can reference `bundle: "context-mode"`; hosts (CLI, server, extension when run from repo) resolve it to `node sources/claude-context-mode/start.mjs` with `CLAUDE_PROJECT_DIR` set to the agent cwd. This keeps tool output out of the context window (sandboxed execute, FTS5 search). See `resolveBundledMcpServers` in core and README.
 
 ## Data Flow
 

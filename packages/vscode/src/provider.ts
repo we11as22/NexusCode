@@ -101,6 +101,11 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     this.controller.addToChat(text)
   }
 
+  /** Start controller init in background so first message is less likely to wait on ensureInitialized. */
+  warmup(): void {
+    void this.controller.ensureInitialized()
+  }
+
   /** Switch webview tab from sidebar title (Roo-Code style). */
   switchView(view: "chat" | "sessions" | "settings"): void {
     this.postMessage({ type: "action", action: "switchView", view })

@@ -65,7 +65,9 @@ checkpoint:
   createOnWrite: true
   doubleCheckCompletion: false
 mcp:
-  servers: []
+  servers:
+    - name: context-mode
+      bundle: context-mode
 skills: []
 tools:
   custom: []

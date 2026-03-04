@@ -188,54 +188,107 @@ export class ParallelAgentManager {
   }
 }
 
-const spawnSchema = z.object({
-  description: z.string().describe("What should the sub-agent do? Provide a clear, self-contained task description."),
-  context_summary: z.string().optional().describe("Optional summarized context (new_task style) to give the sub-agent before the task. Use when the subtask benefits from brief background (e.g. what we're building, which files matter)."),
-  mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
-  task_progress: z.string().optional(),
+const taskItemSchema = z.object({
+  description: z.string().describe("Clear, self-contained task description for this sub-agent."),
+  context_summary: z.string().optional().describe("Optional brief context for this task (e.g. background, relevant files)."),
+  mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for this sub-agent (default: agent). 'search'/'explore' → ask."),
 })
 
+const spawnSchema = (maxTasksPerCall: number) => z.object({
+  description: z.string().optional().describe("Single task: what should the sub-agent do? (Use when launching one sub-agent.)"),
+  context_summary: z.string().optional().describe("Optional context for the single task (used only when tasks is not provided)."),
+  mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for the single sub-agent (default: agent)."),
+  task_progress: z.string().optional(),
+  tasks: z.array(taskItemSchema).max(maxTasksPerCall).optional().describe(
+    `Optional list of tasks to run in parallel (up to ${maxTasksPerCall} per call). When provided, all run concurrently; omit or use single \`description\` for one task.`,
+  ),
+}).refine(
+  (data) => (data.tasks != null && data.tasks.length > 0) || (typeof data.description === "string" && data.description.trim().length > 0),
+  { message: "Provide either description (single task) or non-empty tasks array." },
+)
+
 export function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef {
+  const maxTasksPerCall = config.parallelAgents?.maxTasksPerCall ?? 12
+  const schema = spawnSchema(maxTasksPerCall)
+
   return {
     name: "spawn_agent",
-    description: `Launch a parallel sub-agent to work on a specific task concurrently.
-Use for independent subtasks that don't depend on each other. You can run several in parallel.
-Optionally pass \`context_summary\` (new_task style) to give the sub-agent brief background before the task.
+    description: `Launch one or more parallel sub-agents. Use for independent subtasks that don't depend on each other.
+**Single task:** pass \`description\` (and optional \`context_summary\`, \`mode\`).
+**Multiple tasks:** pass \`tasks\` array with up to ${maxTasksPerCall} items; each has \`description\` and optional \`context_summary\`, \`mode\`. All tasks in one call run in parallel (subject to max concurrent limit).
 **When the main agent is in plan or ask mode**, sub-agents always run with ask (read-only) permissions.
-**When the main agent is in agent/debug mode**, sub-agents can run in agent/plan/ask/debug based on \`mode\` parameter.
-The sub-agent must call attempt_completion when the task is done; its result is returned to you.
+**When the main agent is in agent/debug mode**, sub-agents can run in agent/plan/ask/debug per \`mode\`.
+Each sub-agent must call attempt_completion when done; results are returned in order.
 Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
-    parameters: spawnSchema,
+    parameters: schema,
     // Available in all modes; sub-agent permissions follow parent (plan/ask → ask, agent → agent/plan/ask)
 
-    async execute(args: { description: string; context_summary?: string; mode?: Mode | "search" | "explore"; task_progress?: string }, ctx: ToolContext) {
-      const { description, context_summary } = args
+    async execute(
+      args: {
+        description?: string
+        context_summary?: string
+        mode?: Mode | "search" | "explore"
+        task_progress?: string
+        tasks?: Array<{ description: string; context_summary?: string; mode?: Mode | "search" | "explore" }>
+      },
+      ctx: ToolContext,
+    ) {
       const parentMode = ctx.mode ?? "agent"
-      // In plan/ask, sub-agents always run with ask (read-only) permissions
-      const normalizedMode: Mode =
+      const normalizeMode = (m?: Mode | "search" | "explore"): Mode =>
         parentMode === "plan" || parentMode === "ask"
           ? "ask"
-          : args.mode === "search" || args.mode === "explore"
+          : m === "search" || m === "explore"
             ? "ask"
-            : ((args.mode ?? "agent") as Mode)
-      const result = await manager.spawn(
-        description,
-        normalizedMode,
-        ctx.config,
-        ctx.cwd,
-        ctx.signal,
-        ctx.config.parallelAgents.maxParallel,
-        (event) => ctx.host.emit(event),
-        context_summary,
-      )
+            : ((m ?? "agent") as Mode)
 
+      const maxParallel = ctx.config.parallelAgents.maxParallel
+      const emit = (event: AgentEvent) => ctx.host.emit(event)
+
+      const runOne = (description: string, contextSummary?: string, mode?: Mode | "search" | "explore") =>
+        manager.spawn(
+          description,
+          normalizeMode(mode),
+          ctx.config,
+          ctx.cwd,
+          ctx.signal,
+          maxParallel,
+          emit,
+          contextSummary,
+        )
+
+      if (args.tasks != null && args.tasks.length > 0) {
+        const results = await Promise.all(
+          args.tasks.map((t) => runOne(t.description, t.context_summary, t.mode)),
+        )
+        const outputs: string[] = []
+        let allSuccess = true
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i]
+          const label = args.tasks[i].description.slice(0, 50) + (args.tasks[i].description.length > 50 ? "…" : "")
+          if (r.error) {
+            allSuccess = false
+            outputs.push(`[${i + 1}] ${label}\nSub-agent ${r.subagentId} failed: ${r.error}\nPartial: ${r.output.slice(0, 400)}`)
+          } else {
+            outputs.push(`[${i + 1}] ${label}\nSub-agent ${r.subagentId} completed:\n${r.output}`)
+          }
+        }
+        return {
+          success: allSuccess,
+          output: outputs.join("\n\n---\n\n"),
+        }
+      }
+
+      if (typeof args.description !== "string" || !args.description.trim()) {
+        return { success: false, output: "Provide description or non-empty tasks array." }
+      }
+
+      const result = await runOne(args.description, args.context_summary, args.mode)
       if (result.error) {
         return {
           success: false,
           output: `Sub-agent ${result.subagentId} failed: ${result.error}\nPartial output: ${result.output}`,
         }
       }
-
       return { success: true, output: `Sub-agent ${result.subagentId} completed:\n\n${result.output}` }
     },
   }

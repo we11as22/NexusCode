@@ -11,6 +11,17 @@ export interface ModelsCatalogFromCore {
   recommended: Array<{ providerId: string; modelId: string; name: string; free: boolean }>
 }
 
+/** Agent preset (vector + skills + MCP + rules from .nexus/agent-configs.json). */
+export interface AgentPresetFromCore {
+  name: string
+  vector: boolean
+  skills: string[]
+  mcpServers: string[]
+  rulesFiles: string[]
+  modelProvider?: string
+  modelId?: string
+}
+
 export interface WebviewState {
   messages: SessionMessage[]
   mode: Mode
@@ -44,3 +55,4 @@ export type ExtensionMessage =
   | { type: "pendingApproval"; partId: string; action: { type: string; tool: string; description: string; content?: string } }
   | { type: "confirmResult"; id: string; ok: boolean }
   | { type: "modelsCatalog"; catalog: ModelsCatalogFromCore }
+  | { type: "agentPresets"; presets: AgentPresetFromCore[] }

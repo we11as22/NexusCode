@@ -408,6 +408,8 @@ declare const NexusConfigSchema: z.ZodObject<{
             url: z.ZodOptional<z.ZodString>;
             transport: z.ZodOptional<z.ZodEnum<["stdio", "http", "sse"]>>;
             enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
+            /** Bundled server id (e.g. "context-mode"); resolved by host to command/args/env */
+            bundle: z.ZodOptional<z.ZodString>;
         }, "strip", z.ZodTypeAny, {
             name: string;
             enabled: boolean;
@@ -416,6 +418,7 @@ declare const NexusConfigSchema: z.ZodObject<{
             env?: Record<string, string> | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            bundle?: string | undefined;
         }, {
             name: string;
             command?: string | undefined;
@@ -424,6 +427,7 @@ declare const NexusConfigSchema: z.ZodObject<{
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
             enabled?: boolean | undefined;
+            bundle?: string | undefined;
         }>, "many">>;
     }, "strip", z.ZodTypeAny, {
         servers: {
@@ -434,6 +438,7 @@ declare const NexusConfigSchema: z.ZodObject<{
             env?: Record<string, string> | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            bundle?: string | undefined;
         }[];
     }, {
         servers?: {
@@ -444,6 +449,7 @@ declare const NexusConfigSchema: z.ZodObject<{
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
             enabled?: boolean | undefined;
+            bundle?: string | undefined;
         }[] | undefined;
     }>>;
     skills: z.ZodDefault<z.ZodArray<z.ZodUnion<[z.ZodString, z.ZodObject<{
@@ -458,20 +464,26 @@ declare const NexusConfigSchema: z.ZodObject<{
     }>]>, "many">>;
     tools: z.ZodDefault<z.ZodObject<{
         custom: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        /** When true, use LLM to filter MCP/custom tools by task when count > classifyThreshold. Default off. */
+        classifyToolsEnabled: z.ZodDefault<z.ZodBoolean>;
         classifyThreshold: z.ZodDefault<z.ZodNumber>;
         parallelReads: z.ZodDefault<z.ZodBoolean>;
         maxParallelReads: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
         custom: string[];
+        classifyToolsEnabled: boolean;
         classifyThreshold: number;
         parallelReads: boolean;
         maxParallelReads: number;
     }, {
         custom?: string[] | undefined;
+        classifyToolsEnabled?: boolean | undefined;
         classifyThreshold?: number | undefined;
         parallelReads?: boolean | undefined;
         maxParallelReads?: number | undefined;
     }>>;
+    /** When true, use LLM to filter skills by task when count > skillClassifyThreshold. Default off. */
+    skillClassifyEnabled: z.ZodDefault<z.ZodBoolean>;
     skillClassifyThreshold: z.ZodDefault<z.ZodNumber>;
     structuredOutput: z.ZodDefault<z.ZodEnum<["auto", "always", "never"]>>;
     summarization: z.ZodDefault<z.ZodObject<{
@@ -492,10 +504,14 @@ declare const NexusConfigSchema: z.ZodObject<{
     }>>;
     parallelAgents: z.ZodDefault<z.ZodObject<{
         maxParallel: z.ZodDefault<z.ZodNumber>;
+        /** Max tasks per single spawn_agent call when using \`tasks\` array (default 12). */
+        maxTasksPerCall: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
         maxParallel: number;
+        maxTasksPerCall: number;
     }, {
         maxParallel?: number | undefined;
+        maxTasksPerCall?: number | undefined;
     }>>;
     /** Optional overrides for agent loop limits (OpenCode-style: allow enough tools/iterations to finish). */
     agentLoop: z.ZodDefault<z.ZodObject<{
@@ -617,6 +633,7 @@ declare const NexusConfigSchema: z.ZodObject<{
             env?: Record<string, string> | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            bundle?: string | undefined;
         }[];
     };
     modes: {
@@ -697,10 +714,12 @@ declare const NexusConfigSchema: z.ZodObject<{
     })[];
     tools: {
         custom: string[];
+        classifyToolsEnabled: boolean;
         classifyThreshold: number;
         parallelReads: boolean;
         maxParallelReads: number;
     };
+    skillClassifyEnabled: boolean;
     skillClassifyThreshold: number;
     structuredOutput: "never" | "auto" | "always";
     summarization: {
@@ -711,6 +730,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     };
     parallelAgents: {
         maxParallel: number;
+        maxTasksPerCall: number;
     };
     agentLoop: {
         toolCallBudget?: {
@@ -772,6 +792,7 @@ declare const NexusConfigSchema: z.ZodObject<{
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
             enabled?: boolean | undefined;
+            bundle?: string | undefined;
         }[] | undefined;
     } | undefined;
     embeddings?: {
@@ -904,10 +925,12 @@ declare const NexusConfigSchema: z.ZodObject<{
     })[] | undefined;
     tools?: {
         custom?: string[] | undefined;
+        classifyToolsEnabled?: boolean | undefined;
         classifyThreshold?: number | undefined;
         parallelReads?: boolean | undefined;
         maxParallelReads?: number | undefined;
     } | undefined;
+    skillClassifyEnabled?: boolean | undefined;
     skillClassifyThreshold?: number | undefined;
     structuredOutput?: "never" | "auto" | "always" | undefined;
     summarization?: {
@@ -918,6 +941,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     } | undefined;
     parallelAgents?: {
         maxParallel?: number | undefined;
+        maxTasksPerCall?: number | undefined;
     } | undefined;
     agentLoop?: {
         toolCallBudget?: {
@@ -1158,6 +1182,11 @@ type AgentEvent = {
         added: number;
         removed: number;
     };
+    diffHunks?: Array<{
+        type: string;
+        lineNum: number;
+        line: string;
+    }>;
 } | {
     type: "subagent_start";
     subagentId: string;
@@ -1299,10 +1328,12 @@ interface NexusConfig {
     skills: string[];
     tools: {
         custom: string[];
+        classifyToolsEnabled: boolean;
         classifyThreshold: number;
         parallelReads: boolean;
         maxParallelReads: number;
     };
+    skillClassifyEnabled: boolean;
     skillClassifyThreshold: number;
     structuredOutput: "auto" | "always" | "never";
     summarization: {
@@ -1313,6 +1344,7 @@ interface NexusConfig {
     };
     parallelAgents: {
         maxParallel: number;
+        maxTasksPerCall?: number;
     };
     /** Optional overrides for agent loop limits (tool budget and max iterations per mode). */
     agentLoop?: {
@@ -1358,6 +1390,8 @@ interface McpServerConfig {
     url?: string;
     transport?: "stdio" | "http" | "sse";
     enabled?: boolean;
+    /** Resolve to a bundled MCP server (e.g. "context-mode") when nexusRoot is set by host */
+    bundle?: string;
 }
 interface SkillDef {
     name: string;
@@ -1832,6 +1866,22 @@ declare function testMcpServers(configs: McpServerConfig[]): Promise<Array<{
     error?: string;
 }>>;
 
+interface ResolveBundledOptions {
+    /** Project directory (agent cwd); passed as CLAUDE_PROJECT_DIR to bundled servers */
+    cwd: string;
+    /**
+     * NexusCode repo root (where sources/claude-context-mode lives).
+     * When null/undefined or path does not exist, bundled entries are skipped.
+     */
+    nexusRoot: string | null | undefined;
+}
+/**
+ * Resolves any server with bundle === "context-mode" to a full config
+ * (command, args, env with CLAUDE_PROJECT_DIR). Skips the entry if nexusRoot
+ * is missing or start.mjs is not present.
+ */
+declare function resolveBundledMcpServers(servers: McpServerConfig[], options: ResolveBundledOptions): McpServerConfig[];
+
 /**
  * Models catalog from models.dev.
  * Used by CLI and extension to show "Select model" with Recommended / free models.
@@ -1908,4 +1958,4 @@ declare class CheckpointTracker {
     private restoreToWorkspace;
 }
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, testMcpServers, writeConfig, writeGlobalProfiles };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, testMcpServers, writeConfig, writeGlobalProfiles };

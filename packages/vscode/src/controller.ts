@@ -5,8 +5,9 @@
 
 import * as vscode from "vscode"
 import * as path from "path"
+import * as fs from "node:fs"
 import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
-import type { ApprovalAction, PermissionResult, CheckpointEntry } from "@nexuscode/core"
+import type { ApprovalAction, PermissionResult, CheckpointEntry, McpServerConfig } from "@nexuscode/core"
 import {
   loadConfig,
   writeConfig,
@@ -21,6 +22,7 @@ import {
   loadRules,
   McpClient,
   setMcpClientInstance,
+  resolveBundledMcpServers,
   testMcpServers,
   createCompaction,
   ParallelAgentManager,
@@ -64,6 +66,8 @@ export type WebviewMessage =
   | { type: "openNexusignore" }
   | { type: "getModelsCatalog" }
   | { type: "restoreCheckpoint"; hash: string }
+  | { type: "getAgentPresets" }
+  | { type: "applyAgentPreset"; presetName: string }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
@@ -78,6 +82,7 @@ export type ExtensionMessage =
   | { type: "pendingApproval"; partId: string; action: ApprovalAction }
   | { type: "confirmResult"; id: string; ok: boolean }
   | { type: "modelsCatalog"; catalog: import("@nexuscode/core").ModelsCatalog }
+  | { type: "agentPresets"; presets: Array<{ name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string }> }
 
 export interface WebviewState {
   messages: SessionMessage[]
@@ -114,6 +119,8 @@ export class Controller {
   private config?: NexusConfig
   private defaultModelProfile?: NexusConfig["model"]
   private mode: Mode = "agent"
+  /** Mode of the previous run; used to prepend a reminder when user switches mode in the same session. */
+  private lastRunMode: Mode | null = null
   private isRunning = false
   private abortController?: AbortController
   private checkpoint?: CheckpointTracker
@@ -124,6 +131,7 @@ export class Controller {
   private initPromise?: Promise<void>
   private modelsCatalogCache: import("@nexuscode/core").ModelsCatalog | null = null
   private indexStatusUnsubscribe?: () => void
+  private indexerFileWatcher?: vscode.Disposable
   private disposables: vscode.Disposable[] = []
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
 
@@ -259,6 +267,8 @@ export class Controller {
       if (!this.config) {
         this.config = NexusConfigSchema.parse({}) as NexusConfig
       }
+      // Send config to webview immediately so Settings open fast (before allowed-commands and project settings)
+      this.postMessageToWebview({ type: "configLoaded", config: this.config })
       // Merge project allowlist from .nexus/allowed-commands.json
       try {
         const allowPath = path.join(cwd, ".nexus", "allowed-commands.json")
@@ -339,6 +349,7 @@ export class Controller {
         break
       case "clearChat":
         this.session = Session.create(this.getCwd())
+        this.lastRunMode = null
         this.checkpoint = undefined
         this.serverSessionId = undefined
         this.postStateToWebview()
@@ -535,7 +546,8 @@ export class Controller {
           break
         }
         try {
-          const results = await testMcpServers(this.config.mcp.servers)
+          const resolved = this.getResolvedMcpServers()
+          const results = await testMcpServers(resolved)
           this.postMessageToWebview({ type: "mcpServerStatus", results })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
@@ -602,6 +614,16 @@ export class Controller {
           await this.restoreCheckpointToHash(msg.hash.trim())
         }
         break
+      case "getAgentPresets": {
+        const presets = await this.readAgentPresets()
+        this.postMessageToWebview({ type: "agentPresets", presets })
+        break
+      }
+      case "applyAgentPreset":
+        if (msg.presetName?.trim()) {
+          await this.applyAgentPreset(msg.presetName.trim())
+        }
+        break
     }
   }
 
@@ -638,6 +660,66 @@ export class Controller {
     }
     vscode.window.showInformationMessage("NexusCode: Workspace restored to checkpoint.", { modal: false })
     this.postStateToWebview()
+  }
+
+  /** Read agent presets from .nexus/agent-configs.json (same format as CLI). */
+  private async readAgentPresets(): Promise<
+    Array<{ name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string }>
+  > {
+    const cwd = this.getCwd()
+    const filePath = path.join(cwd, ".nexus", "agent-configs.json")
+    try {
+      const uri = vscode.Uri.file(filePath)
+      const raw = await vscode.workspace.fs.readFile(uri)
+      const parsed = JSON.parse(Buffer.from(raw).toString("utf8")) as { presets?: unknown[]; configs?: unknown[] } | unknown[]
+      const list = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray((parsed as { presets?: unknown[] }).presets)
+          ? (parsed as { presets: unknown[] }).presets
+          : Array.isArray((parsed as { configs?: unknown[] }).configs)
+            ? (parsed as { configs: unknown[] }).configs
+            : []
+      return list.map(normalizeAgentPresetForExtension).filter(Boolean) as Array<{
+        name: string
+        vector: boolean
+        skills: string[]
+        mcpServers: string[]
+        rulesFiles: string[]
+        modelProvider?: string
+        modelId?: string
+      }>
+    } catch {
+      return []
+    }
+  }
+
+  /** Apply an agent preset by name: merge vector, skills, MCP, rules (and optional model) into config and save. */
+  private async applyAgentPreset(presetName: string): Promise<void> {
+    const presets = await this.readAgentPresets()
+    const preset = presets.find((p) => p.name === presetName)
+    if (!preset || !this.config) {
+      vscode.window.showWarningMessage(`NexusCode: Preset "${presetName}" not found.`, { modal: false })
+      return
+    }
+    const current = this.config
+    const namedServers = (current.mcp?.servers ?? []).map((s) => ({ name: (s as McpServerConfig).name ?? "", server: s }))
+    const selectedServers = namedServers
+      .filter((item) => item.name && preset.mcpServers.includes(item.name))
+      .map((item) => item.server)
+    const updates: Partial<NexusConfig> = {
+      indexing: {
+        ...current.indexing,
+        vector: preset.vector,
+      },
+      skills: preset.skills,
+      mcp: { servers: selectedServers.length > 0 ? selectedServers : current.mcp?.servers ?? [] },
+      rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["AGENTS.md", "CLAUDE.md"] },
+    }
+    if (preset.modelProvider && preset.modelId) {
+      updates.model = { ...current.model, provider: preset.modelProvider, id: preset.modelId }
+    }
+    await this.handleSaveConfig(updates)
+    vscode.window.showInformationMessage(`NexusCode: Applied preset "${presetName}".`, { modal: false })
   }
 
   private async handleSaveConfig(patch: Partial<NexusConfig>): Promise<void> {
@@ -710,6 +792,21 @@ export class Controller {
     this.postStateToWebview()
   }
 
+  private getModeReminder(mode: Mode): string {
+    switch (mode) {
+      case "agent":
+        return "[You are now in Agent mode. You may edit files, run commands, and use all tools.]"
+      case "ask":
+        return "[You are now in Ask mode (read-only). Do not modify files or run commands.]"
+      case "plan":
+        return "[You are now in Plan mode. Research and write the plan to .nexus/plans/*.md; call plan_exit when ready.]"
+      case "debug":
+        return "[You are now in Debug mode. Diagnose and fix issues; you have full tool access.]"
+      default:
+        return `[You are now in ${mode} mode.]`
+    }
+  }
+
   private async runAgent(content: string, mode?: Mode): Promise<void> {
     if (this.isRunning) return
     if (!this.session || !this.config) {
@@ -722,9 +819,14 @@ export class Controller {
       return
     }
     this.mode = mode ?? this.mode
+    const prevMode = this.lastRunMode
+    this.lastRunMode = this.mode
+    const effectiveContent =
+      prevMode != null && prevMode !== this.mode ? this.getModeReminder(this.mode) + "\n\n" + content : content
+
     this.isRunning = true
     this.abortController = new AbortController()
-    this.session.addMessage({ role: "user", content })
+    this.session.addMessage({ role: "user", content: effectiveContent })
     this.postStateToWebview()
 
     const cwd = this.getCwd()
@@ -749,7 +851,7 @@ export class Controller {
           {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
-            body: JSON.stringify({ content, mode: this.mode }),
+            body: JSON.stringify({ content: effectiveContent, mode: this.mode }),
             signal: this.abortController!.signal,
           }
         )
@@ -928,6 +1030,23 @@ export class Controller {
     }
   }
 
+  private getNexusRoot(): string | null {
+    try {
+      const root = path.resolve(this.context.extensionPath, "..", "..")
+      const startPath = path.join(root, "sources", "claude-context-mode", "start.mjs")
+      return fs.existsSync(startPath) ? root : null
+    } catch {
+      return null
+    }
+  }
+
+  private getResolvedMcpServers(): McpServerConfig[] {
+    if (!this.config?.mcp.servers.length) return []
+    const cwd = this.getCwd()
+    const nexusRoot = this.getNexusRoot()
+    return resolveBundledMcpServers(this.config.mcp.servers, { cwd, nexusRoot })
+  }
+
   private async reconnectMcpServers(): Promise<void> {
     if (!this.config) return
     if (!this.mcpClient) {
@@ -936,7 +1055,9 @@ export class Controller {
     }
     await this.mcpClient.disconnectAll().catch(() => {})
     if (this.config.mcp.servers.length === 0) return
-    await this.mcpClient.connectAll(this.config.mcp.servers).catch((err: unknown) => {
+    const resolved = this.getResolvedMcpServers()
+    process.env.CLAUDE_PROJECT_DIR = this.getCwd()
+    await this.mcpClient.connectAll(resolved).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err)
       this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
     })
@@ -1028,6 +1149,7 @@ export class Controller {
   }
 
   private async switchSession(sessionId: string): Promise<void> {
+    this.lastRunMode = null
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
     if (serverUrl) {
@@ -1137,6 +1259,8 @@ export class Controller {
   private async initializeIndexer(cwd: string): Promise<void> {
     this.indexStatusUnsubscribe?.()
     this.indexStatusUnsubscribe = undefined
+    this.indexerFileWatcher?.dispose()
+    this.indexerFileWatcher = undefined
     this.indexer?.close()
     this.indexer = undefined
     if (!this.config?.indexing.enabled) {
@@ -1149,6 +1273,16 @@ export class Controller {
       this.postMessageToWebview({ type: "agentEvent", event: { type: "index_update", status } })
     })
     this.indexer.startIndexing().catch((err: unknown) => console.warn("[nexus] Indexer start error:", err))
+
+    const pattern = new vscode.RelativePattern(
+      vscode.Uri.file(cwd),
+      "**/*.{ts,tsx,js,jsx,mjs,cjs,py,rs,go,java,c,cpp,h,hpp,cs,rb,php,swift,kt,scala,md,mdx}"
+    )
+    const watcher = vscode.workspace.createFileSystemWatcher(pattern)
+    watcher.onDidChange((uri) => this.indexer?.refreshFile(uri.fsPath))
+    watcher.onDidCreate((uri) => this.indexer?.refreshFile(uri.fsPath))
+    watcher.onDidDelete((uri) => this.indexer?.refreshFileNow(uri.fsPath))
+    this.indexerFileWatcher = watcher
   }
 
   private async refreshIndexerFromGit(cwd: string): Promise<void> {
@@ -1188,6 +1322,8 @@ export class Controller {
   dispose(): void {
     this.abortController?.abort()
     this.indexStatusUnsubscribe?.()
+    this.indexerFileWatcher?.dispose()
+    this.indexerFileWatcher = undefined
     this.indexer?.close()
     this.indexer = undefined
     this.mcpClient?.disconnectAll().catch(() => {})
@@ -1219,4 +1355,44 @@ function deepMergeInto<T extends Record<string, unknown>>(target: T, patch: Part
     }
   }
   return target
+}
+
+type AgentPresetForExtension = {
+  name: string
+  vector: boolean
+  skills: string[]
+  mcpServers: string[]
+  rulesFiles: string[]
+  modelProvider?: string
+  modelId?: string
+}
+
+function normalizeAgentPresetForExtension(value: unknown): AgentPresetForExtension | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const name = typeof raw.name === "string" ? raw.name.trim() : ""
+  if (!name) return null
+  return {
+    name,
+    modelProvider: typeof raw.modelProvider === "string" ? raw.modelProvider : undefined,
+    modelId: typeof raw.modelId === "string" ? raw.modelId : undefined,
+    vector: Boolean(raw.vector),
+    skills: asStringList(raw.skills),
+    mcpServers: asStringList(raw.mcpServers),
+    rulesFiles: asStringList(raw.rulesFiles),
+  }
+}
+
+function asStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const v of value) {
+    if (typeof v !== "string") continue
+    const s = v.trim()
+    if (!s || seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+  }
+  return out
 }

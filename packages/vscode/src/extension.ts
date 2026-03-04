@@ -5,6 +5,7 @@ let provider: NexusProvider | undefined
 
 export function activate(context: vscode.ExtensionContext): void {
   provider = new NexusProvider(context)
+  provider.warmup()
 
   // Register sidebar view provider
   context.subscriptions.push(

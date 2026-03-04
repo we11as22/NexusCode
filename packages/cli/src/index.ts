@@ -8,12 +8,17 @@ import * as os from "node:os"
 import { execa } from "execa"
 import {
   loadConfig, writeConfig, loadProjectSettings, Session, createLLMClient, ToolRegistry, loadSkills,
-  loadRules, McpClient, setMcpClientInstance, createCompaction,
+  loadRules, McpClient, setMcpClientInstance, resolveBundledMcpServers, createCompaction,
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
   CodebaseIndexer, createCodebaseIndexer, listSessions,
   MODES, type Mode, type AgentEvent, type IndexStatus, type PermissionResult,
 } from "@nexuscode/core"
 import { CliHost } from "./host.js"
+import { fileURLToPath } from "node:url"
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+/** NexusCode repo root when running from packages/cli/dist */
+const NEXUS_ROOT = path.resolve(__dirname, "..", "..")
 import { NexusServerClient } from "./server-client.js"
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -275,7 +280,9 @@ if (isPrintMode && initialMessage) {
   const mcpClientNI = new McpClient()
   setMcpClientInstance(mcpClientNI)
   if (config.mcp.servers.length > 0) {
-    await mcpClientNI.connectAll(config.mcp.servers).catch(() => {})
+    process.env.CLAUDE_PROJECT_DIR = cwd
+    const resolved = resolveBundledMcpServers(config.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
+    await mcpClientNI.connectAll(resolved).catch(() => {})
     for (const tool of mcpClientNI.getTools()) {
       toolRegistry.register(tool)
     }
@@ -384,7 +391,9 @@ setMcpClientInstance(mcpClient)
 
 if (!serverUrl) {
 if (config.mcp.servers.length > 0) {
-  await mcpClient.connectAll(config.mcp.servers)
+  process.env.CLAUDE_PROJECT_DIR = cwd
+  const resolved = resolveBundledMcpServers(config.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
+  await mcpClient.connectAll(resolved)
   for (const tool of mcpClient.getTools()) {
     toolRegistry.register(tool)
   }
@@ -449,7 +458,9 @@ function getAllTools(activeMode: Mode) {
 async function reconnectMcpServers(): Promise<void> {
   await mcpClient.disconnectAll().catch(() => {})
   if (config.mcp.servers.length > 0) {
-    await mcpClient.connectAll(config.mcp.servers).catch(() => {})
+    process.env.CLAUDE_PROJECT_DIR = cwd
+    const resolved = resolveBundledMcpServers(config.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
+    await mcpClient.connectAll(resolved).catch(() => {})
     for (const tool of mcpClient.getTools()) {
       toolRegistry.register(tool)
     }
@@ -519,6 +530,15 @@ function saveConfig(updates: Partial<typeof config>): void {
       })
       .catch(() => {})
   }
+  if (updates.skillsConfig) {
+    config.skillsConfig = updates.skillsConfig
+    config.skills = updates.skillsConfig.filter((s) => s.enabled).map((s) => s.path)
+    loadSkills(config.skills, cwd)
+      .then((loaded) => {
+        skills = loaded
+      })
+      .catch(() => {})
+  }
   if (updates.rules) {
     config.rules = { ...config.rules, ...updates.rules }
     loadRules(cwd, config.rules.files)
@@ -533,6 +553,12 @@ function saveConfig(updates: Partial<typeof config>): void {
   if (updates.profiles) {
     config.profiles = { ...config.profiles, ...updates.profiles }
   }
+  if (updates.tools) {
+    config.tools = { ...config.tools, ...updates.tools }
+  }
+  if (updates.skillClassifyEnabled !== undefined) {
+    config.skillClassifyEnabled = updates.skillClassifyEnabled
+  }
   if (updates.indexing) config.indexing = { ...config.indexing, ...updates.indexing }
   if (updates.vectorDb) config.vectorDb = config.vectorDb ? { ...config.vectorDb, ...updates.vectorDb } : (updates.vectorDb as any)
   writeConfig(config, cwd)
@@ -542,6 +568,42 @@ function saveConfig(updates: Partial<typeof config>): void {
       const msg = err instanceof Error ? err.message : String(err)
       pushEvent({ type: "error", error: `[indexer] ${msg}` })
     })
+  }
+  appProps.configSnapshot = buildConfigSnapshot(config)
+  root.render(React.createElement(App, appProps))
+}
+
+function buildConfigSnapshot(conf: typeof config): typeof appProps.configSnapshot {
+  return {
+    model: { provider: conf.model.provider, id: conf.model.id, temperature: conf.model.temperature },
+    embeddings: conf.embeddings
+      ? {
+          provider: conf.embeddings.provider,
+          model: conf.embeddings.model,
+          dimensions: conf.embeddings.dimensions,
+        }
+      : undefined,
+    indexing: { enabled: conf.indexing.enabled, vector: conf.indexing.vector },
+    vectorDb: conf.vectorDb ? { enabled: conf.vectorDb.enabled, url: conf.vectorDb.url } : undefined,
+    mcp: { servers: (conf.mcp?.servers ?? []) as unknown as Array<Record<string, unknown>> },
+    tools: {
+      classifyToolsEnabled: conf.tools.classifyToolsEnabled,
+      classifyThreshold: conf.tools.classifyThreshold,
+      parallelReads: conf.tools.parallelReads,
+      maxParallelReads: conf.tools.maxParallelReads,
+    },
+    skillClassifyEnabled: conf.skillClassifyEnabled,
+    skillClassifyThreshold: conf.skillClassifyThreshold,
+    skills: conf.skills ?? [],
+    skillsConfig: conf.skillsConfig,
+    rules: { files: conf.rules?.files ?? [] },
+    modes: {
+      agent: { customInstructions: conf.modes?.agent?.customInstructions },
+      plan: { customInstructions: conf.modes?.plan?.customInstructions },
+      ask: { customInstructions: conf.modes?.ask?.customInstructions },
+      debug: { customInstructions: conf.modes?.debug?.customInstructions },
+    },
+    profiles: conf.profiles ?? {},
   }
 }
 
@@ -561,8 +623,31 @@ const onUncaughtException = (err: Error) => {
 process.on("unhandledRejection", onUnhandledRejection)
 process.on("uncaughtException", onUncaughtException)
 
+/** Mode of the previous run; used to prepend a reminder when user switches mode in the same session. */
+let lastRunMode: Mode | null = null
+
+function getModeReminder(mode: Mode): string {
+  switch (mode) {
+    case "agent":
+      return "[You are now in Agent mode. You may edit files, run commands, and use all tools.]"
+    case "ask":
+      return "[You are now in Ask mode (read-only). Do not modify files or run commands.]"
+    case "plan":
+      return "[You are now in Plan mode. Research and write the plan to .nexus/plans/*.md; call plan_exit when ready.]"
+    case "debug":
+      return "[You are now in Debug mode. Diagnose and fix issues; you have full tool access.]"
+    default:
+      return `[You are now in ${mode} mode.]`
+  }
+}
+
 async function runMessage(content: string, msgMode: Mode) {
-  sessionRef.current.addMessage({ role: "user", content })
+  const prevMode = lastRunMode
+  lastRunMode = msgMode
+  const effectiveContent =
+    prevMode != null && prevMode !== msgMode ? getModeReminder(msgMode) + "\n\n" + content : content
+
+  sessionRef.current.addMessage({ role: "user", content: effectiveContent })
   currentAbortController = new AbortController()
   const timeoutMs = 10 * 60_000
   const timeout = setTimeout(() => {
@@ -575,7 +660,7 @@ async function runMessage(content: string, msgMode: Mode) {
     try {
       for await (const event of serverClient.streamMessage(
         sessionRef.current.id,
-        content,
+        effectiveContent,
         msgMode,
         currentAbortController.signal
       )) {
@@ -702,6 +787,7 @@ async function getSessionList(): Promise<Array<{ id: string; ts?: number; title?
 }
 
 async function onSwitchSession(sessionId: string): Promise<void> {
+  lastRunMode = null
   if (serverUrl) {
     const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
     const meta = await serverClient.getSession(sessionId)
@@ -749,37 +835,20 @@ const appProps = {
     if (!profileName) {
       config.model = { ...defaultModelProfile }
       client = createLLMClient(config.model)
-      return
+    } else {
+      const profile = config.profiles?.[profileName]
+      if (!profile) return
+      config.model = { ...config.model, ...profile } as typeof config.model
+      config.model = normalizeModelConfig(config.model)
+      client = createLLMClient(config.model)
     }
-    const profile = config.profiles?.[profileName]
-    if (!profile) return
-    config.model = { ...config.model, ...profile } as typeof config.model
-    config.model = normalizeModelConfig(config.model)
-    client = createLLMClient(config.model)
+    appProps.initialModel = config.model.id
+    appProps.initialProvider = config.model.provider
+    appProps.configSnapshot = buildConfigSnapshot(config)
+    root.render(React.createElement(App, appProps))
   },
   noIndex: !indexEnabledFlag || !!serverUrl,
-  configSnapshot: {
-    model: { provider: config.model.provider, id: config.model.id, temperature: config.model.temperature },
-    embeddings: config.embeddings
-      ? {
-          provider: config.embeddings.provider,
-          model: config.embeddings.model,
-          dimensions: config.embeddings.dimensions,
-        }
-      : undefined,
-    indexing: { enabled: config.indexing.enabled, vector: config.indexing.vector },
-    vectorDb: config.vectorDb ? { enabled: config.vectorDb.enabled, url: config.vectorDb.url } : undefined,
-    mcp: { servers: (config.mcp?.servers ?? []) as unknown as Array<Record<string, unknown>> },
-    skills: config.skills ?? [],
-    rules: { files: config.rules?.files ?? [] },
-    modes: {
-      agent: { customInstructions: config.modes?.agent?.customInstructions },
-      plan: { customInstructions: config.modes?.plan?.customInstructions },
-      ask: { customInstructions: config.modes?.ask?.customInstructions },
-      debug: { customInstructions: config.modes?.debug?.customInstructions },
-    },
-    profiles: config.profiles ?? {},
-  },
+  configSnapshot: buildConfigSnapshot(config),
   saveConfig,
   onReindex: () => indexer?.reindex(),
   onIndexStop: () => indexer?.stop(),

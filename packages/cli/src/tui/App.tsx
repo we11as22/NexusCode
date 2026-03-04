@@ -87,7 +87,11 @@ interface AppProps {
     indexing: { enabled: boolean; vector: boolean }
     vectorDb?: { enabled: boolean; url: string }
     mcp?: { servers: Array<Record<string, unknown>> }
+    tools?: { classifyToolsEnabled?: boolean; classifyThreshold?: number; parallelReads?: boolean; maxParallelReads?: number }
+    skillClassifyEnabled?: boolean
+    skillClassifyThreshold?: number
     skills?: string[]
+    skillsConfig?: Array<{ path: string; enabled: boolean }>
     rules?: { files: string[] }
     modes?: {
       agent?: { customInstructions?: string }
@@ -350,7 +354,7 @@ export function App({
   const renderer = useRenderer()
   const cols = Math.max(40, Math.min(256, dims?.width ?? 80))
   const rows = Math.max(16, Math.min(120, dims?.height ?? 24))
-  type View = "chat" | "model" | "embeddings" | "settings" | "index" | "advanced" | "help" | "sessions" | "agentConfigs"
+  type View = "chat" | "model" | "embeddings" | "settings" | "index" | "advanced" | "mcp" | "skills" | "help" | "sessions" | "agentConfigs"
   const [view, setView] = useState<View>("chat")
   const [state, setState] = useState<AppState>({
     messages: initialMessages ?? [],
@@ -392,6 +396,8 @@ export function App({
   const [embeddingsForm, setEmbeddingsForm] = useState({ provider: "openai", model: "", apiKey: "", baseUrl: "", dimensions: "" })
   const [embeddingsFocus, setEmbeddingsFocus] = useState(0)
   const [advancedForm, setAdvancedForm] = useState({
+    filterToolsEnabled: false,
+    filterSkillsEnabled: false,
     mcpServersJson: "[]",
     skillsText: "",
     claudeMdPath: "CLAUDE.md",
@@ -403,6 +409,10 @@ export function App({
     profilesJson: "{}",
   })
   const [advancedFocus, setAdvancedFocus] = useState(0)
+  const [mcpFocus, setMcpFocus] = useState(0)
+  const [mcpForm, setMcpForm] = useState<Array<Record<string, unknown>>>([])
+  const [skillsFocus, setSkillsFocus] = useState(0)
+  const [skillsForm, setSkillsForm] = useState<Array<{ path: string; enabled: boolean }>>([])
   const [activeProfileIdx, setActiveProfileIdx] = useState(0)
   const [chatScrollLines, setChatScrollLines] = useState(0)
   const [sessionList, setSessionList] = useState<Array<{ id: string; ts?: number; title?: string; messageCount: number }>>([])
@@ -425,6 +435,7 @@ export function App({
   const inputHistory = useRef<string[]>([])
   const eventQueueRef = useRef<AgentEvent[]>([])
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastFlushTimeRef = useRef<number>(0)
   const lastSubmitRef = useRef<number>(0)
 
   // Clamp scroll when terminal is resized so we don't show invalid offset
@@ -617,6 +628,8 @@ export function App({
       const allRules = configSnapshot.rules?.files ?? []
       const claudeMdPath = allRules.find((f) => /CLAUDE\.md$/i.test(f)) ?? "CLAUDE.md"
       setAdvancedForm({
+        filterToolsEnabled: configSnapshot.tools?.classifyToolsEnabled ?? false,
+        filterSkillsEnabled: configSnapshot.skillClassifyEnabled ?? false,
         mcpServersJson: JSON.stringify(configSnapshot.mcp?.servers ?? [], null, 2),
         skillsText: (configSnapshot.skills ?? []).join("\n"),
         claudeMdPath,
@@ -628,6 +641,19 @@ export function App({
         profilesJson: JSON.stringify(configSnapshot.profiles ?? {}, null, 2),
       })
       setAdvancedFocus(0)
+    }
+    if (view === "mcp" && configSnapshot?.mcp?.servers) {
+      setMcpForm((configSnapshot.mcp.servers as Array<Record<string, unknown>>).map((s) => ({
+        ...s,
+        name: (s.name as string) ?? "Unnamed",
+        enabled: s.enabled !== false,
+      })))
+      setMcpFocus(0)
+    }
+    if (view === "skills" && configSnapshot) {
+      const list = configSnapshot.skillsConfig ?? (configSnapshot.skills ?? []).map((p: string) => ({ path: p, enabled: true }))
+      setSkillsForm(list)
+      setSkillsFocus(0)
     }
     if (view === "agentConfigs") {
       setAgentPresetCreateMode(false)
@@ -702,6 +728,7 @@ export function App({
       }
       const batch = eventQueueRef.current.splice(0)
       if (batch.length === 0) return
+      lastFlushTimeRef.current = Date.now()
       let resetScroll = false
       for (const event of batch) {
         if (event.type === "done") resetScroll = true
@@ -932,10 +959,16 @@ export function App({
         if (immediate) {
           flush()
         } else if (!flushTimerRef.current) {
-          flushTimerRef.current = setTimeout(() => {
-            flushTimerRef.current = null
+          const elapsed = Date.now() - lastFlushTimeRef.current
+          // If we just flushed recently (within 16ms), batch with future events; otherwise flush immediately to reduce latency (KiloCode-style)
+          if (elapsed >= EVENT_BATCH_MS || lastFlushTimeRef.current === 0) {
             flush()
-          }, EVENT_BATCH_MS)
+          } else {
+            flushTimerRef.current = setTimeout(() => {
+              flushTimerRef.current = null
+              flush()
+            }, EVENT_BATCH_MS)
+          }
         }
       }
     }
@@ -1481,7 +1514,7 @@ export function App({
 
     // When in config views, handle Tab / Enter / Backspace / type here first (so they don't change mode or send message)
     if (view !== "chat") {
-      if (key.escape && view !== "agentConfigs") {
+      if (key.escape && view !== "agentConfigs" && view !== "mcp" && view !== "skills") {
         setView("chat")
         return
       }
@@ -1671,14 +1704,22 @@ export function App({
           return
         }
         if (inputChar === "5") {
-          setView("advanced")
+          setView("mcp")
           return
         }
         if (inputChar === "6") {
-          setView("help")
+          setView("skills")
           return
         }
         if (inputChar === "7") {
+          setView("advanced")
+          return
+        }
+        if (inputChar === "8") {
+          setView("help")
+          return
+        }
+        if (inputChar === "9") {
           setView("agentConfigs")
           return
         }
@@ -1793,10 +1834,17 @@ export function App({
             setAdvancedFocus((f) => Math.max(0, f - 1))
             return
           }
-          setAdvancedFocus((f) => (f + 1) % 10)
+          setAdvancedFocus((f) => (f + 1) % 12)
           return
         }
-        if (advancedFocus === 9 && isEnter && saveConfig) {
+        if (advancedFocus <= 1 && (isEnter || key.name === "space")) {
+          setAdvancedForm((f) => ({
+            ...f,
+            [advancedFocus === 0 ? "filterToolsEnabled" : "filterSkillsEnabled"]: advancedFocus === 0 ? !f.filterToolsEnabled : !f.filterSkillsEnabled,
+          }))
+          return
+        }
+        if (advancedFocus === 11 && isEnter && saveConfig) {
           let mcpServers: Array<Record<string, unknown>> = []
           let profiles: Record<string, unknown> = {}
           try {
@@ -1811,6 +1859,8 @@ export function App({
           const rules = advancedForm.rulesFilesText.split("\n").map((s) => s.trim()).filter(Boolean)
           const claudeMdPath = advancedForm.claudeMdPath.trim()
           saveConfig({
+            tools: { ...configSnapshot?.tools, classifyToolsEnabled: advancedForm.filterToolsEnabled },
+            skillClassifyEnabled: advancedForm.filterSkillsEnabled,
             mcp: { servers: mcpServers },
             skills,
             rules: { files: [...(claudeMdPath ? [claudeMdPath] : []), ...rules] },
@@ -1836,19 +1886,80 @@ export function App({
           "debugInstructions",
           "profilesJson",
         ] as const
-        if (advancedFocus < 9 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f")) {
-          const k = keys[advancedFocus]!
+        if (advancedFocus >= 2 && advancedFocus <= 10 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f")) {
+          const k = keys[advancedFocus - 2]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k].slice(0, -1) }))
           return
         }
-        if (advancedFocus < 9 && isEnter) {
-          const k = keys[advancedFocus]!
+        if (advancedFocus >= 2 && advancedFocus <= 10 && isEnter) {
+          const k = keys[advancedFocus - 2]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k] + "\n" }))
           return
         }
-        if (advancedFocus < 9 && inputText) {
-          const k = keys[advancedFocus]!
+        if (advancedFocus >= 2 && advancedFocus <= 10 && inputText) {
+          const k = keys[advancedFocus - 2]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k] + inputText }))
+          return
+        }
+        return
+      }
+      if (view === "mcp") {
+        if (key.escape) {
+          setView("settings")
+          return
+        }
+        const total = mcpForm.length + 1
+        if (key.upArrow) {
+          setMcpFocus((f) => (f <= 0 ? total - 1 : f - 1))
+          return
+        }
+        if (key.downArrow || key.tab) {
+          if (key.tab && key.shift) {
+            setMcpFocus((f) => (f <= 0 ? total - 1 : f - 1))
+          } else {
+            setMcpFocus((f) => (f + 1) % total)
+          }
+          return
+        }
+        if (mcpFocus < mcpForm.length && (isEnter || key.name === "space")) {
+          setMcpForm((prev) => prev.map((s, i) => (i === mcpFocus ? { ...s, enabled: !(s.enabled === true) } : s)))
+          return
+        }
+        if (mcpFocus === mcpForm.length && isEnter && saveConfig) {
+          saveConfig({ mcp: { servers: mcpForm } })
+          setView("settings")
+          return
+        }
+        return
+      }
+      if (view === "skills") {
+        if (key.escape) {
+          setView("settings")
+          return
+        }
+        const total = skillsForm.length + 1
+        if (key.upArrow) {
+          setSkillsFocus((f) => (f <= 0 ? total - 1 : f - 1))
+          return
+        }
+        if (key.downArrow || key.tab) {
+          if (key.tab && key.shift) {
+            setSkillsFocus((f) => (f <= 0 ? total - 1 : f - 1))
+          } else {
+            setSkillsFocus((f) => (f + 1) % total)
+          }
+          return
+        }
+        if (skillsFocus < skillsForm.length && (isEnter || key.name === "space")) {
+          setSkillsForm((prev) => prev.map((s, i) => (i === skillsFocus ? { ...s, enabled: !s.enabled } : s)))
+          return
+        }
+        if (skillsFocus === skillsForm.length && isEnter && saveConfig) {
+          saveConfig({
+            skillsConfig: skillsForm,
+            skills: skillsForm.filter((s) => s.enabled).map((s) => s.path),
+          })
+          setView("settings")
           return
         }
         return
@@ -1976,6 +2087,12 @@ export function App({
           )}
           {view === "advanced" && (
             <AdvancedConfigView form={advancedForm} focus={advancedFocus} />
+          )}
+          {view === "mcp" && (
+            <McpConfigView servers={mcpForm} focus={mcpFocus} />
+          )}
+          {view === "skills" && (
+            <SkillsConfigView skills={skillsForm} focus={skillsFocus} />
           )}
           {view === "index" && (
             <IndexManageView
@@ -2151,9 +2268,11 @@ function SettingsHubView({
     "2) Embeddings",
     `3) Vector index: ${vectorState} (toggle)`,
     "4) Index sync & Vector DB",
-    "5) Advanced (MCP, skills, rules, mode prompts, profiles)",
-    "6) Help",
-    "7) Agent configs (/agent-config): select/create presets",
+    "5) MCP servers (enable/disable)",
+    "6) Skills (enable/disable)",
+    "7) Advanced (rules, mode prompts, profiles, raw JSON)",
+    "8) Help",
+    "9) Agent configs (/agent-config): select/create presets",
   ]
   return (
     <box flexDirection="column" borderStyle="single" borderColor={THEME.primary} paddingLeft={1} paddingRight={1}>
@@ -2337,6 +2456,8 @@ function AdvancedConfigView({
   focus,
 }: {
   form: {
+    filterToolsEnabled: boolean
+    filterSkillsEnabled: boolean
     mcpServersJson: string
     skillsText: string
     claudeMdPath: string
@@ -2349,7 +2470,12 @@ function AdvancedConfigView({
   }
   focus: number
 }) {
+  const toggleLabels = [
+    "Filter MCP tools (LLM selects by task when many tools)",
+    "Filter skills (LLM selects by task when many skills)",
+  ]
   const labels = [
+    ...toggleLabels,
     "MCP servers JSON",
     "Skills (one per line)",
     "CLAUDE.md path",
@@ -2374,21 +2500,89 @@ function AdvancedConfigView({
   return (
     <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
       <text fg="cyan" bold> Advanced — MCP, skills, rules, mode prompts, profiles</text>
-      <text fg="gray"> Tab — next field, Enter in field adds newline, Enter on [Save] persists.</text>
-      {labels.map((label, i) => (
+      <text fg="gray"> Tab — next field; Enter/Space on toggles to flip. Enter on [Save] persists.</text>
+      <text fg="gray"> MCP: set "enabled": false in a server entry to disable it.</text>
+      {toggleLabels.map((label, i) => (
+        <box key={label}>
+          <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}</text>
+          <text fg={form[i === 0 ? "filterToolsEnabled" : "filterSkillsEnabled"] ? "green" : "gray"}>
+            {form[i === 0 ? "filterToolsEnabled" : "filterSkillsEnabled"] ? "[x] " : "[ ] "}
+          </text>
+          <text fg="white">{label}</text>
+        </box>
+      ))}
+      {labels.slice(2).map((label, i) => (
         <box key={label} flexDirection="column">
           <box>
-            <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </text>
+            <text fg={focus === i + 2 ? "cyan" : "gray"}>{focus === i + 2 ? "▸ " : "  "}{label}: </text>
           </box>
           <box paddingLeft={2}>
-            <text fg="white">{(form[keys[i]] as string).slice(0, 1600)}</text>
-            {focus === i && <text fg="cyan">│</text>}
+            <text fg="white">{(form[keys[i]!] as string).slice(0, 1600)}</text>
+            {focus === i + 2 && <text fg="cyan">│</text>}
           </box>
         </box>
       ))}
       <box>
-        <text fg={focus === 9 ? "cyan" : "gray"}>{focus === 9 ? "▸ " : "  "}</text>
-        <text fg={focus === 9 ? "green" : "gray"}>[Save] — press Enter</text>
+        <text fg={focus === 11 ? "cyan" : "gray"}>{focus === 11 ? "▸ " : "  "}</text>
+        <text fg={focus === 11 ? "green" : "gray"}>[Save] — press Enter</text>
+      </box>
+    </box>
+  )
+}
+
+function McpConfigView({
+  servers,
+  focus,
+}: {
+  servers: Array<Record<string, unknown>>
+  focus: number
+}) {
+  const saveIndex = servers.length
+  return (
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> MCP servers — enable/disable</text>
+      <text fg="gray"> Tab / ↑↓ — move, Space/Enter — toggle, Enter on [Save] — save and back.</text>
+      {servers.map((s, i) => (
+        <box key={i}>
+          <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}</text>
+          <text fg={s.enabled === true ? "green" : "gray"}>{s.enabled === true ? "[x] " : "[ ] "}</text>
+          <text fg="white" wrap="truncate-end">{(s.name as string) || (s.command as string) || (s.url as string) || "Unnamed"}</text>
+        </box>
+      ))}
+      <box>
+        <text fg={focus === saveIndex ? "cyan" : "gray"}>{focus === saveIndex ? "▸ " : "  "}</text>
+        <text fg={focus === saveIndex ? "green" : "gray"}>[Save] — press Enter</text>
+      </box>
+    </box>
+  )
+}
+
+function SkillsConfigView({
+  skills,
+  focus,
+}: {
+  skills: Array<{ path: string; enabled: boolean }>
+  focus: number
+}) {
+  const saveIndex = skills.length
+  return (
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Skills — enable/disable</text>
+      <text fg="gray"> Tab / ↑↓ — move, Space/Enter — toggle, Enter on [Save] — save and back.</text>
+      {skills.length === 0 ? (
+        <box><text fg="gray">No skills. Add paths in Advanced → Skills (one per line), then return here to toggle.</text></box>
+      ) : (
+        skills.map((s, i) => (
+          <box key={i}>
+            <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}</text>
+            <text fg={s.enabled ? "green" : "gray"}>{s.enabled ? "[x] " : "[ ] "}</text>
+            <text fg="white" wrap="truncate-end">{s.path}</text>
+          </box>
+        ))
+      )}
+      <box>
+        <text fg={focus === saveIndex ? "cyan" : "gray"}>{focus === saveIndex ? "▸ " : "  "}</text>
+        <text fg={focus === saveIndex ? "green" : "gray"}>[Save] — press Enter</text>
       </box>
     </box>
   )
@@ -2838,7 +3032,9 @@ function InputBar({
   const approvalPrompt =
     pendingApprovalAction?.type === "execute"
       ? "Allow? y/n a/s e(allow for folder)"
-      : "Allow? y/n a/s"
+      : pendingApprovalAction?.type === "doom_loop"
+        ? "Continue? y / n (abort)"
+        : "Allow? y/n a/s"
   const prompt = awaitingApproval
     ? approvalPrompt
     : isRunning
@@ -3397,9 +3593,24 @@ function formatToolPreview(tool: LiveTool): string {
 }
 
 function parseTodoItems(todo: string): { done: boolean; text: string }[] {
+  const raw = todo.trim()
+  if (!raw) return []
+  // Structured format from update_todo_list: JSON array of { done, text }
+  if (raw.startsWith("[")) {
+    try {
+      const arr = JSON.parse(raw) as Array<{ done?: boolean; text?: string }>
+      if (!Array.isArray(arr)) return []
+      return arr.map((i) => ({
+        done: Boolean(i.done),
+        text: typeof i.text === "string" ? i.text : String(i.text ?? ""),
+      }))
+    } catch {
+      // fall through to markdown
+    }
+  }
   const items: { done: boolean; text: string }[] = []
-  for (const raw of todo.split("\n")) {
-    const line = raw.trim()
+  for (const rawLine of todo.split("\n")) {
+    const line = rawLine.trim()
     if (!line) continue
     const checkboxDone = /^[-*]\s*\[[xX]\]\s*(.*)$/.exec(line) || /^[-*]\s*✅\s*(.*)$/.exec(line)
     const checkboxPending = /^[-*]\s*\[\s?\]\s*(.*)$/.exec(line)

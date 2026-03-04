@@ -42,6 +42,8 @@ const mcpServerSchema = z.object({
   url: z.string().optional(),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
   enabled: z.boolean().optional().default(true),
+  /** Bundled server id (e.g. "context-mode"); resolved by host to command/args/env */
+  bundle: z.string().optional(),
 })
 
 export const NexusConfigSchema = z.object({
@@ -80,7 +82,7 @@ export const NexusConfigSchema = z.object({
     batchSize: z.number().int().positive().default(50),
     embeddingBatchSize: z.number().int().positive().default(60),
     embeddingConcurrency: z.number().int().positive().default(2),
-    debounceMs: z.number().int().positive().default(1500),
+    debounceMs: z.number().int().positive().default(800),
   }).default({}),
 
   permissions: z.object({
@@ -130,11 +132,15 @@ export const NexusConfigSchema = z.object({
 
   tools: z.object({
     custom: z.array(z.string()).default([]),
+    /** When true, use LLM to filter MCP/custom tools by task when count > classifyThreshold. Default off. */
+    classifyToolsEnabled: z.boolean().default(false),
     classifyThreshold: z.number().int().positive().default(15),
     parallelReads: z.boolean().default(true),
     maxParallelReads: z.number().int().positive().default(5),
   }).default({}),
 
+  /** When true, use LLM to filter skills by task when count > skillClassifyThreshold. Default off. */
+  skillClassifyEnabled: z.boolean().default(false),
   skillClassifyThreshold: z.number().int().positive().default(8),
 
   structuredOutput: z.enum(["auto", "always", "never"]).default("auto"),
@@ -148,6 +154,8 @@ export const NexusConfigSchema = z.object({
 
   parallelAgents: z.object({
     maxParallel: z.number().int().positive().default(4),
+    /** Max tasks per single spawn_agent call when using \`tasks\` array (default 12). */
+    maxTasksPerCall: z.number().int().positive().default(12),
   }).default({}),
 
   /** Optional overrides for agent loop limits (OpenCode-style: allow enough tools/iterations to finish). */
