@@ -22,7 +22,7 @@ import type { LLMStreamEvent, LLMMessage, LLMToolDef } from "../provider/types.j
 import { buildSystemPrompt, type PromptContext } from "./prompts/components/index.js"
 import { getInitialProjectContext } from "./prompts/initial-context.js"
 import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN } from "./modes.js"
-import { classifyTools, classifySkills } from "./classifier.js"
+import { classifyMcpServers, classifySkills } from "./classifier.js"
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
@@ -40,6 +40,27 @@ const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   debug: 200,
 }
 
+/** Minimum length of final text before attempt_completion is accepted (non-plan modes). */
+const MIN_FINAL_TEXT_BEFORE_COMPLETION = 20
+
+/** Returns true if the given message contains a write_to_file or replace_in_file to .nexus/plans/ (for plan_exit gate). */
+function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: string): boolean {
+  const msg = session.messages.find((m) => m.id === messageId)
+  if (!msg || !Array.isArray(msg.content)) return false
+  const parts = msg.content as MessagePart[]
+  for (const p of parts) {
+    if (p.type !== "tool") continue
+    const tp = p as ToolPart
+    if (tp.tool !== "write_to_file" && tp.tool !== "replace_in_file") continue
+    const raw = (tp.input?.path ?? tp.input?.file_path) as string | undefined
+    if (!raw || typeof raw !== "string") continue
+    const rel = path.isAbsolute(raw) ? path.relative(cwd, raw) : raw
+    const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
+    if (PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) return true
+  }
+  return false
+}
+
 export interface AgentLoopOptions {
   session: ISession
   client: LLMClient
@@ -55,6 +76,8 @@ export interface AgentLoopOptions {
   gitBranch?: string
   /** When set, commit on attempt_completion and optionally double-check (Cline-style). */
   checkpoint?: { commit(description?: string): Promise<string> }
+  /** When true, inject create-skill instructions; host must allow writes to .nexus/skills and .cursor/skills */
+  createSkillMode?: boolean
 }
 
 /**
@@ -65,7 +88,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const {
     session, client, host, config, mode,
     tools, skills, rulesContent, indexer, compaction,
-    signal, gitBranch,
+    signal, gitBranch, checkpoint, createSkillMode,
   } = opts
 
   const activeClient = client
@@ -86,25 +109,60 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     ? lastMessage.content
     : (lastMessage?.content as Array<{ type: string; text?: string }>)?.find(p => p.type === "text")?.text ?? ""
 
-  const needClassifyTools = config.tools.classifyToolsEnabled && dynamicTools.length > config.tools.classifyThreshold
+  // Build MCP server list from dynamic tools (name format: "serverName__toolName"). Custom tools have no "__".
+  const serverToTools = new Map<string, ToolDef[]>()
+  const customDynamicTools: ToolDef[] = []
+  for (const t of dynamicTools) {
+    const sep = t.name.indexOf("__")
+    if (sep === -1) {
+      customDynamicTools.push(t)
+    } else {
+      const server = t.name.slice(0, sep)
+      if (!serverToTools.has(server)) serverToTools.set(server, [])
+      serverToTools.get(server)!.push(t)
+    }
+  }
+  const mcpServerCount = serverToTools.size
+  const needClassifyMcpServers = config.tools.classifyToolsEnabled && mcpServerCount > config.tools.classifyThreshold
   const needClassifySkills = config.skillClassifyEnabled && skills.length > config.skillClassifyThreshold
 
   let resolvedDynamicTools: ToolDef[]
   let resolvedSkills: SkillDef[]
-  if (needClassifyTools && needClassifySkills) {
-    const [toolNames, skillResults] = await Promise.all([
-      classifyTools(dynamicTools, taskDesc, activeClient),
+  if (needClassifyMcpServers && needClassifySkills) {
+    const serverInfos = [...serverToTools.entries()].map(([name, tools]) => ({
+      name,
+      toolCount: tools.length,
+      toolNames: tools.map(t => t.name),
+    }))
+    const [selectedServerNames, skillResults] = await Promise.all([
+      classifyMcpServers(serverInfos, taskDesc, activeClient),
       (() => {
         const candidates = ftsTopSkills(skills, taskDesc, 20)
         return classifySkills(candidates, taskDesc, activeClient)
       })(),
     ])
-    resolvedDynamicTools = dynamicTools.filter(t => new Set(toolNames).has(t.name))
+    const selectedServers = new Set(selectedServerNames)
+    resolvedDynamicTools = [
+      ...customDynamicTools,
+      ...([...serverToTools.entries()]
+        .filter(([server]) => selectedServers.has(server))
+        .flatMap(([, tools]) => tools)),
+    ]
     resolvedSkills = skillResults
-  } else if (needClassifyTools) {
-    const selectedNames = await classifyTools(dynamicTools, taskDesc, activeClient)
-    const selectedSet = new Set(selectedNames)
-    resolvedDynamicTools = dynamicTools.filter(t => selectedSet.has(t.name))
+  } else if (needClassifyMcpServers) {
+    const serverInfos = [...serverToTools.entries()].map(([name, tools]) => ({
+      name,
+      toolCount: tools.length,
+      toolNames: tools.map(t => t.name),
+    }))
+    const selectedServerNames = await classifyMcpServers(serverInfos, taskDesc, activeClient)
+    const selectedServers = new Set(selectedServerNames)
+    resolvedDynamicTools = [
+      ...customDynamicTools,
+      ...([...serverToTools.entries()]
+        .filter(([server]) => selectedServers.has(server))
+        .flatMap(([, tools]) => tools)),
+    ]
     resolvedSkills = skills
   } else if (needClassifySkills) {
     resolvedDynamicTools = dynamicTools
@@ -256,6 +314,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       contextUsedTokens: usedTokens,
       contextLimitTokens: limitTokens > 0 ? limitTokens : undefined,
       contextPercent: limitTokens > 0 ? contextPercent : undefined,
+      createSkillMode: createSkillMode === true,
     }
 
     const { blocks, cacheableCount } = buildSystemPrompt(promptCtx)
@@ -489,6 +548,57 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               // Sequential: flush pending reads first
               await flushPendingReads()
 
+              // Non-plan modes: force a final text message before attempt_completion
+              if (toolName === "attempt_completion" && mode !== "plan") {
+                const textSoFar = currentText.trim()
+                if (textSoFar.length < MIN_FINAL_TEXT_BEFORE_COMPLETION) {
+                  const errMsg =
+                    "You must provide a brief text summary to the user before completing. Write your summary in the chat (what you did or found), then call attempt_completion again with the result parameter."
+                  session.updateToolPart(newMessageId, partId, {
+                    status: "error",
+                    output: errMsg,
+                    timeEnd: Date.now(),
+                  })
+                  host.emit({
+                    type: "tool_end",
+                    tool: toolName,
+                    partId,
+                    messageId: newMessageId,
+                    success: false,
+                    output: errMsg,
+                  })
+                  lastToolName = toolName
+                  executedToolThisIteration = true
+                  executedToolCallsTotal++
+                  break
+                }
+              }
+
+              // Plan mode: force writing the plan to .nexus/plans/ before plan_exit
+              if (toolName === "plan_exit" && mode === "plan") {
+                if (!messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd)) {
+                  const errMsg =
+                    "You must write the plan to a file in .nexus/plans/ (e.g. .nexus/plans/plan.md) before calling plan_exit. Create or update the plan file now, then call plan_exit again."
+                  session.updateToolPart(newMessageId, partId, {
+                    status: "error",
+                    output: errMsg,
+                    timeEnd: Date.now(),
+                  })
+                  host.emit({
+                    type: "tool_end",
+                    tool: toolName,
+                    partId,
+                    messageId: newMessageId,
+                    success: false,
+                    output: errMsg,
+                  })
+                  lastToolName = toolName
+                  executedToolThisIteration = true
+                  executedToolCallsTotal++
+                  break
+                }
+              }
+
               const result = await executeToolCall(
                 toolCallId, toolName, toolInput,
                 resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState
@@ -512,6 +622,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 ...(result.success && (toolName === "write_to_file" || toolName === "replace_in_file")
                   ? {
                       path: extractWriteTargetPath(toolName, toolInput),
+                      writtenContent: typeof (result as { metadata?: { writtenContent?: string } }).metadata?.writtenContent === "string"
+                        ? (result.metadata as { writtenContent: string }).writtenContent
+                        : undefined,
                       ...(typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.addedLines === "number" &&
                       typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.removedLines === "number"
                         ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
@@ -654,6 +767,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             ...(result.success && (call.toolName === "write_to_file" || call.toolName === "replace_in_file")
               ? {
                   path: extractWriteTargetPath(call.toolName, call.toolInput),
+                  writtenContent: typeof (result as { metadata?: { writtenContent?: string } }).metadata?.writtenContent === "string"
+                    ? (result.metadata as { writtenContent: string }).writtenContent
+                    : undefined,
                   ...(typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.addedLines === "number" &&
                   typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.removedLines === "number"
                     ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
@@ -943,7 +1059,7 @@ async function executeToolCall(
       }
     }
 
-    return { success: result.success, output: result.output }
+    return { success: result.success, output: result.output, metadata: result.metadata }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return { success: false, output: `Tool ${toolName} error: ${msg}` }

@@ -91,6 +91,23 @@ function isFileEditTool(part: ToolPart): boolean {
   return ["read_file", "write_to_file", "replace_in_file"].includes(part.tool)
 }
 
+/** Up to 4 lines: first added/removed line, 1 line above, then window of 4 lines down (or until 1 context line inclusive). */
+function getDiffPreviewHunks(hunks: Array<{ type: string; lineNum: number; line: string }>): Array<{ type: string; lineNum: number; line: string }> {
+  if (!hunks.length) return []
+  const firstChangeIdx = hunks.findIndex((h) => h.type === "add" || h.type === "remove")
+  if (firstChangeIdx === -1) return hunks.slice(0, 4)
+  const start = Math.max(0, firstChangeIdx - 1)
+  let end = start + 4
+  for (let i = start; i < Math.min(hunks.length, start + 4); i++) {
+    if (i > firstChangeIdx && hunks[i]!.type === "context") {
+      end = i + 1
+      break
+    }
+    end = i + 1
+  }
+  return hunks.slice(start, end)
+}
+
 function getFileEditPath(part: ToolPart): string | null {
   if (part.path != null && String(part.path).trim()) return String(part.path).trim()
   const pathVal = part.input?.path
@@ -184,14 +201,20 @@ export function InlineFileEditBlock({ part }: { part: ToolPart }) {
             {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
           </span>
         ) : statLabel ? (
-          <span className="nexus-file-edit-stats flex-shrink-0">{statLabel}</span>
+          <span className="nexus-file-edit-stats flex-shrink-0">
+            {statLabel.startsWith("+") && !statLabel.includes("-") ? (
+              <span className="text-green-500">{statLabel}</span>
+            ) : (
+              statLabel
+            )}
+          </span>
         ) : null}
       </div>
       {expanded && (
         <div className="nexus-file-edit-content">
           {hasDiffHunks ? (
             <div className="nexus-diff-view rounded overflow-hidden border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
-              <div className="nexus-diff-view-header px-2 py-1 text-[10px] font-mono text-[var(--vscode-descriptionForeground)] border-b border-[var(--vscode-panel-border)] flex items-center gap-2">
+              <div className="nexus-diff-view-header px-2 py-1 text-[10px] font-mono border-b border-[var(--vscode-panel-border)] flex items-center gap-2">
                 {fileName}
                 {part.diffStats != null && (
                   <>
@@ -200,8 +223,8 @@ export function InlineFileEditBlock({ part }: { part: ToolPart }) {
                   </>
                 )}
               </div>
-              <pre className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono max-h-64 overflow-y-auto">
-                {part.diffHunks!.map((h, i) => {
+              <pre className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono overflow-y-auto">
+                {getDiffPreviewHunks(part.diffHunks!).map((h, i) => {
                   if (h.type === "add") {
                     return (
                       <div key={i} className="px-2 py-0.5 bg-green-500/15 text-green-600 dark:text-green-400 whitespace-pre">
@@ -270,7 +293,7 @@ function FileEditBlock({ part }: { part: ToolPart }) {
       <div className="nexus-file-edit-content">
         {hasDiffHunks ? (
           <div className="nexus-diff-view rounded overflow-hidden border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
-            <div className="nexus-diff-view-header px-2 py-1 text-[10px] font-mono text-[var(--vscode-descriptionForeground)] border-b border-[var(--vscode-panel-border)] flex items-center gap-2">
+            <div className="nexus-diff-view-header px-2 py-1 text-[10px] font-mono border-b border-[var(--vscode-panel-border)] flex items-center gap-2">
               {fileName}
               {part.diffStats != null && (
                 <>
@@ -279,8 +302,8 @@ function FileEditBlock({ part }: { part: ToolPart }) {
                 </>
               )}
             </div>
-            <pre className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono max-h-64 overflow-y-auto">
-              {part.diffHunks!.map((h, i) => {
+            <pre className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono overflow-y-auto">
+              {getDiffPreviewHunks(part.diffHunks!).map((h, i) => {
                 if (h.type === "add") {
                   return (
                     <div key={i} className="px-2 py-0.5 bg-green-500/15 text-green-600 dark:text-green-400 whitespace-pre">

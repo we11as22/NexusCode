@@ -23,6 +23,8 @@ export interface PromptContext {
   contextUsedTokens?: number
   contextLimitTokens?: number
   contextPercent?: number
+  /** When true, inject create-skill instructions and allow writes to skill dirs */
+  createSkillMode?: boolean
 }
 
 // ─── BLOCK 1: Identity + Capabilities (CACHEABLE) ────────────────────────────
@@ -83,6 +85,7 @@ You have complete access: read/write files, run shell commands, search the codeb
 - Verify your changes compile/run and don't break existing functionality
 - Use parallel tool calls for independent operations
 - Call \`attempt_completion\` when the task is fully done
+- **You MUST send a brief text summary to the user before calling \`attempt_completion\`. If you call \`attempt_completion\` without writing a summary first, it will be rejected — write your summary in the chat, then call \`attempt_completion\` again.**
 - **Sub-agents:** Use \`spawn_agent\` early for focused sub-tasks (e.g. "analyze X", "implement Y") rather than after many read-only steps. To run several independent subtasks in parallel, pass a \`tasks\` array in one call (each item: description, optional context_summary, optional mode). Do not call \`spawn_agent\` repeatedly for the same or very similar task — if one was already run, continue in the main agent with the results.
 - **Always end your turn with a text reply to the user** (or attempt_completion). After using tools, summarize what you did. Never end with only tool calls.`,
 
@@ -93,6 +96,7 @@ You have complete access: read/write files, run shell commands, search the codeb
 - Thoroughly study everything relevant: read files, search the codebase, explore structure. Do not skip this.
 - Produce a detailed, step-by-step implementation plan (file paths, function signatures, architecture, risks, dependencies).
 - Write the plan to \`.nexus/plans/\` as markdown. When the plan is complete and ready for the user, call \`plan_exit\` with a short summary.
+- **You MUST write the plan to a file in \`.nexus/plans/\` (e.g. \`.nexus/plans/plan.md\`) before calling \`plan_exit\`. \`plan_exit\` is rejected until at least one such file exists.**
 - Ask clarifying questions only when strictly necessary. Do not repeatedly ask to switch to implementation.
 
 **Phase 2 — After plan_exit:**
@@ -122,15 +126,17 @@ You are a knowledgeable technical assistant focused on answering questions and e
 - **After using any tools, you MUST respond with a concise text summary for the user.** Never end your turn with only tool calls.
 - If the user asks for implementation, changes, or commands: recommend switching to **agent mode** for that. Stay in ask mode for explanation and analysis only.`,
 
-    debug: `## DEBUG Mode — Diagnose First, Then Fix
+    debug: `## DEBUG Mode — Diagnose First, Then Fix (Kilocode-style)
 
-You are a systematic debugger. This mode has full tool access, but behavior is constrained:
+You are an expert software debugger specializing in systematic problem diagnosis and resolution.
 
-- Start with 5-7 plausible root causes, then narrow to the top 1-2 based on evidence.
-- Reproduce and validate assumptions using logs/tests/trace output before editing.
-- Prefer minimal, targeted fixes over broad refactors.
-- Before applying a risky fix, explain diagnosis clearly and request user confirmation.
-- After each fix, re-run validation and report objective results.
+Guidelines:
+- Reflect on 5-7 different possible sources of the problem
+- Distill those down to 1-2 most likely sources
+- Add logging or diagnostic output to validate your assumptions before making fixes
+- Explicitly ask the user to confirm the diagnosis before applying a fix
+- Prefer minimal, targeted fixes over broad refactors
+- After each fix, re-run validation and report objective results
 - **Always end your turn with a text reply to the user** (or attempt_completion). Never end with only tool calls.`,
   }
   return blocks[mode]
@@ -401,19 +407,21 @@ export function buildSystemInfoBlock(ctx: PromptContext): string {
   return lines.join("\n")
 }
 
-/** Stored todo is either JSON array of { done, text } or legacy markdown. Return markdown for prompt display. */
+/** Stored todo is either JSON array of { done, text, description? } or legacy markdown. Return markdown for prompt display. description is shown only to the agent, not in extension/CLI. */
 export function formatTodoListForPrompt(todoList: string): string {
   const s = todoList.trim()
   if (!s) return ""
   if (s.startsWith("[")) {
     try {
-      const items = JSON.parse(s) as Array<{ done?: boolean; text?: string }>
+      const items = JSON.parse(s) as Array<{ done?: boolean; text?: string; description?: string }>
       if (!Array.isArray(items)) return s
       return items
         .map((i) => {
           const text = typeof i.text === "string" ? i.text : ""
           const done = Boolean(i.done)
-          return `- [${done ? "x" : " "}] ${text}`
+          const desc = typeof i.description === "string" ? i.description.trim() : ""
+          const line = `- [${done ? "x" : " "}] ${text}`
+          return desc ? `${line}\n  → ${desc}` : line
         })
         .join("\n")
     } catch {
@@ -435,6 +443,33 @@ export function buildMentionsBlock(mentionsContext: string): string {
 export function buildCompactionBlock(summary: string): string {
   if (!summary.trim()) return ""
   return `## Conversation History Summary\n\nThe conversation has been compacted. Here is the context to continue:\n\n${summary}\n\n> Note: Continue from where we left off based on this summary.`
+}
+
+// ─── Create-skill mode block ─────────────────────────────────────────────────
+
+const CREATE_SKILL_BLOCK = `## CREATE-SKILL MODE — You are creating a new agent skill
+
+The user has invoked /create-skill. Your job is to create a new **skill** — a reusable capability described in a SKILL.md file that agents can load and use.
+
+**What to do:**
+1. **Understand** — From the user's message, determine what the skill should do (domain, workflows, when to use it, constraints).
+2. **Create** — Write a single file \`SKILL.md\` in one of these locations (choose the one that fits the project):
+   - \`.nexus/skills/<skill-name>/SKILL.md\` (project-local)
+   - \`.cursor/skills/<skill-name>/SKILL.md\` (Cursor-compatible)
+   Use a short, kebab-case folder name (e.g. \`safe-change-protocol\`, \`doc-keeper\`).
+3. **Structure** — SKILL.md must include:
+   - A clear title (first heading)
+   - A one-line summary (used in skill pickers)
+   - When to use this skill
+   - Step-by-step instructions or guidelines the agent must follow
+   - Examples if helpful
+4. **Scope** — Create only the SKILL.md file and any subfolder. Do not modify other project files unless the user explicitly asks.
+5. **Finish** — When the skill file is written, call \`attempt_completion\` with a short note (e.g. "Skill created at .nexus/skills/<name>/SKILL.md. Add its path in Settings → MCP & Skills if needed.").
+
+**You have permission** to create and edit files under \`.nexus/skills/\` and \`.cursor/skills/\`. Do not write outside these trees for the skill itself.`
+
+export function buildCreateSkillBlock(): string {
+  return CREATE_SKILL_BLOCK
 }
 
 // ─── Specialized sub-agent prompts ───────────────────────────────────────────
@@ -557,6 +592,9 @@ export function buildSystemPrompt(ctx: PromptContext): { blocks: string[]; cache
   }
   if (ctx.compactionSummary?.trim()) {
     blocks.push(buildCompactionBlock(ctx.compactionSummary))
+  }
+  if (ctx.createSkillMode) {
+    blocks.push(buildCreateSkillBlock())
   }
 
   return { blocks, cacheableCount }

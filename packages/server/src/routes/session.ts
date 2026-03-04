@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import { stream } from "hono/streaming"
 import { Session, deriveSessionTitle } from "@nexuscode/core"
-import type { AgentEvent } from "@nexuscode/core"
+import type { AgentEvent, Mode } from "@nexuscode/core"
 import {
   createSession as dbCreateSession,
   listSessions as dbListSessions,
@@ -99,9 +99,9 @@ sessionRoutes.post("/:id/message", async (c) => {
   const id = c.req.param("id")
   const sessionMeta = dbGetSession(id, cwd)
   if (!sessionMeta) return c.json({ error: "Session not found" }, 404)
-  const body = await c.req.json().catch(() => ({})) as { content?: string; mode?: "agent" | "plan" | "ask" }
+  const body = await c.req.json().catch(() => ({})) as { content?: string; mode?: Mode }
   const content = typeof body.content === "string" ? body.content : ""
-  const mode = body.mode === "plan" || body.mode === "ask" ? body.mode : "agent"
+  const mode: Mode = body.mode === "plan" || body.mode === "ask" || body.mode === "debug" ? body.mode : "agent"
   if (!content.trim()) return c.json({ error: "content required" }, 400)
 
   const recentMessages = getRecentMessages(id, RECENT_MESSAGES_FOR_RUN)

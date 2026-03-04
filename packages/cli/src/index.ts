@@ -11,6 +11,7 @@ import {
   loadRules, McpClient, setMcpClientInstance, resolveBundledMcpServers, createCompaction,
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
   CodebaseIndexer, createCodebaseIndexer, listSessions,
+  hadPlanExit, getPlanContentForFollowup,
   MODES, type Mode, type AgentEvent, type IndexStatus, type PermissionResult,
 } from "@nexuscode/core"
 import { CliHost } from "./host.js"
@@ -623,31 +624,38 @@ const onUncaughtException = (err: Error) => {
 process.on("unhandledRejection", onUnhandledRejection)
 process.on("uncaughtException", onUncaughtException)
 
-/** Mode of the previous run; used to prepend a reminder when user switches mode in the same session. */
+/** Mode of the previous run; used only for CLI display. Reminder is NOT prepended — mode is in system prompt and API. */
 let lastRunMode: Mode | null = null
 
-function getModeReminder(mode: Mode): string {
-  switch (mode) {
-    case "agent":
-      return "[You are now in Agent mode. You may edit files, run commands, and use all tools.]"
-    case "ask":
-      return "[You are now in Ask mode (read-only). Do not modify files or run commands.]"
-    case "plan":
-      return "[You are now in Plan mode. Research and write the plan to .nexus/plans/*.md; call plan_exit when ready.]"
-    case "debug":
-      return "[You are now in Debug mode. Diagnose and fix issues; you have full tool access.]"
-    default:
-      return `[You are now in ${mode} mode.]`
-  }
+function getModeReminder(_mode: Mode): string {
+  return ""
 }
 
 async function runMessage(content: string, msgMode: Mode) {
-  const prevMode = lastRunMode
   lastRunMode = msgMode
-  const effectiveContent =
-    prevMode != null && prevMode !== msgMode ? getModeReminder(msgMode) + "\n\n" + content : content
 
-  sessionRef.current.addMessage({ role: "user", content: effectiveContent })
+  let actualContent = content
+  let createSkillMode = false
+  let configForRun = config
+  if (content.trim().toLowerCase().startsWith("/create-skill")) {
+    createSkillMode = true
+    actualContent = content.replace(/^\/create-skill\s*/i, "").trim() || "Describe what you want the skill to do."
+    configForRun = {
+      ...config,
+      permissions: {
+        ...config.permissions,
+        rules: [
+          ...config.permissions.rules,
+          { tool: "write_to_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
+          { tool: "replace_in_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
+          { tool: "write_to_file", pathPattern: ".cursor/skills/**", action: "allow" as const },
+          { tool: "replace_in_file", pathPattern: ".cursor/skills/**", action: "allow" as const },
+        ],
+      },
+    }
+  }
+
+  sessionRef.current.addMessage({ role: "user", content: actualContent })
   currentAbortController = new AbortController()
   const timeoutMs = 10 * 60_000
   const timeout = setTimeout(() => {
@@ -660,10 +668,21 @@ async function runMessage(content: string, msgMode: Mode) {
     try {
       for await (const event of serverClient.streamMessage(
         sessionRef.current.id,
-        effectiveContent,
+        content,
         msgMode,
         currentAbortController.signal
       )) {
+        if (
+          event.type === "tool_end" &&
+          event.success &&
+          (event.tool === "write_to_file" || event.tool === "replace_in_file") &&
+          event.path &&
+          typeof (event as AgentEvent & { writtenContent?: string }).writtenContent === "string"
+        ) {
+          const absPath = path.isAbsolute(event.path) ? event.path : path.join(cwd, event.path)
+          await fs.mkdir(path.dirname(absPath), { recursive: true }).catch(() => {})
+          await fs.writeFile(absPath, (event as AgentEvent & { writtenContent: string }).writtenContent, "utf8").catch(() => {})
+        }
         pushEvent(event)
       }
     } catch (err) {
@@ -683,7 +702,7 @@ async function runMessage(content: string, msgMode: Mode) {
       session: sessionRef.current,
       client,
       host,
-      config,
+      config: configForRun,
       mode: msgMode,
       tools: getAllTools(msgMode),
       skills,
@@ -691,6 +710,7 @@ async function runMessage(content: string, msgMode: Mode) {
       indexer,
       compaction,
       signal: currentAbortController.signal,
+      createSkillMode,
     })
     await sessionRef.current.save().catch(() => {})
   } catch (err) {
@@ -700,6 +720,10 @@ async function runMessage(content: string, msgMode: Mode) {
     }
   } finally {
     clearTimeout(timeout)
+  }
+  if (!serverUrl && sessionRef.current && hadPlanExit(sessionRef.current)) {
+    const planText = await getPlanContentForFollowup(sessionRef.current, cwd)
+    pushEvent({ type: "plan_followup_ask", planText })
   }
 }
 
@@ -861,6 +885,20 @@ const appProps = {
   },
   getSessionList,
   onSwitchSession,
+  onPlanFollowupChoice: async (choice: "new_session" | "continue" | "dismiss", planText?: string) => {
+    if (choice === "dismiss") return
+    if (choice === "new_session" && planText) {
+      const newSession = Session.create(cwd)
+      sessionRef.current = newSession
+      appProps.initialMessages = newSession.messages
+      appProps.sessionId = newSession.id
+      appProps.initialMode = "agent"
+      root.render(React.createElement(App, appProps))
+      await runMessage(`Implement the following plan:\n\n${planText}`, "agent")
+    } else if (choice === "continue") {
+      await runMessage("Implement the plan above.", "agent")
+    }
+  },
 }
 root.render(React.createElement(App, appProps))
 

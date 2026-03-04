@@ -21,6 +21,7 @@ export type { LLMClient, EmbeddingClient } from "./provider/types.js"
 
 // Session
 export { Session, generateSessionId, listSessions, deleteSession, deriveSessionTitle } from "./session/index.js"
+export { hadPlanExit, getPlanContentForFollowup } from "./session/plan-followup.js"
 export { createCompaction } from "./session/compaction.js"
 
 // Agent
@@ -61,6 +62,10 @@ export {
   catalogSelectionToModel,
 } from "./models/catalog.js"
 export type { ModelsCatalog, CatalogProvider, CatalogModel } from "./models/catalog.js"
+
+// Review (Kilocode 1:1 — build review prompts from git diff)
+export { buildReviewPromptBranch, buildReviewPromptUncommitted } from "./review/index.js"
+export type { DiffFile, DiffHunk, DiffResult } from "./review/types.js"
 
 // Checkpoint
 export { CheckpointTracker } from "./checkpoint/tracker.js"

@@ -617,9 +617,10 @@ html, body, #root {
   flex-direction: column;
   background: var(--vscode-input-background, var(--vscode-editor-background));
   border-top: 1px solid var(--vscode-panel-border);
+  padding: 8px 12px 10px;
 }
 
-/* Single unified background: no inner rectangle; text area and buttons share the same color */
+/* Single unified background: text area and buttons share the same color; no inner margin so no dark band */
 .chat-input .chat-bottom-bar {
   display: flex;
   flex-direction: column;
@@ -627,16 +628,17 @@ html, body, #root {
   min-width: 0;
   flex: 1;
   overflow: hidden;
-  background: var(--vscode-input-background, var(--vscode-editor-background));
-  margin: 8px 12px 10px;
+  background: transparent;
+  margin: 0;
 }
 
 .chat-input .chat-input-area {
   flex: 1;
-  min-height: 56px;
+  min-height: 54px;
+  max-height: 108px;
   display: flex;
   flex-direction: column;
-  padding: 0 10px;
+  padding: 0 0 6px;
   min-width: 0;
 }
 
@@ -645,10 +647,11 @@ html, body, #root {
   flex-direction: row;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px 8px;
+  padding: 6px 0 0;
   min-height: 0;
   flex-shrink: 0;
   min-width: 0;
+  background: transparent;
 }
 
 .chat-input .chat-bottom-bar-left {
@@ -912,6 +915,7 @@ html, body, #root {
   flex: 1;
   min-width: 0;
   min-height: 54px;
+  max-height: 108px;
   margin: 0;
   display: flex;
   flex-direction: column;
@@ -936,19 +940,19 @@ html, body, #root {
   background: transparent;
 }
 
-/* Max height = 2x base (54px * 2 = 108px); standard input look, no blue outline */
+/* Max height = 2x base (54px * 2 = 108px); same background as .chat-input; grows upward when content wraps */
 .prompt-input {
   flex: 1;
   min-height: 54px;
   max-height: 108px;
-  padding: 10px 12px 8px;
+  padding: 10px 0 8px;
   font-family: var(--vscode-font-family);
   font-size: 13px;
   line-height: 1.5;
   resize: none;
   outline: none;
   border: none;
-  background: var(--vscode-input-background, var(--vscode-editor-background));
+  background: transparent;
   color: var(--vscode-input-foreground, var(--vscode-foreground));
   caret-color: var(--vscode-foreground);
 }

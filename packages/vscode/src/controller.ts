@@ -6,6 +6,8 @@
 import * as vscode from "vscode"
 import * as path from "path"
 import * as fs from "node:fs"
+import { promises as fsPromises } from "node:fs"
+import * as os from "node:os"
 import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
 import type { ApprovalAction, PermissionResult, CheckpointEntry, McpServerConfig } from "@nexuscode/core"
 import {
@@ -33,8 +35,23 @@ import {
   createCodebaseIndexer,
   NexusConfigSchema,
   getModelsCatalog,
+  hadPlanExit,
+  getPlanContentForFollowup,
 } from "@nexuscode/core"
 import { VsCodeHost, showDiffForPath } from "./host.js"
+
+const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
+
+function stripModeReminderFromMessages(messages: SessionMessage[]): SessionMessage[] {
+  return messages.map((msg) => {
+    if (msg.role !== "user") return msg
+    const content = msg.content
+    if (typeof content !== "string") return msg
+    const stripped = content.replace(MODE_REMINDER_REGEX, "").trimStart()
+    if (stripped === content) return msg
+    return { ...msg, content: stripped }
+  })
+}
 
 export type WebviewMessage =
   | { type: "newMessage"; content: string; mode: Mode; mentions?: string }
@@ -67,7 +84,11 @@ export type WebviewMessage =
   | { type: "getModelsCatalog" }
   | { type: "restoreCheckpoint"; hash: string }
   | { type: "getAgentPresets" }
+  | { type: "getAgentPresetOptions" }
+  | { type: "createAgentPreset"; preset: { name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string } }
+  | { type: "deleteAgentPreset"; presetName: string }
   | { type: "applyAgentPreset"; presetName: string }
+  | { type: "planFollowupChoice"; choice: "new_session" | "continue" | "dismiss"; planText?: string }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
@@ -76,6 +97,7 @@ export type ExtensionMessage =
   | { type: "sessionListLoading"; loading: boolean }
   | { type: "indexStatus"; status: IndexStatus }
   | { type: "configLoaded"; config: NexusConfig }
+  | { type: "skillDefinitions"; definitions: Array<{ name: string; path: string; summary: string }> }
   | { type: "addToChatContent"; content: string }
   | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings" }
   | { type: "mcpServerStatus"; results: Array<{ name: string; status: "ok" | "error"; error?: string }> }
@@ -83,6 +105,7 @@ export type ExtensionMessage =
   | { type: "confirmResult"; id: string; ok: boolean }
   | { type: "modelsCatalog"; catalog: import("@nexuscode/core").ModelsCatalog }
   | { type: "agentPresets"; presets: Array<{ name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string }> }
+  | { type: "agentPresetOptions"; options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } }
 
 export interface WebviewState {
   messages: SessionMessage[]
@@ -101,6 +124,10 @@ export interface WebviewState {
   serverUrl?: string
   modelsCatalog?: import("@nexuscode/core").ModelsCatalog | null
   checkpointEntries?: CheckpointEntry[]
+  /** Plan mode: plan_exit was called; show New session / Continue / Dismiss. */
+  planCompleted?: boolean
+  /** Plan text for "New session" (optional; controller may set via async follow-up). */
+  planFollowupText?: string | null
 }
 
 function getContextLimit(modelId: string): number {
@@ -202,8 +229,9 @@ export class Controller {
       contextLimitTokens > 0
         ? Math.min(100, Math.round((contextUsedTokens / contextLimitTokens) * 100))
         : 0
+    const messages = stripModeReminderFromMessages(this.session.messages)
     return {
-      messages: this.session.messages,
+      messages,
       mode: this.mode,
       isRunning: this.isRunning,
       model: this.config.model.id,
@@ -219,6 +247,9 @@ export class Controller {
       serverUrl: this.getServerUrl(),
       modelsCatalog: this.modelsCatalogCache ?? null,
       checkpointEntries: this.checkpoint?.getEntries() ?? [],
+      planCompleted:
+        this.session && this.mode === "plan" && !this.isRunning && hadPlanExit(this.session),
+      planFollowupText: null,
     }
   }
 
@@ -226,6 +257,33 @@ export class Controller {
   postStateToWebview(): void {
     const state = this.getStateToPostToWebview()
     this.postMessageToWebview({ type: "stateUpdate", state })
+    if (state.planCompleted && this.session) {
+      void getPlanContentForFollowup(this.session, this.getCwd()).then((planFollowupText) => {
+        this.postMessageToWebview({
+          type: "stateUpdate",
+          state: { ...this.getStateToPostToWebview(), planFollowupText },
+        })
+      })
+    }
+  }
+
+  /** Load skills from config paths and send to webview for Skills list UI. */
+  private loadAndSendSkillDefinitions(): void {
+    if (!this.config?.skills?.length) {
+      this.postMessageToWebview({ type: "skillDefinitions", definitions: [] })
+      return
+    }
+    const cwd = this.getCwd()
+    loadSkills(this.config.skills, cwd)
+      .then((skills) => {
+        this.postMessageToWebview({
+          type: "skillDefinitions",
+          definitions: skills.map((s) => ({ name: s.name, path: s.path, summary: s.summary })),
+        })
+      })
+      .catch(() => {
+        this.postMessageToWebview({ type: "skillDefinitions", definitions: [] })
+      })
   }
 
   /** Clear current task/session and reset run state. */
@@ -269,6 +327,7 @@ export class Controller {
       }
       // Send config to webview immediately so Settings open fast (before allowed-commands and project settings)
       this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        void this.loadAndSendSkillDefinitions()
       // Merge project allowlist from .nexus/allowed-commands.json
       try {
         const allowPath = path.join(cwd, ".nexus", "allowed-commands.json")
@@ -300,6 +359,7 @@ export class Controller {
       this.defaultModelProfile = { ...this.config.model }
       // Send config to webview immediately so Settings open fast; session/MCP/indexer continue in background
       this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        void this.loadAndSendSkillDefinitions()
       try {
         this.session = Session.create(cwd)
         this.postStateToWebview()
@@ -365,6 +425,7 @@ export class Controller {
               this.config.model = { ...this.defaultModelProfile }
             }
             this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        void this.loadAndSendSkillDefinitions()
             this.postStateToWebview()
             break
           }
@@ -372,13 +433,17 @@ export class Controller {
           if (!profile) break
           this.config.model = { ...this.config.model, ...profile }
           this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        void this.loadAndSendSkillDefinitions()
           this.postStateToWebview()
         }
         break
       case "getState":
         this.postStateToWebview()
         this.sendIndexStatus()
-        if (this.config) this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        if (this.config) {
+          this.postMessageToWebview({ type: "configLoaded", config: this.config })
+          void this.loadAndSendSkillDefinitions()
+        }
         void this.ensureInitialized().then(() => {
           this.postStateToWebview()
           this.sendIndexStatus()
@@ -404,7 +469,10 @@ export class Controller {
       case "webviewDidLaunch":
         this.postStateToWebview()
         this.sendIndexStatus()
-        if (this.config) this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        if (this.config) {
+          this.postMessageToWebview({ type: "configLoaded", config: this.config })
+          void this.loadAndSendSkillDefinitions()
+        }
         void this.ensureInitialized().then(() => {
           this.postStateToWebview()
           this.sendIndexStatus()
@@ -448,22 +516,25 @@ export class Controller {
         const uri = vscode.Uri.file(absPath)
         const line = Math.max(0, (msg.line ?? 1) - 1)
         const endLine = msg.endLine != null ? Math.max(0, msg.endLine - 1) : line
-        try {
-          const doc = await vscode.workspace.openTextDocument(uri)
-          const editor = await vscode.window.showTextDocument(doc, {
-            viewColumn: vscode.ViewColumn.One,
-            selection: new vscode.Range(line, 0, endLine, 0),
-            preview: false,
-          })
-          // If the file was already open with unsaved (e.g. stale) content, revert to disk
-          // so the user sees what the agent wrote and isn't prompted to save on close.
-          if (doc.isDirty) {
-            await vscode.commands.executeCommand("workbench.action.files.revert")
+        const isPlanFile = absPath.replace(/\\/g, "/").includes(".nexus/plans")
+        void (async () => {
+          try {
+            const doc = await vscode.workspace.openTextDocument(uri)
+            const editor = await vscode.window.showTextDocument(doc, {
+              viewColumn: vscode.ViewColumn.One,
+              selection: new vscode.Range(line, 0, endLine, 0),
+              preview: false,
+            })
+            if (doc.isDirty) await vscode.commands.executeCommand("workbench.action.files.revert")
+            editor.revealRange(new vscode.Range(line, 0, endLine, 0), vscode.TextEditorRevealType.InCenter)
+            if (isPlanFile && doc.getText().trim() === "") {
+              await new Promise((r) => setTimeout(r, 200))
+              await vscode.commands.executeCommand("workbench.action.files.revert")
+            }
+          } catch {
+            vscode.window.showErrorMessage(`NexusCode: Could not open ${msg.path}`)
           }
-          editor.revealRange(new vscode.Range(line, 0, endLine, 0), vscode.TextEditorRevealType.InCenter)
-        } catch {
-          vscode.window.showErrorMessage(`NexusCode: Could not open ${msg.path}`)
-        }
+        })()
         break
       }
       case "showDiff": {
@@ -619,11 +690,60 @@ export class Controller {
         this.postMessageToWebview({ type: "agentPresets", presets })
         break
       }
+      case "getAgentPresetOptions": {
+        const options = await this.getAgentPresetOptions()
+        this.postMessageToWebview({ type: "agentPresetOptions", options })
+        break
+      }
+      case "createAgentPreset":
+        if (msg.preset?.name?.trim()) {
+          await this.createAgentPreset(msg.preset)
+          const presets = await this.readAgentPresets()
+          this.postMessageToWebview({ type: "agentPresets", presets })
+        }
+        break
+      case "deleteAgentPreset":
+        if (msg.presetName?.trim()) {
+          await this.deleteAgentPreset(msg.presetName.trim())
+          const presets = await this.readAgentPresets()
+          this.postMessageToWebview({ type: "agentPresets", presets })
+        }
+        break
       case "applyAgentPreset":
         if (msg.presetName?.trim()) {
           await this.applyAgentPreset(msg.presetName.trim())
         }
         break
+      case "planFollowupChoice": {
+        if (msg.choice === "dismiss") break
+        const cwd = this.getCwd()
+        if (msg.choice === "continue") {
+          this.mode = "agent"
+          const planText =
+            msg.planText?.trim() ||
+            (this.session ? await getPlanContentForFollowup(this.session, cwd) : "")
+          const continueContent = planText
+            ? `Implement the following plan:\n\n${planText}`
+            : "Implement the plan above."
+          await this.runAgent(continueContent, "agent")
+          break
+        }
+        if (msg.choice === "new_session" && this.session) {
+          const planText =
+            msg.planText?.trim() ||
+            (await getPlanContentForFollowup(this.session, cwd))
+          this.session = Session.create(cwd)
+          this.lastRunMode = null
+          this.checkpoint = undefined
+          this.serverSessionId = undefined
+          this.postStateToWebview()
+          await this.runAgent(
+            `Implement the following plan:\n\n${planText}`,
+            "agent"
+          )
+        }
+        break
+      }
     }
   }
 
@@ -693,6 +813,50 @@ export class Controller {
     }
   }
 
+  /** Discover available skills, MCP server names, and rules files for preset builder. */
+  private async getAgentPresetOptions(): Promise<{ skills: string[]; mcpServers: string[]; rulesFiles: string[] }> {
+    const cwd = this.getCwd()
+    const skills = await discoverSkillPathsForExtension(cwd)
+    const mcpServers = (this.config?.mcp?.servers ?? []).map((s) => (s as McpServerConfig).name).filter((n): n is string => Boolean(n?.trim()))
+    const rulesFiles = await discoverRuleFilesForExtension(cwd)
+    const fromConfig = this.config?.rules?.files ?? []
+    const rulesMerged = dedupeStringList([...fromConfig, ...rulesFiles, "AGENTS.md", "CLAUDE.md"])
+    return { skills, mcpServers, rulesFiles: rulesMerged }
+  }
+
+  private async createAgentPreset(preset: {
+    name: string
+    vector: boolean
+    skills: string[]
+    mcpServers: string[]
+    rulesFiles: string[]
+    modelProvider?: string
+    modelId?: string
+  }): Promise<void> {
+    const cwd = this.getCwd()
+    const normalized = normalizeAgentPresetForExtension({
+      ...preset,
+      createdAt: Date.now(),
+    })
+    if (!normalized) return
+    const presets = await this.readAgentPresets()
+    const filtered = presets.filter((p) => p.name !== normalized.name)
+    await writeAgentPresetsForExtension(cwd, [normalized, ...filtered])
+    vscode.window.showInformationMessage(`NexusCode: Preset "${normalized.name}" created.`, { modal: false })
+  }
+
+  private async deleteAgentPreset(presetName: string): Promise<void> {
+    const cwd = this.getCwd()
+    const presets = await this.readAgentPresets()
+    const next = presets.filter((p) => p.name !== presetName)
+    if (next.length === presets.length) {
+      vscode.window.showWarningMessage(`NexusCode: Preset "${presetName}" not found.`, { modal: false })
+      return
+    }
+    await writeAgentPresetsForExtension(cwd, next)
+    vscode.window.showInformationMessage(`NexusCode: Preset "${presetName}" deleted.`, { modal: false })
+  }
+
   /** Apply an agent preset by name: merge vector, skills, MCP, rules (and optional model) into config and save. */
   private async applyAgentPreset(presetName: string): Promise<void> {
     const presets = await this.readAgentPresets()
@@ -752,6 +916,7 @@ export class Controller {
         { modal: false }
       )
       this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        void this.loadAndSendSkillDefinitions()
       this.postStateToWebview()
       return
     }
@@ -789,22 +954,13 @@ export class Controller {
       })
     }
     this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        void this.loadAndSendSkillDefinitions()
     this.postStateToWebview()
   }
 
-  private getModeReminder(mode: Mode): string {
-    switch (mode) {
-      case "agent":
-        return "[You are now in Agent mode. You may edit files, run commands, and use all tools.]"
-      case "ask":
-        return "[You are now in Ask mode (read-only). Do not modify files or run commands.]"
-      case "plan":
-        return "[You are now in Plan mode. Research and write the plan to .nexus/plans/*.md; call plan_exit when ready.]"
-      case "debug":
-        return "[You are now in Debug mode. Diagnose and fix issues; you have full tool access.]"
-      default:
-        return `[You are now in ${mode} mode.]`
-    }
+  private getModeReminder(_mode: Mode): string {
+    // Not shown in UI; mode is enforced via system prompt and API mode parameter only.
+    return ""
   }
 
   private async runAgent(content: string, mode?: Mode): Promise<void> {
@@ -819,14 +975,33 @@ export class Controller {
       return
     }
     this.mode = mode ?? this.mode
-    const prevMode = this.lastRunMode
     this.lastRunMode = this.mode
-    const effectiveContent =
-      prevMode != null && prevMode !== this.mode ? this.getModeReminder(this.mode) + "\n\n" + content : content
-
-    this.isRunning = true
     this.abortController = new AbortController()
-    this.session.addMessage({ role: "user", content: effectiveContent })
+    this.isRunning = true
+
+    let actualContent = content
+    let createSkillMode = false
+    let configForRun = this.config
+    if (content.trim().toLowerCase().startsWith("/create-skill")) {
+      createSkillMode = true
+      actualContent = content.replace(/^\/create-skill\s*/i, "").trim() || "Describe what you want the skill to do."
+      configForRun = {
+        ...this.config,
+        permissions: {
+          ...this.config.permissions,
+          rules: [
+            ...this.config.permissions.rules,
+            { tool: "write_to_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
+            { tool: "replace_in_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
+            { tool: "write_to_file", pathPattern: ".cursor/skills/**", action: "allow" as const },
+            { tool: "replace_in_file", pathPattern: ".cursor/skills/**", action: "allow" as const },
+          ],
+        },
+      }
+    }
+
+    // Do NOT prepend mode reminder to user message — mode is in system prompt and API; keeps UI clean.
+    this.session.addMessage({ role: "user", content: actualContent })
     this.postStateToWebview()
 
     const cwd = this.getCwd()
@@ -851,7 +1026,7 @@ export class Controller {
           {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
-            body: JSON.stringify({ content: effectiveContent, mode: this.mode }),
+            body: JSON.stringify({ content, mode: this.mode }),
             signal: this.abortController!.signal,
           }
         )
@@ -884,7 +1059,29 @@ export class Controller {
               const t = line.trim()
               if (!t) continue
               try {
-                this.postMessageToWebview({ type: "agentEvent", event: JSON.parse(t) as AgentEvent })
+                const event = JSON.parse(t) as AgentEvent
+                if (
+                  event.type === "tool_end" &&
+                  event.success &&
+                  (event.tool === "write_to_file" || event.tool === "replace_in_file") &&
+                  event.path &&
+                  typeof (event as AgentEvent & { writtenContent?: string }).writtenContent === "string"
+                ) {
+                  const absPath = path.isAbsolute(event.path) ? event.path : path.join(cwd, event.path)
+                  let dir = path.dirname(absPath)
+                  const toCreate: string[] = []
+                  while (dir !== cwd && dir.length > cwd.length) {
+                    toCreate.push(dir)
+                    dir = path.dirname(dir)
+                  }
+                  toCreate.reverse()
+                  for (const p of toCreate) {
+                    await vscode.workspace.fs.createDirectory(vscode.Uri.file(p)).catch(() => {})
+                  }
+                  const uri = vscode.Uri.file(absPath)
+                  await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent)).catch(() => {})
+                }
+                this.postMessageToWebview({ type: "agentEvent", event })
               } catch {}
             }
           }
@@ -892,7 +1089,29 @@ export class Controller {
             const t = line.trim()
             if (!t) continue
             try {
-              this.postMessageToWebview({ type: "agentEvent", event: JSON.parse(t) as AgentEvent })
+              const event = JSON.parse(t) as AgentEvent
+              if (
+                event.type === "tool_end" &&
+                event.success &&
+                (event.tool === "write_to_file" || event.tool === "replace_in_file") &&
+                event.path &&
+                typeof (event as AgentEvent & { writtenContent?: string }).writtenContent === "string"
+              ) {
+                const absPath = path.isAbsolute(event.path) ? event.path : path.join(cwd, event.path)
+                let dir = path.dirname(absPath)
+                const toCreate: string[] = []
+                while (dir !== cwd && dir.length > cwd.length) {
+                  toCreate.push(dir)
+                  dir = path.dirname(dir)
+                }
+                toCreate.reverse()
+                for (const p of toCreate) {
+                  await vscode.workspace.fs.createDirectory(vscode.Uri.file(p)).catch(() => {})
+                }
+                const uri = vscode.Uri.file(absPath)
+                await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent)).catch(() => {})
+              }
+              this.postMessageToWebview({ type: "agentEvent", event })
             } catch {}
           }
         } finally {
@@ -976,7 +1195,7 @@ export class Controller {
     }, timeoutMs)
 
     try {
-      const client = createLLMClient(this.config.model)
+      const client = createLLMClient(configForRun.model)
       const toolRegistry = new ToolRegistry()
       if (this.mcpClient) {
         for (const tool of this.mcpClient.getTools()) {
@@ -984,15 +1203,15 @@ export class Controller {
         }
       }
       const parallelManager = new ParallelAgentManager()
-      toolRegistry.register(createSpawnAgentTool(parallelManager, this.config))
+      toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
       const { builtin: tools, dynamic } = toolRegistry.getForMode(this.mode)
       const allTools = [...tools, ...dynamic]
-      const rulesContent = await loadRules(cwd, this.config.rules.files).catch(() => "")
-      const skills = await loadSkills(this.config.skills, cwd).catch(() => [])
+      const rulesContent = await loadRules(cwd, configForRun.rules.files).catch(() => "")
+      const skills = await loadSkills(configForRun.skills, cwd).catch(() => [])
       const compaction = createCompaction()
-      if (this.config.checkpoint.enabled && !this.checkpoint) {
+      if (configForRun.checkpoint.enabled && !this.checkpoint) {
         this.checkpoint = new CheckpointTracker(this.session.id, cwd)
-        await this.checkpoint.init(this.config.checkpoint.timeoutMs).catch(console.warn)
+        await this.checkpoint.init(configForRun.checkpoint.timeoutMs).catch(console.warn)
       }
       if (this.checkpoint) {
         host.setCheckpoint(this.checkpoint)
@@ -1006,7 +1225,7 @@ export class Controller {
         session: this.session,
         client,
         host,
-        config: this.config,
+        config: configForRun,
         mode: this.mode,
         tools: allTools,
         skills,
@@ -1015,6 +1234,7 @@ export class Controller {
         compaction,
         signal: this.abortController!.signal,
         checkpoint: this.checkpoint,
+        createSkillMode,
       })
     } catch (err) {
       const errMsg = (err as Error).message
@@ -1027,6 +1247,34 @@ export class Controller {
       this.isRunning = false
       await this.session!.save().catch(() => {})
       this.postStateToWebview()
+      if (this.session && hadPlanExit(this.session)) {
+        void this.showPlanFollowup(cwd).catch(() => {})
+      }
+    }
+  }
+
+  private async showPlanFollowup(cwd: string): Promise<void> {
+    if (!this.session) return
+    const planText = await getPlanContentForFollowup(this.session, cwd)
+    const choice = await vscode.window.showQuickPick(
+      [
+        { label: "New session", description: "Implement in a fresh session with a clean context" },
+        { label: "Continue here", description: "Implement the plan in this session" },
+        { label: "Dismiss", description: "Do nothing" },
+      ],
+      { title: "Ready to implement?", placeHolder: "Plan is ready. Implement now?" }
+    )
+    if (!choice || choice.label === "Dismiss") return
+    if (choice.label === "New session") {
+      this.session = Session.create(cwd)
+      this.serverSessionId = undefined
+      this.mode = "agent"
+      this.postStateToWebview()
+      await this.runAgent(`Implement the following plan:\n\n${planText}`, "agent")
+    } else {
+      this.mode = "agent"
+      this.postStateToWebview()
+      await this.runAgent("Implement the plan above.", "agent")
     }
   }
 
@@ -1395,4 +1643,104 @@ function asStringList(value: unknown): string[] {
     out.push(s)
   }
   return out
+}
+
+function dedupeStringList(items: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const s of items) {
+    const t = s.trim()
+    if (!t || seen.has(t)) continue
+    seen.add(t)
+    out.push(t)
+  }
+  return out
+}
+
+async function walkSkillFilesForExtension(rootDir: string, maxDepth: number): Promise<string[]> {
+  if (maxDepth < 0) return []
+  let entries: fs.Dirent[]
+  try {
+    entries = await fsPromises.readdir(rootDir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const out: string[] = []
+  for (const entry of entries) {
+    const fullPath = path.join(rootDir, entry.name)
+    if (entry.isDirectory()) {
+      const nested = await walkSkillFilesForExtension(fullPath, maxDepth - 1)
+      out.push(...nested)
+      continue
+    }
+    if (!entry.isFile()) continue
+    if (entry.name.toLowerCase() === "skill.md") out.push(fullPath)
+  }
+  return out
+}
+
+function toDisplayPathForExtension(filePath: string, projectDir: string): string {
+  if (path.isAbsolute(filePath) && filePath.startsWith(projectDir)) {
+    return path.relative(projectDir, filePath) || filePath
+  }
+  return filePath
+}
+
+async function discoverSkillPathsForExtension(projectDir: string): Promise<string[]> {
+  const roots = [
+    path.join(projectDir, ".nexus", "skills"),
+    path.join(projectDir, ".agents", "skills"),
+    path.join(path.resolve(process.env.HOME || os.homedir()), ".nexus", "skills"),
+    path.join(path.resolve(process.env.HOME || os.homedir()), ".agents", "skills"),
+  ]
+  const files: string[] = []
+  for (const root of roots) {
+    const fromRoot = await walkSkillFilesForExtension(root, 5)
+    files.push(...fromRoot)
+  }
+  const normalized = dedupeStringList(files.map((f) => toDisplayPathForExtension(f, projectDir)))
+  return normalized
+}
+
+async function discoverRuleFilesForExtension(projectDir: string): Promise<string[]> {
+  const names = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]
+  const out: string[] = []
+  const visited = new Set<string>()
+  let current = path.resolve(projectDir)
+  const home = path.resolve(os.homedir())
+  while (true) {
+    if (visited.has(current)) break
+    visited.add(current)
+    for (const name of names) {
+      const file = path.join(current, name)
+      try {
+        const stat = await fsPromises.stat(file)
+        if (stat.isFile()) out.push(file)
+      } catch {
+        // skip
+      }
+    }
+    if (current === path.dirname(current) || current === home) break
+    current = path.dirname(current)
+  }
+  for (const name of names) {
+    const file = path.join(home, name)
+    try {
+      const stat = await fsPromises.stat(file)
+      if (stat.isFile()) out.push(file)
+    } catch {
+      // skip
+    }
+  }
+  return dedupeStringList(out)
+}
+
+async function writeAgentPresetsForExtension(
+  projectDir: string,
+  presets: Array<{ name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string }>
+): Promise<void> {
+  const dir = path.join(projectDir, ".nexus")
+  const filePath = path.join(dir, "agent-configs.json")
+  await fsPromises.mkdir(dir, { recursive: true })
+  await fsPromises.writeFile(filePath, JSON.stringify({ presets }, null, 2), "utf8")
 }

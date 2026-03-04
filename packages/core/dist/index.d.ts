@@ -464,8 +464,9 @@ declare const NexusConfigSchema: z.ZodObject<{
     }>]>, "many">>;
     tools: z.ZodDefault<z.ZodObject<{
         custom: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        /** When true, use LLM to filter MCP/custom tools by task when count > classifyThreshold. Default off. */
+        /** When true, use LLM to filter which MCP servers to use when server count > classifyThreshold. Default off. */
         classifyToolsEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** Threshold: when MCP server count exceeds this, classifier selects which servers to use. Default 20. */
         classifyThreshold: z.ZodDefault<z.ZodNumber>;
         parallelReads: z.ZodDefault<z.ZodBoolean>;
         maxParallelReads: z.ZodDefault<z.ZodNumber>;
@@ -484,6 +485,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     }>>;
     /** When true, use LLM to filter skills by task when count > skillClassifyThreshold. Default off. */
     skillClassifyEnabled: z.ZodDefault<z.ZodBoolean>;
+    /** Threshold for skill classification. Default 20. */
     skillClassifyThreshold: z.ZodDefault<z.ZodNumber>;
     structuredOutput: z.ZodDefault<z.ZodEnum<["auto", "always", "never"]>>;
     summarization: z.ZodDefault<z.ZodObject<{
@@ -1178,6 +1180,7 @@ type AgentEvent = {
     error?: string;
     compacted?: boolean;
     path?: string;
+    writtenContent?: string;
     diffStats?: {
         added: number;
         removed: number;
@@ -1239,6 +1242,9 @@ type AgentEvent = {
 } | {
     type: "doom_loop_detected";
     tool: string;
+} | {
+    type: "plan_followup_ask";
+    planText: string;
 };
 interface ProviderConfig {
     provider: ProviderName;
@@ -1566,6 +1572,17 @@ declare class Session implements ISession {
     static resume(sessionId: string, cwd: string): Promise<Session | null>;
 }
 
+/**
+ * Kilocode-style: detect if the last assistant message completed plan_exit,
+ * so the host can show "Ready to implement?" (New session / Continue here).
+ */
+declare function hadPlanExit(session: ISession): boolean;
+/**
+ * Plan content for follow-up: last assistant text, or from last write_to_file to .nexus/plans, or first .nexus/plans/*.md file.
+ * Used to inject "Implement the following plan: ..." into a new session or continue message.
+ */
+declare function getPlanContentForFollowup(session: ISession, cwd: string): Promise<string>;
+
 interface SessionCompaction {
     prune(session: ISession): void;
     compact(session: ISession, client: LLMClient, signal?: AbortSignal): Promise<void>;
@@ -1590,6 +1607,8 @@ interface AgentLoopOptions {
     checkpoint?: {
         commit(description?: string): Promise<string>;
     };
+    /** When true, inject create-skill instructions; host must allow writes to .nexus/skills and .cursor/skills */
+    createSkillMode?: boolean;
 }
 /**
  * Main agent loop — runs until completion, abort, or doom loop.
@@ -1619,7 +1638,7 @@ declare const READ_ONLY_TOOLS: Set<string>;
 declare function getBuiltinToolsForMode(mode: Mode): string[];
 
 /**
- * Classify which MCP/custom tools are relevant for the given task.
+ * Classify which MCP/custom tools are relevant for the given task (legacy; prefer classifyMcpServers).
  * Returns the selected tool names. Built-in mode tools are NOT filtered here.
  */
 declare function classifyTools(tools: ToolDef[], taskDescription: string, client: LLMClient): Promise<string[]>;
@@ -1649,6 +1668,8 @@ interface PromptContext {
     contextUsedTokens?: number;
     contextLimitTokens?: number;
     contextPercent?: number;
+    /** When true, inject create-skill instructions and allow writes to skill dirs */
+    createSkillMode?: boolean;
 }
 /**
  * Assemble the full system prompt from blocks.
@@ -1929,6 +1950,40 @@ declare function catalogSelectionToModel(providerId: string, modelId: string, ca
     baseUrl: string;
 };
 
+interface DiffHunk {
+    oldStart: number;
+    oldLines: number;
+    newStart: number;
+    newLines: number;
+    content: string;
+}
+interface DiffFile {
+    path: string;
+    status: "added" | "modified" | "deleted" | "renamed";
+    hunks: DiffHunk[];
+    oldPath?: string;
+}
+interface DiffResult {
+    files: DiffFile[];
+    raw: string;
+}
+
+/**
+ * Review module — builds code review prompts from git diff (Kilocode 1:1).
+ * Runs git in the given cwd and returns a full prompt for the agent.
+ */
+
+/**
+ * Build review prompt for uncommitted changes only (staged + unstaged).
+ * Kilocode 1:1 — same prompt and behaviour.
+ */
+declare function buildReviewPromptUncommitted(cwd: string): Promise<string>;
+/**
+ * Build review prompt for branch diff vs base branch.
+ * Kilocode 1:1 — same prompt and behaviour.
+ */
+declare function buildReviewPromptBranch(cwd: string): Promise<string>;
+
 /**
  * Shadow git repository for checkpoints.
  * Uses a separate git repo in ~/.nexus/checkpoints/{task-id}/
@@ -1958,4 +2013,4 @@ declare class CheckpointTracker {
     private restoreToWorkspace;
 }
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, testMcpServers, writeConfig, writeGlobalProfiles };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getPlanContentForFollowup, hadPlanExit, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, testMcpServers, writeConfig, writeGlobalProfiles };

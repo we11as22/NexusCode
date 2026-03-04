@@ -1,4 +1,4 @@
-import type { Session, NexusConfig } from "@nexuscode/core"
+import type { Session, NexusConfig, Mode } from "@nexuscode/core"
 import type { AgentEvent } from "@nexuscode/core"
 import { runAgentLoop } from "@nexuscode/core"
 import {
@@ -28,7 +28,7 @@ export interface RunSessionOptions {
   session: Session
   cwd: string
   content: string
-  mode: "agent" | "plan" | "ask"
+  mode: Mode
   onEvent: (event: AgentEvent) => void
   signal: AbortSignal
   configOverride?: Record<string, unknown>

@@ -2,11 +2,22 @@ import React, { useState, useEffect, useRef, useMemo } from "react"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import "opentui-spinner/react"
 import stringWidth from "string-width"
+import { marked } from "marked"
+import { markedTerminal } from "marked-terminal"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
 import type { AgentEvent, Mode, SessionMessage, MessagePart, IndexStatus, PermissionResult, ApprovalAction } from "@nexuscode/core"
-import { getModelsCatalog, catalogSelectionToModel, deriveSessionTitle, type ModelsCatalog } from "@nexuscode/core"
+import { getModelsCatalog, catalogSelectionToModel, deriveSessionTitle, buildReviewPromptBranch, buildReviewPromptUncommitted, type ModelsCatalog } from "@nexuscode/core"
+
+// Markdown → ANSI for terminal (bold, italic, code, lists, headings)
+marked.use(
+  markedTerminal({
+    reflowText: false,
+    width: 80,
+    unescape: true,
+  })
+)
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -58,8 +69,10 @@ interface AppState {
   showThinking: boolean
   /** OpenCode-style: toggle tool execution details in chat */
   showToolDetails: boolean
-  /** Plan mode: plan_exit was called; show Approve / Revise / Abandon */
+  /** Plan mode: plan_exit was called; show New session / Continue / Dismiss (Kilocode-style) */
   planCompleted: boolean
+  /** Plan text for "New session" option (set from plan_followup_ask event) */
+  planFollowupText: string | null
   /** Accumulated parts of the current assistant reply (text, tools, reasoning) for chronological display */
   currentAssistantParts: MessagePart[]
 }
@@ -110,6 +123,8 @@ interface AppProps {
   /** List sessions for switching (server or local). */
   getSessionList?: () => Promise<Array<{ id: string; ts?: number; title?: string; messageCount: number }>>
   onSwitchSession?: (sessionId: string) => Promise<void>
+  /** Kilocode-style: after plan_exit, user chose New session / Continue / Dismiss */
+  onPlanFollowupChoice?: (choice: "new_session" | "continue" | "dismiss", planText?: string) => void
 }
 
 interface AgentPreset {
@@ -189,6 +204,72 @@ function toolDisplayName(tool: string): string {
   return TOOL_LABELS[tool] ?? tool
 }
 
+/** Tools that count as "files explored" for the single Explored summary line (CLI + extension parity). */
+const EXPLORE_FILE_TOOLS = new Set(["read_file", "list_files"])
+/** Tools that count as "searches" for the single Explored summary line. */
+const EXPLORE_SEARCH_TOOLS = new Set(["grep", "codebase_search", "search_files", "list_code_definitions"])
+function getExploredCounts(parts: MessagePart[]): { files: number; searches: number } {
+  let files = 0
+  let searches = 0
+  for (const p of parts) {
+    if (p.type !== "tool") continue
+    const tool = (p as { tool: string }).tool
+    if (EXPLORE_FILE_TOOLS.has(tool)) files++
+    if (EXPLORE_SEARCH_TOOLS.has(tool)) searches++
+  }
+  return { files, searches }
+}
+/** Only exploration tools from the start until first non-exploration (text, reasoning, or other tool). */
+function getExploredPrefixCounts(parts: MessagePart[]): { files: number; searches: number } {
+  let files = 0
+  let searches = 0
+  for (const p of parts) {
+    if (p.type === "text" || p.type === "reasoning") break
+    if (p.type !== "tool") continue
+    const tool = (p as { tool: string }).tool
+    if (!isExploreTool(tool)) break
+    if (EXPLORE_FILE_TOOLS.has(tool)) files++
+    if (EXPLORE_SEARCH_TOOLS.has(tool)) searches++
+  }
+  return { files, searches }
+}
+function isExploreTool(tool: string): boolean {
+  return EXPLORE_FILE_TOOLS.has(tool) || EXPLORE_SEARCH_TOOLS.has(tool)
+}
+
+/** Extract the final reply to the user from assistant parts: attempt_completion result, ask_followup_question, or last text. Used so only one "NexusCode" block per turn shows the actual reply. */
+function getFinalReplyFromAssistantParts(parts: MessagePart[]): string | null {
+  let lastAttemptOutput: string | null = null
+  let lastAskQuestion: string | null = null
+  let lastAskOptions: string[] | null = null
+  let lastText: string | null = null
+  for (const p of parts) {
+    if (p.type === "text") {
+      const t = (p as { text: string }).text?.trim()
+      if (t) lastText = t
+      continue
+    }
+    if (p.type === "tool") {
+      const tp = p as { tool: string; status: string; input?: Record<string, unknown>; output?: string }
+      if (tp.tool === "attempt_completion" && tp.status === "completed" && tp.output?.trim()) {
+        lastAttemptOutput = tp.output.trim()
+      }
+      if (tp.tool === "ask_followup_question") {
+        const q = (tp.input?.question as string)?.trim()
+        if (q) lastAskQuestion = q
+        const opts = tp.input?.options as string[] | undefined
+        if (opts?.length) lastAskOptions = opts
+      }
+    }
+  }
+  if (lastAttemptOutput) return lastAttemptOutput
+  if (lastAskQuestion) {
+    const opts = lastAskOptions?.length ? `\n\nOptions:\n${lastAskOptions.map((o) => `- ${o}`).join("\n")}` : ""
+    return lastAskQuestion + opts
+  }
+  return lastText
+}
+
 const MODES: Mode[] = ["agent", "plan", "ask", "debug"]
 const MODEL_PROVIDERS = ["anthropic", "openai", "google", "openai-compatible", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"] as const
 const EMBEDDING_PROVIDERS = ["openai", "openai-compatible", "ollama", "local"] as const
@@ -199,24 +280,27 @@ type SlashAction =
   | "compact"
   | "help"
   | "settings"
-  | "connect"
   | "model"
   | "embeddings"
   | "index"
-  | "advanced"
   | "thinking"
   | "details"
+  | "showDetails"
   | "sessions"
   | "agentConfigs"
+  | "skills"
+  | "createSkill"
+  | "mcps"
+  | "rules"
   | "exit"
   | "review"
   | "localReview"
   | "localReviewUncommitted"
   | "init"
+  | "presetPicker"
 const SLASH_COMMANDS: Array<{ cmd: string; label: string; desc: string; mode?: Mode; action?: SlashAction }> = [
-  { cmd: "agents", label: "/agents", desc: "Switch agent", action: "agentConfigs" },
-  { cmd: "connect", label: "/connect", desc: "Connect provider", action: "connect" },
-  { cmd: "editor", label: "/editor", desc: "Open editor", action: "advanced" },
+  { cmd: "agents", label: "/agents", desc: "Agent configs (create/edit)", action: "agentConfigs" },
+  { cmd: "preset", label: "/preset", desc: "Switch preset (stay in chat)", action: "presetPicker" },
   { cmd: "exit", label: "/exit", desc: "Exit the app", action: "exit" },
   { cmd: "help", label: "/help", desc: "Help", action: "help" },
   { cmd: "init", label: "/init", desc: "Create/update AGENTS.md", action: "init" },
@@ -227,25 +311,27 @@ const SLASH_COMMANDS: Array<{ cmd: string; label: string; desc: string; mode?: M
     desc: "Local review (uncommitted changes)",
     action: "localReviewUncommitted",
   },
-  { cmd: "mcps", label: "/mcps", desc: "Toggle MCPs", action: "advanced" },
-  { cmd: "models", label: "/models", desc: "Switch model", action: "model" },
+  { cmd: "mcps", label: "/mcps", desc: "MCP servers", action: "mcps" },
+  { cmd: "models", label: "/models", desc: "LLM provider & model", action: "model" },
+  { cmd: "model", label: "/model", desc: "LLM provider & model", action: "model" },
   { cmd: "new", label: "/new", desc: "New session", action: "clear" },
   { cmd: "review", label: "/review", desc: "Review changes", action: "review" },
   { cmd: "index", label: "/index", desc: "Index status and controls", action: "index" },
-  { cmd: "agent-config", label: "/agent-config", desc: "Agent configurations", action: "agentConfigs" },
+  { cmd: "rules", label: "/rules", desc: "Rules & mode prompts", action: "rules" },
   { cmd: "sessions", label: "/sessions", desc: "List sessions", action: "sessions" },
+  { cmd: "skills", label: "/skills", desc: "Skills (enable/disable)", action: "skills" },
+  { cmd: "create-skill", label: "/create-skill", desc: "Create a new skill (describe in chat)", action: "createSkill" },
+  { cmd: "show-details", label: "/show-details", desc: "Thinking & tool details toggles", action: "showDetails" },
   { cmd: "agent", label: "/agent", desc: "Agent mode (tools & execution)", mode: "agent" },
   { cmd: "plan", label: "/plan", desc: "Plan mode", mode: "plan" },
   { cmd: "ask", label: "/ask", desc: "Ask mode (Q&A)", mode: "ask" },
   { cmd: "debug", label: "/debug", desc: "Debug mode (diagnose first)", mode: "debug" },
   { cmd: "compact", label: "/compact", desc: "Compact context", action: "compact" },
-  { cmd: "model", label: "/model", desc: "Configure LLM provider & model", action: "model" },
-  { cmd: "embeddings", label: "/embeddings", desc: "Configure embeddings model", action: "embeddings" },
-  { cmd: "advanced", label: "/advanced", desc: "MCP / skills / rules / profiles", action: "advanced" },
+  { cmd: "embeddings", label: "/embeddings", desc: "Embeddings model (vector search)", action: "embeddings" },
   { cmd: "thinking", label: "/thinking", desc: "Toggle reasoning visibility", action: "thinking" },
   { cmd: "details", label: "/details", desc: "Toggle tool execution details", action: "details" },
   { cmd: "clear", label: "/clear", desc: "Clear chat", action: "clear" },
-  { cmd: "settings", label: "/settings", desc: "Full agent settings", action: "settings" },
+  { cmd: "settings", label: "/settings", desc: "Settings hub", action: "settings" },
 ]
 
 // ─── Logo ────────────────────────────────────────────────────────────────────
@@ -349,12 +435,13 @@ export function App({
   onResolveApproval,
   getSessionList,
   onSwitchSession,
+  onPlanFollowupChoice,
 }: AppProps) {
   const dims = useTerminalDimensions()
   const renderer = useRenderer()
   const cols = Math.max(40, Math.min(256, dims?.width ?? 80))
   const rows = Math.max(16, Math.min(120, dims?.height ?? 24))
-  type View = "chat" | "model" | "embeddings" | "settings" | "index" | "advanced" | "mcp" | "skills" | "help" | "sessions" | "agentConfigs"
+  type View = "chat" | "model" | "embeddings" | "settings" | "index" | "skills" | "mcp" | "rules" | "help" | "sessions" | "agentConfigs" | "showDetails"
   const [view, setView] = useState<View>("chat")
   const [state, setState] = useState<AppState>({
     messages: initialMessages ?? [],
@@ -381,6 +468,7 @@ export function App({
     showThinking: true,
     showToolDetails: true,
     planCompleted: false,
+    planFollowupText: null,
     currentAssistantParts: [],
   })
   const [input, setInput] = useState("")
@@ -409,6 +497,7 @@ export function App({
     profilesJson: "{}",
   })
   const [advancedFocus, setAdvancedFocus] = useState(0)
+  const [rulesFocus, setRulesFocus] = useState(0)
   const [mcpFocus, setMcpFocus] = useState(0)
   const [mcpForm, setMcpForm] = useState<Array<Record<string, unknown>>>([])
   const [skillsFocus, setSkillsFocus] = useState(0)
@@ -424,6 +513,10 @@ export function App({
   const [agentPresetCreateMode, setAgentPresetCreateMode] = useState(false)
   const [agentPresetName, setAgentPresetName] = useState("")
   const [agentPresetOptionIndex, setAgentPresetOptionIndex] = useState(0)
+  const [presetPickerOpen, setPresetPickerOpen] = useState(false)
+  const [presetPickerSelectedIndex, setPresetPickerSelectedIndex] = useState(0)
+  const [appliedPresetName, setAppliedPresetName] = useState<string | null>(null)
+  const [showDetailsFocus, setShowDetailsFocus] = useState(0)
   const [availableSkills, setAvailableSkills] = useState<string[]>([])
   const [availableRules, setAvailableRules] = useState<string[]>([])
   const [selectedPresetSkills, setSelectedPresetSkills] = useState<string[]>([])
@@ -624,23 +717,19 @@ export function App({
       })
       setEmbeddingsFocus(0)
     }
-    if (view === "advanced" && configSnapshot) {
+    if (view === "rules" && configSnapshot) {
       const allRules = configSnapshot.rules?.files ?? []
       const claudeMdPath = allRules.find((f) => /CLAUDE\.md$/i.test(f)) ?? "CLAUDE.md"
-      setAdvancedForm({
-        filterToolsEnabled: configSnapshot.tools?.classifyToolsEnabled ?? false,
-        filterSkillsEnabled: configSnapshot.skillClassifyEnabled ?? false,
-        mcpServersJson: JSON.stringify(configSnapshot.mcp?.servers ?? [], null, 2),
-        skillsText: (configSnapshot.skills ?? []).join("\n"),
+      setAdvancedForm((f) => ({
+        ...f,
         claudeMdPath,
-        rulesFilesText: allRules.filter((f) => !/CLAUDE\.md$/i.test(f)).join("\n"),
+        rulesFilesText: allRules.filter((file: string) => !/CLAUDE\.md$/i.test(file)).join("\n"),
         agentInstructions: configSnapshot.modes?.agent?.customInstructions ?? "",
         planInstructions: configSnapshot.modes?.plan?.customInstructions ?? "",
         askInstructions: configSnapshot.modes?.ask?.customInstructions ?? "",
         debugInstructions: configSnapshot.modes?.debug?.customInstructions ?? "",
-        profilesJson: JSON.stringify(configSnapshot.profiles ?? {}, null, 2),
-      })
-      setAdvancedFocus(0)
+      }))
+      setRulesFocus(0)
     }
     if (view === "mcp" && configSnapshot?.mcp?.servers) {
       setMcpForm((configSnapshot.mcp.servers as Array<Record<string, unknown>>).map((s) => ({
@@ -775,12 +864,28 @@ export function App({
             break
           }
           case "tool_end": {
-            const ev = event as { partId: string; tool: string; success: boolean; output?: string; error?: string }
+            const ev = event as {
+              partId: string
+              tool: string
+              success: boolean
+              output?: string
+              error?: string
+              diffStats?: { added: number; removed: number }
+              diffHunks?: Array<{ type: string; lineNum: number; line: string }>
+            }
             setState((s) => ({
               ...s,
               currentAssistantParts: s.currentAssistantParts.map((p) =>
                 p.type === "tool" && p.id === ev.partId
-                  ? { ...p, status: ev.success ? "completed" : "error", output: ev.output, error: ev.error, timeEnd: Date.now() }
+                  ? {
+                      ...p,
+                      status: ev.success ? "completed" : "error",
+                      output: ev.output,
+                      error: ev.error,
+                      timeEnd: Date.now(),
+                      ...(ev.diffStats != null ? { diffStats: ev.diffStats } : {}),
+                      ...(Array.isArray(ev.diffHunks) ? { diffHunks: ev.diffHunks } : {}),
+                    }
                   : p
               ),
               liveTools: s.liveTools.map((lt) =>
@@ -894,8 +999,12 @@ export function App({
                 awaitingApproval: false,
                 pendingApprovalAction: null,
                 lastError: null,
+                planFollowupText: null,
               }
             })
+            break
+          case "plan_followup_ask":
+            setState((s) => ({ ...s, planFollowupText: (event as { planText: string }).planText ?? null }))
             break
           case "error":
             setState((s) => ({
@@ -1002,6 +1111,7 @@ export function App({
         lastError: makeRunning ? null : s.lastError,
         liveTools: makeRunning ? [] : s.liveTools,
         planCompleted: makeRunning ? false : s.planCompleted,
+        planFollowupText: makeRunning ? null : s.planFollowupText,
         messages: [
           ...s.messages,
           {
@@ -1093,11 +1203,6 @@ export function App({
         }
         setView("chat")
         return
-      case "connect":
-        setModelViewMode("manual")
-        setModelFocus(0)
-        setView("model")
-        return
       case "model":
         setModelViewMode("picker")
         setView("model")
@@ -1114,8 +1219,32 @@ export function App({
       case "agentConfigs":
         setView("agentConfigs")
         return
-      case "advanced":
-        setView("advanced")
+      case "presetPicker":
+        setPresetPickerOpen(true)
+        setPresetPickerSelectedIndex(0)
+        if (projectDir) {
+          setAgentPresetLoading(true)
+          readAgentPresets(projectDir).then((list) => {
+            setAgentPresets(list)
+            setAgentPresetLoading(false)
+          }).catch(() => setAgentPresetLoading(false))
+        }
+        return
+      case "skills":
+        setView("skills")
+        return
+      case "createSkill":
+        setInput("/create-skill ")
+        setView("chat")
+        return
+      case "mcps":
+        setView("mcp")
+        return
+      case "rules":
+        setView("rules")
+        return
+      case "showDetails":
+        setView("showDetails")
         return
       case "settings":
         setView("settings")
@@ -1124,40 +1253,48 @@ export function App({
         setView("help")
         return
       case "thinking":
-        setState((s) => ({ ...s, showThinking: !s.showThinking }))
-        setView("chat")
+        setView("showDetails")
         return
       case "details":
-        setState((s) => ({ ...s, showToolDetails: !s.showToolDetails }))
-        setView("chat")
+        setView("showDetails")
         return
       case "review":
+      case "localReview": {
         if (!state.isRunning) {
-          appendUserEcho("/review", true)
+          const cwd = projectDir || process.cwd()
+          appendUserEcho(action === "localReview" ? "/local-review" : "/review", true)
           setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
           onModeChange("agent")
-          onMessage("Run a repository review for the current branch. Report findings ordered by severity with exact file:line references and concrete fixes.", "agent")
+          setView("chat")
+          buildReviewPromptBranch(cwd)
+            .then((prompt) => onMessage(prompt, "agent"))
+            .catch(() => {
+              onMessage(
+                "Run a local review for the current branch. Report findings by severity with file:line references.",
+                "agent"
+              )
+            })
         }
-        setView("chat")
         return
-      case "localReview":
+      }
+      case "localReviewUncommitted": {
         if (!state.isRunning) {
-          appendUserEcho("/local-review", true)
-          setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
-          onModeChange("agent")
-          onMessage("Run a local review for the current branch only (no remote PR). Report findings by severity with file:line references.", "agent")
-        }
-        setView("chat")
-        return
-      case "localReviewUncommitted":
-        if (!state.isRunning) {
+          const cwd = projectDir || process.cwd()
           appendUserEcho("/local-review-uncommitted", true)
           setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
           onModeChange("agent")
-          onMessage("Review uncommitted changes in the working tree and report findings by severity with file:line references.", "agent")
+          setView("chat")
+          buildReviewPromptUncommitted(cwd)
+            .then((prompt) => onMessage(prompt, "agent"))
+            .catch(() => {
+              onMessage(
+                "Review uncommitted changes in the working tree and report findings by severity with file:line references.",
+                "agent"
+              )
+            })
         }
-        setView("chat")
         return
+      }
       case "init":
         if (!state.isRunning) {
           appendUserEcho("/init", true)
@@ -1262,6 +1399,7 @@ export function App({
     saveConfig(updates)
     setVectorIndexEnabled(Boolean(preset.vector))
     setSelectedPresetVector(Boolean(preset.vector))
+    setAppliedPresetName(preset.name)
     setView("chat")
   }
 
@@ -1317,20 +1455,9 @@ export function App({
       setEmbeddingsForm((f) => ({ ...f, [k]: (f[k] as string) + typed }))
       return true
     }
-    if (view === "advanced" && advancedFocus >= 0 && advancedFocus < 9) {
-      const keys = [
-        "mcpServersJson",
-        "skillsText",
-        "claudeMdPath",
-        "rulesFilesText",
-        "agentInstructions",
-        "planInstructions",
-        "askInstructions",
-        "debugInstructions",
-        "profilesJson",
-      ] as const
-      const k = keys[advancedFocus]!
-      setAdvancedForm((f) => ({ ...f, [k]: f[k] + typed }))
+    if (view === "rules" && rulesFocus >= 0 && rulesFocus < 6) {
+      const k = ["rulesFilesText", "claudeMdPath", "agentInstructions", "planInstructions", "askInstructions", "debugInstructions"][rulesFocus] as keyof typeof advancedForm
+      setAdvancedForm((f) => ({ ...f, [k]: (f[k] as string) + typed }))
       return true
     }
     if (view === "agentConfigs" && agentPresetCreateMode) {
@@ -1354,7 +1481,7 @@ export function App({
     return () => {
       keyInput.off?.("paste", onPaste)
     }
-  }, [renderer, view, modelViewMode, modelFocus, embeddingsFocus, advancedFocus, agentPresetCreateMode])
+  }, [renderer, view, modelViewMode, modelFocus, embeddingsFocus, rulesFocus, agentPresetCreateMode, showDetailsFocus])
 
   useKeyboard((evt) => {
     const name = (evt.name ?? "").toLowerCase()
@@ -1413,31 +1540,54 @@ export function App({
       return
     }
 
-    // Plan mode: after plan_exit, [A]pprove / [R]evise / [D]abandon
+    // Preset picker (stay in chat): ↑↓ select, Enter apply, Esc close
+    if (presetPickerOpen) {
+      if (key.escape) {
+        setPresetPickerOpen(false)
+        return
+      }
+      if (key.upArrow || key.downArrow) {
+        const n = agentPresets.length
+        if (n > 0) {
+          setPresetPickerSelectedIndex((i) => {
+            const next = key.downArrow ? i + 1 : i - 1
+            return ((next % n) + n) % n
+          })
+        }
+        return
+      }
+      if (isEnter && agentPresets.length > 0) {
+        const preset = agentPresets[Math.min(presetPickerSelectedIndex, agentPresets.length - 1)]
+        if (preset) {
+          applyPreset(preset)
+          setPresetPickerOpen(false)
+        }
+        return
+      }
+      return
+    }
+
+    // Plan mode: after plan_exit, [N]ew session / [C]ontinue / [D]ismiss (Kilocode-style)
     if (
       view === "chat" &&
       state.mode === "plan" &&
       state.planCompleted &&
       !state.isRunning &&
-      (lowerChar === "a" || lowerChar === "r" || lowerChar === "d")
+      (lowerChar === "n" || lowerChar === "c" || lowerChar === "d")
     ) {
-      const action = lowerChar
-      if (action === "a") {
-        setState((s) => ({ ...s, mode: "agent", planCompleted: false }))
-        onModeChange("agent")
-        onMessage(
-          "Execute the plan above. Follow the steps in .nexus/plans/ and the plan we agreed. Do not ask for confirmation — proceed with implementation.",
-          "agent"
-        )
+      if (lowerChar === "n" && onPlanFollowupChoice) {
+        setState((s) => ({ ...s, planCompleted: false, planFollowupText: null }))
+        onPlanFollowupChoice("new_session", state.planFollowupText ?? "")
         return
       }
-      if (action === "r") {
-        setState((s) => ({ ...s, planCompleted: false }))
+      if (lowerChar === "c" && onPlanFollowupChoice) {
+        setState((s) => ({ ...s, mode: "agent", planCompleted: false, planFollowupText: null }))
+        onModeChange?.("agent")
+        onPlanFollowupChoice("continue")
         return
       }
-      if (action === "d") {
-        setState((s) => ({ ...s, mode: "ask", planCompleted: false }))
-        onModeChange("ask")
+      if (lowerChar === "d") {
+        setState((s) => ({ ...s, planCompleted: false, planFollowupText: null }))
         return
       }
     }
@@ -1520,6 +1670,14 @@ export function App({
       }
       if (view === "model") {
         if (modelViewMode === "picker") {
+          if (inputChar === "2") {
+            setModelViewMode("manual")
+            setModelFocus(0)
+            return
+          }
+          if (inputChar === "1") {
+            return
+          }
           if (key.upArrow || key.downArrow) {
             const len = modelPickerOptions.length
             if (len === 0) return
@@ -1565,6 +1723,11 @@ export function App({
             setModelPickerIndex(0)
             return
           }
+          return
+        }
+        if (inputChar === "1") {
+          setModelViewMode("picker")
+          setModelPickerIndex(0)
           return
         }
         if (modelFocus === 0 && (key.upArrow || key.downArrow)) {
@@ -1704,7 +1867,7 @@ export function App({
           return
         }
         if (inputChar === "5") {
-          setView("mcp")
+          setView("agentConfigs")
           return
         }
         if (inputChar === "6") {
@@ -1712,15 +1875,19 @@ export function App({
           return
         }
         if (inputChar === "7") {
-          setView("advanced")
+          setView("mcp")
           return
         }
         if (inputChar === "8") {
-          setView("help")
+          setView("rules")
           return
         }
         if (inputChar === "9") {
-          setView("agentConfigs")
+          setView("showDetails")
+          return
+        }
+        if (inputChar === "0") {
+          setView("help")
           return
         }
         if (isEnter) {
@@ -1820,49 +1987,29 @@ export function App({
         }
         return
       }
-      if (view === "advanced") {
-        if (key.upArrow && advancedFocus > 0) {
-          setAdvancedFocus((f) => Math.max(0, f - 1))
+      if (view === "rules") {
+        if (key.escape) {
+          setView("chat")
           return
         }
-        if (key.downArrow && advancedFocus < 9) {
-          setAdvancedFocus((f) => Math.min(9, f + 1))
+        const rulesKeys = ["rulesFilesText", "claudeMdPath", "agentInstructions", "planInstructions", "askInstructions", "debugInstructions"] as const
+        const saveIdx = 6
+        if (key.upArrow) {
+          setRulesFocus((f) => (f <= 0 ? saveIdx : f - 1))
           return
         }
-        if (key.tab) {
-          if (key.shift && advancedFocus > 0) {
-            setAdvancedFocus((f) => Math.max(0, f - 1))
-            return
+        if (key.downArrow || key.tab) {
+          if (key.tab && key.shift) {
+            setRulesFocus((f) => (f <= 0 ? saveIdx : f - 1))
+          } else {
+            setRulesFocus((f) => (f >= saveIdx ? 0 : f + 1))
           }
-          setAdvancedFocus((f) => (f + 1) % 12)
           return
         }
-        if (advancedFocus <= 1 && (isEnter || key.name === "space")) {
-          setAdvancedForm((f) => ({
-            ...f,
-            [advancedFocus === 0 ? "filterToolsEnabled" : "filterSkillsEnabled"]: advancedFocus === 0 ? !f.filterToolsEnabled : !f.filterSkillsEnabled,
-          }))
-          return
-        }
-        if (advancedFocus === 11 && isEnter && saveConfig) {
-          let mcpServers: Array<Record<string, unknown>> = []
-          let profiles: Record<string, unknown> = {}
-          try {
-            const parsed = JSON.parse(advancedForm.mcpServersJson || "[]")
-            if (Array.isArray(parsed)) mcpServers = parsed.filter((x) => x && typeof x === "object") as Array<Record<string, unknown>>
-          } catch {}
-          try {
-            const parsed = JSON.parse(advancedForm.profilesJson || "{}")
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) profiles = parsed as Record<string, unknown>
-          } catch {}
-          const skills = advancedForm.skillsText.split("\n").map((s) => s.trim()).filter(Boolean)
+        if (rulesFocus === saveIdx && isEnter && saveConfig) {
           const rules = advancedForm.rulesFilesText.split("\n").map((s) => s.trim()).filter(Boolean)
           const claudeMdPath = advancedForm.claudeMdPath.trim()
           saveConfig({
-            tools: { ...configSnapshot?.tools, classifyToolsEnabled: advancedForm.filterToolsEnabled },
-            skillClassifyEnabled: advancedForm.filterSkillsEnabled,
-            mcp: { servers: mcpServers },
-            skills,
             rules: { files: [...(claudeMdPath ? [claudeMdPath] : []), ...rules] },
             modes: {
               agent: { customInstructions: advancedForm.agentInstructions.trim() || undefined },
@@ -1870,42 +2017,53 @@ export function App({
               ask: { customInstructions: advancedForm.askInstructions.trim() || undefined },
               debug: { customInstructions: advancedForm.debugInstructions.trim() || undefined },
             },
-            profiles,
           })
           setView("chat")
           return
         }
-        const keys = [
-          "mcpServersJson",
-          "skillsText",
-          "claudeMdPath",
-          "rulesFilesText",
-          "agentInstructions",
-          "planInstructions",
-          "askInstructions",
-          "debugInstructions",
-          "profilesJson",
-        ] as const
-        if (advancedFocus >= 2 && advancedFocus <= 10 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f")) {
-          const k = keys[advancedFocus - 2]!
-          setAdvancedForm((f) => ({ ...f, [k]: f[k].slice(0, -1) }))
+        if (rulesFocus >= 0 && rulesFocus < 6 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f")) {
+          const k = rulesKeys[rulesFocus]!
+          setAdvancedForm((f) => ({ ...f, [k]: (f[k] as string).slice(0, -1) }))
           return
         }
-        if (advancedFocus >= 2 && advancedFocus <= 10 && isEnter) {
-          const k = keys[advancedFocus - 2]!
-          setAdvancedForm((f) => ({ ...f, [k]: f[k] + "\n" }))
+        if (rulesFocus >= 0 && rulesFocus < 6 && isEnter) {
+          const k = rulesKeys[rulesFocus]!
+          setAdvancedForm((f) => ({ ...f, [k]: (f[k] as string) + "\n" }))
           return
         }
-        if (advancedFocus >= 2 && advancedFocus <= 10 && inputText) {
-          const k = keys[advancedFocus - 2]!
-          setAdvancedForm((f) => ({ ...f, [k]: f[k] + inputText }))
+        if (rulesFocus >= 0 && rulesFocus < 6 && inputText) {
+          const k = rulesKeys[rulesFocus]!
+          setAdvancedForm((f) => ({ ...f, [k]: (f[k] as string) + inputText }))
+          return
+        }
+        return
+      }
+      if (view === "showDetails") {
+        if (key.escape) {
+          setView("chat")
+          return
+        }
+        if (key.upArrow) {
+          setShowDetailsFocus((f) => (f <= 0 ? 1 : f - 1))
+          return
+        }
+        if (key.downArrow || key.tab) {
+          setShowDetailsFocus((f) => (f >= 1 ? 0 : f + 1))
+          return
+        }
+        if ((isEnter || key.name === "space") && showDetailsFocus >= 0 && showDetailsFocus <= 1) {
+          if (showDetailsFocus === 0) {
+            setState((s) => ({ ...s, showThinking: !s.showThinking }))
+          } else {
+            setState((s) => ({ ...s, showToolDetails: !s.showToolDetails }))
+          }
           return
         }
         return
       }
       if (view === "mcp") {
         if (key.escape) {
-          setView("settings")
+          setView("chat")
           return
         }
         const total = mcpForm.length + 1
@@ -1927,14 +2085,14 @@ export function App({
         }
         if (mcpFocus === mcpForm.length && isEnter && saveConfig) {
           saveConfig({ mcp: { servers: mcpForm } })
-          setView("settings")
+          setView("chat")
           return
         }
         return
       }
       if (view === "skills") {
         if (key.escape) {
-          setView("settings")
+          setView("chat")
           return
         }
         const total = skillsForm.length + 1
@@ -1959,7 +2117,7 @@ export function App({
             skillsConfig: skillsForm,
             skills: skillsForm.filter((s) => s.enabled).map((s) => s.path),
           })
-          setView("settings")
+          setView("chat")
           return
         }
         return
@@ -2085,8 +2243,11 @@ export function App({
           {view === "embeddings" && (
             <EmbeddingsConfigView form={embeddingsForm} focus={embeddingsFocus} cols={shellW} />
           )}
-          {view === "advanced" && (
-            <AdvancedConfigView form={advancedForm} focus={advancedFocus} />
+          {view === "rules" && (
+            <RulesConfigView form={advancedForm} focus={rulesFocus} />
+          )}
+          {view === "showDetails" && (
+            <ShowDetailsView showThinking={state.showThinking} showToolDetails={state.showToolDetails} focus={showDetailsFocus} />
           )}
           {view === "mcp" && (
             <McpConfigView servers={mcpForm} focus={mcpFocus} />
@@ -2171,6 +2332,7 @@ export function App({
             viewportRows={chatViewportRows}
             scrollLines={chatScrollLines}
           />
+          {view === "chat" && <MemoRunProgressBlock state={state} cols={cols} maxLines={RUN_PROGRESS_MAX_LINES} />}
           {view === "chat" && state.mode === "plan" && state.planCompleted && !state.isRunning && (
             <box flexShrink={0}>
               <PlanActionsBar cols={cols} />
@@ -2181,6 +2343,15 @@ export function App({
             <SlashPopup
               commands={filteredCommands}
               selectedIndex={slashSelected}
+              cols={shellW}
+              rows={rows}
+            />
+            )}
+            {presetPickerOpen && (
+            <PresetPickerPopup
+              presets={agentPresets}
+              selectedIndex={presetPickerSelectedIndex}
+              loading={agentPresetLoading}
               cols={shellW}
               rows={rows}
             />
@@ -2208,14 +2379,14 @@ export function App({
 
       {view !== "chat" && (
         <box flexShrink={0} paddingLeft={shellPad} paddingRight={shellPad}>
-          <text fg={THEME.primary}>{view === "settings" || view === "help" || view === "index" || view === "sessions" || view === "agentConfigs" ? "Use shortcuts shown above." : "Edit the form above."}</text>
+          <text fg={THEME.primary}>{view === "settings" || view === "help" || view === "index" || view === "sessions" || view === "agentConfigs" || view === "showDetails" || view === "rules" || view === "skills" || view === "mcp" ? "Use shortcuts shown above." : "Edit the form above."}</text>
           <text fg={THEME.textMuted}>
             {view === "model"
               ? (modelViewMode === "picker"
-                ? "↑↓ select  Enter apply  Tab manual form  Esc back"
-                : "Tab model list  ↑↓ provider  Enter save  Esc back")
+                ? "1 free  2 custom  ↑↓ select  Enter apply  Tab/2 — custom"
+                : "1 — free list  2 custom  Tab/1 — free  ↑↓ provider  Enter save  Esc back")
               : view === "settings"
-              ? "1:model 2:emb 3:vector 4:index 5:adv 6:help 7:agent-configs Esc-back"
+              ? "1:model 2:emb 3:vector 4:index 5:agents 6:skills 7:mcps 8:rules 9:details 0:help Esc-back"
               : view === "help"
                 ? "Esc back"
                 : view === "index"
@@ -2226,6 +2397,12 @@ export function App({
                   ? (agentPresetCreateMode
                     ? "Type name  ↑↓ option  Space toggle  Enter save  Esc cancel"
                     : "↑↓ select  Enter/A apply  C create  D delete  Esc back")
+                  : view === "showDetails"
+                  ? "↑↓ move  Space/Enter toggle  Esc back"
+                  : view === "rules"
+                  ? "↑↓/Tab move  Enter newline  Focus [Save] + Enter  Esc back"
+                  : view === "skills" || view === "mcp"
+                  ? "↑↓ move  Space toggle  Enter on [Save]  Esc back"
                   : "Tab next field, Enter newline/save, Esc back"}
           </text>
         </box>
@@ -2240,6 +2417,7 @@ export function App({
           sessionTitle={sessionTitle}
           mcpServersCount={mcpServersCount}
           activeProfile={profileOptions[activeProfileIdx] ?? "default"}
+          appliedPresetName={appliedPresetName}
           cols={cols}
           contextUsedTokens={state.contextUsedTokens}
           contextLimitTokens={state.contextLimitTokens}
@@ -2264,20 +2442,21 @@ function SettingsHubView({
 }) {
   const vectorState = !indexingEnabled ? "disabled" : vectorIndexEnabled ? "enabled" : "disabled"
   const items = [
-    "1) Model & LLM",
-    "2) Embeddings",
+    "1) Model & LLM (/models)",
+    "2) Embeddings (/embeddings)",
     `3) Vector index: ${vectorState} (toggle)`,
-    "4) Index sync & Vector DB",
-    "5) MCP servers (enable/disable)",
-    "6) Skills (enable/disable)",
-    "7) Advanced (rules, mode prompts, profiles, raw JSON)",
-    "8) Help",
-    "9) Agent configs (/agent-config): select/create presets",
+    "4) Index sync & Vector DB (/index)",
+    "5) Agents — select preset (/agents)",
+    "6) Skills (/skills)",
+    "7) MCP servers (/mcps)",
+    "8) Rules & mode prompts (/rules)",
+    "9) Show details — thinking & tool details (/show-details)",
+    "0) Help (/help)",
   ]
   return (
     <box flexDirection="column" borderStyle="single" borderColor={THEME.primary} paddingLeft={1} paddingRight={1}>
       <text fg={THEME.primary} bold> Settings Hub</text>
-      <text fg={THEME.muted}> Open section by number. Enter opens Model. Esc — back.</text>
+      <text fg={THEME.muted}> Press number to open section. Enter — Model. Esc — back.</text>
       {items.map((item) => (
         <box key={item}>
           <text fg="white"> {item}</text>
@@ -2311,8 +2490,10 @@ function ModelPickerView({
   const visible = options.slice(start, start + windowSize)
   return (
     <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
-      <text fg="cyan" bold> Select model</text>
-      <text fg="gray"> From models.dev - free models at top. Tab - manual provider/model.</text>
+      <text fg="cyan" bold> Model</text>
+      <text fg="gray"> 1 — free models (catalog)  2 — custom model (provider + id)  Tab — switch</text>
+      <text fg="cyan" bold> Free models</text>
+      <text fg="gray"> ↑↓ — select  Enter — apply  Type to search. Tab or 2 — custom model.</text>
       {loading && (
         <box><text fg="yellow">Loading catalog...</text></box>
       )}
@@ -2379,8 +2560,10 @@ function ModelConfigView({
   const valueWidth = Math.max(18, cols - 34)
   return (
     <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
-      <text fg="cyan" bold> Model — LLM provider & model</text>
-      <text fg="gray"> Tab — next field, Enter — save, Esc — back. Provider via ↑↓.</text>
+      <text fg="cyan" bold> Model</text>
+      <text fg="gray"> 1 — free models  2 — custom (current)  Tab — switch</text>
+      <text fg="cyan" bold> Custom model</text>
+      <text fg="gray"> Provider, Model ID, API Key, Base URL, Temperature. Tab or 1 — back to free list.</text>
       {labels.map((label, i) => (
         <box key={label}>
           <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </text>
@@ -2422,8 +2605,8 @@ function EmbeddingsConfigView({
   const valueWidth = Math.max(18, cols - 40)
   return (
     <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
-      <text fg="cyan" bold> Embeddings — model for vector search</text>
-      <text fg="gray"> Tab — next field, Enter — save, Esc — back. Provider via ↑↓.</text>
+      <text fg="cyan" bold> Embeddings — vector model for codebase search</text>
+      <text fg="gray"> Used when indexing.vector is on. Tab — next field, Enter — save, Esc — back.</text>
       {labels.map((label, i) => (
         <box key={label}>
           <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </text>
@@ -2570,7 +2753,7 @@ function SkillsConfigView({
       <text fg="cyan" bold> Skills — enable/disable</text>
       <text fg="gray"> Tab / ↑↓ — move, Space/Enter — toggle, Enter on [Save] — save and back.</text>
       {skills.length === 0 ? (
-        <box><text fg="gray">No skills. Add paths in Advanced → Skills (one per line), then return here to toggle.</text></box>
+        <box><text fg="gray">No skills. Add skill paths in config (e.g. .nexus or project config), then return here to toggle.</text></box>
       ) : (
         skills.map((s, i) => (
           <box key={i}>
@@ -2583,6 +2766,72 @@ function SkillsConfigView({
       <box>
         <text fg={focus === saveIndex ? "cyan" : "gray"}>{focus === saveIndex ? "▸ " : "  "}</text>
         <text fg={focus === saveIndex ? "green" : "gray"}>[Save] — press Enter</text>
+      </box>
+    </box>
+  )
+}
+
+function RulesConfigView({
+  form,
+  focus,
+}: {
+  form: {
+    rulesFilesText: string
+    claudeMdPath: string
+    agentInstructions: string
+    planInstructions: string
+    askInstructions: string
+    debugInstructions: string
+  }
+  focus: number
+}) {
+  const labels = ["Rules files (one per line)", "CLAUDE.md path", "Agent mode instructions", "Plan mode instructions", "Ask mode instructions", "Debug mode instructions"]
+  const keys = ["rulesFilesText", "claudeMdPath", "agentInstructions", "planInstructions", "askInstructions", "debugInstructions"] as const
+  return (
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Rules & mode prompts</text>
+      <text fg="gray"> ↑↓/Tab — move  Enter — newline  Focus 6 + Enter — Save  Esc — back</text>
+      {labels.map((label, i) => (
+        <box key={label} flexDirection="column">
+          <box>
+            <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </text>
+          </box>
+          <box paddingLeft={2}>
+            <text fg="white">{(form[keys[i]!] as string).slice(0, 400)}</text>
+            {focus === i && <text fg="cyan">│</text>}
+          </box>
+        </box>
+      ))}
+      <box>
+        <text fg={focus === 6 ? "cyan" : "gray"}>{focus === 6 ? "▸ " : "  "}</text>
+        <text fg={focus === 6 ? "green" : "gray"}>[Save] — Enter</text>
+      </box>
+    </box>
+  )
+}
+
+function ShowDetailsView({
+  showThinking,
+  showToolDetails,
+  focus,
+}: {
+  showThinking: boolean
+  showToolDetails: boolean
+  focus: number
+}) {
+  return (
+    <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
+      <text fg="cyan" bold> Show details</text>
+      <text fg="gray"> ↑↓ — move  Space/Enter — toggle  Esc — back</text>
+      <box>
+        <text fg={focus === 0 ? "cyan" : "gray"}>{focus === 0 ? "▸ " : "  "}</text>
+        <text fg={showThinking ? "green" : "gray"}>{showThinking ? "[x] " : "[ ] "}</text>
+        <text fg="white">Show reasoning (thinking) blocks in chat</text>
+      </box>
+      <box>
+        <text fg={focus === 1 ? "cyan" : "gray"}>{focus === 1 ? "▸ " : "  "}</text>
+        <text fg={showToolDetails ? "green" : "gray"}>{showToolDetails ? "[x] " : "[ ] "}</text>
+        <text fg="white">Show tool execution details in chat</text>
       </box>
     </box>
   )
@@ -2729,35 +2978,88 @@ function AgentConfigView({
 }) {
   if (createMode) {
     const safeOptionIndex = Math.min(optionIndex, Math.max(0, options.length - 1))
+    const vectorOpt = options.find((o) => o.kind === "vector")
+    const skillOpts = options.filter((o) => o.kind === "skill")
+    const mcpOpts = options.filter((o) => o.kind === "mcp")
+    const ruleOpts = options.filter((o) => o.kind === "rule")
+    let globalIdx = 0
+    const getActive = (kind: string, value: string) => {
+      const cur = globalIdx++
+      const active =
+        kind === "vector"
+          ? selectedVector
+          : kind === "skill"
+          ? selectedSkills.includes(value)
+          : kind === "mcp"
+          ? selectedMcp.includes(value)
+          : selectedRules.includes(value)
+      return { cur, active }
+    }
     return (
       <box flexDirection="column" borderStyle="single" borderColor={THEME.primary} paddingLeft={1} paddingRight={1}>
         <text fg={THEME.primary} bold> Agent config — create preset</text>
-        <text fg="gray"> Build from skills, MCP and AGENTS.md/CLAUDE.md rules</text>
+        <text fg="gray"> Name and choose skills, MCP servers, rules (↑↓ select, Space toggle, Enter save)</text>
         <box marginTop={1}>
           <text fg="gray">Name: </text>
           <text fg="white">{presetName || "preset-name"}</text>
           <text fg={THEME.primary}>│</text>
         </box>
         <box marginTop={1} flexDirection="column">
-          {options.map((option, idx) => {
-            const active =
-              option.kind === "vector"
-                ? selectedVector
-                : option.kind === "skill"
-                ? selectedSkills.includes(option.value)
-                : option.kind === "mcp"
-                ? selectedMcp.includes(option.value)
-                : selectedRules.includes(option.value)
+          {vectorOpt && (() => {
+            const { cur, active } = getActive(vectorOpt.kind, vectorOpt.value)
             return (
-              <box key={`${option.kind}:${option.value}`}>
-                <text fg={idx === safeOptionIndex ? THEME.primary : "gray"}>
-                  {idx === safeOptionIndex ? "▸ " : "  "}
-                </text>
+              <box key="vector">
+                <text fg={cur === safeOptionIndex ? THEME.primary : "gray"}>{cur === safeOptionIndex ? "▸ " : "  "}</text>
                 <text fg={active ? "green" : "gray"}>{active ? "[x] " : "[ ] "}</text>
-                <text fg={active ? "white" : "gray"}>{option.label}</text>
+                <text fg={active ? "white" : "gray"}>{vectorOpt.label}</text>
               </box>
             )
-          })}
+          })()}
+          {skillOpts.length > 0 && (
+            <>
+              <box marginTop={0}><text fg="cyan" bold> Skills</text></box>
+              {skillOpts.map((option) => {
+                const { cur, active } = getActive(option.kind, option.value)
+                return (
+                  <box key={`skill:${option.value}`}>
+                    <text fg={cur === safeOptionIndex ? THEME.primary : "gray"}>{cur === safeOptionIndex ? "▸ " : "  "}</text>
+                    <text fg={active ? "green" : "gray"}>{active ? "[x] " : "[ ] "}</text>
+                    <text fg={active ? "white" : "gray"}>{option.label.replace(/^Skill: /, "")}</text>
+                  </box>
+                )
+              })}
+            </>
+          )}
+          {mcpOpts.length > 0 && (
+            <>
+              <box marginTop={0}><text fg="cyan" bold> MCP servers</text></box>
+              {mcpOpts.map((option) => {
+                const { cur, active } = getActive(option.kind, option.value)
+                return (
+                  <box key={`mcp:${option.value}`}>
+                    <text fg={cur === safeOptionIndex ? THEME.primary : "gray"}>{cur === safeOptionIndex ? "▸ " : "  "}</text>
+                    <text fg={active ? "green" : "gray"}>{active ? "[x] " : "[ ] "}</text>
+                    <text fg={active ? "white" : "gray"}>{option.label.replace(/^MCP: /, "")}</text>
+                  </box>
+                )
+              })}
+            </>
+          )}
+          {ruleOpts.length > 0 && (
+            <>
+              <box marginTop={0}><text fg="cyan" bold> Rules (AGENTS.md, …)</text></box>
+              {ruleOpts.map((option) => {
+                const { cur, active } = getActive(option.kind, option.value)
+                return (
+                  <box key={`rule:${option.value}`}>
+                    <text fg={cur === safeOptionIndex ? THEME.primary : "gray"}>{cur === safeOptionIndex ? "▸ " : "  "}</text>
+                    <text fg={active ? "green" : "gray"}>{active ? "[x] " : "[ ] "}</text>
+                    <text fg={active ? "white" : "gray"}>{option.label.replace(/^Rule file: /, "")}</text>
+                  </box>
+                )
+              })}
+            </>
+          )}
         </box>
       </box>
     )
@@ -2848,7 +3150,7 @@ function HomeLanding({
   const tips = [
     "Press Tab to cycle between Agent, Plan, Ask and Debug modes.",
     "Use /index to control vector index sync, stop and delete.",
-    "Use /agent-config to assemble presets from skills, MCP and AGENTS.md.",
+    "Use /agents to select or create agent presets (model + skills + MCP + rules).",
   ]
   const tip = tips[(provider.length + model.length) % tips.length]!
   return (
@@ -2946,6 +3248,68 @@ function SlashPopup({
       {commands.length > windowSize && (
         <text fg={THEME.textMuted}>
           Showing {start + 1}-{Math.min(start + windowSize, commands.length)} of {commands.length}
+        </text>
+      )}
+    </box>
+  )
+}
+
+// ─── Preset picker popup (stay in chat) ──────────────────────────────────────
+
+function PresetPickerPopup({
+  presets,
+  selectedIndex,
+  loading,
+  cols,
+  rows,
+}: {
+  presets: AgentPreset[]
+  selectedIndex: number
+  loading: boolean
+  cols: number
+  rows: number
+}) {
+  const lineWidth = Math.max(40, cols - 6)
+  const maxVisible = Math.max(4, Math.min(10, Math.floor(rows * 0.22)))
+  const windowSize = Math.min(maxVisible, Math.max(1, presets.length))
+  const start = Math.max(0, Math.min(Math.max(0, presets.length - windowSize), selectedIndex - Math.floor(windowSize / 2)))
+  const visible = presets.slice(start, start + windowSize)
+  return (
+    <box
+      flexDirection="column"
+      marginBottom={1}
+      borderStyle="single"
+      borderColor={THEME.primary}
+      paddingLeft={1}
+      paddingRight={1}
+      style={{ backgroundColor: THEME.panel }}
+    >
+      <text fg={THEME.textMuted}>Preset — ↑↓ select  Enter apply  Esc close</text>
+      {loading ? (
+        <box paddingTop={1}><text fg={THEME.warning}>Loading…</text></box>
+      ) : presets.length === 0 ? (
+        <box paddingTop={1}><text fg={THEME.muted}>No presets. Use /agents to create.</text></box>
+      ) : (
+        <box flexDirection="column" style={{ maxHeight: windowSize + 1, overflowY: "hidden" }}>
+          {visible.map((preset, i) => {
+            const absolute = start + i
+            const active = absolute === selectedIndex
+            const label = fit(preset.name, Math.min(28, lineWidth - 4))
+            const meta = `s:${preset.skills.length} m:${preset.mcpServers.length} r:${preset.rulesFiles.length}`
+            return (
+              <box key={preset.name} width={lineWidth} flexDirection="row" style={{ backgroundColor: active ? "#e6b188" : undefined }}>
+                <text fg={active ? "#000000" : THEME.textMuted} bold={active}>{active ? "> " : "  "}</text>
+                <text fg={active ? "#000000" : "white"} bold={active}>{label}</text>
+                <text fg={active ? "#000000" : THEME.textMuted}> </text>
+                <text fg={active ? "#000000" : THEME.textMuted}>{meta}</text>
+              </box>
+            )
+          })}
+        </box>
+      )}
+      {presets.length > windowSize && (
+        <text fg={THEME.textMuted}>
+          {start + 1}-{Math.min(start + windowSize, presets.length)} of {presets.length}
         </text>
       )}
     </box>
@@ -3302,19 +3666,19 @@ function PlanActionsBar({ cols }: { cols: number }) {
   return (
     <box paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0} borderStyle="single" borderColor="yellow" flexDirection="column">
       <text fg="yellow" bold>
-        Plan ready. Choose:
+        Ready to implement? (Kilocode-style)
       </text>
       <box>
-        <text fg="cyan"> [A]</text>
-        <text fg="gray"> Approve — run in agent mode and execute the plan</text>
+        <text fg="cyan"> [N]</text>
+        <text fg="gray"> New session — implement in a fresh session with clean context</text>
       </box>
       <box>
-        <text fg="cyan"> [R]</text>
-        <text fg="gray"> Revise — type your message and press Enter to update the plan</text>
+        <text fg="cyan"> [C]</text>
+        <text fg="gray"> Continue here — implement the plan in this session</text>
       </box>
       <box>
         <text fg="cyan"> [D]</text>
-        <text fg="gray"> Abandon — switch to Ask mode</text>
+        <text fg="gray"> Dismiss</text>
       </box>
     </box>
   )
@@ -3423,6 +3787,7 @@ function Footer({
   sessionTitle,
   mcpServersCount,
   activeProfile,
+  appliedPresetName,
   cols,
   contextUsedTokens,
   contextLimitTokens,
@@ -3438,6 +3803,7 @@ function Footer({
   sessionTitle?: string
   mcpServersCount?: number
   activeProfile: string
+  appliedPresetName?: string | null
   cols: number
   contextUsedTokens: number
   contextLimitTokens: number
@@ -3449,6 +3815,7 @@ function Footer({
   const shortSession = sessionId ? fit(sessionId, compact ? 10 : 14) : fit(sessionTitle ?? "untitled", compact ? 10 : 14)
   const vector = noIndex ? "off" : vectorIndexEnabled ? "on" : "off"
   const mcpPart = (mcpServersCount ?? 0) > 0 ? ` MCP:${mcpServersCount}` : " MCP:0"
+  const presetPart = appliedPresetName ? ` preset:${fit(appliedPresetName, 12)}` : ""
   const lineCols = Math.max(20, cols - 4)
   const left = fit(projectDir ? shortenPath(projectDir, Math.max(18, Math.floor((compact ? 0.55 : 0.38) * lineCols))) : "~", Math.max(12, Math.floor((compact ? 0.55 : 0.38) * lineCols)))
   const maxW = Math.max(20, lineCols)
@@ -3457,7 +3824,7 @@ function Footer({
   const right = compact
     ? fit(`${CLI_VERSION}`, rightBudget)
     : fit(
-        `profile:${activeProfile} · session:${shortSession}${mcpPart} · vector:${vector} · Ctrl+C:${isRunning ? "abort" : "quit"}`,
+        `profile:${activeProfile}${presetPart} · session:${shortSession}${mcpPart} · vector:${vector} · Ctrl+C:${isRunning ? "abort" : "quit"}`,
         rightBudget,
       )
   const rightWidth = stringWidth(right)
@@ -3479,7 +3846,7 @@ function Footer({
   )
 }
 
-type ChatLine = { text: string; color?: "white" | "gray" | "cyan" | "green" | "yellow" | "red" | "magenta" | "blue"; bold?: boolean }
+type ChatLine = { text: string; color?: "white" | "gray" | "cyan" | "green" | "yellow" | "red" | "magenta" | "blue"; bold?: boolean; /** When true, text contains ANSI codes — do not set fg/bold */ ansi?: boolean; /** When true, render this line with spinner (only on last action/tool) */ isActive?: boolean }
 
 function ChatViewport({
   state,
@@ -3509,7 +3876,7 @@ function ChatViewport({
         <text fg="cyan">↓ New content — Ctrl+G or End to jump to latest</text>
       )}
       {lines.map((line, idx) => (
-        <text key={`${idx}_${line.text.slice(0, 20)}`} fg={line.color ?? "white"} bold={line.bold}>
+        <text key={`${idx}_${line.text.slice(0, 30)}`} fg={line.ansi ? undefined : (line.color ?? "white")} bold={line.ansi ? undefined : line.bold}>
           {line.text}
         </text>
       ))}
@@ -3526,6 +3893,59 @@ const MemoChatViewport = React.memo(
     prev.viewportRows === next.viewportRows &&
     prev.scrollLines === next.scrollLines,
 )
+
+const RUN_PROGRESS_MAX_LINES = 14
+
+function RunProgressBlock({ state, cols, maxLines }: { state: AppState; cols: number; maxLines?: number }) {
+  const width = Math.max(20, cols - 4)
+  const lines = useMemo(() => {
+    const all = buildRunProgressLines(state, width)
+    const cap = maxLines ?? RUN_PROGRESS_MAX_LINES
+    return all.length <= cap ? all : all.slice(-cap)
+  }, [state, width, maxLines])
+  if (lines.length === 0) return null
+  return (
+    <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1} borderStyle="single" borderColor="gray">
+      {lines.map((line, idx) => (
+        line.isActive ? (
+          <box key={`rp-active-${idx}`}>
+            <text fg="yellow">
+              <spinner name="arc" />
+            </text>
+            <text fg={line.ansi ? undefined : (line.color ?? "gray")} bold={line.ansi ? undefined : line.bold}>
+              {" "}{line.text}
+            </text>
+          </box>
+        ) : (
+          <text key={`rp-${idx}-${line.text.slice(0, 24)}`} fg={line.ansi ? undefined : (line.color ?? "white")} bold={line.ansi ? undefined : line.bold}>
+            {line.text}
+          </text>
+        )
+      ))}
+    </box>
+  )
+}
+
+const MemoRunProgressBlock = React.memo(RunProgressBlock, (prev, next) => prev.state === next.state && prev.cols === next.cols && prev.maxLines === next.maxLines)
+
+/** Up to 4 lines: first added/removed line, 1 line above, then window of 4 lines down (or until 1 context line inclusive). */
+function getDiffPreviewHunksCli(
+  hunks: Array<{ type: string; lineNum: number; line: string }>
+): Array<{ type: string; lineNum: number; line: string }> {
+  if (!hunks.length) return []
+  const firstChangeIdx = hunks.findIndex((h) => h.type === "add" || h.type === "remove")
+  if (firstChangeIdx === -1) return hunks.slice(0, 4)
+  const start = Math.max(0, firstChangeIdx - 1)
+  let end = start + 4
+  for (let i = start; i < Math.min(hunks.length, start + 4); i++) {
+    if (i > firstChangeIdx && hunks[i]!.type === "context") {
+      end = i + 1
+      break
+    }
+    end = i + 1
+  }
+  return hunks.slice(start, end)
+}
 
 function formatToolPreview(tool: LiveTool): string {
   const pathVal = tool.input?.["path"]
@@ -3655,131 +4075,160 @@ function splitMessageBlocks(content: string): MessageSegment[] {
   return segments.length > 0 ? segments : [{ type: "text", content }]
 }
 
+/** Run progress (streaming, tools, todo) — rendered below message scroll, above plan bar. */
+function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
+  const out: ChatLine[] = []
+  const wrapW = Math.max(10, width - 2)
+  const runningTool = state.liveTools.find((t) => t.status === "running" && t.tool !== "update_todo_list")
+  const hasRunningNonTodoTool = state.liveTools.some((t) => t.status === "running" && t.tool !== "update_todo_list")
+  const todoItems = parseTodoItems(state.todo)
+  const inProgressTodoIndex =
+    state.isRunning && hasRunningNonTodoTool ? todoItems.findIndex((i) => !i.done) : -1
+
+  if (state.isRunning && state.currentStreaming.trim() && state.currentAssistantParts.length === 0) {
+    out.push({ text: "  Working…", color: "gray", isActive: true })
+    const streamed = cleanAssistantText(sanitizeText(state.currentStreaming))
+    if (streamed.trim()) out.push(...plainTextToChatLines(streamed, Math.max(10, width - 2)))
+    out.push({ text: "", color: "gray" })
+  }
+  if (state.isRunning && state.currentAssistantParts.length > 0) {
+    const parts = state.currentAssistantParts
+    const { files: exploreFiles, searches: exploreSearches } = getExploredPrefixCounts(parts)
+    if (exploreFiles + exploreSearches > 0) {
+      const fs = exploreFiles === 1 ? "1 file" : `${exploreFiles} files`
+      const ss = exploreSearches === 1 ? "1 search" : `${exploreSearches} searches`
+      out.push({ text: `  Explored ${fs}, ${ss}`, color: "gray" })
+    }
+    let i = 0
+    while (i < parts.length) {
+      const part = parts[i]!
+      if (part.type === "text") {
+        const t = cleanAssistantText(sanitizeText((part as { text: string }).text))
+        if (t.trim()) out.push(...plainTextToChatLines(t, wrapW))
+        i++
+      } else if (part.type === "tool") {
+        const tp = part as { tool: string; status: string; input?: Record<string, unknown> }
+        if (tp.tool === "thinking_preamble") {
+          const userMsg = (tp.input?.user_message as string)?.trim()
+          const reasoning = (tp.input?.reasoning_and_next_actions as string)?.trim()
+          const show = userMsg || reasoning
+          if (show) for (const line of wrapToWidth(sanitizeText(userMsg || reasoning.slice(0, 200)), wrapW)) out.push({ text: `  — ${line}`, color: "gray" })
+          else out.push({ text: `  [${tp.status}] ${toolDisplayName(tp.tool)}`, color: "gray" })
+          i++
+        } else {
+          const toolGroups: { tool: string; status: string; count: number; preview: string }[] = []
+          while (i < parts.length && (parts[i] as { type: string }).type === "tool") {
+            const t = parts[i] as { tool: string; status: string; input?: Record<string, unknown> }
+            if (t.tool === "thinking_preamble") break
+            const last = toolGroups[toolGroups.length - 1]
+            const preview = formatToolPreview({ id: "", tool: t.tool, status: t.status as "running" | "completed" | "error", input: t.input, timeStart: 0 })
+            if (last && last.tool === t.tool && last.status === t.status) {
+              last.count += 1
+              if (preview && !last.preview) last.preview = preview
+            } else {
+              toolGroups.push({ tool: t.tool, status: t.status, count: 1, preview })
+            }
+            i++
+          }
+          for (const g of toolGroups) {
+            if (isExploreTool(g.tool)) continue
+            const icon = TOOL_ICONS[g.tool] ?? "🔧"
+            const status = g.status === "completed" ? "ok" : g.status === "error" ? "err" : "…"
+            const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
+            const line = g.preview ? `  [${status}] ${icon} ${label} — ${g.preview}` : `  [${status}] ${icon} ${label}`
+            for (const l of wrapToWidth(line, width)) out.push({ text: l, color: "gray" })
+          }
+        }
+      } else if (part.type === "reasoning" && state.showThinking) {
+        const r = sanitizeText((part as { text: string }).text)
+        if (r.trim()) {
+          out.push({ text: "  Thinking…", color: "magenta" })
+          for (const line of wrapToWidth(r.slice(-400), wrapW)) out.push({ text: `  ${line}`, color: "magenta" })
+        }
+        i++
+      } else {
+        i++
+      }
+    }
+    if (state.currentStreaming?.trim()) {
+      const streamed = cleanAssistantText(sanitizeText(state.currentStreaming))
+      if (streamed.trim()) {
+        if (!runningTool) out.push({ text: "  Working…", color: "gray", isActive: true })
+        out.push(...plainTextToChatLines(streamed, Math.max(10, width - 2)))
+      }
+    }
+    out.push({ text: "", color: "gray" })
+  }
+  if (state.isRunning && runningTool && state.currentAssistantParts.length > 0) {
+    const preview = formatToolPreview(runningTool)
+    const line = preview
+      ? `  Working… ${toolDisplayName(runningTool.tool)} — ${preview}`
+      : `  Working… ${toolDisplayName(runningTool.tool)}`
+    out.push({ text: line, color: "gray", isActive: true })
+    out.push({ text: "", color: "gray" })
+  }
+  if (state.isRunning && runningTool && state.currentAssistantParts.length === 0 && !state.currentStreaming?.trim()) {
+    const preview = formatToolPreview(runningTool)
+    const line = preview
+      ? `  Working… ${toolDisplayName(runningTool.tool)} — ${preview}`
+      : `  Working… ${toolDisplayName(runningTool.tool)}`
+    out.push({ text: line, color: "gray", isActive: true })
+    out.push({ text: "", color: "gray" })
+  }
+  for (const sa of state.subAgents) {
+    const id = sanitizeText(sa?.id ?? "unknown")
+    const mode = sanitizeText(String(sa?.mode ?? "agent"))
+    const status = sa?.status === "running" ? "RUN" : sa?.status === "completed" ? "OK" : "ERR"
+    const rawTask = sanitizeText(sa?.task ?? "")
+    const task = rawTask.length > 120 ? `${rawTask.slice(0, 120)}...` : rawTask
+    for (const l of wrapToWidth(`[subagent ${id.slice(0, 8)} ${mode} ${status}] ${task}`, width)) out.push({ text: l, color: "cyan" })
+    if (sa?.currentTool) out.push({ text: `  tool: ${sanitizeText(sa.currentTool)}`, color: "gray" })
+    if (sa?.error) out.push({ text: `  error: ${sanitizeText(sa.error)}`, color: "red" })
+  }
+  if (state.subAgents.length > 0) out.push({ text: "", color: "gray" })
+  if (state.todo.trim()) {
+    out.push({ text: "Tasks", color: "yellow", bold: true })
+    const runningTool = state.liveTools.find((t) => t.status === "running")
+    if (state.isRunning && runningTool) {
+      const preview = formatToolPreview(runningTool)
+      const line = preview
+        ? `  ▶ Working on: ${toolDisplayName(runningTool.tool)} — ${preview}`
+        : `  ▶ Working on: ${toolDisplayName(runningTool.tool)}`
+      for (const l of wrapToWidth(line, Math.max(10, width - 2))) out.push({ text: l, color: "cyan" })
+    }
+    for (let idx = 0; idx < todoItems.length; idx++) {
+      const item = todoItems[idx]!
+      const inProgress = idx === inProgressTodoIndex
+      const bullet = item.done ? "  ✓ " : inProgress ? "  ▶ " : "  ○ "
+      const text = sanitizeText(item.text)
+      const wrapped = wrapToWidth(text, Math.max(10, width - 4))
+      wrapped.forEach((line, i) => {
+        out.push({
+          text: (i === 0 ? bullet : "    ") + line,
+          color: item.done ? "gray" : inProgress ? "cyan" : "white",
+        })
+      })
+    }
+    if (todoItems.length === 0) {
+      for (const line of wrapToWidth(sanitizeText(state.todo), Math.max(10, width - 2)))
+        out.push({ text: `  ${line}`, color: "white" })
+    }
+    out.push({ text: "", color: "gray" })
+  }
+  if (state.isRunning && state.reasoning && state.showThinking) {
+    out.push({ text: "Thinking...", color: "magenta" })
+    const preview = sanitizeText(state.reasoning).slice(-800)
+    for (const line of wrapToWidth(preview, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "magenta" })
+    out.push({ text: "", color: "gray" })
+  }
+  if (state.compacting) out.push({ text: "Compacting context...", color: "blue" })
+  if (state.lastError) for (const l of wrapToWidth(`Error: ${sanitizeText(state.lastError)}`, width)) out.push({ text: l, color: "red" })
+  return out
+}
+
 function buildChatLines(state: AppState, width: number): ChatLine[] {
   const out: ChatLine[] = []
   const messages = state.messages
-  let lastUserIdx = -1
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.role === "user") {
-      lastUserIdx = i
-      break
-    }
-  }
-
-  function pushRunProgress() {
-    if (state.isRunning && state.currentAssistantParts.length > 0) {
-      out.push({ text: "NexusCode", color: "green", bold: true })
-      const wrapW = Math.max(10, width - 2)
-      const parts = state.currentAssistantParts
-      let i = 0
-      while (i < parts.length) {
-        const part = parts[i]!
-        if (part.type === "text") {
-          const t = cleanAssistantText(sanitizeText((part as { text: string }).text))
-          if (t.trim()) for (const line of wrapToWidth(t, wrapW)) out.push({ text: `  ${line}`, color: "white" })
-          i++
-        } else if (part.type === "tool") {
-          const tp = part as { tool: string; status: string; input?: Record<string, unknown> }
-          if (tp.tool === "thinking_preamble") {
-            const userMsg = (tp.input?.user_message as string)?.trim()
-            const reasoning = (tp.input?.reasoning_and_next_actions as string)?.trim()
-            const show = userMsg || reasoning
-            if (show) for (const line of wrapToWidth(sanitizeText(userMsg || reasoning.slice(0, 200)), wrapW)) out.push({ text: `  — ${line}`, color: "gray" })
-            else out.push({ text: `  [${tp.status}] ${toolDisplayName(tp.tool)}`, color: "gray" })
-            i++
-          } else {
-            const toolGroups: { tool: string; status: string; count: number; preview: string }[] = []
-            while (i < parts.length && (parts[i] as { type: string }).type === "tool") {
-              const t = parts[i] as { tool: string; status: string; input?: Record<string, unknown> }
-              if (t.tool === "thinking_preamble") break
-              const last = toolGroups[toolGroups.length - 1]
-              const preview = formatToolPreview({ id: "", tool: t.tool, status: t.status as "running" | "completed" | "error", input: t.input, timeStart: 0 })
-              if (last && last.tool === t.tool && last.status === t.status) {
-                last.count += 1
-                if (preview && !last.preview) last.preview = preview
-              } else {
-                toolGroups.push({ tool: t.tool, status: t.status, count: 1, preview })
-              }
-              i++
-            }
-            for (const g of toolGroups) {
-              const icon = TOOL_ICONS[g.tool] ?? "🔧"
-              const status = g.status === "completed" ? "ok" : g.status === "error" ? "err" : "…"
-              const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
-              const line = g.preview ? `  [${status}] ${icon} ${label} — ${g.preview}` : `  [${status}] ${icon} ${label}`
-              for (const l of wrapToWidth(line, width)) out.push({ text: l, color: "gray" })
-            }
-          }
-        } else if (part.type === "reasoning" && state.showThinking) {
-          const r = sanitizeText((part as { text: string }).text)
-          if (r.trim()) {
-            out.push({ text: "  Thinking…", color: "magenta" })
-            for (const line of wrapToWidth(r.slice(-400), wrapW)) out.push({ text: `  ${line}`, color: "magenta" })
-          }
-          i++
-        } else {
-          i++
-        }
-      }
-      out.push({ text: "", color: "gray" })
-    }
-    // Omit standalone "Tools" block — tools are already shown above from currentAssistantParts (with icons). Avoids duplication.
-    for (const sa of state.subAgents) {
-      const id = sanitizeText(sa?.id ?? "unknown")
-      const mode = sanitizeText(String(sa?.mode ?? "agent"))
-      const status = sa?.status === "running" ? "RUN" : sa?.status === "completed" ? "OK" : "ERR"
-      const rawTask = sanitizeText(sa?.task ?? "")
-      const task = rawTask.length > 120 ? `${rawTask.slice(0, 120)}...` : rawTask
-      for (const l of wrapToWidth(`[subagent ${id.slice(0, 8)} ${mode} ${status}] ${task}`, width)) out.push({ text: l, color: "cyan" })
-      if (sa?.currentTool) out.push({ text: `  tool: ${sanitizeText(sa.currentTool)}`, color: "gray" })
-      if (sa?.error) out.push({ text: `  error: ${sanitizeText(sa.error)}`, color: "red" })
-    }
-    if (state.subAgents.length > 0) out.push({ text: "", color: "gray" })
-    if (state.todo.trim()) {
-      out.push({ text: "Plan", color: "yellow", bold: true })
-      const runningTool = state.liveTools.find((t) => t.status === "running")
-      if (state.isRunning && runningTool) {
-        const preview = formatToolPreview(runningTool)
-        const line = preview
-          ? `  ▶ Working on: ${toolDisplayName(runningTool.tool)} — ${preview}`
-          : `  ▶ Working on: ${toolDisplayName(runningTool.tool)}`
-        for (const l of wrapToWidth(line, Math.max(10, width - 2))) out.push({ text: l, color: "cyan" })
-      }
-      const items = parseTodoItems(state.todo)
-      for (const item of items) {
-        const bullet = item.done ? "  ● " : "  ○ "
-        const text = sanitizeText(item.text)
-        const wrapped = wrapToWidth(text, Math.max(10, width - 4))
-        wrapped.forEach((line, i) => {
-          out.push({
-            text: (i === 0 ? bullet : "    ") + line,
-            color: item.done ? "gray" : "white",
-          })
-        })
-      }
-      if (items.length === 0) {
-        for (const line of wrapToWidth(sanitizeText(state.todo), Math.max(10, width - 2)))
-          out.push({ text: `  ${line}`, color: "white" })
-      }
-      out.push({ text: "", color: "gray" })
-    }
-    if (state.isRunning && state.reasoning && state.showThinking) {
-      out.push({ text: "Thinking...", color: "magenta" })
-      const preview = sanitizeText(state.reasoning).slice(-800)
-      for (const line of wrapToWidth(preview, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "magenta" })
-      out.push({ text: "", color: "gray" })
-    }
-    if (state.isRunning && state.currentStreaming) {
-      const streamed = cleanAssistantText(sanitizeText(state.currentStreaming))
-      if (streamed.trim().length > 0) {
-        out.push({ text: "NexusCode (streaming)", color: "green", bold: true })
-        for (const line of wrapToWidth(streamed, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
-        out.push({ text: "", color: "gray" })
-      }
-    }
-    if (state.compacting) out.push({ text: "Compacting context...", color: "blue" })
-    if (state.lastError) for (const l of wrapToWidth(`Error: ${sanitizeText(state.lastError)}`, width)) out.push({ text: l, color: "red" })
-  }
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]!
@@ -3789,92 +4238,27 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
       out.push({ text: "You", color: "cyan", bold: true })
       for (const line of wrapToWidth(content, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "white" })
       out.push({ text: "", color: "gray" })
-      if (i === lastUserIdx) pushRunProgress()
       continue
     }
     if (msg.role === "assistant") {
-      out.push({ text: "NexusCode", color: "green", bold: true })
       const wrapW = Math.max(10, width - 2)
-      const isLastMessageAndRunning = i === messages.length - 1 && state.isRunning
       if (Array.isArray(msg.content)) {
         const contentParts = msg.content as MessagePart[]
-        let idx = 0
-        while (idx < contentParts.length) {
-          const part = contentParts[idx]!
-          if (part.type === "text") {
-            const t = cleanAssistantText(sanitizeText((part as { text: string }).text))
-            if (t.trim()) for (const line of wrapToWidth(t, wrapW)) out.push({ text: `  ${line}`, color: "white" })
-            idx++
-          } else if (part.type === "tool") {
-            const tp = part as { tool: string; status: string; input?: Record<string, unknown>; output?: string }
-            if (tp.tool === "thinking_preamble") {
-              const userMsg = (tp.input?.user_message as string)?.trim()
-              const reasoning = (tp.input?.reasoning_and_next_actions as string)?.trim()
-              const show = userMsg || reasoning
-              if (show) {
-                for (const line of wrapToWidth(sanitizeText(userMsg || reasoning.slice(0, 200)), wrapW)) out.push({ text: `  — ${line}`, color: "gray" })
-              } else {
-                out.push({ text: `  [${tp.status}] ${toolDisplayName(tp.tool)}`, color: "gray" })
-              }
-              idx++
-            } else {
-              const toolGroups: { tool: string; status: string; count: number; preview: string; output?: string }[] = []
-              while (idx < contentParts.length && (contentParts[idx] as { type: string }).type === "tool") {
-                const t = contentParts[idx] as { tool: string; status: string; input?: Record<string, unknown>; output?: string }
-                if (t.tool === "thinking_preamble") break
-                const preview = formatToolPreview({
-                  id: "",
-                  tool: t.tool,
-                  status: t.status as "running" | "completed" | "error",
-                  input: t.input,
-                  output: t.output,
-                  timeStart: 0,
-                })
-                const last = toolGroups[toolGroups.length - 1]
-                if (last && last.tool === t.tool && last.status === t.status) {
-                  last.count += 1
-                  if (preview && !last.preview) last.preview = preview
-                  if (t.output && !last.output) last.output = t.output
-                } else {
-                  toolGroups.push({ tool: t.tool, status: t.status, count: 1, preview, output: t.output })
-                }
-                idx++
-              }
-              if (!isLastMessageAndRunning) {
-                for (const g of toolGroups) {
-                  const icon = TOOL_ICONS[g.tool] ?? "🔧"
-                  const status = g.status === "completed" ? "ok" : g.status === "error" ? "err" : "…"
-                  const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
-                  const line = g.preview ? `  [${status}] ${icon} ${label} — ${g.preview}` : `  [${status}] ${icon} ${label}`
-                  for (const l of wrapToWidth(line, width)) out.push({ text: l, color: g.status === "error" ? "red" : "gray" })
-                }
-                const lastTool = toolGroups[toolGroups.length - 1]
-                if (lastTool?.tool === "attempt_completion" && lastTool.status === "completed" && lastTool.output?.trim()) {
-                  const answer = sanitizeText(lastTool.output).trim()
-                  if (answer.length > 0) {
-                    out.push({ text: "  —", color: "gray" })
-                    for (const line of wrapToWidth(answer, wrapW)) out.push({ text: `  ${line}`, color: "white" })
-                  }
-                }
-              }
-            }
-          } else if (part.type === "reasoning") {
-            const r = sanitizeText((part as { text: string }).text)
-            if (r.trim() && state.showThinking) {
-              out.push({ text: "  Thinking", color: "magenta" })
-              for (const line of wrapToWidth(r.slice(-600), wrapW)) out.push({ text: `  ${line}`, color: "magenta" })
-            }
-            idx++
-          } else {
-            idx++
-          }
+        const finalReply = getFinalReplyFromAssistantParts(contentParts)
+        if (finalReply != null && finalReply.trim()) {
+          out.push({ text: "NexusCode", color: "green", bold: true })
+          out.push(...markdownToChatLines(cleanAssistantText(sanitizeText(finalReply)), wrapW, state.projectDir))
+        } else {
+          out.push({ text: "NexusCode", color: "green", bold: true })
+          out.push({ text: "  (no reply text)", color: "gray" })
         }
       } else {
         const content = cleanAssistantText(sanitizeText(typeof msg.content === "string" ? msg.content : ""))
+        out.push({ text: "NexusCode", color: "green", bold: true })
         const segments = splitMessageBlocks(content)
         for (const seg of segments) {
           if (seg.type === "text") {
-            for (const line of wrapToWidth(seg.content, wrapW)) out.push({ text: `  ${line}`, color: "white" })
+            out.push(...markdownToChatLines(seg.content, wrapW, state.projectDir))
           } else {
             const codeLines = seg.content.split("\n")
             const borderW = Math.max(12, Math.min(width - 4, 58))
@@ -3894,11 +4278,6 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
       out.push({ text: "", color: "gray" })
       continue
     }
-  }
-
-  // If no user message yet but we have progress/error, show it at end (e.g. initial load)
-  if (lastUserIdx === -1 && (state.liveTools.length > 0 || state.subAgents.length > 0 || state.todo.trim() || state.reasoning || state.currentStreaming || state.compacting || state.lastError)) {
-    pushRunProgress()
   }
 
   return out
@@ -3931,6 +4310,81 @@ function wrapToWidth(text: string, width: number): string[] {
       const segment = rest.slice(0, cut)
       const lastSpace = Math.max(segment.lastIndexOf(" "), segment.lastIndexOf("\t"))
       const breakAt = lastSpace >= 0 ? lastSpace : cut
+      const chunk = rest.slice(0, breakAt).trimEnd()
+      if (chunk) lines.push(chunk)
+      rest = (breakAt < rest.length ? rest.slice(breakAt) : "").trimStart()
+      if (rest.length > 0 && stringWidth(rest) <= width) {
+        lines.push(rest)
+        break
+      }
+    }
+  }
+  return lines
+}
+
+/** Like wrapToWidth but does not strip ANSI (stringWidth treats escape codes as zero-width). */
+/** Ensures we never slice in the middle of an ANSI escape (avoids "Ba36m" etc.). */
+function ansiSafeBreakIndex(str: string, breakAt: number): number {
+  let i = 0
+  while (i < str.length) {
+    if (str[i] === "\x1b" && i + 1 < str.length) {
+      const next = str[i + 1]
+      if (next === "[") {
+        let j = i + 2
+        while (j < str.length && str[j] !== "m") j++
+        if (j < str.length) j++
+        if (breakAt > i && breakAt < j) return j
+        i = j
+        continue
+      }
+      if (next === "]") {
+        let j = i + 2
+        while (j < str.length && str[j] !== "\x07") j++
+        if (j < str.length) j++
+        if (breakAt > i && breakAt < j) return j
+        i = j
+        continue
+      }
+      i += 2
+      continue
+    }
+    if (i >= breakAt) return breakAt
+    i++
+  }
+  return breakAt
+}
+
+function wrapToWidthPreserveAnsi(text: string, width: number): string[] {
+  if (width <= 1) return [text]
+  const lines: string[] = []
+  for (const raw of text.split("\n")) {
+    const line = raw || ""
+    if (stringWidth(line) <= width) {
+      lines.push(line)
+      continue
+    }
+    let rest = line
+    while (rest.length > 0) {
+      let w = 0
+      let cut = 0
+      for (let i = 0; i < rest.length; i++) {
+        const cw = stringWidth(rest[i]!)
+        if (w + cw > width && cut > 0) break
+        w += cw
+        cut = i + 1
+      }
+      if (cut >= rest.length) {
+        lines.push(rest)
+        break
+      }
+      const segment = rest.slice(0, cut)
+      const lastSpace = Math.max(segment.lastIndexOf(" "), segment.lastIndexOf("\t"))
+      let breakAt = lastSpace >= 0 ? lastSpace : cut
+      breakAt = ansiSafeBreakIndex(rest, breakAt)
+      if (breakAt >= rest.length) {
+        lines.push(rest)
+        break
+      }
       const chunk = rest.slice(0, breakAt).trimEnd()
       if (chunk) lines.push(chunk)
       rest = (breakAt < rest.length ? rest.slice(breakAt) : "").trimStart()
@@ -4038,6 +4492,158 @@ function cleanAssistantText(value: string): string {
     })
     .join("\n")
     .trim()
+}
+
+/** Render markdown to ANSI-styled string for terminal. Falls back to plain text on error. */
+function renderMarkdownToAnsi(md: string): string {
+  if (!md || !md.trim()) return md
+  try {
+    const out = marked.parse(md, { async: false }) as string
+    return typeof out === "string" ? out : md
+  } catch {
+    return md
+  }
+}
+
+/** Pre-format markdown tables with fixed-width columns (from kilocode sources) so they render aligned. */
+function formatMarkdownTables(content: string): string {
+  const lines = content.split("\n")
+  type TableRow = string[]
+  type Table = { startIndex: number; endIndex: number; rows: TableRow[]; alignments: ("left" | "center" | "right" | "none")[] }
+
+  function parseRow(line: string): TableRow | null {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return null
+    return trimmed.split("|").slice(1, -1).map((c) => c.trim())
+  }
+  function isSeparatorRow(cells: TableRow): boolean {
+    return cells.every((cell) => /^:?-+:?$/.test(cell))
+  }
+  function getAlignment(cell: string): "left" | "center" | "right" | "none" {
+    if (cell.startsWith(":") && cell.endsWith(":")) return "center"
+    if (cell.endsWith(":")) return "right"
+    if (cell.startsWith(":")) return "left"
+    return "none"
+  }
+  function padToWidth(str: string, width: number, align: "left" | "center" | "right" | "none"): string {
+    const w = stringWidth(str)
+    const pad = width - w
+    if (pad <= 0) return str
+    if (align === "center") {
+      const l = Math.floor(pad / 2)
+      return " ".repeat(l) + str + " ".repeat(pad - l)
+    }
+    if (align === "right") return " ".repeat(pad) + str
+    return str + " ".repeat(pad)
+  }
+  function findTables(): Table[] {
+    const tables: Table[] = []
+    let i = 0
+    while (i < lines.length) {
+      const headerCells = parseRow(lines[i]!)
+      if (!headerCells?.length) { i++; continue }
+      if (i + 1 >= lines.length) { i++; continue }
+      const sepCells = parseRow(lines[i + 1]!)
+      if (!sepCells || !isSeparatorRow(sepCells)) { i++; continue }
+      const table: Table = { startIndex: i, endIndex: i + 1, rows: [headerCells, sepCells], alignments: sepCells.map(getAlignment) }
+      let j = i + 2
+      while (j < lines.length) {
+        const row = parseRow(lines[j]!)
+        if (!row) break
+        table.rows.push(row)
+        table.endIndex = j
+        j++
+      }
+      tables.push(table)
+      i = j
+    }
+    return tables
+  }
+  function formatTable(table: Table): string[] {
+    const colCount = Math.max(...table.rows.map((r) => r.length))
+    const widths: number[] = Array(colCount).fill(0)
+    for (const row of table.rows)
+      for (let c = 0; c < colCount; c++)
+        widths[c] = Math.max(widths[c]!, isSeparatorRow(row) ? 3 : stringWidth(row[c] ?? ""))
+    return table.rows.map((row, ri) => {
+      const cells: string[] = []
+      for (let c = 0; c < colCount; c++) {
+        const cell = row[c] ?? ""
+        const w = widths[c]!
+        const align = table.alignments[c] ?? "none"
+        if (ri === 1) {
+          const hasL = align === "left" || align === "center"
+          const hasR = align === "right" || align === "center"
+          const n = Math.max(w - (hasL ? 1 : 0) - (hasR ? 1 : 0), 1)
+          cells.push((hasL ? ":" : "") + "-".repeat(n) + (hasR ? ":" : ""))
+        } else {
+          cells.push(padToWidth(cell, w, align))
+        }
+      }
+      return "| " + cells.join(" | ") + " |"
+    })
+  }
+  const tables = findTables()
+  if (tables.length === 0) return content
+  const out = [...lines]
+  for (let i = tables.length - 1; i >= 0; i--) {
+    const t = tables[i]!
+    out.splice(t.startIndex, t.endIndex - t.startIndex + 1, ...formatTable(t))
+  }
+  return out.join("\n")
+}
+
+/** OSC 8 hyperlink: makes the given text clickable (e.g. open in VSCode). */
+function osc8Link(url: string, text: string): string {
+  return `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`
+}
+
+/** Wrap file path-like substrings in ANSI string with OSC 8 links (file://) so they open in editor. */
+function addFileLinks(ansi: string, cwd: string): string {
+  const pathExt = /\.(ts|tsx|js|jsx|json|md|mjs|cjs|yaml|yml)$/
+  const pathLike = /(^|[\s(\[`])((?:\.\/)?(?:src|tests|lib|packages|app|dist|docs)[\w./-]*\.[a-zA-Z0-9]+)([\s)\]]|$|`)/g
+  return ansi.replace(pathLike, (match, before: string, filePath: string, after: string) => {
+    if (!pathExt.test(filePath) || filePath.includes(" ")) return match
+    try {
+      const absolute = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
+      const fileUrl = "file://" + absolute.replace(/\\/g, "/")
+      return `${before}${osc8Link(fileUrl, filePath)}${after}`
+    } catch {
+      return match
+    }
+  })
+}
+
+/** Plain text to ChatLine[] (no markdown). Use during streaming so partial content doesn't break markdown parse. */
+function plainTextToChatLines(text: string, wrapW: number): ChatLine[] {
+  const lines: ChatLine[] = []
+  const safe = sanitizeText(text).trim()
+  if (!safe) return lines
+  for (const raw of safe.split("\n")) {
+    for (const line of wrapToWidth(raw || " ", wrapW)) {
+      lines.push({ text: `  ${line}`, color: "white" })
+    }
+  }
+  return lines
+}
+
+/** Turn markdown into ChatLine[] with ANSI styling; each line wrapped to width, indented with "  ". */
+function markdownToChatLines(md: string, wrapW: number, cwd?: string): ChatLine[] {
+  const normalized = formatMarkdownTables(md)
+  let ansi = renderMarkdownToAnsi(normalized)
+  if (cwd !== undefined) ansi = addFileLinks(ansi, cwd)
+  const lines: ChatLine[] = []
+  const tableRow = /^\s*\|.+\|\s*$/
+  for (const raw of ansi.split("\n")) {
+    if (tableRow.test(raw)) {
+      lines.push({ text: `  ${raw}`, ansi: true })
+      continue
+    }
+    for (const line of wrapToWidthPreserveAnsi(raw, wrapW)) {
+      lines.push({ text: `  ${line}`, ansi: true })
+    }
+  }
+  return lines
 }
 
 const AGENT_PRESETS_FILE = "agent-configs.json"

@@ -12,6 +12,11 @@ const SKILL_SELECTION_SCHEMA = z.object({
   reasoning: z.string().optional(),
 })
 
+const MCP_SERVER_SELECTION_SCHEMA = z.object({
+  selected: z.array(z.string()),
+  reasoning: z.string().optional(),
+})
+
 // Tools that are ALWAYS included regardless of classification
 const ALWAYS_INCLUDE_TOOLS = new Set([
   "attempt_completion",
@@ -20,7 +25,56 @@ const ALWAYS_INCLUDE_TOOLS = new Set([
 ])
 
 /**
- * Classify which MCP/custom tools are relevant for the given task.
+ * Classify which MCP servers are relevant for the given task.
+ * Returns the selected server names. Only tools from these servers will be included.
+ * Server names are the prefix before "__" in tool names (e.g. "context7" from "context7__search").
+ */
+export async function classifyMcpServers(
+  serverInfos: Array<{ name: string; toolCount: number; toolNames: string[] }>,
+  taskDescription: string,
+  client: LLMClient
+): Promise<string[]> {
+  if (serverInfos.length === 0) return []
+
+  const serverList = serverInfos
+    .map(s => `- ${s.name}: ${s.toolCount} tools (${s.toolNames.slice(0, 8).join(", ")}${s.toolNames.length > 8 ? ", ..." : ""})`)
+    .join("\n")
+
+  const systemPrompt = `You are an MCP server selector. Given a task description and a list of available MCP servers (each exposes many tools), select the servers most likely needed to complete the task.
+
+Rules:
+- Select between 3 and 12 servers (fewer is better — don't include servers that are clearly irrelevant)
+- When unsure, include the server (false negative is worse than false positive)
+- Include servers for: code/IDE, search, docs, file system, git, build/test if the task might need them
+- Do NOT include servers for unrelated domains the task clearly doesn't need
+- Return the exact server names as listed
+
+Respond with JSON: { "selected": ["server_name_1", "server_name_2", ...] }`
+
+  const userMessage = `Task: ${taskDescription.slice(0, 500)}
+
+Available MCP servers:
+${serverList}
+
+Select the most relevant MCP servers.`
+
+  try {
+    const result = await client.generateStructured({
+      messages: [{ role: "user", content: userMessage }],
+      schema: MCP_SERVER_SELECTION_SCHEMA,
+      systemPrompt,
+      maxRetries: 2,
+    })
+
+    const validNames = new Set(serverInfos.map(s => s.name))
+    return result.selected.filter(name => validNames.has(name))
+  } catch {
+    return serverInfos.map(s => s.name)
+  }
+}
+
+/**
+ * Classify which MCP/custom tools are relevant for the given task (legacy; prefer classifyMcpServers).
  * Returns the selected tool names. Built-in mode tools are NOT filtered here.
  */
 export async function classifyTools(

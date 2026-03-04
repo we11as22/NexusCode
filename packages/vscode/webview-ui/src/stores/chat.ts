@@ -165,6 +165,11 @@ interface ChatState {
   /** Checkpoint entries for rollback (Cline-style). */
   checkpointEntries: Array<{ hash: string; ts: number; description?: string; messageId?: string }>
 
+  /** Plan mode: plan_exit was called; show New session / Continue / Dismiss (Kilocode-style). */
+  planCompleted: boolean
+  /** Plan text for "New session" option. */
+  planFollowupText: string | null
+
   /** Models catalog from models.dev (for Select model in Settings). Same shape as core ModelsCatalog. */
   modelsCatalog: ModelsCatalogFromCore | null
   modelsCatalogLoading: boolean
@@ -175,6 +180,15 @@ interface ChatState {
   agentPresets: AgentPresetFromCore[]
   requestAgentPresets: () => void
   handleAgentPresets: (presets: AgentPresetFromCore[]) => void
+
+  /** Options for creating a preset (skills, MCP, rules) — loaded when opening create modal. */
+  agentPresetOptions: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } | null
+  requestAgentPresetOptions: () => void
+  handleAgentPresetOptions: (options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] }) => void
+
+  /** Loaded skill definitions (name, path, summary) for Settings → Skills list. */
+  skillDefinitions: Array<{ name: string; path: string; summary: string }>
+  handleSkillDefinitions: (definitions: Array<{ name: string; path: string; summary: string }>) => void
 
   // Actions
   setView: (view: AppView) => void
@@ -254,6 +268,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   modelsCatalog: null,
   modelsCatalogLoading: false,
   checkpointEntries: [],
+  planCompleted: false,
+  planFollowupText: null,
   requestModelsCatalog: () => {
     set({ modelsCatalogLoading: true })
     postMessage({ type: "getModelsCatalog" })
@@ -268,6 +284,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   handleAgentPresets: (presets: AgentPresetFromCore[]) => {
     set({ agentPresets: presets })
+  },
+
+  agentPresetOptions: null,
+  requestAgentPresetOptions: () => {
+    postMessage({ type: "getAgentPresetOptions" })
+  },
+  handleAgentPresetOptions: (options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] }) => {
+    set({ agentPresetOptions: options })
+  },
+
+  skillDefinitions: [],
+  handleSkillDefinitions: (definitions: Array<{ name: string; path: string; summary: string }>) => {
+    set({ skillDefinitions: definitions })
   },
 
   setView: (view) => {
@@ -321,7 +350,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   clearChat: () => {
     postMessage({ type: "clearChat" })
-    set({ messages: [], todo: "", view: "chat", subagents: [] })
+    set({ messages: [], todo: "", view: "chat", subagents: [], planCompleted: false, planFollowupText: null })
   },
 
   forkSession: (messageId) => {

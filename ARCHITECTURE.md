@@ -4,88 +4,129 @@
 
 NexusCode has three runtime layers:
 
-1. `packages/core` — agent runtime (LLM loop, modes, tool execution, permissions, MCP, skills, indexing).
-2. `packages/vscode` — VS Code host + React webview UI.
-3. `packages/cli` — terminal host + OpenTUI (React binding) TUI.
+1. **`packages/core`** — Agent runtime: LLM loop, modes, tool execution, permissions, MCP client, skills, indexing, session, compaction, checkpoints. No VS Code or CLI dependencies.
+2. **`packages/vscode`** — VS Code host + React webview UI (settings, chat, sessions, agent presets).
+3. **`packages/cli`** — Terminal host + TUI (OpenTUI/React). Same agent loop as the extension.
 
-Both UI hosts call the same `runAgentLoop` in `core`, so behavior remains consistent across VS Code and CLI.
+Both hosts call the same `runAgentLoop()` in core, so behavior is consistent across VS Code and CLI.
 
-### Extension: Cline-style Controller
-**Status:** active  
-**Context:** Port Cline’s extension architecture (single Controller owning task/session state) into NexusCode.  
-**Decision:** `packages/vscode` uses a **Controller** (`src/controller.ts`) that owns session, config, run state, indexer, MCP, and checkpoint. The **NexusProvider** only owns webview(s) and delegates all messages to `controller.handleWebviewMessage()`. State is pushed via `controller.postStateToWebview()` / `getStateToPostToWebview()`. Agent runs use `runAgentLoop` (local) or NexusCode server (sessions, pagination).  
-**Rationale:** Clear separation of concerns, easier to add Cline-like features (task history, approvals, checkpoints) later.  
-**Trade-offs:** Controller depends on VS Code API for `getCwd()` and config overrides; postMessage is passed in so Controller stays testable.
+Optional **`packages/server`** stores sessions and messages in SQLite; extension and CLI can connect to it for shared sessions and pagination (no OOM on long chats).
+
+### Extension: Controller pattern
+
+The VS Code extension uses a single **Controller** (`packages/vscode/src/controller.ts`) that owns:
+
+- Session and config
+- Run state, indexer, MCP client, checkpoint
+- Resolution of config from `.nexus/nexus.yaml` and VS Code settings
+
+The **NexusProvider** owns the webview(s) and delegates all messages to `controller.handleWebviewMessage()`. State is pushed via `postStateToWebview()` / `getStateToPostToWebview()`. The agent runs either in-process (`runAgentLoop`) or against the NexusCode server (sessions, pagination).
+
+---
 
 ## Key Decisions
 
-### Unified Config Flow Across Hosts
-**Status:** active  
-**Context:** VS Code and CLI exposed different slices of config and some settings were UI-only.  
-**Decision:** both hosts now persist updates into `.nexus/nexus.yaml` and deep-merge nested sections (`model`, `embeddings`, `indexing`, `vectorDb`, `tools`).  
-**Rationale:** one source of truth for local/project behavior, with predictable cross-host parity.  
-**Trade-offs:** host-specific overrides (e.g. VS Code settings) can still mask file config at runtime.
+### Unified config flow
 
-### Vector Index Wiring Through Factory
-**Status:** active  
-**Context:** vector indexing options existed, but indexer construction in hosts did not pass embeddings/vector dependencies.  
-**Decision:** introduced `createCodebaseIndexer()` factory that wires embeddings + vector store only when prerequisites are valid.  
-**Rationale:** prevents silent misconfiguration and keeps host code minimal.  
-**Trade-offs:** additional async initialization path before indexing starts.
+Config is loaded from **`.nexus/nexus.yaml`** (project) and **`~/.nexus/nexus.yaml`** (global). Both VS Code and CLI persist updates into the project file with deep-merge of nested sections (`model`, `embeddings`, `indexing`, `vectorDb`, `tools`, `mcp`, etc.). Env vars override file config; VS Code settings (`nexuscode.*`) override when the extension runs.
 
-### Qdrant Availability Guard + Auto-Start
-**Status:** active  
-**Context:** semantic search requires reachable Qdrant; manual startup caused frequent failure states.  
-**Decision:** introduced `ensureQdrantRunning()` with health check + optional auto-start strategy (local `qdrant` binary first, then Docker).  
-**Rationale:** out-of-the-box vector setup while preserving explicit fallback to FTS-only indexing if unavailable.  
-**Trade-offs:** auto-start is local-only (`localhost`) and depends on installed runtime (binary or Docker).
+### MCP server filtering (not tool filtering)
 
-### Mention Resolution as First-Class Prompt Context
-**Status:** active  
-**Context:** `@mentions` parser existed but was not integrated into the runtime prompt assembly.  
-**Decision:** before each task loop, latest user message is parsed for mentions and resolved context is injected as a dedicated prompt block.  
-**Rationale:** deterministic handling of `@file`, `@folder`, `@url`, `@problems`, `@git`.  
-**Trade-offs:** slightly larger system prompt for mention-heavy requests.
+When the number of **MCP servers** exceeds `tools.classifyThreshold` (default 20) and `tools.classifyToolsEnabled` is true, an LLM classifier selects **which MCP servers** to use for the task. All tools from selected servers are included; custom tools (no `serverName__toolName` pattern) are always included. Skill filtering uses `skillClassifyThreshold` (default 20) and selects skills by task. Thresholds default to 20 in schema and UI.
+
+### Vector index factory
+
+`createCodebaseIndexer()` wires embeddings and vector store only when prerequisites are valid. If embeddings or Qdrant are missing, the indexer falls back to FTS-only. This avoids silent misconfiguration.
+
+### Qdrant availability and auto-start
+
+`ensureQdrantRunning()` performs a health check and can auto-start Qdrant (local binary, then Docker). Auto-start is local-only. If Qdrant is unavailable, vector search is disabled; FTS remains available.
+
+### Mention resolution in prompts
+
+Before each agent loop, the latest user message is parsed for `@file`, `@folder`, `@url`, `@problems`, `@git`. Resolved context is injected as a dedicated prompt block so the model gets deterministic, task-relevant context.
+
+### Agent presets
+
+Presets (model/vector/skills/MCP/rules) are stored in **`.nexus/agent-configs.json`**. The extension and CLI discover skill paths from local `SKILL.md` and `AGENTS.md`; MCP server names come from config. Applying a preset updates the active config via the host’s `saveConfig` and reconnects MCP / indexer as needed.
+
+### Bundled MCP (context-mode)
+
+The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can reference `bundle: "context-mode"`; hosts resolve it to `node sources/claude-context-mode/start.mjs` with `CLAUDE_PROJECT_DIR` set to the agent cwd. See `resolveBundledMcpServers` in core.
+
+---
 
 ## Invariants
 
-- Mode permissions are enforced in `core` (not only in UI).
-- Built-in tool set remains always available per mode; filtering applies to dynamic/MCP/custom sets by threshold.
-- If vector prerequisites are invalid, agent must remain functional with FTS-only search.
-- Host UI changes must not change `runAgentLoop` contracts.
-- When the tool-call budget is exceeded, the loop allows one extra iteration with tools disabled so the model can emit a final text-only answer (no silent truncation).
-- Optional `config.agentLoop.toolCallBudget` and `config.agentLoop.maxIterations` override default per-mode limits when set.
-- **Models catalog:** CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) plus live filtering for gateway models (`https://api.kilo.ai/api/gateway/models`) so unavailable free IDs are removed from picker results.
-- **CLI vs KiloCode TUI:** CLI uses the same OpenTUI stack (React binding instead of Solid) and is fully wired to the Nexus agent (runAgentLoop, config, modes, approval, compaction, indexer, MCP, profiles, plan, subagents). UI is refactored to Kilo-like centered Home/Prompt shell, Kilo-style slash command list (`ctrl+p`), and keeps Nexus settings/index/advanced screens behind slash navigation.
-- **CLI agent presets:** `/agent-config` manages preset bundles (model/vector/skills/MCP/rules) persisted in `.nexus/agent-configs.json`; skill candidates are discovered from local `SKILL.md` files and `AGENTS.md` file references, and applying a preset mutates active runtime config through host `saveConfig`.
-- **Bundled MCP (context-mode):** The repo ships `sources/claude-context-mode` (Context Mode MCP). Config can reference `bundle: "context-mode"`; hosts (CLI, server, extension when run from repo) resolve it to `node sources/claude-context-mode/start.mjs` with `CLAUDE_PROJECT_DIR` set to the agent cwd. This keeps tool output out of the context window (sandboxed execute, FTS5 search). See `resolveBundledMcpServers` in core and README.
+- **Mode permissions** are enforced in core (not only in the UI). Blocked tools are never passed to the model.
+- **Built-in tools** are always available per mode; filtering applies only to dynamic (MCP/custom) tools, and by **MCP server** count (not individual tool count) when classification is enabled.
+- **MCP config**: enable/disable is per **server** (all tools of that server). The classifier selects servers, not individual tools.
+- If vector prerequisites are invalid, the agent runs with **FTS-only** search.
+- Host UI must not change `runAgentLoop` contracts (options, events, tool results).
+- When the **tool-call budget** is exceeded, the loop allows one more iteration with tools disabled so the model can emit a final text-only answer.
+- **`config.agentLoop.toolCallBudget`** and **`config.agentLoop.maxIterations`** override per-mode limits when set.
+- **Models catalog**: CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) and live gateway model list where applicable; unavailable free IDs are filtered from pickers.
 
-## Data Flow
+---
 
-1. User message enters VS Code webview or CLI TUI.
-2. **Without server:** host persists message into local session storage (JSONL). **With server:** message is sent to NexusCode server; session and messages live in server SQLite DB.
-3. Core (in-process or on server) assembles prompt blocks (role/rules/skills/system/mentions/compaction).
-4. Model streams text + tool calls.
-5. Tools execute via host adapter with permissions.
-6. Session/tool traces are saved (locally or on server) and surfaced back to UI. Extension and CLI can list/switch sessions when using the server; messages are loaded in pages to avoid OOM.
-7. Index updates run in background and publish status events (in-process mode only; server mode does not run indexer in extension).
+## Data flow
 
-## External Dependencies
+1. User message enters the VS Code webview or CLI TUI.
+2. **Without server:** the host appends the message to the local session (JSONL). **With server:** the message is sent to the NexusCode server; sessions and messages live in the server SQLite DB.
+3. Core (in-process or on server) builds prompt blocks (role, rules, skills, system, mentions, compaction).
+4. The model streams text and tool calls.
+5. Tools run via the host adapter with permission checks (rules, approval dialogs).
+6. Session and tool traces are saved (local or server) and sent back to the UI. With the server, extension and CLI can list/switch sessions; messages are loaded in pages to avoid OOM.
+7. Index updates run in the background and emit status events (in-process only; server mode does not run the indexer in the extension).
 
-| Dependency | Why |
-|---|---|
-| Vercel AI SDK | Unified provider abstraction and tool-call streaming |
-| Qdrant REST client | Semantic vector retrieval |
-| SQLite (FTS5 via `better-sqlite3`) | Fast local keyword + symbol indexing |
-| MCP SDK | External tool ecosystem integration |
+---
+
+## Project layout
+
+```
+NexusCode/
+├── packages/
+│   ├── core/           ← Agent engine
+│   │   ├── agent/      ← Loop, modes, classifier (tools/skills/MCP servers), prompts
+│   │   ├── tools/      ← Built-in tool registry
+│   │   ├── session/    ← JSONL storage, compaction
+│   │   ├── indexer/    ← AST + FTS + Qdrant
+│   │   ├── provider/   ← LLM providers + embeddings
+│   │   ├── checkpoint/  ← Shadow git
+│   │   ├── context/    ← @mentions, rules, condense
+│   │   ├── skills/     ← Skill loader + FTS + classifier
+│   │   ├── mcp/        ← MCP client, resolveBundledMcpServers
+│   │   └── config/     ← Schema, load, merge
+│   ├── vscode/         ← Extension + React webview (controller, settings, chat, presets)
+│   ├── cli/            ← CLI host + TUI (slash commands, agent-config, sessions)
+│   └── server/         ← Optional: SQLite sessions, streaming API
+├── sources/
+│   └── claude-context-mode/  ← Bundled MCP (context compression, FTS, batch_execute)
+└── .nexus/             ← Project config (nexus.yaml, agent-configs.json, mcp-servers.json, rules, skills)
+```
+
+---
+
+## External dependencies
+
+| Dependency        | Purpose                                      |
+|-------------------|----------------------------------------------|
+| Vercel AI SDK     | Provider abstraction, tool-call streaming   |
+| Qdrant REST client| Semantic vector retrieval                    |
+| SQLite (FTS5, better-sqlite3) | Local keyword/symbol indexing        |
+| MCP SDK           | External tool ecosystem                      |
+
+---
 
 ## Version requirements
 
-- **Node.js**: 20+ is required only for **packaging** the VS Code extension (`pnpm package:vscode`). The `vsce` CLI (via undici) needs the global `File` API available from Node 20. The rest of the build (`pnpm build`, core, webview, extension bundle) works on Node 18. The repo provides `.nvmrc` with `20` for nvm/fnm users.
-- **pnpm**: used for workspace and scripts; no minimum version enforced in code.
+- **Node.js**: **20+** is required for packaging the VS Code extension (`pnpm package:vscode`) — `vsce` needs the global `File` API. The rest of the build (`pnpm build`, core, webview, extension bundle) runs on Node 18. `.nvmrc` is set to `20` for nvm/fnm.
+- **pnpm**: used for the workspace and scripts; no minimum version enforced in code.
 
-## Known Constraints
+---
 
-- Auto-started Qdrant currently supports only local endpoints.
-- Workspace multi-root uses the first folder as active project root in VS Code host.
-- Type-checking across workspace expects built `core` artifacts because package exports are dist-first.
+## Known constraints
+
+- Auto-started Qdrant supports only local endpoints.
+- In a multi-root VS Code workspace, the first folder is used as the active project root.
+- Type-checking across the workspace expects built `core` artifacts (package exports are dist-first).

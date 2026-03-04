@@ -53,6 +53,22 @@ export class VsCodeHost implements IHost {
 
   async writeFile(filePath: string, content: string): Promise<void> {
     const absPath = filePath.startsWith("/") ? filePath : path.join(this.cwd, filePath)
+    const dir = path.dirname(absPath)
+    const cwdResolved = path.resolve(this.cwd)
+    const relDir = path.relative(cwdResolved, dir)
+    if (relDir && !relDir.startsWith("..") && relDir !== ".") {
+      const parts = relDir.split(path.sep)
+      let acc = cwdResolved
+      for (const p of parts) {
+        if (!p) continue
+        acc = path.join(acc, p)
+        try {
+          await vscode.workspace.fs.createDirectory(vscode.Uri.file(acc))
+        } catch {
+          // Dir may already exist
+        }
+      }
+    }
     const uri = vscode.Uri.file(absPath)
     const encoder = new TextEncoder()
     await vscode.workspace.fs.writeFile(uri, encoder.encode(content))
@@ -109,6 +125,7 @@ export class VsCodeHost implements IHost {
       cwd,
       reject: false,
       timeout: 120_000,
+      signal,
     })
     return {
       stdout: result.stdout ?? "",

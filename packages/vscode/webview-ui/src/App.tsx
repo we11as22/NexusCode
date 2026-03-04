@@ -5,11 +5,12 @@ import { MessageList } from "./components/MessageList.js"
 import { InputBar } from "./components/InputBar.js"
 import { ModeDropdown } from "./components/ModeDropdown.js"
 import { ProfileDropdown } from "./components/ProfileDropdown.js"
+import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import { ThoughtBlock } from "./components/ThoughtBlock.js"
 import { CheckpointStrip } from "./components/CheckpointStrip.js"
 import type { ExtensionMessage } from "./types/messages.js"
-import { confirmAsync, resolveConfirm } from "./vscode.js"
+import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
@@ -72,6 +73,12 @@ export function App() {
           break
         case "agentPresets":
           if ("presets" in msg) store.handleAgentPresets(msg.presets as import("./types/messages.js").AgentPresetFromCore[])
+          break
+        case "agentPresetOptions":
+          if ("options" in msg) store.handleAgentPresetOptions(msg.options as { skills: string[]; mcpServers: string[]; rulesFiles: string[] })
+          break
+        case "skillDefinitions":
+          if ("definitions" in msg) store.handleSkillDefinitions(msg.definitions as Array<{ name: string; path: string; summary: string }>)
           break
         case "action":
           if (msg.action === "switchView" && msg.view) {
@@ -230,16 +237,6 @@ function ChatView() {
         </div>
       )}
 
-      {store.todo && (
-        <ProgressTodoBlock todo={store.todo} isRunning={store.isRunning} header={todoHeader} />
-      )}
-
-      <ThoughtBlock
-        reasoningText={lastReasoningText}
-        startTime={store.reasoningStartTime}
-        isRunning={store.isRunning}
-      />
-
       <CheckpointStrip />
 
       <div className="chat-view">
@@ -273,6 +270,26 @@ function ChatView() {
             })()}
           </div>
         </div>
+
+        {((store.todo && store.todo.trim()) || store.isRunning) && (
+          <div className="flex-shrink-0 border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+            {store.todo && store.todo.trim() && (
+              <ProgressTodoBlock todo={store.todo} isRunning={store.isRunning} header={todoHeader} />
+            )}
+            <ThoughtBlock
+              reasoningText={lastReasoningText}
+              startTime={store.reasoningStartTime}
+              isRunning={store.isRunning}
+            />
+          </div>
+        )}
+
+        {store.mode === "plan" && store.planCompleted && !store.isRunning && (
+          <PlanActionsBar
+            planFollowupText={store.planFollowupText}
+            onChoice={(choice, planText) => postMessage({ type: "planFollowupChoice", choice, planText: planText ?? undefined })}
+          />
+        )}
 
         <div className="nexus-status">
           <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
@@ -336,6 +353,7 @@ function ChatBottomBar({ referencedFiles }: { referencedFiles: string[] }) {
             </details>
           )}
           <ModeDropdown />
+          <AgentPresetDropdown />
           <ProfileDropdown />
         </div>
         <div className="chat-bottom-bar-input-wrap">
@@ -465,6 +483,42 @@ function SubagentStrip() {
           {a.error && <div className="nexus-subagent-error">{a.error}</div>}
         </div>
       ))}
+    </div>
+  )
+}
+
+/** Kilocode-style: plan_exit completed — New session / Continue / Dismiss (above input). */
+function PlanActionsBar({
+  planFollowupText,
+  onChoice,
+}: {
+  planFollowupText: string | null
+  onChoice: (choice: "new_session" | "continue" | "dismiss", planText?: string) => void
+}) {
+  return (
+    <div className="flex-shrink-0 px-3 py-2 border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-badge-background)] flex flex-wrap items-center gap-2">
+      <span className="text-xs font-medium text-[var(--vscode-foreground)]">Ready to implement?</span>
+      <button
+        type="button"
+        className="nexus-secondary-btn text-xs"
+        onClick={() => onChoice("new_session", planFollowupText ?? undefined)}
+      >
+        New session
+      </button>
+      <button
+        type="button"
+        className="nexus-secondary-btn text-xs"
+        onClick={() => onChoice("continue", planFollowupText ?? undefined)}
+      >
+        Continue here
+      </button>
+      <button
+        type="button"
+        className="nexus-secondary-btn text-xs text-[var(--vscode-descriptionForeground)]"
+        onClick={() => onChoice("dismiss")}
+      >
+        Dismiss
+      </button>
     </div>
   )
 }
@@ -657,7 +711,7 @@ interface SettingsDraft {
 }
 
 function SettingsView() {
-  const { config, provider, model, saveConfig, serverUrl, modelsCatalog, modelsCatalogLoading, requestModelsCatalog, agentPresets, requestAgentPresets } = useChatStore()
+  const { config, provider, model, saveConfig, serverUrl, modelsCatalog, modelsCatalogLoading, requestModelsCatalog, agentPresets, requestAgentPresets, agentPresetOptions, requestAgentPresetOptions, handleAgentPresetOptions } = useChatStore()
   const [draft, setDraft] = useState<SettingsDraft>(() => getDefaultDraft())
   const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
   const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles" | "presets">("llm")
@@ -666,6 +720,12 @@ function SettingsView() {
   const [includeThirdParty, setIncludeThirdParty] = useState(true)
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
   const [modelPickerQuery, setModelPickerQuery] = useState("")
+  const [presetCreateOpen, setPresetCreateOpen] = useState(false)
+  const [presetCreateName, setPresetCreateName] = useState("")
+  const [presetCreateVector, setPresetCreateVector] = useState(false)
+  const [presetCreateSkills, setPresetCreateSkills] = useState<Set<string>>(new Set())
+  const [presetCreateMcp, setPresetCreateMcp] = useState<Set<string>>(new Set())
+  const [presetCreateRules, setPresetCreateRules] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     setServerUrlLocal(serverUrl)
@@ -679,6 +739,16 @@ function SettingsView() {
   useEffect(() => {
     if (tab === "presets") requestAgentPresets()
   }, [tab, requestAgentPresets])
+  const openPresetCreateModal = () => {
+    setPresetCreateName(`preset-${new Date().toISOString().slice(0, 10)}`)
+    setPresetCreateVector(Boolean(config?.indexing?.vector))
+    setPresetCreateSkills(new Set(config?.skills ?? []))
+    setPresetCreateMcp(new Set((config?.mcp?.servers ?? []).map((s) => s.name).filter(Boolean)))
+    setPresetCreateRules(new Set(config?.rules?.files ?? ["AGENTS.md", "CLAUDE.md"]))
+    handleAgentPresetOptions(null)
+    setPresetCreateOpen(true)
+    requestAgentPresetOptions()
+  }
 
   const canSave = Boolean(config && draft)
   const vectorHint = useMemo(() => {
@@ -704,14 +774,6 @@ function SettingsView() {
 
       <div className="nexus-settings-config-bar">
         <span className="nexus-settings-config-label">Config:</span>
-        <button
-          type="button"
-          className="nexus-settings-config-link"
-          onClick={() => postMessage({ type: "openNexusConfigFolder", scope: "global" })}
-        >
-          Open ~/.nexus
-        </button>
-        <span className="nexus-settings-config-sep">·</span>
         <button
           type="button"
           className="nexus-settings-config-link"
@@ -836,12 +898,12 @@ function SettingsView() {
       <section className="nexus-section">
         <h3 className="nexus-section-title">Tools & Skills Filtering</h3>
         <SettingsToggle
-          label="Filter tools when list is large"
+          label="Filter MCP servers when list is large"
           checked={draft.filterTools}
           onChange={(checked) => setDraft({ ...draft, filterTools: checked })}
         />
         <SettingsInput
-          label="Tool threshold"
+          label="MCP server threshold"
           value={draft.toolClassifyThreshold}
           onChange={(v) => setDraft({ ...draft, toolClassifyThreshold: v })}
         />
@@ -925,12 +987,6 @@ function SettingsView() {
               rows={3}
             />
             <SettingsTextarea
-              label="Skill paths (one per line)"
-              value={draft.skillsText}
-              onChange={(v) => setDraft({ ...draft, skillsText: v })}
-              rows={3}
-            />
-            <SettingsTextarea
               label="Agent custom instructions"
               value={draft.agentInstructions}
               onChange={(v) => setDraft({ ...draft, agentInstructions: v })}
@@ -973,33 +1029,93 @@ function SettingsView() {
 
       {tab === "presets" && (
       <section className="nexus-section">
-        <h3 className="nexus-section-title">Agent presets</h3>
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <h3 className="nexus-section-title">Agent configs</h3>
+          <button
+            type="button"
+            className="nexus-secondary-btn text-xs flex items-center gap-1"
+            onClick={openPresetCreateModal}
+            title="Create new preset (skills + MCP + rules)"
+          >
+            <PlusIcon className="w-3.5 h-3.5" />
+            New preset
+          </button>
+        </div>
         <p className="nexus-muted text-[10px] mb-2">
-          Presets bundle vector search, skills, MCP servers, and rules (from .nexus/agent-configs.json). Create and manage presets in the CLI; apply here.
+          Presets bundle vector search, skills, MCP servers, and rules. Create with the list below; apply to switch instantly. Saved in .nexus/agent-configs.json.
         </p>
         {agentPresets.length === 0 ? (
-          <p className="nexus-muted text-xs">No presets found. Add presets in the project&apos;s .nexus/agent-configs.json (e.g. via CLI Settings → Agent configs).</p>
+          <p className="nexus-muted text-xs">No presets yet. Click &quot;New preset&quot; to create one from the list of skills, MCP servers, and rules.</p>
         ) : (
           <ul className="space-y-2">
             {agentPresets.map((preset) => (
               <li key={preset.name} className="flex items-center justify-between gap-2 rounded-md border border-[var(--vscode-panel-border)] p-2 bg-[var(--vscode-editor-inactiveSelectionBackground)]">
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   <span className="font-medium text-[var(--vscode-foreground)]">{preset.name}</span>
                   <div className="text-[10px] text-[var(--vscode-descriptionForeground)] mt-0.5">
                     vector: {preset.vector ? "on" : "off"} · skills: {preset.skills.length} · MCP: {preset.mcpServers.length} · rules: {preset.rulesFiles.length}
                     {preset.modelProvider && preset.modelId && ` · ${preset.modelProvider}/${preset.modelId}`}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className="nexus-secondary-btn flex-shrink-0"
-                  onClick={() => postMessage({ type: "applyAgentPreset", presetName: preset.name })}
-                >
-                  Apply
-                </button>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <button
+                    type="button"
+                    className="nexus-secondary-btn text-xs"
+                    onClick={() => postMessage({ type: "applyAgentPreset", presetName: preset.name })}
+                  >
+                    Apply
+                  </button>
+                  <button
+                    type="button"
+                    className="p-1.5 rounded text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-errorForeground)] hover:bg-[var(--vscode-list-hoverBackground)]"
+                    onClick={async () => {
+                      if (await confirmAsync(`Delete preset "${preset.name}"?`)) {
+                        postMessage({ type: "deleteAgentPreset", presetName: preset.name })
+                      }
+                    }}
+                    title="Delete preset"
+                    aria-label="Delete preset"
+                  >
+                    <TrashIcon className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
+        )}
+        {presetCreateOpen && (
+          <AgentPresetCreateModal
+            name={presetCreateName}
+            setName={setPresetCreateName}
+            vector={presetCreateVector}
+            setVector={setPresetCreateVector}
+            options={agentPresetOptions}
+            selectedSkills={presetCreateSkills}
+            setSelectedSkills={setPresetCreateSkills}
+            selectedMcp={presetCreateMcp}
+            setSelectedMcp={setPresetCreateMcp}
+            selectedRules={presetCreateRules}
+            setSelectedRules={setPresetCreateRules}
+            onSave={() => {
+              const name = presetCreateName.trim()
+              if (!name) return
+              postMessage({
+                type: "createAgentPreset",
+                preset: {
+                  name,
+                  vector: presetCreateVector,
+                  skills: Array.from(presetCreateSkills),
+                  mcpServers: Array.from(presetCreateMcp),
+                  rulesFiles: Array.from(presetCreateRules),
+                  modelProvider: provider,
+                  modelId: model,
+                },
+              })
+              setPresetCreateOpen(false)
+              requestAgentPresets()
+            }}
+            onClose={() => setPresetCreateOpen(false)}
+          />
         )}
       </section>
       )}
@@ -1029,7 +1145,7 @@ function SettingsView() {
   )
 }
 
-/** Indexing & Docs panel (reference layout). */
+/** Indexing panel (codebase index, ignore files, vector/advanced). */
 function IndexingAndDocsView({
   draft,
   setDraft,
@@ -1063,7 +1179,7 @@ function IndexingAndDocsView({
 
   return (
     <div className="nexus-section">
-      <h3 className="nexus-section-title">Indexing &amp; Docs</h3>
+      <h3 className="nexus-section-title">Indexing</h3>
 
       <div className="nexus-panel-block">
         <h4 className="nexus-panel-section-title">
@@ -1152,23 +1268,6 @@ function IndexingAndDocsView({
         </div>
       </div>
 
-      <div className="nexus-panel-block mt-3">
-        <h4 className="nexus-panel-section-title">
-          Docs
-          <button type="button" className="nexus-secondary-btn text-xs ml-auto">
-            + Add Doc
-          </button>
-        </h4>
-        <p className="nexus-panel-section-desc">Crawl and index custom resources and developer docs.</p>
-        <div className="nexus-no-docs-placeholder">
-          <div className="mb-2">No Docs Added</div>
-          <p className="text-[11px] mb-2">Add documentation to use as context. You can also use @ in chat to reference docs.</p>
-          <button type="button" className="nexus-secondary-btn text-xs">
-            Add Doc
-          </button>
-        </div>
-      </div>
-
       <details className="mt-3">
         <summary className="nexus-muted text-xs cursor-pointer">Vector DB &amp; advanced</summary>
         <div className="mt-2 space-y-2">
@@ -1200,6 +1299,10 @@ function RulesSkillsSubagentsView({
   setIncludeThirdParty: (v: boolean) => void
   onOpenRulesInstructions?: () => void
 }) {
+  const skillDefinitions = useChatStore((s) => s.skillDefinitions)
+  const setInputValue = useChatStore((s) => s.setInputValue)
+  const setView = useChatStore((s) => s.setView)
+
   const rulesFiles = useMemo(() => {
     const fromClaude = draft.claudeMdPath.trim() ? [draft.claudeMdPath.trim()] : []
     const fromText = draft.rulesFilesText.split("\n").map((s) => s.trim()).filter(Boolean)
@@ -1256,14 +1359,17 @@ function RulesSkillsSubagentsView({
     })
   }
 
+  const startCreateSkill = () => {
+    setInputValue("/create-skill ")
+    setView("chat")
+  }
+
   const RULES_SHOW = 5
-  const SKILLS_SHOW = 5
   const rulesVisible = rulesFilter === "all" ? rulesFiles : rulesFiles.slice(0, RULES_SHOW)
   const rulesMore = rulesFiles.length - RULES_SHOW
-  const skillsVisible = skillsList.slice(0, SKILLS_SHOW)
-  const skillsMore = skillsList.length - SKILLS_SHOW
   const skillPath = (s: string | { path: string; enabled: boolean }) => (typeof s === "string" ? s : s.path)
   const skillEnabled = (s: string | { path: string; enabled: boolean }) => (typeof s === "string" ? true : s.enabled)
+  const getSkillDef = (path: string) => skillDefinitions.find((d) => d.path === path)
 
   return (
     <div className="nexus-integrations-block">
@@ -1288,25 +1394,27 @@ function RulesSkillsSubagentsView({
       <div className="nexus-panel-block mt-3">
         <div className="nexus-panel-section-title">
           Skills
-          <button type="button" className="nexus-secondary-btn text-xs" onClick={addSkill}>
+          <button type="button" className="nexus-secondary-btn text-xs" onClick={startCreateSkill} title="Open chat with /create-skill to describe the new skill">
             + New
           </button>
         </div>
         <p className="nexus-panel-section-desc">
-          Skills are specialized capabilities that help the agent accomplish specific tasks. Skills will be invoked when relevant or can be triggered manually with / in chat.
+          Skills are specialized capabilities that help the agent accomplish specific tasks. Skills will be invoked when relevant or can be triggered manually with / in chat. Use &quot;+ New&quot; to create a skill in chat via /create-skill.
         </p>
         <div className="flex flex-col gap-1.5">
-          {skillsVisible.length === 0 ? (
-            <div className="nexus-muted text-xs">No skills configured. Add paths in MCP &amp; Skills or edit raw list in Instructions.</div>
+          {skillsList.length === 0 ? (
+            <div className="nexus-muted text-xs">No skills configured. Add paths in MCP &amp; Skills or edit raw list in Instructions. Use &quot;+ New&quot; to create a skill in chat.</div>
           ) : (
-            skillsVisible.map((item, i) => {
+            skillsList.map((item, i) => {
               const path = skillPath(item)
-              const name = path.split("/").filter(Boolean).pop() || path
+              const def = getSkillDef(path)
+              const name = def?.name ?? path.split("/").filter(Boolean).pop() ?? path
+              const summary = def?.summary ?? ""
               const enabled = skillEnabled(item)
               return (
                 <div
                   key={i}
-                  className="flex items-center justify-between gap-2 rounded border border-[var(--vscode-panel-border)] px-2 py-1.5 bg-[var(--vscode-editor-inactiveSelectionBackground)]/20"
+                  className="flex items-center gap-2 flex-wrap rounded border border-[var(--vscode-panel-border)] px-2 py-1.5 bg-[var(--vscode-editor-inactiveSelectionBackground)]/20"
                 >
                   <label className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer">
                     <input
@@ -1324,7 +1432,13 @@ function RulesSkillsSubagentsView({
                       onKeyDown={(e) => e.key === "Enter" && postMessage({ type: "openSkillFolder", path })}
                     >
                       <div className="text-xs font-medium truncate">{name}</div>
-                      <div className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">{path}</div>
+                      {summary ? (
+                        <div className="text-[10px] text-[var(--vscode-descriptionForeground)] line-clamp-2" title={summary}>
+                          {summary}
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">{path}</div>
+                      )}
                     </div>
                   </label>
                   <button type="button" className="p-1 text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] flex-shrink-0" onClick={() => removeSkill(i)} title="Remove" aria-label="Remove">
@@ -1333,11 +1447,6 @@ function RulesSkillsSubagentsView({
                 </div>
               )
             })
-          )}
-          {skillsMore > 0 && (
-            <button type="button" className="text-xs text-[var(--vscode-textLink-foreground)] hover:underline self-start">
-              Show all ({skillsMore} more)
-            </button>
           )}
         </div>
       </div>
@@ -1360,6 +1469,12 @@ function IntegrationsMcpView({
   const servers = parseJsonArray(draft.mcpServersJson)
   const statusByName = Object.fromEntries(mcpStatus.map((r) => [r.name, r]))
 
+  // Remote server form state (Cline-style)
+  const [remoteName, setRemoteName] = useState("")
+  const [remoteUrl, setRemoteUrl] = useState("")
+  const [remoteTransport, setRemoteTransport] = useState<"sse" | "http">("sse")
+  const [remoteError, setRemoteError] = useState("")
+
   const updateServers = (next: Array<Record<string, unknown>>) => {
     setDraft((d) => ({ ...d, mcpServersJson: JSON.stringify(next, null, 2) }))
   }
@@ -1376,6 +1491,36 @@ function IntegrationsMcpView({
 
   const addServer = () => {
     updateServers([...servers, { name: "New server", command: "", enabled: true }])
+  }
+
+  const addRemoteServer = () => {
+    setRemoteError("")
+    const name = remoteName.trim()
+    const url = remoteUrl.trim()
+    if (!name) {
+      setRemoteError("Server name is required")
+      return
+    }
+    if (!url) {
+      setRemoteError("Server URL is required")
+      return
+    }
+    try {
+      new URL(url)
+    } catch {
+      setRemoteError("Invalid URL format")
+      return
+    }
+    const entry: Record<string, unknown> = {
+      name,
+      url,
+      transport: remoteTransport,
+      enabled: true,
+    }
+    updateServers([...servers, entry])
+    setRemoteName("")
+    setRemoteUrl("")
+    setMcpTab("configure")
   }
 
   const serverName = (s: Record<string, unknown>) =>
@@ -1411,150 +1556,249 @@ function IntegrationsMcpView({
         </button>
       </div>
 
+      {/* Marketplace (Cline-style) */}
       {mcpTab === "marketplace" && (
-        <div className="space-y-3">
-          <p className="nexus-muted text-[11px]">Browse and add MCP servers from official and community sources.</p>
+        <div className="flex flex-col gap-4">
+          <p className="text-[13px] text-[var(--vscode-descriptionForeground)]">
+            Browse and add MCP servers from official and community sources.
+          </p>
           <div className="flex flex-col gap-2">
-            <button
-              type="button"
-              onClick={() => postMessage({ type: "openExternal", url: "https://github.com/modelcontextprotocol/servers" })}
-              className="text-left px-3 py-2 rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 hover:bg-[var(--vscode-list-hoverBackground)] text-xs"
+            <a
+              href="#"
+              onClick={(e) => { e.preventDefault(); postMessage({ type: "openExternal", url: "https://github.com/modelcontextprotocol/servers" }) }}
+              className="block px-4 py-3 rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 hover:bg-[var(--vscode-list-hoverBackground)] no-underline text-inherit"
             >
-              <span className="font-medium text-[var(--vscode-foreground)]">GitHub — MCP Servers</span>
-              <span className="block text-[10px] text-[var(--vscode-descriptionForeground)] mt-0.5">Browse community servers</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => postMessage({ type: "openExternal", url: "https://registry.modelcontextprotocol.io" })}
-              className="text-left px-3 py-2 rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 hover:bg-[var(--vscode-list-hoverBackground)] text-xs"
+              <span className="font-semibold text-[13px] text-[var(--vscode-foreground)]">GitHub — MCP Servers</span>
+              <span className="block text-[12px] text-[var(--vscode-descriptionForeground)] mt-1">Browse community servers</span>
+            </a>
+            <a
+              href="#"
+              onClick={(e) => { e.preventDefault(); postMessage({ type: "openExternal", url: "https://registry.modelcontextprotocol.io" }) }}
+              className="block px-4 py-3 rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 hover:bg-[var(--vscode-list-hoverBackground)] no-underline text-inherit"
             >
-              <span className="font-medium text-[var(--vscode-foreground)]">MCP Registry</span>
-              <span className="block text-[10px] text-[var(--vscode-descriptionForeground)] mt-0.5">Official registry</span>
-            </button>
+              <span className="font-semibold text-[13px] text-[var(--vscode-foreground)]">MCP Registry</span>
+              <span className="block text-[12px] text-[var(--vscode-descriptionForeground)] mt-1">Official registry</span>
+            </a>
+          </div>
+          {/* Submit MCP Server card (Cline-style) */}
+          <div
+            className="flex flex-col items-center gap-3 py-4 px-4 rounded-md text-center"
+            style={{ backgroundColor: "var(--vscode-textBlockQuote-background)" }}
+          >
+            <i className="codicon codicon-add text-[18px]" />
+            <div className="flex flex-col items-center gap-1 max-w-[480px]">
+              <h3 className="m-0 text-sm font-semibold text-[var(--vscode-foreground)]">Submit MCP Server</h3>
+              <p className="text-[13px] m-0 text-[var(--vscode-descriptionForeground)]">
+                Help others discover great MCP servers by submitting an issue to{" "}
+                <button
+                  type="button"
+                  className="text-[var(--vscode-textLink-foreground)] hover:underline bg-transparent border-none cursor-pointer p-0"
+                  onClick={() => postMessage({ type: "openExternal", url: "https://github.com/modelcontextprotocol/servers" })}
+                >
+                  github.com/modelcontextprotocol/servers
+                </button>
+              </p>
+            </div>
           </div>
         </div>
       )}
 
+      {/* Remote Servers (Cline-style form) */}
       {mcpTab === "remote" && (
-        <div className="space-y-3">
-          <p className="nexus-muted text-[11px]">Add a remote MCP server by URL. Then enable it in Configure.</p>
-          <p className="text-[11px] text-[var(--vscode-foreground)]">
-            Add an entry in <button type="button" className="text-[var(--vscode-textLink-foreground)] hover:underline" onClick={() => setMcpTab("configure")}>Configure</button> with <code className="px-1 py-0.5 rounded bg-[var(--vscode-textCodeBlock-background)] text-[10px]">url</code> set to your server URL (e.g. <code className="px-1 py-0.5 rounded bg-[var(--vscode-textCodeBlock-background)] text-[10px]">https://...</code> or <code className="px-1 py-0.5 rounded bg-[var(--vscode-textCodeBlock-background)] text-[10px]">sse://...</code>).
+        <div className="p-4 px-5">
+          <p className="text-[13px] text-[var(--vscode-foreground)] mb-3">
+            Add a remote MCP server by providing a name and its URL endpoint. Learn more{" "}
+            <button
+              type="button"
+              className="text-[var(--vscode-textLink-foreground)] hover:underline bg-transparent border-none cursor-pointer p-0"
+              onClick={() => postMessage({ type: "openExternal", url: "https://modelcontextprotocol.io" })}
+            >
+              here
+            </button>
+            .
           </p>
+          <div className="flex flex-col gap-2 mb-3">
+            <label className="text-xs font-medium text-[var(--vscode-foreground)]">Server Name</label>
+            <input
+              type="text"
+              className="nexus-input w-full text-xs"
+              placeholder="mcp-server"
+              value={remoteName}
+              onChange={(e) => { setRemoteName(e.target.value); setRemoteError("") }}
+            />
+          </div>
+          <div className="flex flex-col gap-2 mb-3">
+            <label className="text-xs font-medium text-[var(--vscode-foreground)]">Server URL</label>
+            <input
+              type="text"
+              className="nexus-input w-full text-xs"
+              placeholder="https://example.com/mcp-server"
+              value={remoteUrl}
+              onChange={(e) => { setRemoteUrl(e.target.value); setRemoteError("") }}
+            />
+          </div>
+          <div className="flex flex-col gap-2 mb-3">
+            <span className="text-xs font-medium text-[var(--vscode-foreground)]">Transport Type</span>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="remoteTransport"
+                  checked={remoteTransport === "sse"}
+                  onChange={() => setRemoteTransport("sse")}
+                  className="rounded-full"
+                />
+                <span className="text-xs">SSE</span>
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="remoteTransport"
+                  checked={remoteTransport === "http"}
+                  onChange={() => setRemoteTransport("http")}
+                  className="rounded-full"
+                />
+                <span className="text-xs">HTTP</span>
+              </label>
+            </div>
+          </div>
+          {remoteError && (
+            <div className="mb-3 text-xs text-[var(--vscode-errorForeground)]">{remoteError}</div>
+          )}
+          <button type="button" className="nexus-btn nexus-btn-primary w-full text-xs py-2" onClick={addRemoteServer}>
+            Add Server
+          </button>
+          <button
+            type="button"
+            className="nexus-secondary-btn w-full text-xs py-2 mt-3"
+            onClick={() => setMcpTab("configure")}
+          >
+            Configure MCP Servers
+          </button>
         </div>
       )}
 
+      {/* Configure (Cline-style description + server list + test) */}
       {mcpTab === "configure" && (
         <>
-      <p className="nexus-muted text-[10px] mb-2">
-        MCP servers run as separate processes or remote URLs. Add entries below or edit raw JSON.
-      </p>
-      <div className="flex flex-wrap gap-2 mb-2">
-        <button
-          type="button"
-          className="nexus-secondary-btn text-xs"
-          onClick={() => postMessage({ type: "openMcpConfig" })}
-          title="Open .nexus/mcp-servers.json in editor"
-        >
-          Open MCP JSON
-        </button>
-        <button
-          type="button"
-          className="nexus-secondary-btn text-xs"
-          disabled={testing || servers.length === 0}
-          onClick={async () => {
-            setTesting(true)
-            postMessage({ type: "testMcpServers" })
-            setTimeout(() => setTesting(false), 8000)
-          }}
-          title="Test connectivity of each server"
-        >
-          {testing ? "Testing…" : "Test servers"}
-        </button>
-        <button
-          type="button"
-          onClick={() => postMessage({ type: "openExternal", url: "https://github.com/modelcontextprotocol/servers" })}
-          className="text-xs text-[var(--vscode-textLink-foreground)] hover:underline bg-transparent border-none cursor-pointer p-0"
-        >
-          Marketplace — browse MCP servers
-        </button>
-        <button
-          type="button"
-          onClick={() => postMessage({ type: "openExternal", url: "https://registry.modelcontextprotocol.io" })}
-          className="text-xs text-[var(--vscode-textLink-foreground)] hover:underline bg-transparent border-none cursor-pointer p-0"
-          title="Official MCP Registry"
-        >
-          MCP Registry
-        </button>
-      </div>
-      <div className="flex flex-col gap-2 mb-2">
-        {servers.length === 0 ? (
-          <div className="nexus-muted text-xs">No MCP servers configured. Add entries or open .nexus/mcp-servers.json.</div>
-        ) : (
-          servers.map((s, i) => {
-            const name = serverName(s)
-            const status = statusByName[name]
-            return (
-              <div
-                key={i}
-                className="flex items-center gap-2 flex-wrap rounded border border-[var(--vscode-panel-border)] p-2 bg-[var(--vscode-editor-inactiveSelectionBackground)]/30"
-              >
-                <label className="flex items-center gap-1.5 flex-shrink-0">
-                  <input
-                    type="checkbox"
-                    checked={(s as Record<string, unknown>).enabled !== false}
-                    onChange={(e) => setEnabled(i, e.target.checked)}
-                  />
-                  <span className="text-xs font-medium truncate max-w-[120px]" title={name}>
-                    {name}
-                  </span>
-                </label>
-                {status && (
-                  <span
-                    className={`text-[10px] px-1.5 py-0.5 rounded ${status.status === "ok" ? "bg-green-500/20 text-green-600 dark:text-green-400" : "bg-red-500/20 text-red-600 dark:text-red-400"}`}
-                    title={status.error}
-                  >
-                    {status.status === "ok" ? "OK" : "Error"}
-                  </span>
-                )}
-                <span className="text-[10px] font-mono text-[var(--vscode-descriptionForeground)] truncate flex-1 min-w-0" title={serverCommand(s)}>
-                  {serverCommand(s)}
-                </span>
-                <button
-                  type="button"
-                  className="nexus-secondary-btn text-xs py-0.5 px-1.5"
-                  onClick={() => removeAt(i)}
-                  title="Remove server"
-                >
-                  Remove
-                </button>
+          <p className="text-[13px] text-[var(--vscode-foreground)] mb-4 leading-relaxed">
+            The{" "}
+            <button
+              type="button"
+              className="text-[var(--vscode-textLink-foreground)] hover:underline bg-transparent border-none cursor-pointer p-0"
+              onClick={() => postMessage({ type: "openExternal", url: "https://modelcontextprotocol.io" })}
+            >
+              Model Context Protocol
+            </button>{" "}
+            enables communication with locally running MCP servers that provide additional tools and resources to extend
+            the agent&apos;s capabilities. You can use{" "}
+            <button
+              type="button"
+              className="text-[var(--vscode-textLink-foreground)] hover:underline bg-transparent border-none cursor-pointer p-0"
+              onClick={() => postMessage({ type: "openExternal", url: "https://github.com/modelcontextprotocol/servers" })}
+            >
+              community-made servers
+            </button>{" "}
+            or ask the agent to create new tools specific to your workflow (e.g. &quot;add a tool that gets the latest npm docs&quot;).
+          </p>
+
+          <div className="flex flex-wrap gap-2 mb-3">
+            <button
+              type="button"
+              className="nexus-btn nexus-btn-primary text-xs py-1.5 px-3"
+              onClick={() => postMessage({ type: "openMcpConfig" })}
+              title="Open .nexus/mcp-servers.json in editor"
+            >
+              <span className="codicon codicon-server mr-1.5" />
+              Configure MCP Servers
+            </button>
+            <button
+              type="button"
+              className="nexus-secondary-btn text-xs py-1.5 px-3"
+              disabled={testing || servers.length === 0}
+              onClick={() => {
+                setTesting(true)
+                postMessage({ type: "testMcpServers" })
+                setTimeout(() => setTesting(false), 8000)
+              }}
+              title="Test connectivity of each server"
+            >
+              <span className="codicon codicon-debug-restart mr-1.5" />
+              {testing ? "Testing…" : "Test servers"}
+            </button>
+          </div>
+
+          <div className="flex flex-col gap-2 mb-3">
+            {servers.length === 0 ? (
+              <div className="text-xs text-[var(--vscode-descriptionForeground)] py-4 text-center">
+                No MCP servers configured. Add entries above or open .nexus/mcp-servers.json. Use the checkbox to enable or disable each server (all its tools).
               </div>
-            )
-          })
-        )}
-      </div>
-      <div className="flex flex-wrap gap-2 mb-2">
-        <button type="button" className="nexus-secondary-btn text-xs" onClick={addServer}>
-          Add server
-        </button>
-      </div>
-      <label className="nexus-field">
-        <span
-          className="text-xs cursor-pointer text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
-          onClick={() => setShowRaw((r) => !r)}
-        >
-          {showRaw ? "Hide" : "Edit"} raw JSON
-        </span>
-        {showRaw && (
-          <textarea
-            value={draft.mcpServersJson}
-            rows={6}
-            onChange={(e) => setDraft((d) => ({ ...d, mcpServersJson: e.target.value }))}
-            className="nexus-input mt-1 w-full font-mono text-[10px]"
-            style={{ fontFamily: "var(--vscode-editor-font-family)" }}
-          />
-        )}
-      </label>
+            ) : (
+              servers.map((s, i) => {
+                const name = serverName(s)
+                const status = statusByName[name]
+                return (
+                  <div
+                    key={i}
+                    className="flex items-center gap-2 flex-wrap rounded border border-[var(--vscode-panel-border)] p-2 bg-[var(--vscode-editor-inactiveSelectionBackground)]/30"
+                  >
+                    <label className="flex items-center gap-1.5 flex-shrink-0 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={(s as Record<string, unknown>).enabled !== false}
+                        onChange={(e) => setEnabled(i, e.target.checked)}
+                      />
+                      <span className="text-xs font-medium truncate max-w-[140px]" title={name}>
+                        {name}
+                      </span>
+                    </label>
+                    {status && (
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${status.status === "ok" ? "bg-green-500/20 text-green-600 dark:text-green-400" : "bg-red-500/20 text-red-600 dark:text-red-400"}`}
+                        title={status.error}
+                      >
+                        {status.status === "ok" ? "OK" : "Error"}
+                      </span>
+                    )}
+                    <span className="text-[10px] font-mono text-[var(--vscode-descriptionForeground)] truncate flex-1 min-w-0" title={serverCommand(s)}>
+                      {serverCommand(s)}
+                    </span>
+                    <button
+                      type="button"
+                      className="nexus-secondary-btn text-xs py-0.5 px-1.5 flex-shrink-0"
+                      onClick={() => removeAt(i)}
+                      title="Remove server"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )
+              })
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2 mb-2">
+            <button type="button" className="nexus-secondary-btn text-xs py-1 px-2" onClick={addServer}>
+              Add server
+            </button>
+          </div>
+          <div className="mt-4 pt-2 border-t border-[var(--vscode-panel-border)]">
+            <button
+              type="button"
+              className="text-xs text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] bg-transparent border-none cursor-pointer p-0"
+              onClick={() => setShowRaw((r) => !r)}
+            >
+              {showRaw ? "Hide" : "Edit"} raw JSON
+            </button>
+            {showRaw && (
+              <textarea
+                value={draft.mcpServersJson}
+                rows={6}
+                onChange={(e) => setDraft((d) => ({ ...d, mcpServersJson: e.target.value }))}
+                className="nexus-input mt-2 w-full font-mono text-[10px] block"
+                style={{ fontFamily: "var(--vscode-editor-font-family)" }}
+              />
+            )}
+          </div>
         </>
       )}
     </div>
@@ -1662,9 +1906,9 @@ function TabPill({
   setTab,
   label,
 }: {
-  id: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles"
-  tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles"
-  setTab: (tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles") => void
+  id: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles" | "presets"
+  tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles" | "presets"
+  setTab: (tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles" | "presets") => void
   label: string
 }) {
   const active = tab === id
@@ -1702,9 +1946,13 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     vectorDbUrl: config.vectorDb?.url ?? "http://127.0.0.1:6333",
     vectorDbAutoStart: config.vectorDb?.autoStart ?? true,
     filterTools: config.tools.classifyToolsEnabled === true,
-    toolClassifyThreshold: String(config.tools.classifyThreshold ?? 15),
+    toolClassifyThreshold: String(
+      config.tools.classifyThreshold === 9999 ? 20 : (config.tools.classifyThreshold ?? 20)
+    ),
     filterSkills: config.skillClassifyEnabled === true,
-    skillClassifyThreshold: String(config.skillClassifyThreshold ?? 8),
+    skillClassifyThreshold: String(
+      config.skillClassifyThreshold === 9999 ? 20 : (config.skillClassifyThreshold ?? 20)
+    ),
     parallelReads: Boolean(config.tools.parallelReads),
     maxParallelReads: String(config.tools.maxParallelReads ?? 5),
     mcpServersJson: JSON.stringify(config.mcp?.servers ?? [], null, 2),
@@ -1740,9 +1988,9 @@ function getDefaultDraft(): SettingsDraft {
     vectorDbUrl: "http://127.0.0.1:6333",
     vectorDbAutoStart: true,
     filterTools: false,
-    toolClassifyThreshold: "15",
+    toolClassifyThreshold: "20",
     filterSkills: false,
-    skillClassifyThreshold: "8",
+    skillClassifyThreshold: "20",
     parallelReads: true,
     maxParallelReads: "5",
     mcpServersJson: "[]",
@@ -1776,8 +2024,8 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       : embProvider === "openai-compatible"
         ? (isLikelyHttpUrl(embBaseUrlRaw) ? embBaseUrlRaw : undefined)
         : (embBaseUrlRaw || undefined)
-  const toolThresholdRaw = parsePositiveInt(draft.toolClassifyThreshold, 15)
-  const skillThresholdRaw = parsePositiveInt(draft.skillClassifyThreshold, 8)
+  const toolThresholdRaw = parsePositiveInt(draft.toolClassifyThreshold, 20)
+  const skillThresholdRaw = parsePositiveInt(draft.skillClassifyThreshold, 20)
   const mcpServers = parseJsonArray(draft.mcpServersJson)
   const skillsConfig = draft.skillsConfig ?? linesToList(draft.skillsText).map((p) => ({ path: p, enabled: true }))
   const skills = skillsConfig.filter((s) => s.enabled).map((s) => s.path)
@@ -2073,6 +2321,144 @@ function PlusIcon({ className }: { className?: string }) {
       <line x1="12" y1="5" x2="12" y2="19" />
       <line x1="5" y1="12" x2="19" y2="12" />
     </svg>
+  )
+}
+
+function AgentPresetCreateModal({
+  name,
+  setName,
+  vector,
+  setVector,
+  options,
+  selectedSkills,
+  setSelectedSkills,
+  selectedMcp,
+  setSelectedMcp,
+  selectedRules,
+  setSelectedRules,
+  onSave,
+  onClose,
+}: {
+  name: string
+  setName: (v: string) => void
+  vector: boolean
+  setVector: (v: boolean) => void
+  options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } | null
+  selectedSkills: Set<string>
+  setSelectedSkills: (s: Set<string>) => void
+  selectedMcp: Set<string>
+  setSelectedMcp: (s: Set<string>) => void
+  selectedRules: Set<string>
+  setSelectedRules: (s: Set<string>) => void
+  onSave: () => void
+  onClose: () => void
+}) {
+  const toggleSkill = (item: string) => {
+    const next = new Set(selectedSkills)
+    if (next.has(item)) next.delete(item)
+    else next.add(item)
+    setSelectedSkills(next)
+  }
+  const toggleMcp = (item: string) => {
+    const next = new Set(selectedMcp)
+    if (next.has(item)) next.delete(item)
+    else next.add(item)
+    setSelectedMcp(next)
+  }
+  const toggleRule = (item: string) => {
+    const next = new Set(selectedRules)
+    if (next.has(item)) next.delete(item)
+    else next.add(item)
+    setSelectedRules(next)
+  }
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onClose}
+      role="dialog"
+      aria-label="Create agent preset"
+    >
+      <div
+        className="bg-[var(--vscode-editor-background)] border border-[var(--vscode-panel-border)] rounded-lg shadow-xl max-w-xl w-full max-h-[85vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--vscode-panel-border)]">
+          <h3 className="text-sm font-semibold text-[var(--vscode-foreground)]">New agent preset</h3>
+          <button type="button" onClick={onClose} className={BTN_CLASS} aria-label="Close">×</button>
+        </div>
+        <div className="p-3 space-y-3 overflow-y-auto min-h-0 flex-1">
+          <label className="nexus-field block">
+            <span className="nexus-field-label">Name</span>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="preset-name"
+              className="nexus-input w-full text-sm"
+            />
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={vector} onChange={(e) => setVector(e.target.checked)} />
+            <span className="text-xs text-[var(--vscode-foreground)]">Vector search on</span>
+          </label>
+          {!options ? (
+            <p className="nexus-muted text-xs">Loading skills, MCP servers, and rules…</p>
+          ) : (
+            <>
+              <div>
+                <h4 className="text-xs font-semibold text-[var(--vscode-foreground)] mb-1.5">Skills</h4>
+                <div className="max-h-32 overflow-y-auto rounded border border-[var(--vscode-panel-border)] p-1.5 space-y-1">
+                  {options.skills.length === 0 ? (
+                    <p className="nexus-muted text-[10px]">No skills discovered.</p>
+                  ) : (
+                    options.skills.map((item) => (
+                      <label key={item} className="flex items-center gap-2 cursor-pointer hover:bg-[var(--vscode-list-hoverBackground)] rounded px-1.5 py-0.5">
+                        <input type="checkbox" checked={selectedSkills.has(item)} onChange={() => toggleSkill(item)} />
+                        <span className="text-[11px] font-mono truncate text-[var(--vscode-foreground)]" title={item}>{item}</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              </div>
+              <div>
+                <h4 className="text-xs font-semibold text-[var(--vscode-foreground)] mb-1.5">MCP servers</h4>
+                <div className="max-h-24 overflow-y-auto rounded border border-[var(--vscode-panel-border)] p-1.5 space-y-1">
+                  {options.mcpServers.length === 0 ? (
+                    <p className="nexus-muted text-[10px]">No MCP servers in config.</p>
+                  ) : (
+                    options.mcpServers.map((item) => (
+                      <label key={item} className="flex items-center gap-2 cursor-pointer hover:bg-[var(--vscode-list-hoverBackground)] rounded px-1.5 py-0.5">
+                        <input type="checkbox" checked={selectedMcp.has(item)} onChange={() => toggleMcp(item)} />
+                        <span className="text-[11px] truncate text-[var(--vscode-foreground)]" title={item}>{item}</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              </div>
+              <div>
+                <h4 className="text-xs font-semibold text-[var(--vscode-foreground)] mb-1.5">Rules (AGENTS.md, CLAUDE.md, …)</h4>
+                <div className="max-h-24 overflow-y-auto rounded border border-[var(--vscode-panel-border)] p-1.5 space-y-1">
+                  {options.rulesFiles.length === 0 ? (
+                    <p className="nexus-muted text-[10px]">No rule files.</p>
+                  ) : (
+                    options.rulesFiles.map((item) => (
+                      <label key={item} className="flex items-center gap-2 cursor-pointer hover:bg-[var(--vscode-list-hoverBackground)] rounded px-1.5 py-0.5">
+                        <input type="checkbox" checked={selectedRules.has(item)} onChange={() => toggleRule(item)} />
+                        <span className="text-[11px] font-mono truncate text-[var(--vscode-foreground)]" title={item}>{item}</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-[var(--vscode-panel-border)]">
+          <button type="button" className="nexus-secondary-btn text-xs" onClick={onClose}>Cancel</button>
+          <button type="button" className="nexus-primary-btn text-xs" onClick={onSave} disabled={!name.trim() || !options}>Save preset</button>
+        </div>
+      </div>
+    </div>
   )
 }
 

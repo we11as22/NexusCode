@@ -132,16 +132,18 @@ export const NexusConfigSchema = z.object({
 
   tools: z.object({
     custom: z.array(z.string()).default([]),
-    /** When true, use LLM to filter MCP/custom tools by task when count > classifyThreshold. Default off. */
+    /** When true, use LLM to filter which MCP servers to use when server count > classifyThreshold. Default off. */
     classifyToolsEnabled: z.boolean().default(false),
-    classifyThreshold: z.number().int().positive().default(15),
+    /** Threshold: when MCP server count exceeds this, classifier selects which servers to use. Default 20. */
+    classifyThreshold: z.number().int().positive().default(20),
     parallelReads: z.boolean().default(true),
     maxParallelReads: z.number().int().positive().default(5),
   }).default({}),
 
   /** When true, use LLM to filter skills by task when count > skillClassifyThreshold. Default off. */
   skillClassifyEnabled: z.boolean().default(false),
-  skillClassifyThreshold: z.number().int().positive().default(8),
+  /** Threshold for skill classification. Default 20. */
+  skillClassifyThreshold: z.number().int().positive().default(20),
 
   structuredOutput: z.enum(["auto", "always", "never"]).default("auto"),
 

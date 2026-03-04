@@ -121,8 +121,7 @@ export function ModeDropdown() {
       <button
         ref={buttonRef}
         type="button"
-        onClick={() => !isRunning && setOpen((o) => !o)}
-        disabled={isRunning}
+        onClick={() => setOpen((o) => !o)}
         title={current.description}
         className="nexus-mode-pill flex items-center gap-1.5"
       >

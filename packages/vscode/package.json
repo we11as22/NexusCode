@@ -1,7 +1,7 @@
 {
   "name": "nexuscode",
   "displayName": "NexusCode",
-  "description": "AI coding agent combining best practices from all vibe-coding tools",
+  "description": "AI coding agent combining best practices from Cline, Continue, KiloCode, OpenCode, Roo-Code: agent/plan/debug/ask modes, AST + optional vector indexing, MCP, skills, rules, parallel tools, NexusCode Server. Repository: https://github.com/we11as22/NexusCode",
   "version": "0.1.0",
   "private": true,
   "publisher": "nexuscode",
@@ -10,7 +10,14 @@
   },
   "categories": ["AI", "Chat", "Programming Languages"],
   "keywords": ["ai", "coding", "agent", "claude", "gpt", "nexus"],
-  "repository": { "type": "git", "url": "https://github.com/we11as22/NexusCode" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/we11as22/NexusCode"
+  },
+  "homepage": "https://github.com/we11as22/NexusCode#readme",
+  "bugs": {
+    "url": "https://github.com/we11as22/NexusCode/issues"
+  },
   "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "scripts": {
@@ -118,23 +125,6 @@
       }
     ],
     "menus": {
-      "view/title": [
-        {
-          "command": "nexuscode.chatClicked",
-          "group": "navigation@1",
-          "when": "view == nexuscode.sidebar"
-        },
-        {
-          "command": "nexuscode.settingsClicked",
-          "group": "navigation@2",
-          "when": "view == nexuscode.sidebar"
-        },
-        {
-          "command": "nexuscode.sessionsClicked",
-          "group": "overflow@1",
-          "when": "view == nexuscode.sidebar"
-        }
-      ],
       "editor/context": [
         {
           "command": "nexuscode.addToChat",
@@ -269,12 +259,12 @@
         },
         "nexuscode.toolClassifyThreshold": {
           "type": "number",
-          "default": 15,
-          "description": "Dynamic tool filtering threshold. Higher = less filtering."
+          "default": 20,
+          "description": "MCP server filtering threshold. When server count exceeds this, only selected servers are used. Higher = less filtering."
         },
         "nexuscode.skillClassifyThreshold": {
           "type": "number",
-          "default": 8,
+          "default": 20,
           "description": "Skill filtering threshold. Higher = less filtering."
         },
         "nexuscode.enableCheckpoints": {

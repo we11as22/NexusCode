@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
-import { getExploredFromParts, ExploredSummaryInline } from "./ExploredProgressBlock.js"
+import { getExploredFromParts, getExploredPrefixFromParts, ExploredSummaryInline } from "./ExploredProgressBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 
@@ -246,15 +246,26 @@ function AssistantText({ text }: { text: string }) {
 }
 
 function AssistantParts({ parts, isComplete }: { parts: MessagePart[]; isComplete: boolean }) {
-  const toolParts = parts.filter((p): p is ToolPart => p.type === "tool")
-  const fileEditParts = toolParts.filter((p) => FILE_EDIT_TOOLS.has(p.tool))
-  const otherToolParts = toolParts.filter((p) => !FILE_EDIT_TOOLS.has(p.tool))
-  const explored = getExploredFromParts(otherToolParts)
-  const hasExploredBlock = (explored.filesCount > 0 || explored.searchesCount > 0) && otherToolParts.length > 0
+  const { prefixParts, prefixIndices } = getExploredPrefixFromParts(parts)
+  const explored = getExploredFromParts(prefixParts)
+  const hasExploredBlock = (explored.filesCount > 0 || explored.searchesCount > 0) && prefixParts.length > 0
 
   return (
     <div className="space-y-3">
+      {/* Explored block at top so it doesn't jump when new content streams below; only exploration tools before first other tool/text */}
+      {hasExploredBlock && (
+        <ExploredSummaryInline
+          filesCount={explored.filesCount}
+          searchesCount={explored.searchesCount}
+          entries={explored.entries}
+          defaultCollapsed={isComplete}
+          onOpenFile={(path, line, endLine) =>
+            postMessage({ type: "openFileAtLocation", path, line, endLine })
+          }
+        />
+      )}
       {parts.map((part, i) => {
+        if (prefixIndices.has(i)) return null
         if (part.type === "text") {
           const text = (part as { text: string }).text
           if (!text || !text.trim()) return null
@@ -285,17 +296,6 @@ function AssistantParts({ parts, isComplete }: { parts: MessagePart[]; isComplet
         }
         return null
       })}
-      {hasExploredBlock && (
-        <ExploredSummaryInline
-          filesCount={explored.filesCount}
-          searchesCount={explored.searchesCount}
-          entries={explored.entries}
-          defaultCollapsed={isComplete}
-          onOpenFile={(path, line, endLine) =>
-            postMessage({ type: "openFileAtLocation", path, line, endLine })
-          }
-        />
-      )}
     </div>
   )
 }

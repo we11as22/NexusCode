@@ -40,6 +40,10 @@ export interface WebviewState {
   serverUrl?: string
   /** Checkpoint entries for rollback (Cline-style). */
   checkpointEntries?: Array<{ hash: string; ts: number; description?: string; messageId?: string }>
+  /** Plan mode: plan_exit was called; show New session / Continue / Dismiss (Kilocode-style). */
+  planCompleted?: boolean
+  /** Plan text for "New session" option (set when planCompleted). */
+  planFollowupText?: string | null
 }
 
 export type ExtensionMessage =
@@ -56,3 +60,5 @@ export type ExtensionMessage =
   | { type: "confirmResult"; id: string; ok: boolean }
   | { type: "modelsCatalog"; catalog: ModelsCatalogFromCore }
   | { type: "agentPresets"; presets: AgentPresetFromCore[] }
+  | { type: "agentPresetOptions"; options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } }
+  | { type: "skillDefinitions"; definitions: Array<{ name: string; path: string; summary: string }> }

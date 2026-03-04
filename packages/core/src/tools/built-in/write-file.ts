@@ -1,5 +1,4 @@
 import { z } from "zod"
-import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as diff from "diff"
 import type { ToolDef, ToolContext } from "../../types.js"
@@ -28,25 +27,20 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
 
   async execute({ path: filePath, content }, ctx: ToolContext) {
     const absPath = path.resolve(ctx.cwd, filePath)
-    const dirPath = path.dirname(absPath)
 
     let oldContent: string | null = null
     try {
-      oldContent = await fs.readFile(absPath, "utf8")
+      const exists = await ctx.host.exists(filePath)
+      if (exists) {
+        oldContent = await ctx.host.readFile(filePath)
+      }
     } catch {
       // File does not exist — new file
     }
 
-    // Create directories if needed
-    await fs.mkdir(dirPath, { recursive: true })
-
-    // Atomic write: write to temp file, then rename
-    const tmpPath = `${absPath}.nexus_tmp_${Date.now()}`
     try {
-      await fs.writeFile(tmpPath, content, "utf8")
-      await fs.rename(tmpPath, absPath)
+      await ctx.host.writeFile(filePath, content)
     } catch (err) {
-      try { await fs.unlink(tmpPath) } catch {}
       return { success: false, output: `Failed to write ${filePath}: ${(err as Error).message}` }
     }
 
@@ -79,7 +73,7 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
     return {
       success: true,
       output: `Successfully wrote ${filePath} (${newLines} lines)`,
-      metadata: { addedLines, removedLines, diffHunks },
+      metadata: { addedLines, removedLines, diffHunks, writtenContent: content },
     }
   },
 }

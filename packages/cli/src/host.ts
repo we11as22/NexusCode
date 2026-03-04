@@ -71,6 +71,7 @@ export class CliHost implements IHost {
       cwd: cwd || this.cwd,
       reject: false,
       timeout: 120_000,
+      signal,
     })
     return {
       stdout: result.stdout ?? "",

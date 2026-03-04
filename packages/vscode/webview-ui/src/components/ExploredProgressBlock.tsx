@@ -15,6 +15,31 @@ export interface ExploredEntry {
 const FILE_TOOLS = new Set(["read_file", "list_files"])
 const SEARCH_TOOLS = new Set(["grep", "codebase_search", "search_files", "list_code_definitions"])
 
+/** Whether this tool counts as exploration (file read/list or search) for the collapsed "Explored" block. */
+export function isExplorationTool(tool: string): boolean {
+  return FILE_TOOLS.has(tool) || SEARCH_TOOLS.has(tool)
+}
+
+/** Parts from the start until first non-exploration (text, reasoning, or other tool). Used so Explored block only shows the leading run. */
+export function getExploredPrefixFromParts(parts: MessagePart[]): {
+  prefixParts: ToolPart[]
+  prefixIndices: Set<number>
+} {
+  const prefixParts: ToolPart[] = []
+  const prefixIndices = new Set<number>()
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!
+    if (part.type === "text" || part.type === "reasoning") break
+    if (part.type === "tool") {
+      const toolPart = part as ToolPart
+      if (!isExplorationTool(toolPart.tool)) break
+      prefixParts.push(toolPart)
+      prefixIndices.add(i)
+    }
+  }
+  return { prefixParts, prefixIndices }
+}
+
 function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
   const id = `${part.id}-${index}`
   const durationSec =

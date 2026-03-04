@@ -12,6 +12,7 @@ const AT_MENTION_SUGGESTIONS = [
 export function InputBar() {
   const { inputValue, isRunning, awaitingApproval, setInputValue, sendMessage, abort } = useChatStore()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [suggestions, setSuggestions] = useState(AT_MENTION_SUGGESTIONS)
 
@@ -22,6 +23,14 @@ export function InputBar() {
     textareaRef.current.style.height = "auto"
     textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, max)}px`
   }
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => autosize())
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -79,7 +88,7 @@ export function InputBar() {
   }, [inputValue])
 
   return (
-    <div className="relative flex-1 min-w-0 flex flex-col overflow-hidden">
+    <div ref={containerRef} className="relative flex-1 min-w-0 flex flex-col overflow-hidden">
       {showSuggestions && (
         <div className="absolute bottom-full left-0 right-0 bg-[var(--vscode-editor-background)] border border-[var(--vscode-panel-border)] rounded-t-xl overflow-hidden shadow-lg z-10">
           {suggestions.map(s => (

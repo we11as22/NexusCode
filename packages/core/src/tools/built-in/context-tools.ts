@@ -63,21 +63,29 @@ When NOT to use:
 }
 
 /**
- * Plan exit — signal that planning is complete (OpenCode-style).
- * Only available in plan mode. Ends the agent loop like attempt_completion.
+ * Plan exit — signal that planning is complete (Kilocode/OpenCode-style).
+ * Only available in plan mode. Ends the agent loop; host may show "Ready to implement?" (New session / Continue here).
  */
 const planExitSchema = z.object({
-  summary: z.string().describe("Brief summary of the plan for the user"),
+  summary: z.string().optional().describe("Optional brief summary of the plan for the user"),
   task_progress: z.string().optional(),
 })
 
 export const planExitTool: ToolDef<z.infer<typeof planExitSchema>> = {
   name: "plan_exit",
-  description: `Signal that planning is complete (plan mode only). Call after writing the plan to .nexus/plans/ and present a short summary to the user. Ends the turn like attempt_completion in agent mode.`,
+  description: `Signal that planning is complete (plan mode only). Call once you have finalized the plan file and are confident it is ready. This ends your planning turn and hands control back to the user.
+
+Call this tool:
+- After you have written a complete plan to the plan file
+- After you have clarified any questions with the user
+- When you are confident the plan is ready for implementation
+
+Do NOT call this tool before you have created or finalized the plan, or if you still have unanswered questions.`,
   parameters: planExitSchema,
   modes: ["plan"],
 
-  async execute({ summary }, ctx: ToolContext) {
+  async execute(args, ctx: ToolContext) {
+    const summary = args.summary?.trim() ?? "Plan is ready."
     return { success: true, output: `Plan complete.\n\n${summary}` }
   },
 }

@@ -22,254 +22,74 @@
 
 ---
 
-## CLI в одну команду после клона (как OpenCode)
+## Documentation
 
-Склонируй репо, затем **одна команда** — всё ставится, `nexus` потом вызывается из любого места.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — System layers, key decisions, invariants, data flow, project layout.
+- **[DOCS.md](DOCS.md)** — Full project documentation in Russian: installation, configuration reference, modes, indexing, tools, CLI, VS Code extension, MCP, skills, rules, troubleshooting.
 
-**Важно:** используй **Node 20** при установке и при запуске `nexus` (нативный модуль better-sqlite3 привязан к версии Node).
-Для TUI также нужен **Bun** (OpenTUI runtime): `curl -fsSL https://bun.sh/install | bash`.
+---
+
+## One-command CLI setup (after clone)
+
+Clone the repo, then a **single command** installs everything; `nexus` can be run from anywhere afterward.
+
+**Important:** use **Node 20** for both install and when running `nexus` (the native module `better-sqlite3` is tied to the Node version). For the TUI you also need **Bun** (OpenTUI runtime): `curl -fsSL https://bun.sh/install | bash`.
 
 ```bash
 git clone <repo> NexusCode && cd NexusCode
-nvm use 20          # или: nvm use (если есть .nvmrc)
-pnpm run cli        # одна команда: install → rebuild native → build → установка nexus в ~/bin
+nvm use 20          # or: nvm use (if .nvmrc exists)
+pnpm run cli        # one command: install → rebuild native → build → install nexus to ~/bin
 ```
 
-Один раз добавь в `~/.bashrc` (или `~/.profile`):
+Add to `~/.bashrc` (or `~/.profile`) once:
 
 ```bash
 export PATH="$HOME/bin:$PATH"
 ```
 
-Дальше в **любом** терминале и из **любой** директории:
+Then in **any** terminal and from **any** directory:
 
 ```bash
 nexus
 ```
 
-Обновить после изменений в коде — снова (под той же Node 20):
+To update after code changes (with the same Node 20):
 
 ```bash
 cd NexusCode && nvm use 20 && pnpm run cli
 ```
 
-Если при первом запуске `nexus` видишь `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED` — значит `nexus` запущен под другой версией Node, чем при установке. Выполни `nvm use 20` в этом терминале и снова запусти `nexus`. Обёртка в `~/bin/nexus` запоминает Node из шага установки; если переключил nvm после установки, переустанови: `pnpm run cli`.
+If on first run you see `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`, `nexus` is running under a different Node version than at install time. Run `nvm use 20` in that terminal and start `nexus` again. The wrapper in `~/bin/nexus` remembers the Node from install; if you switched nvm after install, reinstall with `pnpm run cli`.
 
 ---
 
-## Установка в одну команду (полная переустановка)
+## One-command full install (clean reinstall)
 
-**Актуальная версия NexusCode — только из этого репо.** В проекте включён **локальный store** (`.npmrc` → `store-dir=.pnpm-store`), поэтому конфликта с глобальным pnpm не будет.
+**The only up-to-date NexusCode build is from this repo.** The project uses a **local store** (`.npmrc` → `store-dir=.pnpm-store`), so there is no conflict with the global pnpm store.
 
-Из корня репозитория, в среде с **Node.js 20** (например `nvm use 20`):
+From the repo root with **Node.js 20** (e.g. `nvm use 20`):
 
 ```bash
 pnpm run one
 ```
 
-Одна команда: удаляет `node_modules` и `.pnpm-store` → ставит зависимости → нативные модули **better-sqlite3** → полная сборка. После неё запускай CLI: `node packages/cli/dist/index.js` (или сделай глобальную команду: `cd packages/cli && npm link`).
+This single command: removes `node_modules` and `.pnpm-store` → installs dependencies → builds native **better-sqlite3** → full build. Then run the CLI: `node packages/cli/dist/index.js` (or make a global command: `cd packages/cli && npm link`).
 
-**Вариант «всё сразу» (CLI глобально + .vsix расширения):**
+**Option “everything at once” (global CLI + .vsix extension):**
 
 ```bash
 pnpm run ready
 ```
 
-Делает то же, что `pnpm run one`, плюс упаковка расширения и `npm link` для команды `nexus`. Дальше: **CLI** — `nexus` из любого каталога; **расширение** — установи `packages/vscode/nexuscode-0.1.0.vsix` в VS Code (Extensions → «…» → Install from VSIX).
+Does the same as `pnpm run one`, plus packages the extension and `npm link` for the `nexus` command. Result: **CLI** — `nexus` from any directory; **extension** — install `packages/vscode/nexuscode-0.1.0.vsix` in VS Code (Extensions → "…" → Install from VSIX).
 
-**Если при запуске `nexus` ошибка `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`** — запускаешь под другой версией Node, чем при сборке. Включи Node 20 (`nvm use 20`), в корне репо выполни `pnpm run one` и снова запускай `nexus`.
-
----
-
-## Сборка и установка (по шагам)
-
-### Запуск за две команды (CLI)
-
-Из корня репозитория, в среде с **Node.js 20** (например `nvm use`):
-
-```bash
-pnpm run setup
-nexus
-```
-
-Команда `pnpm run setup` делает: `pnpm install` → загрузка пресобранных бинарников **better-sqlite3** (`setup:native`) → `pnpm build`. Для установки без возни с store лучше использовать **`pnpm run one`** (чистая установка в локальный store).
-
-**Если `setup:native` не находит пресобранный бинарь** (например, редкая платформа) — нужны инструменты сборки (python3, make, g++). Тогда после `pnpm install` выполни вручную: `pnpm rebuild better-sqlite3`, затем `pnpm build`.
-
-Запуск CLI после setup: `node packages/cli/dist/index.js` (или `nexus`, если сделал `cd packages/cli && npm link`).
-
-### Полный билд: глобальная команда `nexus` + .vsix для теста
-
-Проще всего — одна команда **`pnpm run ready`** (см. раздел выше). Вручную то же самое:
-
-```bash
-nvm use
-pnpm run fullbuild
-cd packages/cli && npm link && cd ../..
-```
-
-После этого: **CLI** — команда `nexus` доступна глобально; **расширение** — `packages/vscode/nexuscode-0.1.0.vsix` (установка: **Extensions** → «…» → **Install from VSIX...**). После следующих полных билдов достаточно снова выполнить `cd packages/cli && npm link`.
-
-### Требования (версии)
-
-| Что | Версия | Заметка |
-|-----|--------|---------|
-| **Node.js** | **20+** | Обязательно для сборки, **и для запуска** `nexus` и `pnpm run serve`: нативный модуль better-sqlite3 привязан к версии Node. Если в терминале Node 18 и вы видите ошибку `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED` — выполните в этом же терминале `nvm use 20` и снова запустите `nexus` или `pnpm run serve`. Для упаковки .vsix тоже нужен Node 20 (в Node 18 vsce падает). |
-| **pnpm** | актуальная | Рекомендуется: `npm install -g pnpm` |
-
-В репозитории есть **`.nvmrc`** с версией `20` — при использовании nvm достаточно выполнить в корне:
-```bash
-nvm use
-```
-Проверка Node:
-```bash
-node -v   # для упаковки .vsix должно быть v20.x или выше
-```
-Если Node &lt; 20: `nvm use 20` или установи Node 20 с [nodejs.org](https://nodejs.org/).
+**If `nexus` shows `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`** — you are running under a different Node version than the one used at build time. Use Node 20 (`nvm use 20`), run `pnpm run one` from the repo root, then start `nexus` again.
 
 ---
 
-### VS Code расширение
+## Build and install (step by step)
 
-#### 1. Клонирование и зависимости
-
-Из корня репозитория:
-
-```bash
-cd NexusCode
-pnpm install
-```
-
-Если в CI или при жёстком lockfile: `pnpm install --no-frozen-lockfile`.
-
-#### 2. Сборка
-
-Собрать все пакеты (core, webview-ui, расширение):
-
-```bash
-pnpm build
-```
-
-Что происходит:
-- `packages/core` — сборка движка агента (tsup)
-- `packages/vscode/webview-ui` — сборка React-интерфейса (Vite)
-- `packages/vscode` — сборка расширения (esbuild) и копирование webview в `webview-ui/dist`
-
-Сборка только расширения (если core уже собран):
-
-```bash
-pnpm build:core && pnpm build:vscode
-```
-
-Или из каталога расширения:
-
-```bash
-cd packages/vscode
-pnpm build
-```
-
-#### 3. Упаковка в .vsix
-
-Из **корня** репозитория:
-
-```bash
-pnpm package:vscode
-```
-
-Эта команда выполняет `pnpm build` и затем упаковывает расширение в один файл.  
-Файл создаётся в `packages/vscode/` с именем **`nexuscode-0.1.0.vsix`**.
-
-Требуется **Node.js 20+**. Если версия Node меньше 20, скрипт выведет ошибку и подсказку.
-
-Упаковка только из каталога расширения (если всё уже собрано):
-
-```bash
-cd packages/vscode
-pnpm package
-```
-
-#### 4. Установка в VS Code
-
-**Способ A — через интерфейс VS Code**
-
-1. Открой VS Code.
-2. Панель **Extensions** (Ctrl+Shift+X / Cmd+Shift+X).
-3. Вверху панели нажми **«…»** → **Install from VSIX...**.
-4. Укажи **полный путь** к файлу, например:
-   - Windows: `C:\Users\...\NexusCode\packages\vscode\nexuscode-0.1.0.vsix`
-   - Linux/macOS: `/home/user/NexusCode/packages/vscode/nexuscode-0.1.0.vsix`
-
-**Способ B — из терминала**
-
-В терминале (путь к `.vsix` — полный или относительный):
-
-```bash
-code --install-extension /полный/путь/к/NexusCode/packages/vscode/nexuscode-0.1.0.vsix
-```
-
-Пример из каталога репозитория:
-
-```bash
-code --install-extension "$(pwd)/packages/vscode/nexuscode-0.1.0.vsix"
-```
-
-После установки **перезапусти VS Code**. В боковой панели появится иконка NexusCode; панель открывается по **Ctrl+Shift+N** (Cmd+Shift+N на Mac).
-
-**При работе через SSH:** команда `code --install-extension` может вести себя иначе; надёжнее установить расширение через меню **Extensions → … → Install from VSIX...**. Файл `.vsix` должен быть доступен на **той машине, где запущен VS Code Server** (при необходимости собери и упакуй расширение на сервере и укажи локальный путь к нему).
-
-#### 5. Разработка расширения (без установки .vsix)
-
-- Открой в VS Code папку **`NexusCode/packages/vscode`**.
-- Нажми **F5** (Run → Start Debugging) — откроется окно **Extension Development Host** с загруженным расширением.
-- После изменений: пересобери из корня `pnpm build` (или `pnpm build` в `packages/vscode`), затем в окне Extension Development Host нажми **Ctrl+R** (Cmd+R) для перезагрузки расширения.
-
-Сборка в watch-режиме (только extension.js, без webview):
-
-```bash
-cd packages/vscode && pnpm dev
-```
-
----
-
-### CLI (терминал)
-
-Сборка и установка CLI для использования в терминале:
-
-```bash
-# Из корня NexusCode
-pnpm install
-pnpm build:cli
-```
-
-Бинарник и скрипт попадают в `packages/cli/dist/`. Для вызова из любого каталога:
-
-**Вариант 1 — через npm link (глобальная команда `nexus`):**
-
-```bash
-cd packages/cli
-npm link
-nexus --help
-```
-
-**Вариант 2 — запуск напрямую:**
-
-```bash
-node /полный/путь/к/NexusCode/packages/cli/dist/index.js --help
-```
-
-Или, если в `packages/cli` есть исполняемый скрипт:
-
-```bash
-/полный/путь/к/NexusCode/packages/cli/dist/nexus --help
-```
-
-После `npm link` команда `nexus` доступна глобально в терминале.
-
----
-
-## Installation (English)
-
-### Quick start (two commands)
+### Two-command CLI start
 
 From the repo root with **Node.js 20** (e.g. `nvm use`):
 
@@ -278,101 +98,169 @@ pnpm run setup
 nexus
 ```
 
-`pnpm run setup` runs: `pnpm install` → downloads prebuilt **better-sqlite3** binaries (`setup:native`) → `pnpm build`. Then `nexus` starts the CLI.
+`pnpm run setup` runs: `pnpm install` → downloads prebuilt **better-sqlite3** binaries (`setup:native`) → `pnpm build`. For a clean install without store issues, prefer **`pnpm run one`** (full reinstall into the local store).
 
-If pnpm reports **Unexpected store location**, set the store once (path from the error), then run setup again:
+**If `setup:native` does not find a prebuilt binary** (e.g. uncommon platform) — you need build tools (python3, make, g++). After `pnpm install` run manually: `pnpm rebuild better-sqlite3`, then `pnpm build`.
 
-```bash
-pnpm config set store-dir /path/from/error/message --global
-pnpm run setup
-nexus
-```
-
-If **bindings file** is missing after setup, run `pnpm rebuild better-sqlite3` (requires build tools: python3, make, g++), then `pnpm build`.  
-Run CLI: `node packages/cli/dist/index.js` or `nexus` after `npm link` from `packages/cli`.
+CLI after setup: `node packages/cli/dist/index.js` (or `nexus` if you ran `cd packages/cli && npm link`).
 
 ### Full build: global `nexus` command + .vsix for testing
 
-To have the latest CLI as the global `nexus` command and a fresh VS Code extension file:
+Easiest is the single command **`pnpm run ready`** (see above). Manually, the same steps:
 
 ```bash
-cd /path/to/NexusCode
 nvm use
 pnpm run fullbuild
 cd packages/cli && npm link && cd ../..
 ```
 
-Then:
-- **CLI:** `nexus` is available globally and uses the newly built code (from any directory).
-- **Extension:** `packages/vscode/nexuscode-0.1.0.vsix` is the latest build for testing. Install via **Extensions** (Ctrl+Shift+X) → "..." → **Install from VSIX...** and select that file.
-
-If you already ran `npm link` from `packages/cli` before, run it again after each full build so the global `nexus` points to the new build.
+Result: **CLI** — `nexus` is available globally; **extension** — `packages/vscode/nexuscode-0.1.0.vsix` (install via **Extensions** → "…" → **Install from VSIX...**). After later full builds, run `cd packages/cli && npm link` again.
 
 ### Requirements (versions)
 
 | Requirement | Version | Note |
 |-------------|---------|------|
-| **Node.js** | **20+** | Required for `pnpm package:vscode`; on Node 18, `vsce` (undici) fails with `File is not defined`. The rest of the build (`pnpm build`) runs on Node 18. |
+| **Node.js** | **20+** | Required for build **and** for running `nexus` and `pnpm run serve`: the native module better-sqlite3 is tied to the Node version. If you see `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED` in a terminal with Node 18, run `nvm use 20` in that terminal and start `nexus` or `pnpm run serve` again. Packaging .vsix also requires Node 20 (vsce fails on Node 18). |
 | **pnpm** | current | Recommended: `npm install -g pnpm` |
 
-The repo includes **`.nvmrc`** set to `20`. With nvm, run in the project root: `nvm use`. If Node &lt; 20: `nvm use 20` or install Node 20 from [nodejs.org](https://nodejs.org/).
+The repo has **`.nvmrc`** set to `20`. With nvm, run in the root: `nvm use`. Check Node: `node -v` (for .vsix packaging you need v20.x or higher). If Node &lt; 20: `nvm use 20` or install Node 20 from [nodejs.org](https://nodejs.org/).
 
-### VS Code Extension
+---
 
-**Build and install from source:**
+### VS Code extension
 
-1. Clone the repo and install dependencies:
-   ```bash
-   cd NexusCode
-   pnpm install
-   ```
-   If install fails due to lockfile (e.g. in CI): `pnpm install --no-frozen-lockfile`
+#### 1. Clone and dependencies
 
-2. Build all packages (core, extension, webview):
-   ```bash
-   pnpm build
-   ```
-   Or only the extension: `pnpm build:core && pnpm build:vscode`
-
-3. Package the extension as `.vsix`:
-   ```bash
-   pnpm package:vscode
-   ```
-   The file is created in `packages/vscode/` as `nexuscode-0.1.0.vsix`.  
-   **Node.js 20+** is required (vsce fails on Node 18 with `File is not defined`). Use `nvm use 20` or install Node 20.  
-   To package from the extension folder:
-   ```bash
-   cd packages/vscode && pnpm install && pnpm package
-   ```
-
-4. Install in VS Code:
-   - Open VS Code → **Extensions** (Ctrl+Shift+X)
-   - Click "…" at the top → **Install from VSIX...**
-   - Choose the **full path** to the file, e.g.  
-     `C:\...\NexusCode\packages\vscode\nexuscode-0.1.0.vsix` or  
-     `/path/to/NexusCode/packages/vscode/nexuscode-0.1.0.vsix`
-
-   Or from the terminal:
-   ```bash
-   code --install-extension /path/to/NexusCode/packages/vscode/nexuscode-0.1.0.vsix
-   ```
-   When using **SSH**, install via the IDE menu; ensure the `.vsix` file exists on the **remote** machine if needed.
-
-5. Restart VS Code. The NexusCode icon appears in the sidebar; open the panel with **Ctrl+Shift+N** (Cmd+Shift+N on Mac).
-
-**Development (run without installing):**
-- Open the folder `NexusCode/packages/vscode` in VS Code
-- Press **F5** (Run → Start Debugging) — a second window "Extension Development Host" opens with the extension loaded
-- After code changes, rebuild (`pnpm build` from root or `packages/vscode`) and press **Ctrl+R** in the Extension Development Host to reload
-
-### CLI
+From the repo root:
 
 ```bash
+cd NexusCode
+pnpm install
+```
+
+If in CI or with a strict lockfile: `pnpm install --no-frozen-lockfile`.
+
+#### 2. Build
+
+Build all packages (core, webview-ui, extension):
+
+```bash
+pnpm build
+```
+
+What runs:
+- `packages/core` — agent engine build (tsup)
+- `packages/vscode/webview-ui` — React UI build (Vite)
+- `packages/vscode` — extension build (esbuild) and webview copy to `webview-ui/dist`
+
+Build only the extension (if core is already built):
+
+```bash
+pnpm build:core && pnpm build:vscode
+```
+
+Or from the extension directory:
+
+```bash
+cd packages/vscode
+pnpm build
+```
+
+#### 3. Package as .vsix
+
+From the **repo root**:
+
+```bash
+pnpm package:vscode
+```
+
+This runs `pnpm build` and then packages the extension into a single file. The file is created in `packages/vscode/` as **`nexuscode-0.1.0.vsix`**.
+
+**Node.js 20+** is required. If Node is below 20, the script will print an error and a hint.
+
+To package only from the extension directory (if everything is already built):
+
+```bash
+cd packages/vscode
+pnpm package
+```
+
+#### 4. Install in VS Code
+
+**Option A — via VS Code UI**
+
+1. Open VS Code.
+2. Open **Extensions** (Ctrl+Shift+X / Cmd+Shift+X).
+3. At the top of the panel click **"…"** → **Install from VSIX...**.
+4. Choose the **full path** to the file, e.g.:
+   - Windows: `C:\Users\...\NexusCode\packages\vscode\nexuscode-0.1.0.vsix`
+   - Linux/macOS: `/home/user/NexusCode/packages/vscode/nexuscode-0.1.0.vsix`
+
+**Option B — from terminal**
+
+In the terminal (full or relative path to the `.vsix`):
+
+```bash
+code --install-extension /full/path/to/NexusCode/packages/vscode/nexuscode-0.1.0.vsix
+```
+
+Example from the repo directory:
+
+```bash
+code --install-extension "$(pwd)/packages/vscode/nexuscode-0.1.0.vsix"
+```
+
+**Restart VS Code** after installing. The NexusCode icon appears in the sidebar; open the panel with **Ctrl+Shift+N** (Cmd+Shift+N on Mac).
+
+**Over SSH:** `code --install-extension` may behave differently; it is more reliable to install via **Extensions → … → Install from VSIX...**. The `.vsix` file must be available on **the machine where VS Code Server is running** (if needed, build and package the extension on the server and point to the local path).
+
+#### 5. Extension development (without installing .vsix)
+
+- Open the folder **`NexusCode/packages/vscode`** in VS Code.
+- Press **F5** (Run → Start Debugging) — an **Extension Development Host** window opens with the extension loaded.
+- After changes: rebuild from root with `pnpm build` (or `pnpm build` in `packages/vscode`), then press **Ctrl+R** (Cmd+R) in the Extension Development Host to reload.
+
+Watch build (extension.js only, no webview):
+
+```bash
+cd packages/vscode && pnpm dev
+```
+
+---
+
+### CLI (terminal)
+
+Build and install the CLI for use in the terminal:
+
+```bash
+# From NexusCode root
 pnpm install
 pnpm build:cli
-npm link packages/cli
+```
+
+The binary and script end up in `packages/cli/dist/`. To run from any directory:
+
+**Option 1 — via npm link (global `nexus` command):**
+
+```bash
+cd packages/cli
+npm link
 nexus --help
 ```
+
+**Option 2 — run directly:**
+
+```bash
+node /full/path/to/NexusCode/packages/cli/dist/index.js --help
+```
+
+Or, if there is an executable script in `packages/cli`:
+
+```bash
+/full/path/to/NexusCode/packages/cli/dist/nexus --help
+```
+
+After `npm link`, the `nexus` command is available globally in the terminal.
 
 ---
 
@@ -581,7 +469,7 @@ mcp:
       bundle: context-mode
 ```
 
-When many MCP tools are available, NexusCode automatically classifies which tools are relevant for the current task. Built-in tools are always available.
+When many **MCP servers** are configured, you can enable "Filter MCP servers when list is large" in Settings (Tools tab). The classifier then selects which **servers** to use for the task; all tools from selected servers are included. Built-in tools are always available.
 
 ### Context Mode (bundled)
 
@@ -611,29 +499,29 @@ Use `codebase_search` tool or `@problems` in chat to leverage the index.
 NexusCode/
 ├── packages/
 │   ├── core/              ← Provider-agnostic agent engine
-│   │   ├── agent/         ← Agent loop, modes, classifiers, prompts
-│   │   ├── tools/         ← Tool registry + 19 built-in tools
-│   │   ├── session/       ← JSONL storage + compaction
-│   │   ├── indexer/       ← AST + FTS + Qdrant
-│   │   ├── provider/      ← All LLM providers + embeddings
-│   │   ├── checkpoint/    ← Shadow git
-│   │   ├── context/       ← @mentions, rules, condense
-│   │   ├── skills/        ← Skill loader + classifier
-│   │   └── mcp/           ← MCP client
-│   ├── vscode/            ← VS Code extension + React UI
-│   └── cli/               ← CLI with Ink TUI
-└── .nexus/               ← Project config
-    ├── nexus.yaml
-    ├── rules/
-    └── skills/
+│   │   ├── agent/        ← Agent loop, modes, classifiers (MCP servers + skills), prompts
+│   │   ├── tools/        ← Tool registry + built-in tools
+│   │   ├── session/     ← JSONL storage + compaction
+│   │   ├── indexer/     ← AST + FTS + Qdrant
+│   │   ├── provider/    ← All LLM providers + embeddings
+│   │   ├── checkpoint/  ← Shadow git
+│   │   ├── context/     ← @mentions, rules, condense
+│   │   ├── skills/      ← Skill loader + classifier
+│   │   └── mcp/         ← MCP client
+│   ├── vscode/          ← VS Code extension + React UI
+│   ├── cli/             ← CLI + TUI (OpenTUI/React)
+│   └── server/          ← Optional: SQLite sessions, streaming API
+└── .nexus/               ← Project config (nexus.yaml, agent-configs.json, rules, skills)
 ```
+
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for details.
 
 ---
 
 ## Key Design Decisions
 
 1. **No step limits** — Doom loop detection (3 identical consecutive calls) prevents infinite loops
-2. **Built-in tools always active** — Mode permissions gate which tools are available; classifier only filters MCP/custom tools
+2. **Built-in tools always active** — Mode permissions gate which tools are available; the classifier filters by **MCP server** (and by skill) when thresholds are exceeded, not by individual tools.
 3. **Parallel reads** — Multiple read-only tools execute concurrently with `Promise.all`
 4. **Cache-aware prompts** — Stable blocks (role, rules, skills) use `cache_control: ephemeral` on Anthropic
 5. **Two-level compaction** — Fast prune (remove old tool outputs) + LLM compact (full summary) from OpenCode
@@ -643,8 +531,9 @@ NexusCode/
 
 ## Further Reading
 
-- Architecture details: `ARCHITECTURE.md`
-- Semantic changes: `docs/changes/`
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — System layers, controller pattern, MCP server filtering, invariants, data flow, project layout, dependencies, version requirements.
+- **[DOCS.md](DOCS.md)** — Full documentation (Russian): config reference, modes, indexing, tools, CLI, VS Code, MCP, skills, rules, troubleshooting.
+- **Semantic changes:** `docs/changes/`
 
 ---
 
