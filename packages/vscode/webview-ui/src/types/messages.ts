@@ -27,6 +27,8 @@ export interface WebviewState {
   contextPercent: number
   /** NexusCode server URL (from nexuscode.serverUrl). When set, extension uses server for sessions and runs. */
   serverUrl?: string
+  /** Checkpoint entries for rollback (Cline-style). */
+  checkpointEntries?: Array<{ hash: string; ts: number; description?: string; messageId?: string }>
 }
 
 export type ExtensionMessage =

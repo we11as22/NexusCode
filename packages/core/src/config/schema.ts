@@ -54,6 +54,7 @@ export const NexusConfigSchema = z.object({
   embeddings: embeddingSchema.optional(),
 
   vectorDb: z.object({
+    /** Disabled by default. Set to true to enable vector codebase search (requires Qdrant + embeddings). */
     enabled: z.boolean().default(false),
     url: z.string().default("http://localhost:6333"),
     collection: z.string().default("nexus"),
@@ -64,6 +65,7 @@ export const NexusConfigSchema = z.object({
     agent: modeConfigSchema.optional(),
     plan: modeConfigSchema.optional(),
     ask: modeConfigSchema.optional(),
+    debug: modeConfigSchema.optional(),
   }).catchall(modeConfigSchema.optional()).default({}),
 
   indexing: z.object({
@@ -73,6 +75,7 @@ export const NexusConfigSchema = z.object({
       "*.lock", ".next/**", ".nuxt/**", "coverage/**",
     ]),
     symbolExtract: z.boolean().default(true),
+    /** Disabled by default. Set to true with vectorDb.enabled to use semantic codebase_search. */
     vector: z.boolean().default(false),
     batchSize: z.number().int().positive().default(50),
     embeddingBatchSize: z.number().int().positive().default(60),
@@ -153,11 +156,13 @@ export const NexusConfigSchema = z.object({
       ask: z.number().int().positive().optional(),
       plan: z.number().int().positive().optional(),
       agent: z.number().int().positive().optional(),
+      debug: z.number().int().positive().optional(),
     }).optional(),
     maxIterations: z.object({
       ask: z.number().int().positive().optional(),
       plan: z.number().int().positive().optional(),
       agent: z.number().int().positive().optional(),
+      debug: z.number().int().positive().optional(),
     }).optional(),
   }).default({}),
 

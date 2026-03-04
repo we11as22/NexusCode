@@ -61,6 +61,17 @@ function SpinnerIcon({ className }: { className?: string }) {
   )
 }
 
+function ListIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="5" cy="6" r="1.5" />
+      <circle cx="5" cy="12" r="1.5" />
+      <line x1="9" y1="6" x2="20" y2="6" />
+      <line x1="9" y1="12" x2="20" y2="12" />
+    </svg>
+  )
+}
+
 function CircleIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -80,7 +91,7 @@ function FilledCircleIcon({ className }: { className?: string }) {
 interface Props {
   todo: string
   isRunning: boolean
-  /** Optional header (e.g. last user message). Falls back to "Progress". */
+  /** Optional header (ignored; title is always "To-dos N"). */
   header?: string
 }
 
@@ -89,7 +100,6 @@ export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
   const listRef = useRef<HTMLUListElement>(null)
   const itemRefs = useRef<(HTMLDivElement | null)[]>([])
   const { items, currentIndex, total } = useTodoWithProgress(todo, isRunning)
-  const headerText = header?.trim() || "Progress"
   const completedCount = items.filter((i) => i.done).length
   const allCompleted = total > 0 && completedCount === total
   const mostImportant = useMemo(() => getMostImportantTodo(items), [items])
@@ -123,25 +133,12 @@ export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
           mostImportant?.inProgress && !open ? "text-[var(--vscode-charts-yellow)]" : "text-[var(--vscode-foreground)]"
         }`}
       >
-        <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
-          {allCompleted ? (
-            <CheckIcon className="w-3.5 h-3.5 text-green-500" />
-          ) : (
-            <CircleIcon className="w-4 h-4 text-[var(--vscode-descriptionForeground)]" />
-          )}
+        <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center text-[var(--vscode-descriptionForeground)]">
+          <ListIcon className="w-4 h-4" />
         </span>
         <span className="flex-1 min-w-0 truncate">
-          {!open
-            ? allCompleted
-              ? `Complete (${completedCount})`
-              : mostImportant?.label ?? headerText
-            : `${completedCount}/${total} complete`}
+          To-dos {total}
         </span>
-        {!open && !allCompleted && (
-          <span className="flex-shrink-0 text-[10px] text-[var(--vscode-descriptionForeground)]">
-            {completedCount}/{total}
-          </span>
-        )}
         <span
           className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform"
           style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}

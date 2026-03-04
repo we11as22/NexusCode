@@ -8,7 +8,9 @@
   --nexus-accent: #0078d4;
   --nexus-accent-hover: #106ebe;
   --nexus-accent-muted: rgba(0, 120, 212, 0.15);
-  --nexus-chat-bg: var(--vscode-editor-background, #1e1e1e);
+  /* Slightly darker than VSCode sidebar for extension/chat area */
+  --nexus-panel-bg: color-mix(in srgb, var(--vscode-sideBar-background, #1a1a1a) 88%, #000 12%);
+  --nexus-chat-bg: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 92%, #000 8%);
   --nexus-user-bubble: rgba(0, 120, 212, 0.25);
   --nexus-assistant-bubble: var(--vscode-editor-inactiveSelectionBackground, rgba(255, 255, 255, 0.06));
 }
@@ -23,7 +25,7 @@ body {
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
   font-size: var(--vscode-font-size, 13px);
   color: var(--vscode-foreground, #cccccc);
-  background: var(--vscode-sideBar-background, #1a1a1a);
+  background: var(--nexus-panel-bg);
   overflow: hidden;
 }
 
@@ -125,10 +127,12 @@ html, body, #root {
   justify-content: space-between;
   gap: 8px;
   padding: 10px 12px;
+  min-width: 0;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--vscode-panel-border);
   background:
     radial-gradient(circle at 10% 0%, rgba(0, 120, 212, 0.18), transparent 50%),
-    linear-gradient(180deg, var(--vscode-sideBar-background), color-mix(in srgb, var(--vscode-sideBar-background) 84%, #000 16%));
+    linear-gradient(180deg, var(--nexus-panel-bg), color-mix(in srgb, var(--nexus-panel-bg) 84%, #000 16%));
 }
 
 .nexus-logo-dot {
@@ -144,8 +148,10 @@ html, body, #root {
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
+  min-width: 0;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--vscode-panel-border);
-  background: var(--vscode-editor-background);
+  background: var(--nexus-panel-bg);
 }
 
 .nexus-nav-minimal {
@@ -344,14 +350,18 @@ html, body, #root {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: var(--vscode-sideBar-background);
+  background: var(--nexus-panel-bg);
+  min-width: 0;
 }
 
 .nexus-pane {
   padding: 12px;
   overflow-y: auto;
+  overflow-x: hidden;
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
   display: flex;
   flex-direction: column;
   background:
@@ -478,8 +488,8 @@ html, body, #root {
 }
 
 .nexus-input:focus {
-  outline: 1px solid var(--nexus-accent);
-  border-color: var(--nexus-accent);
+  outline: none;
+  border-color: var(--vscode-focusBorder, var(--vscode-panel-border));
 }
 
 .nexus-settings-grid {
@@ -528,30 +538,51 @@ html, body, #root {
   padding: 6px 10px;
 }
 
-/* ========== Kilo Code layout (sources/kilocode webview-ui/src/styles/chat.css) ========== */
+/* ========== Chat Layout ========== */
 .container {
   display: flex;
   flex-direction: column;
   height: 100%;
   width: 100%;
+  max-width: 100%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
   position: relative;
+  background: var(--nexus-panel-bg);
 }
 
-.chat-view {
-  display: flex;
-  flex-direction: column;
+.nexus-main {
+  padding: 0;
+  overflow: hidden;
   flex: 1;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--nexus-panel-bg);
 }
-
+/* Fill available width in all views (chat, sessions, settings) */
 .nexus-main > .chat-view {
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.nexus-main > .nexus-pane {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .chat-messages-wrapper {
@@ -565,35 +596,80 @@ html, body, #root {
 }
 
 .chat-messages {
-  height: 100%;
+  flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+.chat-messages > * {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chat-input {
   flex-shrink: 0;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--nexus-panel-bg);
   border-top: 1px solid var(--vscode-panel-border);
 }
 
-.chat-bottom-bar {
+/* Single gray frame: input area + control row inside one bordered box */
+.chat-input .chat-bottom-bar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  background: var(--vscode-input-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 10px;
+  margin: 8px 12px 10px;
+}
+
+.chat-input .chat-input-area {
+  flex: 1;
+  min-height: 56px;
+  display: flex;
+  flex-direction: column;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  min-width: 0;
+}
+
+.chat-input .chat-control-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 8px;
+  min-height: 0;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.chat-input .chat-bottom-bar-left {
+  flex-shrink: 0;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px 12px;
-  border-top: 1px solid var(--vscode-panel-border);
-  background: var(--vscode-editor-background);
-  min-height: 0;
-  min-width: 0;
   overflow: hidden;
 }
 
-.chat-bottom-bar .prompt-input-container {
-  margin: 0;
+.chat-input .chat-bottom-bar-input-wrap {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
   overflow: hidden;
 }
 
@@ -752,6 +828,8 @@ html, body, #root {
   flex: 1;
   min-height: 0;
   min-width: 0;
+  width: 100%;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -760,6 +838,9 @@ html, body, #root {
 .message-list {
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
@@ -831,45 +912,161 @@ html, body, #root {
 
 .prompt-input-container {
   position: relative;
-  margin: 10px 12px 12px;
-  border-radius: 8px;
-  background-color: var(--vscode-input-background, #3c3c3c);
-  border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.1));
-  box-shadow: none;
+  flex: 1;
+  min-width: 0;
+  min-height: 54px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  transition: none;
 }
+
 .prompt-input-container:focus-within {
-  border-color: var(--nexus-accent);
+  border: none;
   box-shadow: none;
+  outline: none;
 }
 
 .prompt-input-wrapper {
   display: flex;
-  gap: 8px;
-  align-items: flex-end;
+  flex-direction: column;
   min-width: 0;
+  flex: 1;
+  background: transparent;
 }
 
+/* Max height = 2x base (54px * 2 = 108px); standard input look, no blue outline */
 .prompt-input {
   flex: 1;
   min-height: 54px;
-  max-height: 200px;
-  padding: 8px 8px calc(8px + 1.4em);
+  max-height: 108px;
+  padding: 10px 12px 8px;
   font-family: var(--vscode-font-family);
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 1.5;
   resize: none;
   outline: none;
   border: none;
-  background: transparent;
-  color: var(--vscode-input-foreground);
-  caret-color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background, var(--vscode-editor-background));
+  color: var(--vscode-input-foreground, var(--vscode-foreground));
+  caret-color: var(--vscode-foreground);
 }
+
+.prompt-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
 .prompt-input::placeholder {
-  color: var(--vscode-input-placeholderForeground);
+  color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
 }
 .prompt-input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Input bar control row — slightly smaller pills and send button */
+.nexus-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--vscode-foreground);
+  background: color-mix(in srgb, var(--vscode-foreground) 12%, var(--vscode-editor-background));
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  min-width: 0;
+}
+.nexus-mode-pill:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vscode-foreground) 18%, var(--vscode-editor-background));
+}
+.nexus-mode-pill:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.nexus-mode-pill svg {
+  flex-shrink: 0;
+  color: var(--vscode-foreground);
+}
+
+.nexus-profile-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--vscode-descriptionForeground);
+  background: color-mix(in srgb, var(--vscode-foreground) 10%, var(--vscode-editor-background));
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  min-width: 0;
+}
+.nexus-profile-pill:hover {
+  color: var(--vscode-foreground);
+  background: color-mix(in srgb, var(--vscode-foreground) 16%, var(--vscode-editor-background));
+}
+
+.nexus-profile-select {
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  background: transparent;
+  border: none;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  max-width: 140px;
+}
+.nexus-profile-select:hover {
+  color: var(--vscode-foreground);
+  background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.nexus-send-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, opacity 0.15s ease;
+  background: color-mix(in srgb, var(--vscode-foreground) 18%, var(--vscode-editor-background));
+  color: var(--vscode-foreground);
+}
+.nexus-send-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vscode-foreground) 28%, var(--vscode-editor-background));
+}
+.nexus-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.nexus-send-btn.nexus-send-btn-primary {
+  background: var(--nexus-accent);
+  color: #fff;
+}
+.nexus-send-btn.nexus-send-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
 }
 
 /* Smooth transitions */
@@ -972,7 +1169,14 @@ button, input, textarea {
   background: rgba(244, 67, 54, 0.35);
 }
 
-/* Focus — blue ring like Cursor */
+/* Focus — no blue ring on inputs; keep for keyboard nav on buttons only */
+.prompt-input:focus-visible,
+.nexus-input:focus-visible,
+textarea:focus-visible,
+input[type="text"]:focus-visible {
+  outline: none;
+}
+
 :focus-visible {
   outline: 2px solid var(--nexus-accent);
   outline-offset: 1px;
@@ -992,4 +1196,177 @@ button, input, textarea {
 @keyframes nexus-dot-pulse {
   0%, 80%, 100% { opacity: 0.35; transform: scale(0.9) }
   40% { opacity: 1; transform: scale(1.1) }
+}
+
+/* ========== Checkpoint strip (Cline-style rollback) ========== */
+.nexus-checkpoint-strip {
+  flex-shrink: 0;
+  padding: 8px 12px 10px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  background: color-mix(in srgb, var(--vscode-editor-background) 94%, var(--vscode-panel-border) 6%);
+  min-height: 36px;
+}
+
+.nexus-checkpoint-strip-inner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.nexus-checkpoint-icon {
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.9;
+}
+
+.nexus-checkpoint-dotted {
+  flex: 1;
+  min-width: 8px;
+  height: 1px;
+  background-image: linear-gradient(
+    to right,
+    var(--vscode-descriptionForeground) 50%,
+    transparent 50%
+  );
+  background-size: 4px 1px;
+  background-repeat: repeat-x;
+  opacity: 0.6;
+}
+
+.nexus-checkpoint-label {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.95;
+}
+
+.nexus-checkpoint-entries {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.nexus-checkpoint-entry-wrap {
+  position: relative;
+}
+
+.nexus-checkpoint-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-panel-border);
+  background: color-mix(in srgb, var(--vscode-editor-inactiveSelectionBackground) 70%, transparent);
+  font-size: 10px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.nexus-checkpoint-entry:hover {
+  border-color: color-mix(in srgb, var(--vscode-textLink-foreground) 50%, var(--vscode-panel-border));
+  background: color-mix(in srgb, var(--vscode-list-hoverBackground) 60%, var(--vscode-editor-background));
+}
+
+.nexus-checkpoint-entry-label {
+  color: var(--vscode-foreground);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexus-checkpoint-restore-btn {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--vscode-textLink-foreground);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 45%, transparent);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.nexus-checkpoint-restore-btn:hover {
+  background: var(--vscode-textLink-foreground);
+  color: var(--vscode-editor-background);
+}
+
+.nexus-checkpoint-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 100;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 12px;
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-editorGroup-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.nexus-checkpoint-popover::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 12px;
+  width: 10px;
+  height: 10px;
+  background: var(--vscode-editor-background);
+  border-left: 1px solid var(--vscode-editorGroup-border);
+  border-top: 1px solid var(--vscode-editorGroup-border);
+  transform: rotate(45deg);
+}
+
+.nexus-checkpoint-popover-desc {
+  margin: 0 0 12px 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-checkpoint-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.nexus-checkpoint-popover-cancel {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  background: var(--vscode-button-secondaryBackground);
+  border: 1px solid var(--vscode-button-secondaryBorder);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.nexus-checkpoint-popover-cancel:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.nexus-checkpoint-popover-confirm {
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.nexus-checkpoint-popover-confirm:hover {
+  background: var(--vscode-button-hoverBackground);
 }

@@ -11,6 +11,7 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
   agent: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents", "context"],
   plan:  ["always", "read", "write", "search", "browser", "mcp", "skills", "agents", "context", "plan_exit"],
   ask:   ["always", "read", "search", "browser", "mcp", "skills", "agents", "context"],
+  debug: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents", "context"],
 }
 
 /**
@@ -23,6 +24,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   agent: ["plan_exit"],
   plan:  ["execute_command"],
   ask:   ["write_to_file", "replace_in_file", "execute_command", "create_rule", "plan_exit"],
+  debug: ["plan_exit"],
 }
 
 /**
@@ -118,6 +120,7 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
     agent: ["read"],
     plan:  ["read"],
     ask:   ["read"],
+    debug: ["read"],
   }
   const configured = modeConfig?.autoApprove ?? defaults[mode]
   return new Set(configured)
@@ -130,4 +133,5 @@ export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   agent: "AGENT mode: full access — read/write files, run commands, search, browser, MCP, skills, spawn sub-agents (with full agent permissions). Execute tasks end-to-end. After plan approval, run with the approved plan and a detailed todo (fuller task descriptions).",
   plan:  "PLAN mode: (1) Study the task thoroughly — read codebase, search, browser, MCP, skills; write only the plan to .nexus/plans/*.md. (2) You may use spawn_agent for parallel research subtasks (sub-agents run in ask mode). (3) Call plan_exit when the plan is ready; user may approve (then execution continues in agent mode with the plan and detailed todo), revise, or abandon.",
   ask:   "ASK mode: read-only. Answer questions, explain code, analyze — use read, search, browser, MCP, skills. You may use spawn_agent for parallel read-only subtasks (sub-agents run in ask mode). Do NOT modify files, run commands, or use plan_exit.",
+  debug: "DEBUG mode: diagnose first, then fix. Use read/search/execute/write with strict discipline: list likely root causes, validate with evidence (logs/tests/repro), then apply minimal targeted fixes and re-verify.",
 }

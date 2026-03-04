@@ -191,7 +191,7 @@ export class ParallelAgentManager {
 const spawnSchema = z.object({
   description: z.string().describe("What should the sub-agent do? Provide a clear, self-contained task description."),
   context_summary: z.string().optional().describe("Optional summarized context (new_task style) to give the sub-agent before the task. Use when the subtask benefits from brief background (e.g. what we're building, which files matter)."),
-  mode: z.enum(["agent", "plan", "ask", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
+  mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for the sub-agent (default: agent). 'search'/'explore' map to ask mode."),
   task_progress: z.string().optional(),
 })
 
@@ -202,7 +202,7 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
 Use for independent subtasks that don't depend on each other. You can run several in parallel.
 Optionally pass \`context_summary\` (new_task style) to give the sub-agent brief background before the task.
 **When the main agent is in plan or ask mode**, sub-agents always run with ask (read-only) permissions.
-**When the main agent is in agent mode**, sub-agents can run in agent/plan/ask based on \`mode\` parameter.
+**When the main agent is in agent/debug mode**, sub-agents can run in agent/plan/ask/debug based on \`mode\` parameter.
 The sub-agent must call attempt_completion when the task is done; its result is returned to you.
 Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: spawnSchema,

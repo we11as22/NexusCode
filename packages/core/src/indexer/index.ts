@@ -30,7 +30,7 @@ interface PreparedFile {
 }
 
 /**
- * Codebase indexer: vector-only (Qdrant). No FTS.
+ * Codebase indexer: vector-only (Qdrant).
  * When vector client is missing, indexing is no-op and search returns [].
  */
 export class CodebaseIndexer implements IIndexer {

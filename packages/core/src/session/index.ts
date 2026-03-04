@@ -29,10 +29,11 @@ export class Session implements ISession {
   private _todo: string = ""
   private cwd: string
 
-  constructor(id: string, cwd: string, messages?: SessionMessage[]) {
+  constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string) {
     this.id = id
     this.cwd = cwd
     this._messages = messages ?? []
+    this._todo = typeof initialTodo === "string" ? initialTodo : ""
   }
 
   get messages(): SessionMessage[] {
@@ -127,6 +128,7 @@ export class Session implements ISession {
       cwd: this.cwd,
       ts: Date.now(),
       title: title || undefined,
+      todo: this._todo,
       messages: this._messages,
     }
     await saveSession(stored)
@@ -136,6 +138,7 @@ export class Session implements ISession {
     const stored = await loadSession(this.id, this.cwd)
     if (stored) {
       this._messages = stored.messages
+      this._todo = typeof stored.todo === "string" ? stored.todo : ""
     }
   }
 
@@ -146,7 +149,8 @@ export class Session implements ISession {
   static async resume(sessionId: string, cwd: string): Promise<Session | null> {
     const stored = await loadSession(sessionId, cwd)
     if (!stored) return null
-    return new Session(sessionId, cwd, stored.messages)
+    const todo = typeof stored.todo === "string" ? stored.todo : ""
+    return new Session(sessionId, cwd, stored.messages, todo)
   }
 }
 

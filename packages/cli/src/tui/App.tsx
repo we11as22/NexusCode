@@ -93,6 +93,7 @@ interface AppProps {
       agent?: { customInstructions?: string }
       plan?: { customInstructions?: string }
       ask?: { customInstructions?: string }
+      debug?: { customInstructions?: string }
     }
     profiles?: Record<string, Record<string, unknown>>
   }
@@ -102,7 +103,7 @@ interface AppProps {
   onIndexDelete?: () => void | Promise<void>
   /** Resolve pending tool approval (y/n/a/s). Called when user submits during awaitingApproval. */
   onResolveApproval?: (result: PermissionResult) => void
-  /** KiloCode-style: list sessions for switching (server or local). */
+  /** List sessions for switching (server or local). */
   getSessionList?: () => Promise<Array<{ id: string; ts?: number; title?: string; messageCount: number }>>
   onSwitchSession?: (sessionId: string) => Promise<void>
 }
@@ -127,12 +128,14 @@ const MODE_ICONS: Record<Mode, string> = {
   agent: "⚡",
   plan: "📋",
   ask: "💬",
+  debug: "🐞",
 }
 
 const MODE_COLORS: Record<Mode, string> = {
   agent: "#3ca0ff",
   plan: "#faf74f",
   ask: "#cccccc",
+  debug: "#ff9e3d",
 }
 
 const THEME = {
@@ -182,7 +185,7 @@ function toolDisplayName(tool: string): string {
   return TOOL_LABELS[tool] ?? tool
 }
 
-const MODES: Mode[] = ["agent", "plan", "ask"]
+const MODES: Mode[] = ["agent", "plan", "ask", "debug"]
 const MODEL_PROVIDERS = ["anthropic", "openai", "google", "openai-compatible", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"] as const
 const EMBEDDING_PROVIDERS = ["openai", "openai-compatible", "ollama", "local"] as const
 
@@ -230,18 +233,18 @@ const SLASH_COMMANDS: Array<{ cmd: string; label: string; desc: string; mode?: M
   { cmd: "agent", label: "/agent", desc: "Agent mode (tools & execution)", mode: "agent" },
   { cmd: "plan", label: "/plan", desc: "Plan mode", mode: "plan" },
   { cmd: "ask", label: "/ask", desc: "Ask mode (Q&A)", mode: "ask" },
+  { cmd: "debug", label: "/debug", desc: "Debug mode (diagnose first)", mode: "debug" },
   { cmd: "compact", label: "/compact", desc: "Compact context", action: "compact" },
   { cmd: "model", label: "/model", desc: "Configure LLM provider & model", action: "model" },
   { cmd: "embeddings", label: "/embeddings", desc: "Configure embeddings model", action: "embeddings" },
   { cmd: "advanced", label: "/advanced", desc: "MCP / skills / rules / profiles", action: "advanced" },
   { cmd: "thinking", label: "/thinking", desc: "Toggle reasoning visibility", action: "thinking" },
   { cmd: "details", label: "/details", desc: "Toggle tool execution details", action: "details" },
-  { cmd: "debug", label: "/debug", desc: "Toggle debug tool details", action: "details" },
   { cmd: "clear", label: "/clear", desc: "Clear chat", action: "clear" },
   { cmd: "settings", label: "/settings", desc: "Full agent settings", action: "settings" },
 ]
 
-// ─── Logo (одна строка, как в opencode — без лишнего объёма) ─────────────────
+// ─── Logo ────────────────────────────────────────────────────────────────────
 
 const NEXUS_LOGO = [
   "███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗",
@@ -279,7 +282,7 @@ function Logo({ cols }: { cols: number }) {
   )
 }
 
-// ─── Header (opencode-style: заголовок + одна строка контекста, без склейки) ─
+// ─── Header ──────────────────────────────────────────────────────────────────
 
 function HeaderBar({
   provider,
@@ -396,6 +399,7 @@ export function App({
     agentInstructions: "",
     planInstructions: "",
     askInstructions: "",
+    debugInstructions: "",
     profilesJson: "{}",
   })
   const [advancedFocus, setAdvancedFocus] = useState(0)
@@ -620,6 +624,7 @@ export function App({
         agentInstructions: configSnapshot.modes?.agent?.customInstructions ?? "",
         planInstructions: configSnapshot.modes?.plan?.customInstructions ?? "",
         askInstructions: configSnapshot.modes?.ask?.customInstructions ?? "",
+        debugInstructions: configSnapshot.modes?.debug?.customInstructions ?? "",
         profilesJson: JSON.stringify(configSnapshot.profiles ?? {}, null, 2),
       })
       setAdvancedFocus(0)
@@ -635,7 +640,7 @@ export function App({
     }
   }, [view, configSnapshot, mcpServerNames])
 
-  // Load session list when opening sessions view (KiloCode-style)
+  // Load session list when opening sessions view
   useEffect(() => {
     if (view !== "sessions" || !getSessionList) return
     setSessionListLoading(true)
@@ -666,9 +671,8 @@ export function App({
     }
   }, [view, projectDir])
 
-  // Load models catalog when opening model view (same source as KiloCode: models.dev)
+  // Load models catalog once at TUI start (same as extension: not every time model picker is opened)
   useEffect(() => {
-    if (view !== "model" || modelViewMode !== "picker") return
     let cancelled = false
     setModelCatalogLoading(true)
     getModelsCatalog()
@@ -685,7 +689,7 @@ export function App({
         if (!cancelled) setModelCatalogLoading(false)
       })
     return () => { cancelled = true }
-  }, [view, modelViewMode])
+  }, [])
 
   // Process agent events (OpenCode-style: batch every EVENT_BATCH_MS to reduce re-renders)
   useEffect(() => {
@@ -979,11 +983,12 @@ export function App({
     setChatScrollLines(0)
   }
 
-  const submitChatInput = () => {
+  const submitChatInput = (submittedRaw?: string) => {
     if (view !== "chat") return
+    const currentInput = typeof submittedRaw === "string" ? submittedRaw : input
 
     if (slashOpen) {
-      const typed = input.slice(1).trim().toLowerCase()
+      const typed = currentInput.slice(1).trim().toLowerCase()
       const exact = typed
         ? SLASH_COMMANDS.find((cmd) => cmd.cmd.toLowerCase() === typed || cmd.label.slice(1).toLowerCase() === typed)
         : undefined
@@ -998,7 +1003,7 @@ export function App({
     }
 
     if (state.awaitingApproval && onResolveApproval) {
-      const raw = input.trim().toLowerCase()
+      const raw = currentInput.trim().toLowerCase()
       const isExecute = state.pendingApprovalAction?.type === "execute"
       const addToAllowed = isExecute && (raw === "e" || raw === "add")
       const allowedKeys = ["y", "yes", "n", "no", "a", "always", "s", "skip"]
@@ -1020,11 +1025,11 @@ export function App({
       return
     }
 
-    if (input.trim() && !state.isRunning) {
+    if (currentInput.trim() && !state.isRunning) {
       const now = Date.now()
       if (now - lastSubmitRef.current < 400) return
       lastSubmitRef.current = now
-      const content = input.trim()
+      const content = currentInput.trim()
       inputHistory.current.push(content)
       if (inputHistory.current.length > 50) inputHistory.current.shift()
       setHistoryIdx(-1)
@@ -1279,7 +1284,7 @@ export function App({
       setEmbeddingsForm((f) => ({ ...f, [k]: (f[k] as string) + typed }))
       return true
     }
-    if (view === "advanced" && advancedFocus >= 0 && advancedFocus < 8) {
+    if (view === "advanced" && advancedFocus >= 0 && advancedFocus < 9) {
       const keys = [
         "mcpServersJson",
         "skillsText",
@@ -1288,6 +1293,7 @@ export function App({
         "agentInstructions",
         "planInstructions",
         "askInstructions",
+        "debugInstructions",
         "profilesJson",
       ] as const
       const k = keys[advancedFocus]!
@@ -1778,8 +1784,8 @@ export function App({
           setAdvancedFocus((f) => Math.max(0, f - 1))
           return
         }
-        if (key.downArrow && advancedFocus < 8) {
-          setAdvancedFocus((f) => Math.min(8, f + 1))
+        if (key.downArrow && advancedFocus < 9) {
+          setAdvancedFocus((f) => Math.min(9, f + 1))
           return
         }
         if (key.tab) {
@@ -1787,10 +1793,10 @@ export function App({
             setAdvancedFocus((f) => Math.max(0, f - 1))
             return
           }
-          setAdvancedFocus((f) => (f + 1) % 9)
+          setAdvancedFocus((f) => (f + 1) % 10)
           return
         }
-        if (advancedFocus === 8 && isEnter && saveConfig) {
+        if (advancedFocus === 9 && isEnter && saveConfig) {
           let mcpServers: Array<Record<string, unknown>> = []
           let profiles: Record<string, unknown> = {}
           try {
@@ -1812,6 +1818,7 @@ export function App({
               agent: { customInstructions: advancedForm.agentInstructions.trim() || undefined },
               plan: { customInstructions: advancedForm.planInstructions.trim() || undefined },
               ask: { customInstructions: advancedForm.askInstructions.trim() || undefined },
+              debug: { customInstructions: advancedForm.debugInstructions.trim() || undefined },
             },
             profiles,
           })
@@ -1826,19 +1833,20 @@ export function App({
           "agentInstructions",
           "planInstructions",
           "askInstructions",
+          "debugInstructions",
           "profilesJson",
         ] as const
-        if (advancedFocus < 8 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f")) {
+        if (advancedFocus < 9 && (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f")) {
           const k = keys[advancedFocus]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k].slice(0, -1) }))
           return
         }
-        if (advancedFocus < 8 && isEnter) {
+        if (advancedFocus < 9 && isEnter) {
           const k = keys[advancedFocus]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k] + "\n" }))
           return
         }
-        if (advancedFocus < 8 && inputText) {
+        if (advancedFocus < 9 && inputText) {
           const k = keys[advancedFocus]!
           setAdvancedForm((f) => ({ ...f, [k]: f[k] + inputText }))
           return
@@ -1910,9 +1918,26 @@ export function App({
   const isHomeView = view === "chat" && state.messages.length === 0
   const shellW = Math.max(48, Math.min(Math.max(48, cols - 2), Math.max(92, Math.floor(cols * 0.82))))
   const shellPad = Math.max(0, Math.floor((cols - shellW) / 2))
-  const chatViewportRows = Math.max(8, rows - 20)
+  const slashPopupRows = slashOpen ? Math.min(12, Math.max(5, Math.floor(rows * 0.24))) + 3 : 0
+  const approvalRows = state.awaitingApproval && state.pendingApprovalAction ? 8 : 0
+  const planRows = view === "chat" && state.mode === "plan" && state.planCompleted && !state.isRunning ? 3 : 0
+  const reservedRows = 11 + slashPopupRows + approvalRows + planRows
+  const chatViewportRows = Math.max(6, rows - reservedRows)
+  const indexStatusLabel = (() => {
+    if (noIndex) return "Vector index: off"
+    const st = state.indexStatus
+    if (st?.state === "indexing") {
+      const done = typeof st.chunksProcessed === "number" ? st.chunksProcessed : 0
+      const total = typeof st.chunksTotal === "number" ? st.chunksTotal : 0
+      const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((done / total) * 100))) : 0
+      return total > 0
+        ? `Vector index: ${done.toLocaleString()}/${total.toLocaleString()} (${pct}%)`
+        : "Vector index: indexing"
+    }
+    return state.indexReady ? "Vector index: ready" : "Vector index: building"
+  })()
   const topLine = fit(
-    `${state.provider}/${state.model} · Vector index: ${noIndex ? "off" : state.indexReady ? "ready" : "building"} · Context: ${formatTokens(state.contextUsedTokens)}/${formatTokens(state.contextLimitTokens)} (${state.contextPercent}%)${projectDir ? ` · ${projectDir}` : ""}`,
+    `${state.provider}/${state.model} · ${indexStatusLabel} · Context: ${formatTokens(state.contextUsedTokens)}/${formatTokens(state.contextLimitTokens)} (${state.contextPercent}%)${projectDir ? ` · ${projectDir}` : ""}`,
     Math.max(20, cols - 4),
   )
 
@@ -2023,7 +2048,7 @@ export function App({
         />
       ) : (
         <box flexDirection="column" flexGrow={1} minHeight={0}>
-          <ChatViewport
+          <MemoChatViewport
             state={state}
             cols={cols}
             viewportRows={chatViewportRows}
@@ -2319,6 +2344,7 @@ function AdvancedConfigView({
     agentInstructions: string
     planInstructions: string
     askInstructions: string
+    debugInstructions: string
     profilesJson: string
   }
   focus: number
@@ -2331,6 +2357,7 @@ function AdvancedConfigView({
     "Agent instructions",
     "Plan instructions",
     "Ask instructions",
+    "Debug instructions",
     "Profiles JSON",
   ]
   const keys = [
@@ -2341,6 +2368,7 @@ function AdvancedConfigView({
     "agentInstructions",
     "planInstructions",
     "askInstructions",
+    "debugInstructions",
     "profilesJson",
   ] as const
   return (
@@ -2359,8 +2387,8 @@ function AdvancedConfigView({
         </box>
       ))}
       <box>
-        <text fg={focus === 8 ? "cyan" : "gray"}>{focus === 8 ? "▸ " : "  "}</text>
-        <text fg={focus === 8 ? "green" : "gray"}>[Save] — press Enter</text>
+        <text fg={focus === 9 ? "cyan" : "gray"}>{focus === 9 ? "▸ " : "  "}</text>
+        <text fg={focus === 9 ? "green" : "gray"}>[Save] — press Enter</text>
       </box>
     </box>
   )
@@ -2582,7 +2610,7 @@ function AgentConfigView({
   )
 }
 
-// ─── Home + prompt shell (Kilo-style center layout) ─────────────────────────
+// ─── Home + prompt shell ────────────────────────────────────────────────────
 
 function HomeLanding({
   cols,
@@ -2621,10 +2649,10 @@ function HomeLanding({
   pendingApprovalAction: ApprovalAction | null
   indexReady: boolean
   onInputChange: (value: string) => void
-  onSubmit: () => void
+  onSubmit: (value?: string) => void
 }) {
   const tips = [
-    "Press Tab to cycle between Agent, Plan and Ask modes.",
+    "Press Tab to cycle between Agent, Plan, Ask and Debug modes.",
     "Use /index to control vector index sync, stop and delete.",
     "Use /agent-config to assemble presets from skills, MCP and AGENTS.md.",
   ]
@@ -2672,7 +2700,7 @@ function HomeLanding({
   )
 }
 
-// ─── Slash command popup (Kilo-style command palette list) ──────────────────
+// ─── Slash command popup ────────────────────────────────────────────────────
 
 function SlashPopup({
   commands,
@@ -2689,7 +2717,7 @@ function SlashPopup({
   const labelWidth = Math.min(36, Math.max(14, Math.floor(lineWidth * 0.34)))
   const descWidth = Math.max(16, lineWidth - labelWidth - 5)
   const rowWidth = lineWidth
-  // Keep command palette compact and always fully visible above input (Kilo-like behavior).
+  // Keep command palette compact and fully visible above input.
   const maxVisibleByHeight = Math.max(5, Math.min(12, Math.floor(rows * 0.24)))
   const windowSize = Math.min(maxVisibleByHeight, Math.max(1, commands.length))
   const start = Math.max(0, Math.min(Math.max(0, commands.length - windowSize), selectedIndex - Math.floor(windowSize / 2)))
@@ -2709,12 +2737,14 @@ function SlashPopup({
         {visible.map((cmd, i) => {
           const absolute = start + i
           const active = absolute === selectedIndex
-          const label = fit(cmd.label, labelWidth)
+          const label = padToWidth(fit(cmd.label, labelWidth), labelWidth)
           const desc = fit(cmd.desc, descWidth)
-          const row = padToWidth(`${active ? "> " : "  "}${padToWidth(label, labelWidth)} ${desc}`, rowWidth - 1)
           return (
-            <box key={cmd.cmd} width={rowWidth} style={{ backgroundColor: active ? "#e6b188" : undefined }}>
-              <text fg={active ? "#000000" : THEME.textMuted} bold={active}>{row}</text>
+            <box key={cmd.cmd} width={rowWidth} flexDirection="row" style={{ backgroundColor: active ? "#e6b188" : undefined }}>
+              <text fg={active ? "#000000" : THEME.textMuted} bold={active}>{active ? "> " : "  "}</text>
+              <text fg={active ? "#000000" : "white"} bold={active}>{label}</text>
+              <text fg={active ? "#000000" : THEME.textMuted}> </text>
+              <text fg={active ? "#000000" : THEME.textMuted}>{desc}</text>
             </box>
           )
         })}
@@ -2802,7 +2832,7 @@ function InputBar({
   model: string
   showPlaceholder?: boolean
   onInputChange: (value: string) => void
-  onSubmit: () => void
+  onSubmit: (value?: string) => void
 }) {
   const borderColor = awaitingApproval ? THEME.warning : isRunning ? THEME.danger : THEME.accent
   const approvalPrompt =
@@ -2813,9 +2843,8 @@ function InputBar({
     ? approvalPrompt
     : isRunning
       ? "[Abort: Ctrl+C]"
-      : mode === "agent" ? "Agent" : mode === "plan" ? "Plan" : "Ask"
+      : mode === "agent" ? "Agent" : mode === "plan" ? "Plan" : mode === "debug" ? "Debug" : "Ask"
   const promptColor = awaitingApproval ? THEME.warning : isRunning ? THEME.danger : modeColor
-  const singleLineInput = input.replace(/\r\n/g, " ").replace(/\r/g, " ").replace(/\n/g, " ")
   const placeholder = showPlaceholder
     ? 'Ask anything... "Fix a TODO in the codebase"'
     : ""
@@ -2839,17 +2868,18 @@ function InputBar({
       >
         <input
           focused
-          value={singleLineInput}
+          value={input}
           maxLength={6000}
           placeholder={placeholder}
           onInput={(value: string) => onInputChange(value)}
-          onSubmit={() => onSubmit()}
+          onSubmit={(value: string) => onSubmit(value)}
           textColor={THEME.text}
           focusedTextColor={THEME.text}
           placeholderColor={THEME.textMuted}
           backgroundColor={THEME.panel2}
           focusedBackgroundColor={THEME.panel2}
           cursorColor={THEME.primary}
+          style={{ flexGrow: 1, height: 1, minHeight: 1, maxHeight: 1 }}
         />
       </box>
       <box
@@ -3291,6 +3321,15 @@ function ChatViewport({
     </box>
   )
 }
+
+const MemoChatViewport = React.memo(
+  ChatViewport,
+  (prev, next) =>
+    prev.state === next.state &&
+    prev.cols === next.cols &&
+    prev.viewportRows === next.viewportRows &&
+    prev.scrollLines === next.scrollLines,
+)
 
 function formatToolPreview(tool: LiveTool): string {
   const pathVal = tool.input?.["path"]
@@ -4007,7 +4046,7 @@ function HelpBox({
       <text fg="gray"> Tab mode · Ctrl+P profile · Ctrl+S compact · Ctrl+K clear · Ctrl+C abort/quit</text>
       <text fg="white" bold>{"\n"} Config files</text>
       <text fg="gray"> .nexus/nexus.yaml (project) · ~/.nexus/nexus.yaml (global)</text>
-      <text fg="gray"> Free models: provider `openai-compatible` + baseUrl `https://api.kilo.ai/api/gateway`</text>
+      <text fg="gray"> Free models: provider `openai-compatible` via Nexus Gateway (configure in /model)</text>
     </box>
   )
 }

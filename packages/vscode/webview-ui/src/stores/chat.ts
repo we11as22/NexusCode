@@ -2,7 +2,7 @@ import { create } from "zustand"
 import { postMessage } from "../vscode.js"
 import type { ModelsCatalogFromCore } from "../types/messages.js"
 
-export type Mode = "agent" | "plan" | "ask"
+export type Mode = "agent" | "plan" | "ask" | "debug"
 export type AppView = "chat" | "sessions" | "settings"
 
 export type IndexStatusKind =
@@ -54,7 +54,6 @@ export interface NexusConfigState {
     enabled: boolean
     vector: boolean
     symbolExtract: boolean
-    fts: boolean
     batchSize: number
     embeddingBatchSize: number
     embeddingConcurrency: number
@@ -95,6 +94,7 @@ export interface NexusConfigState {
     agent?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     plan?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     ask?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
+    debug?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     [key: string]: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string } | undefined
   }
   permissions?: {
@@ -156,6 +156,9 @@ interface ChatState {
   /** When set, show in-webview approval bar (Allow / Deny) instead of only VS Code notification */
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
 
+  /** Checkpoint entries for rollback (Cline-style). */
+  checkpointEntries: Array<{ hash: string; ts: number; description?: string; messageId?: string }>
+
   /** Models catalog from models.dev (for Select model in Settings). Same shape as core ModelsCatalog. */
   modelsCatalog: ModelsCatalogFromCore | null
   modelsCatalogLoading: boolean
@@ -178,6 +181,7 @@ interface ChatState {
   reindex: () => void
   clearIndex: () => void
   saveConfig: (patch: Record<string, unknown>) => void
+  restoreCheckpoint: (hash: string) => void
   handleStateUpdate: (state: Partial<ChatState>) => void
   handleConfigLoaded: (config: NexusConfigState) => void
   handleAgentEvent: (event: AgentEvent) => void
@@ -238,6 +242,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   modelsCatalog: null,
   modelsCatalogLoading: false,
+  checkpointEntries: [],
   requestModelsCatalog: () => {
     set({ modelsCatalogLoading: true })
     postMessage({ type: "getModelsCatalog" })
@@ -311,6 +316,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteSession: (sessionId) => {
     postMessage({ type: "deleteSession", sessionId })
+    set((prev) => ({
+      sessions: prev.sessions.filter((s) => s.id !== sessionId),
+    }))
   },
 
   reindex: () => {
@@ -323,6 +331,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   saveConfig: (patch) => {
     postMessage({ type: "saveConfig", config: patch })
+  },
+
+  restoreCheckpoint: (hash) => {
+    postMessage({ type: "restoreCheckpoint", hash })
   },
 
   handleStateUpdate: (state) => {

@@ -6,7 +6,7 @@
 import * as vscode from "vscode"
 import * as path from "path"
 import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
-import type { ApprovalAction, PermissionResult } from "@nexuscode/core"
+import type { ApprovalAction, PermissionResult, CheckpointEntry } from "@nexuscode/core"
 import {
   loadConfig,
   writeConfig,
@@ -32,7 +32,7 @@ import {
   NexusConfigSchema,
   getModelsCatalog,
 } from "@nexuscode/core"
-import { VsCodeHost } from "./host.js"
+import { VsCodeHost, showDiffForPath } from "./host.js"
 
 export type WebviewMessage =
   | { type: "newMessage"; content: string; mode: Mode; mentions?: string }
@@ -51,6 +51,7 @@ export type WebviewMessage =
   | { type: "reindex" }
   | { type: "clearIndex" }
   | { type: "openFileAtLocation"; path: string; line?: number; endLine?: number }
+  | { type: "showDiff"; path: string }
   | { type: "setServerUrl"; url: string }
   | { type: "openNexusConfigFolder"; scope: "global" | "project" }
   | { type: "openCursorignore" }
@@ -62,6 +63,7 @@ export type WebviewMessage =
   | { type: "showConfirm"; id: string; message: string }
   | { type: "openNexusignore" }
   | { type: "getModelsCatalog" }
+  | { type: "restoreCheckpoint"; hash: string }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
@@ -92,6 +94,8 @@ export interface WebviewState {
   contextLimitTokens: number
   contextPercent: number
   serverUrl?: string
+  modelsCatalog?: import("@nexuscode/core").ModelsCatalog | null
+  checkpointEntries?: CheckpointEntry[]
 }
 
 function getContextLimit(modelId: string): number {
@@ -118,6 +122,7 @@ export class Controller {
   private serverSessionId?: string
   private initialized = false
   private initPromise?: Promise<void>
+  private modelsCatalogCache: import("@nexuscode/core").ModelsCatalog | null = null
   private indexStatusUnsubscribe?: () => void
   private disposables: vscode.Disposable[] = []
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
@@ -180,6 +185,7 @@ export class Controller {
         contextLimitTokens: 128000,
         contextPercent: 0,
         serverUrl: this.getServerUrl(),
+        modelsCatalog: this.modelsCatalogCache ?? null,
       }
     }
     const contextUsedTokens = this.session.getTokenEstimate()
@@ -203,6 +209,8 @@ export class Controller {
       contextLimitTokens,
       contextPercent,
       serverUrl: this.getServerUrl(),
+      modelsCatalog: this.modelsCatalogCache ?? null,
+      checkpointEntries: this.checkpoint?.getEntries() ?? [],
     }
   }
 
@@ -293,6 +301,18 @@ export class Controller {
           const message = err instanceof Error ? err.message : String(err)
           this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[indexer] ${message}` } })
         })
+        // Load models catalog in background so Settings open immediately
+        if (!this.modelsCatalogCache) {
+          void getModelsCatalog()
+            .then((cat) => {
+              this.modelsCatalogCache = cat
+              this.postStateToWebview()
+            })
+            .catch(() => {
+              this.modelsCatalogCache = { providers: [], recommended: [] }
+              this.postStateToWebview()
+            })
+        }
       } catch (err) {
         console.warn("[nexus] Init error:", err)
         this.postStateToWebview()
@@ -347,14 +367,24 @@ export class Controller {
         this.postStateToWebview()
         this.sendIndexStatus()
         if (this.config) this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        void this.ensureInitialized().then(() => {
+          this.postStateToWebview()
+          this.sendIndexStatus()
+        })
         await this.sendSessionList()
         break
       case "getModelsCatalog": {
+        if (this.modelsCatalogCache) {
+          this.postMessageToWebview({ type: "modelsCatalog", catalog: this.modelsCatalogCache })
+          break
+        }
         try {
           const catalog = await getModelsCatalog()
+          this.modelsCatalogCache = catalog
           this.postMessageToWebview({ type: "modelsCatalog", catalog })
         } catch {
-          this.postMessageToWebview({ type: "modelsCatalog", catalog: { providers: [], recommended: [] } })
+          this.modelsCatalogCache = { providers: [], recommended: [] }
+          this.postMessageToWebview({ type: "modelsCatalog", catalog: this.modelsCatalogCache })
         }
         break
       }
@@ -362,6 +392,10 @@ export class Controller {
         this.postStateToWebview()
         this.sendIndexStatus()
         if (this.config) this.postMessageToWebview({ type: "configLoaded", config: this.config })
+        void this.ensureInitialized().then(() => {
+          this.postStateToWebview()
+          this.sendIndexStatus()
+        })
         await this.sendSessionList()
         break
       case "openSettings":
@@ -408,9 +442,21 @@ export class Controller {
             selection: new vscode.Range(line, 0, endLine, 0),
             preview: false,
           })
+          // If the file was already open with unsaved (e.g. stale) content, revert to disk
+          // so the user sees what the agent wrote and isn't prompted to save on close.
+          if (doc.isDirty) {
+            await vscode.commands.executeCommand("workbench.action.files.revert")
+          }
           editor.revealRange(new vscode.Range(line, 0, endLine, 0), vscode.TextEditorRevealType.InCenter)
         } catch {
           vscode.window.showErrorMessage(`NexusCode: Could not open ${msg.path}`)
+        }
+        break
+      }
+      case "showDiff": {
+        const cwd = this.getCwd()
+        if (msg.path?.trim()) {
+          await showDiffForPath(cwd, msg.path.trim())
         }
         break
       }
@@ -547,7 +593,47 @@ export class Controller {
         }
         break
       }
+      case "restoreCheckpoint":
+        if (msg.hash?.trim()) {
+          await this.restoreCheckpointToHash(msg.hash.trim())
+        }
+        break
     }
+  }
+
+  /**
+   * Restore workspace to a checkpoint (shadow git). After restoring files to disk,
+   * reverts any open editor tabs under cwd so their content matches disk (Cline-style).
+   */
+  private async restoreCheckpointToHash(hash: string): Promise<void> {
+    if (!this.checkpoint) {
+      vscode.window.showWarningMessage("NexusCode: Checkpoints are not enabled or no checkpoint is available.", { modal: false })
+      return
+    }
+    const cwd = this.getCwd()
+    try {
+      await this.checkpoint.resetHead(hash)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      vscode.window.showErrorMessage(`NexusCode: Failed to restore checkpoint — ${message}`)
+      return
+    }
+    // Sync editor "memory" with disk: revert all open docs under cwd so they show restored content
+    const cwdResolved = path.resolve(cwd)
+    for (const doc of vscode.workspace.textDocuments) {
+      if (doc.uri.scheme !== "file") continue
+      const rel = path.relative(cwdResolved, doc.uri.fsPath)
+      if (rel.startsWith("..") || path.isAbsolute(rel)) continue
+      if (!doc.isDirty) continue
+      try {
+        await vscode.window.showTextDocument(doc, { preserveFocus: false })
+        await vscode.commands.executeCommand("workbench.action.files.revert")
+      } catch {
+        // Ignore per-doc revert errors
+      }
+    }
+    vscode.window.showInformationMessage("NexusCode: Workspace restored to checkpoint.", { modal: false })
+    this.postStateToWebview()
   }
 
   private async handleSaveConfig(patch: Partial<NexusConfig>): Promise<void> {
@@ -752,6 +838,24 @@ export class Controller {
       // Sync full state after tool_end so webview gets latest todo (update_todo_list) and messages
       if (event.type === "tool_end") {
         this.postStateToWebview()
+        // Keep editor "memory" in sync with disk: after a successful file write, reload the doc if open so it's not dirty
+        if (
+          event.success &&
+          "path" in event &&
+          typeof (event as { path?: string }).path === "string" &&
+          ((event as { path?: string }).path as string).length > 0 &&
+          (event.tool === "write_to_file" || event.tool === "replace_in_file")
+        ) {
+          const filePath = (event as { path: string }).path
+          const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
+          const uri = vscode.Uri.file(absPath)
+          const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === uri.fsPath)
+          if (doc?.isDirty) {
+            void vscode.window.showTextDocument(doc, { preserveFocus: true }).then(() =>
+              vscode.commands.executeCommand("workbench.action.files.revert")
+            )
+          }
+        }
       }
     }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef })
 
@@ -788,7 +892,7 @@ export class Controller {
         host.setCheckpoint(this.checkpoint)
       }
       try {
-        await this.refreshIndexerFromGit(cwd)
+        void this.refreshIndexerFromGit(cwd)
       } catch {
         // Git not available or not a repo — skip incremental refresh
       }
@@ -955,21 +1059,21 @@ export class Controller {
   private async deleteSession(sessionId: string): Promise<void> {
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
+    let deleted = false
     if (serverUrl) {
       try {
         const res = await fetch(
           `${serverUrl.replace(/\/$/, "")}/session/${sessionId}?directory=${encodeURIComponent(cwd)}`,
           { method: "DELETE", headers: { "x-nexus-directory": cwd } }
         )
-        if (!res.ok) return
+        deleted = res.ok
       } catch {
-        return
+        // fall through to sendSessionList
       }
     } else {
-      const ok = await deleteSession(sessionId, cwd)
-      if (!ok) return
+      deleted = await deleteSession(sessionId, cwd)
     }
-    if (this.session?.id === sessionId) {
+    if (deleted && this.session?.id === sessionId) {
       if (serverUrl) {
         try {
           const createRes = await fetch(`${serverUrl.replace(/\/$/, "")}/session`, {
@@ -977,12 +1081,13 @@ export class Controller {
             headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
             body: "{}",
           })
-          if (!createRes.ok) return
-          const created = (await createRes.json()) as { id: string }
-          this.session = new Session(created.id, cwd, [])
-          this.serverSessionId = created.id
+          if (createRes.ok) {
+            const created = (await createRes.json()) as { id: string }
+            this.session = new Session(created.id, cwd, [])
+            this.serverSessionId = created.id
+          }
         } catch {
-          return
+          // keep current session ref; list will refresh
         }
       } else {
         this.session = Session.create(cwd)

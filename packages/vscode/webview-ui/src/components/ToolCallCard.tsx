@@ -58,11 +58,12 @@ function toolDisplayName(tool: string): string {
   return tool
 }
 
+/* Tool cards (except file edit): on chat background, only subtle status bar */
 const STATUS_STYLES = {
-  pending:   "border-l-2 border-l-yellow-500 bg-yellow-500/5",
-  running:   "border-l-2 border-l-blue-400 bg-blue-400/5",
-  completed: "border-l-2 border-l-green-500 bg-green-500/5",
-  error:     "border-l-2 border-l-red-500 bg-red-500/5",
+  pending:   "border-l-2 border-l-yellow-500",
+  running:   "border-l-2 border-l-blue-400",
+  completed: "border-l-2 border-l-green-500",
+  error:     "border-l-2 border-l-red-500",
 }
 
 function getLangBadge(path: string): string {
@@ -96,6 +97,78 @@ function getFileEditPath(part: ToolPart): string | null {
   const m = part.output?.match(/<file_content\s+path="([^"]+)"/)
   if (m) return m[1]!
   return null
+}
+
+function getEditStatLabel(part: ToolPart): string {
+  const output = part.output ?? ""
+  const stats = getDiffStats(output)
+  const isDiff = output.split("\n").filter((l) => l.startsWith("+") || l.startsWith("-")).length >= 3
+  if (isDiff && (stats.add > 0 || stats.del > 0)) {
+    return [stats.add > 0 ? `+${stats.add}` : "", stats.del > 0 ? `-${stats.del}` : ""].filter(Boolean).join(" ")
+  }
+  if (part.tool === "write_to_file") {
+    const m = output.match(/\((\d+)\s+lines?\)/)
+    if (m) return `+${m[1]}`
+  }
+  return "edited"
+}
+
+/** Inline file-edit block in chat: one block per replace_in_file/write_to_file, chronological. Collapsible, hover chevron, click filename opens diff in VS Code. */
+export function InlineFileEditBlock({ part }: { part: ToolPart }) {
+  const path = getFileEditPath(part)
+  const output = part.output ?? ""
+  const [expanded, setExpanded] = useState(true)
+  const [hovered, setHovered] = useState(false)
+  if (!path && !output) return null
+  const lang = path ? getLangBadge(path) : "FILE"
+  const fileName = path ? path.split("/").pop() ?? path : "file"
+  const statLabel = getEditStatLabel(part)
+  return (
+    <div
+      className="nexus-file-edit-block my-2"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div className="nexus-file-edit-header flex items-center gap-2">
+        <button
+          type="button"
+          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
+          onClick={(e) => {
+            e.stopPropagation()
+            setExpanded((prev) => !prev)
+          }}
+          aria-label={expanded ? "Collapse" : "Expand"}
+        >
+          {hovered ? (
+            <span
+              className="text-[var(--vscode-descriptionForeground)] transition-transform inline-flex"
+              style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
+            >
+              ▼
+            </span>
+          ) : (
+            <span className="nexus-file-edit-badge">{lang}</span>
+          )}
+        </button>
+        <button
+          type="button"
+          className="nexus-file-edit-path flex-1 min-w-0 text-left truncate font-medium text-[var(--vscode-foreground)] hover:underline"
+          onClick={(e) => {
+            e.stopPropagation()
+            if (path) postMessage({ type: "showDiff", path })
+          }}
+        >
+          {fileName}
+        </button>
+        {statLabel && <span className="nexus-file-edit-stats flex-shrink-0">{statLabel}</span>}
+      </div>
+      {expanded && (
+        <div className="nexus-file-edit-content">
+          <ToolOutputBlock output={output} compacted={part.compacted} />
+        </div>
+      )}
+    </div>
+  )
 }
 
 /** File edit/add block: language badge + path + diff stats, then code with green/red highlights (reference design). */
@@ -232,10 +305,10 @@ export function ToolCallCard({ part }: Props) {
   const inputPreview = formatToolInputPreview(part)
 
   return (
-    <div className={`my-1 rounded text-xs ${STATUS_STYLES[part.status]}`}>
+    <div className={`my-1 text-xs ${STATUS_STYLES[part.status]}`}>
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-2 py-1 text-left hover:opacity-80 transition-opacity"
+        className="w-full flex items-center gap-2 px-1 py-0.5 text-left hover:opacity-80 transition-opacity"
       >
         <span className="flex-shrink-0">{icon}</span>
         <span className="font-mono text-[var(--vscode-foreground)] flex-shrink-0">{toolDisplayName(part.tool)}</span>

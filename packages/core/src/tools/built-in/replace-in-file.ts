@@ -4,12 +4,12 @@ import * as path from "node:path"
 import type { ToolDef, ToolContext } from "../../types.js"
 
 const searchReplaceBlock = z.object({
-  search: z.string().describe("Exact text to find in the file (must match exactly)"),
+  search: z.string().min(1).describe("Exact text to find in the file (must match exactly, cannot be empty)"),
   replace: z.string().describe("Text to replace the search block with"),
 })
 
 const schema = z.object({
-  path: z.string().describe("Path to the file to modify"),
+  path: z.string().min(1).describe("Path to the file to modify"),
   diff: z.array(searchReplaceBlock).min(1).describe("One or more search/replace blocks to apply"),
 })
 

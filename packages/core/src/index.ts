@@ -5,6 +5,7 @@ export { NexusConfigSchema } from "./config/schema.js"
 export type { NexusConfig, ProviderConfig, EmbeddingConfig, McpServerConfig, SkillDef, ModeConfig } from "./types.js"
 
 // Types
+export { MODES } from "./types.js"
 export type {
   Mode, IHost, ISession, IIndexer,
   AgentEvent, ToolDef, ToolResult, ToolContext,

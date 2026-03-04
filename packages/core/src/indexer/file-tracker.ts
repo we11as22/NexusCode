@@ -9,7 +9,7 @@ export interface FileRecord {
 
 /**
  * Lightweight file tracker for incremental vector indexing.
- * Replaces FTS file table: tracks path -> mtime, hash so we skip unchanged files.
+ * Tracks path -> mtime/hash/chunk count so unchanged files are skipped.
  */
 export class FileTracker {
   private filePath: string

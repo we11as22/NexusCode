@@ -3,16 +3,19 @@ import { useChatStore, type NexusConfigState } from "./stores/chat.js"
 import type { MessagePart } from "./stores/chat.js"
 import { MessageList } from "./components/MessageList.js"
 import { InputBar } from "./components/InputBar.js"
-import { ModeSelector } from "./components/ModeSelector.js"
+import { ModeDropdown } from "./components/ModeDropdown.js"
+import { ProfileDropdown } from "./components/ProfileDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import { ThoughtBlock } from "./components/ThoughtBlock.js"
-import { AutoApproveDropdown } from "./components/AutoApproveDropdown.js"
-import { postMessage, confirmAsync, resolveConfirm } from "./vscode.js"
+import { CheckpointStrip } from "./components/CheckpointStrip.js"
 import type { ExtensionMessage } from "./types/messages.js"
+import { confirmAsync, resolveConfirm } from "./vscode.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
   "p-1.5 rounded-md text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+const BTN_SM_CLASS =
+  "p-1 rounded text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
 const MODEL_PROVIDER_OPTIONS = ["anthropic", "openai", "google", "openai-compatible", "openrouter", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]
 const EMB_PROVIDER_OPTIONS = [
   "openai",
@@ -83,70 +86,6 @@ export function App() {
 
   return (
     <div className="container">
-      <header className="nexus-header">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="nexus-logo-dot" />
-          <span className="text-sm font-semibold text-[var(--vscode-foreground)] truncate">NexusCode</span>
-          <IndexBadge status={store.indexStatus} />
-          {(!store.projectDir || store.projectDir === "") && (
-            <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate" title="Open a workspace folder for full features">
-              No workspace folder
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-0.5 flex-shrink-0">
-          <button
-            type="button"
-            onClick={store.clearChat}
-            title="New chat"
-            disabled={store.isRunning}
-            className={BTN_CLASS}
-          >
-            <PlusIcon className={ICON_CLASS} />
-          </button>
-          <button
-            type="button"
-            onClick={store.compact}
-            title="Compact history"
-            disabled={store.isRunning || store.messages.length === 0}
-            className={BTN_CLASS}
-          >
-            <CompactIcon className={ICON_CLASS} />
-          </button>
-          <button
-            type="button"
-            onClick={store.reindex}
-            title="Re-index codebase"
-            disabled={store.indexStatus.state === "indexing"}
-            className={BTN_CLASS}
-          >
-            <RefreshIcon className={ICON_CLASS} />
-          </button>
-          <button
-            type="button"
-            onClick={async () => {
-              if (await confirmAsync("Clear the entire codebase index and rebuild from scratch?")) {
-                store.clearIndex()
-              }
-            }}
-            title="Clear index and rebuild"
-            disabled={store.indexStatus.state === "indexing"}
-            className={`${BTN_CLASS} hover:text-red-400 hover:bg-red-500/10`}
-          >
-            <DatabaseOffIcon className={ICON_CLASS} />
-          </button>
-          <button
-            type="button"
-            onClick={() => store.setView("settings")}
-            title="Agent settings"
-            className={BTN_CLASS}
-          >
-            <GearIcon className={ICON_CLASS} />
-          </button>
-        </div>
-      </header>
-
       {/* Roo-Code style: view switched via sidebar title icons; optional in-webview nav for quick switch */}
       <div className="nexus-nav nexus-nav-minimal">
         <TabButton active={store.view === "chat"} onClick={() => store.setView("chat")} label="Chat" />
@@ -298,12 +237,14 @@ function ChatView() {
         isRunning={store.isRunning}
       />
 
+      <CheckpointStrip />
+
       <div className="chat-view">
         {store.subagents.length > 0 && <SubagentStrip />}
 
         <div className="chat-messages-wrapper">
           <div className="chat-messages">
-            <MessageList messages={store.messages} />
+            <MessageList messages={store.messages} isRunning={store.isRunning} />
             {(() => {
               const msgs = store.messages
               const last = msgs[msgs.length - 1]
@@ -363,45 +304,73 @@ function ChatBottomBar({ referencedFiles }: { referencedFiles: string[] }) {
 
   return (
     <div className="chat-bottom-bar">
-      <div className="flex items-center gap-2 min-w-0 overflow-hidden">
-        {fileCount > 0 && (
-          <details
-            open={filesOpen}
-            onToggle={(e) => setFilesOpen((e.target as HTMLDetailsElement).open)}
-            className="flex-shrink-0 relative"
-          >
-            <summary className="list-none cursor-pointer text-[10px] text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] py-1 px-1.5 rounded hover:bg-[var(--vscode-list-hoverBackground)]">
-              &gt; {fileCount} Files
-            </summary>
-            <div className="absolute bottom-full left-0 mb-1 max-h-48 overflow-y-auto rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] shadow-lg py-1 min-w-[200px] z-10">
-              {referencedFiles.slice(0, 50).map((path, i) => (
-                <div key={i} className="px-2 py-1 text-[10px] font-mono truncate text-[var(--vscode-foreground)]">
-                  {path}
-                </div>
-              ))}
-              {referencedFiles.length > 50 && (
-                <div className="px-2 py-1 text-[10px] text-[var(--vscode-descriptionForeground)]">
-                  +{referencedFiles.length - 50} more
-                </div>
-              )}
-            </div>
-          </details>
-        )}
-        <div className="flex items-center gap-1 flex-shrink-0">
-          <AutoApproveDropdown />
-          <ModeSelector />
-        </div>
-      </div>
-      <div className="flex-1 min-w-0 flex items-center gap-2">
+      <div className="chat-input-area">
         <InputBar />
-        <button
-          type="button"
-          onClick={() => store.setView("settings")}
-          title="Settings"
-          className={BTN_CLASS}
-        >
-          <GearIcon className="w-4 h-4" />
-        </button>
+      </div>
+      <div className="chat-control-row">
+        <div className="chat-bottom-bar-left">
+          {fileCount > 0 && (
+            <details
+              open={filesOpen}
+              onToggle={(e) => setFilesOpen((e.target as HTMLDetailsElement).open)}
+              className="flex-shrink-0 relative"
+            >
+              <summary className="list-none cursor-pointer text-[10px] text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] py-1 px-1.5 rounded hover:bg-[var(--vscode-list-hoverBackground)]">
+                &gt; {fileCount} Files
+              </summary>
+              <div className="absolute bottom-full left-0 mb-1 max-h-48 overflow-y-auto rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] shadow-lg py-1 min-w-[200px] z-10">
+                {referencedFiles.slice(0, 50).map((path, i) => (
+                  <div key={i} className="px-2 py-1 text-[10px] font-mono truncate text-[var(--vscode-foreground)]">
+                    {path}
+                  </div>
+                ))}
+                {referencedFiles.length > 50 && (
+                  <div className="px-2 py-1 text-[10px] text-[var(--vscode-descriptionForeground)]">
+                    +{referencedFiles.length - 50} more
+                  </div>
+                )}
+              </div>
+            </details>
+          )}
+          <ModeDropdown />
+          <ProfileDropdown />
+        </div>
+        <div className="chat-bottom-bar-input-wrap">
+          {store.isRunning && (
+            <span className="flex items-center justify-center w-8 h-8 flex-shrink-0" title="Running">
+              <SpinnerIcon className="w-5 h-5 text-[var(--vscode-descriptionForeground)]" />
+            </span>
+          )}
+          {store.isRunning || store.awaitingApproval ? (
+            <button
+              type="button"
+              onClick={store.abort}
+              title="Stop (Esc)"
+              className="nexus-send-btn"
+              style={{ background: "rgba(239, 68, 68, 0.9)", color: "#fff" }}
+            >
+              <StopIcon />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => store.inputValue.trim() && store.sendMessage(store.inputValue.trim())}
+              disabled={!store.inputValue.trim()}
+              title="Send (Enter)"
+              className={`nexus-send-btn ${store.inputValue.trim() ? "nexus-send-btn-primary" : ""}`}
+            >
+              <SendIcon />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => store.setView("settings")}
+            title="Settings"
+            className={`${BTN_SM_CLASS} flex-shrink-0`}
+          >
+            <GearIcon className="w-3 h-3" />
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -538,7 +507,7 @@ function toolToActionLabel(tool: string): string {
   return labels[tool] ?? `Running ${tool}`
 }
 
-/** Modal for selecting model from models.dev catalog (same as KiloCode CLI). Free models shown first. */
+/** Modal for selecting model. Uses same catalog as CLI: core getModelsCatalog() (models.dev + Nexus Gateway); free models first. */
 function ModelPickerModal({
   catalog,
   loading,
@@ -600,7 +569,7 @@ function ModelPickerModal({
           </button>
         </div>
         <p className="px-3 py-1.5 text-[10px] text-[var(--vscode-descriptionForeground)] border-b border-[var(--vscode-panel-border)]">
-          Free models (OpenRouter) at top — no API key or get one at openrouter.ai
+          Same as CLI: models.dev + Nexus Gateway. Free models first — no API key for free tier.
         </p>
         <div className="p-2 border-b border-[var(--vscode-panel-border)]">
           <input
@@ -612,7 +581,7 @@ function ModelPickerModal({
           />
         </div>
         <div className="flex-1 overflow-y-auto p-2 min-h-0">
-          {loading && <div className="nexus-muted text-xs py-2">Loading catalog from models.dev…</div>}
+          {loading && <div className="nexus-muted text-xs py-2">Loading catalog…</div>}
           {!loading && !catalog && <div className="nexus-muted text-xs py-2">Could not load catalog.</div>}
           {!loading && catalog && (
             <>
@@ -676,6 +645,7 @@ interface SettingsDraft {
   agentInstructions: string
   planInstructions: string
   askInstructions: string
+  debugInstructions: string
   profilesJson: string
 }
 
@@ -773,13 +743,13 @@ function SettingsView() {
                 onClick={() => {
                   setModelPickerOpen(true)
                   setModelPickerQuery("")
-                  requestModelsCatalog()
+                  if (!modelsCatalog) requestModelsCatalog()
                 }}
               >
-                Select model (free models from models.dev)
+                Select model (same free list as CLI — models.dev + gateway)
               </button>
               <span className="text-[10px] text-[var(--vscode-descriptionForeground)]">
-                Same catalog as KiloCode — free models first; OpenRouter base URL. No key required for free tier.
+                Same catalog as CLI: models.dev + Nexus Gateway; free models first.
               </span>
             </div>
             {modelPickerOpen && (
@@ -964,6 +934,12 @@ function SettingsView() {
               onChange={(v) => setDraft({ ...draft, askInstructions: v })}
               rows={3}
             />
+            <SettingsTextarea
+              label="Debug custom instructions"
+              value={draft.debugInstructions}
+              onChange={(v) => setDraft({ ...draft, debugInstructions: v })}
+              rows={3}
+            />
           </>
         )}
       </section>
@@ -1013,6 +989,7 @@ function IndexingAndDocsView({
   onReindex,
   onDeleteIndex,
   onOpenCursorignore,
+  onOpenNexusignore,
 }: {
   draft: SettingsDraft
   setDraft: React.Dispatch<React.SetStateAction<SettingsDraft>>
@@ -1053,7 +1030,7 @@ function IndexingAndDocsView({
           {indexStatus.state === "indexing" && (
             <>
               <div className="flex items-center justify-between text-[11px] text-[var(--vscode-descriptionForeground)] mb-1">
-                <span>Full-text (files)</span>
+                <span>Files scanned</span>
                 <span>{filesDone.toLocaleString()} / {filesTotal > 0 ? filesTotal.toLocaleString() : "…"} ({filesPct}%)</span>
               </div>
               <div className="nexus-index-progress-bar">
@@ -1062,7 +1039,7 @@ function IndexingAndDocsView({
               {chunksTotal > 0 && (
                 <>
                   <div className="flex items-center justify-between text-[11px] text-[var(--vscode-descriptionForeground)] mb-1 mt-2">
-                    <span>Chunks (FTS + vector)</span>
+                    <span>Chunks indexed</span>
                     <span>{chunksDone.toLocaleString()} / {chunksTotal.toLocaleString()} ({chunksPct}%)</span>
                   </div>
                   <div className="nexus-index-progress-bar">
@@ -1691,6 +1668,7 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     agentInstructions: config.modes?.agent?.customInstructions ?? "",
     planInstructions: config.modes?.plan?.customInstructions ?? "",
     askInstructions: config.modes?.ask?.customInstructions ?? "",
+    debugInstructions: config.modes?.debug?.customInstructions ?? "",
     profilesJson: JSON.stringify(config.profiles ?? {}, null, 2),
   }
 }
@@ -1771,6 +1749,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       agent: { customInstructions: draft.agentInstructions.trim() || undefined },
       plan: { customInstructions: draft.planInstructions.trim() || undefined },
       ask: { customInstructions: draft.askInstructions.trim() || undefined },
+      debug: { customInstructions: draft.debugInstructions.trim() || undefined },
     },
     profiles: parsedProfiles,
   }
@@ -1955,7 +1934,7 @@ function IndexProgress({
   return (
     <div className="px-3 py-1 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
       <div className="flex items-center justify-between text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
-        <span>Full-text (files)</span>
+        <span>Files scanned</span>
         <span>{progress}/{total} ({filesPct}%)</span>
       </div>
       <div className="w-full h-1 rounded-full bg-[var(--vscode-progressBar-background)]/30 overflow-hidden">
@@ -1967,7 +1946,7 @@ function IndexProgress({
       {chunksTotal > 0 && (
         <>
           <div className="flex items-center justify-between text-[10px] text-[var(--vscode-descriptionForeground)] mt-1 mb-1">
-            <span>Chunks (FTS + vector)</span>
+            <span>Chunks indexed</span>
             <span>{chunksDone}/{chunksTotal} ({chunksPct}%)</span>
           </div>
           <div className="w-full h-1 rounded-full bg-[var(--vscode-progressBar-background)]/30 overflow-hidden">
@@ -2066,6 +2045,23 @@ function SpinnerIcon({ className }: { className?: string }) {
     <svg className={`animate-spin ${className}`} viewBox="0 0 24 24" fill="none">
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  )
+}
+
+function SendIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="19" x2="12" y2="5" />
+      <polyline points="5 12 12 5 19 12" />
+    </svg>
+  )
+}
+
+function StopIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+      <rect x="4" y="4" width="16" height="16" rx="2" />
     </svg>
   )
 }

@@ -21,6 +21,8 @@ export interface StoredSession {
   cwd: string
   ts: number
   title?: string
+  /** Global todo list for the chat (persisted with session) */
+  todo?: string
   messages: SessionMessage[]
 }
 
@@ -30,7 +32,13 @@ export async function saveSession(session: StoredSession): Promise<void> {
 
   const filePath = path.join(dir, `${session.id}.jsonl`)
   const lines = session.messages.map(m => JSON.stringify(m)).join("\n")
-  const meta = JSON.stringify({ id: session.id, cwd: session.cwd, ts: session.ts, title: session.title })
+  const meta = JSON.stringify({
+    id: session.id,
+    cwd: session.cwd,
+    ts: session.ts,
+    title: session.title,
+    todo: session.todo ?? "",
+  })
 
   await fsp.writeFile(filePath, `${meta}\n${lines}\n`, "utf8")
 }
@@ -46,10 +54,17 @@ export async function loadSession(sessionId: string, cwd: string): Promise<Store
 
   if (lines.length === 0) return null
 
-  const meta = JSON.parse(lines[0]!) as { id: string; cwd: string; ts: number; title?: string }
+  const meta = JSON.parse(lines[0]!) as { id: string; cwd: string; ts: number; title?: string; todo?: string }
   const messages = lines.slice(1).map(l => JSON.parse(l) as SessionMessage)
 
-  return { ...meta, messages }
+  return {
+    id: meta.id,
+    cwd,
+    ts: meta.ts,
+    title: meta.title,
+    todo: typeof meta.todo === "string" ? meta.todo : "",
+    messages,
+  }
 }
 
 export async function listSessions(cwd: string): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number }>> {

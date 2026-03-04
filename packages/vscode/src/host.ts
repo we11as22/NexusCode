@@ -266,3 +266,48 @@ function getLanguageFromExtension(ext: string): string {
   }
   return map[ext] ?? "plaintext"
 }
+
+/**
+ * Open VS Code diff view for a file: before = git HEAD version, after = current file.
+ * Call from webview when user clicks an edited file (e.g. from Editable Files list).
+ */
+export async function showDiffForPath(cwd: string, filePath: string): Promise<void> {
+  const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
+  const uri = vscode.Uri.file(absPath)
+  let after: string
+  try {
+    const data = await vscode.workspace.fs.readFile(uri)
+    after = Buffer.from(data).toString("utf8")
+  } catch {
+    vscode.window.showErrorMessage(`NexusCode: Could not read file ${filePath}`)
+    return
+  }
+
+  const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
+  let before = ""
+  try {
+    const { execa } = await import("execa")
+    const res = await execa("git", ["-C", cwd, "show", `HEAD:${relPath}`], { reject: false, timeout: 5000 })
+    if (res.exitCode === 0 && res.stdout != null) before = res.stdout
+  } catch {
+    // New file or not in git — before stays ""
+  }
+
+  const fileName = path.basename(filePath)
+  const lang = getLanguageFromExtension(path.extname(filePath))
+  const beforeDoc = await vscode.workspace.openTextDocument({
+    content: before,
+    language: lang,
+  })
+  const afterDoc = await vscode.workspace.openTextDocument({
+    content: after,
+    language: lang,
+  })
+  await vscode.commands.executeCommand(
+    "vscode.diff",
+    beforeDoc.uri,
+    afterDoc.uri,
+    `${fileName}: NexusCode Changes`,
+    { viewColumn: vscode.ViewColumn.Beside, preview: true }
+  )
+}

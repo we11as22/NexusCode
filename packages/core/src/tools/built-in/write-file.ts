@@ -4,7 +4,7 @@ import * as path from "node:path"
 import type { ToolDef, ToolContext } from "../../types.js"
 
 const schema = z.object({
-  path: z.string().describe("Path to the file to create or overwrite"),
+  path: z.string().min(1).describe("Path to the file to create or overwrite"),
   content: z.string().describe("The complete content to write to the file"),
 })
 

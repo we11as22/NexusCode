@@ -11,13 +11,13 @@ import {
   loadRules, McpClient, setMcpClientInstance, createCompaction,
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
   CodebaseIndexer, createCodebaseIndexer, listSessions,
-  type Mode, type AgentEvent, type IndexStatus, type PermissionResult,
+  MODES, type Mode, type AgentEvent, type IndexStatus, type PermissionResult,
 } from "@nexuscode/core"
 import { CliHost } from "./host.js"
 import { NexusServerClient } from "./server-client.js"
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-const FREE_MODELS_BASE_URL = "https://api.kilo.ai/api/gateway"
+const NEXUS_GATEWAY_BASE_URL = "https://api.kilo.ai/api/gateway"
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0
@@ -38,7 +38,7 @@ function normalizeModelConfig<T extends { provider?: unknown; id?: unknown; base
   const modelId = String(next.id ?? "")
   if (normalizedProvider === "openai-compatible" && modelId.endsWith(":free")) {
     if (!isNonEmptyString(next.baseUrl) || isOpenRouterBaseUrl(next.baseUrl)) {
-      next.baseUrl = FREE_MODELS_BASE_URL
+      next.baseUrl = NEXUS_GATEWAY_BASE_URL
     }
   }
   return next as T
@@ -171,11 +171,13 @@ if (argv.profile && config.profiles[argv.profile]) {
 }
 
 // Determine mode
-const mode = (argv._[0] as Mode) ?? "agent"
+const firstArg = String(argv._[0] ?? "")
+const hasExplicitMode = (MODES as string[]).includes(firstArg)
+const mode = (hasExplicitMode ? firstArg : "agent") as Mode
 const isPrintMode = argv.print
 
 // Get message from positional args
-const messageArgs = argv._.slice(1)
+const messageArgs = hasExplicitMode ? argv._.slice(1) : argv._
 const initialMessage = messageArgs.join(" ").trim() || undefined
 
 // Init session (refs allow switching session and re-rendering TUI)
@@ -674,7 +676,14 @@ try {
   const { createCliRenderer } = opentuiCore
   const { createRoot } = opentuiReact
   App = appModule.App
-  renderer = await createCliRenderer({ exitOnCtrlC: false })
+  renderer = await createCliRenderer({
+    exitOnCtrlC: false,
+    targetFps: 60,
+    gatherStats: false,
+    autoFocus: false,
+    useKittyKeyboard: { disambiguate: true, alternateKeys: true, events: true },
+    openConsoleOnError: false,
+  })
   root = createRoot(renderer)
 } catch (err) {
   const msg = err instanceof Error ? err.message : String(err)
@@ -767,6 +776,7 @@ const appProps = {
       agent: { customInstructions: config.modes?.agent?.customInstructions },
       plan: { customInstructions: config.modes?.plan?.customInstructions },
       ask: { customInstructions: config.modes?.ask?.customInstructions },
+      debug: { customInstructions: config.modes?.debug?.customInstructions },
     },
     profiles: config.profiles ?? {},
   },

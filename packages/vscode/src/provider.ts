@@ -163,7 +163,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       color: var(--vscode-foreground, #d4d4d4);
       font-family: var(--vscode-font-family, var(--monaco-monospace-font, 'Segoe UI', sans-serif));
     }
-    #root { height: 100%; width: 100%; min-height: 0; display: flex; flex-direction: column; }
+    #root { height: 100%; width: 100%; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
     #root .loading-msg { display: flex; align-items: center; justify-content: center; flex: 1; color: var(--vscode-foreground, #d4d4d4); }
     #root.loaded .loading-msg { display: none; }
     #root.loaded .loading-hint { display: none; }

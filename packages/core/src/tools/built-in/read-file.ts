@@ -7,10 +7,13 @@ const MAX_FILE_SIZE = 200 * 1024 // 200 KB
 const MAX_LINES = 3000
 
 const schema = z.object({
-  path: z.string().describe("Relative or absolute path to the file"),
+  path: z.string().min(1).describe("Relative or absolute path to the file"),
   start_line: z.number().int().positive().optional().describe("Start line (1-indexed)"),
   end_line: z.number().int().positive().optional().describe("End line (1-indexed, inclusive)"),
-})
+}).refine(
+  (data) => data.end_line == null || data.start_line == null || data.end_line >= data.start_line,
+  { message: "end_line must be >= start_line", path: ["end_line"] }
+)
 
 export const readFileTool: ToolDef<z.infer<typeof schema>> = {
   name: "read_file",

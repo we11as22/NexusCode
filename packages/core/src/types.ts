@@ -2,9 +2,9 @@ import type { z } from "zod"
 
 // ─── Modes ───────────────────────────────────────────────────────────────────
 
-export type Mode = "agent" | "plan" | "ask"
+export type Mode = "agent" | "plan" | "ask" | "debug"
 
-export const MODES: Mode[] = ["agent", "plan", "ask"]
+export const MODES: Mode[] = ["agent", "plan", "ask", "debug"]
 
 // ─── Permissions ─────────────────────────────────────────────────────────────
 
@@ -235,7 +235,7 @@ export type AgentEvent =
   | { type: "text_delta"; delta: string; messageId: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
-  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean }
+  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
@@ -310,6 +310,7 @@ export interface NexusConfig {
     agent?: ModeConfig
     plan?: ModeConfig
     ask?: ModeConfig
+    debug?: ModeConfig
     [key: string]: ModeConfig | undefined
   }
   indexing: {

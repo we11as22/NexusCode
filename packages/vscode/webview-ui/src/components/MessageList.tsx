@@ -1,14 +1,19 @@
 import React, { useEffect, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ToolCallCard } from "./ToolCallCard.js"
+import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
+import { getExploredFromParts, ExploredSummaryInline } from "./ExploredProgressBlock.js"
+import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
+
+const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file"])
 
 interface Props {
   messages: SessionMessage[]
+  isRunning?: boolean
 }
 
-export function MessageList({ messages }: Props) {
+export function MessageList({ messages, isRunning = false }: Props) {
   const listRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const [stickToBottom, setStickToBottom] = React.useState(true)
@@ -51,8 +56,12 @@ export function MessageList({ messages }: Props) {
   return (
     <div className="message-list-container">
       <div ref={listRef} onScroll={handleScroll} className="message-list flex flex-col space-y-4">
-        {messages.map(msg => (
-          <MessageBubble key={msg.id} message={msg} />
+        {messages.map((msg, idx) => (
+          <MessageBubble
+            key={msg.id}
+            message={msg}
+            isComplete={!isRunning || idx < messages.length - 1}
+          />
         ))}
         <div ref={bottomRef} />
       </div>
@@ -70,11 +79,11 @@ export function MessageList({ messages }: Props) {
   )
 }
 
-function MessageBubble({ message }: { message: SessionMessage }) {
+function MessageBubble({ message, isComplete }: { message: SessionMessage; isComplete: boolean }) {
   if (message.summary) {
     return (
-      <div className="rounded-xl border border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)] px-4 py-3 text-xs">
-        <div className="text-[var(--vscode-descriptionForeground)] mb-1.5 font-medium">📝 Conversation compacted</div>
+      <div className="text-xs text-[var(--vscode-descriptionForeground)] py-2">
+        <div className="font-medium mb-1">📝 Conversation compacted</div>
         <ReactMarkdown className="prose-nexus text-xs" remarkPlugins={[remarkGfm]}>
           {typeof message.content === "string" ? message.content : ""}
         </ReactMarkdown>
@@ -108,13 +117,13 @@ function MessageBubble({ message }: { message: SessionMessage }) {
     )
   }
 
-  // Assistant — full-width card like Kilo
+  // Assistant — on chat background, no frame (only user messages are in a bubble)
   return (
-    <div className="w-full min-w-0 rounded-xl border border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)] px-4 py-3">
+    <div className="w-full min-w-0">
       {typeof message.content === "string" ? (
         <AssistantText text={message.content} />
       ) : (
-        <AssistantParts parts={message.content as MessagePart[]} />
+        <AssistantParts parts={message.content as MessagePart[]} isComplete={isComplete} />
       )}
     </div>
   )
@@ -186,7 +195,13 @@ function AssistantText({ text }: { text: string }) {
   )
 }
 
-function AssistantParts({ parts }: { parts: MessagePart[] }) {
+function AssistantParts({ parts, isComplete }: { parts: MessagePart[]; isComplete: boolean }) {
+  const toolParts = parts.filter((p): p is ToolPart => p.type === "tool")
+  const fileEditParts = toolParts.filter((p) => FILE_EDIT_TOOLS.has(p.tool))
+  const otherToolParts = toolParts.filter((p) => !FILE_EDIT_TOOLS.has(p.tool))
+  const explored = getExploredFromParts(otherToolParts)
+  const hasExploredBlock = otherToolParts.length > 0
+
   return (
     <div className="space-y-3">
       {parts.map((part, i) => {
@@ -197,13 +212,16 @@ function AssistantParts({ parts }: { parts: MessagePart[] }) {
         }
         if (part.type === "tool") {
           const toolPart = part as ToolPart
+          if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file") {
+            return <InlineFileEditBlock key={i} part={toolPart} />
+          }
           if (toolPart.tool === "thinking_preamble") {
             const userMsg = (toolPart.input?.user_message as string)?.trim()
             const reasoning = (toolPart.input?.reasoning_and_next_actions as string) || ""
             if (userMsg || reasoning) return <ThinkingPreambleBlock key={i} userMessage={userMsg} reasoning={reasoning} />
             return <ToolCallCard key={i} part={toolPart} />
           }
-          return <ToolCallCard key={i} part={toolPart} />
+          return null
         }
         if (part.type === "reasoning") {
           const reasoningText = (part as { text: string }).text
@@ -214,23 +232,29 @@ function AssistantParts({ parts }: { parts: MessagePart[] }) {
         }
         return null
       })}
+      {hasExploredBlock && (
+        <ExploredSummaryInline
+          filesCount={explored.filesCount}
+          searchesCount={explored.searchesCount}
+          entries={explored.entries}
+          defaultCollapsed={isComplete}
+          onOpenFile={(path, line, endLine) =>
+            postMessage({ type: "openFileAtLocation", path, line, endLine })
+          }
+        />
+      )}
     </div>
   )
 }
 
-/** Thinking preamble: reasoning (required) + optional user-visible message — chronological with text and tools */
+/** Thinking preamble: reasoning (required) + optional user-visible message — on chat background, no frame */
 function ThinkingPreambleBlock({ userMessage, reasoning }: { userMessage: string; reasoning: string }) {
   const [showReasoning, setShowReasoning] = useState(false)
   const hasReasoning = reasoning.trim().length > 0
   return (
-    <div className="nexus-thinking-preamble-block rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden my-1 font-sans">
-      <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)]">
-        <span className="text-[10px] font-semibold text-[var(--vscode-descriptionForeground)] uppercase tracking-wide">
-          —
-        </span>
-      </div>
+    <div className="nexus-thinking-preamble-block my-2 font-sans">
       {userMessage ? (
-        <div className="px-2.5 py-2 text-sm text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
+        <div className="px-0 py-1 text-sm text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
           {userMessage}
         </div>
       ) : null}
@@ -239,12 +263,12 @@ function ThinkingPreambleBlock({ userMessage, reasoning }: { userMessage: string
           <button
             type="button"
             onClick={() => setShowReasoning(!showReasoning)}
-            className="w-full px-2.5 py-1 text-[10px] text-[var(--nexus-accent)] hover:bg-[var(--vscode-list-hoverBackground)] border-t border-[var(--vscode-panel-border)]"
+            className="text-[10px] text-[var(--nexus-accent)] hover:bg-[var(--vscode-list-hoverBackground)] rounded px-0 py-1"
           >
             {showReasoning ? "Hide reasoning" : "Show reasoning"}
           </button>
           {showReasoning && (
-            <div className="px-2.5 py-2 text-xs text-[var(--vscode-descriptionForeground)] whitespace-pre-wrap break-words border-t border-[var(--vscode-panel-border)] font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
+            <div className="px-0 py-2 text-xs text-[var(--vscode-descriptionForeground)] whitespace-pre-wrap break-words border-t border-[var(--vscode-panel-border)] font-sans mt-1" style={{ fontFamily: "var(--vscode-font-family)" }}>
               {reasoning}
             </div>
           )}
@@ -254,27 +278,22 @@ function ThinkingPreambleBlock({ userMessage, reasoning }: { userMessage: string
   )
 }
 
-/** Inline reasoning/thinking block in message — chronological with text and tools, Cline-style */
+/** Inline reasoning/thinking block — on chat background, no frame */
 function ReasoningPartBlock({ text }: { text: string }) {
   const [collapsed, setCollapsed] = useState(false)
   const isLong = text.length > 600
   const displayText = collapsed && isLong ? text.slice(0, 600) + "\n…" : text
 
   return (
-    <div className="nexus-reasoning-block rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden font-sans">
-      <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)]">
-        <span className="text-[10px] font-semibold text-[var(--vscode-descriptionForeground)] uppercase tracking-wide">
-          Thinking
-        </span>
-      </div>
-      <div className="px-2.5 py-2 text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
+    <div className="nexus-reasoning-block my-2 font-sans">
+      <div className="px-0 py-1 text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
         {displayText}
       </div>
       {isLong && (
         <button
           type="button"
           onClick={() => setCollapsed(!collapsed)}
-          className="w-full px-2.5 py-1.5 text-[10px] text-[var(--nexus-accent)] hover:bg-[var(--vscode-list-hoverBackground)] border-t border-[var(--vscode-panel-border)]"
+          className="text-[10px] text-[var(--nexus-accent)] hover:bg-[var(--vscode-list-hoverBackground)] rounded px-0 py-1"
         >
           {collapsed ? "Show more" : "Show less"}
         </button>

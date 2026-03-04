@@ -1,5 +1,5 @@
 /**
- * Models catalog from models.dev (same source as KiloCode/OpenCode).
+ * Models catalog from models.dev.
  * Used by CLI and extension to show "Select model" with Recommended / free models.
  * Free models (cost.input === 0) are sorted first so users can start without an API key (OpenRouter free tier).
  */
@@ -7,6 +7,7 @@
 const DEFAULT_MODELS_URL = "https://models.dev/api.json"
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 const NEXUS_GATEWAY_BASE_URL = "https://api.kilo.ai/api/gateway"
+const SOURCE_TIMEOUT_MS = 15_000
 
 export interface CatalogModel {
   id: string
@@ -37,9 +38,9 @@ const CACHE_MS = 10 * 60 * 1000 // 10 min
 
 function isSupportedProvider(providerKey: string, p: { api?: string }): boolean {
   const key = providerKey.toLowerCase()
-  if (key === "openrouter" || key === "kilo") return true
+  if (key === "openrouter" || key === "kilo" || key === "nexus") return true
   const api = (p.api ?? "").toLowerCase()
-  return api.includes("openrouter.ai") || api.includes("api.kilo.ai")
+  return api.includes("openrouter.ai") || api.includes("api.kilo.ai") || api.includes("api.nexus")
 }
 
 function isFreeModel(m: { cost?: { input?: number } }): boolean {
@@ -56,53 +57,125 @@ export function getModelsPath(): string | undefined {
 }
 
 /**
- * Load catalog: from NEXUS_MODELS_PATH file, or fetch from NEXUS_MODELS_URL (models.dev).
- * Supported gateway providers are mapped to Nexus openai-compatible + baseUrl.
+ * Load catalog from all available sources with 15s timeout per source.
+ * Uses only sources that respond in time; results are merged and deduplicated by (providerId, modelId).
  */
 export async function getModelsCatalog(): Promise<ModelsCatalog> {
   const now = Date.now()
   if (cachedCatalog && now - cachedAt < CACHE_MS) {
     return cachedCatalog
   }
-  const gatewayModelIds = await getNexusGatewayModelIds()
 
   const path = getModelsPath()
-  if (path) {
-    try {
-      const fs = await import("node:fs/promises")
-      const content = await fs.readFile(path, "utf8")
-      const data = JSON.parse(content) as Record<string, unknown>
-      cachedCatalog = parseCatalog(data, gatewayModelIds)
-      cachedAt = now
-      return cachedCatalog
-    } catch {
-      // fallback to fetch
-    }
+  const url = getModelsUrl()
+
+  const fetchUrl = (): Promise<Record<string, unknown>> =>
+    fetch(url, {
+      signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS),
+      headers: { Accept: "application/json" },
+    }).then((res) => {
+      if (!res.ok) throw new Error(`fetch: ${res.status}`)
+      return res.json() as Promise<Record<string, unknown>>
+    })
+
+  const readPath = (): Promise<Record<string, unknown> | null> => {
+    if (!path) return Promise.resolve(null)
+    const read = import("node:fs/promises")
+      .then((fs) => fs.readFile(path, "utf8"))
+      .then((content) => JSON.parse(content) as Record<string, unknown>)
+    return Promise.race([
+      read,
+      new Promise<null>((_, reject) =>
+        setTimeout(() => reject(new Error("timeout")), SOURCE_TIMEOUT_MS)
+      ),
+    ]).then((data) => data, () => null)
   }
 
-  const url = getModelsUrl()
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(15_000),
-      headers: { Accept: "application/json" },
-    })
-    if (!res.ok) throw new Error(`models.dev fetch: ${res.status}`)
-    const data = (await res.json()) as Record<string, unknown>
-    cachedCatalog = parseCatalog(data, gatewayModelIds)
-    cachedAt = now
-    return cachedCatalog
-  } catch (e) {
-    // Return minimal catalog so UI still works
+  const [gatewaySettled, urlSettled, pathSettled] = await Promise.allSettled([
+    getNexusGatewayModelIds(),
+    fetchUrl(),
+    readPath(),
+  ])
+
+  const gatewayModelIds =
+    gatewaySettled.status === "fulfilled" ? gatewaySettled.value : null
+
+  const rawDataSources: Record<string, unknown>[] = []
+  if (urlSettled.status === "fulfilled") rawDataSources.push(urlSettled.value)
+  if (pathSettled.status === "fulfilled" && pathSettled.value)
+    rawDataSources.push(pathSettled.value)
+
+  if (rawDataSources.length === 0) {
     cachedCatalog = getFallbackCatalog()
     cachedAt = now
     return cachedCatalog
   }
+
+  const catalogs = rawDataSources.map((data) =>
+    parseCatalog(data, gatewayModelIds)
+  )
+  cachedCatalog = mergeCatalogs(catalogs)
+  cachedAt = now
+  return cachedCatalog
+}
+
+/** Merge multiple catalogs: deduplicate by (providerId, modelId), first occurrence wins */
+function mergeCatalogs(catalogs: ModelsCatalog[]): ModelsCatalog {
+  const providersById = new Map<string, CatalogProvider>()
+  const recommendedKeys = new Set<string>()
+
+  for (const cat of catalogs) {
+    for (const prov of cat.providers) {
+      const existing = providersById.get(prov.id)
+      if (!existing) {
+        providersById.set(prov.id, { ...prov, models: [...prov.models] })
+      } else {
+        const modelIds = new Set(existing.models.map((m) => m.id))
+        for (const m of prov.models) {
+          if (!modelIds.has(m.id)) {
+            modelIds.add(m.id)
+            existing.models.push(m)
+          }
+        }
+        existing.models.sort((a, b) => {
+          if (a.free !== b.free) return a.free ? -1 : 1
+          const ra = a.recommendedIndex ?? 9999
+          const rb = b.recommendedIndex ?? 9999
+          if (ra !== rb) return ra - rb
+          return a.name.localeCompare(b.name)
+        })
+      }
+    }
+  }
+
+  const providers = Array.from(providersById.values())
+  const recommended: ModelsCatalog["recommended"] = []
+
+  for (const cat of catalogs) {
+    for (const r of cat.recommended) {
+      const key = `${r.providerId}:${r.modelId}`
+      if (recommendedKeys.has(key)) continue
+      recommendedKeys.add(key)
+      recommended.push(r)
+    }
+  }
+
+  recommended.sort((a, b) => {
+    if (a.free !== b.free) return a.free ? -1 : 1
+    if (a.providerId !== b.providerId) {
+      if (a.providerId === "nexus") return -1
+      if (b.providerId === "nexus") return 1
+    }
+    return a.name.localeCompare(b.name)
+  })
+
+  return { providers, recommended }
 }
 
 async function getNexusGatewayModelIds(): Promise<Set<string> | null> {
   try {
     const res = await fetch(`${NEXUS_GATEWAY_BASE_URL}/models`, {
-      signal: AbortSignal.timeout(12_000),
+      signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS),
       headers: {
         Accept: "application/json",
         Authorization: "Bearer dummy",
@@ -128,15 +201,16 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
   for (const [providerKey, prov] of Object.entries(rawProviders)) {
     if (!prov || typeof prov !== "object" || !prov.models) continue
     if (!isSupportedProvider(providerKey, prov)) continue
+    const providerId = providerKey === "kilo" ? "nexus" : providerKey
     const api = prov.api ?? ""
 
     const baseUrl = api.trim() || OPENROUTER_BASE_URL
-    const name = providerKey === "kilo" ? "Nexus Gateway" : (prov.name ?? providerKey) as string
+    const name = providerId === "nexus" ? "Nexus Gateway" : (prov.name ?? providerId) as string
     const models: CatalogModel[] = []
     for (const [modelKey, m] of Object.entries(prov.models)) {
       if (!m || typeof m !== "object") continue
       const id = (m.id ?? modelKey) as string
-      if (providerKey === "kilo" && gatewayModelIds && !gatewayModelIds.has(id)) continue
+      if (providerId === "nexus" && gatewayModelIds && !gatewayModelIds.has(id)) continue
       const free = isFreeModel(m)
       const catalogModel: CatalogModel = {
         id,
@@ -149,7 +223,7 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
       models.push(catalogModel)
       if (free || typeof catalogModel.recommendedIndex === "number") {
         recommended.push({
-          providerId: providerKey,
+          providerId,
           modelId: id,
           name: catalogModel.name,
           free,
@@ -167,7 +241,7 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
         return a.name.localeCompare(b.name)
       })
       providers.push({
-        id: providerKey,
+        id: providerId,
         name,
         baseUrl,
         models,
@@ -178,8 +252,8 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
   recommended.sort((a, b) => {
     if (a.free !== b.free) return a.free ? -1 : 1
     if (a.providerId !== b.providerId) {
-      if (a.providerId === "kilo") return -1
-      if (b.providerId === "kilo") return 1
+      if (a.providerId === "nexus") return -1
+      if (b.providerId === "nexus") return 1
     }
     return a.name.localeCompare(b.name)
   })
@@ -190,16 +264,16 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
 /** Fallback when fetch fails: default free models so "Select model" still works */
 function getFallbackCatalog(): ModelsCatalog {
   const recommended: ModelsCatalog["recommended"] = [
-    { providerId: "kilo", modelId: "minimax/minimax-m2.5:free", name: "MiniMax M2.5 (free)", free: true },
-    { providerId: "kilo", modelId: "moonshotai/kimi-k2.5:free", name: "Kimi K2.5 (free)", free: true },
-    { providerId: "kilo", modelId: "arcee-ai/trinity-large-preview:free", name: "Arcee Trinity Large Preview (free)", free: true },
-    { providerId: "kilo", modelId: "stepfun/step-3.5-flash:free", name: "Step 3.5 Flash (free)", free: true },
-    { providerId: "kilo", modelId: "corethink:free", name: "CoreThink (free)", free: true },
+    { providerId: "nexus", modelId: "minimax/minimax-m2.5:free", name: "MiniMax M2.5 (free)", free: true },
+    { providerId: "nexus", modelId: "moonshotai/kimi-k2.5:free", name: "Kimi K2.5 (free)", free: true },
+    { providerId: "nexus", modelId: "arcee-ai/trinity-large-preview:free", name: "Arcee Trinity Large Preview (free)", free: true },
+    { providerId: "nexus", modelId: "stepfun/step-3.5-flash:free", name: "Step 3.5 Flash (free)", free: true },
+    { providerId: "nexus", modelId: "corethink:free", name: "CoreThink (free)", free: true },
   ]
   return {
     providers: [
       {
-        id: "kilo",
+        id: "nexus",
         name: "Nexus Gateway",
         baseUrl: NEXUS_GATEWAY_BASE_URL,
         models: recommended.map((r) => ({ id: r.modelId, name: r.name, free: r.free })),
@@ -215,7 +289,9 @@ function getFallbackCatalog(): ModelsCatalog {
  */
 export function catalogSelectionToModel(providerId: string, modelId: string, catalog: ModelsCatalog): { provider: string; id: string; baseUrl: string } {
   const prov = catalog.providers.find((p) => p.id === providerId)
-  const baseUrl = prov?.baseUrl ?? (providerId === "kilo" ? NEXUS_GATEWAY_BASE_URL : OPENROUTER_BASE_URL)
+  const baseUrl =
+    prov?.baseUrl ??
+    (providerId === "nexus" || providerId === "kilo" ? NEXUS_GATEWAY_BASE_URL : OPENROUTER_BASE_URL)
   return {
     provider: "openai-compatible",
     id: modelId,

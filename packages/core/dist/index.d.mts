@@ -57,6 +57,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         region?: string | undefined;
     }>>;
     vectorDb: z.ZodOptional<z.ZodObject<{
+        /** Disabled by default. Set to true to enable vector codebase search (requires Qdrant + embeddings). */
         enabled: z.ZodDefault<z.ZodBoolean>;
         url: z.ZodDefault<z.ZodString>;
         collection: z.ZodDefault<z.ZodString>;
@@ -100,6 +101,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             customInstructions?: string | undefined;
         }>>;
         ask: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        debug: z.ZodOptional<z.ZodObject<{
             autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
             systemPrompt: z.ZodOptional<z.ZodString>;
             customInstructions: z.ZodOptional<z.ZodString>;
@@ -164,6 +178,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
+        debug: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
     }, z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -216,6 +243,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
+        debug: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
     }, z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -233,6 +273,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         excludePatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         symbolExtract: z.ZodDefault<z.ZodBoolean>;
+        /** Disabled by default. Set to true with vectorDb.enabled to use semantic codebase_search. */
         vector: z.ZodDefault<z.ZodBoolean>;
         batchSize: z.ZodDefault<z.ZodNumber>;
         embeddingBatchSize: z.ZodDefault<z.ZodNumber>;
@@ -462,49 +503,59 @@ declare const NexusConfigSchema: z.ZodObject<{
             ask: z.ZodOptional<z.ZodNumber>;
             plan: z.ZodOptional<z.ZodNumber>;
             agent: z.ZodOptional<z.ZodNumber>;
+            debug: z.ZodOptional<z.ZodNumber>;
         }, "strip", z.ZodTypeAny, {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         }, {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         }>>;
         maxIterations: z.ZodOptional<z.ZodObject<{
             ask: z.ZodOptional<z.ZodNumber>;
             plan: z.ZodOptional<z.ZodNumber>;
             agent: z.ZodOptional<z.ZodNumber>;
+            debug: z.ZodOptional<z.ZodNumber>;
         }, "strip", z.ZodTypeAny, {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         }, {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         }>>;
     }, "strip", z.ZodTypeAny, {
         toolCallBudget?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         } | undefined;
         maxIterations?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         } | undefined;
     }, {
         toolCallBudget?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         } | undefined;
         maxIterations?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         } | undefined;
     }>>;
     rules: z.ZodDefault<z.ZodObject<{
@@ -580,6 +631,11 @@ declare const NexusConfigSchema: z.ZodObject<{
             customInstructions?: string | undefined;
         } | undefined;
         ask?: {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        } | undefined;
+        debug?: {
             autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
@@ -661,11 +717,13 @@ declare const NexusConfigSchema: z.ZodObject<{
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         } | undefined;
         maxIterations?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         } | undefined;
     };
     profiles: Record<string, {
@@ -770,6 +828,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
+        debug: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
     }, z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -853,11 +924,13 @@ declare const NexusConfigSchema: z.ZodObject<{
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         } | undefined;
         maxIterations?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
+            debug?: number | undefined;
         } | undefined;
     } | undefined;
     profiles?: Record<string, {
@@ -873,7 +946,8 @@ declare const NexusConfigSchema: z.ZodObject<{
     }> | undefined;
 }>;
 
-type Mode = "agent" | "plan" | "ask";
+type Mode = "agent" | "plan" | "ask" | "debug";
+declare const MODES: Mode[];
 type PermissionAction = "read" | "write" | "execute" | "mcp" | "browser" | "search";
 interface PermissionResult {
     approved: boolean;
@@ -1171,6 +1245,7 @@ interface NexusConfig {
         agent?: ModeConfig;
         plan?: ModeConfig;
         ask?: ModeConfig;
+        debug?: ModeConfig;
         [key: string]: ModeConfig | undefined;
     };
     indexing: {
@@ -1613,7 +1688,7 @@ declare class ToolRegistry {
 declare function getAllBuiltinTools(): ToolDef[];
 
 /**
- * Codebase indexer: vector-only (Qdrant). No FTS.
+ * Codebase indexer: vector-only (Qdrant).
  * When vector client is missing, indexing is no-op and search returns [].
  */
 declare class CodebaseIndexer implements IIndexer {
@@ -1753,7 +1828,7 @@ declare function testMcpServers(configs: McpServerConfig[]): Promise<Array<{
 }>>;
 
 /**
- * Models catalog from models.dev (same source as KiloCode/OpenCode).
+ * Models catalog from models.dev.
  * Used by CLI and extension to show "Select model" with Recommended / free models.
  * Free models (cost.input === 0) are sorted first so users can start without an API key (OpenRouter free tier).
  */
@@ -1785,8 +1860,8 @@ interface ModelsCatalog {
 declare function getModelsUrl(): string;
 declare function getModelsPath(): string | undefined;
 /**
- * Load catalog: from NEXUS_MODELS_PATH file, or fetch from NEXUS_MODELS_URL (models.dev).
- * Supported gateway providers are mapped to Nexus openai-compatible + baseUrl.
+ * Load catalog from all available sources with 15s timeout per source.
+ * Uses only sources that respond in time; results are merged and deduplicated by (providerId, modelId).
  */
 declare function getModelsCatalog(): Promise<ModelsCatalog>;
 /**
@@ -1828,4 +1903,4 @@ declare class CheckpointTracker {
     private restoreToWorkspace;
 }
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, testMcpServers, writeConfig, writeGlobalProfiles };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, runAgentLoop, setMcpClientInstance, testMcpServers, writeConfig, writeGlobalProfiles };

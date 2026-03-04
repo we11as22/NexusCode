@@ -15,7 +15,7 @@ const schema = z.object({
 export const codebaseSearchTool: ToolDef<z.infer<typeof schema>> = {
   name: "codebase_search",
   description: `Semantic (vector) search over the indexed codebase. Finds code by meaning, not exact text.
-Only available when the vector index is built and ready (indexing.enabled + vectorDb + embeddings configured).
+Only available when vector search is enabled (indexing.vector + vectorDb.enabled in .nexus/nexus.yaml) and the index is built (embeddings configured, Qdrant running).
 
 When to use:
 - Explore codebase by intent: "where is auth validated", "error handling for API calls", "how does caching work".
@@ -32,10 +32,17 @@ When NOT to use:
   readOnly: true,
 
   async execute({ query, queries, path, paths, kind, limit }, ctx: ToolContext) {
+    const vectorEnabled = Boolean(ctx.config.indexing?.vector && ctx.config.vectorDb?.enabled)
+    if (!vectorEnabled) {
+      return {
+        success: false,
+        output: "Vector codebase search is disabled. Enable indexing.vector and vectorDb.enabled in .nexus/nexus.yaml to use codebase_search.",
+      }
+    }
     if (!ctx.indexer) {
       return {
         success: false,
-        output: "Vector codebase search is not enabled or index is not ready. Enable indexing.vector and vectorDb in .nexus/nexus.yaml and set embeddings (model + API key). Wait for indexing to complete.",
+        output: "Indexer is not ready. Configure embeddings (model + API key) and ensure Qdrant is running, then wait for indexing to complete.",
       }
     }
 

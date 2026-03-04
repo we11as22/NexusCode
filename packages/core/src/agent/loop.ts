@@ -22,6 +22,7 @@ import { buildSystemPrompt, type PromptContext } from "./prompts/components/inde
 import { getInitialProjectContext } from "./prompts/initial-context.js"
 import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN } from "./modes.js"
 import { classifyTools, classifySkills } from "./classifier.js"
+import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
 import { estimateTokens } from "../context/condense.js"
@@ -33,6 +34,7 @@ const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   ask: 80,
   plan: 80,
   agent: 200,
+  debug: 200,
 }
 
 export interface AgentLoopOptions {
@@ -69,6 +71,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   //    Access control is enforced here (backend), not in prompts — only resolvedTools go to the LLM.
   const blockedTools = getBlockedToolsForMode(mode)
   const builtinToolNames = new Set(getBuiltinToolsForMode(mode))
+  // Vector search is opt-in: when disabled, codebase_search is not available.
+  if (!config.indexing?.vector || !config.vectorDb?.enabled) {
+    builtinToolNames.delete("codebase_search")
+  }
   const builtinTools = tools.filter(t => builtinToolNames.has(t.name) && !blockedTools.has(t.name))
   const dynamicTools = tools.filter(t => !builtinToolNames.has(t.name) && !blockedTools.has(t.name))
 
@@ -103,7 +109,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
   const resolvedTools = [...builtinTools, ...resolvedDynamicTools, ...blockedFallbackTools]
 
-  // 2. Resolve skills: classify if >threshold
+  // 2. Resolve skills: FTS top-20 by name/summary, then LLM classify if >threshold
   let resolvedSkills: SkillDef[]
   if (skills.length > config.skillClassifyThreshold) {
     const lastMessage = session.messages[session.messages.length - 1]
@@ -111,7 +117,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       ? lastMessage.content
       : (lastMessage?.content as Array<{type: string; text?: string}>)?.find(p => p.type === "text")?.text ?? ""
 
-    resolvedSkills = await classifySkills(skills, taskDesc, activeClient)
+    const candidates = ftsTopSkills(skills, taskDesc, 20)
+    resolvedSkills = await classifySkills(candidates, taskDesc, activeClient)
   } else {
     resolvedSkills = skills
   }
@@ -146,6 +153,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     ask: 24,
     plan: 24,
     agent: 48,
+    debug: 48,
   }
   const toolBudgetFromConfig = config.agentLoop?.toolCallBudget
   const iterFromConfig = config.agentLoop?.maxIterations
@@ -153,11 +161,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     ask: toolBudgetFromConfig?.ask ?? BASE_TOOL_CALL_BUDGET_BY_MODE.ask,
     plan: toolBudgetFromConfig?.plan ?? BASE_TOOL_CALL_BUDGET_BY_MODE.plan,
     agent: toolBudgetFromConfig?.agent ?? BASE_TOOL_CALL_BUDGET_BY_MODE.agent,
+    debug: toolBudgetFromConfig?.debug ?? BASE_TOOL_CALL_BUDGET_BY_MODE.debug,
   }
   const effectiveMaxIterations: Record<Mode, number> = {
     ask: iterFromConfig?.ask ?? baseMaxIterationsByMode.ask,
     plan: iterFromConfig?.plan ?? baseMaxIterationsByMode.plan,
     agent: iterFromConfig?.agent ?? baseMaxIterationsByMode.agent,
+    debug: iterFromConfig?.debug ?? baseMaxIterationsByMode.debug,
   }
   const maxIterations = effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode]
   const toolCallBudget = Math.max(8, effectiveToolBudget[mode] ?? BASE_TOOL_CALL_BUDGET_BY_MODE[mode])
@@ -480,17 +490,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 output: result.output,
                 error: result.success ? undefined : result.output,
                 compacted: (result as { compacted?: boolean }).compacted,
+                ...(result.success && (toolName === "write_to_file" || toolName === "replace_in_file")
+                  ? { path: extractWriteTargetPath(toolName, toolInput) }
+                  : {}),
               })
 
               if (toolName === "update_todo_list") {
                 host.emit({ type: "todo_updated", todo: session.getTodo() })
-              }
-
-              if (toolName === "spawn_agent" && result.success && result.output) {
-                session.addMessage({
-                  role: "user",
-                  content: `Subtask completed.\n\n${result.output}`,
-                })
               }
 
               lastToolName = toolName
@@ -617,6 +623,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             output: result.output,
             error: result.success ? undefined : result.output,
             compacted: (result as { compacted?: boolean }).compacted,
+            ...(result.success && (call.toolName === "write_to_file" || call.toolName === "replace_in_file")
+              ? { path: extractWriteTargetPath(call.toolName, call.toolInput) }
+              : {}),
           })
 
           if (call.toolName === "update_todo_list") {
