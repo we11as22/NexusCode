@@ -92,6 +92,7 @@ function isFileEditTool(part: ToolPart): boolean {
 }
 
 function getFileEditPath(part: ToolPart): string | null {
+  if (part.path != null && String(part.path).trim()) return String(part.path).trim()
   const pathVal = part.input?.path
   if (pathVal != null && String(pathVal).trim()) return String(pathVal).trim()
   const m = part.output?.match(/<file_content\s+path="([^"]+)"/)
@@ -100,7 +101,23 @@ function getFileEditPath(part: ToolPart): string | null {
 }
 
 function getEditStatLabel(part: ToolPart): string {
+  if (part.diffStats != null) {
+    const { added, removed } = part.diffStats
+    return [added > 0 ? `+${added}` : "", removed > 0 ? `-${removed}` : ""].filter(Boolean).join(" ")
+  }
   const output = part.output ?? ""
+  if (part.tool === "read_file") {
+    const m = output.match(/<file_content\s+path="[^"]+"\s+lines="([^"]+)"\s+total="([^"]+)">/)
+    if (m) {
+      const [, linesAttr, total] = m
+      if (linesAttr && total) {
+        const totalNum = parseInt(total, 10)
+        const isFull = linesAttr === `1-${totalNum}` || linesAttr === `1-${total}`
+        if (!isFull) return `lines ${linesAttr}`
+      }
+    }
+    return "view"
+  }
   const stats = getDiffStats(output)
   const isDiff = output.split("\n").filter((l) => l.startsWith("+") || l.startsWith("-")).length >= 3
   if (isDiff && (stats.add > 0 || stats.del > 0)) {
@@ -113,16 +130,17 @@ function getEditStatLabel(part: ToolPart): string {
   return "edited"
 }
 
-/** Inline file-edit block in chat: one block per replace_in_file/write_to_file, chronological. Collapsible, hover chevron, click filename opens diff in VS Code. */
+/** Inline file-edit block in chat: one block per replace_in_file/write_to_file, chronological. Collapsible, hover chevron, click filename opens diff in VS Code. When diffHunks present, shows line-by-line diff (red/green). */
 export function InlineFileEditBlock({ part }: { part: ToolPart }) {
   const path = getFileEditPath(part)
   const output = part.output ?? ""
   const [expanded, setExpanded] = useState(true)
   const [hovered, setHovered] = useState(false)
-  if (!path && !output) return null
+  if (!path && !output && !(part.diffHunks?.length)) return null
   const lang = path ? getLangBadge(path) : "FILE"
   const fileName = path ? path.split("/").pop() ?? path : "file"
   const statLabel = getEditStatLabel(part)
+  const hasDiffHunks = Array.isArray(part.diffHunks) && part.diffHunks.length > 0
   return (
     <div
       className="nexus-file-edit-block my-2"
@@ -160,31 +178,79 @@ export function InlineFileEditBlock({ part }: { part: ToolPart }) {
         >
           {fileName}
         </button>
-        {statLabel && <span className="nexus-file-edit-stats flex-shrink-0">{statLabel}</span>}
+        {part.diffStats != null ? (
+          <span className="nexus-file-edit-stats flex-shrink-0 flex items-center gap-1">
+            {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
+            {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
+          </span>
+        ) : statLabel ? (
+          <span className="nexus-file-edit-stats flex-shrink-0">{statLabel}</span>
+        ) : null}
       </div>
       {expanded && (
         <div className="nexus-file-edit-content">
-          <ToolOutputBlock output={output} compacted={part.compacted} />
+          {hasDiffHunks ? (
+            <div className="nexus-diff-view rounded overflow-hidden border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+              <div className="nexus-diff-view-header px-2 py-1 text-[10px] font-mono text-[var(--vscode-descriptionForeground)] border-b border-[var(--vscode-panel-border)] flex items-center gap-2">
+                {fileName}
+                {part.diffStats != null && (
+                  <>
+                    {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
+                    {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
+                  </>
+                )}
+              </div>
+              <pre className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono max-h-64 overflow-y-auto">
+                {part.diffHunks!.map((h, i) => {
+                  if (h.type === "add") {
+                    return (
+                      <div key={i} className="px-2 py-0.5 bg-green-500/15 text-green-600 dark:text-green-400 whitespace-pre">
+                        <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
+                        <span className="text-green-600 dark:text-green-400">+</span> {h.line || " "}
+                      </div>
+                    )
+                  }
+                  if (h.type === "remove") {
+                    return (
+                      <div key={i} className="px-2 py-0.5 bg-red-500/15 text-red-600 dark:text-red-400 whitespace-pre">
+                        <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
+                        <span className="text-red-600 dark:text-red-400">-</span> {h.line || " "}
+                      </div>
+                    )
+                  }
+                  return (
+                    <div key={i} className="px-2 py-0.5 text-[var(--vscode-foreground)] whitespace-pre">
+                      <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
+                      {h.line || " "}
+                    </div>
+                  )
+                })}
+              </pre>
+            </div>
+          ) : (
+            <ToolOutputBlock output={output} compacted={part.compacted} />
+          )}
         </div>
       )}
     </div>
   )
 }
 
-/** File edit/add block: language badge + path + diff stats, then code with green/red highlights (reference design). */
+/** File edit/add block: language badge + path + diff stats, then code with green/red highlights (reference design). When diffHunks present, shows line-by-line diff. */
 function FileEditBlock({ part }: { part: ToolPart }) {
   const path = getFileEditPath(part)
   const output = part.output ?? ""
-  if (!path && !output) return null
+  const hasDiffHunks = Array.isArray(part.diffHunks) && part.diffHunks.length > 0
+  if (!path && !output && !hasDiffHunks) return null
   const lang = path ? getLangBadge(path) : "FILE"
   const fileName = path ? path.split("/").pop() ?? path : "file"
   const stats = getDiffStats(output)
   const isDiff = output.split("\n").filter((l) => l.startsWith("+") || l.startsWith("-")).length >= 3
-  const statLabel =
+  const fallbackLabel =
     isDiff && (stats.add > 0 || stats.del > 0)
       ? [stats.add > 0 ? `+${stats.add}` : "", stats.del > 0 ? `-${stats.del}` : ""].filter(Boolean).join(" ")
       : part.tool === "read_file"
-        ? "view"
+        ? getEditStatLabel(part)
         : ""
 
   return (
@@ -192,10 +258,57 @@ function FileEditBlock({ part }: { part: ToolPart }) {
       <div className="nexus-file-edit-header">
         <span className="nexus-file-edit-badge">{lang}</span>
         <span className="nexus-file-edit-path">{fileName}</span>
-        {statLabel && <span className="nexus-file-edit-stats">{statLabel}</span>}
+        {part.diffStats != null ? (
+          <span className="nexus-file-edit-stats flex items-center gap-1">
+            {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
+            {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
+          </span>
+        ) : fallbackLabel ? (
+          <span className="nexus-file-edit-stats">{fallbackLabel}</span>
+        ) : null}
       </div>
       <div className="nexus-file-edit-content">
-        <ToolOutputBlock output={output} compacted={part.compacted} />
+        {hasDiffHunks ? (
+          <div className="nexus-diff-view rounded overflow-hidden border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+            <div className="nexus-diff-view-header px-2 py-1 text-[10px] font-mono text-[var(--vscode-descriptionForeground)] border-b border-[var(--vscode-panel-border)] flex items-center gap-2">
+              {fileName}
+              {part.diffStats != null && (
+                <>
+                  {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
+                  {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
+                </>
+              )}
+            </div>
+            <pre className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono max-h-64 overflow-y-auto">
+              {part.diffHunks!.map((h, i) => {
+                if (h.type === "add") {
+                  return (
+                    <div key={i} className="px-2 py-0.5 bg-green-500/15 text-green-600 dark:text-green-400 whitespace-pre">
+                      <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
+                      <span className="text-green-600 dark:text-green-400">+</span> {h.line || " "}
+                    </div>
+                  )
+                }
+                if (h.type === "remove") {
+                  return (
+                    <div key={i} className="px-2 py-0.5 bg-red-500/15 text-red-600 dark:text-red-400 whitespace-pre">
+                      <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
+                      <span className="text-red-600 dark:text-red-400">-</span> {h.line || " "}
+                    </div>
+                  )
+                }
+                return (
+                  <div key={i} className="px-2 py-0.5 text-[var(--vscode-foreground)] whitespace-pre">
+                    <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
+                    {h.line || " "}
+                  </div>
+                )
+              })}
+            </pre>
+          </div>
+        ) : (
+          <ToolOutputBlock output={output} compacted={part.compacted} />
+        )}
       </div>
     </div>
   )
@@ -217,15 +330,23 @@ function formatToolInputPreview(part: ToolPart): string {
   const short = (s: string, max: number) => (s.length > max ? s.slice(0, max - 1) + "…" : s)
 
   switch (part.tool) {
-    case "read_file":
+    case "read_file": {
       if (!pathStr) return ""
-      const lines =
-        typeof startLine === "number" && typeof endLine === "number"
-          ? ` (lines ${startLine}–${endLine})`
-          : typeof startLine === "number"
-            ? ` (line ${startLine})`
-            : ""
-      return short(pathStr, 56) + lines
+      let range = ""
+      const out = part.output ?? ""
+      const fileContentMatch = out.match(/<file_content\s+path="[^"]+"\s+lines="([^"]+)"\s+total="([^"]+)">/)
+      if (fileContentMatch) {
+        const [, linesAttr, total] = fileContentMatch
+        if (linesAttr && total) {
+          const totalNum = parseInt(total, 10)
+          const isFull = linesAttr === `1-${totalNum}` || linesAttr === `1-${total}`
+          if (!isFull) range = ` (lines ${linesAttr})`
+        }
+      }
+      if (!range && typeof startLine === "number" && typeof endLine === "number") range = ` (lines ${startLine}–${endLine})`
+      else if (!range && typeof startLine === "number") range = ` (line ${startLine})`
+      return short(pathStr, 56) + range
+    }
     case "list_files":
       return pathStr ? `folder ${short(pathStr, 48)}` : "folder ."
     case "write_to_file":

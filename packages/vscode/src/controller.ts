@@ -288,11 +288,12 @@ export class Controller {
       }
       this.applyVscodeOverrides(this.config)
       this.defaultModelProfile = { ...this.config.model }
+      // Send config to webview immediately so Settings open fast; session/MCP/indexer continue in background
+      this.postMessageToWebview({ type: "configLoaded", config: this.config })
       try {
         this.session = Session.create(cwd)
         this.postStateToWebview()
         this.sendIndexStatus()
-        this.postMessageToWebview({ type: "configLoaded", config: this.config })
         void this.reconnectMcpServers().catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err)
           this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
@@ -378,14 +379,15 @@ export class Controller {
           this.postMessageToWebview({ type: "modelsCatalog", catalog: this.modelsCatalogCache })
           break
         }
-        try {
-          const catalog = await getModelsCatalog()
-          this.modelsCatalogCache = catalog
-          this.postMessageToWebview({ type: "modelsCatalog", catalog })
-        } catch {
-          this.modelsCatalogCache = { providers: [], recommended: [] }
-          this.postMessageToWebview({ type: "modelsCatalog", catalog: this.modelsCatalogCache })
-        }
+        void getModelsCatalog()
+          .then((catalog) => {
+            this.modelsCatalogCache = catalog
+            this.postMessageToWebview({ type: "modelsCatalog", catalog })
+          })
+          .catch(() => {
+            this.modelsCatalogCache = { providers: [], recommended: [] }
+            this.postMessageToWebview({ type: "modelsCatalog", catalog: this.modelsCatalogCache })
+          })
         break
       }
       case "webviewDidLaunch":
@@ -455,8 +457,10 @@ export class Controller {
       }
       case "showDiff": {
         const cwd = this.getCwd()
-        if (msg.path?.trim()) {
-          await showDiffForPath(cwd, msg.path.trim())
+        const raw = msg.path?.trim() ?? ""
+        // Avoid using multi-line or huge strings as path (e.g. accidental content paste).
+        if (raw.length > 0 && raw.length < 2048 && !raw.includes("\n")) {
+          await showDiffForPath(cwd, raw)
         }
         break
       }

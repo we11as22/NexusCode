@@ -15,7 +15,7 @@ const SUPPORTED_EXTENSIONS = new Set([
 const DEFAULT_EXCLUDE = [
   "node_modules/**", ".git/**", "dist/**", "build/**",
   ".next/**", ".nuxt/**", "coverage/**", "*.lock",
-  ".nexus/index/**", ".nexus/checkpoints/**",
+  ".nexus/**",
   "**/*.min.js", "**/*.bundle.js", "**/*.map",
 ]
 

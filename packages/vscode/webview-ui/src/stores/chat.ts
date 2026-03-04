@@ -33,6 +33,12 @@ export interface ToolPart {
   timeStart?: number
   timeEnd?: number
   compacted?: boolean
+  /** Set from tool_end for write_to_file/replace_in_file */
+  path?: string
+  /** Set from tool_end for write_to_file/replace_in_file */
+  diffStats?: { added: number; removed: number }
+  /** Line-by-line diff for UI (red/green); set from tool_end when available */
+  diffHunks?: Array<{ type: string; lineNum: number; line: string }>
 }
 
 export interface NexusConfigState {
@@ -197,7 +203,7 @@ export type AgentEvent =
   | { type: "text_delta"; delta: string; messageId: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
-  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean }
+  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
@@ -441,7 +447,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "tool_end": {
-        const ev = event as { output?: string; error?: string; compacted?: boolean }
+        const ev = event as { output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
         set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
         const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg
@@ -454,6 +460,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 output: ev.output,
                 error: ev.error,
                 compacted: ev.compacted,
+                ...(ev.path != null ? { path: ev.path } : {}),
+                ...(ev.diffStats != null ? { diffStats: ev.diffStats } : {}),
+                ...(Array.isArray(ev.diffHunks) ? { diffHunks: ev.diffHunks } : {}),
               } as ToolPart
             }
             return p

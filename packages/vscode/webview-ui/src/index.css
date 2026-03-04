@@ -615,11 +615,11 @@ html, body, #root {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--nexus-panel-bg);
+  background: var(--vscode-input-background, var(--vscode-editor-background));
   border-top: 1px solid var(--vscode-panel-border);
 }
 
-/* Single gray frame: input area + control row inside one bordered box */
+/* Single unified background: no inner rectangle; text area and buttons share the same color */
 .chat-input .chat-bottom-bar {
   display: flex;
   flex-direction: column;
@@ -628,8 +628,6 @@ html, body, #root {
   flex: 1;
   overflow: hidden;
   background: var(--vscode-input-background, var(--vscode-editor-background));
-  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
-  border-radius: 10px;
   margin: 8px 12px 10px;
 }
 
@@ -639,7 +637,6 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   padding: 0 10px;
-  border-bottom: 1px solid var(--vscode-panel-border);
   min-width: 0;
 }
 

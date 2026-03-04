@@ -1,7 +1,9 @@
 import { z } from "zod"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
+import * as diff from "diff"
 import type { ToolDef, ToolContext } from "../../types.js"
+import { buildDiffHunks } from "./diff-hunks.js"
 
 const schema = z.object({
   path: z.string().min(1).describe("Path to the file to create or overwrite"),
@@ -28,6 +30,13 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
     const absPath = path.resolve(ctx.cwd, filePath)
     const dirPath = path.dirname(absPath)
 
+    let oldContent: string | null = null
+    try {
+      oldContent = await fs.readFile(absPath, "utf8")
+    } catch {
+      // File does not exist — new file
+    }
+
     // Create directories if needed
     await fs.mkdir(dirPath, { recursive: true })
 
@@ -41,16 +50,36 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
       return { success: false, output: `Failed to write ${filePath}: ${(err as Error).message}` }
     }
 
-    const lines = content.split("\n").length
+    const newLines = content.split(/\r?\n/).length
+    let addedLines: number
+    let removedLines: number
+    const oldContentStr = oldContent ?? ""
+    if (oldContent != null) {
+      const changes = diff.diffLines(oldContent, content)
+      addedLines = 0
+      removedLines = 0
+      for (const c of changes) {
+        const lineCount = c.value.split(/\r?\n/).length
+        if (c.added) addedLines += lineCount
+        if (c.removed) removedLines += lineCount
+      }
+    } else {
+      addedLines = newLines
+      removedLines = 0
+    }
+
     const indexer = ctx.indexer as { refreshFileNow?: (filePath: string) => Promise<void> } | undefined
     if (indexer?.refreshFileNow) {
       await indexer.refreshFileNow(absPath).catch(() => {})
     } else if (ctx.indexer?.refreshFile) {
       await ctx.indexer.refreshFile(absPath).catch(() => {})
     }
+
+    const diffHunks = buildDiffHunks(oldContentStr, content)
     return {
       success: true,
-      output: `Successfully wrote ${filePath} (${lines} lines)`,
+      output: `Successfully wrote ${filePath} (${newLines} lines)`,
+      metadata: { addedLines, removedLines, diffHunks },
     }
   },
 }

@@ -27,9 +27,10 @@ const searchSchema = z.object({
 
 export const grepTool: ToolDef<z.infer<typeof searchSchema>> = {
   name: "grep",
-  description: `Search file contents with regex (ripgrep). Use for exact text, identifiers, or complex patterns.
+  description: `Search file contents with regex (ripgrep). Use for exact text, identifiers, or complex patterns. Use grep to locate code before reading; then use read_file with start_line/end_line for only those ranges.
 
 When to use:
+- **Locate before reading** — Use grep (and list_code_definitions) to find where code lives; then use read_file with start_line/end_line to read only that section. Use grep early and often when discovering structure or finding usages.
 - Find exact strings, identifiers, or regex patterns in the codebase.
 - Complex patterns (e.g. "function\\\\s+\\\\w+", "class\\\\s+[A-Z]\\\\w*", "TODO|FIXME").
 - Restrict to a folder (path/paths), file types (include), or exclude files (exclude).
@@ -136,13 +137,13 @@ export const listFilesTool: ToolDef<z.infer<typeof listSchema>> = {
   description: `List files and directories. Tree-like structure; respects .gitignore and common ignores.
 
 When to use:
-- Discover project layout before searching or reading.
+- **Discover project layout first** — Use list_files (root and key dirs like ., src, packages) at the start of a task. Use once or twice for layout; do not list every nested folder. Then use list_code_definitions and grep to find code; use read_file only for targeted ranges.
 - Find file names or directory structure.
 - Check presence of config files, scripts, or modules.
 
 When NOT to use:
 - Finding by content: use codebase_search (semantic) or grep (regex).
-- Reading a file: use read_file.
+- Reading a file: use read_file (prefer after list_code_definitions or grep so you have start_line/end_line).
 - Glob by extension: use path + include (e.g. include="*.ts").
 
 Parameters:
@@ -175,7 +176,7 @@ Parameters:
           ig = ig.add(gitignoreContent)
         } catch {}
       }
-      ig.add([".git", "node_modules", ".nexus/index", ".nexus/checkpoints"])
+      ig.add([".git", "node_modules", ".nexus"])
 
       const entries: string[] = []
 

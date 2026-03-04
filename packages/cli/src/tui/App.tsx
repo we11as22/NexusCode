@@ -2212,8 +2212,8 @@ function ModelPickerView({
               visible.map((opt, i) => {
                 const absolute = start + i
                 const selected = absolute === selectedIndex
-                const hasFreeLabel = /\(free\)/i.test(opt.name)
-                const displayName = opt.free && !hasFreeLabel ? `${opt.name} (free)` : opt.name
+                const normalized = opt.name.replace(/\s*\(\s*free\s*\)\s*/gi, "").trim()
+                const displayName = opt.free ? `${normalized} (free)` : normalized
                 const name = padToWidth(fit(displayName, Math.min(nameWidth, maxName)), nameWidth)
                 const cat = padToWidth(fit(opt.category, catWidth), catWidth)
                 const row = padToWidth(fit(`${selected ? "> " : "  "}${name} - ${cat}`, rowWidth), rowWidth)
@@ -3334,8 +3334,8 @@ const MemoChatViewport = React.memo(
 function formatToolPreview(tool: LiveTool): string {
   const pathVal = tool.input?.["path"]
   const pathStr = pathVal != null ? String(pathVal) : ""
-  const startLine = tool.input?.["start_line"]
-  const endLine = tool.input?.["end_line"]
+  let startLine = tool.input?.["start_line"]
+  let endLine = tool.input?.["end_line"]
   const pattern = tool.input?.["pattern"]
   const patterns = tool.input?.["patterns"]
   const pathsArr = tool.input?.["paths"]
@@ -3344,7 +3344,23 @@ function formatToolPreview(tool: LiveTool): string {
   const url = tool.input?.["url"]
   const parts: string[] = []
 
-  if (tool.tool === "list_files") {
+  if (tool.tool === "read_file" && pathStr) {
+    const base = pathStr.split("/").pop() ?? pathStr
+    const short = base.length > 36 ? base.slice(0, 33) + "…" : base
+    parts.push(short)
+    const out = tool.output ?? ""
+    const fileContentMatch = out.match(/<file_content\s+path="[^"]+"\s+lines="([^"]+)"\s+total="([^"]+)">/)
+    if (fileContentMatch) {
+      const [, linesAttr, total] = fileContentMatch
+      if (linesAttr && total) {
+        const totalNum = parseInt(total, 10)
+        const isFull = linesAttr === `1-${totalNum}` || linesAttr === `1-${total}`
+        if (!isFull) parts.push(`L${linesAttr}`)
+      }
+    }
+    if (parts.length === 1 && typeof startLine === "number" && typeof endLine === "number") parts.push(`L${startLine}-${endLine}`)
+    else if (parts.length === 1 && typeof startLine === "number") parts.push(`L${startLine}`)
+  } else if (tool.tool === "list_files") {
     const dir = pathStr || "."
     const short = dir.length > 36 ? dir.slice(0, 33) + "…" : dir
     parts.push(`folder ${short}`)

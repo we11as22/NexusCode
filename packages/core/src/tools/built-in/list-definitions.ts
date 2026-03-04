@@ -10,9 +10,10 @@ const schema = z.object({
 
 export const listDefinitionsTool: ToolDef<z.infer<typeof schema>> = {
   name: "list_code_definitions",
-  description: `List top-level code definitions (classes, functions, methods, interfaces, types) for a file or directory. No full bodies — structure only.
+  description: `List top-level code definitions (classes, functions, methods, interfaces, types) for a file or directory. No full bodies — structure only. Use this before read_file to get symbol names and line numbers so you can call read_file with start_line/end_line.
 
 When to use:
+- **Get symbols and line numbers before reading** — Use list_code_definitions on a file or directory first; then use read_file with start_line/end_line to read only the definitions you need. Use on every relevant file or dir when exploring, not only list_files.
 - Understand file or module structure before reading or searching.
 - Find where a symbol is defined (then use read_file or codebase_search for details).
 - Quick overview of many files in a directory.
@@ -20,7 +21,7 @@ When to use:
 When NOT to use:
 - Semantic search: use codebase_search.
 - Exact pattern in content: use grep.
-- Reading implementation: use read_file.
+- Reading implementation: use read_file (after list_code_definitions or grep for the range).
 
 Supports: TS/JS, Python, Rust, Go, Java, C/C++. Returns path and line (e.g. "function foo (L42)").`,
   parameters: schema,
@@ -78,7 +79,7 @@ async function extractFromDirectory(
     const gi = await fs.readFile(path.join(cwd, ".gitignore"), "utf8").catch(() => "")
     ig = ignoreFactory().add(gi)
   } catch {}
-  ig.add([".git", "node_modules", "dist", "build"])
+  ig.add([".git", "node_modules", "dist", "build", ".nexus"])
 
   async function processDir(dir: string, depth: number) {
     if (depth > 3) return

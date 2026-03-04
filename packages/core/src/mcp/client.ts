@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import type { McpServerConfig, ToolDef } from "../types.js"
+import { normalizeToolSchema } from "../provider/tool-schema.js"
 import { z } from "zod"
 
 export interface McpTool {
@@ -105,7 +106,8 @@ export class McpClient {
 
   getTools(): ToolDef[] {
     return Array.from(this.tools.values()).map(mcpTool => {
-      const schema = buildZodSchema(mcpTool.inputSchema)
+      const normalizedSchema = normalizeToolSchema(mcpTool.inputSchema)
+      const schema = buildZodSchema(normalizedSchema)
       const serverName = mcpTool.serverName
 
       return {
@@ -177,20 +179,33 @@ export async function testMcpServers(
 }
 
 function buildZodSchema(inputSchema: Record<string, unknown>): z.ZodType {
-  // Build a flexible schema that accepts any object
-  const properties = (inputSchema["properties"] as Record<string, { description?: string; type?: string }>) ?? {}
+  // Build Zod from normalized JSON Schema (supports nested object and array)
+  const properties = (inputSchema["properties"] as Record<string, Record<string, unknown>>) ?? {}
   const required = (inputSchema["required"] as string[]) ?? []
 
   const shape: Record<string, z.ZodType> = {}
   for (const [key, prop] of Object.entries(properties)) {
+    if (!prop || typeof prop !== "object") {
+      shape[key] = z.unknown()
+      continue
+    }
+    const propType = prop["type"] as string | string[] | undefined
+    const desc = prop["description"] as string | undefined
     let fieldSchema: z.ZodType = z.string()
-    if (prop.type === "number" || prop.type === "integer") fieldSchema = z.number()
-    if (prop.type === "boolean") fieldSchema = z.boolean()
-    if (prop.type === "array") fieldSchema = z.array(z.unknown())
-    if (prop.type === "object") fieldSchema = z.record(z.unknown())
-    if (prop.description) fieldSchema = fieldSchema.describe(prop.description)
+    if (propType === "number" || propType === "integer" || (Array.isArray(propType) && (propType.includes("number") || propType.includes("integer")))) {
+      fieldSchema = z.number()
+    } else if (propType === "boolean" || (Array.isArray(propType) && propType.includes("boolean"))) {
+      fieldSchema = z.boolean()
+    } else if (propType === "array" || (Array.isArray(propType) && propType.includes("array"))) {
+      const items = prop["items"] as Record<string, unknown> | undefined
+      fieldSchema = items && typeof items === "object"
+        ? z.array(buildZodSchema(items as Record<string, unknown>))
+        : z.array(z.unknown())
+    } else if (propType === "object" || (Array.isArray(propType) && propType.includes("object"))) {
+      fieldSchema = buildZodSchema(prop as Record<string, unknown>)
+    }
+    if (desc) fieldSchema = fieldSchema.describe(desc)
     if (!required.includes(key)) fieldSchema = fieldSchema.optional() as z.ZodType
-
     shape[key] = fieldSchema
   }
 

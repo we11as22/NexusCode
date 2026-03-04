@@ -72,7 +72,7 @@ export const NexusConfigSchema = z.object({
     enabled: z.boolean().default(true),
     excludePatterns: z.array(z.string()).default([
       "node_modules/**", ".git/**", "dist/**", "build/**",
-      "*.lock", ".next/**", ".nuxt/**", "coverage/**",
+      "*.lock", ".next/**", ".nuxt/**", "coverage/**", ".nexus/**",
     ]),
     symbolExtract: z.boolean().default(true),
     /** Disabled by default. Set to true with vectorDb.enabled to use semantic codebase_search. */
@@ -87,7 +87,7 @@ export const NexusConfigSchema = z.object({
     autoApproveRead: z.boolean().default(true),
     autoApproveWrite: z.boolean().default(false),
     autoApproveCommand: z.boolean().default(false),
-    autoApproveReadPatterns: z.array(z.string()).default([]),
+    autoApproveReadPatterns: z.array(z.string()).default([".nexus/tool-output/**"]),
     /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
     allowedCommands: z.array(z.string()).default([]),
     /** Command patterns from .nexus/settings.json + settings.local.json */

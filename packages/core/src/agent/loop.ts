@@ -3,6 +3,7 @@ import type {
   IHost,
   ISession,
   ToolDef,
+  ToolResult,
   ToolContext,
   AgentEvent,
   NexusConfig,
@@ -191,6 +192,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
   emitContextUsage()
 
+  let lastToolName = ""
+  let attemptedCompletionThisIteration = false
   while (!signal.aborted) {
     loopIterations++
 
@@ -295,10 +298,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     let currentText = ""
     let currentReasoning = ""
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
-    let lastToolName = ""
+    lastToolName = ""
     let sawNativeToolCall = false
     let executedToolThisIteration = false
-    let attemptedCompletionThisIteration = false
+    attemptedCompletionThisIteration = false
     let finishReason: string | undefined
     let fatalStreamError = false
     let budgetExceededThisIteration = false
@@ -491,7 +494,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 error: result.success ? undefined : result.output,
                 compacted: (result as { compacted?: boolean }).compacted,
                 ...(result.success && (toolName === "write_to_file" || toolName === "replace_in_file")
-                  ? { path: extractWriteTargetPath(toolName, toolInput) }
+                  ? {
+                      path: extractWriteTargetPath(toolName, toolInput),
+                      ...(typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.addedLines === "number" &&
+                      typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.removedLines === "number"
+                        ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
+                        : {}),
+                      ...(Array.isArray((result.metadata as { diffHunks?: unknown[] })?.diffHunks)
+                        ? { diffHunks: (result.metadata as { diffHunks: Array<{ type: string; lineNum: number; line: string }> }).diffHunks }
+                        : {}),
+                    }
                   : {}),
               })
 
@@ -624,7 +636,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             error: result.success ? undefined : result.output,
             compacted: (result as { compacted?: boolean }).compacted,
             ...(result.success && (call.toolName === "write_to_file" || call.toolName === "replace_in_file")
-              ? { path: extractWriteTargetPath(call.toolName, call.toolInput) }
+              ? {
+                  path: extractWriteTargetPath(call.toolName, call.toolInput),
+                  ...(typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.addedLines === "number" &&
+                  typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.removedLines === "number"
+                    ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
+                    : {}),
+                  ...(Array.isArray((result.metadata as { diffHunks?: unknown[] })?.diffHunks)
+                    ? { diffHunks: (result.metadata as { diffHunks: Array<{ type: string; lineNum: number; line: string }> }).diffHunks }
+                    : {}),
+                }
               : {}),
           })
 
@@ -673,6 +694,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
 
   if (!signal.aborted && lastAssistantMessageId) {
+    // When agent closes the task (attempt_completion), clear todo so it's removed from session
+    // and the agent can create a new one next time. If we don't clear, todo persists and agent continues with it.
+    if (attemptedCompletionThisIteration || lastToolName === "attempt_completion") {
+      session.updateTodo("")
+      host.emit({ type: "todo_updated", todo: "" })
+    }
     emitContextUsage()
     host.emit({ type: "done", messageId: lastAssistantMessageId })
   }
@@ -753,7 +780,7 @@ async function executeToolCall(
     pending: { current: boolean }
     checkpoint?: { commit(description?: string): Promise<string> }
   }
-): Promise<{ success: boolean; output: string }> {
+): Promise<ToolResult> {
   const tool = tools.find(t => t.name === toolName)
   if (!tool) {
     const availableList = tools.map(t => t.name).join(", ")

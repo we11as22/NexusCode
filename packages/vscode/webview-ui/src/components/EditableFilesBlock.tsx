@@ -26,6 +26,7 @@ function getDiffStats(output: string): { add: number; del: number } {
 }
 
 function getFileEditPath(part: ToolPart): string | null {
+  if (part.path != null && String(part.path).trim()) return String(part.path).trim()
   const pathVal = part.input?.path
   if (pathVal != null && String(pathVal).trim()) return String(pathVal).trim()
   const m = part.output?.match(/<file_content\s+path="([^"]+)"/)
@@ -34,6 +35,10 @@ function getFileEditPath(part: ToolPart): string | null {
 }
 
 function getStatLabel(part: ToolPart): string {
+  if (part.diffStats != null) {
+    const { added, removed } = part.diffStats
+    return [added > 0 ? `+${added}` : "", removed > 0 ? `-${removed}` : ""].filter(Boolean).join(" ")
+  }
   const output = part.output ?? ""
   const stats = getDiffStats(output)
   const isDiff = output.split("\n").filter((l) => l.startsWith("+") || l.startsWith("-")).length >= 3
@@ -53,6 +58,7 @@ export interface EditableFileEntry {
   statLabel: string
   langBadge: string
   fileName: string
+  diffStats?: { added: number; removed: number }
 }
 
 function collectEditedFiles(messages: SessionMessage[]): EditableFileEntry[] {
@@ -73,6 +79,7 @@ function collectEditedFiles(messages: SessionMessage[]): EditableFileEntry[] {
         statLabel,
         langBadge: getLangBadge(path),
         fileName,
+        ...(toolPart.diffStats != null ? { diffStats: toolPart.diffStats } : {}),
       })
     }
   }
@@ -178,8 +185,15 @@ export function EditableFilesBlock({ messages }: Props) {
               >
                 {entry.fileName}
               </button>
-              <span className="flex-shrink-0 text-[10px] text-[var(--vscode-descriptionForeground)]">
-                {entry.statLabel}
+              <span className="flex-shrink-0 text-[10px] flex items-center gap-1">
+                {entry.diffStats != null ? (
+                  <>
+                    {entry.diffStats.added > 0 && <span className="text-green-500">+{entry.diffStats.added}</span>}
+                    {entry.diffStats.removed > 0 && <span className="text-red-400">-{entry.diffStats.removed}</span>}
+                  </>
+                ) : (
+                  <span className="text-[var(--vscode-descriptionForeground)]">{entry.statLabel}</span>
+                )}
               </span>
             </div>
             {expanded && (

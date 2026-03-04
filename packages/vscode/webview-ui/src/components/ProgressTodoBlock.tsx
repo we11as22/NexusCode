@@ -8,7 +8,25 @@ export interface TodoItem {
 }
 
 export function parseTodo(todo: string): TodoItem[] {
-  const lines = todo.split("\n").map((s) => s.trim()).filter(Boolean)
+  const raw = todo.trim()
+  if (!raw) return []
+  // Structured format: JSON array of { done, text }
+  if (raw.startsWith("[")) {
+    try {
+      const arr = JSON.parse(raw) as Array<{ done?: boolean; text?: string }>
+      if (!Array.isArray(arr)) return []
+      return arr.map((item, i) => ({
+        id: i,
+        done: Boolean(item.done),
+        label: typeof item.text === "string" ? item.text : String(item.text ?? ""),
+        inProgress: false,
+      }))
+    } catch {
+      // fall through to markdown
+    }
+  }
+  // Legacy markdown format
+  const lines = raw.split("\n").map((s) => s.trim()).filter(Boolean)
   const items: TodoItem[] = []
   lines.forEach((line, i) => {
     const done = /^-\s*\[x\]/i.test(line) || /^-\s*\[X\]/.test(line)

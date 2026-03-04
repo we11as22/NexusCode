@@ -545,6 +545,11 @@ function ModelPickerModal({
     return all.filter((o) => o.name.toLowerCase().includes(q) || o.modelId.toLowerCase().includes(q))
   }, [catalog, query])
 
+  const displayName = (name: string, free: boolean) => {
+    const normalized = name.replace(/\s*\(\s*free\s*\)\s*/gi, "").trim()
+    return free ? `${normalized} (free)` : normalized
+  }
+
   const provById = useMemo(() => {
     const m = new Map<string, { baseUrl: string }>()
     if (catalog) for (const p of catalog.providers) m.set(p.id, { baseUrl: p.baseUrl })
@@ -596,8 +601,7 @@ function ModelPickerModal({
                     onClick={() => onSelect(opt.providerId, opt.modelId, baseUrl)}
                   >
                     <span className="truncate text-[var(--vscode-foreground)]">
-                      {opt.name}
-                      {opt.free ? " (free)" : ""}
+                      {displayName(opt.name, opt.free)}
                     </span>
                     <span className="text-[10px] text-[var(--vscode-descriptionForeground)] flex-shrink-0">{opt.category}</span>
                   </button>
@@ -651,7 +655,7 @@ interface SettingsDraft {
 
 function SettingsView() {
   const { config, provider, model, saveConfig, serverUrl, modelsCatalog, modelsCatalogLoading, requestModelsCatalog } = useChatStore()
-  const [draft, setDraft] = useState<SettingsDraft | null>(null)
+  const [draft, setDraft] = useState<SettingsDraft>(() => getDefaultDraft())
   const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
   const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles">("llm")
   const [integTab, setIntegTab] = useState<"rules-skills" | "mcp" | "rules-instructions">("rules-skills")
@@ -664,11 +668,13 @@ function SettingsView() {
     setServerUrlLocal(serverUrl)
   }, [serverUrl])
   useEffect(() => {
-    if (!config) return
-    setDraft(toDraft(config, provider, model))
+    if (config) setDraft(toDraft(config, provider, model))
   }, [config, provider, model])
+  useEffect(() => {
+    requestModelsCatalog()
+  }, [requestModelsCatalog])
 
-  const canSave = Boolean(draft)
+  const canSave = Boolean(config && draft)
   const vectorHint = useMemo(() => {
     if (!draft) return ""
     if (!draft.indexingVector || !draft.vectorDbEnabled) return "Vector search is disabled."
@@ -676,17 +682,18 @@ function SettingsView() {
     return "Vector search enabled (Qdrant-compatible)."
   }, [draft])
 
-  if (!draft) {
-    return (
-      <div className="nexus-pane">
-        <div className="nexus-pane-title">Settings</div>
-        <div className="nexus-muted text-xs">Configuration is loading...</div>
-      </div>
-    )
-  }
-
   return (
     <div className="nexus-pane">
+      {!config && (
+        <div className="nexus-muted text-xs mb-2 flex items-center gap-2">
+          <span className="nexus-loading-dots flex items-center gap-1">
+            <span className="nexus-dot" />
+            <span className="nexus-dot" />
+            <span className="nexus-dot" />
+          </span>
+          Configuration is loading…
+        </div>
+      )}
       <div className="nexus-pane-title">Agent Settings</div>
 
       <div className="nexus-settings-config-bar">
@@ -1670,6 +1677,43 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     askInstructions: config.modes?.ask?.customInstructions ?? "",
     debugInstructions: config.modes?.debug?.customInstructions ?? "",
     profilesJson: JSON.stringify(config.profiles ?? {}, null, 2),
+  }
+}
+
+function getDefaultDraft(): SettingsDraft {
+  return {
+    modelProvider: "openrouter",
+    modelId: "",
+    modelApiKey: "",
+    modelBaseUrl: "https://openrouter.ai/api/v1",
+    modelTemperature: "0.7",
+    embProvider: "openai",
+    embModel: "",
+    embApiKey: "",
+    embBaseUrl: "",
+    embDimensions: "",
+    indexingEnabled: true,
+    indexingVector: false,
+    embeddingBatchSize: "60",
+    embeddingConcurrency: "2",
+    vectorDbEnabled: false,
+    vectorDbUrl: "http://127.0.0.1:6333",
+    vectorDbAutoStart: true,
+    filterTools: true,
+    toolClassifyThreshold: "15",
+    filterSkills: true,
+    skillClassifyThreshold: "8",
+    parallelReads: true,
+    maxParallelReads: "5",
+    mcpServersJson: "[]",
+    skillsText: "",
+    rulesFilesText: "",
+    claudeMdPath: "CLAUDE.md",
+    agentInstructions: "",
+    planInstructions: "",
+    askInstructions: "",
+    debugInstructions: "",
+    profilesJson: "{}",
   }
 }
 

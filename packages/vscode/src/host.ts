@@ -269,6 +269,7 @@ function getLanguageFromExtension(ext: string): string {
 
 /**
  * Open VS Code diff view for a file: before = git HEAD version, after = current file.
+ * Uses untitled:path URIs so the tab and save dialog show the real filename, not the first line of content.
  * Call from webview when user clicks an edited file (e.g. from Editable Files list).
  */
 export async function showDiffForPath(cwd: string, filePath: string): Promise<void> {
@@ -294,15 +295,21 @@ export async function showDiffForPath(cwd: string, filePath: string): Promise<vo
   }
 
   const fileName = path.basename(filePath)
-  const lang = getLanguageFromExtension(path.extname(filePath))
-  const beforeDoc = await vscode.workspace.openTextDocument({
-    content: before,
-    language: lang,
-  })
-  const afterDoc = await vscode.workspace.openTextDocument({
-    content: after,
-    language: lang,
-  })
+
+  // Use untitled:path URIs so VS Code shows the filename in the tab and save dialog, not the first line of content.
+  const dir = path.dirname(absPath)
+  const base = path.basename(absPath)
+  const uriAfter = vscode.Uri.parse("untitled:" + absPath)
+  const uriBefore = vscode.Uri.parse("untitled:" + path.join(dir, ".nexuscode-diff-before", base))
+
+  const beforeDoc = await vscode.workspace.openTextDocument(uriBefore)
+  const afterDoc = await vscode.workspace.openTextDocument(uriAfter)
+
+  const we = new vscode.WorkspaceEdit()
+  we.insert(uriBefore, new vscode.Position(0, 0), before)
+  we.insert(uriAfter, new vscode.Position(0, 0), after)
+  await vscode.workspace.applyEdit(we)
+
   await vscode.commands.executeCommand(
     "vscode.diff",
     beforeDoc.uri,

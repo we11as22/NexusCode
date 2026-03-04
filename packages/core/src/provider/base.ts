@@ -33,6 +33,8 @@ export class BaseLLMClient implements LLMClient {
   }
 
   async *stream(opts: StreamOptions): AsyncIterable<LLMStreamEvent> {
+    // Tools are always sent with zod parameters; AI SDK converts to JSON Schema for the provider.
+    // When the provider supports structured output, tool-call args conform to that schema.
     const tools = opts.tools
       ? Object.fromEntries(
           opts.tools.map(t => [

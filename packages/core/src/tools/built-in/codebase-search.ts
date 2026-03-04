@@ -14,7 +14,7 @@ const schema = z.object({
 
 export const codebaseSearchTool: ToolDef<z.infer<typeof schema>> = {
   name: "codebase_search",
-  description: `Semantic (vector) search over the indexed codebase. Finds code by meaning, not exact text.
+  description: `Semantic (vector) search over the indexed codebase. Finds code by meaning, not exact text. Use for discovery before read_file; then use read_file with path:line from results to load only those sections.
 Only available when vector search is enabled (indexing.vector + vectorDb.enabled in .nexus/nexus.yaml) and the index is built (embeddings configured, Qdrant running).
 
 When to use:
@@ -27,7 +27,7 @@ When to use:
 When NOT to use:
 - Exact text or regex: use grep instead.
 - Reading a known file: use read_file.
-- Single identifier: use grep or list_code_definitions.`,
+- Single identifier or symbol overview: use grep or list_code_definitions.`,
   parameters: schema,
   readOnly: true,
 

@@ -87,12 +87,15 @@ When NOT to use:
 }
 
 const todoSchema = z.object({
-  todo: z.string().describe("Complete todo list in markdown checklist format:\n- [x] Completed item\n- [ ] Pending item"),
+  items: z.array(z.object({
+    done: z.boolean().describe("Whether this item is completed"),
+    text: z.string().describe("Short label for the item"),
+  })).describe("Full list of todo items; pass the complete list each time with your updates (add/check/uncheck)."),
 })
 
 export const updateTodoTool: ToolDef<z.infer<typeof todoSchema>> = {
   name: "update_todo_list",
-  description: `Update the task checklist. Use frequently on multi-step tasks so the user sees progress.
+  description: `Update the task checklist. Use frequently on multi-step tasks so the user sees progress. Structured output: pass an array of items, each with done (boolean) and text (string).
 
 When to use:
 - Complex tasks (3+ steps): start with a checklist, update as you complete items.
@@ -102,11 +105,12 @@ When NOT to use:
 - Trivial 1–2 step tasks: optional.
 - Do not put exploratory steps (e.g. "search codebase") as todo items; focus on deliverable milestones.
 
-Format: Markdown "- [ ]" pending, "- [x]" done. Keep items concise; update silently.`,
+Create only when the session has no current todo list (see "Current Todo List" in context). If a list already exists, pass the full list with your edits (add/check/uncheck items); do not replace with a brand new list. When you call attempt_completion, the list is cleared after your response so you can create a new one next time.`,
   parameters: todoSchema,
 
-  async execute({ todo }, ctx: ToolContext) {
-    ctx.session.updateTodo(todo)
+  async execute({ items }, ctx: ToolContext) {
+    const json = JSON.stringify(items)
+    ctx.session.updateTodo(json)
     return { success: true, output: "Todo list updated." }
   },
 }

@@ -7,6 +7,56 @@ import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file"])
+const BASH_OUTPUT_TAIL_LINES = 80
+
+/** Bash (execute_command) block: command in header, expandable output (tail when long). */
+function BashCommandBlock({ part }: { part: ToolPart }) {
+  const [expanded, setExpanded] = useState(true)
+  const command = (part.input?.command as string)?.trim() ?? ""
+  const output = (part.output ?? "").trim()
+  const lines = output ? output.split("\n") : []
+  const showTail = lines.length > BASH_OUTPUT_TAIL_LINES
+  const displayLines = showTail ? lines.slice(-BASH_OUTPUT_TAIL_LINES) : lines
+  const displayOutput = displayLines.join("\n")
+  const elapsed =
+    part.timeStart != null && part.timeEnd != null
+      ? `${((part.timeEnd - part.timeStart) / 1000).toFixed(1)}s`
+      : null
+  const shortCommand = command.length > 72 ? command.slice(0, 69) + "…" : command
+
+  return (
+    <div className="my-2 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]"
+      >
+        <span className="flex-shrink-0" title="bash">⌨️</span>
+        <span className="flex-shrink-0 font-mono">bash</span>
+        <span className="flex-1 min-w-0 truncate font-mono text-[var(--vscode-descriptionForeground)]" title={command}>
+          {shortCommand || "—"}
+        </span>
+        {elapsed && <span className="flex-shrink-0 text-[var(--vscode-descriptionForeground)]">{elapsed}</span>}
+        <span className="flex-shrink-0 text-[var(--vscode-descriptionForeground)]">{expanded ? "▼" : "▶"}</span>
+      </button>
+      {expanded && (output || part.error) && (
+        <div className="border-t border-[var(--vscode-panel-border)] px-3 py-2">
+          {showTail && (
+            <div className="text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
+              … last {BASH_OUTPUT_TAIL_LINES} lines (of {lines.length})
+            </div>
+          )}
+          <pre className="text-[11px] font-mono whitespace-pre-wrap break-words overflow-x-auto max-h-64 overflow-y-auto bg-[var(--vscode-textCodeBlock-background)] rounded p-2">
+            {displayOutput || " "}
+          </pre>
+          {part.error && (
+            <div className="mt-1 text-red-400 text-[11px] bg-red-500/10 rounded p-2">{part.error}</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface Props {
   messages: SessionMessage[]
@@ -200,7 +250,7 @@ function AssistantParts({ parts, isComplete }: { parts: MessagePart[]; isComplet
   const fileEditParts = toolParts.filter((p) => FILE_EDIT_TOOLS.has(p.tool))
   const otherToolParts = toolParts.filter((p) => !FILE_EDIT_TOOLS.has(p.tool))
   const explored = getExploredFromParts(otherToolParts)
-  const hasExploredBlock = otherToolParts.length > 0
+  const hasExploredBlock = (explored.filesCount > 0 || explored.searchesCount > 0) && otherToolParts.length > 0
 
   return (
     <div className="space-y-3">
@@ -214,6 +264,9 @@ function AssistantParts({ parts, isComplete }: { parts: MessagePart[]; isComplet
           const toolPart = part as ToolPart
           if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file") {
             return <InlineFileEditBlock key={i} part={toolPart} />
+          }
+          if (toolPart.tool === "execute_command") {
+            return <BashCommandBlock key={i} part={toolPart} />
           }
           if (toolPart.tool === "thinking_preamble") {
             const userMsg = (toolPart.input?.user_message as string)?.trim()

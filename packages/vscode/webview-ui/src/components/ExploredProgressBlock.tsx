@@ -77,6 +77,8 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
       const scope = (part.input?.pathScope as string) ?? "codebase"
       return { id, kind: "search", label: `List definitions in ${scope}${dur}`, durationSec }
     }
+    case "execute_command":
+      return null
     default:
       return {
         id,
@@ -130,7 +132,9 @@ export function ExploredSummaryInline({
 }) {
   const [open, setOpen] = useState(!defaultCollapsed)
   const total = filesCount + searchesCount
-  if (entries.length === 0 && total === 0) return null
+  // Do not show "Explored 0 files, 0 searches" when there are no file reads or searches.
+  if (total === 0) return null
+  if (entries.length === 0) return null
 
   return (
     <div
@@ -257,7 +261,9 @@ export function ExploredProgressBlock({ messages, isRunning, reasoningStartTime 
   )
 
   const total = filesCount + searchesCount
-  if (total === 0 && entries.length === 0) return null
+  // Do not show "Explored 0 files, 0 searches" when there are no file reads or searches.
+  if (total === 0) return null
+  if (entries.length === 0) return null
 
   return (
     <div

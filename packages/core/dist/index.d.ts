@@ -1153,6 +1153,11 @@ type AgentEvent = {
     output?: string;
     error?: string;
     compacted?: boolean;
+    path?: string;
+    diffStats?: {
+        added: number;
+        removed: number;
+    };
 } | {
     type: "subagent_start";
     subagentId: string;
@@ -1511,7 +1516,7 @@ declare class Session implements ISession {
     private _messages;
     private _todo;
     private cwd;
-    constructor(id: string, cwd: string, messages?: SessionMessage[]);
+    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string);
     get messages(): SessionMessage[];
     addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage;
     updateMessage(id: string, updates: Partial<SessionMessage>): void;
