@@ -6,8 +6,10 @@ interface Props {
   isRunning: boolean
 }
 
+/** Live thinking_diff: expandable on click, scrollable, same height as expanded tool block (e.g. file edit). No border. */
 export function ThoughtBlock({ reasoningText, startTime, isRunning }: Props) {
   const [elapsed, setElapsed] = useState(0)
+  const [expanded, setExpanded] = useState(false)
 
   useEffect(() => {
     if (!isRunning || !startTime || !reasoningText.trim()) return
@@ -22,20 +24,21 @@ export function ThoughtBlock({ reasoningText, startTime, isRunning }: Props) {
   const preview = reasoningText.length > 800 ? reasoningText.slice(-800) : reasoningText
 
   return (
-    <div className="nexus-thought-block flex-shrink-0 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
-      <div className="nexus-reasoning-block rounded-lg border border-[var(--vscode-panel-border)] mx-2 my-1.5 bg-[var(--vscode-editor-background)] overflow-hidden">
-        <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--nexus-assistant-bubble)]">
-          <span className="text-[10px] font-semibold text-[var(--vscode-descriptionForeground)] uppercase tracking-wide">
-            {startTime != null ? `Thought for ${elapsed}s` : "Thinking…"}
-          </span>
-          <span className="text-[9px] text-[var(--vscode-descriptionForeground)] bg-[var(--vscode-badge-background)] px-1.5 py-0.5 rounded">
-            Live
-          </span>
-        </div>
-        <div className="px-2.5 py-2 max-h-40 overflow-y-auto text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed">
+    <div className="nexus-thought-block flex-shrink-0 my-1.5 bg-transparent">
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        className="w-full flex items-center gap-2 px-2 py-1.5 text-left text-xs text-[var(--vscode-descriptionForeground)] hover:bg-[var(--vscode-list-hoverBackground)] rounded"
+      >
+        <span className="flex-shrink-0 transition-transform" style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
+        <span>Thought{startTime != null ? ` (${elapsed}s)` : "…"}</span>
+        <span className="text-[9px] bg-[var(--vscode-badge-background)] px-1.5 py-0.5 rounded">Live</span>
+      </button>
+      {expanded && (
+        <div className="px-2 py-1.5 max-h-64 overflow-y-auto text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans bg-[var(--vscode-editor-background)] rounded">
           {preview}
         </div>
-      </div>
+      )}
     </div>
   )
 }

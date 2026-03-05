@@ -5,28 +5,28 @@ import { replaceInFileTool } from "./replace-in-file.js"
 import { executeCommandTool } from "./execute-command.js"
 import { grepTool, listFilesTool } from "./search-files.js"
 import { listDefinitionsTool } from "./list-definitions.js"
+import { readLintsTool } from "./read-lints.js"
 import { codebaseSearchTool } from "./codebase-search.js"
 import { webFetchTool, webSearchTool } from "./web-fetch.js"
-import { exaWebSearchTool, exaCodeSearchTool } from "./exa-search.js"
+import { globFileSearchTool } from "./glob-file-search.js"
 import { useSkillTool, browserActionTool } from "./use-skill.js"
 import { condenseTool, summarizeTaskTool, planExitTool } from "./context-tools.js"
 import {
-  attemptCompletionTool,
   askFollowupTool,
   updateTodoTool,
   createRuleTool,
+  reportToUserTool,
 } from "./attempt-completion.js"
-import { thinkingPreambleTool } from "./thinking-preamble.js"
 
 export function getAllBuiltinTools(): ToolDef[] {
   return [
-    attemptCompletionTool,
     askFollowupTool,
     updateTodoTool,
-    thinkingPreambleTool,
+    reportToUserTool,
     readFileTool,
     listFilesTool,
     listDefinitionsTool,
+    readLintsTool,
     writeFileTool,
     replaceInFileTool,
     createRuleTool,
@@ -35,8 +35,7 @@ export function getAllBuiltinTools(): ToolDef[] {
     codebaseSearchTool,
     webFetchTool,
     webSearchTool,
-    exaWebSearchTool,
-    exaCodeSearchTool,
+    globFileSearchTool,
 
     // Browser group
     browserActionTool,
@@ -59,19 +58,18 @@ export {
   grepTool,
   listFilesTool,
   listDefinitionsTool,
+  readLintsTool,
   codebaseSearchTool,
   webFetchTool,
   webSearchTool,
-  exaWebSearchTool,
-  exaCodeSearchTool,
+  globFileSearchTool,
   browserActionTool,
   useSkillTool,
-  attemptCompletionTool,
   askFollowupTool,
   updateTodoTool,
   createRuleTool,
   condenseTool,
   summarizeTaskTool,
   planExitTool,
-  thinkingPreambleTool,
+  reportToUserTool,
 }

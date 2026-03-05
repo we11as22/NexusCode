@@ -11,6 +11,8 @@ export interface EnsureQdrantOptions {
   url: string
   autoStart: boolean
   log?: (message: string) => void
+  /** Max ms to wait for Qdrant to become healthy after starting (e.g. 2500 for fast first message). Default 20_000. */
+  maxWaitMs?: number
 }
 
 export interface EnsureQdrantResult {
@@ -24,7 +26,7 @@ export interface EnsureQdrantResult {
  * Ensures Qdrant is reachable. If autoStart is enabled, tries to start a local instance.
  */
 export async function ensureQdrantRunning(opts: EnsureQdrantOptions): Promise<EnsureQdrantResult> {
-  const { url, autoStart, log } = opts
+  const { url, autoStart, log, maxWaitMs = DEFAULT_START_TIMEOUT_MS } = opts
 
   if (await isQdrantHealthy(url)) {
     return { available: true, started: false, method: "existing" }
@@ -57,16 +59,18 @@ export async function ensureQdrantRunning(opts: EnsureQdrantOptions): Promise<En
     }
   }
 
+  const waitMs = Math.max(1000, maxWaitMs)
+
   // 1) Try local qdrant binary
   if (await tryStartLocalBinary(port, log)) {
-    if (await waitForHealthy(url, DEFAULT_START_TIMEOUT_MS)) {
+    if (await waitForHealthy(url, waitMs)) {
       return { available: true, started: true, method: "binary" }
     }
   }
 
   // 2) Try docker fallback
   if (await tryStartDocker(port, log)) {
-    if (await waitForHealthy(url, DEFAULT_START_TIMEOUT_MS)) {
+    if (await waitForHealthy(url, waitMs)) {
       return { available: true, started: true, method: "docker" }
     }
   }

@@ -1,5 +1,7 @@
 # ⚡ NexusCode
 
+**⚠️ Проект находится в разработке. Это не финальная версия.** Интерфейсы, поведение и документация могут меняться. Актуальное состояние — в [ARCHITECTURE.md](ARCHITECTURE.md) и [DOCS.md](DOCS.md).
+
 > AI coding agent combining the best practices from Cline, Continue, KiloCode, OpenCode, Pi, and Roo-Code.
 
 **VS Code extension + CLI** with:

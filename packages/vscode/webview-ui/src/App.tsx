@@ -4,10 +4,8 @@ import type { MessagePart } from "./stores/chat.js"
 import { MessageList } from "./components/MessageList.js"
 import { InputBar } from "./components/InputBar.js"
 import { ModeDropdown } from "./components/ModeDropdown.js"
-import { ProfileDropdown } from "./components/ProfileDropdown.js"
 import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
-import { ThoughtBlock } from "./components/ThoughtBlock.js"
 import { CheckpointStrip } from "./components/CheckpointStrip.js"
 import type { ExtensionMessage } from "./types/messages.js"
 import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
@@ -125,20 +123,6 @@ function ChatView() {
         ? "text-yellow-300"
         : "text-emerald-300"
 
-  const lastReasoningText = useMemo(() => {
-    const msgs = store.messages
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const m = msgs[i]
-      if (m?.role !== "assistant") continue
-      const parts = Array.isArray(m.content) ? (m.content as MessagePart[]) : []
-      for (let j = parts.length - 1; j >= 0; j--) {
-        const p = parts[j]
-        if (p?.type === "reasoning") return (p as { text: string }).text
-      }
-    }
-    return ""
-  }, [store.messages])
-
   const todoHeader = useMemo(() => {
     const user = [...store.messages].reverse().find((m) => m.role === "user")
     const content = user?.content
@@ -148,19 +132,6 @@ function ChatView() {
       return text.slice(0, 120)
     }
     return ""
-  }, [store.messages])
-
-  const referencedFiles = useMemo(() => {
-    const paths = new Set<string>()
-    for (const msg of store.messages) {
-      if (!Array.isArray(msg.content)) continue
-      for (const p of msg.content as MessagePart[]) {
-        if (p.type === "tool" && (p as { input?: Record<string, unknown> }).input?.path) {
-          paths.add(String((p as { input: { path?: string } }).input.path))
-        }
-      }
-    }
-    return Array.from(paths)
   }, [store.messages])
 
   return (
@@ -184,64 +155,20 @@ function ChatView() {
         </div>
       )}
 
-      {store.pendingApproval && (
-        <div className="nexus-approval-bar">
-          <span className="nexus-approval-bar-icon">⚠</span>
-          <span className="nexus-approval-bar-text">
-            {store.pendingApproval.action.type === "execute"
-              ? (store.pendingApproval.action.content
-                  ? `Run: ${store.pendingApproval.action.content}`
-                  : store.pendingApproval.action.description)
-              : store.pendingApproval.action.type === "write"
-                ? `Write: ${store.pendingApproval.action.description}`
-                : store.pendingApproval.action.description}
-          </span>
-          <div className="nexus-approval-bar-buttons">
-            <button
-              type="button"
-              className="nexus-approval-btn nexus-approval-btn-allow"
-              onClick={() => store.resolveApproval(true)}
-            >
-              Allow
-            </button>
-            {store.pendingApproval.action.type === "execute" && (
-              <button
-                type="button"
-                className="nexus-approval-btn nexus-approval-btn-allow"
-                onClick={() =>
-                  store.resolveApproval(
-                    true,
-                    false,
-                    store.pendingApproval!.action.content
-                  )
-                }
-              >
-                Add to allowed for this folder
-              </button>
-            )}
-            <button
-              type="button"
-              className="nexus-approval-btn nexus-approval-btn-always"
-              onClick={() => store.resolveApproval(true, true)}
-            >
-              Allow Always
-            </button>
-            <button
-              type="button"
-              className="nexus-approval-btn nexus-approval-btn-deny"
-              onClick={() => store.resolveApproval(false)}
-            >
-              Deny
-            </button>
-          </div>
-        </div>
-      )}
-
       <CheckpointStrip />
 
       <div className="chat-view">
-        {store.subagents.length > 0 && <SubagentStrip />}
-
+        <div className="nexus-status">
+          <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
+            {store.provider}/{store.model}
+          </span>
+          <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
+            session {store.sessionId.slice(0, 8)}
+          </span>
+          <span className={`text-[10px] ${contextColor} truncate`}>
+            ctx {formatTokens(store.contextUsedTokens)}/{formatTokens(store.contextLimitTokens)} ({store.contextPercent}%)
+          </span>
+        </div>
         <div className="chat-messages-wrapper">
           <div className="chat-messages">
             <MessageList messages={store.messages} isRunning={store.isRunning} />
@@ -276,11 +203,6 @@ function ChatView() {
             {store.todo && store.todo.trim() && (
               <ProgressTodoBlock todo={store.todo} isRunning={store.isRunning} header={todoHeader} />
             )}
-            <ThoughtBlock
-              reasoningText={lastReasoningText}
-              startTime={store.reasoningStartTime}
-              isRunning={store.isRunning}
-            />
           </div>
         )}
 
@@ -291,36 +213,16 @@ function ChatView() {
           />
         )}
 
-        <div className="nexus-status">
-          <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
-            {store.provider}/{store.model}
-          </span>
-          <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
-            session {store.sessionId.slice(0, 8)}
-          </span>
-          <span className={`text-[10px] ${contextColor} truncate`}>
-            ctx {formatTokens(store.contextUsedTokens)}/{formatTokens(store.contextLimitTokens)} ({store.contextPercent}%)
-          </span>
-          {store.isRunning && (
-            <span className="flex items-center gap-1 text-[10px] text-[var(--vscode-badge-foreground)] bg-[var(--vscode-badge-background)] px-1.5 py-0.5 rounded">
-              <SpinnerIcon className="w-3 h-3" />
-              Running
-            </span>
-          )}
-        </div>
-
         <div className="chat-input">
-          <ChatBottomBar referencedFiles={referencedFiles} />
+          <ChatBottomBar />
         </div>
       </div>
     </>
   )
 }
 
-function ChatBottomBar({ referencedFiles }: { referencedFiles: string[] }) {
+function ChatBottomBar() {
   const store = useChatStore()
-  const [filesOpen, setFilesOpen] = useState(false)
-  const fileCount = referencedFiles.length
 
   return (
     <div className="chat-bottom-bar">
@@ -329,32 +231,8 @@ function ChatBottomBar({ referencedFiles }: { referencedFiles: string[] }) {
       </div>
       <div className="chat-control-row">
         <div className="chat-bottom-bar-left">
-          {fileCount > 0 && (
-            <details
-              open={filesOpen}
-              onToggle={(e) => setFilesOpen((e.target as HTMLDetailsElement).open)}
-              className="flex-shrink-0 relative"
-            >
-              <summary className="list-none cursor-pointer text-[10px] text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] py-1 px-1.5 rounded hover:bg-[var(--vscode-list-hoverBackground)]">
-                &gt; {fileCount} Files
-              </summary>
-              <div className="absolute bottom-full left-0 mb-1 max-h-48 overflow-y-auto rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] shadow-lg py-1 min-w-[200px] z-10">
-                {referencedFiles.slice(0, 50).map((path, i) => (
-                  <div key={i} className="px-2 py-1 text-[10px] font-mono truncate text-[var(--vscode-foreground)]">
-                    {path}
-                  </div>
-                ))}
-                {referencedFiles.length > 50 && (
-                  <div className="px-2 py-1 text-[10px] text-[var(--vscode-descriptionForeground)]">
-                    +{referencedFiles.length - 50} more
-                  </div>
-                )}
-              </div>
-            </details>
-          )}
           <ModeDropdown />
           <AgentPresetDropdown />
-          <ProfileDropdown />
         </div>
         <div className="chat-bottom-bar-input-wrap">
           {store.isRunning && (
@@ -463,30 +341,6 @@ function SessionsView() {
   )
 }
 
-function SubagentStrip() {
-  const subagents = useChatStore((s) => s.subagents)
-  return (
-    <div className="nexus-subagent-strip">
-      {subagents.map((a) => (
-        <div
-          key={a.id}
-          className={`nexus-subagent-card ${
-            a.status === "completed" ? "nexus-subagent-card-ok" : a.status === "error" ? "nexus-subagent-card-err" : ""
-          }`}
-        >
-          <div className="nexus-subagent-title">
-            {truncateTaskTitle(a.task)}
-          </div>
-          <div className="nexus-subagent-action">
-            {getSubagentActionLabel(a)}
-          </div>
-          {a.error && <div className="nexus-subagent-error">{a.error}</div>}
-        </div>
-      ))}
-    </div>
-  )
-}
-
 /** Kilocode-style: plan_exit completed — New session / Continue / Dismiss (above input). */
 function PlanActionsBar({
   planFollowupText,
@@ -521,47 +375,6 @@ function PlanActionsBar({
       </button>
     </div>
   )
-}
-
-function truncateTaskTitle(task: string, maxLen = 56): string {
-  const oneLine = task.replace(/\s+/g, " ").trim()
-  if (oneLine.length <= maxLen) return oneLine
-  return oneLine.slice(0, maxLen - 1) + "…"
-}
-
-function getSubagentActionLabel(a: { status: string; currentTool?: string }): string {
-  if (a.status === "completed") return "Completed"
-  if (a.status === "error") return "Failed"
-  if (a.currentTool) return toolToActionLabel(a.currentTool)
-  return "Starting…"
-}
-
-function toolToActionLabel(tool: string): string {
-  const labels: Record<string, string> = {
-    read_file: "Reading file",
-    list_files: "Listing directory",
-    list_code_definitions: "Listing definitions",
-    search_files: "Searching files",
-    codebase_search: "Searching codebase",
-    write_to_file: "Writing file",
-    replace_in_file: "Editing file",
-    execute_command: "Bash",
-    web_fetch: "Fetching URL",
-    web_search: "Web search",
-    exa_web_search: "Exa web search",
-    exa_code_search: "Exa code search",
-    browser_action: "Browser action",
-    use_skill: "Using skill",
-    attempt_completion: "Completing",
-    ask_followup_question: "Asking user",
-    update_todo_list: "Updating todo",
-    create_rule: "Creating rule",
-    condense: "Compacting",
-    summarize_task: "Summarizing",
-    plan_exit: "Exiting plan",
-    batch: "Batch operation",
-  }
-  return labels[tool] ?? `Running ${tool}`
 }
 
 /** Modal for selecting model. Uses same catalog as CLI: core getModelsCatalog() (models.dev + Nexus Gateway); free models first. */
@@ -714,7 +527,7 @@ function SettingsView() {
   const { config, provider, model, saveConfig, serverUrl, modelsCatalog, modelsCatalogLoading, requestModelsCatalog, agentPresets, requestAgentPresets, agentPresetOptions, requestAgentPresetOptions, handleAgentPresetOptions } = useChatStore()
   const [draft, setDraft] = useState<SettingsDraft>(() => getDefaultDraft())
   const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
-  const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles" | "presets">("llm")
+  const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "presets">("llm")
   const [integTab, setIntegTab] = useState<"rules-skills" | "mcp" | "rules-instructions">("rules-skills")
   const [rulesFilter, setRulesFilter] = useState<"all" | "user" | "projects">("all")
   const [includeThirdParty, setIncludeThirdParty] = useState(true)
@@ -804,7 +617,6 @@ function SettingsView() {
         <TabPill id="index" tab={tab} setTab={setTab} label="Index" />
         <TabPill id="tools" tab={tab} setTab={setTab} label="Tools" />
         <TabPill id="integrations" tab={tab} setTab={setTab} label="MCP &amp; Skills" />
-        <TabPill id="profiles" tab={tab} setTab={setTab} label="Profiles" />
         <TabPill id="presets" tab={tab} setTab={setTab} label="Agent presets" />
       </div>
 
@@ -1012,18 +824,6 @@ function SettingsView() {
             />
           </>
         )}
-      </section>
-      )}
-
-      {tab === "profiles" && (
-      <section className="nexus-section">
-        <h3 className="nexus-section-title">Agent Profiles</h3>
-        <SettingsTextarea
-          label='Profiles JSON object (saved in project config; global presets are loaded from ~/.nexus/nexus.yaml)'
-          value={draft.profilesJson}
-          onChange={(v) => setDraft({ ...draft, profilesJson: v })}
-          rows={5}
-        />
       </section>
       )}
 
@@ -1325,19 +1125,30 @@ function RulesSkillsSubagentsView({
     setDraft({ ...draft, rulesFilesText: lines.join("\n") })
   }
 
+  /** Merged list: config paths + discovered from ~/.nexus/skills and .nexus/skills (skillDefinitions not in config). */
+  const skillsDisplayList = useMemo(() => {
+    const list = skillsList.map((s) => ({ path: typeof s === "string" ? s : s.path, enabled: typeof s === "string" ? true : s.enabled }))
+    const pathsSet = new Set(list.map((s) => s.path))
+    for (const def of skillDefinitions) {
+      if (!pathsSet.has(def.path)) {
+        list.push({ path: def.path, enabled: true })
+        pathsSet.add(def.path)
+      }
+    }
+    return list
+  }, [skillsList, skillDefinitions])
+
   const removeSkill = (index: number) => {
-    const next = skillsList.filter((_, i) => i !== index)
+    const next = skillsDisplayList.filter((_, i) => i !== index)
     setDraft({
       ...draft,
       skillsConfig: next,
-      skillsText: next.map((s) => (typeof s === "string" ? s : s.path)).join("\n"),
+      skillsText: next.map((s) => s.path).join("\n"),
     })
   }
 
   const setSkillEnabled = (index: number, enabled: boolean) => {
-    const next = skillsList.map((s, i) =>
-      i === index ? { path: typeof s === "string" ? s : s.path, enabled } : (typeof s === "string" ? { path: s, enabled: true } : s)
-    )
+    const next = skillsDisplayList.map((s, i) => (i === index ? { ...s, enabled } : s))
     setDraft({
       ...draft,
       skillsConfig: next,
@@ -1402,10 +1213,10 @@ function RulesSkillsSubagentsView({
           Skills are specialized capabilities that help the agent accomplish specific tasks. Skills will be invoked when relevant or can be triggered manually with / in chat. Use &quot;+ New&quot; to create a skill in chat via /create-skill.
         </p>
         <div className="flex flex-col gap-1.5">
-          {skillsList.length === 0 ? (
+          {skillsDisplayList.length === 0 ? (
             <div className="nexus-muted text-xs">No skills configured. Add paths in MCP &amp; Skills or edit raw list in Instructions. Use &quot;+ New&quot; to create a skill in chat.</div>
           ) : (
-            skillsList.map((item, i) => {
+            skillsDisplayList.map((item, i) => {
               const path = skillPath(item)
               const def = getSkillDef(path)
               const name = def?.name ?? path.split("/").filter(Boolean).pop() ?? path
@@ -1906,9 +1717,9 @@ function TabPill({
   setTab,
   label,
 }: {
-  id: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles" | "presets"
-  tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles" | "presets"
-  setTab: (tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "profiles" | "presets") => void
+  id: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"
+  tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"
+  setTab: (tab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets") => void
   label: string
 }) {
   const active = tab === id

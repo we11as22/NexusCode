@@ -218,7 +218,7 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
 **Multiple tasks:** pass \`tasks\` array with up to ${maxTasksPerCall} items; each has \`description\` and optional \`context_summary\`, \`mode\`. All tasks in one call run in parallel (subject to max concurrent limit).
 **When the main agent is in plan or ask mode**, sub-agents always run with ask (read-only) permissions.
 **When the main agent is in agent/debug mode**, sub-agents can run in agent/plan/ask/debug per \`mode\`.
-Each sub-agent must call attempt_completion when done; results are returned in order.
+Each sub-agent must call final_report_to_user when done; results are returned in order.
 Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: schema,
     // Available in all modes; sub-agent permissions follow parent (plan/ask → ask, agent → agent/plan/ask)

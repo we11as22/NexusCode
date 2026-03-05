@@ -5,6 +5,9 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
 
 # Build outputs
 dist/
@@ -12,12 +15,14 @@ dist/
 *.tsbuildinfo
 *.js.map
 *.mjs.map
+*.vsix
 
-# Packages build dirs
+# Packages build dirs (explicit for clarity)
 packages/core/dist/
 packages/cli/dist/
 packages/vscode/dist/
 packages/vscode/webview-ui/dist/
+packages/server/dist/
 
 # IDE / Editor
 .idea/
@@ -26,6 +31,7 @@ packages/vscode/webview-ui/dist/
 *.swp
 *.swo
 *~
+.cursor/
 
 # OS
 .DS_Store
@@ -38,10 +44,14 @@ Thumbs.db
 *.pem
 *.key
 
-# NexusCode runtime (project-local index/checkpoints; keep .nexus/nexus.yaml)
+# NexusCode runtime — local state and config (do not commit secrets)
 .nexus/index/
 .nexus/checkpoints/
 .nexus/sessions/
+.nexus/nexus.yaml
+.nexus/settings.json
+.nexus/settings.local.json
+.nexus/agent-configs.json
 
 # Generated / temp
 *.log
@@ -50,6 +60,16 @@ coverage/
 .cache/
 tmp/
 temp/
+.vite/
+.esbuild/
+*.bak
+*.backup
+.node_repl_history
+.eslintcache
+.prettiercache
+
+# Backup / junk
+ignore/
 
 # Optional: generated comparison docs (uncomment if you don't want to commit)
 # COMPARISON_SUMMARY.md

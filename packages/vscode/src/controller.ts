@@ -156,6 +156,8 @@ export class Controller {
   private serverSessionId?: string
   private initialized = false
   private initPromise?: Promise<void>
+  /** Started in ensureInitialized (not awaited there); runAgent awaits it so MCP is ready before first run. */
+  private mcpReconnectPromise: Promise<void> | null = null
   private modelsCatalogCache: import("@nexuscode/core").ModelsCatalog | null = null
   private indexStatusUnsubscribe?: () => void
   private indexerFileWatcher?: vscode.Disposable
@@ -267,14 +269,11 @@ export class Controller {
     }
   }
 
-  /** Load skills from config paths and send to webview for Skills list UI. */
+  /** Load skills from config paths and standard dirs (~/.nexus/skills, .nexus/skills) and send to webview for Skills list UI. */
   private loadAndSendSkillDefinitions(): void {
-    if (!this.config?.skills?.length) {
-      this.postMessageToWebview({ type: "skillDefinitions", definitions: [] })
-      return
-    }
     const cwd = this.getCwd()
-    loadSkills(this.config.skills, cwd)
+    const paths = this.config?.skills ?? []
+    loadSkills(paths, cwd)
       .then((skills) => {
         this.postMessageToWebview({
           type: "skillDefinitions",
@@ -325,10 +324,8 @@ export class Controller {
       if (!this.config) {
         this.config = NexusConfigSchema.parse({}) as NexusConfig
       }
-      // Send config to webview immediately so Settings open fast (before allowed-commands and project settings)
       this.postMessageToWebview({ type: "configLoaded", config: this.config })
-        void this.loadAndSendSkillDefinitions()
-      // Merge project allowlist from .nexus/allowed-commands.json
+      void this.loadAndSendSkillDefinitions()
       try {
         const allowPath = path.join(cwd, ".nexus", "allowed-commands.json")
         const uri = vscode.Uri.file(allowPath)
@@ -340,7 +337,6 @@ export class Controller {
       } catch {
         // No file or invalid — keep default
       }
-      // Merge .nexus/settings.json + settings.local.json (like .claude)
       try {
         const settings = loadProjectSettings(cwd)
         const perms = settings.permissions
@@ -357,36 +353,28 @@ export class Controller {
       }
       this.applyVscodeOverrides(this.config)
       this.defaultModelProfile = { ...this.config.model }
-      // Send config to webview immediately so Settings open fast; session/MCP/indexer continue in background
-      this.postMessageToWebview({ type: "configLoaded", config: this.config })
-        void this.loadAndSendSkillDefinitions()
-      try {
-        this.session = Session.create(cwd)
-        this.postStateToWebview()
-        this.sendIndexStatus()
-        void this.reconnectMcpServers().catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err)
-          this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
-        })
-        void this.initializeIndexer(cwd).catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err)
-          this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[indexer] ${message}` } })
-        })
-        // Load models catalog in background so Settings open immediately
-        if (!this.modelsCatalogCache) {
-          void getModelsCatalog()
-            .then((cat) => {
-              this.modelsCatalogCache = cat
-              this.postStateToWebview()
-            })
-            .catch(() => {
-              this.modelsCatalogCache = { providers: [], recommended: [] }
-              this.postStateToWebview()
-            })
-        }
-      } catch (err) {
-        console.warn("[nexus] Init error:", err)
-        this.postStateToWebview()
+      this.session = Session.create(cwd)
+      this.postStateToWebview()
+      this.sendIndexStatus()
+      // Resolve init here so first message is not blocked. MCP/indexer/catalog/skills run in background.
+      this.mcpReconnectPromise = this.reconnectMcpServers().catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
+      })
+      void this.initializeIndexer(cwd).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[indexer] ${message}` } })
+      })
+      if (!this.modelsCatalogCache) {
+        void getModelsCatalog()
+          .then((cat) => {
+            this.modelsCatalogCache = cat
+            this.postStateToWebview()
+          })
+          .catch(() => {
+            this.modelsCatalogCache = { providers: [], recommended: [] }
+            this.postStateToWebview()
+          })
       }
     })()
     await this.initPromise
@@ -513,7 +501,9 @@ export class Controller {
       case "openFileAtLocation": {
         const cwd = this.getCwd()
         const absPath = path.isAbsolute(msg.path) ? msg.path : path.join(cwd, msg.path)
-        const uri = vscode.Uri.file(absPath)
+        const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
+        const wf = vscode.workspace.workspaceFolders?.[0]
+        const uri = wf ? vscode.Uri.joinPath(wf.uri, relPath) : vscode.Uri.file(absPath)
         const line = Math.max(0, (msg.line ?? 1) - 1)
         const endLine = msg.endLine != null ? Math.max(0, msg.endLine - 1) : line
         const isPlanFile = absPath.replace(/\\/g, "/").includes(".nexus/plans")
@@ -813,14 +803,17 @@ export class Controller {
     }
   }
 
-  /** Discover available skills, MCP server names, and rules files for preset builder. */
+  /** Discover available skills, MCP server names, and rules files for preset builder. Uses same source as Skills tab (loadSkills) so ~/.nexus and all .md are included. */
   private async getAgentPresetOptions(): Promise<{ skills: string[]; mcpServers: string[]; rulesFiles: string[] }> {
     const cwd = this.getCwd()
-    const skills = await discoverSkillPathsForExtension(cwd)
-    const mcpServers = (this.config?.mcp?.servers ?? []).map((s) => (s as McpServerConfig).name).filter((n): n is string => Boolean(n?.trim()))
+    const skillDefs = await loadSkills(this.config?.skills ?? [], cwd).catch(() => [])
+    const skills = dedupeStringList(skillDefs.map((s) => s.path))
+    const fromConfig = (this.config?.mcp?.servers ?? []).map((s) => (s as McpServerConfig).name).filter((n): n is string => Boolean(n?.trim()))
+    const discoveredMcp = await discoverMcpServerNamesForExtension(cwd)
+    const mcpServers = dedupeStringList([...fromConfig, ...discoveredMcp])
     const rulesFiles = await discoverRuleFilesForExtension(cwd)
-    const fromConfig = this.config?.rules?.files ?? []
-    const rulesMerged = dedupeStringList([...fromConfig, ...rulesFiles, "AGENTS.md", "CLAUDE.md"])
+    const fromRulesConfig = this.config?.rules?.files ?? []
+    const rulesMerged = dedupeStringList([...fromRulesConfig, ...rulesFiles, "AGENTS.md", "CLAUDE.md"])
     return { skills, mcpServers, rulesFiles: rulesMerged }
   }
 
@@ -1195,6 +1188,26 @@ export class Controller {
     }, timeoutMs)
 
     try {
+      // MCP (started in ensureInitialized), rules, skills in parallel so first message is faster.
+      // Cap MCP wait so first message is not blocked when vector is off or MCP servers are slow.
+      const MCP_FIRST_MESSAGE_TIMEOUT_MS = 2500
+      const mcpP = this.mcpReconnectPromise
+        ? Promise.race([
+            this.mcpReconnectPromise,
+            new Promise<void>((r) => setTimeout(r, MCP_FIRST_MESSAGE_TIMEOUT_MS)),
+          ])
+        : Promise.resolve()
+      const rulesP = loadRules(cwd, configForRun.rules.files).catch(() => "")
+      const skillsP = loadSkills(configForRun.skills, cwd).catch(() => [])
+      const RULES_SKILLS_TIMEOUT_MS = 2000
+      const rulesAndSkillsP = Promise.race([
+        Promise.all([rulesP, skillsP]).then(([rulesContent, skills]) => ({ type: "ok" as const, rulesContent, skills })),
+        new Promise<{ type: "timeout" }>((r) => setTimeout(() => r({ type: "timeout" }), RULES_SKILLS_TIMEOUT_MS)),
+      ])
+      const [, rulesAndSkillsResult] = await Promise.all([mcpP, rulesAndSkillsP])
+      const rulesContent = rulesAndSkillsResult.type === "ok" ? rulesAndSkillsResult.rulesContent : ""
+      const skills = rulesAndSkillsResult.type === "ok" ? rulesAndSkillsResult.skills : []
+
       const client = createLLMClient(configForRun.model)
       const toolRegistry = new ToolRegistry()
       if (this.mcpClient) {
@@ -1206,12 +1219,10 @@ export class Controller {
       toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
       const { builtin: tools, dynamic } = toolRegistry.getForMode(this.mode)
       const allTools = [...tools, ...dynamic]
-      const rulesContent = await loadRules(cwd, configForRun.rules.files).catch(() => "")
-      const skills = await loadSkills(configForRun.skills, cwd).catch(() => [])
       const compaction = createCompaction()
       if (configForRun.checkpoint.enabled && !this.checkpoint) {
         this.checkpoint = new CheckpointTracker(this.session.id, cwd)
-        await this.checkpoint.init(configForRun.checkpoint.timeoutMs).catch(console.warn)
+        void this.checkpoint.init(configForRun.checkpoint.timeoutMs).catch(console.warn)
       }
       if (this.checkpoint) {
         host.setCheckpoint(this.checkpoint)
@@ -1515,7 +1526,20 @@ export class Controller {
       this.sendIndexStatus({ state: "idle" })
       return
     }
-    this.indexer = await createCodebaseIndexer(cwd, this.config, { onWarning: (message: string) => console.warn(message) })
+    // Same as server run-session: short timeout so first message is not delayed (Qdrant default is 20s).
+    const INDEXER_CREATE_TIMEOUT_MS = 2500
+    this.indexer = await Promise.race([
+      createCodebaseIndexer(cwd, this.config, {
+        onWarning: (message: string) => console.warn(message),
+        maxQdrantWaitMs: INDEXER_CREATE_TIMEOUT_MS,
+      }),
+      new Promise<undefined>((r) => setTimeout(() => r(undefined), INDEXER_CREATE_TIMEOUT_MS)),
+    ])
+    if (!this.indexer) {
+      console.warn("[nexus] Indexer creation timed out; running without vector search.")
+      this.sendIndexStatus({ state: "idle" })
+      return
+    }
     this.indexStatusUnsubscribe = this.indexer.onStatusChange((status: IndexStatus) => {
       this.sendIndexStatus(status)
       this.postMessageToWebview({ type: "agentEvent", event: { type: "index_update", status } })
@@ -1733,6 +1757,29 @@ async function discoverRuleFilesForExtension(projectDir: string): Promise<string
     }
   }
   return dedupeStringList(out)
+}
+
+/** Discover MCP server names from project .nexus/mcp-servers.json and ~/.nexus/mcp-servers.json (same sources as config merge). */
+async function discoverMcpServerNamesForExtension(projectDir: string): Promise<string[]> {
+  const names: string[] = []
+  const readJson = async (filePath: string): Promise<string[]> => {
+    try {
+      const content = await fsPromises.readFile(filePath, "utf8")
+      const data = JSON.parse(content)
+      const servers = Array.isArray(data) ? data : (data?.servers ?? data?.mcp?.servers)
+      if (!Array.isArray(servers)) return []
+      return servers
+        .map((s: unknown) => (s && typeof s === "object" && "name" in s && typeof (s as { name: unknown }).name === "string" ? (s as { name: string }).name.trim() : ""))
+        .filter((n: string) => n.length > 0)
+    } catch {
+      return []
+    }
+  }
+  const projectPath = path.join(projectDir, ".nexus", "mcp-servers.json")
+  const globalPath = path.join(os.homedir(), ".nexus", "mcp-servers.json")
+  const [fromProject, fromGlobal] = await Promise.all([readJson(projectPath), readJson(globalPath)])
+  names.push(...fromProject, ...fromGlobal)
+  return dedupeStringList(names)
 }
 
 async function writeAgentPresetsForExtension(

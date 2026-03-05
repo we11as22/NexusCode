@@ -1097,6 +1097,8 @@ type MessagePart = TextPart | ToolPart | ReasoningPart;
 interface TextPart {
     type: "text";
     text: string;
+    /** Optional short line shown to the user (progress line); when present, explored block collapses. */
+    user_message?: string;
 }
 interface ReasoningPart {
     type: "reasoning";
@@ -1157,9 +1159,13 @@ type IndexStatus = {
     error: string;
 };
 type AgentEvent = {
+    type: "assistant_message_started";
+    messageId: string;
+} | {
     type: "text_delta";
     delta: string;
     messageId: string;
+    user_message_delta?: string;
 } | {
     type: "reasoning_delta";
     delta: string;
@@ -1670,6 +1676,8 @@ interface PromptContext {
     contextPercent?: number;
     /** When true, inject create-skill instructions and allow writes to skill dirs */
     createSkillMode?: boolean;
+    /** When true, inject JSON schema for first-line preamble (reasoning + user_message). */
+    supportsStructuredOutput?: boolean;
 }
 /**
  * Assemble the full system prompt from blocks.
@@ -1805,6 +1813,8 @@ declare function getIndexDir(projectRoot: string): string;
 
 interface IndexerFactoryOptions {
     onWarning?: (message: string) => void;
+    /** Max ms to wait for Qdrant when vector is enabled (e.g. 2500 for fast first message). Omit for default 20s. */
+    maxQdrantWaitMs?: number;
 }
 /**
  * Creates a CodebaseIndexer with optional vector search (Qdrant).
@@ -1816,6 +1826,8 @@ interface EnsureQdrantOptions {
     url: string;
     autoStart: boolean;
     log?: (message: string) => void;
+    /** Max ms to wait for Qdrant to become healthy after starting (e.g. 2500 for fast first message). Default 20_000. */
+    maxWaitMs?: number;
 }
 interface EnsureQdrantResult {
     available: boolean;

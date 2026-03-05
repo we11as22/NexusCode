@@ -19,9 +19,21 @@ export function InputBar() {
   const autosize = () => {
     if (!textareaRef.current) return
     const base = 54
-    const max = base * 2
+    const max = 240
     textareaRef.current.style.height = "auto"
     textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, max)}px`
+    scrollCaretIntoView()
+  }
+
+  const scrollCaretIntoView = () => {
+    const ta = textareaRef.current
+    if (!ta) return
+    requestAnimationFrame(() => {
+      const lineHeight = parseInt(getComputedStyle(ta).lineHeight, 10) || 20
+      const lines = ta.value.slice(0, ta.selectionStart).split("\n").length
+      const scrollTop = Math.max(0, lines * lineHeight - ta.clientHeight + lineHeight)
+      ta.scrollTop = Math.min(scrollTop, ta.scrollHeight - ta.clientHeight)
+    })
   }
 
   useEffect(() => {
@@ -121,7 +133,9 @@ export function InputBar() {
           disabled={false}
           rows={1}
           className={`prompt-input flex-1 min-w-0 w-full ${isRunning || awaitingApproval ? "opacity-70" : ""}`}
-          style={{ minHeight: "54px" }}
+          style={{ minHeight: "44px" }}
+          onSelect={scrollCaretIntoView}
+          onKeyUp={scrollCaretIntoView}
           />
         </div>
       </div>

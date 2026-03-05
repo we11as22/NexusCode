@@ -25,6 +25,8 @@ function extractPathLinePairs(output: string): Array<{ path: string; line: numbe
 
 interface Props {
   part: ToolPart
+  /** When set, render approval UI inline inside the card (same field as tool). */
+  approval?: React.ReactNode
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -35,15 +37,15 @@ const TOOL_ICONS: Record<string, string> = {
   search_files: "🔍",
   list_files: "📁",
   list_code_definitions: "🏗️",
+  read_lints: "⚠️",
   codebase_search: "🔎",
   web_fetch: "🌐",
   web_search: "🌍",
-  exa_web_search: "◈",
-  exa_code_search: "◇",
+  glob: "📋",
   browser_action: "🖥️",
   spawn_agent: "🤖",
   use_skill: "💡",
-  attempt_completion: "✅",
+  final_report_to_user: "✅",
   ask_followup_question: "❓",
   update_todo_list: "📝",
   thinking_preamble: "💭",
@@ -53,8 +55,6 @@ const TOOL_ICONS: Record<string, string> = {
 
 function toolDisplayName(tool: string): string {
   if (tool === "execute_command") return "bash"
-  if (tool === "exa_web_search") return "Exa Web Search"
-  if (tool === "exa_code_search") return "Exa Code Search"
   return tool
 }
 
@@ -108,6 +108,24 @@ function getDiffPreviewHunks(hunks: Array<{ type: string; lineNum: number; line:
   return hunks.slice(start, end)
 }
 
+const DIFF_PREVIEW_LINE_HEIGHT = 1.4
+const DIFF_PREVIEW_MAX_LINES = 4
+const diffPreviewMaxHeightRem = DIFF_PREVIEW_MAX_LINES * DIFF_PREVIEW_LINE_HEIGHT
+
+/** Parse "Successfully updated path\n...\n<updated_content>\n...\n</updated_content>" for fallback. */
+function parseSuccessfullyUpdatedOutput(output: string): { content: string } | null {
+  const contentMatch = output.match(/<updated_content>\s*([\s\S]*?)<\/updated_content>/)
+  const content = contentMatch?.[1]?.trim() ?? ""
+  if (!content) return null
+  return { content }
+}
+
+/** Fallback diff hunks from raw content when diffHunks missing — first N lines as "add". */
+function buildFallbackDiffHunks(content: string, maxLines = 4): Array<{ type: "add"; lineNum: number; line: string }> {
+  const lines = content.split(/\r?\n/)
+  return lines.slice(0, maxLines).map((line, i) => ({ type: "add" as const, lineNum: i + 1, line: line || " " }))
+}
+
 function getFileEditPath(part: ToolPart): string | null {
   if (part.path != null && String(part.path).trim()) return String(part.path).trim()
   const pathVal = part.input?.path
@@ -148,7 +166,7 @@ function getEditStatLabel(part: ToolPart): string {
 }
 
 /** Inline file-edit block in chat: one block per replace_in_file/write_to_file, chronological. Collapsible, hover chevron, click filename opens diff in VS Code. When diffHunks present, shows line-by-line diff (red/green). */
-export function InlineFileEditBlock({ part }: { part: ToolPart }) {
+export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approval?: React.ReactNode }) {
   const path = getFileEditPath(part)
   const output = part.output ?? ""
   const [expanded, setExpanded] = useState(true)
@@ -158,6 +176,13 @@ export function InlineFileEditBlock({ part }: { part: ToolPart }) {
   const fileName = path ? path.split("/").pop() ?? path : "file"
   const statLabel = getEditStatLabel(part)
   const hasDiffHunks = Array.isArray(part.diffHunks) && part.diffHunks.length > 0
+  const fallback = !hasDiffHunks ? parseSuccessfullyUpdatedOutput(output) : null
+  const previewHunks = hasDiffHunks
+    ? getDiffPreviewHunks(part.diffHunks!)
+    : fallback
+      ? buildFallbackDiffHunks(fallback.content, DIFF_PREVIEW_MAX_LINES)
+      : []
+  const showDiffPreview = previewHunks.length > 0
   return (
     <div
       className="nexus-file-edit-block my-2"
@@ -212,7 +237,7 @@ export function InlineFileEditBlock({ part }: { part: ToolPart }) {
       </div>
       {expanded && (
         <div className="nexus-file-edit-content">
-          {hasDiffHunks ? (
+          {showDiffPreview ? (
             <div className="nexus-diff-view rounded overflow-hidden border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
               <div className="nexus-diff-view-header px-2 py-1 text-[10px] font-mono border-b border-[var(--vscode-panel-border)] flex items-center gap-2">
                 {fileName}
@@ -222,9 +247,15 @@ export function InlineFileEditBlock({ part }: { part: ToolPart }) {
                     {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
                   </>
                 )}
+                {fallback && part.diffStats == null && output.includes("replaced") && (
+                  <span className="text-[var(--vscode-descriptionForeground)]">edited</span>
+                )}
               </div>
-              <pre className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono overflow-y-auto">
-                {getDiffPreviewHunks(part.diffHunks!).map((h, i) => {
+              <pre
+                className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono overflow-y-auto nexus-diff-preview-pre"
+                style={{ lineHeight: DIFF_PREVIEW_LINE_HEIGHT, maxHeight: `${diffPreviewMaxHeightRem}rem` }}
+              >
+                {previewHunks.map((h, i) => {
                   if (h.type === "add") {
                     return (
                       <div key={i} className="px-2 py-0.5 bg-green-500/15 text-green-600 dark:text-green-400 whitespace-pre">
@@ -255,6 +286,7 @@ export function InlineFileEditBlock({ part }: { part: ToolPart }) {
           )}
         </div>
       )}
+      {approval}
     </div>
   )
 }
@@ -400,9 +432,15 @@ function formatToolInputPreview(part: ToolPart): string {
     case "web_fetch":
     case "web_search":
       return url && typeof url === "string" ? short(String(url), 52) : ""
-    case "exa_web_search":
-    case "exa_code_search":
-      return query && typeof query === "string" ? short(String(query).replace(/\s+/g, " "), 48) : ""
+    case "glob":
+      return (inp["glob_pattern"] && typeof inp["glob_pattern"] === "string")
+        ? short(String(inp["glob_pattern"]), 48)
+        : ""
+    case "read_lints": {
+      const paths = inp["paths"]
+      if (Array.isArray(paths) && paths.length > 0) return short(paths.slice(0, 3).join(", "), 52)
+      return "workspace"
+    }
     case "list_code_definitions":
       return pathStr ? short(pathStr, 56) : ""
     case "batch": {
@@ -431,7 +469,7 @@ function formatToolInputPreview(part: ToolPart): string {
   }
 }
 
-export function ToolCallCard({ part }: Props) {
+export function ToolCallCard({ part, approval }: Props) {
   const [expanded, setExpanded] = useState(false)
   const icon = TOOL_ICONS[part.tool] ?? "🔧"
   const isMcp = part.tool.includes("__")
@@ -532,6 +570,7 @@ export function ToolCallCard({ part }: Props) {
           )}
         </div>
       )}
+      {approval}
     </div>
   )
 }

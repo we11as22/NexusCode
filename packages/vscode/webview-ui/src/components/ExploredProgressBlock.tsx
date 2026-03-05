@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react"
+import React, { useMemo, useState, useEffect } from "react"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 
@@ -14,30 +14,56 @@ export interface ExploredEntry {
 
 const FILE_TOOLS = new Set(["read_file", "list_files"])
 const SEARCH_TOOLS = new Set(["grep", "codebase_search", "search_files", "list_code_definitions"])
+/** Only these increase "N files" in Explored label. list_files is in Explored but not counted. */
+const FILE_COUNT_TOOLS = new Set(["read_file"])
 
 /** Whether this tool counts as exploration (file read/list or search) for the collapsed "Explored" block. */
 export function isExplorationTool(tool: string): boolean {
   return FILE_TOOLS.has(tool) || SEARCH_TOOLS.has(tool)
 }
 
-/** Parts from the start until first non-exploration (text, reasoning, or other tool). Used so Explored block only shows the leading run. */
+/** One item in the explored block: either a thought (reasoning without user_message) or an exploration tool. */
+export type ExploredPrefixItem =
+  | { type: "reasoning"; text: string; durationMs?: number }
+  | { type: "tool"; part: ToolPart; entry: ExploredEntry }
+
+/** Parts: collect ALL reasoning and ALL exploration tools in the message (in order). Block is shown only when there is at least one tool; if only reasoning, return empty so we show Thought(s) as-is. We do not stop at first text — so list_files etc. later in the message are still inside Explored. */
 export function getExploredPrefixFromParts(parts: MessagePart[]): {
-  prefixParts: ToolPart[]
+  prefixItems: ExploredPrefixItem[]
   prefixIndices: Set<number>
+  /** True if there is at least one part after the last prefix index — then collapse by default when complete or when text has user_message. */
+  hasContentAfterPrefix: boolean
 } {
-  const prefixParts: ToolPart[] = []
+  const prefixItems: ExploredPrefixItem[] = []
   const prefixIndices = new Set<number>()
+  let partIndex = 0
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i]!
-    if (part.type === "text" || part.type === "reasoning") break
+    if (part.type === "reasoning") {
+      const r = part as { text: string; durationMs?: number }
+      prefixItems.push({ type: "reasoning", text: r.text, durationMs: r.durationMs })
+      prefixIndices.add(i)
+      partIndex++
+      continue
+    }
+    if (part.type === "text") continue
     if (part.type === "tool") {
       const toolPart = part as ToolPart
-      if (!isExplorationTool(toolPart.tool)) break
-      prefixParts.push(toolPart)
+      if (!isExplorationTool(toolPart.tool)) continue
+      const entry = getToolEntry(toolPart, partIndex++)
+      if (entry) prefixItems.push({ type: "tool", part: toolPart, entry })
       prefixIndices.add(i)
+      continue
     }
   }
-  return { prefixParts, prefixIndices }
+  const lastPrefixIndex = prefixIndices.size > 0 ? Math.max(...prefixIndices) : -1
+  const hasContentAfterPrefix = lastPrefixIndex >= 0 && lastPrefixIndex < parts.length - 1
+  if (prefixItems.length === 0) return { prefixItems: [], prefixIndices: new Set(), hasContentAfterPrefix }
+  const hasAtLeastOneTool = prefixItems.some((x) => x.type === "tool")
+  if (!hasAtLeastOneTool) {
+    return { prefixItems: [], prefixIndices: new Set(), hasContentAfterPrefix }
+  }
+  return { prefixItems, prefixIndices, hasContentAfterPrefix }
 }
 
 function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
@@ -120,7 +146,7 @@ function formatToolName(tool: string): string {
   return tool
 }
 
-/** Per-message: compute files/searches count and entries from tool parts only */
+/** Per-message: compute files/searches count and entries from tool parts only. list_files is in entries but not counted in files (files = read_file only). */
 export function getExploredFromParts(parts: MessagePart[]): {
   filesCount: number
   searchesCount: number
@@ -133,7 +159,7 @@ export function getExploredFromParts(parts: MessagePart[]): {
   for (const part of parts) {
     if (part.type !== "tool") continue
     const toolPart = part as ToolPart
-    if (FILE_TOOLS.has(toolPart.tool)) filesCount++
+    if (FILE_COUNT_TOOLS.has(toolPart.tool)) filesCount++
     if (SEARCH_TOOLS.has(toolPart.tool)) searchesCount++
     const entry = getToolEntry(toolPart, partIndex++)
     if (entry) entries.push(entry)
@@ -141,39 +167,43 @@ export function getExploredFromParts(parts: MessagePart[]): {
   return { filesCount, searchesCount, entries }
 }
 
-/** Inline collapsible "Explored X files, Y searches" block for one message (used inside chat) */
+/** Inline collapsible "Explored [N files,] [M searches]" — list_files is in the block but not counted; N = read_file only, M = grep/search. If N or M is 0 that part is omitted. */
 export function ExploredSummaryInline({
-  filesCount,
-  searchesCount,
-  entries,
+  prefixItems,
   defaultCollapsed,
   onOpenFile,
 }: {
-  filesCount: number
-  searchesCount: number
-  entries: ExploredEntry[]
+  prefixItems: ExploredPrefixItem[]
   defaultCollapsed: boolean
   onOpenFile?: (path: string, line?: number, endLine?: number) => void
 }) {
   const [open, setOpen] = useState(!defaultCollapsed)
-  const total = filesCount + searchesCount
-  // Do not show "Explored 0 files, 0 searches" when there are no file reads or searches.
+  useEffect(() => {
+    if (defaultCollapsed) setOpen(false)
+  }, [defaultCollapsed])
+  // list_files is in Explored but not counted; N files = FILE_COUNT_TOOLS only, M searches = SEARCH_TOOLS
+  const filesCount = prefixItems.filter((x) => x.type === "tool" && FILE_COUNT_TOOLS.has(x.part.tool)).length
+  const searchesCount = prefixItems.filter((x) => x.type === "tool" && SEARCH_TOOLS.has(x.part.tool)).length
+  const labelParts: string[] = []
+  if (filesCount > 0) labelParts.push(`${filesCount} file${filesCount === 1 ? "" : "s"}`)
+  if (searchesCount > 0) labelParts.push(`${searchesCount} search${searchesCount === 1 ? "" : "es"}`)
+  const total = prefixItems.length
   if (total === 0) return null
-  if (entries.length === 0) return null
 
   return (
     <div
       data-explored-inline
-      className="my-2 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden"
+      className="my-2 overflow-hidden bg-transparent"
     >
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer select-none text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]"
+        className="w-full flex items-center gap-2 px-2 py-1.5 text-left cursor-pointer select-none text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] rounded"
       >
         <ExploredIcon className="w-4 h-4 flex-shrink-0 text-[var(--vscode-descriptionForeground)]" />
         <span className="flex-1 min-w-0 truncate">
-          Explored {filesCount} file{filesCount === 1 ? "" : "s"}, {searchesCount} search{searchesCount === 1 ? "" : "es"}
+          Explored
+          {labelParts.length > 0 && ` ${labelParts.join(", ")}`}
         </span>
         <span
           className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform"
@@ -183,23 +213,58 @@ export function ExploredSummaryInline({
         </span>
       </button>
       {open && (
-        <div className="border-t border-[var(--vscode-panel-border)] max-h-[240px] overflow-y-auto py-2 px-3 space-y-1">
-          {entries.map((e) => (
-            <div key={e.id} className="text-[11px] leading-snug text-[var(--vscode-descriptionForeground)]">
-              {e.path != null && (e.line != null || e.endLine != null) && onOpenFile ? (
-                <button
-                  type="button"
-                  onClick={() => onOpenFile(e.path!, e.line, e.endLine)}
-                  className="text-left w-full rounded px-1.5 py-0.5 hover:bg-[var(--vscode-list-hoverBackground)] text-[var(--vscode-textLink-foreground)] truncate block"
-                  title={e.path}
-                >
-                  {e.label}
-                </button>
-              ) : (
-                <span className="px-1.5 py-0.5 block truncate">{e.label}</span>
-              )}
-            </div>
-          ))}
+        <div className="max-h-[280px] overflow-y-auto py-1.5 px-2 space-y-1">
+          {prefixItems.map((item, idx) => {
+            if (item.type === "reasoning") {
+              return (
+                <ExploredThoughtRow
+                  key={`thought-${idx}`}
+                  text={item.text}
+                  durationMs={item.durationMs}
+                />
+              )
+            }
+            const e = item.entry
+            return (
+              <div key={e.id} className="text-[11px] leading-snug text-[var(--vscode-descriptionForeground)]">
+                {e.path != null && (e.line != null || e.endLine != null) && onOpenFile ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenFile(e.path!, e.line, e.endLine)}
+                    className="text-left w-full rounded px-1.5 py-0.5 hover:bg-[var(--vscode-list-hoverBackground)] text-[var(--vscode-textLink-foreground)] truncate block"
+                    title={e.path}
+                  >
+                    {e.label}
+                  </button>
+                ) : (
+                  <span className="px-1.5 py-0.5 block truncate">{e.label}</span>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** One thought row inside Explored block — expandable on click. */
+function ExploredThoughtRow({ text, durationMs }: { text: string; durationMs?: number }) {
+  const [expanded, setExpanded] = useState(false)
+  const durationStr = durationMs != null ? ` (${(durationMs / 1000).toFixed(1)}s)` : ""
+  return (
+    <div className="space-y-0">
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        className="w-full text-left px-1.5 py-0.5 hover:bg-[var(--vscode-list-hoverBackground)] rounded text-[11px] text-[var(--vscode-descriptionForeground)] flex items-center gap-1"
+      >
+        <span className="flex-shrink-0 transition-transform" style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
+        <span>Thought{durationStr}</span>
+      </button>
+      {expanded && text.trim() && (
+        <div className="pl-4 pr-1 py-1.5 text-[11px] text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans max-h-[min(50vh,320px)] overflow-y-auto overflow-x-hidden rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+          {text.trim()}
         </div>
       )}
     </div>
@@ -219,24 +284,24 @@ export function useExploredFromMessages(
 
     for (const msg of messages) {
       if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
-      for (const part of msg.content) {
-        if (part.type === "reasoning") {
-          const text = (part as { text: string }).text
-          entries.push({
-            id: `reasoning-${partIndex++}`,
-            kind: "thought",
-            label: text.trim().length < 80 ? "Thought briefly" : "Thought",
-          })
-          continue
-        }
-        if (part.type === "tool") {
-          const toolPart = part as ToolPart
-          if (FILE_TOOLS.has(toolPart.tool)) filesCount++
-          if (SEARCH_TOOLS.has(toolPart.tool)) searchesCount++
-          const entry = getToolEntry(toolPart, partIndex++)
-          if (entry) entries.push(entry)
-        }
+    for (const part of msg.content) {
+      if (part.type === "reasoning") {
+        const text = (part as { text: string }).text
+        entries.push({
+          id: `reasoning-${partIndex++}`,
+          kind: "thought",
+          label: text.trim().length < 80 ? "Thought briefly" : "Thought",
+        })
+        continue
       }
+      if (part.type === "tool") {
+        const toolPart = part as ToolPart
+        if (FILE_COUNT_TOOLS.has(toolPart.tool)) filesCount++
+        if (SEARCH_TOOLS.has(toolPart.tool)) searchesCount++
+        const entry = getToolEntry(toolPart, partIndex++)
+        if (entry) entries.push(entry)
+      }
+    }
     }
 
     if (isRunning && reasoningStartTime != null) {
@@ -286,32 +351,35 @@ export function ExploredProgressBlock({ messages, isRunning, reasoningStartTime 
   )
 
   const total = filesCount + searchesCount
-  // Do not show "Explored 0 files, 0 searches" when there are no file reads or searches.
-  if (total === 0) return null
-  if (entries.length === 0) return null
+  // Do not show "Explored" when there are no file reads or searches (list_files is in entries but not counted)
+  if (total === 0 && entries.length === 0) return null
+  const labelParts: string[] = []
+  if (filesCount > 0) labelParts.push(`${filesCount} file${filesCount === 1 ? "" : "s"}`)
+  if (searchesCount > 0) labelParts.push(`${searchesCount} search${searchesCount === 1 ? "" : "es"}`)
+  const label = labelParts.length > 0 ? labelParts.join(", ") : "Explored"
 
   return (
     <div
       data-explored-block
-      className="flex-shrink-0 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden"
+      className="flex-shrink-0 overflow-hidden bg-transparent"
     >
       <div
         role="button"
         tabIndex={0}
         onClick={() => setOpen((o) => !o)}
         onKeyDown={(e) => e.key === "Enter" && setOpen((o) => !o)}
-        className="flex items-center gap-2 px-3 py-2 cursor-pointer select-none text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]"
+        className="flex items-center gap-2 px-2 py-1.5 cursor-pointer select-none text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] rounded"
       >
         <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center text-[var(--vscode-descriptionForeground)]">
           <ExploredIcon className="w-4 h-4" />
         </span>
         <span className="flex-1 min-w-0 truncate">
-          Explored {filesCount} file{filesCount === 1 ? "" : "s"}, {searchesCount} search{searchesCount === 1 ? "" : "es"}
+          {label}
         </span>
         <ChevronDownIcon open={open} />
       </div>
       {open && (
-        <div className="border-t border-[var(--vscode-panel-border)] max-h-[280px] overflow-y-auto py-2 px-3 space-y-1">
+        <div className="max-h-[280px] overflow-y-auto py-1.5 px-2 space-y-1">
           {entries.map((e) => (
             <div key={e.id} className="text-[11px] leading-snug text-[var(--vscode-descriptionForeground)]">
               {e.path != null && (e.line != null || e.endLine != null) ? (

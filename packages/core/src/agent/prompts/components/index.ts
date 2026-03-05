@@ -25,6 +25,8 @@ export interface PromptContext {
   contextPercent?: number
   /** When true, inject create-skill instructions and allow writes to skill dirs */
   createSkillMode?: boolean
+  /** When true, inject JSON schema for first-line preamble (reasoning + user_message). */
+  supportsStructuredOutput?: boolean
 }
 
 // ─── BLOCK 1: Identity + Capabilities (CACHEABLE) ────────────────────────────
@@ -58,6 +60,14 @@ export function buildRoleBlock(ctx: PromptContext): string {
   lines.push(TASK_PROGRESS_GUIDE)
   lines.push("")
   lines.push(RESPONSE_STYLE)
+  if (ctx.supportsStructuredOutput) {
+    lines.push("")
+    lines.push(`**First-line JSON schema (use this exact shape when the model supports structured output):**`)
+    lines.push("```json")
+    lines.push(JSON.stringify(AGENT_TURN_PREAMBLE_SCHEMA, null, 2))
+    lines.push("```")
+    lines.push("Output one line of JSON matching this schema, then a newline, then your response.")
+  }
   lines.push("")
   lines.push(CODE_REFERENCES_FORMAT)
   lines.push("")
@@ -84,10 +94,9 @@ You have complete access: read/write files, run shell commands, search the codeb
 - **Study project structure first:** Use \`list_files\`, \`list_code_definitions\`, and \`grep\` to understand layout and find relevant code before reading whole files. Then use \`read_file\` with \`start_line\`/\`end_line\` to load only the sections you need. Do not rely mainly on list_files + read_file — use grep and list_code_definitions (and codebase_search when the index is ready) to locate code, then read only targeted ranges.
 - Verify your changes compile/run and don't break existing functionality
 - Use parallel tool calls for independent operations
-- Call \`attempt_completion\` when the task is fully done
-- **You MUST send a brief text summary to the user before calling \`attempt_completion\`. If you call \`attempt_completion\` without writing a summary first, it will be rejected — write your summary in the chat, then call \`attempt_completion\` again.**
+- Call \`final_report_to_user\` when the task is fully done (this ends the turn)
 - **Sub-agents:** Use \`spawn_agent\` early for focused sub-tasks (e.g. "analyze X", "implement Y") rather than after many read-only steps. To run several independent subtasks in parallel, pass a \`tasks\` array in one call (each item: description, optional context_summary, optional mode). Do not call \`spawn_agent\` repeatedly for the same or very similar task — if one was already run, continue in the main agent with the results.
-- **Always end your turn with a text reply to the user** (or attempt_completion). After using tools, summarize what you did. Never end with only tool calls.`,
+- **Always end your turn with a text reply to the user** (or final_report_to_user). After using tools, summarize what you did. Never end with only tool calls.`,
 
     plan: `## PLAN Mode — Research & Planning (Kilo-style)
 
@@ -137,7 +146,7 @@ Guidelines:
 - Explicitly ask the user to confirm the diagnosis before applying a fix
 - Prefer minimal, targeted fixes over broad refactors
 - After each fix, re-run validation and report objective results
-- **Always end your turn with a text reply to the user** (or attempt_completion). Never end with only tool calls.`,
+- **Always end your turn with a text reply to the user** (or final_report_to_user). Never end with only tool calls.`,
   }
   return blocks[mode]
 }
@@ -200,21 +209,23 @@ Editor may auto-format files after writing. Tool response includes post-format c
 
 const TOOL_USE_GUIDE = `## Tool Usage
 
+- **Think before each logical group of tools** — Do not act mindlessly. Before every logical batch of tool calls (e.g. exploration, then edits, then run), briefly reason in your response: what you are about to do and why. Plan the next step, then execute. After each group (e.g. after reading several files), think again before the next group (e.g. before writing or running commands). Use the reasoning field in your first-line JSON to capture this; the user sees it as "Thought". Never fire tools without a clear purpose.
+
 - **Always end with a reply** — In every mode you MUST end your turn with a clear text response to the user. After using any tools (read_file, list_files, codebase_search, grep, etc.) provide a short summary or answer. Never end your turn with only tool calls — the user always expects a reply.
 
 - **Use every discovery tool for deep code study** — Do not over-use only list_files and read_file. For each exploration: use list_files for layout (sparingly), list_code_definitions for symbols/line numbers, grep for exact text/regex, codebase_search (when index ready) for meaning; then read_file with start_line/end_line only for the ranges you need. Avoid reading whole files to browse.
 
 - **Context window** — Check the Environment block for "Context: X / Y tokens (Z%)". When usage is high (e.g. >80%), use the \`condense\` tool to summarize the conversation and free tokens before continuing.
-- **Explore structure first** — Use \`list_files\` (root and key dirs), \`list_code_definitions\` (file or dir for symbols and line numbers), and \`grep\` (exact patterns, identifiers, imports) to understand the codebase before opening files. Prefer these over reading whole files when you are discovering layout or locating code.
+- **Explore structure first** — Use \`list_files\` (root and key dirs), \`glob\` (find by pattern, e.g. \`**/*.ts\`), \`list_code_definitions\` (file or dir for symbols and line numbers), and \`grep\` (exact patterns, identifiers, imports) to understand the codebase before opening files. Prefer these over reading whole files when you are discovering layout or locating code.
 - **Read only what you need** — After grep, codebase_search, or list_code_definitions, use \`read_file\` with \`start_line\` and \`end_line\` to load only the relevant section (saves context and tokens). Do not read an entire file when a line range is enough.
 - **Parallel reads** — When fetching multiple independent files/results, call all tools in parallel in a single response. This is significantly faster.
 - **One replace_in_file per file** — For edits to the same file, use a single \`replace_in_file\` call with all changes in the \`diff\` array. Do not call replace_in_file repeatedly for the same path.
 - **Sequential when dependent** — If tool B needs tool A's output, run them in order.
-- **Specialized tools** — Use \`read_file\` instead of \`execute_command\` with cat. Use \`grep\` for regex/content search in files. Use \`execute_command\` for: (1) **find/glob** — list files by name pattern; (2) **ripgrep** — when you need shell-specific rg flags. Reserve \`execute_command\` for real shell operations (tests, builds, git, installs). **Always start the command with \`cd <path> &&\` when running in a subdirectory** so the shell is in the right folder.
+- **Specialized tools** — Use \`read_file\` instead of \`execute_command\` with cat. Use \`grep\` for regex/content search in files. Use \`glob\` to find files by name/pattern (e.g. \`**/*.test.ts\`). Use \`execute_command\` for: (1) **find/glob** only when you need shell-specific behavior; (2) **ripgrep** when you need shell-specific rg flags. Reserve \`execute_command\` for real shell operations (tests, builds, git, installs). **Always start the command with \`cd <path> &&\` when running in a subdirectory** so the shell is in the right folder.
 - **Codebase search** — Use \`codebase_search\` for semantic (vector) queries when the index is ready; use \`grep\` for exact pattern matching; \`list_code_definitions\` for symbol discovery and file structure.
-- **Web & docs (Exa)** — Use \`exa_web_search\` for real-time web search (current events, recent docs; no API key). Use \`exa_code_search\` for library/SDK/docs and code examples. Prefer these when you need up-to-date or external documentation; use \`web_fetch\` for a specific URL.
+- **Web & docs** — Use \`web_search\` for real-time web search; use \`web_fetch\` for a specific URL. Use \`glob\` to find files by name/pattern (e.g. \`**/*.ts\`, \`**/package.json\`).
 - **Don't repeat** — If a tool already returned a result, don't call it again with the same args.
-- **Thinking preamble** — Use \`thinking_preamble\` to record your reasoning and potential next steps (required: \`reasoning_and_next_actions\`) and optionally a short message for the user (\`user_message\`). Use before a batch of tools or when switching context. Do not call twice in a row; after each \`thinking_preamble\` call a different tool next.`
+`
 
 const TERMINAL_SAFETY = `## Bash / Terminal — Safe Usage
 
@@ -224,7 +235,7 @@ const TERMINAL_SAFETY = `## Bash / Terminal — Safe Usage
 - **Watch output:** Run \`tail -n 100 <log_path>\` in a separate execute_command to see recent lines.
 - **Poll with sleep:** Run \`sleep 10 && tail -n 100 <log_path>\` to wait a few seconds and check again; repeat as needed to monitor progress.
 - **Search for errors:** Run \`grep -E "error|Error|FAIL|exception" <log_path>\` to detect failures.
-- **If something goes wrong:** Stop the process with \`kill <PID>\` (or \`pkill -f "part of command"\`), then inform the user clearly (e.g. with attempt_completion or a direct message) about what failed and what to do next.
+- **If something goes wrong:** Stop the process with \`kill <PID>\` (or \`pkill -f "part of command"\`), then inform the user clearly (e.g. with final_report_to_user or a direct message) about what failed and what to do next.
 Do not run long commands in blocking mode — they will time out and the user cannot see progress.
 
 Command output is capped (50KB, head+tail). To keep context and progress under control:
@@ -269,11 +280,16 @@ Use \`update_todo_list\` frequently to track progress on complex tasks. The tool
 - Update as scope changes or new steps emerge
 - For simple 1-2 step tasks, a todo list is optional
 - Call \`update_todo_list\` silently — don't announce it
-- When you finish the task and call \`attempt_completion\`, the todo list is cleared from the session; the next turn you can create a new one if needed`
+- When you finish the task and call \`final_report_to_user\`, the todo list is cleared from the session; the next turn you can create a new one if needed`
 
 const RESPONSE_STYLE = `## Response Style
 
-- **Always give a final answer** — Every turn must end with a text response to the user. After tool use, summarize what you did or found. In agent/plan use \`attempt_completion\` when the task is done; otherwise reply in text. Never end with only tool calls.
+- **Always give a final answer** — Every turn must end with a text response to the user. After tool use, summarize what you did or found. In agent/plan use \`final_report_to_user\` when the task is done (this ends the turn); otherwise reply in text. Never end with only tool calls.
+- **You MUST call \`final_report_to_user\` at the end of every reply** — After using tools (exploration, reads, edits, runs), you must call the \`final_report_to_user\` tool with a clear text summary for the user. Do not rely only on the first-line JSON \`user_message\` field — that can appear as one undivided block with reasoning. Always call \`final_report_to_user\` with the result text (what was done, key findings, what the user needs to know). Then the user sees a separate, clearly formatted message. Example: after studying a project, call \`final_report_to_user({ message: "Studied SAG. Key findings: ..." })\`; when the task is complete, calling \`final_report_to_user\` ends the turn.
+- **First part of your text = JSON preamble** — The loop uses \`text_delta\`, code search/read tools, and other tools. Your first token output must be a **single line of JSON** with two fields (generate with JSON schema structured output when the model supports it, otherwise plain JSON):
+  1. **\`reasoning\`** (string) — Your reasoning or plan for this step. In the UI this is shown as **Thought** (chronologically with tools, with optional time). Always include when you have non-trivial reasoning. This field is for display only and is **not** included in the context for the next task or in compaction summaries.
+  2. **\`user_message\`** (string, optional) — Short intermediate note; the main result for the user must go via \`final_report_to_user\` tool, not only here.
+  After this line and a newline, output your full response: text and/or tool calls. End with \`final_report_to_user\` when you have a result to show.
 - **Concise**: Be direct and to the point. Match verbosity to task complexity.
 - **No preamble**: Don't start with "Great!", "Sure!", "Certainly!". Go straight to the answer/action.
 - **No postamble**: Don't end with "Let me know if you need anything!", "Feel free to ask!", etc.
@@ -283,6 +299,17 @@ const RESPONSE_STYLE = `## Response Style
 - For code changes: mention relevant file paths with line numbers when helpful.
 - Never ask permission questions ("Should I proceed?", "Do you want me to run tests?") — just do the most reasonable thing.
 - If you must ask: do all non-blocked work first, ask exactly one targeted question.`
+
+/** JSON schema for the first part of text_delta: reasoning (Thought in UI) + optional user_message (to user, collapses tools). Used in prompt and loop parser. */
+export const AGENT_TURN_PREAMBLE_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    reasoning: { type: "string" as const, description: "Reasoning or plan for this step; shown as Thought (expandable, scrollable) in UI." },
+    user_message: { type: "string" as const, description: "Optional. When present: shown to user and included in context for next task and in compaction. Must contain what was done, key findings, and what the user/agent need to know for continuity. Omit only for trivial steps." },
+  },
+  required: ["reasoning"] as const,
+  additionalProperties: false,
+}
 
 const CODE_REFERENCES_FORMAT = `## Code References
 
@@ -332,7 +359,7 @@ export function buildSkillsBlock(skills: SkillDef[]): string {
 function getCurrentModeLabel(mode: Mode): string {
   switch (mode) {
     case "agent":
-      return "AGENT (full access: read, write, execute, search, MCP). Complete tasks end-to-end; use attempt_completion when done."
+      return "AGENT (full access: read, write, execute, search, MCP). Complete tasks end-to-end; use final_report_to_user when done."
     case "plan":
       return "PLAN (read-only planning). You may ONLY write to .nexus/plans/*.md or .txt. Do not modify source code or run commands. Use plan_exit when the plan is ready."
     case "ask":
@@ -464,7 +491,7 @@ The user has invoked /create-skill. Your job is to create a new **skill** — a 
    - Step-by-step instructions or guidelines the agent must follow
    - Examples if helpful
 4. **Scope** — Create only the SKILL.md file and any subfolder. Do not modify other project files unless the user explicitly asks.
-5. **Finish** — When the skill file is written, call \`attempt_completion\` with a short note (e.g. "Skill created at .nexus/skills/<name>/SKILL.md. Add its path in Settings → MCP & Skills if needed.").
+5. **Finish** — When the skill file is written, call \`final_report_to_user\` with a short note (e.g. "Skill created at .nexus/skills/<name>/SKILL.md. Add its path in Settings → MCP & Skills if needed.").
 
 **You have permission** to create and edit files under \`.nexus/skills/\` and \`.cursor/skills/\`. Do not write outside these trees for the skill itself.`
 

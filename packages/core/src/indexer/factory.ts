@@ -6,6 +6,8 @@ import { ensureQdrantRunning } from "./qdrant-manager.js"
 
 export interface IndexerFactoryOptions {
   onWarning?: (message: string) => void
+  /** Max ms to wait for Qdrant when vector is enabled (e.g. 2500 for fast first message). Omit for default 20s. */
+  maxQdrantWaitMs?: number
 }
 
 /**
@@ -18,6 +20,7 @@ export async function createCodebaseIndexer(
   options: IndexerFactoryOptions = {}
 ): Promise<CodebaseIndexer> {
   const warn = options.onWarning ?? (() => {})
+  const maxQdrantWaitMs = options.maxQdrantWaitMs
   const wantsVector = Boolean(config.indexing.vector && config.vectorDb?.enabled)
 
   if (!wantsVector) {
@@ -40,6 +43,7 @@ export async function createCodebaseIndexer(
     url: vectorUrl,
     autoStart,
     log: warn,
+    ...(maxQdrantWaitMs != null && { maxWaitMs: maxQdrantWaitMs }),
   })
   if (!qdrant.available) {
     warn(qdrant.warning ?? "[nexus] Qdrant is unavailable. Indexer will run without vector search.")

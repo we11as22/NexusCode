@@ -286,22 +286,28 @@ function getLanguageFromExtension(ext: string): string {
 
 /**
  * Open VS Code diff view for a file: before = git HEAD version, after = current file.
- * Uses untitled:path URIs so the tab and save dialog show the real filename, not the first line of content.
+ * Uses workspace folder URI when available so remote/SSH works (file opens with correct content).
  * Call from webview when user clicks an edited file (e.g. from Editable Files list).
  */
 export async function showDiffForPath(cwd: string, filePath: string): Promise<void> {
   const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
-  const uri = vscode.Uri.file(absPath)
+  const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
+
+  // Use workspace folder URI so on SSH/remote we read the file from the same resource as the workspace.
+  const wf = vscode.workspace.workspaceFolders?.[0]
+  const fileUri = wf
+    ? vscode.Uri.joinPath(wf.uri, relPath)
+    : vscode.Uri.file(absPath)
+
   let after: string
   try {
-    const data = await vscode.workspace.fs.readFile(uri)
+    const data = await vscode.workspace.fs.readFile(fileUri)
     after = Buffer.from(data).toString("utf8")
   } catch {
     vscode.window.showErrorMessage(`NexusCode: Could not read file ${filePath}`)
     return
   }
 
-  const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
   let before = ""
   try {
     const { execa } = await import("execa")
@@ -313,7 +319,7 @@ export async function showDiffForPath(cwd: string, filePath: string): Promise<vo
 
   const fileName = path.basename(filePath)
 
-  // Use untitled:path URIs so VS Code shows the filename in the tab and save dialog, not the first line of content.
+  // Use untitled URIs so the tab shows a path hint (filename in save dialog).
   const dir = path.dirname(absPath)
   const base = path.basename(absPath)
   const uriAfter = vscode.Uri.parse("untitled:" + absPath)

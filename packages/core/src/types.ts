@@ -151,6 +151,8 @@ export type MessagePart = TextPart | ToolPart | ReasoningPart
 export interface TextPart {
   type: "text"
   text: string
+  /** Optional short line shown to the user (progress line); when present, explored block collapses. */
+  user_message?: string
 }
 
 export interface ReasoningPart {
@@ -232,7 +234,8 @@ export type IndexStatus =
 // ─── Agent Events ─────────────────────────────────────────────────────────────
 
 export type AgentEvent =
-  | { type: "text_delta"; delta: string; messageId: string }
+  | { type: "assistant_message_started"; messageId: string }
+  | { type: "text_delta"; delta: string; messageId: string; user_message_delta?: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
@@ -346,7 +349,7 @@ export interface NexusConfig {
     enabled: boolean
     timeoutMs: number
     createOnWrite: boolean
-    /** When true, first attempt_completion is rejected; model must re-verify and call again (Cline-style). */
+    /** When true, first final_report_to_user (agent) is rejected; model must re-verify and call again (Cline-style). */
     doubleCheckCompletion?: boolean
   }
   mcp: {

@@ -11,7 +11,7 @@ const PRUNE_PROTECT = 30_000
 const PRUNE_PROTECTED_TOOLS = new Set([
   "use_skill",
   "codebase_search",
-  "attempt_completion",
+  "final_report_to_user",
   "plan_exit",
   "ask_followup_question",
 ])
@@ -186,7 +186,12 @@ function buildLLMMessages(messages: SessionMessage[]) {
     } else {
       const parts = m.content as MessagePart[]
       text = parts.map(p => {
-        if (p.type === "text") return p.text
+        if (p.type === "reasoning") return "" // do not include reasoning in compaction summary
+        if (p.type === "text") {
+          const t = p as { text: string; user_message?: string }
+          const um = t.user_message?.trim()
+          return um ? um + "\n" + t.text : t.text
+        }
         if (p.type === "tool") {
           const tp = p as ToolPart
           if (tp.compacted) return `[${tp.tool}: output pruned]`
@@ -200,7 +205,7 @@ function buildLLMMessages(messages: SessionMessage[]) {
           return `[${tp.tool}: ${(tp.output ?? "").slice(0, 300)}]`
         }
         return ""
-      }).join("\n")
+      }).filter(Boolean).join("\n")
     }
     if (text.trim()) result.push({ role: m.role as "user" | "assistant", content: text })
   }

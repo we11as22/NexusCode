@@ -635,7 +635,7 @@ html, body, #root {
 .chat-input .chat-input-area {
   flex: 1;
   min-height: 54px;
-  max-height: 108px;
+  max-height: 260px;
   display: flex;
   flex-direction: column;
   padding: 0 0 6px;
@@ -915,20 +915,20 @@ html, body, #root {
   flex: 1;
   min-width: 0;
   min-height: 54px;
-  max-height: 108px;
+  max-height: 240px;
   margin: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  transition: none;
+  background: var(--vscode-input-background, var(--vscode-editor-inactiveSelectionBackground));
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 14px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .prompt-input-container:focus-within {
-  border: none;
-  box-shadow: none;
+  border-color: var(--vscode-focusBorder, var(--vscode-input-border));
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder, transparent);
   outline: none;
 }
 
@@ -938,14 +938,16 @@ html, body, #root {
   min-width: 0;
   flex: 1;
   background: transparent;
+  border-radius: inherit;
+  overflow: hidden;
 }
 
-/* Max height = 2x base (54px * 2 = 108px); same background as .chat-input; grows upward when content wraps */
+/* Grows upward when content wraps; max height allows ~4 lines */
 .prompt-input {
   flex: 1;
-  min-height: 54px;
-  max-height: 108px;
-  padding: 10px 0 8px;
+  min-height: 44px;
+  max-height: 240px;
+  padding: 10px 12px 10px;
   font-family: var(--vscode-font-family);
   font-size: 13px;
   line-height: 1.5;
@@ -1168,6 +1170,60 @@ button, input, textarea {
 
 .nexus-approval-btn-deny:hover {
   background: rgba(244, 67, 54, 0.35);
+}
+
+/* Inline approval (same field as tool card) — organic colors to match card */
+.nexus-approval-inline {
+  flex-shrink: 0;
+}
+.nexus-approval-inline-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  opacity: 0.9;
+}
+.nexus-approval-inline-text {
+  color: var(--vscode-foreground);
+}
+.nexus-approval-inline-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.nexus-approval-inline-btn {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: opacity 0.15s, background 0.15s, border-color 0.15s;
+}
+.nexus-approval-inline-btn-allow {
+  background: var(--vscode-button-secondaryBackground, var(--vscode-editor-inactiveSelectionBackground));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  border-color: var(--vscode-panel-border);
+}
+.nexus-approval-inline-btn-allow:hover {
+  background: var(--vscode-list-hoverBackground);
+  border-color: var(--vscode-focusBorder, var(--vscode-panel-border));
+}
+.nexus-approval-inline-btn-always {
+  background: var(--vscode-editor-inactiveSelectionBackground);
+  color: var(--vscode-descriptionForeground);
+  border-color: var(--vscode-panel-border);
+}
+.nexus-approval-inline-btn-always:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
+}
+.nexus-approval-inline-btn-deny {
+  background: rgba(244, 67, 54, 0.12);
+  color: var(--vscode-errorForeground, #f48771);
+  border-color: var(--vscode-inputValidation-errorBorder, rgba(244, 67, 54, 0.5));
+}
+.nexus-approval-inline-btn-deny:hover {
+  background: rgba(244, 67, 54, 0.22);
 }
 
 /* Focus — no blue ring on inputs; keep for keyboard nav on buttons only */

@@ -2,22 +2,11 @@ import React, { useState, useEffect, useRef, useMemo } from "react"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import "opentui-spinner/react"
 import stringWidth from "string-width"
-import { marked } from "marked"
-import { markedTerminal } from "marked-terminal"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
 import type { AgentEvent, Mode, SessionMessage, MessagePart, IndexStatus, PermissionResult, ApprovalAction } from "@nexuscode/core"
 import { getModelsCatalog, catalogSelectionToModel, deriveSessionTitle, buildReviewPromptBranch, buildReviewPromptUncommitted, type ModelsCatalog } from "@nexuscode/core"
-
-// Markdown → ANSI for terminal (bold, italic, code, lists, headings)
-marked.use(
-  markedTerminal({
-    reflowText: false,
-    width: 80,
-    unescape: true,
-  })
-)
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -41,6 +30,9 @@ interface SubAgentState {
   finishedAt?: number
   error?: string
 }
+
+/** Tool part (from core) with optional subagents attached at runtime (CLI/extension). */
+type ToolPartWithSubagents = MessagePart & { tool?: string; subagents?: SubAgentState[] }
 
 interface AppState {
   messages: SessionMessage[]
@@ -75,6 +67,8 @@ interface AppState {
   planFollowupText: string | null
   /** Accumulated parts of the current assistant reply (text, tools, reasoning) for chronological display */
   currentAssistantParts: MessagePart[]
+  /** partId of the last tool_start(spawn_agent); used to attach subagent_start to that part */
+  lastSpawnAgentPartId: string | null
 }
 
 interface AppProps {
@@ -180,15 +174,14 @@ const TOOL_ICONS: Record<string, string> = {
   search_files: "🔍",
   list_files: "📂",
   list_code_definitions: "🏗️",
+  read_lints: "⚠️",
   codebase_search: "🔎",
   web_fetch: "🌐",
   web_search: "🔍",
-  exa_web_search: "◈",
-  exa_code_search: "◇",
-  attempt_completion: "✅",
+  glob: "📋",
+  final_report_to_user: "✅",
   ask_followup_question: "❓",
   update_todo_list: "📋",
-  thinking_preamble: "💭",
   use_skill: "🎯",
   browser_action: "🌍",
   spawn_agent: "🤖",
@@ -197,51 +190,96 @@ const TOOL_ICONS: Record<string, string> = {
 /** Display name for tools (e.g. execute_command → bash) */
 const TOOL_LABELS: Record<string, string> = {
   execute_command: "bash",
-  exa_web_search: "Exa Web Search",
-  exa_code_search: "Exa Code Search",
 }
 function toolDisplayName(tool: string): string {
   return TOOL_LABELS[tool] ?? tool
 }
 
-/** Tools that count as "files explored" for the single Explored summary line (CLI + extension parity). */
+/** One-line status for a subagent (for status area and chat history). */
+function subagentStatusLine(sa: SubAgentState): string {
+  if (sa.status === "completed") return "Completed"
+  if (sa.status === "error") return sa.error ? `Failed: ${sa.error.slice(0, 60)}` : "Failed"
+  if (sa.currentTool) return `Running: ${toolDisplayName(sa.currentTool)}`
+  return "Starting…"
+}
+
+/** Truncate task for display (match extension SubagentInlineList). */
+function truncateTask(s: string, max = 56): string {
+  const one = s.replace(/\s+/g, " ").trim()
+  return one.length <= max ? one : one.slice(0, max - 1) + "…"
+}
+
+/** Tools that are exploration (go into Explored block): read_file, list_files, and search tools. */
 const EXPLORE_FILE_TOOLS = new Set(["read_file", "list_files"])
-/** Tools that count as "searches" for the single Explored summary line. */
-const EXPLORE_SEARCH_TOOLS = new Set(["grep", "codebase_search", "search_files", "list_code_definitions"])
+/** Tools that count as "files" in Explored label: read_file only. list_files is in block but not counted. */
+const EXPLORE_FILE_COUNT_TOOLS = new Set(["read_file"])
+/** Tools that count as "searches" in Explored label. */
+const EXPLORE_SEARCH_TOOLS = new Set(["grep", "codebase_search", "search_files", "list_code_definitions", "glob"])
 function getExploredCounts(parts: MessagePart[]): { files: number; searches: number } {
   let files = 0
   let searches = 0
   for (const p of parts) {
     if (p.type !== "tool") continue
     const tool = (p as { tool: string }).tool
-    if (EXPLORE_FILE_TOOLS.has(tool)) files++
+    if (EXPLORE_FILE_COUNT_TOOLS.has(tool)) files++
     if (EXPLORE_SEARCH_TOOLS.has(tool)) searches++
   }
   return { files, searches }
 }
-/** Only exploration tools from the start until first non-exploration (text, reasoning, or other tool). */
+/** Only exploration tools from the start until first non-exploration (text, reasoning, or other tool). Counts: files = read_file only, searches = grep/search. */
 function getExploredPrefixCounts(parts: MessagePart[]): { files: number; searches: number } {
   let files = 0
   let searches = 0
   for (const p of parts) {
-    if (p.type === "text" || p.type === "reasoning") break
+    if (p.type === "text") break
     if (p.type !== "tool") continue
     const tool = (p as { tool: string }).tool
     if (!isExploreTool(tool)) break
-    if (EXPLORE_FILE_TOOLS.has(tool)) files++
+    if (EXPLORE_FILE_COUNT_TOOLS.has(tool)) files++
     if (EXPLORE_SEARCH_TOOLS.has(tool)) searches++
   }
   return { files, searches }
+}
+
+/** Same logic as extension: collect ALL reasoning and ALL exploration tools in the message (in order). If only reasoning (no tools), no Explored — return empty. list_files etc. are always in Explored when present. */
+type ExploredPrefixItemCLI =
+  | { type: "reasoning"; text: string; durationMs?: number }
+  | { type: "tool"; part: ToolPartWithSubagents }
+function getExploredPrefixItems(parts: MessagePart[]): { items: ExploredPrefixItemCLI[]; prefixIndices: Set<number> } {
+  const items: ExploredPrefixItemCLI[] = []
+  const prefixIndices = new Set<number>()
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!
+    if (part.type === "reasoning") {
+      const r = part as { text: string; durationMs?: number }
+      items.push({ type: "reasoning", text: r.text, durationMs: r.durationMs })
+      prefixIndices.add(i)
+      continue
+    }
+    if (part.type === "text") continue
+    if (part.type === "tool") {
+      const toolPart = part as ToolPartWithSubagents
+      if (!isExploreTool(toolPart.tool)) continue
+      items.push({ type: "tool", part: toolPart })
+      prefixIndices.add(i)
+      continue
+    }
+  }
+  const hasAtLeastOneTool = items.some((x) => x.type === "tool")
+  if (!hasAtLeastOneTool) {
+    return { items: [], prefixIndices: new Set() }
+  }
+  return { items, prefixIndices }
 }
 function isExploreTool(tool: string): boolean {
   return EXPLORE_FILE_TOOLS.has(tool) || EXPLORE_SEARCH_TOOLS.has(tool)
 }
 
-/** Extract the final reply to the user from assistant parts: attempt_completion result, ask_followup_question, or last text. Used so only one "NexusCode" block per turn shows the actual reply. */
+/** Extract the final reply to the user from assistant parts: final_report_to_user, ask_followup_question, or last text. Used so only one "NexusCode" block per turn shows the actual reply. */
 function getFinalReplyFromAssistantParts(parts: MessagePart[]): string | null {
-  let lastAttemptOutput: string | null = null
   let lastAskQuestion: string | null = null
   let lastAskOptions: string[] | null = null
+  let lastReportToUser: string | null = null
   let lastText: string | null = null
   for (const p of parts) {
     if (p.type === "text") {
@@ -251,22 +289,23 @@ function getFinalReplyFromAssistantParts(parts: MessagePart[]): string | null {
     }
     if (p.type === "tool") {
       const tp = p as { tool: string; status: string; input?: Record<string, unknown>; output?: string }
-      if (tp.tool === "attempt_completion" && tp.status === "completed" && tp.output?.trim()) {
-        lastAttemptOutput = tp.output.trim()
-      }
       if (tp.tool === "ask_followup_question") {
         const q = (tp.input?.question as string)?.trim()
         if (q) lastAskQuestion = q
         const opts = tp.input?.options as string[] | undefined
         if (opts?.length) lastAskOptions = opts
       }
+      if (tp.tool === "final_report_to_user" && tp.status === "completed") {
+        const msg = (tp.output ?? (tp.input?.message as string))?.trim()
+        if (msg) lastReportToUser = msg
+      }
     }
   }
-  if (lastAttemptOutput) return lastAttemptOutput
   if (lastAskQuestion) {
     const opts = lastAskOptions?.length ? `\n\nOptions:\n${lastAskOptions.map((o) => `- ${o}`).join("\n")}` : ""
     return lastAskQuestion + opts
   }
+  if (lastReportToUser) return lastReportToUser
   return lastText
 }
 
@@ -470,6 +509,7 @@ export function App({
     planCompleted: false,
     planFollowupText: null,
     currentAssistantParts: [],
+    lastSpawnAgentPartId: null,
   })
   const [input, setInput] = useState("")
   const [historyIdx, setHistoryIdx] = useState(-1)
@@ -825,36 +865,29 @@ export function App({
           case "text_delta":
             setState((s) => ({ ...s, currentStreaming: s.currentStreaming + (event.delta ?? "") }))
             break
-          case "reasoning_delta": {
-            const delta = (event as { delta?: string }).delta ?? ""
-            setState((s) => {
-              const flushed = s.currentStreaming.trim() ? [...s.currentAssistantParts, { type: "text" as const, text: s.currentStreaming }] : s.currentAssistantParts
-              const prev = flushed.filter((p) => p.type === "reasoning").pop() as { type: "reasoning"; text: string } | undefined
-              const reasoningParts = flushed.filter((p) => p.type !== "reasoning")
-              if (prev) reasoningParts.push({ type: "reasoning", text: prev.text + delta })
-              else reasoningParts.push({ type: "reasoning", text: delta })
-              return { ...s, currentAssistantParts: reasoningParts, currentStreaming: "", reasoning: s.reasoning + delta }
-            })
+          case "reasoning_delta":
+            // Reasoning is internal only (not streamed to user); core no longer emits this.
             break
-          }
           case "tool_start": {
             const ev = event as { partId: string; tool: string; input?: Record<string, unknown> }
             setState((s) => {
               const flushed = s.currentStreaming.trim()
                 ? [...s.currentAssistantParts, { type: "text" as const, text: s.currentStreaming }]
                 : s.currentAssistantParts
-              const toolPart: MessagePart = {
+              const toolPart: MessagePart & { subagents?: SubAgentState[] } = {
                 type: "tool",
                 id: ev.partId,
                 tool: ev.tool,
                 status: "running",
                 input: ev.input ?? {},
                 timeStart: Date.now(),
+                ...(ev.tool === "spawn_agent" ? { subagents: [] } : {}),
               }
               return {
                 ...s,
                 currentAssistantParts: [...flushed, toolPart],
                 currentStreaming: "",
+                lastSpawnAgentPartId: ev.tool === "spawn_agent" ? ev.partId : s.lastSpawnAgentPartId,
                 liveTools: [
                   ...s.liveTools,
                   { id: ev.partId, tool: ev.tool, status: "running" as const, timeStart: Date.now() },
@@ -875,6 +908,7 @@ export function App({
             }
             setState((s) => ({
               ...s,
+              lastSpawnAgentPartId: ev.tool === "spawn_agent" ? null : s.lastSpawnAgentPartId,
               currentAssistantParts: s.currentAssistantParts.map((p) =>
                 p.type === "tool" && p.id === ev.partId
                   ? {
@@ -907,7 +941,14 @@ export function App({
                 status: "running",
                 startedAt: Date.now(),
               })
-              return { ...s, subAgents: next.slice(-8) }
+              const partId = s.lastSpawnAgentPartId
+              if (!partId) return { ...s, subAgents: next.slice(-8) }
+              const parts = s.currentAssistantParts.map((p) => {
+                if (p.type !== "tool" || p.id !== partId) return p
+                const subagents = [...((p as ToolPartWithSubagents).subagents ?? []), next[next.length - 1]!]
+                return { ...p, subagents }
+              })
+              return { ...s, currentAssistantParts: parts, subAgents: next.slice(-8) }
             })
             break
           case "subagent_tool_start":
@@ -915,9 +956,19 @@ export function App({
               ...s,
               subAgents: s.subAgents.map((a) =>
                 a.id === event.subagentId
-                  ? { ...a, status: "running", currentTool: event.tool }
+                  ? { ...a, status: "running" as const, currentTool: event.tool }
                   : a
               ),
+              currentAssistantParts: s.currentAssistantParts.map((p) => {
+                if (p.type !== "tool") return p
+                const subagents = (p as ToolPartWithSubagents).subagents
+                if (!subagents?.length) return p
+                const idx = subagents.findIndex((a) => a.id === event.subagentId)
+                if (idx < 0) return p
+                const next = [...subagents]
+                next[idx] = { ...next[idx]!, status: "running", currentTool: event.tool }
+                return { ...p, subagents: next }
+              }),
             }))
             break
           case "subagent_tool_end":
@@ -932,6 +983,20 @@ export function App({
                     }
                   : a
               ),
+              currentAssistantParts: s.currentAssistantParts.map((p) => {
+                if (p.type !== "tool") return p
+                const subagents = (p as ToolPartWithSubagents).subagents
+                if (!subagents?.length) return p
+                const idx = subagents.findIndex((a) => a.id === event.subagentId)
+                if (idx < 0) return p
+                const next = [...subagents]
+                next[idx] = {
+                  ...next[idx]!,
+                  status: event.success ? "running" : "error",
+                  currentTool: event.success ? undefined : event.tool,
+                }
+                return { ...p, subagents: next }
+              }),
             }))
             break
           case "subagent_done":
@@ -948,6 +1013,22 @@ export function App({
                     }
                   : a
               ),
+              currentAssistantParts: s.currentAssistantParts.map((p) => {
+                if (p.type !== "tool") return p
+                const subagents = (p as ToolPartWithSubagents).subagents
+                if (!subagents?.length) return p
+                const idx = subagents.findIndex((a) => a.id === event.subagentId)
+                if (idx < 0) return p
+                const next = [...subagents]
+                next[idx] = {
+                  ...next[idx]!,
+                  status: event.success ? "completed" : "error",
+                  currentTool: undefined,
+                  finishedAt: Date.now(),
+                  error: event.error,
+                }
+                return { ...p, subagents: next }
+              }),
             }))
             break
           case "tool_approval_needed": {
@@ -992,7 +1073,8 @@ export function App({
                   ? [...s.messages, newMsg]
                   : (noFinalTextMsg ? [...s.messages, noFinalTextMsg] : s.messages),
                 currentAssistantParts: [],
-                subAgents: s.subAgents.filter((a) => a.status === "running"),
+                lastSpawnAgentPartId: null,
+                subAgents: [],
                 reasoning: "",
                 currentStreaming: "",
                 isRunning: false,
@@ -1014,6 +1096,7 @@ export function App({
                 awaitingApproval: false,
                 pendingApprovalAction: null,
                 currentAssistantParts: [],
+                lastSpawnAgentPartId: null,
               liveTools: s.liveTools.map((lt) =>
                 lt.status === "running" ? { ...lt, status: "error", timeEnd: Date.now() } : lt
               ),
@@ -1193,7 +1276,7 @@ export function App({
     }
     switch (cmd.action) {
       case "clear":
-        setState((s) => ({ ...s, messages: [], todo: "", lastError: null, liveTools: [], subAgents: [] }))
+        setState((s) => ({ ...s, messages: [], todo: "", lastError: null, liveTools: [], subAgents: [], lastSpawnAgentPartId: null }))
         setView("chat")
         return
       case "compact":
@@ -1533,7 +1616,7 @@ export function App({
     if (key.ctrl && ctrlKey === "c") {
       if (state.isRunning) {
         onAbort()
-        setState((s) => ({ ...s, isRunning: false, liveTools: [], subAgents: [], awaitingApproval: false, pendingApprovalAction: null }))
+        setState((s) => ({ ...s, isRunning: false, liveTools: [], subAgents: [], lastSpawnAgentPartId: null, awaitingApproval: false, pendingApprovalAction: null }))
       } else {
         onExit?.()
       }
@@ -1593,7 +1676,7 @@ export function App({
     }
 
     if (key.ctrl && ctrlKey === "k") {
-      setState((s) => ({ ...s, messages: [], todo: "", lastError: null, liveTools: [], subAgents: [] }))
+      setState((s) => ({ ...s, messages: [], todo: "", lastError: null, liveTools: [], subAgents: [], lastSpawnAgentPartId: null }))
       setChatScrollLines(0)
       return
     }
@@ -2338,7 +2421,7 @@ export function App({
               <PlanActionsBar cols={cols} />
             </box>
           )}
-          <box flexShrink={0} paddingLeft={shellPad} paddingRight={shellPad}>
+          <box flexShrink={0} paddingLeft={shellPad} paddingRight={shellPad} marginBottom={1}>
             {slashOpen && filteredCommands.length > 0 && (
             <SlashPopup
               commands={filteredCommands}
@@ -3415,15 +3498,15 @@ function InputBar({
   const providerLabel = fit(provider, providerWidth)
 
   return (
-    <box flexDirection="column" marginBottom={0}>
+    <box flexDirection="column" marginBottom={0} paddingTop={1} paddingBottom={1}>
       <box
         flexDirection="row"
         border={["left"]}
         borderColor={borderColor}
         paddingLeft={1}
         paddingRight={1}
-        paddingTop={0}
-        paddingBottom={0}
+        paddingTop={1}
+        paddingBottom={1}
         style={{ backgroundColor: THEME.panel2 }}
       >
         <input
@@ -3438,8 +3521,8 @@ function InputBar({
           placeholderColor={THEME.textMuted}
           backgroundColor={THEME.panel2}
           focusedBackgroundColor={THEME.panel2}
-          cursorColor={THEME.primary}
-          style={{ flexGrow: 1, height: 1, minHeight: 1, maxHeight: 1 }}
+          cursorColor={THEME.accent}
+          style={{ flexGrow: 1, height: 1, minHeight: 1, maxHeight: 1, cursorWidth: 1 }}
         />
       </box>
       <box
@@ -3448,6 +3531,8 @@ function InputBar({
         borderColor={borderColor}
         paddingLeft={1}
         paddingRight={1}
+        paddingTop={1}
+        paddingBottom={1}
         style={{ backgroundColor: THEME.panel2 }}
       >
         <text fg={promptColor} bold>{prompt}</text>
@@ -3980,6 +4065,13 @@ function formatToolPreview(tool: LiveTool): string {
     const dir = pathStr || "."
     const short = dir.length > 36 ? dir.slice(0, 33) + "…" : dir
     parts.push(`folder ${short}`)
+  } else if (tool.tool === "glob") {
+    const gp = tool.input?.["glob_pattern"]
+    if (gp && typeof gp === "string") parts.push((gp.length > 32 ? gp.slice(0, 29) + "…" : gp))
+  } else if (tool.tool === "read_lints") {
+    const pathsArr = tool.input?.["paths"]
+    if (Array.isArray(pathsArr) && pathsArr.length > 0) parts.push(pathsArr.slice(0, 2).join(", "))
+    else parts.push("workspace")
   } else if (tool.tool === "execute_command" && command && typeof command === "string") {
     parts.push((command.length > 48 ? command.slice(0, 45) + "…" : command).replace(/\s+/g, " "))
   } else if (tool.tool === "batch") {
@@ -3992,9 +4084,6 @@ function formatToolPreview(tool: LiveTool): string {
   } else if (tool.tool === "spawn_agent") {
     const desc = tool.input?.["description"]
     if (desc && typeof desc === "string") parts.push((desc.length > 40 ? desc.slice(0, 37) + "…" : desc).replace(/\s+/g, " "))
-  } else if (tool.tool === "exa_web_search" || tool.tool === "exa_code_search") {
-    const q = tool.input?.["query"]
-    if (q && typeof q === "string") parts.push((q.length > 40 ? q.slice(0, 37) + "…" : q).replace(/\s+/g, " "))
   } else if (pathStr) {
     const base = pathStr.split("/").pop() ?? pathStr
     const short = base.length > 36 ? base.slice(0, 33) + "…" : base
@@ -4007,7 +4096,7 @@ function formatToolPreview(tool: LiveTool): string {
   if (pattern && typeof pattern === "string") parts.push((pattern.length > 24 ? pattern.slice(0, 21) + "…" : pattern).replace(/\s+/g, " "))
   if (Array.isArray(patterns) && patterns.length > 0) parts.push(`pat:${patterns.length}`)
   if (tool.tool !== "execute_command" && command && typeof command === "string") parts.push((command.length > 32 ? command.slice(0, 29) + "…" : command).replace(/\s+/g, " "))
-  if (query && typeof query === "string" && !["exa_web_search", "exa_code_search"].includes(tool.tool)) parts.push((query.length > 28 ? query.slice(0, 25) + "…" : query).replace(/\s+/g, " "))
+  if (query && typeof query === "string") parts.push((query.length > 28 ? query.slice(0, 25) + "…" : query).replace(/\s+/g, " "))
   if (url && typeof url === "string") parts.push((url.length > 36 ? url.slice(0, 33) + "…" : url))
   return parts.length > 0 ? parts.join(" · ") : ""
 }
@@ -4025,7 +4114,7 @@ function parseTodoItems(todo: string): { done: boolean; text: string }[] {
         text: typeof i.text === "string" ? i.text : String(i.text ?? ""),
       }))
     } catch {
-      // fall through to markdown
+      // fall through to bullet parsing
     }
   }
   const items: { done: boolean; text: string }[] = []
@@ -4093,14 +4182,38 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
   }
   if (state.isRunning && state.currentAssistantParts.length > 0) {
     const parts = state.currentAssistantParts
-    const { files: exploreFiles, searches: exploreSearches } = getExploredPrefixCounts(parts)
-    if (exploreFiles + exploreSearches > 0) {
-      const fs = exploreFiles === 1 ? "1 file" : `${exploreFiles} files`
-      const ss = exploreSearches === 1 ? "1 search" : `${exploreSearches} searches`
-      out.push({ text: `  Explored ${fs}, ${ss}`, color: "gray" })
+    const { items: prefixItems, prefixIndices } = getExploredPrefixItems(parts)
+    const exploreFiles = prefixItems.filter((x) => x.type === "tool" && EXPLORE_FILE_COUNT_TOOLS.has(x.part.tool)).length
+    const exploreSearches = prefixItems.filter((x) => x.type === "tool" && EXPLORE_SEARCH_TOOLS.has(x.part.tool)).length
+    if (prefixItems.length > 0) {
+      const labelParts: string[] = []
+      if (exploreFiles > 0) labelParts.push(exploreFiles === 1 ? "1 file" : `${exploreFiles} files`)
+      if (exploreSearches > 0) labelParts.push(exploreSearches === 1 ? "1 search" : `${exploreSearches} searches`)
+      out.push({ text: `  Explored${labelParts.length > 0 ? ` ${labelParts.join(", ")}` : ""}`, color: "gray" })
+      for (const item of prefixItems) {
+        if (item.type === "reasoning") {
+          const durationStr = item.durationMs != null ? ` (${(item.durationMs / 1000).toFixed(1)}s)` : ""
+          out.push({ text: `  Thought${durationStr}`, color: "magenta" })
+          if (state.showThinking && item.text.trim()) {
+            for (const line of wrapToWidth(sanitizeText(item.text).slice(-600), wrapW))
+              out.push({ text: `    ${line}`, color: "magenta" })
+          }
+        } else {
+          const tp = item.part
+          const icon = TOOL_ICONS[tp.tool] ?? "🔧"
+          const status = tp.status === "completed" ? "ok" : tp.status === "error" ? "err" : "…"
+          const preview = formatToolPreview({ id: tp.id, tool: tp.tool, status: tp.status as "running" | "completed" | "error", input: tp.input, timeStart: tp.timeStart ?? 0 })
+          const line = preview ? `  [${status}] ${icon} ${toolDisplayName(tp.tool)} — ${preview}` : `  [${status}] ${icon} ${toolDisplayName(tp.tool)}`
+          for (const l of wrapToWidth(line, width)) out.push({ text: l, color: "gray" })
+        }
+      }
     }
     let i = 0
     while (i < parts.length) {
+      if (prefixIndices.has(i)) {
+        i++
+        continue
+      }
       const part = parts[i]!
       if (part.type === "text") {
         const t = cleanAssistantText(sanitizeText((part as { text: string }).text))
@@ -4109,24 +4222,21 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
       } else if (part.type === "tool") {
         const tp = part as { tool: string; status: string; input?: Record<string, unknown> }
         if (tp.tool === "thinking_preamble") {
-          const userMsg = (tp.input?.user_message as string)?.trim()
-          const reasoning = (tp.input?.reasoning_and_next_actions as string)?.trim()
-          const show = userMsg || reasoning
-          if (show) for (const line of wrapToWidth(sanitizeText(userMsg || reasoning.slice(0, 200)), wrapW)) out.push({ text: `  — ${line}`, color: "gray" })
-          else out.push({ text: `  [${tp.status}] ${toolDisplayName(tp.tool)}`, color: "gray" })
           i++
         } else {
-          const toolGroups: { tool: string; status: string; count: number; preview: string }[] = []
+          const toolGroups: { tool: string; status: string; count: number; preview: string; subagents?: SubAgentState[] }[] = []
           while (i < parts.length && (parts[i] as { type: string }).type === "tool") {
             const t = parts[i] as { tool: string; status: string; input?: Record<string, unknown> }
-            if (t.tool === "thinking_preamble") break
+            if (t.tool === "thinking_preamble") { i++; continue }
+            const part = parts[i] as ToolPartWithSubagents
             const last = toolGroups[toolGroups.length - 1]
             const preview = formatToolPreview({ id: "", tool: t.tool, status: t.status as "running" | "completed" | "error", input: t.input, timeStart: 0 })
-            if (last && last.tool === t.tool && last.status === t.status) {
+            const subagents = part.tool === "spawn_agent" ? (part.subagents ?? []) : undefined
+            if (!subagents && last && last.tool === t.tool && last.status === t.status) {
               last.count += 1
               if (preview && !last.preview) last.preview = preview
             } else {
-              toolGroups.push({ tool: t.tool, status: t.status, count: 1, preview })
+              toolGroups.push({ tool: t.tool, status: t.status, count: 1, preview, subagents })
             }
             i++
           }
@@ -4137,14 +4247,19 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
             const label = g.count > 1 ? `${g.count}× ${toolDisplayName(g.tool)}` : toolDisplayName(g.tool)
             const line = g.preview ? `  [${status}] ${icon} ${label} — ${g.preview}` : `  [${status}] ${icon} ${label}`
             for (const l of wrapToWidth(line, width)) out.push({ text: l, color: "gray" })
+            if (g.tool === "spawn_agent" && g.subagents?.length) {
+              for (const sa of g.subagents) {
+                const task = sanitizeText(sa.task ?? "")
+                const shortTask = task.length > 80 ? `${task.slice(0, 80)}...` : task
+                const statusLine = subagentStatusLine(sa)
+                for (const l of wrapToWidth(`    - ${shortTask} — ${statusLine}`, width)) out.push({ text: l, color: "cyan" })
+                if (sa.error && sa.status === "error")
+                  for (const l of wrapToWidth(`      ${sanitizeText(sa.error)}`, width)) out.push({ text: l, color: "red" })
+              }
+            }
           }
         }
-      } else if (part.type === "reasoning" && state.showThinking) {
-        const r = sanitizeText((part as { text: string }).text)
-        if (r.trim()) {
-          out.push({ text: "  Thinking…", color: "magenta" })
-          for (const line of wrapToWidth(r.slice(-400), wrapW)) out.push({ text: `  ${line}`, color: "magenta" })
-        }
+      } else if (part.type === "reasoning") {
         i++
       } else {
         i++
@@ -4175,17 +4290,17 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
     out.push({ text: line, color: "gray", isActive: true })
     out.push({ text: "", color: "gray" })
   }
-  for (const sa of state.subAgents) {
-    const id = sanitizeText(sa?.id ?? "unknown")
-    const mode = sanitizeText(String(sa?.mode ?? "agent"))
-    const status = sa?.status === "running" ? "RUN" : sa?.status === "completed" ? "OK" : "ERR"
-    const rawTask = sanitizeText(sa?.task ?? "")
-    const task = rawTask.length > 120 ? `${rawTask.slice(0, 120)}...` : rawTask
-    for (const l of wrapToWidth(`[subagent ${id.slice(0, 8)} ${mode} ${status}] ${task}`, width)) out.push({ text: l, color: "cyan" })
-    if (sa?.currentTool) out.push({ text: `  tool: ${sanitizeText(sa.currentTool)}`, color: "gray" })
-    if (sa?.error) out.push({ text: `  error: ${sanitizeText(sa.error)}`, color: "red" })
+  if (state.subAgents.length > 0) {
+    // Tasks block 1:1 with extension: yellow header "Tasks", then each subagent as task + status (two lines)
+    out.push({ text: "\x1b[43m\x1b[1m\x1b[30m Tasks \x1b[0m", ansi: true })
+    for (const sa of state.subAgents) {
+      out.push({ text: "  " + truncateTask(sanitizeText(sa?.task ?? ""), 56), color: "white" })
+      out.push({ text: "  " + subagentStatusLine(sa), color: "gray" })
+      if (sa?.error && sa.status === "error")
+        for (const l of wrapToWidth("    " + sanitizeText(sa.error), width)) out.push({ text: l, color: "red" })
+    }
+    out.push({ text: "", color: "gray" })
   }
-  if (state.subAgents.length > 0) out.push({ text: "", color: "gray" })
   if (state.todo.trim()) {
     out.push({ text: "Tasks", color: "yellow", bold: true })
     const runningTool = state.liveTools.find((t) => t.status === "running")
@@ -4215,12 +4330,6 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
     }
     out.push({ text: "", color: "gray" })
   }
-  if (state.isRunning && state.reasoning && state.showThinking) {
-    out.push({ text: "Thinking...", color: "magenta" })
-    const preview = sanitizeText(state.reasoning).slice(-800)
-    for (const line of wrapToWidth(preview, Math.max(10, width - 2))) out.push({ text: `  ${line}`, color: "magenta" })
-    out.push({ text: "", color: "gray" })
-  }
   if (state.compacting) out.push({ text: "Compacting context...", color: "blue" })
   if (state.lastError) for (const l of wrapToWidth(`Error: ${sanitizeText(state.lastError)}`, width)) out.push({ text: l, color: "red" })
   return out
@@ -4245,11 +4354,27 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
       if (Array.isArray(msg.content)) {
         const contentParts = msg.content as MessagePart[]
         const finalReply = getFinalReplyFromAssistantParts(contentParts)
+        out.push({ text: "NexusCode", color: "green", bold: true })
+        for (const part of contentParts) {
+          if (part.type === "tool" && (part as ToolPartWithSubagents).tool === "spawn_agent") {
+            const icon = TOOL_ICONS["spawn_agent"] ?? "🤖"
+            out.push({ text: `  ${icon} ${toolDisplayName("spawn_agent")}`, color: "gray" })
+            const subagents = (part as ToolPartWithSubagents).subagents ?? []
+            if (subagents.length > 0) {
+              out.push({ text: "\x1b[43m\x1b[1m\x1b[30m Tasks \x1b[0m", ansi: true })
+              for (const sa of subagents) {
+                out.push({ text: "    " + truncateTask(sanitizeText(sa.task ?? ""), 56), color: "white" })
+                out.push({ text: "    " + subagentStatusLine(sa), color: "gray" })
+                if (sa.error && sa.status === "error")
+                  for (const l of wrapToWidth("      " + sanitizeText(sa.error), wrapW)) out.push({ text: l, color: "red" })
+              }
+            }
+          }
+        }
         if (finalReply != null && finalReply.trim()) {
-          out.push({ text: "NexusCode", color: "green", bold: true })
-          out.push(...markdownToChatLines(cleanAssistantText(sanitizeText(finalReply)), wrapW, state.projectDir))
+          const text = formatMarkdownTables(cleanAssistantText(sanitizeText(finalReply)))
+          out.push(...plainTextToChatLines(text, wrapW))
         } else {
-          out.push({ text: "NexusCode", color: "green", bold: true })
           out.push({ text: "  (no reply text)", color: "gray" })
         }
       } else {
@@ -4258,7 +4383,7 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
         const segments = splitMessageBlocks(content)
         for (const seg of segments) {
           if (seg.type === "text") {
-            out.push(...markdownToChatLines(seg.content, wrapW, state.projectDir))
+            out.push(...plainTextToChatLines(formatMarkdownTables(seg.content), wrapW))
           } else {
             const codeLines = seg.content.split("\n")
             const borderW = Math.max(12, Math.min(width - 4, 58))
@@ -4494,18 +4619,7 @@ function cleanAssistantText(value: string): string {
     .trim()
 }
 
-/** Render markdown to ANSI-styled string for terminal. Falls back to plain text on error. */
-function renderMarkdownToAnsi(md: string): string {
-  if (!md || !md.trim()) return md
-  try {
-    const out = marked.parse(md, { async: false }) as string
-    return typeof out === "string" ? out : md
-  } catch {
-    return md
-  }
-}
-
-/** Pre-format markdown tables with fixed-width columns (from kilocode sources) so they render aligned. */
+/** From KiloCode (packages/opencode/src/cli/cmd/tui/util/markdown.ts): format markdown tables with fixed-width columns for aligned plain-text output. */
 function formatMarkdownTables(content: string): string {
   const lines = content.split("\n")
   type TableRow = string[]
@@ -4593,28 +4707,7 @@ function formatMarkdownTables(content: string): string {
   return out.join("\n")
 }
 
-/** OSC 8 hyperlink: makes the given text clickable (e.g. open in VSCode). */
-function osc8Link(url: string, text: string): string {
-  return `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`
-}
-
-/** Wrap file path-like substrings in ANSI string with OSC 8 links (file://) so they open in editor. */
-function addFileLinks(ansi: string, cwd: string): string {
-  const pathExt = /\.(ts|tsx|js|jsx|json|md|mjs|cjs|yaml|yml)$/
-  const pathLike = /(^|[\s(\[`])((?:\.\/)?(?:src|tests|lib|packages|app|dist|docs)[\w./-]*\.[a-zA-Z0-9]+)([\s)\]]|$|`)/g
-  return ansi.replace(pathLike, (match, before: string, filePath: string, after: string) => {
-    if (!pathExt.test(filePath) || filePath.includes(" ")) return match
-    try {
-      const absolute = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
-      const fileUrl = "file://" + absolute.replace(/\\/g, "/")
-      return `${before}${osc8Link(fileUrl, filePath)}${after}`
-    } catch {
-      return match
-    }
-  })
-}
-
-/** Plain text to ChatLine[] (no markdown). Use during streaming so partial content doesn't break markdown parse. */
+/** Plain text to ChatLine[] (no markdown). Table alignment via formatMarkdownTables applied before calling. */
 function plainTextToChatLines(text: string, wrapW: number): ChatLine[] {
   const lines: ChatLine[] = []
   const safe = sanitizeText(text).trim()
@@ -4622,25 +4715,6 @@ function plainTextToChatLines(text: string, wrapW: number): ChatLine[] {
   for (const raw of safe.split("\n")) {
     for (const line of wrapToWidth(raw || " ", wrapW)) {
       lines.push({ text: `  ${line}`, color: "white" })
-    }
-  }
-  return lines
-}
-
-/** Turn markdown into ChatLine[] with ANSI styling; each line wrapped to width, indented with "  ". */
-function markdownToChatLines(md: string, wrapW: number, cwd?: string): ChatLine[] {
-  const normalized = formatMarkdownTables(md)
-  let ansi = renderMarkdownToAnsi(normalized)
-  if (cwd !== undefined) ansi = addFileLinks(ansi, cwd)
-  const lines: ChatLine[] = []
-  const tableRow = /^\s*\|.+\|\s*$/
-  for (const raw of ansi.split("\n")) {
-    if (tableRow.test(raw)) {
-      lines.push({ text: `  ${raw}`, ansi: true })
-      continue
-    }
-    for (const line of wrapToWidthPreserveAnsi(raw, wrapW)) {
-      lines.push({ text: `  ${line}`, ansi: true })
     }
   }
   return lines

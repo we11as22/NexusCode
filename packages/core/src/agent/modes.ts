@@ -44,11 +44,11 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
  * Tools in "always" group are available in every mode.
  */
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
-  always:  ["attempt_completion", "ask_followup_question", "update_todo_list", "thinking_preamble"],
-  read:    ["read_file", "list_files", "list_code_definitions"],
+  always:  ["ask_followup_question", "update_todo_list", "final_report_to_user"],
+  read:    ["read_file", "list_files", "list_code_definitions", "read_lints"],
   write:   ["write_to_file", "replace_in_file", "create_rule"],
   execute: ["execute_command"],
-  search:  ["grep", "codebase_search", "web_fetch", "web_search", "exa_web_search", "exa_code_search"],
+  search:  ["grep", "codebase_search", "web_fetch", "web_search", "glob"],
   browser: ["browser_action"],
   mcp:     [], // populated dynamically from MCP registry
   skills:  ["use_skill"],
@@ -70,16 +70,27 @@ export const READ_ONLY_TOOLS = new Set([
   "read_file",
   "list_files",
   "list_code_definitions",
+  "read_lints",
   "grep",
   "codebase_search",
   "web_fetch",
   "web_search",
-  "exa_web_search",
-  "exa_code_search",
+  "glob",
   "use_skill",
   "condense",
   "summarize_task",
 ])
+
+/**
+ * Mandatory tool that must be called at the end of a turn per mode.
+ * If the model finishes (returns text, no more tool calls) without calling it, the loop will force-call it.
+ */
+export const MANDATORY_END_TOOL: Record<Mode, string> = {
+  agent: "final_report_to_user",
+  plan:  "plan_exit",
+  ask:   "final_report_to_user",
+  debug: "final_report_to_user",
+}
 
 /**
  * Get all built-in tool names available for a given mode.

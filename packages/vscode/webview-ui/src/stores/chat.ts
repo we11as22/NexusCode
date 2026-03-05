@@ -20,8 +20,8 @@ export interface SessionMessage {
 }
 
 export type MessagePart = TextPart | ToolPart | ReasoningPart
-export interface TextPart { type: "text"; text: string }
-export interface ReasoningPart { type: "reasoning"; text: string }
+export interface TextPart { type: "text"; text: string; user_message?: string }
+export interface ReasoningPart { type: "reasoning"; text: string; durationMs?: number }
 export interface ToolPart {
   type: "tool"
   id: string
@@ -39,6 +39,8 @@ export interface ToolPart {
   diffStats?: { added: number; removed: number }
   /** Line-by-line diff for UI (red/green); set from tool_end when available */
   diffHunks?: Array<{ type: string; lineNum: number; line: string }>
+  /** Subagents for spawn_agent: filled by subagent_start/tool_start/done, shown inline under this tool card */
+  subagents?: SubAgentState[]
 }
 
 export interface NexusConfigState {
@@ -151,6 +153,8 @@ interface ChatState {
   config: NexusConfigState | null
   isCompacting: boolean
   subagents: SubAgentState[]
+  /** partId of the last tool_start(spawn_agent); used to attach subagent_start to that part */
+  lastSpawnAgentPartId: string | null
   selectedProfile: string
   projectDir: string
   /** When the current reasoning block started (for "Thought for Xs" display) */
@@ -219,7 +223,7 @@ interface ChatState {
 }
 
 export type AgentEvent =
-  | { type: "text_delta"; delta: string; messageId: string }
+  | { type: "text_delta"; delta: string; messageId: string; user_message_delta?: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
@@ -258,6 +262,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   config: null,
   isCompacting: false,
   subagents: [],
+  lastSpawnAgentPartId: null,
   selectedProfile: "",
   projectDir: "",
   reasoningStartTime: null,
@@ -350,7 +355,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   clearChat: () => {
     postMessage({ type: "clearChat" })
-    set({ messages: [], todo: "", view: "chat", subagents: [], planCompleted: false, planFollowupText: null })
+    set({ messages: [], todo: "", view: "chat", subagents: [], lastSpawnAgentPartId: null, planCompleted: false, planFollowupText: null })
   },
 
   forkSession: (messageId) => {
@@ -437,22 +442,43 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { messages } = get()
 
     switch (event.type) {
+      case "assistant_message_started": {
+        const { list, index } = ensureAssistantMessage(messages, event.messageId)
+        set({ messages: list })
+        break
+      }
+
       case "text_delta": {
         const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
         const updated = { ...target }
+        const umDelta = (event as { user_message_delta?: string }).user_message_delta
         if (typeof updated.content === "string") {
-          updated.content = sanitizeAssistantText(updated.content + event.delta)
+          const newText = sanitizeAssistantText(updated.content + event.delta)
+          if (umDelta != null) {
+            updated.content = [{ type: "text", text: newText, user_message: umDelta }]
+          } else {
+            updated.content = newText
+          }
         } else {
           const parts = [...(updated.content as MessagePart[])]
           const lastPart = parts[parts.length - 1]
           if (lastPart?.type === "text") {
-            parts[parts.length - 1] = { ...lastPart, text: sanitizeAssistantText(lastPart.text + event.delta) } as TextPart
+            parts[parts.length - 1] = {
+              ...lastPart,
+              text: sanitizeAssistantText(lastPart.text + event.delta),
+              ...(umDelta != null ? { user_message: umDelta } : {}),
+            } as TextPart
           } else {
             const cleaned = sanitizeAssistantText(event.delta)
             if (cleaned) {
-              parts.push({ type: "text", text: cleaned })
+              const startTime = get().reasoningStartTime
+              if (lastPart?.type === "reasoning" && startTime != null) {
+                parts[parts.length - 1] = { ...lastPart, durationMs: Date.now() - startTime } as ReasoningPart
+                set((s) => ({ ...s, reasoningStartTime: null }))
+              }
+              parts.push({ type: "text", text: cleaned, ...(umDelta != null ? { user_message: umDelta } : {}) })
             }
           }
           updated.content = parts
@@ -469,12 +495,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "tool_start": {
         const ev = event as { input?: Record<string, unknown> }
+        if (ev.tool === "spawn_agent") set({ lastSpawnAgentPartId: event.partId })
         const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
         const parts = Array.isArray(target.content)
           ? [...(target.content as MessagePart[])]
           : [{ type: "text" as const, text: target.content as string }]
+        const lastPart = parts[parts.length - 1]
+        const startTime = get().reasoningStartTime
+        if (lastPart?.type === "reasoning" && startTime != null) {
+          parts[parts.length - 1] = { ...lastPart, durationMs: Date.now() - startTime } as ReasoningPart
+          set((s) => ({ ...s, reasoningStartTime: null }))
+        }
         parts.push({
           type: "tool",
           id: event.partId,
@@ -490,6 +523,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "tool_end": {
         const ev = event as { output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
+        if (event.tool === "spawn_agent") set({ lastSpawnAgentPartId: null })
         set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
         const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg
@@ -509,6 +543,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }
             return p
           })
+          if (event.tool === "final_report_to_user" && event.success && ev.output?.trim() && parts.some((p) => p.type === "tool" && (p as ToolPart).id === event.partId)) {
+            // Only final_report_to_user merges into text part; no other tool does this — MessageList shows user_message once and hides final_report_to_user card.
+            const lastTextIdx = parts.map((p, i) => (p.type === "text" ? i : -1)).filter((i) => i >= 0).pop()
+            if (lastTextIdx !== undefined) {
+              const part = parts[lastTextIdx] as TextPart
+              parts[lastTextIdx] = { ...part, user_message: (part.user_message ?? "").trim() ? `${part.user_message}\n${ev.output!.trim()}` : ev.output!.trim() }
+            } else {
+              parts.push({ type: "text", text: "", user_message: ev.output.trim() })
+            }
+          }
           return { ...msg, content: parts }
         })
         set({ messages: msgs, awaitingApproval: false })
@@ -524,59 +568,87 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
 
       case "subagent_start": {
-        const prev = get().subagents.filter((a) => a.id !== event.subagentId)
-        prev.push({
-          id: event.subagentId,
-          mode: event.mode,
-          task: event.task,
-          status: "running",
-          startedAt: Date.now(),
-        })
-        set({ subagents: prev.slice(-12) })
+        const partId = get().lastSpawnAgentPartId
+        if (!partId) break
+        const msgs = get().messages
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const msg = msgs[i]
+          if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
+          const parts = msg.content as MessagePart[]
+          const idx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).id === partId)
+          if (idx === -1) continue
+          const part = parts[idx] as ToolPart
+          const nextSubagents = [...(part.subagents ?? []), { id: event.subagentId, mode: event.mode, task: event.task, status: "running" as const, startedAt: Date.now() }]
+          const nextParts = [...parts]
+          nextParts[idx] = { ...part, subagents: nextSubagents }
+          set({ messages: [...msgs.slice(0, i), { ...msg, content: nextParts }, ...msgs.slice(i + 1)] })
+          break
+        }
         break
       }
 
       case "subagent_tool_start": {
-        const subagents: SubAgentState[] = get().subagents.map((a) =>
-          a.id === event.subagentId
-            ? { ...a, status: "running" as const, currentTool: event.tool }
-            : a
-        )
-        set({ subagents })
+        const msgs = get().messages
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const msg = msgs[i]
+          if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
+          const parts = msg.content as MessagePart[]
+          const partIdx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).subagents?.some((s) => s.id === event.subagentId))
+          if (partIdx === -1) continue
+          const part = parts[partIdx] as ToolPart
+          const subagents = (part.subagents ?? []).map((a) => (a.id === event.subagentId ? { ...a, status: "running" as const, currentTool: event.tool } : a))
+          const nextParts = [...parts]
+          nextParts[partIdx] = { ...part, subagents }
+          set({ messages: [...msgs.slice(0, i), { ...msg, content: nextParts }, ...msgs.slice(i + 1)] })
+          break
+        }
         break
       }
 
       case "subagent_tool_end": {
-        const subagents: SubAgentState[] = get().subagents.map((a) =>
-          a.id === event.subagentId
-            ? {
-                ...a,
-                status: (event.success ? "running" : "error") as "running" | "error",
-                currentTool: event.success ? undefined : event.tool,
-              }
-            : a
-        )
-        set({ subagents })
+        const msgs = get().messages
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const msg = msgs[i]
+          if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
+          const parts = msg.content as MessagePart[]
+          const partIdx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).subagents?.some((s) => s.id === event.subagentId))
+          if (partIdx === -1) continue
+          const part = parts[partIdx] as ToolPart
+          const subagents = (part.subagents ?? []).map((a) =>
+            a.id === event.subagentId ? { ...a, status: (event.success ? "running" : "error") as "running" | "error", currentTool: event.success ? undefined : event.tool } : a
+          )
+          const nextParts = [...parts]
+          nextParts[partIdx] = { ...part, subagents }
+          set({ messages: [...msgs.slice(0, i), { ...msg, content: nextParts }, ...msgs.slice(i + 1)] })
+          break
+        }
         break
       }
 
       case "subagent_done": {
-        const subagents: SubAgentState[] = get().subagents.map((a) =>
-          a.id === event.subagentId
-            ? {
-                ...a,
-                status: (event.success ? "completed" : "error") as "completed" | "error",
-                currentTool: undefined,
-                finishedAt: Date.now(),
-                error: event.error,
-              }
-            : a
-        )
-        set({ subagents })
+        const msgs = get().messages
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const msg = msgs[i]
+          if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
+          const parts = msg.content as MessagePart[]
+          const partIdx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).subagents?.some((s) => s.id === event.subagentId))
+          if (partIdx === -1) continue
+          const part = parts[partIdx] as ToolPart
+          const subagents = (part.subagents ?? []).map((a) =>
+            a.id === event.subagentId
+              ? { ...a, status: (event.success ? "completed" : "error") as "completed" | "error", currentTool: undefined, finishedAt: Date.now(), error: event.error }
+              : a
+          )
+          const nextParts = [...parts]
+          nextParts[partIdx] = { ...part, subagents }
+          set({ messages: [...msgs.slice(0, i), { ...msg, content: nextParts }, ...msgs.slice(i + 1)] })
+          break
+        }
         break
       }
 
       case "reasoning_delta": {
+        // Built-in agent-loop reflection: provider streams reasoning between tool calls; no tool, stored as type "reasoning" and shown as Thought in Explored block.
         const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
@@ -682,6 +754,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             awaitingApproval: false,
             pendingApproval: null,
             subagents: [],
+            lastSpawnAgentPartId: null,
             reasoningStartTime: null,
           }
         })
@@ -695,6 +768,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingApproval: null,
           reasoningStartTime: null,
           subagents: [],
+          lastSpawnAgentPartId: null,
         }))
         if (event.error) {
           const msgs = [

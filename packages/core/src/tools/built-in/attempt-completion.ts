@@ -1,48 +1,24 @@
 import { z } from "zod"
 import type { ToolDef, ToolContext } from "../../types.js"
 
-const schema = z.object({
-  result: z.string().describe("Summary of what was accomplished"),
-  command: z.string().optional().describe("Optional command to run to demonstrate the result (e.g., 'npm run dev', 'open index.html')"),
-  task_progress: z.string().optional(),
+/** Tool that explicitly sends a text result to the user. Must be called at the end of each reply so the user sees a clear summary; do not rely only on the first-line JSON user_message. */
+const reportToUserSchema = z.object({
+  message: z.string().describe("Result text for the user: what was done, key findings, and what they need to know. This is shown in the chat and included in context for the next turn."),
 })
 
-export const attemptCompletionTool: ToolDef<z.infer<typeof schema>> = {
-  name: "attempt_completion",
-  description: `Signal that the task is complete and present the result. Call when the user's request is fully done.
+export const reportToUserTool: ToolDef<z.infer<typeof reportToUserSchema>> = {
+  name: "final_report_to_user",
+  description: `Send the result of your work to the user as plain text. You MUST call this at the end of every reply (after using tools) so the user sees a clear summary. Do not rely on the first-line JSON user_message field — always call this tool with the result text.
 
 When to use:
-- All requested changes are implemented and verified.
-- You have a clear summary and, if useful, a demo command.
+- After any batch of tool use (exploration, edits, runs): call once with a concise summary for the user.
+- When the task is done: call final_report_to_user with your final summary — this ends the turn.
 
-When NOT to use:
-- Task only partially done: continue with tools and then call attempt_completion.
-- Plan mode: use plan_exit instead.
+The message is shown in the chat and saved for context/compaction. Keep it clear and concise.`,
+  parameters: reportToUserSchema,
 
-Provide a concise summary in result. Optionally give a command to run (e.g. npm run dev, pytest). This ends the current agent turn.`,
-  parameters: schema,
-
-  async execute({ result, command }, ctx: ToolContext) {
-    let output = result
-    if (command) {
-      const approval = await ctx.host.showApprovalDialog({
-        type: "execute",
-        tool: "attempt_completion",
-        description: `Run demo command: ${command}`,
-      })
-      if (approval.approved) {
-        try {
-          const run = await ctx.host.runCommand(command, ctx.cwd, ctx.signal)
-          const out = [run.stdout, run.stderr].filter(Boolean).join("\n").trim()
-          output += `\n\nDemo command output:\n\`\`\`\n${out || "(no output)"}\n\`\`\``
-        } catch (e) {
-          output += `\n\nDemo command failed: ${(e as Error).message}`
-        }
-      } else {
-        output += `\n\nTo see the result, run:\n\`\`\`\n${command}\n\`\`\``
-      }
-    }
-    return { success: true, output }
+  async execute({ message }, ctx: ToolContext) {
+    return { success: true, output: message }
   },
 }
 
@@ -106,7 +82,7 @@ When NOT to use:
 - Trivial 1–2 step tasks: optional.
 - Do not put exploratory steps (e.g. "search codebase") as todo items; focus on deliverable milestones.
 
-Use description to add a note for yourself (e.g. scope, file names, acceptance criteria); it is shown only in your context, not in the UI. Create only when the session has no current todo list (see "Current Todo List" in context). If a list already exists, pass the full list with your edits (add/check/uncheck items); do not replace with a brand new list. When you call attempt_completion, the list is cleared after your response so you can create a new one next time.`,
+Use description to add a note for yourself (e.g. scope, file names, acceptance criteria); it is shown only in your context, not in the UI. Create only when the session has no current todo list (see "Current Todo List" in context). If a list already exists, pass the full list with your edits (add/check/uncheck items); do not replace with a brand new list. When you call final_report_to_user to finish the turn, the list is cleared after your response so you can create a new one next time.`,
   parameters: todoSchema,
 
   async execute({ items }, ctx: ToolContext) {

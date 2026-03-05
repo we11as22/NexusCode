@@ -17,11 +17,12 @@ import type {
   ToolPart,
   SessionRole,
   MessagePart,
+  DiagnosticItem,
 } from "../types.js"
 import type { LLMStreamEvent, LLMMessage, LLMToolDef } from "../provider/types.js"
 import { buildSystemPrompt, type PromptContext } from "./prompts/components/index.js"
 import { getInitialProjectContext } from "./prompts/initial-context.js"
-import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN } from "./modes.js"
+import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN, MANDATORY_END_TOOL } from "./modes.js"
 import { classifyMcpServers, classifySkills } from "./classifier.js"
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
@@ -40,8 +41,23 @@ const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   debug: 200,
 }
 
-/** Minimum length of final text before attempt_completion is accepted (non-plan modes). */
-const MIN_FINAL_TEXT_BEFORE_COMPLETION = 20
+/** When final_report_to_user tool completes, set its output as user_message on the last text part of the message (so UI and context see it). */
+function setReportToUserMessage(session: ISession, messageId: string, userMessage: string): void {
+  const msg = session.messages.find((m) => m.id === messageId)
+  if (!msg || !userMessage.trim()) return
+  let parts: MessagePart[] =
+    typeof msg.content === "string"
+      ? [{ type: "text", text: msg.content }]
+      : [...(msg.content as MessagePart[])]
+  const lastTextIdx = parts.map((p, i) => (p.type === "text" ? i : -1)).filter((i) => i >= 0).pop()
+  if (lastTextIdx !== undefined) {
+    const part = parts[lastTextIdx] as TextPart
+    parts[lastTextIdx] = { ...part, user_message: (part.user_message ?? "").trim() ? `${part.user_message}\n${userMessage.trim()}` : userMessage.trim() }
+  } else {
+    parts.push({ type: "text", text: "", user_message: userMessage.trim() })
+  }
+  session.updateMessage(messageId, { content: parts })
+}
 
 /** Returns true if the given message contains a write_to_file or replace_in_file to .nexus/plans/ (for plan_exit gate). */
 function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: string): boolean {
@@ -61,6 +77,16 @@ function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: stri
   return false
 }
 
+/** Returns true if the message already contains a call to the mode's mandatory end tool. */
+function messageHasMandatoryEndTool(session: ISession, messageId: string, mode: Mode): boolean {
+  const mandatory = MANDATORY_END_TOOL[mode]
+  if (!mandatory) return true
+  const msg = session.messages.find((m) => m.id === messageId)
+  if (!msg || !Array.isArray(msg.content)) return false
+  const parts = msg.content as MessagePart[]
+  return parts.some((p) => p.type === "tool" && (p as ToolPart).tool === mandatory)
+}
+
 export interface AgentLoopOptions {
   session: ISession
   client: LLMClient
@@ -74,7 +100,7 @@ export interface AgentLoopOptions {
   compaction: SessionCompaction
   signal: AbortSignal
   gitBranch?: string
-  /** When set, commit on attempt_completion and optionally double-check (Cline-style). */
+  /** When set, commit on final_report_to_user (agent) and optionally double-check (Cline-style). */
   checkpoint?: { commit(description?: string): Promise<string> }
   /** When true, inject create-skill instructions; host must allow writes to .nexus/skills and .cursor/skills */
   createSkillMode?: boolean
@@ -291,8 +317,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
     const isFinalIteration = forceFinalAnswerNext || loopIterations >= maxIterations
 
-    // 3. Build system prompt (cache-aware)
-    const diagnostics = host.getProblems ? await host.getProblems() : []
+    // 3. Build system prompt (cache-aware). Cap getProblems() so first message is not delayed (e.g. VSCode getDiagnostics can be slow).
+    const PROBLEMS_TIMEOUT_MS = 800
+    const diagnostics = host.getProblems
+      ? await Promise.race([
+          host.getProblems(),
+          new Promise<DiagnosticItem[]>((r) => setTimeout(() => r([]), PROBLEMS_TIMEOUT_MS)),
+        ])
+      : []
     const limitTokens = getContextLimit(activeClient.modelId)
     const usedTokens = session.getTokenEstimate()
     const contextPercent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
@@ -315,6 +347,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       contextLimitTokens: limitTokens > 0 ? limitTokens : undefined,
       contextPercent: limitTokens > 0 ? contextPercent : undefined,
       createSkillMode: createSkillMode === true,
+      supportsStructuredOutput: activeClient.supportsStructuredOutput(),
     }
 
     const { blocks, cacheableCount } = buildSystemPrompt(promptCtx)
@@ -343,6 +376,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     // 5. Build messages from session
     const messages = buildMessagesFromSession(session)
+    // No separate "reflection" or "thinking" step between tool runs: we do not call the LLM again
+    // just to reflect between tools. One iteration = one stream(); reasoning comes only from the model's own stream (reasoning_delta) if supported.
     if (isFinalIteration) {
       messages.push({
         role: "user",
@@ -361,9 +396,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       content: "",
     }).id
     lastAssistantMessageId = newMessageId
+    host.emit({ type: "assistant_message_started", messageId: newMessageId })
 
     let currentText = ""
     let currentReasoning = ""
+    /** Optional message to user from JSON preamble; set once when first line is parsed. */
+    let currentUserMessage: string | undefined
+    /** True after we've parsed the optional JSON preamble line (or decided to skip). */
+    let preambleParsed = false
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
     lastToolName = ""
     let sawNativeToolCall = false
@@ -391,7 +431,42 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       const toolParts = existingParts.filter((p): p is ToolPart => p.type === "tool")
       const parts: MessagePart[] = []
       if (currentReasoning) parts.push({ type: "reasoning", text: currentReasoning } as ReasoningPart)
-      if (currentText) parts.push({ type: "text", text: currentText } as TextPart)
+      // Parse first line as JSON: { reasoning, user_message? } — part 1 → Thought, part 2 → user (collapses tools)
+      if (!preambleParsed && currentText.includes("\n")) {
+        preambleParsed = true
+        const firstNewline = currentText.indexOf("\n")
+        const line = currentText.slice(0, firstNewline).trim()
+        const rest = currentText.slice(firstNewline + 1)
+        let parsed: { reasoning?: string; user_message?: string } | null = null
+        if (line.startsWith("{")) {
+          try {
+            const v = JSON.parse(line) as unknown
+            if (v && typeof v === "object" && !Array.isArray(v)) {
+              const o = v as Record<string, unknown>
+              parsed = {}
+              if (typeof o.reasoning === "string" && o.reasoning.trim()) parsed.reasoning = o.reasoning.trim()
+              if (typeof o.user_message === "string" && o.user_message.trim()) parsed.user_message = o.user_message.trim()
+            }
+          } catch {
+            // Not valid JSON — leave as normal text
+          }
+        }
+        if (parsed && (parsed.reasoning || parsed.user_message)) {
+          if (parsed.reasoning) {
+            currentReasoning += (currentReasoning ? "\n\n" : "") + parsed.reasoning
+            host.emit({ type: "reasoning_delta", delta: parsed.reasoning, messageId: newMessageId })
+          }
+          if (parsed.user_message) {
+            currentUserMessage = parsed.user_message
+            host.emit({ type: "text_delta", delta: "", messageId: newMessageId, user_message_delta: parsed.user_message })
+          }
+          currentText = rest
+        }
+        // If not valid preamble JSON, keep currentText unchanged (first line stays in text)
+      }
+      if (currentText || currentUserMessage) {
+        parts.push({ type: "text", text: currentText, user_message: currentUserMessage } as TextPart)
+      }
       parts.push(...toolParts)
       session.updateMessage(newMessageId, { content: parts.length > 0 ? parts : currentText || "" })
     }
@@ -400,7 +475,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       if (pendingReads.length === 0) return
 
       const tasks = pendingReads.map(tc =>
-        executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState)
+        executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode)
           .catch(err => ({ success: false, output: `Error: ${err.message}` }))
       )
 
@@ -548,32 +623,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               // Sequential: flush pending reads first
               await flushPendingReads()
 
-              // Non-plan modes: force a final text message before attempt_completion
-              if (toolName === "attempt_completion" && mode !== "plan") {
-                const textSoFar = currentText.trim()
-                if (textSoFar.length < MIN_FINAL_TEXT_BEFORE_COMPLETION) {
-                  const errMsg =
-                    "You must provide a brief text summary to the user before completing. Write your summary in the chat (what you did or found), then call attempt_completion again with the result parameter."
-                  session.updateToolPart(newMessageId, partId, {
-                    status: "error",
-                    output: errMsg,
-                    timeEnd: Date.now(),
-                  })
-                  host.emit({
-                    type: "tool_end",
-                    tool: toolName,
-                    partId,
-                    messageId: newMessageId,
-                    success: false,
-                    output: errMsg,
-                  })
-                  lastToolName = toolName
-                  executedToolThisIteration = true
-                  executedToolCallsTotal++
-                  break
-                }
-              }
-
               // Plan mode: force writing the plan to .nexus/plans/ before plan_exit
               if (toolName === "plan_exit" && mode === "plan") {
                 if (!messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd)) {
@@ -601,7 +650,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
               const result = await executeToolCall(
                 toolCallId, toolName, toolInput,
-                resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState
+                resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode
               )
 
               session.updateToolPart(newMessageId, partId, {
@@ -640,10 +689,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 host.emit({ type: "todo_updated", todo: session.getTodo() })
               }
 
+              if (toolName === "final_report_to_user" && result.success && result.output?.trim()) {
+                setReportToUserMessage(session, newMessageId, result.output)
+              }
+
               lastToolName = toolName
               executedToolThisIteration = true
               executedToolCallsTotal++
-              if (toolName === "attempt_completion" || toolName === "plan_exit") {
+              if (toolName === MANDATORY_END_TOOL[mode]) {
                 attemptedCompletionThisIteration = true
               }
             }
@@ -746,7 +799,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             host,
             session,
             newMessageId,
-            completionState
+            completionState,
+            mode
           )
 
           session.updateToolPart(newMessageId, partId, {
@@ -785,10 +839,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             host.emit({ type: "todo_updated", todo: session.getTodo() })
           }
 
+          if (call.toolName === "final_report_to_user" && result.success && result.output?.trim()) {
+            setReportToUserMessage(session, newMessageId, result.output)
+          }
+
           lastToolName = call.toolName
           executedToolThisIteration = true
           executedToolCallsTotal++
-          if (call.toolName === "attempt_completion" || call.toolName === "plan_exit") {
+          if (call.toolName === MANDATORY_END_TOOL[mode]) {
             attemptedCompletionThisIteration = true
           }
         }
@@ -807,9 +865,82 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       continue
     }
 
-    // Check if done
-    if (attemptedCompletionThisIteration || lastToolName === "attempt_completion" || lastToolName === "plan_exit") break
-    if (finishReason === "stop" && !executedToolThisIteration) break
+    // Check if done — mandatory end tool (per mode) ends the turn: final_report_to_user (agent/ask/debug), plan_exit (plan).
+    const mandatoryEnd = MANDATORY_END_TOOL[mode]
+    if (
+      attemptedCompletionThisIteration ||
+      (mandatoryEnd != null && lastToolName === mandatoryEnd)
+    )
+      break
+    if (finishReason === "stop" && !executedToolThisIteration) {
+      let mandatoryTool = MANDATORY_END_TOOL[mode]
+      const alreadyCalled = messageHasMandatoryEndTool(session, newMessageId, mode)
+      if (mandatoryTool && !alreadyCalled && resolvedTools.some((t) => t.name === mandatoryTool)) {
+        // Plan mode: if no plan file was written, force final_report_to_user instead of plan_exit so user still gets a message
+        if (mode === "plan" && mandatoryTool === "plan_exit" && !messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd)) {
+          mandatoryTool = "final_report_to_user"
+        }
+        if (!resolvedTools.some((t) => t.name === mandatoryTool)) {
+          break
+        }
+        flushAssistantContent()
+        const syntheticId = `forced_end_${loopIterations}_${Date.now()}`
+        const partId = `part_${syntheticId}`
+        const summary = (currentText || "").trim().slice(0, 2000) || "Work completed."
+        let toolInput: Record<string, unknown>
+        if (mandatoryTool === "final_report_to_user") {
+          toolInput = { message: summary }
+        } else if (mandatoryTool === "plan_exit") {
+          toolInput = { summary: (currentText || "").trim().slice(0, 500) || "Plan ready." }
+        } else {
+          toolInput = { message: summary }
+        }
+        session.addToolPart(newMessageId, {
+          type: "tool",
+          id: partId,
+          tool: mandatoryTool,
+          status: "pending",
+          input: toolInput,
+          timeStart: Date.now(),
+        })
+        host.emit({ type: "tool_start", tool: mandatoryTool, partId, messageId: newMessageId, input: toolInput })
+        const forcedResult = await executeToolCall(
+          syntheticId,
+          mandatoryTool,
+          toolInput,
+          resolvedTools,
+          toolCtx,
+          autoApproveActions,
+          config,
+          host,
+          session,
+          newMessageId,
+          completionState,
+          mode
+        )
+        session.updateToolPart(newMessageId, partId, {
+          status: forcedResult.success ? "completed" : "error",
+          output: forcedResult.output,
+          timeEnd: Date.now(),
+        })
+        host.emit({
+          type: "tool_end",
+          tool: mandatoryTool,
+          partId,
+          messageId: newMessageId,
+          success: forcedResult.success,
+          output: forcedResult.output,
+        })
+        if (mandatoryTool === "final_report_to_user" && forcedResult.success && forcedResult.output?.trim()) {
+          setReportToUserMessage(session, newMessageId, forcedResult.output)
+        }
+        lastToolName = mandatoryTool
+        if (mandatoryTool === MANDATORY_END_TOOL[mode]) {
+          attemptedCompletionThisIteration = true
+        }
+      }
+      break
+    }
     if (signal.aborted) break
 
     // Check for context overflow proactively
@@ -826,9 +957,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
 
   if (!signal.aborted && lastAssistantMessageId) {
-    // When agent closes the task (attempt_completion), clear todo so it's removed from session
-    // and the agent can create a new one next time. If we don't clear, todo persists and agent continues with it.
-    if (attemptedCompletionThisIteration || lastToolName === "attempt_completion") {
+    // When mandatory end tool was executed, clear todo so it's removed from session.
+    if (attemptedCompletionThisIteration || lastToolName === MANDATORY_END_TOOL[mode]) {
       session.updateTodo("")
       host.emit({ type: "todo_updated", todo: "" })
     }
@@ -907,24 +1037,22 @@ async function executeToolCall(
   host: IHost,
   session: ISession,
   messageId: string,
-  completionState?: {
-    doubleCheckEnabled: boolean
-    pending: { current: boolean }
-    checkpoint?: { commit(description?: string): Promise<string> }
-  }
+  completionState: { doubleCheckEnabled: boolean; pending: { current: boolean }; checkpoint?: { commit(description?: string): Promise<string> } } | undefined,
+  mode: Mode
 ): Promise<ToolResult> {
   const tool = tools.find(t => t.name === toolName)
   if (!tool) {
     const availableList = tools.map(t => t.name).join(", ")
     return {
       success: false,
-      output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use execute_command. To present final results, use attempt_completion.`,
+      output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use execute_command. To present final results, use final_report_to_user.`,
     }
   }
 
-  // Cline-style double-check: first attempt_completion is rejected; model must re-verify and call again
+  // Cline-style double-check (agent mode): first final_report_to_user is rejected; model must re-verify and call again
   if (
-    toolName === "attempt_completion" &&
+    toolName === "final_report_to_user" &&
+    mode === "agent" &&
     completionState?.doubleCheckEnabled &&
     !completionState.pending.current
   ) {
@@ -932,7 +1060,7 @@ async function executeToolCall(
     return {
       success: false,
       output:
-        "Before completing, re-verify your work against the original task. Check that: (1) All requested changes were made, (2) No steps were skipped, (3) Edge cases are addressed, (4) The solution matches what was asked. If everything checks out, call attempt_completion again with your final result.",
+        "Before completing, re-verify your work against the original task. Check that: (1) All requested changes were made, (2) No steps were skipped, (3) Edge cases are addressed, (4) The solution matches what was asked. If everything checks out, call final_report_to_user again with your final result.",
     }
   }
 
@@ -1027,12 +1155,12 @@ async function executeToolCall(
   try {
     const result = await tool.execute(validatedArgs as Record<string, unknown>, ctx)
 
-    // On successful attempt_completion: save checkpoint (Cline-style) and clear double-check state
-    if (toolName === "attempt_completion" && result.success && completionState) {
+    // On successful final_report_to_user (agent): save checkpoint (Cline-style) and clear double-check state
+    if (toolName === "final_report_to_user" && result.success && mode === "agent" && completionState) {
       completionState.pending.current = false
       if (completionState.checkpoint) {
         try {
-          const hash = await completionState.checkpoint.commit("attempt_completion")
+          const hash = await completionState.checkpoint.commit("final_report_to_user")
           result.output += `\n\nCheckpoint saved: ${hash}`
         } catch (e) {
           result.output += `\n\nCheckpoint save failed: ${(e as Error).message}`
@@ -1195,21 +1323,18 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
 
     // ── Assistant message ────────────────────────────────────────────────────
     const textParts = parts.filter((p): p is TextPart => p.type === "text")
-    const reasoningParts = parts.filter((p): p is ReasoningPart => p.type === "reasoning")
     const toolParts = parts.filter((p): p is ToolPart => p.type === "tool")
 
-    const textContent = textParts.map(p => p.text).join("").trim()
+    const textContent = textParts
+      .map(p => (p.user_message?.trim() ? p.user_message.trim() + "\n" + p.text : p.text))
+      .join("")
+      .trim()
     const toolCallParts = toolParts.filter(tp => tp.input != null)
     const completedToolParts = toolParts.filter(tp => tp.status === "completed" || tp.status === "error")
 
     if (toolCallParts.length > 0) {
-      // Assistant message with tool calls
+      // Assistant message with tool calls — do NOT include reasoning in context for next turn; only user_message + text + tools.
       const assistantContent: Array<Record<string, unknown>> = []
-
-      // Include reasoning first (for reasoning/thinking models — Kilo Code style)
-      for (const rp of reasoningParts) {
-        if (rp.text?.trim()) assistantContent.push({ type: "reasoning", text: rp.text })
-      }
       if (textContent) {
         assistantContent.push({ type: "text", text: textContent })
       }
@@ -1245,17 +1370,9 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
         })
         messages.push({ role: "tool" as SessionRole, content: toolResultContent as LLMMessage["content"] })
       }
-    } else if (textContent || reasoningParts.length > 0) {
-      // Pure text or reasoning-only response (no tool calls)
-      const assistantContent: Array<Record<string, unknown>> = []
-      for (const rp of reasoningParts) {
-        if (rp.text?.trim()) assistantContent.push({ type: "reasoning", text: rp.text })
-      }
-      if (textContent) assistantContent.push({ type: "text", text: textContent })
-      const content: LLMMessage["content"] =
-        assistantContent.length === 1 && assistantContent[0]!.type === "text"
-          ? (assistantContent[0] as { type: "text"; text: string }).text
-          : (assistantContent as LLMMessage["content"])
+    } else if (textContent) {
+      // Pure text response (no tool calls) — only text goes to context, not reasoning.
+      const content: LLMMessage["content"] = textContent
       messages.push({ role: "assistant", content })
     }
   }

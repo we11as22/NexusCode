@@ -2,15 +2,75 @@ import React, { useEffect, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
-import { getExploredFromParts, getExploredPrefixFromParts, ExploredSummaryInline } from "./ExploredProgressBlock.js"
+import { getExploredPrefixFromParts, ExploredSummaryInline } from "./ExploredProgressBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
+import type { SubAgentState } from "../stores/chat.js"
+import { useChatStore } from "../stores/chat.js"
 
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file"])
 const BASH_OUTPUT_TAIL_LINES = 80
 
+/** Approval request inline (same field as tool card); organic colors to match card. */
+function ApprovalInline({
+  action,
+  onResolve,
+}: {
+  action: { type: string; tool: string; description: string; content?: string }
+  onResolve: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string) => void
+}) {
+  const label =
+    action.type === "execute"
+      ? (action.content ? `Run: ${action.content}` : action.description)
+      : action.type === "write"
+        ? `Write: ${action.description}`
+        : action.description
+  return (
+    <div className="nexus-approval-inline border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 px-3 py-2 flex flex-wrap items-center gap-2">
+      <span className="nexus-approval-inline-icon text-[var(--vscode-editorWarning-foreground)]" title="Permission required">
+        ⚠
+      </span>
+      <span className="nexus-approval-inline-text text-xs text-[var(--vscode-foreground)] truncate flex-1 min-w-0">
+        {label}
+      </span>
+      <div className="nexus-approval-inline-buttons flex items-center gap-1.5 flex-shrink-0">
+        <button
+          type="button"
+          className="nexus-approval-inline-btn nexus-approval-inline-btn-allow"
+          onClick={() => onResolve(true)}
+        >
+          Allow
+        </button>
+        {action.type === "execute" && (
+          <button
+            type="button"
+            className="nexus-approval-inline-btn nexus-approval-inline-btn-allow"
+            onClick={() => onResolve(true, false, action.content)}
+          >
+            Add to allowed for this folder
+          </button>
+        )}
+        <button
+          type="button"
+          className="nexus-approval-inline-btn nexus-approval-inline-btn-always"
+          onClick={() => onResolve(true, true)}
+        >
+          Allow Always
+        </button>
+        <button
+          type="button"
+          className="nexus-approval-inline-btn nexus-approval-inline-btn-deny"
+          onClick={() => onResolve(false)}
+        >
+          Deny
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** Bash (execute_command) block: command in header, expandable output (tail when long). */
-function BashCommandBlock({ part }: { part: ToolPart }) {
+function BashCommandBlock({ part, approval }: { part: ToolPart; approval?: React.ReactNode }) {
   const [expanded, setExpanded] = useState(true)
   const command = (part.input?.command as string)?.trim() ?? ""
   const output = (part.output ?? "").trim()
@@ -39,7 +99,7 @@ function BashCommandBlock({ part }: { part: ToolPart }) {
         {elapsed && <span className="flex-shrink-0 text-[var(--vscode-descriptionForeground)]">{elapsed}</span>}
         <span className="flex-shrink-0 text-[var(--vscode-descriptionForeground)]">{expanded ? "▼" : "▶"}</span>
       </button>
-      {expanded && (output || part.error) && (
+        {expanded && (output || part.error) && (
         <div className="border-t border-[var(--vscode-panel-border)] px-3 py-2">
           {showTail && (
             <div className="text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
@@ -54,6 +114,7 @@ function BashCommandBlock({ part }: { part: ToolPart }) {
           )}
         </div>
       )}
+      {approval}
     </div>
   )
 }
@@ -67,6 +128,7 @@ export function MessageList({ messages, isRunning = false }: Props) {
   const listRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const [stickToBottom, setStickToBottom] = React.useState(true)
+  const store = useChatStore()
 
   useEffect(() => {
     if (!stickToBottom) return
@@ -111,6 +173,8 @@ export function MessageList({ messages, isRunning = false }: Props) {
             key={msg.id}
             message={msg}
             isComplete={!isRunning || idx < messages.length - 1}
+            pendingApproval={store.pendingApproval}
+            onResolveApproval={store.resolveApproval}
           />
         ))}
         <div ref={bottomRef} />
@@ -129,7 +193,17 @@ export function MessageList({ messages, isRunning = false }: Props) {
   )
 }
 
-function MessageBubble({ message, isComplete }: { message: SessionMessage; isComplete: boolean }) {
+function MessageBubble({
+  message,
+  isComplete,
+  pendingApproval,
+  onResolveApproval,
+}: {
+  message: SessionMessage
+  isComplete: boolean
+  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
+  onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string) => void
+}) {
   if (message.summary) {
     return (
       <div className="text-xs text-[var(--vscode-descriptionForeground)] py-2">
@@ -171,15 +245,20 @@ function MessageBubble({ message, isComplete }: { message: SessionMessage; isCom
   return (
     <div className="w-full min-w-0">
       {typeof message.content === "string" ? (
-        <AssistantText text={message.content} />
+        <AssistantText text={message.content} streaming={!isComplete} />
       ) : (
-        <AssistantParts parts={message.content as MessagePart[]} isComplete={isComplete} />
+        <AssistantParts
+          parts={message.content as MessagePart[]}
+          isComplete={isComplete}
+          pendingApproval={pendingApproval}
+          onResolveApproval={onResolveApproval}
+        />
       )}
     </div>
   )
 }
 
-function AssistantText({ text }: { text: string }) {
+function AssistantText({ text, streaming }: { text: string; streaming?: boolean }) {
   return (
     <div className="text-sm text-[var(--vscode-foreground)] min-w-0 break-words">
       <ReactMarkdown
@@ -241,24 +320,98 @@ function AssistantText({ text }: { text: string }) {
       >
         {text}
       </ReactMarkdown>
+      {streaming && (
+        <span className="nexus-streaming-cursor inline-block w-0.5 h-4 ml-0.5 align-middle bg-[var(--vscode-foreground)] animate-pulse" aria-hidden />
+      )}
     </div>
   )
 }
 
-function AssistantParts({ parts, isComplete }: { parts: MessagePart[]; isComplete: boolean }) {
-  const { prefixParts, prefixIndices } = getExploredPrefixFromParts(parts)
-  const explored = getExploredFromParts(prefixParts)
-  const hasExploredBlock = (explored.filesCount > 0 || explored.searchesCount > 0) && prefixParts.length > 0
+const SUBAGENT_TOOL_LABELS: Record<string, string> = {
+  read_file: "Reading file",
+  list_files: "Listing directory",
+  list_code_definitions: "Listing definitions",
+  search_files: "Searching files",
+  codebase_search: "Searching codebase",
+  write_to_file: "Writing file",
+  replace_in_file: "Editing file",
+  execute_command: "Bash",
+  web_fetch: "Fetching URL",
+  web_search: "Web search",
+  use_skill: "Using skill",
+  batch: "Batch operation",
+}
+
+function subagentStatusLine(a: SubAgentState): string {
+  if (a.status === "completed") return "Completed"
+  if (a.status === "error") return a.error ? `Failed: ${a.error.slice(0, 60)}` : "Failed"
+  if (a.currentTool) return SUBAGENT_TOOL_LABELS[a.currentTool] ?? `Running ${a.currentTool}`
+  return "Starting…"
+}
+
+function truncateTask(s: string, max = 56): string {
+  const one = s.replace(/\s+/g, " ").trim()
+  return one.length <= max ? one : one.slice(0, max - 1) + "…"
+}
+
+/** Subagents inline under the spawn_agent tool card; one line per subagent (task + dynamic status). */
+function SubagentInlineList({ subagents }: { subagents: SubAgentState[] }) {
+  return (
+    <div className="mt-1.5 ml-1 space-y-1">
+      {subagents.map((a) => (
+        <div
+          key={a.id}
+          className={`rounded border px-2 py-1.5 text-xs ${
+            a.status === "completed"
+              ? "border-green-500/30 bg-green-500/10"
+              : a.status === "error"
+                ? "border-red-500/30 bg-red-500/10"
+                : "border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/20"
+          }`}
+        >
+          <div className="font-medium text-[var(--vscode-foreground)] truncate" title={a.task}>
+            {truncateTask(a.task)}
+          </div>
+          <div className="text-[11px] text-[var(--vscode-descriptionForeground)] mt-0.5">
+            {subagentStatusLine(a)}
+          </div>
+          {a.error && a.status === "error" && (
+            <div className="text-[10px] text-red-400 mt-1 truncate" title={a.error}>
+              {a.error}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function AssistantParts({
+  parts,
+  isComplete,
+  pendingApproval,
+  onResolveApproval,
+}: {
+  parts: MessagePart[]
+  isComplete: boolean
+  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
+  onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string) => void
+}) {
+  const { prefixItems, prefixIndices, hasContentAfterPrefix } = getExploredPrefixFromParts(parts)
+  const hasExploredBlock = prefixItems.length > 0
+  const hasTextPartWithUserMessage = parts.some(
+    (p) => p.type === "text" && (p as { user_message?: string }).user_message?.trim()
+  )
+  /** Collapse when complete and: there is content after exploration, or text step has user_message (second optional field). */
+  const defaultCollapsed = isComplete && (hasContentAfterPrefix || hasTextPartWithUserMessage)
 
   return (
     <div className="space-y-3">
-      {/* Explored block at top so it doesn't jump when new content streams below; only exploration tools before first other tool/text */}
+      {/* Explored: reasoning + exploration tools in order; ends at user_message or non-exploration tool. Thoughts expandable. */}
       {hasExploredBlock && (
         <ExploredSummaryInline
-          filesCount={explored.filesCount}
-          searchesCount={explored.searchesCount}
-          entries={explored.entries}
-          defaultCollapsed={isComplete}
+          prefixItems={prefixItems}
+          defaultCollapsed={defaultCollapsed}
           onOpenFile={(path, line, endLine) =>
             postMessage({ type: "openFileAtLocation", path, line, endLine })
           }
@@ -266,33 +419,83 @@ function AssistantParts({ parts, isComplete }: { parts: MessagePart[]; isComplet
       )}
       {parts.map((part, i) => {
         if (prefixIndices.has(i)) return null
+        if (part.type === "reasoning") {
+          const r = part as { text: string; durationMs?: number }
+          return (
+            <ThoughtInlineBlock
+              key={i}
+              text={r.text}
+              durationMs={r.durationMs}
+            />
+          )
+        }
         if (part.type === "text") {
-          const text = (part as { text: string }).text
-          if (!text || !text.trim()) return null
-          return <AssistantText key={i} text={text} />
+          const textPart = part as { text: string; user_message?: string }
+          const text = textPart.text
+          const userMessage = textPart.user_message?.trim()
+          const isLastPart = i === parts.length - 1
+          const showStreaming = !isComplete && isLastPart
+          if (!showStreaming && (!text || !text.trim()) && !userMessage) return null
+          const hasMainText = showStreaming || (text && text.trim())
+          // Prefer user_message (from final_report_to_user) as the single reply — do not show both to avoid duplication.
+          if (userMessage) {
+            return (
+              <div key={i} className="space-y-0">
+                <AssistantText text={userMessage} streaming={false} />
+              </div>
+            )
+          }
+          return (
+            <div key={i} className="space-y-0">
+              {hasMainText && <AssistantText text={text ?? ""} streaming={showStreaming} />}
+            </div>
+          )
         }
         if (part.type === "tool") {
           const toolPart = part as ToolPart
           if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file") {
-            return <InlineFileEditBlock key={i} part={toolPart} />
+            const approval =
+              pendingApproval?.partId === toolPart.id ? (
+                <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+              ) : undefined
+            return <InlineFileEditBlock key={i} part={toolPart} approval={approval} />
           }
           if (toolPart.tool === "execute_command") {
-            return <BashCommandBlock key={i} part={toolPart} />
+            const approval =
+              pendingApproval?.partId === toolPart.id ? (
+                <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+              ) : undefined
+            return <BashCommandBlock key={i} part={toolPart} approval={approval} />
           }
           if (toolPart.tool === "thinking_preamble") {
-            const userMsg = (toolPart.input?.user_message as string)?.trim()
-            const reasoning = (toolPart.input?.reasoning_and_next_actions as string) || ""
-            if (userMsg || reasoning) return <ThinkingPreambleBlock key={i} userMessage={userMsg} reasoning={reasoning} />
-            return <ToolCallCard key={i} part={toolPart} />
+            return null
           }
-          return null
+          if (toolPart.tool === "final_report_to_user") {
+            // Only final_report_to_user output is merged into text part's user_message (core + store). Show reply once via user_message; hide card to avoid duplicate.
+            return null
+          }
+          if (toolPart.tool === "spawn_agent") {
+            const approval =
+              pendingApproval?.partId === toolPart.id ? (
+                <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+              ) : undefined
+            return (
+              <React.Fragment key={i}>
+                <ToolCallCard part={toolPart} approval={approval} />
+                {toolPart.subagents && toolPart.subagents.length > 0 ? (
+                  <SubagentInlineList subagents={toolPart.subagents} />
+                ) : null}
+              </React.Fragment>
+            )
+          }
+          const approval =
+            pendingApproval?.partId === toolPart.id ? (
+              <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+            ) : undefined
+          return <ToolCallCard key={i} part={toolPart} approval={approval} />
         }
         if (part.type === "reasoning") {
-          const reasoningText = (part as { text: string }).text
-          if (!reasoningText.trim()) return null
-          return (
-            <ReasoningPartBlock key={i} text={reasoningText} />
-          )
+          return null
         }
         return null
       })}
@@ -300,8 +503,31 @@ function AssistantParts({ parts, isComplete }: { parts: MessagePart[]; isComplet
   )
 }
 
-/** Thinking preamble: reasoning (required) + optional user-visible message — on chat background, no frame */
-function ThinkingPreambleBlock({ userMessage, reasoning }: { userMessage: string; reasoning: string }) {
+/** Thought inline: one reasoning part, tool-like (header + optional duration, expandable body). Always shown chronologically. */
+function ThoughtInlineBlock({ text, durationMs }: { text: string; durationMs?: number }) {
+  const [open, setOpen] = useState(true)
+  const durationStr = durationMs != null ? ` (${(durationMs / 1000).toFixed(1)}s)` : ""
+  return (
+    <div className="my-2 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]"
+      >
+        <span className="flex-shrink-0" title="Thought">💭</span>
+        <span className="flex-shrink-0 font-medium">Thought{durationStr}</span>
+        <span className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform" style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
+      </button>
+      {open && text.trim() && (
+        <div className="border-t border-[var(--vscode-panel-border)] px-3 py-2 text-[11px] text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans max-h-[min(50vh,320px)] overflow-y-auto">
+          {text.trim()}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Thinking preamble:
   const [showReasoning, setShowReasoning] = useState(false)
   const hasReasoning = reasoning.trim().length > 0
   return (

@@ -288,11 +288,10 @@ model:
 | **codebase_search** | Семантический/ключевой поиск по индексу (FTS + опционально вектор) | все при включённом индексе |
 | **web_fetch** | GET-запрос по URL | agent, plan, debug, ask |
 | **web_search** | Поиск в интернете (Brave/Serper; нужны BRAVE_API_KEY или SERPER_API_KEY) | agent, plan, debug, ask |
-| **exa_web_search** | Поиск в интернете через Exa AI (без API-ключа, MCP endpoint) | agent, plan, ask |
-| **exa_code_search** | Поиск документации и примеров кода по библиотекам/SDK через Exa (без API-ключа) | agent, plan, ask |
+| **glob** | Поиск файлов по glob-паттерну (например \`**/*.ts\`), сортировка по времени изменения | agent, plan, debug, ask |
 | **use_skill** | Подключение навыка из SKILL.md | agent, plan, debug |
 | **spawn_agent** | Запуск параллельного сабагента с описанием задачи и режимом | agent |
-| **attempt_completion** | Финализация ответа пользователю | все |
+| **final_report_to_user** | Финализация ответа пользователю | все |
 | **ask_followup_question** | Уточняющий вопрос пользователю | все |
 | **update_todo_list** | Обновление чек-листа прогресса (task_progress) | все |
 
