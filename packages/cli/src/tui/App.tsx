@@ -117,6 +117,7 @@ interface AppProps {
   /** List sessions for switching (server or local). */
   getSessionList?: () => Promise<Array<{ id: string; ts?: number; title?: string; messageCount: number }>>
   onSwitchSession?: (sessionId: string) => Promise<void>
+  onDeleteSession?: (sessionId: string) => void | Promise<void>
   /** Kilocode-style: after plan_exit, user chose New session / Continue / Dismiss */
   onPlanFollowupChoice?: (choice: "new_session" | "continue" | "dismiss", planText?: string) => void
 }
@@ -181,6 +182,7 @@ const TOOL_ICONS: Record<string, string> = {
   glob: "📋",
   final_report_to_user: "✅",
   ask_followup_question: "❓",
+  progress_note: "📌",
   update_todo_list: "📋",
   use_skill: "🎯",
   browser_action: "🌍",
@@ -275,7 +277,7 @@ function isExploreTool(tool: string): boolean {
   return EXPLORE_FILE_TOOLS.has(tool) || EXPLORE_SEARCH_TOOLS.has(tool)
 }
 
-/** Extract the final reply to the user from assistant parts: final_report_to_user, ask_followup_question, or last text. Used so only one "NexusCode" block per turn shows the actual reply. */
+/** Extract the final reply to the user from assistant parts: final_report_to_user, ask_followup_question, user_message on text parts, or last text. Used so only one "NexusCode" block per turn shows the actual reply. */
 function getFinalReplyFromAssistantParts(parts: MessagePart[]): string | null {
   let lastAskQuestion: string | null = null
   let lastAskOptions: string[] | null = null
@@ -283,12 +285,15 @@ function getFinalReplyFromAssistantParts(parts: MessagePart[]): string | null {
   let lastText: string | null = null
   for (const p of parts) {
     if (p.type === "text") {
-      const t = (p as { text: string }).text?.trim()
-      if (t) lastText = t
+      const textPart = p as { text?: string; user_message?: string }
+      const um = typeof textPart.user_message === "string" ? textPart.user_message.trim() : ""
+      const t = typeof textPart.text === "string" ? textPart.text.trim() : ""
+      if (um) lastText = um
+      else if (t) lastText = t
       continue
     }
     if (p.type === "tool") {
-      const tp = p as { tool: string; status: string; input?: Record<string, unknown>; output?: string }
+      const tp = p as { tool: string; status: string; input?: Record<string, unknown>; output?: unknown }
       if (tp.tool === "ask_followup_question") {
         const q = (tp.input?.question as string)?.trim()
         if (q) lastAskQuestion = q
@@ -296,7 +301,8 @@ function getFinalReplyFromAssistantParts(parts: MessagePart[]): string | null {
         if (opts?.length) lastAskOptions = opts
       }
       if (tp.tool === "final_report_to_user" && tp.status === "completed") {
-        const msg = (tp.output ?? (tp.input?.message as string))?.trim()
+        const raw = tp.output ?? tp.input?.message
+        const msg = typeof raw === "string" ? raw.trim() : raw != null ? String(raw).trim() : ""
         if (msg) lastReportToUser = msg
       }
     }
@@ -313,7 +319,7 @@ const MODES: Mode[] = ["agent", "plan", "ask", "debug"]
 const MODEL_PROVIDERS = ["anthropic", "openai", "google", "openai-compatible", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"] as const
 const EMBEDDING_PROVIDERS = ["openai", "openai-compatible", "ollama", "local"] as const
 
-/** Slash commands (OpenCode-style: /new, /sessions, /compact, /thinking, /details, etc.) */
+/** Slash commands (OpenCode-style: /new, /sessions, /compact, /show-details, /details, etc.) */
 type SlashAction =
   | "clear"
   | "compact"
@@ -322,7 +328,6 @@ type SlashAction =
   | "model"
   | "embeddings"
   | "index"
-  | "thinking"
   | "details"
   | "showDetails"
   | "sessions"
@@ -351,7 +356,6 @@ const SLASH_COMMANDS: Array<{ cmd: string; label: string; desc: string; mode?: M
     action: "localReviewUncommitted",
   },
   { cmd: "mcps", label: "/mcps", desc: "MCP servers", action: "mcps" },
-  { cmd: "models", label: "/models", desc: "LLM provider & model", action: "model" },
   { cmd: "model", label: "/model", desc: "LLM provider & model", action: "model" },
   { cmd: "new", label: "/new", desc: "New session", action: "clear" },
   { cmd: "review", label: "/review", desc: "Review changes", action: "review" },
@@ -367,7 +371,6 @@ const SLASH_COMMANDS: Array<{ cmd: string; label: string; desc: string; mode?: M
   { cmd: "debug", label: "/debug", desc: "Debug mode (diagnose first)", mode: "debug" },
   { cmd: "compact", label: "/compact", desc: "Compact context", action: "compact" },
   { cmd: "embeddings", label: "/embeddings", desc: "Embeddings model (vector search)", action: "embeddings" },
-  { cmd: "thinking", label: "/thinking", desc: "Toggle reasoning visibility", action: "thinking" },
   { cmd: "details", label: "/details", desc: "Toggle tool execution details", action: "details" },
   { cmd: "clear", label: "/clear", desc: "Clear chat", action: "clear" },
   { cmd: "settings", label: "/settings", desc: "Settings hub", action: "settings" },
@@ -474,6 +477,7 @@ export function App({
   onResolveApproval,
   getSessionList,
   onSwitchSession,
+  onDeleteSession,
   onPlanFollowupChoice,
 }: AppProps) {
   const dims = useTerminalDimensions()
@@ -546,6 +550,7 @@ export function App({
   const [chatScrollLines, setChatScrollLines] = useState(0)
   const [sessionList, setSessionList] = useState<Array<{ id: string; ts?: number; title?: string; messageCount: number }>>([])
   const [sessionListSelected, setSessionListSelected] = useState(0)
+  const [sessionListSearchQuery, setSessionListSearchQuery] = useState("")
   const [sessionListLoading, setSessionListLoading] = useState(false)
   const [agentPresets, setAgentPresets] = useState<AgentPreset[]>([])
   const [agentPresetSelected, setAgentPresetSelected] = useState(0)
@@ -570,6 +575,8 @@ export function App({
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastFlushTimeRef = useRef<number>(0)
   const lastSubmitRef = useRef<number>(0)
+  /** Prevent duplicate assistant message when multiple "done" events are in the same batch (React batches setState). */
+  const addedAssistantInBatchRef = useRef<boolean>(false)
 
   // Clamp scroll when terminal is resized so we don't show invalid offset
   useEffect(() => {
@@ -581,35 +588,10 @@ export function App({
       return Math.min(prev, maxScroll)
     })
   }, [cols, rows, view])
-  // Enable mouse wheel (SGR) for scroll — disable on unmount
+  // While agent is running, keep scroll at end so "NexusCode Working" stays at bottom of viewport
   useEffect(() => {
-    if (!process.stdout.isTTY) return
-    process.stdout.write("\x1b[?1006h")
-    return () => {
-      process.stdout.write("\x1b[?1006l")
-    }
-  }, [])
-  useEffect(() => {
-    if (!process.stdin.isTTY) return
-    const onData = (chunk: Buffer | string) => {
-      if (view !== "chat") return
-      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8")
-      if (!text.includes("\u001b[<")) return
-      const matches = text.matchAll(/\u001b\[<(\d+);(\d+);(\d+)([mM])/g)
-      for (const match of matches) {
-        const code = Number(match[1] ?? "")
-        if (code === 64) {
-          setChatScrollLines((v) => v + 3)
-        } else if (code === 65) {
-          setChatScrollLines((v) => Math.max(0, v - 3))
-        }
-      }
-    }
-    process.stdin.on("data", onData)
-    return () => {
-      process.stdin.off("data", onData)
-    }
-  }, [view])
+    if (view === "chat" && state.isRunning) setChatScrollLines(0)
+  }, [view, state.isRunning, state])
   const profileOptions = useMemo(() => ["default", ...profileNames], [profileNames])
   const sessionTitle = useMemo(() => deriveSessionTitle(state.messages), [state.messages])
   const mcpServersCount = configSnapshot?.mcp?.servers?.length ?? 0
@@ -798,6 +780,7 @@ export function App({
   // Load session list when opening sessions view
   useEffect(() => {
     if (view !== "sessions" || !getSessionList) return
+    setSessionListSearchQuery("")
     setSessionListLoading(true)
     getSessionList()
       .then((list) => {
@@ -807,6 +790,16 @@ export function App({
       .catch(() => setSessionList([]))
       .finally(() => setSessionListLoading(false))
   }, [view, getSessionList])
+
+  const SESSION_LIST_MAX_VISIBLE = 12
+  const sessionListFiltered = useMemo(() => {
+    const q = sessionListSearchQuery.trim().toLowerCase()
+    if (!q) return sessionList
+    return sessionList.filter(
+      (s) =>
+        (s.title ?? "").toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
+    )
+  }, [sessionList, sessionListSearchQuery])
 
   useEffect(() => {
     if (view !== "agentConfigs" || !projectDir) return
@@ -906,10 +899,8 @@ export function App({
               diffStats?: { added: number; removed: number }
               diffHunks?: Array<{ type: string; lineNum: number; line: string }>
             }
-            setState((s) => ({
-              ...s,
-              lastSpawnAgentPartId: ev.tool === "spawn_agent" ? null : s.lastSpawnAgentPartId,
-              currentAssistantParts: s.currentAssistantParts.map((p) =>
+            setState((s) => {
+              let nextParts = s.currentAssistantParts.map((p) =>
                 p.type === "tool" && p.id === ev.partId
                   ? {
                       ...p,
@@ -921,14 +912,33 @@ export function App({
                       ...(Array.isArray(ev.diffHunks) ? { diffHunks: ev.diffHunks } : {}),
                     }
                   : p
-              ),
-              liveTools: s.liveTools.map((lt) =>
-                lt.id === ev.partId
-                  ? { ...lt, status: ev.success ? "completed" : "error", timeEnd: Date.now() }
-                  : lt
-              ),
-              ...(ev.tool === "plan_exit" && ev.success ? { planCompleted: true } : {}),
-            }))
+              )
+              // Merge progress_note output into last text part so it shows as plain text; Explored block will collapse.
+              if (ev.tool === "progress_note" && ev.success && ev.output?.trim()) {
+                const lastTextIdx = nextParts.map((p, i) => (p.type === "text" ? i : -1)).filter((i) => i >= 0).pop()
+                if (lastTextIdx !== undefined) {
+                  const part = nextParts[lastTextIdx] as { type: "text"; text: string; user_message?: string }
+                  nextParts = [...nextParts]
+                  nextParts[lastTextIdx] = {
+                    ...part,
+                    user_message: (part.user_message ?? "").trim() ? `${part.user_message}\n${ev.output!.trim()}` : ev.output!.trim(),
+                  }
+                } else {
+                  nextParts = [...nextParts, { type: "text" as const, text: "", user_message: ev.output.trim() }]
+                }
+              }
+              return {
+                ...s,
+                lastSpawnAgentPartId: ev.tool === "spawn_agent" ? null : s.lastSpawnAgentPartId,
+                currentAssistantParts: nextParts,
+                liveTools: s.liveTools.map((lt) =>
+                  lt.id === ev.partId
+                    ? { ...lt, status: ev.success ? "completed" : "error", timeEnd: Date.now() }
+                    : lt
+                ),
+                ...(ev.tool === "plan_exit" && ev.success ? { planCompleted: true } : {}),
+              }
+            })
             break
           }
           case "subagent_start":
@@ -1036,7 +1046,11 @@ export function App({
             setState((s) => ({ ...s, awaitingApproval: true, pendingApprovalAction: ev.action ?? null }))
             break
           }
-          case "done":
+          case "done": {
+            // Set ref immediately so a second "done" in the same batch skips (setState updater runs async).
+            const wasAlreadyAdded = addedAssistantInBatchRef.current
+            addedAssistantInBatchRef.current = true
+            if (wasAlreadyAdded) break
             setState((s) => {
               const text = stripToolCallMarkup(s.currentStreaming)
               const parts = [...s.currentAssistantParts]
@@ -1067,6 +1081,7 @@ export function App({
                         : "No final text response was produced. Retry with a narrower prompt or switch to agent mode.",
                   }
                 : null
+              if (duplicateAssistant) addedAssistantInBatchRef.current = false
               return {
                 ...s,
                 messages: newMsg && !duplicateAssistant
@@ -1085,6 +1100,7 @@ export function App({
               }
             })
             break
+          }
           case "plan_followup_ask":
             setState((s) => ({ ...s, planFollowupText: (event as { planText: string }).planText ?? null }))
             break
@@ -1177,6 +1193,7 @@ export function App({
   const appendUserEcho = (content: string, makeRunning = false) => {
     const trimmed = content.trim()
     if (!trimmed) return
+    if (makeRunning) addedAssistantInBatchRef.current = false
     setState((s) => {
       const last = s.messages[s.messages.length - 1]
       if (
@@ -1261,7 +1278,7 @@ export function App({
       setHistoryIdx(-1)
       setInput("")
       appendUserEcho(content, true)
-      onMessage(content, state.mode)
+      onMessage(content, state.mode) // mode from chat state: system prompt and tools are built from this in runAgentLoop
     }
   }
 
@@ -1334,9 +1351,6 @@ export function App({
         return
       case "help":
         setView("help")
-        return
-      case "thinking":
-        setView("showDetails")
         return
       case "details":
         setView("showDetails")
@@ -2042,20 +2056,49 @@ export function App({
       }
       if (view === "sessions") {
         if (key.upArrow) {
-          setSessionListSelected((i) => (i <= 0 ? Math.max(0, sessionList.length - 1) : i - 1))
+          setSessionListSelected((i) =>
+            i <= 0 ? Math.max(0, sessionListFiltered.length - 1) : i - 1
+          )
           return
         }
         if (key.downArrow) {
-          setSessionListSelected((i) => (i >= sessionList.length - 1 ? 0 : i + 1))
+          setSessionListSelected((i) =>
+            i >= sessionListFiltered.length - 1 ? 0 : i + 1
+          )
           return
         }
-        if (isEnter && onSwitchSession && sessionList[sessionListSelected]) {
-          const id = sessionList[sessionListSelected]!.id
+        if (isEnter && onSwitchSession && sessionListFiltered[sessionListSelected]) {
+          const id = sessionListFiltered[sessionListSelected]!.id
           onSwitchSession(id).then(() => setView("chat")).catch(() => {})
           return
         }
         if (key.escape) {
           setView("chat")
+          return
+        }
+        if (lowerChar === "d" && onDeleteSession && sessionListFiltered[sessionListSelected]) {
+          const id = sessionListFiltered[sessionListSelected]!.id
+          Promise.resolve(onDeleteSession(id))
+            .then(() => getSessionList?.())
+            .then((list) => {
+              if (list) {
+                setSessionList(list)
+                setSessionListSelected((prev) =>
+                  Math.max(0, Math.min(prev, sessionListFiltered.length - 2))
+                )
+              }
+            })
+            .catch(() => {})
+          return
+        }
+        if (key.backspace || key.delete || inputChar === "\b" || inputChar === "\x7f") {
+          setSessionListSearchQuery((q) => q.slice(0, -1))
+          setSessionListSelected(0)
+          return
+        }
+        if (inputText && !key.ctrl && !key.meta) {
+          setSessionListSearchQuery((q) => q + inputText)
+          setSessionListSelected(0)
           return
         }
         return
@@ -2273,7 +2316,9 @@ export function App({
   const slashPopupRows = slashOpen ? Math.min(12, Math.max(5, Math.floor(rows * 0.24))) + 3 : 0
   const approvalRows = state.awaitingApproval && state.pendingApprovalAction ? 8 : 0
   const planRows = view === "chat" && state.mode === "plan" && state.planCompleted && !state.isRunning ? 3 : 0
-  const reservedRows = 11 + slashPopupRows + approvalRows + planRows
+  // Run progress + "NexusCode Working" are inside viewport (buildChatLines); no extra reserved rows
+  const runProgressRows = 0
+  const reservedRows = 11 + slashPopupRows + approvalRows + planRows + runProgressRows
   const chatViewportRows = Math.max(6, rows - reservedRows)
   const indexStatusLabel = (() => {
     if (noIndex) return "Vector index: off"
@@ -2350,10 +2395,13 @@ export function App({
           )}
           {view === "sessions" && (
             <SessionsListView
-              sessionList={sessionList}
+              sessionListFiltered={sessionListFiltered}
               sessionListLoading={sessionListLoading}
               sessionListSelected={sessionListSelected}
+              sessionListSearchQuery={sessionListSearchQuery}
+              maxVisible={SESSION_LIST_MAX_VISIBLE}
               currentSessionId={sessionId}
+              onDeleteSession={onDeleteSession}
               cols={shellW}
             />
           )}
@@ -2408,14 +2456,13 @@ export function App({
           onSubmit={submitChatInput}
         />
       ) : (
-        <box flexDirection="column" flexGrow={1} minHeight={0}>
+        <box flexDirection="column" flexGrow={1} minHeight={0} flexShrink={1}>
           <MemoChatViewport
             state={state}
             cols={cols}
             viewportRows={chatViewportRows}
             scrollLines={chatScrollLines}
           />
-          {view === "chat" && <MemoRunProgressBlock state={state} cols={cols} maxLines={RUN_PROGRESS_MAX_LINES} />}
           {view === "chat" && state.mode === "plan" && state.planCompleted && !state.isRunning && (
             <box flexShrink={0}>
               <PlanActionsBar cols={cols} />
@@ -2525,7 +2572,7 @@ function SettingsHubView({
 }) {
   const vectorState = !indexingEnabled ? "disabled" : vectorIndexEnabled ? "enabled" : "disabled"
   const items = [
-    "1) Model & LLM (/models)",
+    "1) Model & LLM (/model)",
     "2) Embeddings (/embeddings)",
     `3) Vector index: ${vectorState} (toggle)`,
     "4) Index sync & Vector DB (/index)",
@@ -2648,7 +2695,7 @@ function ModelConfigView({
       <text fg="cyan" bold> Custom model</text>
       <text fg="gray"> Provider, Model ID, API Key, Base URL, Temperature. Tab or 1 — back to free list.</text>
       {labels.map((label, i) => (
-        <box key={label}>
+        <box key={label} flexDirection="row">
           <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </text>
           <text fg="white">
             {fit(
@@ -2657,8 +2704,8 @@ function ModelConfigView({
                 : ((form[keys[i]] as string) || ""),
               valueWidth
             )}
+            {focus === i ? "│" : ""}
           </text>
-          {focus === i && <text fg="cyan">│</text>}
         </box>
       ))}
       {focus === 0 && (
@@ -2689,9 +2736,8 @@ function EmbeddingsConfigView({
   return (
     <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
       <text fg="cyan" bold> Embeddings — vector model for codebase search</text>
-      <text fg="gray"> Used when indexing.vector is on. Tab — next field, Enter — save, Esc — back.</text>
       {labels.map((label, i) => (
-        <box key={label}>
+        <box key={label} flexDirection="row">
           <text fg={focus === i ? "cyan" : "gray"}>{focus === i ? "▸ " : "  "}{label}: </text>
           <text fg="white">
             {fit(
@@ -2700,8 +2746,8 @@ function EmbeddingsConfigView({
                 : ((form[keys[i]] as string) || ""),
               valueWidth
             )}
+            {focus === i ? "│" : ""}
           </text>
-          {focus === i && <text fg="cyan">│</text>}
         </box>
       ))}
       {focus === 0 && (
@@ -2921,33 +2967,50 @@ function ShowDetailsView({
 }
 
 function SessionsListView({
-  sessionList,
+  sessionListFiltered,
   sessionListLoading,
   sessionListSelected,
+  sessionListSearchQuery,
+  maxVisible,
   currentSessionId,
+  onDeleteSession,
   cols,
 }: {
-  sessionList: Array<{ id: string; ts?: number; title?: string; messageCount: number }>
+  sessionListFiltered: Array<{ id: string; ts?: number; title?: string; messageCount: number }>
   sessionListLoading: boolean
   sessionListSelected: number
+  sessionListSearchQuery: string
+  maxVisible: number
   currentSessionId?: string
+  onDeleteSession?: (sessionId: string) => void | Promise<void>
   cols: number
 }) {
   const width = Math.max(40, cols - 4)
+  const start = Math.max(
+    0,
+    Math.min(
+      sessionListSelected - Math.floor(maxVisible / 2),
+      sessionListFiltered.length - maxVisible
+    )
+  )
+  const end = Math.min(start + maxVisible, sessionListFiltered.length)
+  const visibleSlice = sessionListFiltered.slice(start, end)
+
   return (
     <box flexDirection="column" borderStyle="single" borderColor="cyan" paddingLeft={1} paddingRight={1}>
       <text fg="cyan" bold> Sessions</text>
-      <text fg="gray"> ↑↓ select  Enter — switch  Esc — back</text>
+      <text fg="gray"> Search: {sessionListSearchQuery || "(type to filter by title/id)"}</text>
       {sessionListLoading ? (
         <box><text fg="yellow"> Loading…</text></box>
-      ) : sessionList.length === 0 ? (
+      ) : sessionListFiltered.length === 0 ? (
         <box><text fg="gray"> No sessions</text></box>
       ) : (
-        <box flexDirection="column" marginTop={1}>
-          {sessionList.map((s, i) => {
+        <box flexDirection="column" marginTop={1} height={maxVisible}>
+          {visibleSlice.map((s, i) => {
+            const globalIndex = start + i
             const title = (s.title || s.id).slice(0, width - 12)
             const isCurrent = s.id === currentSessionId
-            const isSelected = i === sessionListSelected
+            const isSelected = globalIndex === sessionListSelected
             return (
               <box key={s.id}>
                 <text fg={isCurrent ? "green" : isSelected ? "cyan" : "white"}>
@@ -2958,6 +3021,7 @@ function SessionsListView({
           })}
         </box>
       )}
+      <text fg="gray"> ↑↓ select  Enter switch  D delete  Esc back</text>
     </box>
   )
 }
@@ -3662,13 +3726,11 @@ function LiveToolCard({ tool }: { tool: LiveTool }) {
   }
 
   return (
-    <box paddingLeft={2} paddingRight={1}>
-      <text fg="yellow">
-        <spinner name="arc" />
-      </text>
+    <box paddingLeft={2} paddingRight={1} flexDirection="row">
+      <spinner name="arc" />
       <text fg="yellow">
         {" "}
-        {icon} {displayName}
+        {String(icon)} {String(displayName)}
       </text>
       {preview && (
         <text fg="gray"> — {preview}</text>
@@ -3931,7 +3993,23 @@ function Footer({
   )
 }
 
-type ChatLine = { text: string; color?: "white" | "gray" | "cyan" | "green" | "yellow" | "red" | "magenta" | "blue"; bold?: boolean; /** When true, text contains ANSI codes — do not set fg/bold */ ansi?: boolean; /** When true, render this line with spinner (only on last action/tool) */ isActive?: boolean }
+type ChatLine = { text: string; color?: "white" | "gray" | "cyan" | "green" | "yellow" | "red" | "magenta" | "blue"; bold?: boolean; /** When true, text contains ANSI codes — do not set fg/bold */ ansi?: boolean; /** When true, render this line with spinner (only on last action/tool) */ isActive?: boolean; /** When true, render as progress indicator (spinner + label) — last line when running */ isProgressIndicator?: boolean }
+
+/** Ensure OpenTUI never receives non-string: normalize to ChatLine with string text. */
+function toChatLine(
+  text: unknown,
+  opts: { color?: ChatLine["color"]; bold?: boolean; ansi?: boolean; isActive?: boolean; isProgressIndicator?: boolean } = {}
+): ChatLine {
+  const { color, bold, ansi, isActive, isProgressIndicator } = opts
+  return {
+    text: typeof text === "string" ? text : String(text ?? ""),
+    ...(color != null ? { color } : {}),
+    ...(bold != null ? { bold } : {}),
+    ...(ansi != null ? { ansi } : {}),
+    ...(isActive != null ? { isActive } : {}),
+    ...(isProgressIndicator != null ? { isProgressIndicator } : {}),
+  }
+}
 
 function ChatViewport({
   state,
@@ -3955,14 +4033,17 @@ function ChatViewport({
   return (
     <box flexDirection="column" flexGrow={1} minHeight={visibleHeight} overflowY="hidden" paddingLeft={1} paddingRight={1}>
       {safeScroll > 0 && (
-        <text fg="gray">↑ Scroll: wheel / ↑↓ / PgUp/Dn · Ctrl+G or End = latest</text>
+        <text fg="gray">↑ Scroll: ↑↓ / PgUp/PgDn · Ctrl+G or End = latest · Select: mouse · Copy: Ctrl+C or Ctrl+Y</text>
+      )}
+      {safeScroll === 0 && lines.length > 0 && (
+        <text fg="gray">Select: mouse · Copy: Ctrl+C or Ctrl+Y · Esc: cancel selection</text>
       )}
       {safeScroll > 0 && state.isRunning && (
         <text fg="cyan">↓ New content — Ctrl+G or End to jump to latest</text>
       )}
       {lines.map((line, idx) => (
-        <text key={`${idx}_${line.text.slice(0, 30)}`} fg={line.ansi ? undefined : (line.color ?? "white")} bold={line.ansi ? undefined : line.bold}>
-          {line.text}
+        <text key={`${idx}_${String(line.text).slice(0, 30)}`} fg={line.ansi ? undefined : (line.color ?? "white")} bold={line.ansi ? undefined : line.bold}>
+          {String(line.text ?? "")}
         </text>
       ))}
       {lines.length === 0 && <text fg="gray">No messages yet.</text>}
@@ -3990,23 +4071,32 @@ function RunProgressBlock({ state, cols, maxLines }: { state: AppState; cols: nu
   }, [state, width, maxLines])
   if (lines.length === 0) return null
   return (
-    <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1} borderStyle="single" borderColor="gray">
-      {lines.map((line, idx) => (
-        line.isActive ? (
-          <box key={`rp-active-${idx}`}>
-            <text fg="yellow">
+    <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1} overflowY="hidden" height={lines.length}>
+      {lines.map((line, idx) => {
+        const safeText = String(line.text ?? "")
+        if (line.isProgressIndicator) {
+          return (
+            <box key={`rp-progress-${idx}`} flexDirection="row">
               <spinner name="arc" />
-            </text>
+              <text fg={line.ansi ? undefined : (line.color ?? "green")} bold={line.ansi ? undefined : line.bold}>
+                {safeText}
+              </text>
+            </box>
+          )
+        }
+        return line.isActive ? (
+          <box key={`rp-active-${idx}`} flexDirection="row">
+            <spinner name="arc" />
             <text fg={line.ansi ? undefined : (line.color ?? "gray")} bold={line.ansi ? undefined : line.bold}>
-              {" "}{line.text}
+              {" "}{safeText}
             </text>
           </box>
         ) : (
-          <text key={`rp-${idx}-${line.text.slice(0, 24)}`} fg={line.ansi ? undefined : (line.color ?? "white")} bold={line.ansi ? undefined : line.bold}>
-            {line.text}
+          <text key={`rp-${idx}-${safeText.slice(0, 24)}`} fg={line.ansi ? undefined : (line.color ?? "white")} bold={line.ansi ? undefined : line.bold}>
+            {safeText}
           </text>
         )
-      ))}
+      })}
     </box>
   )
 }
@@ -4084,6 +4174,9 @@ function formatToolPreview(tool: LiveTool): string {
   } else if (tool.tool === "spawn_agent") {
     const desc = tool.input?.["description"]
     if (desc && typeof desc === "string") parts.push((desc.length > 40 ? desc.slice(0, 37) + "…" : desc).replace(/\s+/g, " "))
+  } else if (tool.tool === "progress_note" || tool.tool === "final_report_to_user") {
+    const msg = tool.input?.["message"]
+    if (msg && typeof msg === "string") parts.push((msg.length > 36 ? msg.slice(0, 33) + "…" : msg).replace(/\s+/g, " "))
   } else if (pathStr) {
     const base = pathStr.split("/").pop() ?? pathStr
     const short = base.length > 36 ? base.slice(0, 33) + "…" : base
@@ -4175,7 +4268,7 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
     state.isRunning && hasRunningNonTodoTool ? todoItems.findIndex((i) => !i.done) : -1
 
   if (state.isRunning && state.currentStreaming.trim() && state.currentAssistantParts.length === 0) {
-    out.push({ text: "  Working…", color: "gray", isActive: true })
+    out.push({ text: "  Working…", color: "gray" })
     const streamed = cleanAssistantText(sanitizeText(state.currentStreaming))
     if (streamed.trim()) out.push(...plainTextToChatLines(streamed, Math.max(10, width - 2)))
     out.push({ text: "", color: "gray" })
@@ -4190,7 +4283,13 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
       if (exploreFiles > 0) labelParts.push(exploreFiles === 1 ? "1 file" : `${exploreFiles} files`)
       if (exploreSearches > 0) labelParts.push(exploreSearches === 1 ? "1 search" : `${exploreSearches} searches`)
       out.push({ text: `  Explored${labelParts.length > 0 ? ` ${labelParts.join(", ")}` : ""}`, color: "gray" })
-      for (const item of prefixItems) {
+      const collapseExplored = parts.some(
+        (p) =>
+          (p.type === "text" && (p as { user_message?: string }).user_message?.trim()) ||
+          (p.type === "tool" && (p as { tool: string; status: string }).tool === "progress_note" && (p as { status: string }).status === "completed")
+      )
+      if (!collapseExplored) {
+        for (const item of prefixItems) {
         if (item.type === "reasoning") {
           const durationStr = item.durationMs != null ? ` (${(item.durationMs / 1000).toFixed(1)}s)` : ""
           out.push({ text: `  Thought${durationStr}`, color: "magenta" })
@@ -4207,6 +4306,7 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
           for (const l of wrapToWidth(line, width)) out.push({ text: l, color: "gray" })
         }
       }
+      }
     }
     let i = 0
     while (i < parts.length) {
@@ -4216,7 +4316,10 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
       }
       const part = parts[i]!
       if (part.type === "text") {
-        const t = cleanAssistantText(sanitizeText((part as { text: string }).text))
+        const textPart = part as { text: string; user_message?: string }
+        const t = cleanAssistantText(sanitizeText(textPart.text ?? ""))
+        const um = typeof textPart.user_message === "string" ? textPart.user_message.trim() : ""
+        if (um) out.push(...plainTextToChatLines(um, wrapW))
         if (t.trim()) out.push(...plainTextToChatLines(t, wrapW))
         i++
       } else if (part.type === "tool") {
@@ -4241,6 +4344,7 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
             i++
           }
           for (const g of toolGroups) {
+            if (g.tool === "progress_note") continue
             if (isExploreTool(g.tool)) continue
             const icon = TOOL_ICONS[g.tool] ?? "🔧"
             const status = g.status === "completed" ? "ok" : g.status === "error" ? "err" : "…"
@@ -4279,7 +4383,7 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
     const line = preview
       ? `  Working… ${toolDisplayName(runningTool.tool)} — ${preview}`
       : `  Working… ${toolDisplayName(runningTool.tool)}`
-    out.push({ text: line, color: "gray", isActive: true })
+    out.push({ text: line, color: "gray" })
     out.push({ text: "", color: "gray" })
   }
   if (state.isRunning && runningTool && state.currentAssistantParts.length === 0 && !state.currentStreaming?.trim()) {
@@ -4287,7 +4391,7 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
     const line = preview
       ? `  Working… ${toolDisplayName(runningTool.tool)} — ${preview}`
       : `  Working… ${toolDisplayName(runningTool.tool)}`
-    out.push({ text: line, color: "gray", isActive: true })
+    out.push({ text: line, color: "gray" })
     out.push({ text: "", color: "gray" })
   }
   if (state.subAgents.length > 0) {
@@ -4330,9 +4434,7 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
     }
     out.push({ text: "", color: "gray" })
   }
-  if (state.compacting) out.push({ text: "Compacting context...", color: "blue" })
-  if (state.lastError) for (const l of wrapToWidth(`Error: ${sanitizeText(state.lastError)}`, width)) out.push({ text: l, color: "red" })
-  return out
+  return out.map((l) => toChatLine(l.text, l))
 }
 
 function buildChatLines(state: AppState, width: number): ChatLine[] {
@@ -4371,8 +4473,8 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
             }
           }
         }
-        if (finalReply != null && finalReply.trim()) {
-          const text = formatMarkdownTables(cleanAssistantText(sanitizeText(finalReply)))
+        if (finalReply != null && String(finalReply).trim()) {
+          const text = formatMarkdownTables(cleanAssistantText(sanitizeText(String(finalReply))))
           out.push(...plainTextToChatLines(text, wrapW))
         } else {
           out.push({ text: "  (no reply text)", color: "gray" })
@@ -4383,9 +4485,9 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
         const segments = splitMessageBlocks(content)
         for (const seg of segments) {
           if (seg.type === "text") {
-            out.push(...plainTextToChatLines(formatMarkdownTables(seg.content), wrapW))
+            out.push(...plainTextToChatLines(formatMarkdownTables(String(seg.content ?? "")), wrapW))
           } else {
-            const codeLines = seg.content.split("\n")
+            const codeLines = String(seg.content ?? "").split("\n")
             const borderW = Math.max(12, Math.min(width - 4, 58))
             out.push({ text: "  ┌" + "─".repeat(Math.max(0, borderW - 2)) + "┐", color: "gray" })
             for (const codeLine of codeLines) {
@@ -4405,7 +4507,18 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
     }
   }
 
-  return out
+  if (state.compacting) out.push({ text: "Compacting context...", color: "blue" })
+  if (state.lastError) for (const l of wrapToWidth(`Error: ${sanitizeText(state.lastError)}`, width)) out.push({ text: l, color: "red" })
+  if (state.isRunning) {
+    const runLines = buildRunProgressLines(state, width)
+    const cap = RUN_PROGRESS_MAX_LINES
+    const toAppend = runLines.length <= cap ? runLines : runLines.slice(-cap)
+    out.push(...toAppend)
+    const runningTool = state.liveTools.find((t) => t.status === "running" && t.tool !== "update_todo_list")
+    const label = runningTool ? ` ${toolDisplayName(runningTool.tool)}…` : " Working…"
+    out.push({ text: ` ◀ NexusCode${label}`, color: "green", bold: true, isProgressIndicator: true })
+  }
+  return out.map((l) => toChatLine(l.text, l))
 }
 
 function wrapToWidth(text: string, width: number): string[] {
@@ -4710,7 +4823,7 @@ function formatMarkdownTables(content: string): string {
 /** Plain text to ChatLine[] (no markdown). Table alignment via formatMarkdownTables applied before calling. */
 function plainTextToChatLines(text: string, wrapW: number): ChatLine[] {
   const lines: ChatLine[] = []
-  const safe = sanitizeText(text).trim()
+  const safe = sanitizeText(String(text ?? "")).trim()
   if (!safe) return lines
   for (const raw of safe.split("\n")) {
     for (const line of wrapToWidth(raw || " ", wrapW)) {

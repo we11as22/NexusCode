@@ -104,6 +104,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   toolRegistry.register(createSpawnAgentTool(parallelManager, config))
   const { builtin: tools, dynamic } = toolRegistry.getForMode(mode)
   const allTools = [...tools, ...dynamic]
+  // mode and allTools match; runAgentLoop builds system prompt and tool set from this mode
 
   const compaction = createCompaction()
 

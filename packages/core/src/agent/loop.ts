@@ -41,7 +41,7 @@ const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   debug: 200,
 }
 
-/** When final_report_to_user tool completes, set its output as user_message on the last text part of the message (so UI and context see it). */
+/** When final_report_to_user or progress_note tool completes, set its output as user_message on the last text part of the message (so UI and context see it). */
 function setReportToUserMessage(session: ISession, messageId: string, userMessage: string): void {
   const msg = session.messages.find((m) => m.id === messageId)
   if (!msg || !userMessage.trim()) return
@@ -119,8 +119,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
   const activeClient = client
 
-  // 1. Resolve tools: built-ins by mode + dynamic (MCP/custom); blocked tools NEVER included.
-  //    Access control is enforced here (backend), not in prompts — only resolvedTools go to the LLM.
+  // 1. Resolve tools: built-ins by mode + dynamic (MCP/custom); blocked tools NEVER included in allowed set.
+  //    System prompt (buildSystemPrompt) and tool set both use the same `mode` — promptCtx.mode and
+  //    getBlockedToolsForMode(mode) / getBuiltinToolsForMode(mode) are derived from this single value on every run.
   const blockedTools = getBlockedToolsForMode(mode)
   const builtinToolNames = new Set(getBuiltinToolsForMode(mode))
   // Vector search is opt-in: when disabled, codebase_search is not available.
@@ -232,7 +233,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     },
   }
 
-  const autoApproveActions = getAutoApproveActions(mode, config.modes[mode])
+  const autoApproveActions = getAutoApproveActions(mode, config.modes?.[mode])
   const mentionsContext = await resolveMentionsContext(session, host)
   const initialProjectContext = await getInitialProjectContext(host.cwd)
   /**
@@ -329,7 +330,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     const usedTokens = session.getTokenEstimate()
     const contextPercent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
     const promptCtx: PromptContext = {
-      mode,
+      mode, // same mode used for tool resolution above; system prompt block and Environment "Current mode" come from this
       config,
       cwd: host.cwd,
       modelId: activeClient.modelId,
@@ -400,9 +401,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     let currentText = ""
     let currentReasoning = ""
-    /** Optional message to user from JSON preamble; set once when first line is parsed. */
-    let currentUserMessage: string | undefined
-    /** True after we've parsed the optional JSON preamble line (or decided to skip). */
+    /** True after we've parsed the optional JSON preamble line (reasoning only) or decided to skip. */
     let preambleParsed = false
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
     lastToolName = ""
@@ -431,41 +430,32 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       const toolParts = existingParts.filter((p): p is ToolPart => p.type === "tool")
       const parts: MessagePart[] = []
       if (currentReasoning) parts.push({ type: "reasoning", text: currentReasoning } as ReasoningPart)
-      // Parse first line as JSON: { reasoning, user_message? } — part 1 → Thought, part 2 → user (collapses tools)
+      // Parse first line as JSON: { reasoning } only — shown as Thought in UI. Progress notes use progress_note tool.
       if (!preambleParsed && currentText.includes("\n")) {
         preambleParsed = true
         const firstNewline = currentText.indexOf("\n")
         const line = currentText.slice(0, firstNewline).trim()
         const rest = currentText.slice(firstNewline + 1)
-        let parsed: { reasoning?: string; user_message?: string } | null = null
+        let parsedReasoning: string | null = null
         if (line.startsWith("{")) {
           try {
             const v = JSON.parse(line) as unknown
             if (v && typeof v === "object" && !Array.isArray(v)) {
               const o = v as Record<string, unknown>
-              parsed = {}
-              if (typeof o.reasoning === "string" && o.reasoning.trim()) parsed.reasoning = o.reasoning.trim()
-              if (typeof o.user_message === "string" && o.user_message.trim()) parsed.user_message = o.user_message.trim()
+              if (typeof o.reasoning === "string" && o.reasoning.trim()) parsedReasoning = o.reasoning.trim()
             }
           } catch {
             // Not valid JSON — leave as normal text
           }
         }
-        if (parsed && (parsed.reasoning || parsed.user_message)) {
-          if (parsed.reasoning) {
-            currentReasoning += (currentReasoning ? "\n\n" : "") + parsed.reasoning
-            host.emit({ type: "reasoning_delta", delta: parsed.reasoning, messageId: newMessageId })
-          }
-          if (parsed.user_message) {
-            currentUserMessage = parsed.user_message
-            host.emit({ type: "text_delta", delta: "", messageId: newMessageId, user_message_delta: parsed.user_message })
-          }
+        if (parsedReasoning) {
+          currentReasoning += (currentReasoning ? "\n\n" : "") + parsedReasoning
+          host.emit({ type: "reasoning_delta", delta: parsedReasoning, messageId: newMessageId })
           currentText = rest
         }
-        // If not valid preamble JSON, keep currentText unchanged (first line stays in text)
       }
-      if (currentText || currentUserMessage) {
-        parts.push({ type: "text", text: currentText, user_message: currentUserMessage } as TextPart)
+      if (currentText) {
+        parts.push({ type: "text", text: currentText } as TextPart)
       }
       parts.push(...toolParts)
       session.updateMessage(newMessageId, { content: parts.length > 0 ? parts : currentText || "" })
@@ -692,6 +682,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               if (toolName === "final_report_to_user" && result.success && result.output?.trim()) {
                 setReportToUserMessage(session, newMessageId, result.output)
               }
+              if (toolName === "progress_note" && result.success && result.output?.trim()) {
+                setReportToUserMessage(session, newMessageId, result.output)
+              }
 
               lastToolName = toolName
               executedToolThisIteration = true
@@ -840,6 +833,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           }
 
           if (call.toolName === "final_report_to_user" && result.success && result.output?.trim()) {
+            setReportToUserMessage(session, newMessageId, result.output)
+          }
+          if (call.toolName === "progress_note" && result.success && result.output?.trim()) {
             setReportToUserMessage(session, newMessageId, result.output)
           }
 
@@ -1064,32 +1060,29 @@ async function executeToolCall(
     }
   }
 
-  // Restricted modes (plan/ask): allow writes only to .nexus/plans/*.md|*.txt
-  if (ctx.config.modes && ["write_to_file", "replace_in_file"].includes(toolName)) {
-    const isRestrictedMode = !tools.some(t => t.name === "execute_command")
-    if (isRestrictedMode) {
-      const targetPath = extractWriteTargetPath(toolName, toolInput)
-      if (!targetPath) {
+  // Plan mode: allow writes only to .nexus/plans/*.md|*.txt (no source code edits)
+  if (mode === "plan" && ["write_to_file", "replace_in_file"].includes(toolName)) {
+    const targetPath = extractWriteTargetPath(toolName, toolInput)
+    if (!targetPath) {
+      return {
+        success: false,
+        output: "In plan mode, write operations require an explicit target path under .nexus/plans/*.md or .txt.",
+      }
+    }
+    const rel = path.isAbsolute(targetPath) ? path.relative(ctx.cwd, targetPath) : targetPath
+    const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
+    if (!PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) {
+      const extMatch = normalized.match(/\.[a-zA-Z0-9]+$/)
+      const ext = extMatch ? extMatch[0].toLowerCase() : ""
+      if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
         return {
           success: false,
-          output: "In the current mode, write operations require an explicit target path under .nexus/plans/*.md or .txt.",
+          output: `In plan mode you cannot modify source code files (${ext}). Write only the plan to .nexus/plans/*.md or .txt, then call plan_exit.`,
         }
       }
-      const rel = path.isAbsolute(targetPath) ? path.relative(ctx.cwd, targetPath) : targetPath
-      const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
-      if (!PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) {
-        const extMatch = normalized.match(/\.[a-zA-Z0-9]+$/)
-        const ext = extMatch ? extMatch[0].toLowerCase() : ""
-        if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
-          return {
-            success: false,
-            output: `In the current mode, you cannot modify source code files (${ext}). You may only write plan docs in .nexus/plans/*.md or .txt.`,
-          }
-        }
-        return {
-          success: false,
-          output: "In the current mode, you may only write plan documentation files under .nexus/plans/ (*.md or *.txt).",
-        }
+      return {
+        success: false,
+        output: "In plan mode you may only write plan documentation under .nexus/plans/ (*.md or *.txt). Do not modify source files.",
       }
     }
   }

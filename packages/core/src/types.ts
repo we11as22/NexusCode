@@ -352,6 +352,11 @@ export interface NexusConfig {
     /** When true, first final_report_to_user (agent) is rejected; model must re-verify and call again (Cline-style). */
     doubleCheckCompletion?: boolean
   }
+  /** UI preferences (e.g. chat pane). */
+  ui?: {
+    /** When true, streamed text_delta is shown in chat as muted/small; when false, only tool-written text is shown. */
+    showReasoningInChat?: boolean
+  }
   mcp: {
     servers: McpServerConfig[]
   }

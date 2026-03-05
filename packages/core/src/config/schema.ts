@@ -121,6 +121,12 @@ export const NexusConfigSchema = z.object({
     doubleCheckCompletion: z.boolean().default(false),
   }).default({}),
 
+  /** UI preferences (e.g. chat pane). */
+  ui: z.object({
+    /** When true, streamed text_delta is shown in chat as muted/small "reasoning"; when false, only tool-written text (progress_note, final_report_to_user) is shown. */
+    showReasoningInChat: z.boolean().default(false),
+  }).default({}),
+
   mcp: z.object({
     servers: z.array(mcpServerSchema).default([]),
   }).default({}),

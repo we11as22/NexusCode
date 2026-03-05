@@ -199,7 +199,7 @@ function ChatView() {
         </div>
 
         {((store.todo && store.todo.trim()) || store.isRunning) && (
-          <div className="flex-shrink-0 border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+          <div className="flex-shrink-0 border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] nexus-todo-panel">
             {store.todo && store.todo.trim() && (
               <ProgressTodoBlock todo={store.todo} isRunning={store.isRunning} header={todoHeader} />
             )}
@@ -521,6 +521,8 @@ interface SettingsDraft {
   askInstructions: string
   debugInstructions: string
   profilesJson: string
+  /** When true, streamed text_delta is shown in chat as muted reasoning; when false, only tool-written text. */
+  showReasoningInChat: boolean
 }
 
 function SettingsView() {
@@ -708,7 +710,13 @@ function SettingsView() {
 
       {tab === "tools" && (
       <section className="nexus-section">
-        <h3 className="nexus-section-title">Tools & Skills Filtering</h3>
+        <h3 className="nexus-section-title">Chat</h3>
+        <SettingsToggle
+          label="Show reasoning in chat (streamed model text as muted; when off, only tool messages are shown)"
+          checked={draft.showReasoningInChat}
+          onChange={(checked) => setDraft({ ...draft, showReasoningInChat: checked })}
+        />
+        <h3 className="nexus-section-title mt-4">Tools & Skills Filtering</h3>
         <SettingsToggle
           label="Filter MCP servers when list is large"
           checked={draft.filterTools}
@@ -1776,6 +1784,7 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     askInstructions: config.modes?.ask?.customInstructions ?? "",
     debugInstructions: config.modes?.debug?.customInstructions ?? "",
     profilesJson: JSON.stringify(config.profiles ?? {}, null, 2),
+    showReasoningInChat: config.ui?.showReasoningInChat ?? false,
   }
 }
 
@@ -1813,6 +1822,7 @@ function getDefaultDraft(): SettingsDraft {
     askInstructions: "",
     debugInstructions: "",
     profilesJson: "{}",
+    showReasoningInChat: false,
   }
 }
 
@@ -1896,6 +1906,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       ask: { customInstructions: draft.askInstructions.trim() || undefined },
       debug: { customInstructions: draft.debugInstructions.trim() || undefined },
     },
+    ui: { showReasoningInChat: draft.showReasoningInChat },
     profiles: parsedProfiles,
   }
 }

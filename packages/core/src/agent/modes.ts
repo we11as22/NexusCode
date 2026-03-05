@@ -44,7 +44,7 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
  * Tools in "always" group are available in every mode.
  */
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
-  always:  ["ask_followup_question", "update_todo_list", "final_report_to_user"],
+  always:  ["ask_followup_question", "update_todo_list", "final_report_to_user", "progress_note"],
   read:    ["read_file", "list_files", "list_code_definitions", "read_lints"],
   write:   ["write_to_file", "replace_in_file", "create_rule"],
   execute: ["execute_command"],
@@ -79,6 +79,7 @@ export const READ_ONLY_TOOLS = new Set([
   "use_skill",
   "condense",
   "summarize_task",
+  "progress_note",
 ])
 
 /**
@@ -142,7 +143,7 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
  */
 export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   agent: "AGENT mode: full access — read/write files, run commands, search, browser, MCP, skills, spawn sub-agents (with full agent permissions). Execute tasks end-to-end. After plan approval, run with the approved plan and a detailed todo (fuller task descriptions).",
-  plan:  "PLAN mode: (1) Study the task thoroughly — read codebase, search, browser, MCP, skills; write only the plan to .nexus/plans/*.md. (2) You may use spawn_agent for parallel research subtasks (sub-agents run in ask mode). (3) Call plan_exit when the plan is ready; user may approve (then execution continues in agent mode with the plan and detailed todo), revise, or abandon.",
+  plan:  "PLAN mode: (1) Study the task thoroughly — read codebase, search, browser, MCP, skills; write only the plan to .nexus/plans/*.md or .txt. (2) You may use spawn_agent for parallel research subtasks (sub-agents run in ask mode). (3) Call plan_exit only after at least one plan file exists in .nexus/plans/; user may then approve (execution continues in agent mode), revise, or abandon.",
   ask:   "ASK mode: read-only. Answer questions, explain code, analyze — use read, search, browser, MCP, skills. You may use spawn_agent for parallel read-only subtasks (sub-agents run in ask mode). Do NOT modify files, run commands, or use plan_exit.",
   debug: "DEBUG mode: diagnose first, then fix. Use read/search/execute/write with strict discipline: list likely root causes, validate with evidence (logs/tests/repro), then apply minimal targeted fixes and re-verify.",
 }

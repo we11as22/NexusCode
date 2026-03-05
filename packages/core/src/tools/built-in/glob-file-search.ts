@@ -21,6 +21,10 @@ When to use:
 - Locate config or specific modules: "**/tsconfig*.json", "src/**/*.tsx".
 - Prefer over list_files when you know the pattern; prefer over execute_command find/ls for speed and consistent behavior.
 
+When NOT to use:
+- Searching by content (strings, code): use grep or codebase_search.
+- Reading a file: use read_file.
+
 Parameters:
 - glob_pattern: e.g. "**/*.js", "src/**/*.{ts,tsx}". Recursive by default.
 - target_directory: optional; relative to project root. Omit for whole repo.

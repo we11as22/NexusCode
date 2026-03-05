@@ -1,14 +1,14 @@
 import { z } from "zod"
 import type { ToolDef, ToolContext } from "../../types.js"
 
-/** Tool that explicitly sends a text result to the user. Must be called at the end of each reply so the user sees a clear summary; do not rely only on the first-line JSON user_message. */
+/** Tool that explicitly sends a text result to the user. Must be called at the end of each reply so the user sees a clear summary. */
 const reportToUserSchema = z.object({
   message: z.string().describe("Result text for the user: what was done, key findings, and what they need to know. This is shown in the chat and included in context for the next turn."),
 })
 
 export const reportToUserTool: ToolDef<z.infer<typeof reportToUserSchema>> = {
   name: "final_report_to_user",
-  description: `Send the result of your work to the user as plain text. You MUST call this at the end of every reply (after using tools) so the user sees a clear summary. Do not rely on the first-line JSON user_message field — always call this tool with the result text.
+  description: `Send the result of your work to the user as plain text. You MUST call this at the end of every reply (after using tools) so the user sees a clear summary.
 
 When to use:
 - After any batch of tool use (exploration, edits, runs): call once with a concise summary for the user.
@@ -16,6 +16,30 @@ When to use:
 
 The message is shown in the chat and saved for context/compaction. Keep it clear and concise.`,
   parameters: reportToUserSchema,
+
+  async execute({ message }, ctx: ToolContext) {
+    return { success: true, output: message }
+  },
+}
+
+const progressNoteSchema = z.object({
+  message: z.string().describe("Brief progress note for the user: what just happened, what you are about to do, or any blocker. Shown in the chat; keep it short and conversational."),
+})
+
+export const progressNoteTool: ToolDef<z.infer<typeof progressNoteSchema>> = {
+  name: "progress_note",
+  description: `Show the user a brief progress update. Call this so the user sees what you are doing without waiting for the final summary.
+
+Always output the first-line JSON preamble with \`reasoning\` before calling this tool — the loop's built-in thought (Thought in UI) must come first; then call progress_note.
+
+When to use:
+- Before the first tool call each turn: one short note (e.g. "Scanning the codebase for auth logic.").
+- Before each new batch of tools: note what you are about to do (e.g. "Reading the relevant files next.").
+- Before ending your turn: a brief note before you call final_report_to_user with the summary.
+
+Critical: If you say you are about to do something, do it in the same turn (call the tool right after this note). Do not use headings like "Update:"; write in a continuous conversational style. Use backticks for file/dir names.`,
+  parameters: progressNoteSchema,
+  readOnly: true,
 
   async execute({ message }, ctx: ToolContext) {
     return { success: true, output: message }
@@ -80,7 +104,7 @@ When to use:
 
 When NOT to use:
 - Trivial 1–2 step tasks: optional.
-- Do not put exploratory steps (e.g. "search codebase") as todo items; focus on deliverable milestones.
+- Do not put exploratory or operational steps as todo items (e.g. "search codebase", "run lint", "run tests", "read file X") — focus on deliverable milestones (e.g. "Add dark mode toggle", "Fix login validation").
 
 Use description to add a note for yourself (e.g. scope, file names, acceptance criteria); it is shown only in your context, not in the UI. Create only when the session has no current todo list (see "Current Todo List" in context). If a list already exists, pass the full list with your edits (add/check/uncheck items); do not replace with a brand new list. When you call final_report_to_user to finish the turn, the list is cleared after your response so you can create a new one next time.`,
   parameters: todoSchema,

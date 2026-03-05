@@ -27,7 +27,9 @@ When to use:
 When NOT to use:
 - Exact text or regex: use grep instead.
 - Reading a known file: use read_file.
-- Single identifier or symbol overview: use grep or list_code_definitions.`,
+- Single identifier or symbol overview: use grep or list_code_definitions.
+
+Query examples: Good — "Where is user authentication validated before login?" (complete question with context). Bad — "AuthService" (single word; use grep). Bad — "What is X? How does Y work?" (split into separate queries).`,
   parameters: schema,
   readOnly: true,
 

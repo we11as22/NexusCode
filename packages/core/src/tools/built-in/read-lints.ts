@@ -38,8 +38,8 @@ When to use:
 - Prefer passing paths to limit output; the system prompt may already include a snapshot of active diagnostics at turn start.
 
 When NOT to use:
-- Do not call on the whole workspace without paths unless you need a global snapshot (output is capped).
-- In CLI/server mode diagnostics are not available (only in the VS Code extension); the tool will return an explanatory message.
+- NEVER call this tool on a file unless you have edited it or are about to edit it. Do not call read_lints on the whole workspace without paths unless you need a global snapshot (output is capped).
+- In CLI/server mode diagnostics are not available (only in the VS Code extension); the tool will return an explanatory message — use execute_command to run the linter (e.g. eslint, tsc) if needed.
 
 Parameters:
 - paths: optional array of file or directory paths (relative to project root). If omitted, returns up to ${MAX_DIAGNOSTICS} diagnostics from the whole workspace.`,

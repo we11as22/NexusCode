@@ -47,6 +47,7 @@ const TOOL_ICONS: Record<string, string> = {
   use_skill: "💡",
   final_report_to_user: "✅",
   ask_followup_question: "❓",
+  progress_note: "📌",
   update_todo_list: "📝",
   thinking_preamble: "💭",
   create_rule: "📏",
@@ -452,6 +453,11 @@ function formatToolInputPreview(part: ToolPart): string {
     case "spawn_agent": {
       const desc = inp["description"]
       return desc && typeof desc === "string" ? short(desc.replace(/\s+/g, " "), 48) : "subtask"
+    }
+    case "progress_note":
+    case "final_report_to_user": {
+      const msg = inp["message"]
+      return msg && typeof msg === "string" ? short(String(msg).replace(/\s+/g, " "), 52) : ""
     }
     case "thinking_preamble": {
       const msg = inp["user_message"]

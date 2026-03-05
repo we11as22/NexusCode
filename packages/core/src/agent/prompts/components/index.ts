@@ -25,11 +25,13 @@ export interface PromptContext {
   contextPercent?: number
   /** When true, inject create-skill instructions and allow writes to skill dirs */
   createSkillMode?: boolean
-  /** When true, inject JSON schema for first-line preamble (reasoning + user_message). */
+  /** When true, inject JSON schema for first-line preamble (reasoning only). */
   supportsStructuredOutput?: boolean
 }
 
 // ─── BLOCK 1: Identity + Capabilities (CACHEABLE) ────────────────────────────
+// Mode block and Environment "Current mode" must stay in sync with agent/modes.ts
+// (MODE_TOOL_GROUPS, MODE_BLOCKED_TOOLS) so prompt and tool set match.
 
 export function buildRoleBlock(ctx: PromptContext): string {
   const lines: string[] = []
@@ -94,6 +96,7 @@ You have complete access: read/write files, run shell commands, search the codeb
 - **Study project structure first:** Use \`list_files\`, \`list_code_definitions\`, and \`grep\` to understand layout and find relevant code before reading whole files. Then use \`read_file\` with \`start_line\`/\`end_line\` to load only the sections you need. Do not rely mainly on list_files + read_file — use grep and list_code_definitions (and codebase_search when the index is ready) to locate code, then read only targeted ranges.
 - Verify your changes compile/run and don't break existing functionality
 - Use parallel tool calls for independent operations
+- **Flow:** On a new goal, run a brief read-only discovery (list_files, grep, codebase_search). Before each logical group of tool calls, call \`progress_note\` with a short update. When all tasks are done, call \`final_report_to_user\` with your summary (this ends the turn).
 - Call \`final_report_to_user\` when the task is fully done (this ends the turn)
 - **Sub-agents:** Use \`spawn_agent\` early for focused sub-tasks (e.g. "analyze X", "implement Y") rather than after many read-only steps. To run several independent subtasks in parallel, pass a \`tasks\` array in one call (each item: description, optional context_summary, optional mode). Do not call \`spawn_agent\` repeatedly for the same or very similar task — if one was already run, continue in the main agent with the results.
 - **Always end your turn with a text reply to the user** (or final_report_to_user). After using tools, summarize what you did. Never end with only tool calls.`,
@@ -148,7 +151,7 @@ Guidelines:
 - After each fix, re-run validation and report objective results
 - **Always end your turn with a text reply to the user** (or final_report_to_user). Never end with only tool calls.`,
   }
-  return blocks[mode]
+  return blocks[mode] ?? String(mode)
 }
 
 const CORE_PRINCIPLES = `## Core Principles
@@ -186,7 +189,8 @@ const EXPLORING_CODEBASE = `## Exploring the codebase
 
 - **Anti-pattern:** Listing many folders and then reading entire files. **Correct pattern:** list_files (layout) → list_code_definitions on relevant dirs/files → grep or codebase_search to find exact spots → read_file with start_line/end_line for only those spots.
 
-- **Prefer targeted reads** — After grep or list_code_definitions returns \`path:line\`, call \`read_file\` with \`start_line\` and \`end_line\` to load only that range (e.g. a function or block). Do not read the entire file unless you need it. Saves context and keeps responses fast.`
+- **Prefer targeted reads** — After grep or list_code_definitions returns \`path:line\`, call \`read_file\` with \`start_line\` and \`end_line\` to load only that range (e.g. a function or block). Do not read the entire file unless you need it. Saves context and keeps responses fast.
+- **Avoid re-reading** — When a previous tool result (codebase_search, grep, list_code_definitions) already contained the full content or a chunk for a path and line range, do not call read_file again for the same range. Use the content you already have.`
 
 const EDITING_FILES_GUIDE = `## Editing Files
 
@@ -209,7 +213,7 @@ Editor may auto-format files after writing. Tool response includes post-format c
 
 const TOOL_USE_GUIDE = `## Tool Usage
 
-- **Think before each logical group of tools** — Do not act mindlessly. Before every logical batch of tool calls (e.g. exploration, then edits, then run), briefly reason in your response: what you are about to do and why. Plan the next step, then execute. After each group (e.g. after reading several files), think again before the next group (e.g. before writing or running commands). Use the reasoning field in your first-line JSON to capture this; the user sees it as "Thought". Never fire tools without a clear purpose.
+- **Think before each logical group of tools** — Do not act mindlessly. Before every logical batch of tool calls (e.g. exploration, then edits, then run), briefly reason in your response: what you are about to do and why. Use the \`reasoning\` field in your first-line JSON to capture this (shown as Thought in UI); **that reasoning line must always come before a \`progress_note\`**. Then call \`progress_note\` with a short note for the user before executing the batch. Never fire tools without a clear purpose.
 
 - **Always end with a reply** — In every mode you MUST end your turn with a clear text response to the user. After using any tools (read_file, list_files, codebase_search, grep, etc.) provide a short summary or answer. Never end your turn with only tool calls — the user always expects a reply.
 
@@ -224,6 +228,7 @@ const TOOL_USE_GUIDE = `## Tool Usage
 - **Specialized tools** — Use \`read_file\` instead of \`execute_command\` with cat. Use \`grep\` for regex/content search in files. Use \`glob\` to find files by name/pattern (e.g. \`**/*.test.ts\`). Use \`execute_command\` for: (1) **find/glob** only when you need shell-specific behavior; (2) **ripgrep** when you need shell-specific rg flags. Reserve \`execute_command\` for real shell operations (tests, builds, git, installs). **Always start the command with \`cd <path> &&\` when running in a subdirectory** so the shell is in the right folder.
 - **Codebase search** — Use \`codebase_search\` for semantic (vector) queries when the index is ready; use \`grep\` for exact pattern matching; \`list_code_definitions\` for symbol discovery and file structure.
 - **Web & docs** — Use \`web_search\` for real-time web search; use \`web_fetch\` for a specific URL. Use \`glob\` to find files by name/pattern (e.g. \`**/*.ts\`, \`**/package.json\`).
+- **Lints** — Call \`read_lints\` only on files you have edited or are about to edit. Never call it on the whole workspace without paths unless you need a global snapshot. In CLI/server mode diagnostics may be unavailable — use \`execute_command\` to run the linter (e.g. eslint, tsc) if needed.
 - **Don't repeat** — If a tool already returned a result, don't call it again with the same args.
 `
 
@@ -275,6 +280,7 @@ const TASK_PROGRESS_GUIDE = `## Task Progress
 Use \`update_todo_list\` frequently to track progress on complex tasks. The tool expects **structured output**: an array of items, each with \`done\` (boolean) and \`text\` (string). Pass the full list each time with your updates.
 
 - **Create only when none exists**: If the context has no "Current Todo List", you may create one. If it already shows a todo list, do not replace it with a brand new list — pass the full list with your edits (add/check/uncheck items).
+- **Do not put operational steps in todos** — Todo items must be deliverable milestones (e.g. "Add dark mode toggle", "Fix login validation"). Never add items like "run lint", "search codebase", "run tests", or "read file X" — those are actions you do in service of the task, not checklist outcomes.
 - Start complex tasks with a checklist: multiple items with \`done: false\` and short \`text\`.
 - Mark complete immediately: set \`done: true\` for that item.
 - Update as scope changes or new steps emerge
@@ -285,27 +291,25 @@ Use \`update_todo_list\` frequently to track progress on complex tasks. The tool
 const RESPONSE_STYLE = `## Response Style
 
 - **Always give a final answer** — Every turn must end with a text response to the user. After tool use, summarize what you did or found. In agent/plan use \`final_report_to_user\` when the task is done (this ends the turn); otherwise reply in text. Never end with only tool calls.
-- **You MUST call \`final_report_to_user\` at the end of every reply** — After using tools (exploration, reads, edits, runs), you must call the \`final_report_to_user\` tool with a clear text summary for the user. Do not rely only on the first-line JSON \`user_message\` field — that can appear as one undivided block with reasoning. Always call \`final_report_to_user\` with the result text (what was done, key findings, what the user needs to know). Then the user sees a separate, clearly formatted message. Example: after studying a project, call \`final_report_to_user({ message: "Studied SAG. Key findings: ..." })\`; when the task is complete, calling \`final_report_to_user\` ends the turn.
-- **First part of your text = JSON preamble** — The loop uses \`text_delta\`, code search/read tools, and other tools. Your first token output must be a **single line of JSON** with two fields (generate with JSON schema structured output when the model supports it, otherwise plain JSON):
-  1. **\`reasoning\`** (string) — Your reasoning or plan for this step. In the UI this is shown as **Thought** (chronologically with tools, with optional time). Always include when you have non-trivial reasoning. This field is for display only and is **not** included in the context for the next task or in compaction summaries.
-  2. **\`user_message\`** (string, optional) — Short intermediate note; the main result for the user must go via \`final_report_to_user\` tool, not only here.
-  After this line and a newline, output your full response: text and/or tool calls. End with \`final_report_to_user\` when you have a result to show.
-- **Concise**: Be direct and to the point. Match verbosity to task complexity.
+- **You MUST call \`final_report_to_user\` at the end of every reply** — After using tools (exploration, reads, edits, runs), you must call the \`final_report_to_user\` tool with a clear text summary for the user. Always call \`final_report_to_user\` with the result text (what was done, key findings, what the user needs to know). When the task is complete, calling \`final_report_to_user\` ends the turn.
+- **First part of your text = JSON preamble (reasoning only)** — Your first token output must be a **single line of JSON** with one field: \`reasoning\` (string). Your reasoning or plan for this step is shown as **Thought** in the UI. After this line and a newline, output your full response: text and/or tool calls.
+- **Progress notes** — Call the \`progress_note\` tool to show the user a brief progress update. **Always output the first-line JSON preamble with \`reasoning\` before any \`progress_note\`** — the loop's built-in thought (Thought in UI) must come first; then call \`progress_note\`. Use it: (1) before the first tool call each turn, (2) before each new batch of tools, (3) before ending your turn (before \`final_report_to_user\`). Keep each note short: what just happened, what you are about to do, or any blocker. If you say you are about to do something, do it in the same turn (call the tool right after). Do not use headings like "Update:"; describe actions naturally without mentioning tool names.
+- **Concise**: Be direct and to the point. Match verbosity to task complexity. Be direct and to the point. Match verbosity to task complexity.
 - **No preamble**: Don't start with "Great!", "Sure!", "Certainly!". Go straight to the answer/action.
 - **No postamble**: Don't end with "Let me know if you need anything!", "Feel free to ask!", etc.
 - **No unnecessary summaries**: After completing a task, confirm briefly. Don't re-explain what you did.
+- **Final summary (final_report_to_user)** — When the task is done, call \`final_report_to_user\` with a short, high-signal summary: what changed and its impact, or the answer if the user asked for info. Use concise bullet points or one short paragraph; do not repeat the plan. Do not use headings like "Summary:" or "Update:". The user can see full code changes in the editor — only highlight what is critical. Keep it short and non-repetitive.
 - **No emojis** unless the user explicitly asks for them.
 - For substantial changes: lead with a quick explanation of what changed and why.
 - For code changes: mention relevant file paths with line numbers when helpful.
 - Never ask permission questions ("Should I proceed?", "Do you want me to run tests?") — just do the most reasonable thing.
 - If you must ask: do all non-blocked work first, ask exactly one targeted question.`
 
-/** JSON schema for the first part of text_delta: reasoning (Thought in UI) + optional user_message (to user, collapses tools). Used in prompt and loop parser. */
+/** JSON schema for the first part of text_delta: reasoning only (Thought in UI). Progress notes use the progress_note tool. */
 export const AGENT_TURN_PREAMBLE_SCHEMA = {
   type: "object" as const,
   properties: {
     reasoning: { type: "string" as const, description: "Reasoning or plan for this step; shown as Thought (expandable, scrollable) in UI." },
-    user_message: { type: "string" as const, description: "Optional. When present: shown to user and included in context for next task and in compaction. Must contain what was done, key findings, and what the user/agent need to know for continuity. Omit only for trivial steps." },
   },
   required: ["reasoning"] as const,
   additionalProperties: false,
@@ -367,7 +371,7 @@ function getCurrentModeLabel(mode: Mode): string {
     case "debug":
       return "DEBUG (diagnose first). Full tools allowed, but prioritize root-cause analysis, evidence gathering, minimal fixes, and post-fix verification."
     default:
-      return String(mode).toUpperCase()
+      return `${String(mode).toUpperCase()} (see mode block above for constraints).`
   }
 }
 

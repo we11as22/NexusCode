@@ -32,6 +32,7 @@ When NOT to use:
 - Searching content: use codebase_search (semantic) or grep (regex) first.
 - Listing directory: use list_files.
 - Discovering structure: use list_code_definitions and grep first, then read_file with ranges.
+- Re-reading the same range: when a previous tool result (codebase_search, grep, list_code_definitions) already returned full content for a path:line range, do not call read_file again for that range — use the content you already have.
 
 Best practice: Use start_line and end_line whenever you have a line number (from grep, list_code_definitions, or codebase_search). Do not read entire large files when a small range is enough.
 

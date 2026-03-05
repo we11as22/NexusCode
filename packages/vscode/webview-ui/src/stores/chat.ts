@@ -110,6 +110,8 @@ export interface NexusConfigState {
     autoApproveWrite: boolean
     autoApproveCommand: boolean
   }
+  /** UI preferences. showReasoningInChat: when true, text_delta shown as muted; when false, only tool text. */
+  ui?: { showReasoningInChat?: boolean }
   profiles: Record<string, Partial<{ provider: string; id: string; apiKey: string; baseUrl: string; temperature: number }>>
 }
 
@@ -553,6 +555,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
               parts.push({ type: "text", text: "", user_message: ev.output.trim() })
             }
           }
+          if (event.tool === "progress_note" && event.success && ev.output?.trim() && parts.some((p) => p.type === "tool" && (p as ToolPart).id === event.partId)) {
+            // progress_note output is merged into text part's user_message; MessageList shows it as plain text and hides the progress_note card.
+            const lastTextIdx = parts.map((p, i) => (p.type === "text" ? i : -1)).filter((i) => i >= 0).pop()
+            if (lastTextIdx !== undefined) {
+              const part = parts[lastTextIdx] as TextPart
+              parts[lastTextIdx] = { ...part, user_message: (part.user_message ?? "").trim() ? `${part.user_message}\n${ev.output!.trim()}` : ev.output!.trim() }
+            } else {
+              parts.push({ type: "text", text: "", user_message: ev.output.trim() })
+            }
+          }
           return { ...msg, content: parts }
         })
         set({ messages: msgs, awaitingApproval: false })
@@ -722,7 +734,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
               msgs[msgs.length - 1] = { ...last, content: stripToolCallMarkup(last.content) }
             } else if (Array.isArray(last.content)) {
               const cleanedParts = (last.content as MessagePart[])
-                .filter((p) => p.type !== "text" || stripToolCallMarkup((p as TextPart).text).length > 0)
+                .filter(
+                  (p) =>
+                    p.type !== "text" ||
+                    stripToolCallMarkup((p as TextPart).text).length > 0 ||
+                    (p as TextPart).user_message?.trim().length > 0
+                )
                 .map((p) => (p.type === "text" ? { ...p, text: stripToolCallMarkup((p as TextPart).text) } : p))
               msgs[msgs.length - 1] = { ...last, content: cleanedParts }
             }
@@ -734,7 +751,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
             && (
               typeof latestAssistant.content === "string"
                 ? latestAssistant.content.trim().length > 0
-                : (latestAssistant.content as MessagePart[]).some((p) => p.type === "text" && p.text.trim().length > 0)
+                : (() => {
+                    const parts = latestAssistant.content as MessagePart[]
+                    const hasTextOrUserMessage = parts.some(
+                      (p) =>
+                        p.type === "text" &&
+                        ((p as TextPart).text?.trim().length > 0 || (p as TextPart).user_message?.trim().length > 0)
+                    )
+                    if (hasTextOrUserMessage) return true
+                    const hasFinalReport = parts.some(
+                      (p) =>
+                        p.type === "tool" &&
+                        (p as ToolPart).tool === "final_report_to_user" &&
+                        (p as ToolPart).status === "completed" &&
+                        typeof (p as ToolPart).output === "string" &&
+                        (p as ToolPart).output!.trim().length > 0
+                    )
+                    return !!hasFinalReport
+                  })()
             )
 
           // Always provide a text response when needed: add assistant fallback if model produced no final text

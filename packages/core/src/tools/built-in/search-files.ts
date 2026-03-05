@@ -36,7 +36,7 @@ When to use:
 - Restrict to a folder (path/paths), file types (include), or exclude files (exclude).
 
 Parameters:
-- pattern / patterns: regex (ripgrep syntax). Escape or use raw string for special chars.
+- pattern / patterns: regex (ripgrep syntax). Escape special chars — e.g. to match literal \`interface{}\` in Go use \`interface\\{\\}\`. Use raw string or escape backslashes.
 - path / paths: directory or file to search (relative to project root). Omit for whole repo.
 - include: glob for file types (e.g. "*.ts"). Default: common code/md extensions.
 - exclude: glob to exclude.

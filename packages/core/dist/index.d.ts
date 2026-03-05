@@ -399,6 +399,15 @@ declare const NexusConfigSchema: z.ZodObject<{
         createOnWrite?: boolean | undefined;
         doubleCheckCompletion?: boolean | undefined;
     }>>;
+    /** UI preferences (e.g. chat pane). */
+    ui: z.ZodDefault<z.ZodObject<{
+        /** When true, streamed text_delta is shown in chat as muted/small "reasoning"; when false, only tool-written text (progress_note, final_report_to_user) is shown. */
+        showReasoningInChat: z.ZodDefault<z.ZodBoolean>;
+    }, "strip", z.ZodTypeAny, {
+        showReasoningInChat: boolean;
+    }, {
+        showReasoningInChat?: boolean | undefined;
+    }>>;
     mcp: z.ZodDefault<z.ZodObject<{
         servers: z.ZodDefault<z.ZodArray<z.ZodObject<{
             name: z.ZodString;
@@ -710,6 +719,9 @@ declare const NexusConfigSchema: z.ZodObject<{
         createOnWrite: boolean;
         doubleCheckCompletion: boolean;
     };
+    ui: {
+        showReasoningInChat: boolean;
+    };
     skills: (string | {
         path: string;
         enabled?: boolean | undefined;
@@ -920,6 +932,9 @@ declare const NexusConfigSchema: z.ZodObject<{
         timeoutMs?: number | undefined;
         createOnWrite?: boolean | undefined;
         doubleCheckCompletion?: boolean | undefined;
+    } | undefined;
+    ui?: {
+        showReasoningInChat?: boolean | undefined;
     } | undefined;
     skills?: (string | {
         path: string;
@@ -1326,8 +1341,13 @@ interface NexusConfig {
         enabled: boolean;
         timeoutMs: number;
         createOnWrite: boolean;
-        /** When true, first attempt_completion is rejected; model must re-verify and call again (Cline-style). */
+        /** When true, first final_report_to_user (agent) is rejected; model must re-verify and call again (Cline-style). */
         doubleCheckCompletion?: boolean;
+    };
+    /** UI preferences (e.g. chat pane). */
+    ui?: {
+        /** When true, streamed text_delta is shown in chat as muted/small; when false, only tool-written text is shown. */
+        showReasoningInChat?: boolean;
     };
     mcp: {
         servers: McpServerConfig[];
@@ -1609,7 +1629,7 @@ interface AgentLoopOptions {
     compaction: SessionCompaction;
     signal: AbortSignal;
     gitBranch?: string;
-    /** When set, commit on attempt_completion and optionally double-check (Cline-style). */
+    /** When set, commit on final_report_to_user (agent) and optionally double-check (Cline-style). */
     checkpoint?: {
         commit(description?: string): Promise<string>;
     };
@@ -1676,7 +1696,7 @@ interface PromptContext {
     contextPercent?: number;
     /** When true, inject create-skill instructions and allow writes to skill dirs */
     createSkillMode?: boolean;
-    /** When true, inject JSON schema for first-line preamble (reasoning + user_message). */
+    /** When true, inject JSON schema for first-line preamble (reasoning only). */
     supportsStructuredOutput?: boolean;
 }
 /**

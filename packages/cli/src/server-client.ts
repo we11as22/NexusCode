@@ -77,6 +77,19 @@ export class NexusServerClient {
   }
 
   /**
+   * Delete a session and its messages.
+   */
+  async deleteSession(sessionId: string): Promise<boolean> {
+    const res = await fetch(this.url(`/session/${sessionId}`, { directory: this.directory }), {
+      method: "DELETE",
+      headers: this.headers(),
+    })
+    if (res.status === 404) return false
+    if (!res.ok) throw new Error(`Server deleteSession: ${res.status} ${await res.text()}`)
+    return true
+  }
+
+  /**
    * Send message and stream AgentEvents as NDJSON. Yields each event; throws on fetch error.
    */
   async *streamMessage(

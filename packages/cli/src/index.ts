@@ -10,7 +10,7 @@ import {
   loadConfig, writeConfig, loadProjectSettings, Session, createLLMClient, ToolRegistry, loadSkills,
   loadRules, McpClient, setMcpClientInstance, resolveBundledMcpServers, createCompaction,
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
-  CodebaseIndexer, createCodebaseIndexer, listSessions,
+  CodebaseIndexer, createCodebaseIndexer, listSessions, deleteSession as coreDeleteSession,
   hadPlanExit, getPlanContentForFollowup,
   MODES, type Mode, type AgentEvent, type IndexStatus, type PermissionResult,
 } from "@nexuscode/core"
@@ -703,7 +703,7 @@ async function runMessage(content: string, msgMode: Mode) {
       client,
       host,
       config: configForRun,
-      mode: msgMode,
+      mode: msgMode, // system prompt and tool set in core are both built from msgMode
       tools: getAllTools(msgMode),
       skills,
       rulesContent,
@@ -790,8 +790,19 @@ try {
     targetFps: 60,
     gatherStats: false,
     autoFocus: false,
+    useMouse: false,
+    enableMouseMovement: false,
     useKittyKeyboard: { disambiguate: true, alternateKeys: true, events: true },
     openConsoleOnError: false,
+    consoleOptions: {
+      keyBindings: [{ name: "y", ctrl: true, action: "copy-selection" }],
+      onCopySelection: (text: string) => {
+        if (text && renderer) {
+          renderer.copyToClipboardOSC52(text)
+          renderer.clearSelection()
+        }
+      },
+    },
   })
   root = createRoot(renderer)
 } catch (err) {
@@ -829,6 +840,43 @@ async function onSwitchSession(sessionId: string): Promise<void> {
     appProps.sessionId = newSession.id
   }
   root.render(React.createElement(App, appProps))
+}
+
+async function onDeleteSession(sessionId: string): Promise<void> {
+  if (serverUrl) {
+    const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
+    const ok = await serverClient.deleteSession(sessionId).catch(() => false)
+    if (!ok) return
+  } else {
+    const ok = await coreDeleteSession(sessionId, cwd).catch(() => false)
+    if (!ok) return
+  }
+  if (sessionRef.current.id === sessionId) {
+    if (serverUrl) {
+      const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
+      const list = await serverClient.listSessions()
+      const next = list[0]
+      if (next) {
+        const meta = await serverClient.getSession(next.id)
+        const offset = Math.max(0, meta.messageCount - PAGE_SIZE)
+        currentMessagesRef.current = await serverClient.getMessages(next.id, { limit: PAGE_SIZE, offset })
+        currentSessionIdRef.current = next.id
+      } else {
+        const created = await serverClient.createSession()
+        currentSessionIdRef.current = created.id
+        currentMessagesRef.current = []
+      }
+    } else {
+      const list = await listSessions(cwd)
+      const next = list[0]
+      sessionRef.current = next
+        ? (await Session.resume(next.id, cwd) ?? Session.create(cwd))
+        : Session.create(cwd)
+    }
+    appProps.initialMessages = sessionRef.current.messages
+    appProps.sessionId = sessionRef.current.id
+    root.render(React.createElement(App, appProps))
+  }
 }
 
 const appProps = {
@@ -885,6 +933,7 @@ const appProps = {
   },
   getSessionList,
   onSwitchSession,
+  onDeleteSession,
   onPlanFollowupChoice: async (choice: "new_session" | "continue" | "dismiss", planText?: string) => {
     if (choice === "dismiss") return
     if (choice === "new_session" && planText) {

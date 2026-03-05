@@ -242,6 +242,7 @@ function MessageBubble({
   }
 
   // Assistant — on chat background, no frame (only user messages are in a bubble)
+  const showReasoningInChat = useChatStore((s) => s.config?.ui?.showReasoningInChat ?? false)
   return (
     <div className="w-full min-w-0">
       {typeof message.content === "string" ? (
@@ -252,15 +253,17 @@ function MessageBubble({
           isComplete={isComplete}
           pendingApproval={pendingApproval}
           onResolveApproval={onResolveApproval}
+          showReasoningInChat={showReasoningInChat}
         />
       )}
     </div>
   )
 }
 
-function AssistantText({ text, streaming }: { text: string; streaming?: boolean }) {
+function AssistantText({ text, streaming, variant = "normal" }: { text: string; streaming?: boolean; variant?: "normal" | "muted" }) {
+  const isMuted = variant === "muted"
   return (
-    <div className="text-sm text-[var(--vscode-foreground)] min-w-0 break-words">
+    <div className={`text-sm min-w-0 break-words ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
       <ReactMarkdown
         className="prose-nexus"
         remarkPlugins={[remarkGfm]}
@@ -321,7 +324,7 @@ function AssistantText({ text, streaming }: { text: string; streaming?: boolean 
         {text}
       </ReactMarkdown>
       {streaming && (
-        <span className="nexus-streaming-cursor inline-block w-0.5 h-4 ml-0.5 align-middle bg-[var(--vscode-foreground)] animate-pulse" aria-hidden />
+        <span className={`nexus-streaming-cursor inline-block w-0.5 h-4 ml-0.5 align-middle animate-pulse ${isMuted ? "bg-[var(--vscode-descriptionForeground)]" : "bg-[var(--vscode-foreground)]"}`} aria-hidden />
       )}
     </div>
   )
@@ -391,11 +394,13 @@ function AssistantParts({
   isComplete,
   pendingApproval,
   onResolveApproval,
+  showReasoningInChat,
 }: {
   parts: MessagePart[]
   isComplete: boolean
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string) => void
+  showReasoningInChat: boolean
 }) {
   const { prefixItems, prefixIndices, hasContentAfterPrefix } = getExploredPrefixFromParts(parts)
   const hasExploredBlock = prefixItems.length > 0
@@ -404,6 +409,21 @@ function AssistantParts({
   )
   /** Collapse when complete and: there is content after exploration, or text step has user_message (second optional field). */
   const defaultCollapsed = isComplete && (hasContentAfterPrefix || hasTextPartWithUserMessage)
+
+  // Single reply per message: show only one block (canonical part) to avoid multiple identical bubbles.
+  const textPartIndices = parts
+    .map((p, i) => (p.type === "text" ? i : -1))
+    .filter((i) => i >= 0)
+  const canonicalReplyIndex =
+    textPartIndices.length === 0
+      ? -1
+      : (() => {
+          const withUserMessage = textPartIndices.filter(
+            (i) => (parts[i] as { user_message?: string }).user_message?.trim()
+          )
+          if (withUserMessage.length > 0) return withUserMessage[withUserMessage.length - 1]!
+          return textPartIndices[textPartIndices.length - 1]!
+        })()
 
   return (
     <div className="space-y-3">
@@ -435,19 +455,23 @@ function AssistantParts({
           const userMessage = textPart.user_message?.trim()
           const isLastPart = i === parts.length - 1
           const showStreaming = !isComplete && isLastPart
-          if (!showStreaming && (!text || !text.trim()) && !userMessage) return null
-          const hasMainText = showStreaming || (text && text.trim())
-          // Prefer user_message (from final_report_to_user) as the single reply — do not show both to avoid duplication.
-          if (userMessage) {
+          if (i !== canonicalReplyIndex) return null
+          // Main reply: only tool-written text (user_message). Text_delta is not shown here unless showReasoningInChat.
+          const hasToolReply = !!userMessage
+          const hasRawText = !!(text?.trim())
+          if (hasToolReply) {
             return (
               <div key={i} className="space-y-0">
-                <AssistantText text={userMessage} streaming={false} />
+                <AssistantText text={userMessage!} streaming={false} />
               </div>
             )
           }
+          if (!showReasoningInChat) return null
+          const displayText = text?.trim() ?? ""
+          if (!showStreaming && !displayText) return null
           return (
             <div key={i} className="space-y-0">
-              {hasMainText && <AssistantText text={text ?? ""} streaming={showStreaming} />}
+              <AssistantText text={displayText} streaming={showStreaming} variant="muted" />
             </div>
           )
         }
@@ -472,6 +496,10 @@ function AssistantParts({
           }
           if (toolPart.tool === "final_report_to_user") {
             // Only final_report_to_user output is merged into text part's user_message (core + store). Show reply once via user_message; hide card to avoid duplicate.
+            return null
+          }
+          if (toolPart.tool === "progress_note") {
+            // progress_note output is merged into text part's user_message; show as plain text only, no card.
             return null
           }
           if (toolPart.tool === "spawn_agent") {

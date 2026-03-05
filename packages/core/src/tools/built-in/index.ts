@@ -16,13 +16,15 @@ import {
   updateTodoTool,
   createRuleTool,
   reportToUserTool,
-} from "./attempt-completion.js"
+  progressNoteTool,
+} from "./report-and-control.js"
 
 export function getAllBuiltinTools(): ToolDef[] {
   return [
     askFollowupTool,
     updateTodoTool,
     reportToUserTool,
+    progressNoteTool,
     readFileTool,
     listFilesTool,
     listDefinitionsTool,
@@ -72,4 +74,5 @@ export {
   summarizeTaskTool,
   planExitTool,
   reportToUserTool,
+  progressNoteTool,
 }

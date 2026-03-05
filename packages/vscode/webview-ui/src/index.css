@@ -550,6 +550,8 @@ html, body, #root {
   overflow: hidden;
   position: relative;
   background: var(--nexus-panel-bg);
+  /* Prevent chat input from overlapping panel chrome / bottom bar */
+  padding-bottom: env(safe-area-inset-bottom, 12px);
 }
 
 .nexus-main {
@@ -618,6 +620,8 @@ html, body, #root {
   background: var(--vscode-input-background, var(--vscode-editor-background));
   border-top: 1px solid var(--vscode-panel-border);
   padding: 8px 12px 10px;
+  /* Keep input area above bottom safe area; ensure it never gets clipped */
+  margin-bottom: 0;
 }
 
 /* Single unified background: text area and buttons share the same color; no inner margin so no dark band */
@@ -671,6 +675,20 @@ html, body, #root {
   justify-content: flex-end;
   gap: 6px;
   overflow: hidden;
+}
+
+/* Limit todo panel height so the input bar stays visible and doesn't overlap */
+.nexus-todo-panel {
+  max-height: min(40vh, 320px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.nexus-todo-panel [data-todo-list] {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .nexus-subagent-strip {
