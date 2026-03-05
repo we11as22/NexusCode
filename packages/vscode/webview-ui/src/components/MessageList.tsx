@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react"
+import React, { useRef, useState, useCallback } from "react"
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
@@ -129,30 +130,20 @@ function BashCommandBlock({ part, approval }: { part: ToolPart; approval?: React
 interface Props {
   messages: SessionMessage[]
   isRunning?: boolean
+  /** When true, show "Load older" at top (server session with more messages above). */
+  hasOlderMessages?: boolean
+  loadingOlderMessages?: boolean
 }
 
-export function MessageList({ messages, isRunning = false }: Props) {
-  const listRef = useRef<HTMLDivElement>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const [stickToBottom, setStickToBottom] = React.useState(true)
+export function MessageList({ messages, isRunning = false, hasOlderMessages = false, loadingOlderMessages = false }: Props) {
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const [stickToBottom, setStickToBottom] = useState(true)
   const store = useChatStore()
 
-  useEffect(() => {
-    if (!stickToBottom) return
-    bottomRef.current?.scrollIntoView({ behavior: "auto" })
-  }, [messages, stickToBottom])
-
-  const handleScroll = () => {
-    const el = listRef.current
-    if (!el) return
-    const distanceToBottom = el.scrollHeight - el.clientHeight - el.scrollTop
-    setStickToBottom(distanceToBottom < 24)
-  }
-
-  const jumpToLatest = () => {
+  const jumpToLatest = useCallback(() => {
     setStickToBottom(true)
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }
+    virtuosoRef.current?.scrollToIndex({ index: messages.length - 1, behavior: "smooth" })
+  }, [messages.length])
 
   if (messages.length === 0) {
     return (
@@ -174,17 +165,40 @@ export function MessageList({ messages, isRunning = false }: Props) {
 
   return (
     <div className="message-list-container">
-      <div ref={listRef} onScroll={handleScroll} className="message-list flex flex-col space-y-4">
-        {messages.map((msg, idx) => (
-          <MessageBubble
-            key={msg.id}
-            message={msg}
-            isComplete={!isRunning || idx < messages.length - 1}
-            pendingApproval={store.pendingApproval}
-            onResolveApproval={store.resolveApproval}
-          />
-        ))}
-        <div ref={bottomRef} />
+      {hasOlderMessages && (
+        <div className="message-list-load-older">
+          <button
+            type="button"
+            onClick={() => postMessage({ type: "loadOlderMessages" })}
+            disabled={loadingOlderMessages}
+            className="nexus-load-older-btn"
+            title="Load older messages"
+          >
+            {loadingOlderMessages ? "Loading…" : "Load older messages"}
+          </button>
+        </div>
+      )}
+      <div className="message-list message-list-virtuoso">
+        <Virtuoso
+          ref={virtuosoRef}
+          data={messages}
+          initialTopMostItemIndex={messages.length - 1}
+          followOutput="smooth"
+          atBottomStateChange={setStickToBottom}
+          computeItemKey={(_, msg) => (msg as SessionMessage).id}
+          itemContent={(idx, msg) => (
+            <div className="message-list-item">
+              <MessageBubble
+                message={msg}
+                isComplete={!isRunning || idx < messages.length - 1}
+                pendingApproval={store.pendingApproval}
+                onResolveApproval={store.resolveApproval}
+              />
+            </div>
+          )}
+          style={{ height: "100%" }}
+          className="message-list-virtuoso-inner"
+        />
       </div>
       {!stickToBottom && (
         <button

@@ -171,7 +171,12 @@ function ChatView() {
         </div>
         <div className="chat-messages-wrapper">
           <div className="chat-messages">
-            <MessageList messages={store.messages} isRunning={store.isRunning} />
+            <MessageList
+              messages={store.messages}
+              isRunning={store.isRunning}
+              hasOlderMessages={store.hasOlderMessages}
+              loadingOlderMessages={store.loadingOlderMessages}
+            />
             {(() => {
               const msgs = store.messages
               const last = msgs[msgs.length - 1]

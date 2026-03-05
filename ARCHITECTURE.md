@@ -154,7 +154,6 @@ Mode-specific blocks: **plan** blocks `execute_command`; **ask** blocks `write_t
 |--------------------|----------------------------------------------|
 | Vercel AI SDK      | Provider abstraction, tool-call streaming   |
 | Qdrant REST client | Semantic vector retrieval                    |
-| SQLite (FTS5, better-sqlite3) | Local keyword/symbol indexing   |
 | MCP SDK            | External tool ecosystem                      |
 
 ---

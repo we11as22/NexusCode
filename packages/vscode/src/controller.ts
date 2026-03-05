@@ -42,6 +42,9 @@ import { VsCodeHost, showDiffForPath } from "./host.js"
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 
+/** Number of messages to load when opening a server session (same as server RECENT_MESSAGES_FOR_RUN for agent context). */
+const INITIAL_SERVER_MESSAGES = 200
+
 function stripModeReminderFromMessages(messages: SessionMessage[]): SessionMessage[] {
   return messages.map((msg) => {
     if (msg.role !== "user") return msg
@@ -90,6 +93,7 @@ export type WebviewMessage =
   | { type: "deleteAgentPreset"; presetName: string }
   | { type: "applyAgentPreset"; presetName: string }
   | { type: "planFollowupChoice"; choice: "new_session" | "continue" | "dismiss"; planText?: string }
+  | { type: "loadOlderMessages" }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
@@ -129,6 +133,10 @@ export interface WebviewState {
   planCompleted?: boolean
   /** Plan text for "New session" (optional; controller may set via async follow-up). */
   planFollowupText?: string | null
+  /** Server session: there are older messages above; show "Load older" in chat. */
+  hasOlderMessages?: boolean
+  /** True while older messages are being fetched. */
+  loadingOlderMessages?: boolean
 }
 
 function getContextLimit(modelId: string): number {
@@ -162,6 +170,9 @@ export class Controller {
   private indexer?: CodebaseIndexer
   private mcpClient?: McpClient
   private serverSessionId?: string
+  /** For server sessions: offset of the oldest loaded message (0 = all loaded). Used for "Load older" pagination. */
+  private serverSessionOldestLoadedOffset: number | undefined = undefined
+  private loadingOlderMessages = false
   private initialized = false
   private initPromise?: Promise<void>
   /** Started in ensureInitialized (not awaited there); runAgent awaits it so MCP is ready before first run. */
@@ -260,6 +271,8 @@ export class Controller {
       planCompleted:
         this.session && this.mode === "plan" && !this.isRunning && hadPlanExit(this.session),
       planFollowupText: null,
+      hasOlderMessages: this.serverSessionOldestLoadedOffset != null && this.serverSessionOldestLoadedOffset > 0,
+      loadingOlderMessages: this.loadingOlderMessages,
     }
   }
 
@@ -297,6 +310,7 @@ export class Controller {
   async clearTask(): Promise<void> {
     this.abortController?.abort()
     this.session = undefined
+    this.serverSessionOldestLoadedOffset = undefined
     this.checkpoint = undefined
     this.serverSessionId = undefined
     this.postStateToWebview()
@@ -498,13 +512,19 @@ export class Controller {
       case "switchSession":
         await this.switchSession(msg.sessionId)
         break
+      case "loadOlderMessages":
+        await this.loadOlderMessages()
+        break
       case "deleteSession":
         await this.deleteSession(msg.sessionId)
         break
       case "forkSession":
         if (this.session && msg.messageId) {
           this.session = this.session.fork(msg.messageId) as Session
-          if (this.getServerUrl()) this.serverSessionId = undefined
+          if (this.getServerUrl()) {
+            this.serverSessionId = undefined
+            this.serverSessionOldestLoadedOffset = undefined
+          }
           this.postStateToWebview()
         }
         break
@@ -1217,14 +1237,15 @@ export class Controller {
           )
           if (metaRes.ok) {
             const meta = (await metaRes.json()) as { messageCount: number }
-            const offset = Math.max(0, meta.messageCount - 100)
+            const offset = Math.max(0, meta.messageCount - INITIAL_SERVER_MESSAGES)
             const msgRes = await fetch(
-              `${serverUrl.replace(/\/$/, "")}/session/${sid}/message?directory=${encodeURIComponent(cwd)}&limit=100&offset=${offset}`,
+              `${serverUrl.replace(/\/$/, "")}/session/${sid}/message?directory=${encodeURIComponent(cwd)}&limit=${INITIAL_SERVER_MESSAGES}&offset=${offset}`,
               { headers: { "x-nexus-directory": cwd } }
             )
             if (msgRes.ok) {
               const messages = (await msgRes.json()) as SessionMessage[]
               this.session = new Session(sid!, cwd, messages)
+              this.serverSessionOldestLoadedOffset = offset
             }
           }
         } catch {}
@@ -1507,6 +1528,38 @@ export class Controller {
     }
   }
 
+  private async loadOlderMessages(): Promise<void> {
+    const serverUrl = this.getServerUrl()
+    const cwd = this.getCwd()
+    if (
+      !serverUrl ||
+      !this.session ||
+      this.session.id !== this.serverSessionId ||
+      this.serverSessionOldestLoadedOffset == null ||
+      this.serverSessionOldestLoadedOffset <= 0
+    ) {
+      return
+    }
+    const limit = Math.min(INITIAL_SERVER_MESSAGES, this.serverSessionOldestLoadedOffset)
+    if (limit <= 0) return
+    this.loadingOlderMessages = true
+    this.postStateToWebview()
+    try {
+      const msgRes = await fetch(
+        `${serverUrl.replace(/\/$/, "")}/session/${this.session.id}/message?directory=${encodeURIComponent(cwd)}&limit=${limit}&offset=0`,
+        { headers: { "x-nexus-directory": cwd } }
+      )
+      if (!msgRes.ok) return
+      const olderMessages = (await msgRes.json()) as SessionMessage[]
+      if (olderMessages.length === 0) return
+      this.session = new Session(this.session.id, cwd, [...olderMessages, ...this.session.messages])
+      this.serverSessionOldestLoadedOffset -= olderMessages.length
+    } finally {
+      this.loadingOlderMessages = false
+      this.postStateToWebview()
+    }
+  }
+
   private async switchSession(sessionId: string): Promise<void> {
     this.lastRunMode = null
     const cwd = this.getCwd()
@@ -1519,15 +1572,16 @@ export class Controller {
         )
         if (!metaRes.ok) return
         const meta = (await metaRes.json()) as { messageCount: number }
-        const offset = Math.max(0, meta.messageCount - 100)
+        const offset = Math.max(0, meta.messageCount - INITIAL_SERVER_MESSAGES)
         const msgRes = await fetch(
-          `${serverUrl.replace(/\/$/, "")}/session/${sessionId}/message?directory=${encodeURIComponent(cwd)}&limit=100&offset=${offset}`,
+          `${serverUrl.replace(/\/$/, "")}/session/${sessionId}/message?directory=${encodeURIComponent(cwd)}&limit=${INITIAL_SERVER_MESSAGES}&offset=${offset}`,
           { headers: { "x-nexus-directory": cwd } }
         )
         if (!msgRes.ok) return
         const messages = (await msgRes.json()) as SessionMessage[]
         this.session = new Session(sessionId, cwd, messages)
         this.serverSessionId = sessionId
+        this.serverSessionOldestLoadedOffset = offset
         this.checkpoint = undefined
         this.postStateToWebview()
       } catch {}
@@ -1536,6 +1590,8 @@ export class Controller {
     const loaded = await Session.resume(sessionId, cwd)
     if (loaded) {
       this.session = loaded
+      this.serverSessionId = undefined
+      this.serverSessionOldestLoadedOffset = undefined
       this.checkpoint = undefined
       this.postStateToWebview()
     }
@@ -1570,6 +1626,7 @@ export class Controller {
             const created = (await createRes.json()) as { id: string }
             this.session = new Session(created.id, cwd, [])
             this.serverSessionId = created.id
+            this.serverSessionOldestLoadedOffset = undefined
           }
         } catch {
           // keep current session ref; list will refresh

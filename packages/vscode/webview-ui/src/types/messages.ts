@@ -38,12 +38,10 @@ export interface WebviewState {
   contextPercent: number
   /** NexusCode server URL (from nexuscode.serverUrl). When set, extension uses server for sessions and runs. */
   serverUrl?: string
-  /** Checkpoint entries for rollback (Cline-style). */
-  checkpointEntries?: Array<{ hash: string; ts: number; description?: string; messageId?: string }>
-  /** Plan mode: plan_exit was called; show New session / Continue / Dismiss (Kilocode-style). */
-  planCompleted?: boolean
-  /** Plan text for "New session" option (set when planCompleted). */
-  planFollowupText?: string | null
+  /** When true, server session has more messages above; show "Load older". */
+  hasOlderMessages?: boolean
+  /** True while older messages are being fetched. */
+  loadingOlderMessages?: boolean
 }
 
 export type ExtensionMessage =

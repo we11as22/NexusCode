@@ -237,7 +237,7 @@ const messageArgs = hasExplicitMode ? argv._.slice(1) : argv._
 const initialMessage = messageArgs.join(" ").trim() || undefined
 
 // Init session (refs allow switching session and re-rendering TUI)
-const PAGE_SIZE = 100
+const PAGE_SIZE = 200
 type SessionMessage = { id: string; role: "user" | "assistant" | "system" | "tool"; content: string; ts: number }
 const currentSessionIdRef: { current: string } = { current: "" }
 let currentMessagesRef: { current: SessionMessage[] } = { current: [] }

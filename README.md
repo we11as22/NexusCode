@@ -488,7 +488,6 @@ NexusCode includes **[claude-context-mode](sources/claude-context-mode)** (MCP +
 NexusCode indexes your codebase on startup (incremental updates on file save):
 
 - **Symbols**: classes, functions, methods, interfaces, types, enums (via AST)
-- **FTS**: SQLite FTS5 for keyword search
 - **Vector** (optional): semantic search via Qdrant + embeddings (auto-start supported via `vectorDb.autoStart`)
 
 Use `codebase_search` tool or `@problems` in chat to leverage the index.
@@ -504,7 +503,7 @@ NexusCode/
 │   │   ├── agent/        ← Agent loop, modes, classifiers (MCP servers + skills), prompts
 │   │   ├── tools/        ← Tool registry + built-in tools
 │   │   ├── session/     ← JSONL storage + compaction
-│   │   ├── indexer/     ← AST + FTS + Qdrant
+│   │   ├── indexer/     ← AST + Qdrant
 │   │   ├── provider/    ← All LLM providers + embeddings
 │   │   ├── checkpoint/  ← Shadow git
 │   │   ├── context/     ← @mentions, rules, condense
@@ -527,7 +526,7 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for details.
 3. **Parallel reads** — Multiple read-only tools execute concurrently with `Promise.all`
 4. **Cache-aware prompts** — Stable blocks (role, rules, skills) use `cache_control: ephemeral` on Anthropic
 5. **Two-level compaction** — Fast prune (remove old tool outputs) + LLM compact (full summary) from OpenCode
-6. **Multi-project** — Separate FTS/vector indices per project hash in `~/.nexus/index/`
+6. **Multi-project** — Separate vector index and metadata per project hash in `~/.nexus/index/`
 
 ---
 

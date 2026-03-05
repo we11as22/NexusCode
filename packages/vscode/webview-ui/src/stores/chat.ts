@@ -176,6 +176,11 @@ interface ChatState {
   /** Plan text for "New session" option. */
   planFollowupText: string | null
 
+  /** Server session: there are older messages above the loaded window; show "Load older". */
+  hasOlderMessages: boolean
+  /** True while older messages are being fetched. */
+  loadingOlderMessages: boolean
+
   /** Models catalog from models.dev (for Select model in Settings). Same shape as core ModelsCatalog. */
   modelsCatalog: ModelsCatalogFromCore | null
   modelsCatalogLoading: boolean
@@ -278,6 +283,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   checkpointEntries: [],
   planCompleted: false,
   planFollowupText: null,
+  hasOlderMessages: false,
+  loadingOlderMessages: false,
   requestModelsCatalog: () => {
     set({ modelsCatalogLoading: true })
     postMessage({ type: "getModelsCatalog" })
@@ -358,7 +365,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   clearChat: () => {
     postMessage({ type: "clearChat" })
-    set({ messages: [], todo: "", view: "chat", subagents: [], lastSpawnAgentPartId: null, planCompleted: false, planFollowupText: null })
+    set({ messages: [], todo: "", view: "chat", subagents: [], lastSpawnAgentPartId: null, planCompleted: false, planFollowupText: null, hasOlderMessages: false, loadingOlderMessages: false })
   },
 
   forkSession: (messageId) => {
