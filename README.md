@@ -535,7 +535,6 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for details.
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — System layers, controller pattern, MCP server filtering, invariants, data flow, project layout, dependencies, version requirements.
 - **[DOCS.md](DOCS.md)** — Full documentation (Russian): config reference, modes, indexing, tools, CLI, VS Code, MCP, skills, rules, troubleshooting.
-- **Semantic changes:** `docs/changes/`
 
 ---
 
