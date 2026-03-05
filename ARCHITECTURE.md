@@ -24,6 +24,27 @@ The **NexusProvider** owns the webview(s) and delegates all messages to `control
 
 ---
 
+## Agent loop and mandatory end tools
+
+The agent loop runs until one of:
+
+- **Mandatory end tool** for the current mode is executed (turn ends).
+- **finishReason === "stop"** and no tool calls in the last step (then the loop may force-call the mandatory end tool).
+- Abort, fatal error, or tool/iteration budget exceeded.
+
+**Mandatory end tool per mode** (`MANDATORY_END_TOOL` in `packages/core/src/agent/modes.ts`):
+
+| Mode   | Mandatory end tool        | Meaning |
+|--------|---------------------------|--------|
+| agent  | `final_report_to_user`    | Turn ends after the model reports the result to the user. |
+| plan   | `plan_exit`               | Turn ends when the plan is ready (plan written to `.nexus/plans/*.md`). |
+| ask    | `final_report_to_user`   | Turn ends after the model reports the answer. |
+| debug  | `final_report_to_user`   | Turn ends after the model reports the diagnosis/fix. |
+
+When the model stops without calling the mandatory tool, the loop force-calls it (with a summary of the current text) so the user always gets a final message. After the mandatory tool runs, the loop breaks and the turn is complete. There is no separate “completion” tool; **final_report_to_user** is the single way to deliver the final answer and end the turn in agent/ask/debug.
+
+---
+
 ## Key Decisions
 
 ### Unified config flow
@@ -52,7 +73,7 @@ Presets (model/vector/skills/MCP/rules) are stored in **`.nexus/agent-configs.js
 
 ### Bundled MCP (context-mode)
 
-The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can reference `bundle: "context-mode"`; hosts resolve it to `node sources/claude-context-mode/start.mjs` with `CLAUDE_PROJECT_DIR` set to the agent cwd. See `resolveBundledMcpServers` in core.
+The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can reference `bundle: "context-mode"`; hosts resolve it via **`resolveBundledMcpServers`** in core (`packages/core/src/mcp/resolve-bundled.ts`) to a full server config (command/args/env). `CLAUDE_PROJECT_DIR` is set to the agent cwd when running from the NexusCode repo.
 
 ---
 
@@ -66,6 +87,7 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 - When the **tool-call budget** is exceeded, the loop allows one more iteration with tools disabled so the model can emit a final text-only answer.
 - **`config.agentLoop.toolCallBudget`** and **`config.agentLoop.maxIterations`** override per-mode limits when set.
 - **Models catalog**: CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) and live gateway model list where applicable; unavailable free IDs are filtered from pickers.
+- **End of turn**: In agent/ask/debug the turn ends when **final_report_to_user** is executed; in plan when **plan_exit** is executed. The loop does not run another LLM request after that.
 
 ---
 
@@ -76,8 +98,9 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 3. Core (in-process or on server) builds prompt blocks (role, rules, skills, system, mentions, compaction).
 4. The model streams text and tool calls.
 5. Tools run via the host adapter with permission checks (rules, approval dialogs).
-6. Session and tool traces are saved (local or server) and sent back to the UI. With the server, extension and CLI can list/switch sessions; messages are loaded in pages to avoid OOM.
-7. Index updates run in the background and emit status events (in-process only; server mode does not run the indexer in the extension).
+6. When **final_report_to_user** (or **plan_exit** in plan mode) runs, its output is merged into the last text part’s `user_message` and the loop exits after that iteration.
+7. Session and tool traces are saved (local or server) and sent back to the UI. With the server, extension and CLI can list/switch sessions; messages are loaded in pages to avoid OOM.
+8. Index updates run in the background and emit status events (in-process only; server mode does not run the indexer in the extension).
 
 ---
 
@@ -86,41 +109,59 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 ```
 NexusCode/
 ├── packages/
-│   ├── core/           ← Agent engine
-│   │   ├── agent/      ← Loop, modes, classifier (tools/skills/MCP servers), prompts
-│   │   ├── tools/      ← Built-in tool registry
-│   │   ├── session/    ← JSONL storage, compaction
-│   │   ├── indexer/    ← AST + FTS + Qdrant
-│   │   ├── provider/   ← LLM providers + embeddings
-│   │   ├── checkpoint/  ← Shadow git
-│   │   ├── context/    ← @mentions, rules, condense
-│   │   ├── skills/     ← Skill loader + FTS + classifier
-│   │   ├── mcp/        ← MCP client, resolveBundledMcpServers
-│   │   └── config/     ← Schema, load, merge
-│   ├── vscode/         ← Extension + React webview (controller, settings, chat, presets)
-│   ├── cli/            ← CLI host + TUI (slash commands, agent-config, sessions)
-│   └── server/         ← Optional: SQLite sessions, streaming API
+│   ├── core/              ← Agent engine
+│   │   ├── agent/         ← Loop, modes, classifier (MCP servers + skills), prompts
+│   │   ├── tools/         ← Built-in tool registry + built-in implementations
+│   │   ├── session/       ← JSONL storage, compaction
+│   │   ├── indexer/       ← AST + FTS + Qdrant
+│   │   ├── provider/      ← LLM providers + embeddings
+│   │   ├── checkpoint/    ← Shadow git
+│   │   ├── context/       ← @mentions, rules, condense
+│   │   ├── skills/        ← Skill loader + FTS + classifier
+│   │   ├── mcp/           ← MCP client, resolveBundledMcpServers
+│   │   ├── config/        ← Schema (NexusConfigSchema), load, merge
+│   │   └── review/        ← Review helpers (if any)
+│   ├── vscode/            ← Extension + React webview (controller, settings, chat, presets)
+│   ├── cli/               ← CLI host + TUI (slash commands, agent-config, sessions)
+│   └── server/            ← Optional: SQLite sessions, streaming API
 ├── sources/
 │   └── claude-context-mode/  ← Bundled MCP (context compression, FTS, batch_execute)
-└── .nexus/             ← Project config (nexus.yaml, agent-configs.json, mcp-servers.json, rules, skills)
+└── .nexus/                ← Project config (nexus.yaml, agent-configs.json, rules, skills)
 ```
+
+---
+
+## Built-in tools (by group)
+
+- **always:** `final_report_to_user`, `ask_followup_question`, `update_todo_list`
+- **read:** `read_file`, `list_files`, `list_code_definitions`, `read_lints`
+- **write:** `write_to_file`, `replace_in_file`, `create_rule`
+- **execute:** `execute_command`
+- **search:** `grep`, `codebase_search`, `web_fetch`, `web_search`, `glob`
+- **browser:** `browser_action`
+- **skills:** `use_skill`
+- **agents:** `spawn_agent`
+- **context:** `condense`, `summarize_task`
+- **plan_exit:** `plan_exit` (plan mode only)
+
+Mode-specific blocks: **plan** blocks `execute_command`; **ask** blocks `write_to_file`, `replace_in_file`, `execute_command`, `create_rule`, `plan_exit`. **agent** and **debug** block `plan_exit`.
 
 ---
 
 ## External dependencies
 
-| Dependency        | Purpose                                      |
-|-------------------|----------------------------------------------|
-| Vercel AI SDK     | Provider abstraction, tool-call streaming   |
-| Qdrant REST client| Semantic vector retrieval                    |
-| SQLite (FTS5, better-sqlite3) | Local keyword/symbol indexing        |
-| MCP SDK           | External tool ecosystem                      |
+| Dependency         | Purpose                                      |
+|--------------------|----------------------------------------------|
+| Vercel AI SDK      | Provider abstraction, tool-call streaming   |
+| Qdrant REST client | Semantic vector retrieval                    |
+| SQLite (FTS5, better-sqlite3) | Local keyword/symbol indexing   |
+| MCP SDK            | External tool ecosystem                      |
 
 ---
 
 ## Version requirements
 
-- **Node.js**: **20+** is required for packaging the VS Code extension (`pnpm package:vscode`) — `vsce` needs the global `File` API. The rest of the build (`pnpm build`, core, webview, extension bundle) runs on Node 18. `.nvmrc` is set to `20` for nvm/fnm.
+- **Node.js**: **20+** is required for packaging the VS Code extension (`pnpm package:vscode`) — `vsce` needs the global `File` API. The rest of the build (`pnpm build`, core, webview, extension bundle) runs on Node 18+. `.nvmrc` is set to `20` for nvm/fnm.
 - **pnpm**: used for the workspace and scripts; no minimum version enforced in code.
 
 ---

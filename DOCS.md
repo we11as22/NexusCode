@@ -32,7 +32,7 @@
 
 ### Требования
 
-- **Node.js** 18+
+- **Node.js** 20+ (для сборки расширения VS Code и нативного модуля better-sqlite3)
 - **pnpm** (рекомендуется для монорепозитория) или npm
 
 ### Установка pnpm
@@ -151,7 +151,7 @@ nexus agent --print "Что делает функция parseConfig?"
 
 ### Минимальный пример `.nexus/nexus.yaml`
 
-По умолчанию используется бесплатная модель OpenRouter (`minimax/minimax-m2:free`, как в Kilo Code). Достаточно задать ключ:
+По умолчанию используется бесплатный шлюз Nexus/Kilo (`minimax/minimax-m2.5:free`, baseUrl api.kilo.ai). Ключ можно не указывать для этого шлюза. Для OpenRouter или своей модели задайте конфиг и при необходимости ключ через переменную окружения.
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
@@ -181,21 +181,21 @@ model:
 | Секция | Ключ | Тип | По умолчанию | Описание |
 |--------|------|-----|--------------|----------|
 | **model** | provider | string | openai-compatible | Провайдер LLM: anthropic, openai, google, ollama, azure, bedrock, groq, mistral, xai, deepinfra, cerebras, cohere, togetherai, perplexity, openai-compatible (OpenRouter через openai-compatible + baseUrl) |
-| | id | string | minimax/minimax-m2:free | Идентификатор модели (по умолчанию — бесплатная MiniMax M2 на OpenRouter, как в Kilo Code) |
+| | id | string | minimax/minimax-m2.5:free | Идентификатор модели (по умолчанию — бесплатная MiniMax на шлюзе api.kilo.ai) |
 | | apiKey | string | — | API-ключ (можно не указывать, если задан в env) |
 | | baseUrl | string | — | Кастомный URL API (для openai-compatible) |
 | **indexing** | enabled | boolean | true | Включить индексацию кодовой базы |
 | | excludePatterns | string[] | node_modules/**, .git/**, dist/**, ... | Glob-паттерны исключения при индексации |
 | | symbolExtract | boolean | true | Извлекать символы (классы, функции) для умной индексации |
-| | fts | boolean | true | Полнотекстовый поиск (SQLite FTS5) |
 | | vector | boolean | false | Векторный поиск (нужен Qdrant и embeddings) |
 | | batchSize | number | 50 | Размер батча при индексации |
 | | embeddingBatchSize | number | 60 | Размер батча embedding-запросов при векторной индексации |
 | | embeddingConcurrency | number | 2 | Параллелизм embedding-запросов при векторной индексации |
-| | debounceMs | number | 1500 | Задержка перед обновлением индекса при изменении файла |
-| **vectorDb** | enabled | boolean | false | Включить векторную БД |
+| | debounceMs | number | 800 | Задержка перед обновлением индекса при изменении файла |
+| **vectorDb** | enabled | boolean | false | Включить векторную БД (Qdrant) |
 | | url | string | http://localhost:6333 | URL Qdrant |
 | | collection | string | nexus | Имя коллекции |
+| | autoStart | boolean | true | Пытаться автоматически запустить Qdrant (локальный бинарник или Docker) при недоступности |
 | **permissions** | autoApproveRead | boolean | true | Авто-одобрение чтения файлов |
 | | autoApproveWrite | boolean | false | Авто-одобрение записи |
 | | autoApproveCommand | boolean | false | Авто-одобрение выполнения команд |
@@ -210,10 +210,11 @@ model:
 | **checkpoint** | enabled | boolean | true | Чекпоинты (требуется git) |
 | | timeoutMs | number | 15000 | Таймаут создания чекпоинта |
 | | createOnWrite | boolean | true | Создавать чекпоинт при записи файлов |
-| **mcp** | servers | array | [] | Список MCP-серверов (name, command, args, env, url, transport) |
+| | doubleCheckCompletion | boolean | false | Cline-style: первый вызов final_report_to_user (в agent) отклоняется, модель должна перепроверить и вызвать снова |
+| **mcp** | servers | array | [] | Список MCP-серверов (name, command, args, env, url, transport, bundle для встроенных вроде context-mode) |
 | **skills** | — | string[] | [] | Пути к SKILL.md или папкам с навыками |
 | **tools** | custom | string[] | [] | Кастомные инструменты |
-| | classifyToolsEnabled | boolean | false | Включить фильтр MCP-серверов по задаче |
+| | classifyToolsEnabled | boolean | false | Включить фильтр MCP-серверов по задаче (LLM выбирает серверы при числе серверов > classifyThreshold) |
 | | classifyThreshold | number | 20 | Порог по числу MCP-серверов: при превышении классификатор выбирает, какие серверы использовать |
 | | parallelReads | boolean | true | Параллельное выполнение read-only инструментов |
 | | maxParallelReads | number | 5 | Макс. параллельных чтений |
@@ -225,19 +226,22 @@ model:
 | **parallelAgents** | maxParallel | number | 4 | Макс. число одновременных сабагентов |
 | **rules** | files | string[] | CLAUDE.md, AGENTS.md, .nexus/rules/** | Файлы с правилами проекта |
 | **profiles** | &lt;name&gt; | object | {} | Именованные профили (переопределения model), выбор через --profile |
+| **agentLoop** | toolCallBudget | object | {} | Опциональные лимиты вызовов тулов по режимам (ask, plan, agent, debug) |
+| | maxIterations | object | {} | Опциональные лимиты итераций цикла по режимам |
+| **structuredOutput** | — | "auto" \| "always" \| "never" | auto | Использование структурированного вывода (JSON schema) когда модель поддерживает |
 
 ---
 
 ## Режимы работы
 
-| Режим | Описание | Чтение | Запись | Команды | Поиск | MCP/Skills/Agents |
-|-------|----------|--------|--------|---------|--------|-------------------|
-| **agent** | Полноценный агент: чтение, запись, команды, поиск, браузер, MCP, сабагенты | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **plan** | Только план: чтение + поиск; запись только в `.nexus/plans/*.md` | ✅ | Только .md в .nexus/plans | ❌ | ✅ | Skills |
-| **debug** | Фокус на отладке: как agent, но с акцентом на воспроизведение → изоляция → фикс | ✅ | ✅ | ✅ | ✅ | Skills |
-| **ask** | Только вопросы: объяснения, анализ кода; без изменений и команд | ✅ | ❌ | ❌ | ✅ | — |
+| Режим | Описание | Чтение | Запись | Команды | Поиск | MCP/Skills/Agents | Завершение хода |
+|-------|----------|--------|--------|---------|--------|-------------------|-----------------|
+| **agent** | Полноценный агент: чтение, запись, команды, поиск, браузер, MCP, сабагенты | ✅ | ✅ | ✅ | ✅ | ✅ | **final_report_to_user** |
+| **plan** | Только план: чтение + поиск; запись только в `.nexus/plans/*.md` | ✅ | Только .md в .nexus/plans | ❌ | ✅ | ✅ | **plan_exit** |
+| **debug** | Фокус на отладке: как agent, но с акцентом на воспроизведение → изоляция → фикс | ✅ | ✅ | ✅ | ✅ | ✅ | **final_report_to_user** |
+| **ask** | Только вопросы: объяснения, анализ кода; без изменений и команд | ✅ | ❌ | ❌ | ✅ | ✅ | **final_report_to_user** |
 
-Переключение режима: в CLI — **Tab**; в VS Code — кнопки режимов в панели NexusCode.
+Переключение режима: в CLI — **Tab**; в VS Code — кнопки режимов в панели NexusCode. В конце каждого хода модель должна вызвать инструмент завершения (final_report_to_user или plan_exit в plan); иначе цикл принудительно вызывает его с кратким итогом.
 
 ---
 
@@ -280,20 +284,25 @@ model:
 | **read_file** | Чтение файла с опциональным диапазоном строк (start_line, end_line). Для больших файлов — обрезка по размеру/строкам. | agent, plan, debug, ask |
 | **write_to_file** | Создание/перезапись файла | agent, debug |
 | **replace_in_file** | Несколько search/replace блоков в одном вызове | agent, debug |
-| **batch** | Пакетное чтение и/или поиск (все режимы); в режиме **agent** дополнительно — пакетные правки (replaces). В plan и ask доступны только \`reads\` и \`searches\`, без изменения файлов. | agent, plan, ask |
 | **execute_command** | Выполнение shell-команды (таймаут, обрезка вывода) | agent, debug |
-| **search_files** | Поиск по содержимому (ripgrep), regex | agent, plan, debug, ask |
+| **grep** | Поиск по содержимому (ripgrep), regex | agent, plan, debug, ask |
 | **list_files** | Список файлов/папок с опциональным glob include | все |
 | **list_code_definitions** | Список определений кода в файле/папке | все |
+| **read_lints** | Чтение диагностик (ошибки/предупреждения) по путям | все |
 | **codebase_search** | Семантический/ключевой поиск по индексу (FTS + опционально вектор) | все при включённом индексе |
 | **web_fetch** | GET-запрос по URL | agent, plan, debug, ask |
 | **web_search** | Поиск в интернете (Brave/Serper; нужны BRAVE_API_KEY или SERPER_API_KEY) | agent, plan, debug, ask |
 | **glob** | Поиск файлов по glob-паттерну (например \`**/*.ts\`), сортировка по времени изменения | agent, plan, debug, ask |
-| **use_skill** | Подключение навыка из SKILL.md | agent, plan, debug |
-| **spawn_agent** | Запуск параллельного сабагента с описанием задачи и режимом | agent |
-| **final_report_to_user** | Финализация ответа пользователю | все |
+| **browser_action** | Действия в браузере (MCP cursor-ide-browser или аналог) | agent, plan, debug, ask |
+| **use_skill** | Подключение навыка из SKILL.md | agent, plan, debug, ask |
+| **spawn_agent** | Запуск параллельного сабагента с описанием задачи и режимом | agent, plan, ask, debug |
+| **condense** | Компактизация истории диалога (сокращение контекста) | все |
+| **summarize_task** | Краткое резюме задачи для контекста | все |
+| **plan_exit** | Завершение фазы планирования (только в режиме plan) | plan |
+| **final_report_to_user** | Итоговый ответ пользователю; **завершает ход** в режимах agent, ask, debug | все |
 | **ask_followup_question** | Уточняющий вопрос пользователю | все |
 | **update_todo_list** | Обновление чек-листа прогресса (task_progress) | все |
+| **create_rule** | Создание правила в .nexus/rules/ или ~/.nexus/rules/ | agent, debug |
 
 ### Ограничения для больших файлов и логов
 
@@ -510,7 +519,7 @@ rules:
 - **Только CLI**: `pnpm --filter @nexuscode/cli build`.
 - **Только VS Code**: `pnpm --filter nexuscode build` (собирает extension и webview-ui).
 
-Документация актуальна для текущего состояния репозитория; при добавлении новых фич и опций конфига их стоит дополнять в этот файл.
+Документация актуальна для текущего состояния репозитория. Ключевые изменения: завершение хода через **final_report_to_user** (agent/ask/debug) и **plan_exit** (plan); встроенный поиск по содержимому — **grep** (ripgrep); индексация — FTS всегда, вектор опционально. При добавлении новых фич и опций конфига их стоит дополнять в этот файл.
 
 ---
 
