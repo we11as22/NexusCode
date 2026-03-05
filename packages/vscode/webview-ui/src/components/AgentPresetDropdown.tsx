@@ -43,9 +43,23 @@ export function AgentPresetDropdown() {
       className="rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] shadow-xl py-1 min-w-[180px] max-h-[240px] overflow-y-auto"
       style={menuStyle}
     >
+      <button
+        type="button"
+        onClick={() => {
+          postMessage({ type: "applyAgentPreset", presetName: "Default" })
+          setOpen(false)
+        }}
+        title="Use all skills, MCP servers, and default rules from config"
+        className="w-full flex flex-col items-start gap-0.5 px-3 py-2 text-left text-[12px] text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] transition-colors"
+      >
+        <span className="font-medium truncate w-full">Default</span>
+        <span className="text-[10px] text-[var(--vscode-descriptionForeground)]">
+          All skills · all MCP · default rules
+        </span>
+      </button>
       {agentPresets.length === 0 ? (
         <div className="px-3 py-2 text-[11px] text-[var(--vscode-descriptionForeground)]">
-          No presets. Create in Settings → Agent presets.
+          No other presets. Create in Settings → Agent presets.
         </div>
       ) : (
         agentPresets.map((preset) => (

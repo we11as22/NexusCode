@@ -1045,6 +1045,9 @@ async function executeToolCall(
     }
   }
 
+  const ctxWithPartId = ctx as ToolContext & { partId?: string }
+  ctxWithPartId.partId = `part_${toolCallId}`
+
   // Cline-style double-check (agent mode): first final_report_to_user is rejected; model must re-verify and call again
   if (
     toolName === "final_report_to_user" &&
@@ -1113,7 +1116,14 @@ async function executeToolCall(
   }
 
   // --- Standard approval flow (only when no explicit rule matched) ---
-  if (ruleResult === null) {
+  // For write_to_file/replace_in_file with host file-edit API: tool does open → approve → save/revert; skip here.
+  const useFileEditFlow =
+    (toolName === "write_to_file" || toolName === "replace_in_file") &&
+    typeof host.openFileEdit === "function" &&
+    typeof host.saveFileEdit === "function" &&
+    typeof host.revertFileEdit === "function"
+
+  if (ruleResult === null && !useFileEditFlow) {
     const needsApproval = toolNeedsApproval(toolName, toolInput, autoApproveActions, config)
     if (needsApproval) {
       const action = buildApprovalAction(toolName, toolInput)

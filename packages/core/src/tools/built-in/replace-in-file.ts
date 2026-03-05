@@ -4,6 +4,15 @@ import * as diff from "diff"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { buildDiffHunks } from "./diff-hunks.js"
 
+const MAX_DIFF_PREVIEW_LINES = 80
+
+function createDiffPreview(oldContent: string, newContent: string, label: string): string {
+  const patch = diff.createTwoFilesPatch(label, label, oldContent, newContent, "", "", { context: 2 })
+  const lines = patch.split(/\r?\n/)
+  if (lines.length <= MAX_DIFF_PREVIEW_LINES) return patch
+  return lines.slice(0, MAX_DIFF_PREVIEW_LINES).join("\n") + "\n... (truncated)"
+}
+
 const searchReplaceBlock = z.object({
   search: z.string().min(1).describe("Exact text to find in the file (must match exactly, cannot be empty)"),
   replace: z.string().describe("Text to replace the search block with"),
@@ -30,7 +39,7 @@ When NOT to use:
 - Unclear exact content: read_file first to get exact text and indentation.
 
 Rules:
-- search must match exactly (whitespace and indentation). Blocks applied in order.
+- search must match exactly (whitespace and indentation). Include sufficient context in each block so the match is unique and the edit is unambiguous. Minimize unchanged code in the block; but each block should have enough surrounding context that the replacement is clear. Blocks are applied in order.
 - Tool returns full updated content — use it as reference for next edits.
 - If search appears multiple times, only the first occurrence is replaced.`,
   parameters: schema,
@@ -67,7 +76,6 @@ Rules:
       })
     }
 
-    // Sort by start index descending so applying from end doesn't shift earlier indices
     replacements.sort((a, b) => b.start - a.start)
 
     let content = originalContent
@@ -79,10 +87,52 @@ Rules:
       .sort((a, b) => a.blockIndex - b.blockIndex)
       .map((r) => `Block ${r.blockIndex + 1}: replaced at line ~${r.lineNum}`)
 
-    try {
-      await ctx.host.writeFile(filePath, content)
-    } catch (err) {
-      return { success: false, output: `Failed to write: ${(err as Error).message}` }
+    // Roo/Cline-style: open → approve → save or revert (when host supports it)
+    const useFileEditFlow =
+      typeof ctx.host.openFileEdit === "function" &&
+      typeof ctx.host.saveFileEdit === "function" &&
+      typeof ctx.host.revertFileEdit === "function"
+
+    if (useFileEditFlow) {
+      const diffPreview = createDiffPreview(originalContent, content, filePath)
+      await ctx.host.openFileEdit!(filePath, {
+        originalContent,
+        newContent: content,
+        isNewFile: false,
+      })
+      ctx.host.emit({
+        type: "tool_approval_needed",
+        action: {
+          type: "write",
+          tool: "replace_in_file",
+          description: `Edit ${filePath}`,
+          content,
+          diff: diffPreview,
+        },
+        partId: ctx.partId ?? "",
+      })
+      const approval = await ctx.host.showApprovalDialog({
+        type: "write",
+        tool: "replace_in_file",
+        description: `Edit ${filePath}`,
+        content,
+        diff: diffPreview,
+      })
+      if (!approval.approved) {
+        await ctx.host.revertFileEdit!(filePath)
+        return { success: false, output: `User denied edit to ${filePath}` }
+      }
+      try {
+        await ctx.host.saveFileEdit!(filePath)
+      } catch (err) {
+        return { success: false, output: `Failed to write: ${(err as Error).message}` }
+      }
+    } else {
+      try {
+        await ctx.host.writeFile(filePath, content)
+      } catch (err) {
+        return { success: false, output: `Failed to write: ${(err as Error).message}` }
+      }
     }
 
     const absPath = path.resolve(ctx.cwd, filePath)

@@ -1034,6 +1034,8 @@ interface ToolContext {
     signal: AbortSignal;
     /** Optional: trigger context compaction (condense/summarize_task tools). */
     compactSession?: () => Promise<void>;
+    /** Current tool call part id (e.g. part_xyz). Set by loop for write/replace so tool can emit tool_approval_needed. */
+    partId?: string;
 }
 interface ApprovalAction {
     type: "write" | "execute" | "mcp" | "browser" | "read" | "doom_loop";
@@ -1066,6 +1068,19 @@ interface IHost {
     getCheckpointEntries?(): Promise<CheckpointEntry[]>;
     /** Get diff between two checkpoints for preview. */
     getCheckpointDiff?(fromHash: string, toHash?: string): Promise<ChangedFile[]>;
+    /**
+     * Roo/Cline-style file edit flow: open → [approval] → save or revert.
+     * openFileEdit: open diff view (extension) or store pending edit (CLI). Do not write to disk yet.
+     * saveFileEdit: commit current pending edit to disk.
+     * revertFileEdit: discard pending edit; for new files do not create, for existing restore original (if view was opened).
+     */
+    openFileEdit?(path: string, options: {
+        originalContent: string;
+        newContent: string;
+        isNewFile: boolean;
+    }): Promise<void>;
+    saveFileEdit?(path: string): Promise<void>;
+    revertFileEdit?(path: string): Promise<void>;
 }
 interface DiagnosticItem {
     file: string;
@@ -1086,6 +1101,8 @@ interface ISession {
     getTodo(): string;
     getTokenEstimate(): number;
     fork(messageId: string): ISession;
+    /** Rewind chat to timestamp; keeps only messages with ts <= timestamp (for checkpoint restore). */
+    rewindToTimestamp(timestamp: number): void;
     save(): Promise<void>;
     load(): Promise<void>;
 }
@@ -1592,6 +1609,8 @@ declare class Session implements ISession {
     getTodo(): string;
     getTokenEstimate(): number;
     fork(messageId: string): ISession;
+    /** Rewind chat to timestamp (Cline/Roo-Code style). Keeps only messages with ts <= timestamp. */
+    rewindToTimestamp(timestamp: number): void;
     save(): Promise<void>;
     load(): Promise<void>;
     static create(cwd: string): Session;
@@ -2017,32 +2036,49 @@ declare function buildReviewPromptUncommitted(cwd: string): Promise<string>;
 declare function buildReviewPromptBranch(cwd: string): Promise<string>;
 
 /**
- * Shadow git repository for checkpoints.
- * Uses a separate git repo in ~/.nexus/checkpoints/{task-id}/
- * to snapshot the workspace state without interfering with the project's git.
+ * Shadow git repository for checkpoints (Cline/Roo-Code style).
+ * - Shadow repo lives in ~/.nexus/checkpoints/{cwdHash}/.git
+ * - core.worktree points to the workspace; no file copy — worktree is the workspace.
+ * - saveCheckpoint = stage + commit in shadow; restore = git clean -fd + git reset --hard hash.
  */
 declare class CheckpointTracker {
     private readonly taskId;
     private readonly workspaceRoot;
     private git;
-    private readonly shadowRoot;
+    /** Directory containing .git (shadow repo root). */
+    private readonly shadowDir;
+    private readonly cwdHash;
     private initialized;
     private entries;
     constructor(taskId: string, workspaceRoot: string);
-    /** Lazy git instance — only after init() has created shadowRoot (simple-git requires dir to exist). */
     private getGit;
     /**
-     * Initialize the shadow git repository.
-     * Returns false if workspace is too large or git unavailable.
+     * Initialize the shadow git repository with worktree = workspaceRoot.
+     * Returns false if validation fails, git unavailable, or timeout.
      */
     init(timeoutMs?: number): Promise<boolean>;
     private initInternal;
+    /** Stage files in worktree; temporarily renames nested .git dirs so git doesn't treat them as submodules (Cline-style). */
+    private addCheckpointFiles;
+    private renameNestedGitRepos;
     commit(description?: string): Promise<string>;
+    /**
+     * Restore workspace to a checkpoint (Cline/Roo-Code style).
+     * Runs git clean -fd then git reset --hard in the shadow repo; worktree = workspace so files are restored in place.
+     */
     resetHead(hash: string): Promise<void>;
     getDiff(fromHash: string, toHash?: string): Promise<ChangedFile[]>;
     getEntries(): CheckpointEntry[];
-    private syncWorkspace;
-    private restoreToWorkspace;
 }
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getPlanContentForFollowup, hadPlanExit, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, testMcpServers, writeConfig, writeGlobalProfiles };
+/**
+ * Persist checkpoint entries for a session (CLI use: after run or on each commit).
+ * Stored under ~/.nexus/sessions/{cwdHash}/checkpoints.json keyed by sessionId.
+ */
+declare function writeCheckpointEntries(cwd: string, sessionId: string, entries: CheckpointEntry[]): Promise<void>;
+/**
+ * Load checkpoint entries for a session.
+ */
+declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
+
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getPlanContentForFollowup, hadPlanExit, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles };

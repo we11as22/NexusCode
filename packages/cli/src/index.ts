@@ -12,6 +12,7 @@ import {
   ParallelAgentManager, createSpawnAgentTool, runAgentLoop,
   CodebaseIndexer, createCodebaseIndexer, listSessions, deleteSession as coreDeleteSession,
   hadPlanExit, getPlanContentForFollowup,
+  CheckpointTracker, writeCheckpointEntries, readCheckpointEntries,
   MODES, type Mode, type AgentEvent, type IndexStatus, type PermissionResult,
 } from "@nexuscode/core"
 import { CliHost } from "./host.js"
@@ -106,6 +107,13 @@ const argv = await yargs(hideBin(process.argv))
     type: "boolean",
     describe: "Show version",
   })
+  .option("type", {
+    alias: "t",
+    type: "string",
+    choices: ["task", "workspace", "taskAndWorkspace"],
+    default: "taskAndWorkspace",
+    describe: "Restore type (task restore only): task | workspace | taskAndWorkspace",
+  })
   .help("help")
   .alias("help", "h")
   .argv
@@ -119,6 +127,48 @@ if (argv["nexus-version"]) {
 const cwd = argv.project ? path.resolve(argv.project) : process.cwd()
 const indexEnabledFlag = Boolean((argv as Record<string, unknown>)["index"])
 const serverUrl = (argv as Record<string, string>)["server"] || process.env.NEXUS_SERVER_URL || ""
+
+// Handle task subcommands (Cline-style: nexus task restore <id> -t task|workspace|taskAndWorkspace, nexus task checkpoints)
+const positionalArgs = argv._ as string[]
+if (positionalArgs[0] === "task") {
+  const sessions = await listSessions(cwd)
+  const defaultSessionId = sessions[0]?.id
+  const sessionIdOpt = argv.session as string | undefined
+
+  if (positionalArgs[1] === "checkpoints") {
+    const sid = sessionIdOpt ?? defaultSessionId
+    if (!sid) {
+      console.error("[nexus] No session found. Run a task first or use --session <id>.")
+      process.exit(1)
+    }
+    const entries = await readCheckpointEntries(cwd, sid)
+    if (entries.length === 0) {
+      console.log("No checkpoints for this session.")
+    } else {
+      entries.forEach((e, i) => {
+        const shortHash = e.hash.slice(0, 7)
+        const desc = e.description ? ` ${e.description}` : ""
+        console.log(`${i + 1}. ${shortHash} (${new Date(e.ts).toISOString()})${desc}`)
+      })
+    }
+    process.exit(0)
+  }
+
+  if (positionalArgs[1] === "restore" && positionalArgs[2]) {
+    const sid = sessionIdOpt ?? defaultSessionId
+    if (!sid) {
+      console.error("[nexus] No session found. Use --session <id>.")
+      process.exit(1)
+    }
+    const restoreType = (argv.type ?? "taskAndWorkspace") as "task" | "workspace" | "taskAndWorkspace"
+    const { runTaskRestore } = await import("./task-restore.js")
+    await runTaskRestore(cwd, sid, positionalArgs[2], restoreType)
+    process.exit(0)
+  }
+
+  console.error("Usage: nexus task checkpoints [--session <id>] | nexus task restore <id> [-t task|workspace|taskAndWorkspace] [--session <id>]")
+  process.exit(1)
+}
 
 // Load config
 let config = await loadConfig(cwd)
@@ -573,7 +623,6 @@ function saveConfig(updates: Partial<typeof config>): void {
   appProps.configSnapshot = buildConfigSnapshot(config)
   root.render(React.createElement(App, appProps))
 }
-
 function buildConfigSnapshot(conf: typeof config): typeof appProps.configSnapshot {
   return {
     model: { provider: conf.model.provider, id: conf.model.id, temperature: conf.model.temperature },
@@ -698,6 +747,21 @@ async function runMessage(content: string, msgMode: Mode) {
 
   try {
     await refreshIndexerFromGit(indexer, cwd).catch(() => {})
+    let checkpointTracker: CheckpointTracker | null = null
+    const checkpointOpt =
+      configForRun.checkpoint?.enabled !== false
+        ? (async () => {
+            const tracker = new CheckpointTracker(sessionRef.current.id, cwd)
+            const ok = await tracker.init()
+            if (ok) {
+              checkpointTracker = tracker
+              return { commit: (d?: string) => tracker.commit(d) }
+            }
+            return undefined
+          })()
+        : undefined
+    const checkpoint = checkpointOpt ? await checkpointOpt : undefined
+
     await runAgentLoop({
       session: sessionRef.current,
       client,
@@ -711,8 +775,14 @@ async function runMessage(content: string, msgMode: Mode) {
       compaction,
       signal: currentAbortController.signal,
       createSkillMode,
+      checkpoint,
     })
     await sessionRef.current.save().catch(() => {})
+    if (checkpointTracker) {
+      await writeCheckpointEntries(cwd, sessionRef.current.id, checkpointTracker.getEntries()).catch(
+        () => {}
+      )
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (!msg.includes("AbortError") && !msg.includes("Aborted")) {
@@ -921,6 +991,8 @@ const appProps = {
   },
   noIndex: !indexEnabledFlag || !!serverUrl,
   configSnapshot: buildConfigSnapshot(config),
+  /** Snapshot of config at startup; used for "Default" preset (all skills, MCP, rules). */
+  initialConfigSnapshot: buildConfigSnapshot(config),
   saveConfig,
   onReindex: () => indexer?.reindex(),
   onIndexStop: () => indexer?.stop(),
@@ -934,6 +1006,19 @@ const appProps = {
   getSessionList,
   onSwitchSession,
   onDeleteSession,
+  getCheckpointList: serverUrl ? undefined : () => readCheckpointEntries(cwd, sessionRef.current.id),
+  onRestoreCheckpoint: serverUrl
+    ? undefined
+    : async (checkpointId: string, restoreType: "task" | "workspace" | "taskAndWorkspace") => {
+        const { runTaskRestore } = await import("./task-restore.js")
+        await runTaskRestore(cwd, sessionRef.current.id, checkpointId, restoreType)
+        const updated = await Session.resume(sessionRef.current.id, cwd)
+        if (updated) {
+          sessionRef.current = updated
+          appProps.initialMessages = updated.messages
+          root.render(React.createElement(App, appProps))
+        }
+      },
   onPlanFollowupChoice: async (choice: "new_session" | "continue" | "dismiss", planText?: string) => {
     if (choice === "dismiss") return
     if (choice === "new_session" && planText) {

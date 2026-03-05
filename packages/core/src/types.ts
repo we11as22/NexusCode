@@ -66,6 +66,8 @@ export interface ToolContext {
   signal: AbortSignal
   /** Optional: trigger context compaction (condense/summarize_task tools). */
   compactSession?: () => Promise<void>
+  /** Current tool call part id (e.g. part_xyz). Set by loop for write/replace so tool can emit tool_approval_needed. */
+  partId?: string
 }
 
 // ─── Host Interface ───────────────────────────────────────────────────────────
@@ -102,6 +104,16 @@ export interface IHost {
   getCheckpointEntries?(): Promise<CheckpointEntry[]>
   /** Get diff between two checkpoints for preview. */
   getCheckpointDiff?(fromHash: string, toHash?: string): Promise<ChangedFile[]>
+
+  /**
+   * Roo/Cline-style file edit flow: open → [approval] → save or revert.
+   * openFileEdit: open diff view (extension) or store pending edit (CLI). Do not write to disk yet.
+   * saveFileEdit: commit current pending edit to disk.
+   * revertFileEdit: discard pending edit; for new files do not create, for existing restore original (if view was opened).
+   */
+  openFileEdit?(path: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void>
+  saveFileEdit?(path: string): Promise<void>
+  revertFileEdit?(path: string): Promise<void>
 }
 
 export interface DiagnosticItem {
@@ -126,6 +138,8 @@ export interface ISession {
   getTodo(): string
   getTokenEstimate(): number
   fork(messageId: string): ISession
+  /** Rewind chat to timestamp; keeps only messages with ts <= timestamp (for checkpoint restore). */
+  rewindToTimestamp(timestamp: number): void
   save(): Promise<void>
   load(): Promise<void>
 }

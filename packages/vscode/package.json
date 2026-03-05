@@ -122,6 +122,12 @@
         "command": "nexuscode.clearIndex",
         "title": "Clear Index and Rebuild",
         "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.openTerminal",
+        "title": "Open NexusCode Terminal",
+        "category": "NexusCode",
+        "icon": "$(terminal)"
       }
     ],
     "menus": {
@@ -286,6 +292,11 @@
           "type": "boolean",
           "default": false,
           "description": "Auto-approve terminal command execution"
+        },
+        "nexuscode.runCommandsInTerminal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run approved commands in the integrated terminal (Cline-style). When enabled, a 'NexusCode' terminal is created or reused and shown; command output is captured for the agent. When disabled, commands run in the background without opening the terminal."
         }
       }
     }

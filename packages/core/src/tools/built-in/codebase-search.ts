@@ -18,16 +18,20 @@ export const codebaseSearchTool: ToolDef<z.infer<typeof schema>> = {
 Only available when vector search is enabled (indexing.vector + vectorDb.enabled in .nexus/nexus.yaml) and the index is built (embeddings configured, Qdrant running).
 
 When to use:
-- Explore codebase by intent: "where is auth validated", "error handling for API calls", "how does caching work".
+- Explore codebase by intent: "where is auth validated", "error handling for API calls", "how does caching work". Ask as if talking to a colleague: "How does X work?", "What happens when Y?", "Where is Z handled?"
 - Use the query field for natural-language descriptions of what you want to find.
-- path/paths: optional scope (directory or file). Omit to search whole repo.
+- path/paths: optional scope (ONE directory or file; omit or empty to search whole repo). Do not use multiple directories in one scope; no globs or wildcards (e.g. avoid "frontend/", "backend/" together or "*.ts").
 - kind: filter by symbol type (class, function, interface, etc.).
 - limit: max results (default 10). Use read_file with path:line from results to load only relevant sections.
+
+Search strategy: Start with a broad query (e.g. empty path) if unsure where code lives; review results and rerun with a narrower path if a directory stands out. Break large questions into smaller focused queries (e.g. "Where are user roles checked?" in backend/auth/). For big files (>1K lines), run codebase_search scoped to that file or use grep for exact symbols.
 
 When NOT to use:
 - Exact text or regex: use grep instead.
 - Reading a known file: use read_file.
 - Single identifier or symbol overview: use grep or list_code_definitions.
+
+Usage: When full chunk contents are provided in results, avoid re-reading the exact same chunk with read_file. When only chunk signatures (e.g. function/class names) are shown, use read_file or grep to explore those files or ranges.
 
 Query examples: Good — "Where is user authentication validated before login?" (complete question with context). Bad — "AuthService" (single word; use grep). Bad — "What is X? How does Y work?" (split into separate queries).`,
   parameters: schema,

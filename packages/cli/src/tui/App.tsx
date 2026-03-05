@@ -108,6 +108,8 @@ interface AppProps {
     }
     profiles?: Record<string, Record<string, unknown>>
   }
+  /** Snapshot at startup for "Default" preset (all skills, MCP, rules). Same shape as configSnapshot. */
+  initialConfigSnapshot?: AppProps["configSnapshot"]
   saveConfig?: (updates: Record<string, unknown>) => void
   onReindex?: () => void
   onIndexStop?: () => void
@@ -120,6 +122,9 @@ interface AppProps {
   onDeleteSession?: (sessionId: string) => void | Promise<void>
   /** Kilocode-style: after plan_exit, user chose New session / Continue / Dismiss */
   onPlanFollowupChoice?: (choice: "new_session" | "continue" | "dismiss", planText?: string) => void
+  /** CLI checkpoints (Cline-style): list and restore */
+  getCheckpointList?: () => Promise<Array<{ hash: string; ts: number; description?: string }>>
+  onRestoreCheckpoint?: (checkpointId: string, type: "task" | "workspace" | "taskAndWorkspace") => Promise<void>
 }
 
 interface AgentPreset {
@@ -470,6 +475,7 @@ export function App({
   onProfileSelect,
   noIndex = false,
   configSnapshot,
+  initialConfigSnapshot,
   saveConfig,
   onReindex,
   onIndexStop,
@@ -479,6 +485,8 @@ export function App({
   onSwitchSession,
   onDeleteSession,
   onPlanFollowupChoice,
+  getCheckpointList,
+  onRestoreCheckpoint,
 }: AppProps) {
   const dims = useTerminalDimensions()
   const renderer = useRenderer()
@@ -571,6 +579,8 @@ export function App({
   const [vectorIndexEnabled, setVectorIndexEnabled] = useState(Boolean(configSnapshot?.indexing?.vector))
   const [indexingEnabled, setIndexingEnabled] = useState(Boolean(configSnapshot?.indexing?.enabled ?? true))
   const inputHistory = useRef<string[]>([])
+  const [checkpointList, setCheckpointList] = useState<Array<{ hash: string; ts: number; description?: string }>>([])
+  const [checkpointRestorePrompt, setCheckpointRestorePrompt] = useState<string | null>(null)
   const eventQueueRef = useRef<AgentEvent[]>([])
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastFlushTimeRef = useRef<number>(0)
@@ -777,6 +787,16 @@ export function App({
     }
   }, [view, configSnapshot, mcpServerNames])
 
+  // When preset picker opens, sync selected index to current applied preset (Default = 0).
+  useEffect(() => {
+    if (!presetPickerOpen) return
+    const idx =
+      appliedPresetName === null || appliedPresetName === "Default"
+        ? 0
+        : 1 + agentPresets.findIndex((p) => p.name === appliedPresetName)
+    setPresetPickerSelectedIndex(idx >= 0 ? idx : 0)
+  }, [presetPickerOpen, appliedPresetName, agentPresets])
+
   // Load session list when opening sessions view
   useEffect(() => {
     if (view !== "sessions" || !getSessionList) return
@@ -790,6 +810,14 @@ export function App({
       .catch(() => setSessionList([]))
       .finally(() => setSessionListLoading(false))
   }, [view, getSessionList])
+
+  // Load checkpoint list for current session (CLI checkpoints, Cline-style)
+  useEffect(() => {
+    if (!getCheckpointList || !sessionId) return
+    getCheckpointList()
+      .then((list) => setCheckpointList(list))
+      .catch(() => setCheckpointList([]))
+  }, [sessionId, getCheckpointList, initialMessages?.length])
 
   const SESSION_LIST_MAX_VISIBLE = 12
   const sessionListFiltered = useMemo(() => {
@@ -1321,7 +1349,6 @@ export function App({
         return
       case "presetPicker":
         setPresetPickerOpen(true)
-        setPresetPickerSelectedIndex(0)
         if (projectDir) {
           setAgentPresetLoading(true)
           readAgentPresets(projectDir).then((list) => {
@@ -1425,6 +1452,23 @@ export function App({
     return options
   }, [availableSkills, mcpServerNames, availableRules])
 
+  /** Virtual "Default" preset = all skills, MCP, rules from initial config (startup). Always first in picker. */
+  const defaultPreset = useMemo((): AgentPreset => {
+    const snap = initialConfigSnapshot ?? configSnapshot
+    const servers = (snap?.mcp?.servers ?? []) as Array<{ name?: string }>
+    return {
+      name: "Default",
+      vector: Boolean(snap?.indexing?.vector),
+      skills: dedupeList(snap?.skills ?? []),
+      mcpServers: servers.map((s) => (s.name ?? "").trim()).filter(Boolean),
+      rulesFiles: snap?.rules?.files?.length ? [...snap.rules.files] : ["AGENTS.md", "CLAUDE.md"],
+      createdAt: 0,
+    }
+  }, [initialConfigSnapshot, configSnapshot])
+
+  /** Picker list: Default first, then saved presets. */
+  const presetsForPicker = useMemo(() => [defaultPreset, ...agentPresets], [defaultPreset, agentPresets])
+
   const selectedPreset = agentPresets[Math.min(agentPresetSelected, Math.max(0, agentPresets.length - 1))]
 
   const startPresetCreate = () => {
@@ -1477,6 +1521,23 @@ export function App({
 
   const applyPreset = (preset: AgentPreset | undefined) => {
     if (!preset || !saveConfig) return
+    if (preset.name === "Default" && initialConfigSnapshot) {
+      const updates: Record<string, unknown> = {
+        indexing: {
+          enabled: indexingEnabled,
+          vector: Boolean(initialConfigSnapshot.indexing?.vector),
+        },
+        skills: initialConfigSnapshot.skills ?? [],
+        mcp: { servers: initialConfigSnapshot.mcp?.servers ?? [] },
+        rules: { files: initialConfigSnapshot.rules?.files?.length ? initialConfigSnapshot.rules.files : ["AGENTS.md", "CLAUDE.md"] },
+      }
+      saveConfig(updates)
+      setVectorIndexEnabled(Boolean(initialConfigSnapshot.indexing?.vector))
+      setSelectedPresetVector(Boolean(initialConfigSnapshot.indexing?.vector))
+      setAppliedPresetName("Default")
+      setView("chat")
+      return
+    }
     const selectedServers = namedMcpServers
       .filter((item) => preset.mcpServers.includes(item.name))
       .map((item) => item.server)
@@ -1637,14 +1698,14 @@ export function App({
       return
     }
 
-    // Preset picker (stay in chat): ↑↓ select, Enter apply, Esc close
+    // Preset picker (stay in chat): ↑↓ select, Enter apply, Esc close. First option = Default.
     if (presetPickerOpen) {
       if (key.escape) {
         setPresetPickerOpen(false)
         return
       }
       if (key.upArrow || key.downArrow) {
-        const n = agentPresets.length
+        const n = presetsForPicker.length
         if (n > 0) {
           setPresetPickerSelectedIndex((i) => {
             const next = key.downArrow ? i + 1 : i - 1
@@ -1653,8 +1714,8 @@ export function App({
         }
         return
       }
-      if (isEnter && agentPresets.length > 0) {
-        const preset = agentPresets[Math.min(presetPickerSelectedIndex, agentPresets.length - 1)]
+      if (isEnter && presetsForPicker.length > 0) {
+        const preset = presetsForPicker[Math.min(presetPickerSelectedIndex, presetsForPicker.length - 1)]
         if (preset) {
           applyPreset(preset)
           setPresetPickerOpen(false)
@@ -1687,6 +1748,29 @@ export function App({
         setState((s) => ({ ...s, planCompleted: false, planFollowupText: null }))
         return
       }
+    }
+
+    // Checkpoints (Cline-style): r = restore, then 1–N to pick checkpoint (taskAndWorkspace)
+    if (view === "chat" && checkpointRestorePrompt === "which" && checkpointList.length > 0 && onRestoreCheckpoint) {
+      if (key.escape) {
+        setCheckpointRestorePrompt(null)
+        return
+      }
+      const digit = lowerChar >= "1" && lowerChar <= "9" ? parseInt(lowerChar, 10) : 0
+      if (digit >= 1 && digit <= checkpointList.length) {
+        const entry = checkpointList[digit - 1]
+        if (entry) {
+          setCheckpointRestorePrompt(null)
+          onRestoreCheckpoint(entry.hash, "taskAndWorkspace").then(() => {
+            getCheckpointList?.().then((list) => setCheckpointList(list)).catch(() => {})
+          }).catch(() => {})
+        }
+        return
+      }
+    }
+    if (view === "chat" && !state.isRunning && !checkpointRestorePrompt && checkpointList.length > 0 && onRestoreCheckpoint && lowerChar === "r") {
+      setCheckpointRestorePrompt("which")
+      return
     }
 
     if (key.ctrl && ctrlKey === "k") {
@@ -2479,7 +2563,7 @@ export function App({
             )}
             {presetPickerOpen && (
             <PresetPickerPopup
-              presets={agentPresets}
+              presets={presetsForPicker}
               selectedIndex={presetPickerSelectedIndex}
               loading={agentPresetLoading}
               cols={shellW}
@@ -2488,6 +2572,22 @@ export function App({
             )}
             {state.awaitingApproval && state.pendingApprovalAction && (
               <ApprovalBanner action={state.pendingApprovalAction} cols={shellW} />
+            )}
+            {checkpointList.length > 0 && onRestoreCheckpoint && (
+              <box flexDirection="row" paddingTop={1} paddingBottom={0} flexWrap="wrap">
+                {checkpointRestorePrompt === "which" ? (
+                  <text fg={THEME.accent}>Restore which (1–{checkpointList.length})? </text>
+                ) : (
+                  <>
+                    <text fg={THEME.textMuted}>Checkpoints: </text>
+                    {checkpointList.slice(0, 6).map((e, i) => (
+                      <text key={e.hash}> [{i + 1}] {e.hash.slice(0, 7)}</text>
+                    ))}
+                    {checkpointList.length > 6 && <text> …</text>}
+                    <text fg={THEME.textMuted}>  r: Restore</text>
+                  </>
+                )}
+              </box>
             )}
             <InputBar
               input={input}
@@ -3468,20 +3568,25 @@ function PresetPickerPopup({
 function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number }) {
   const width = Math.max(20, cols - 4)
   const lines: string[] = []
+  const coloredLines: { line: string; fg: string }[] = []
   if (action.type === "write") {
     lines.push("✏ File write")
     lines.push(`  ${action.description}`)
-    if (action.content) {
-      const preview = action.content.split("\n").slice(0, 12).join("\n")
-      lines.push("  Content preview:")
-      for (const line of preview.split("\n")) {
-        lines.push("    " + (line.length > width - 6 ? line.slice(0, width - 7) + "…" : line))
-      }
-    }
     if (action.diff) {
-      const diffPreview = action.diff.split("\n").slice(0, 8).join("\n")
-      lines.push("  Diff preview:")
-      for (const line of diffPreview.split("\n")) {
+      const diffPreview = action.diff.split("\n").slice(0, 25)
+      for (const line of diffPreview) {
+        if (line.startsWith("+") && !line.startsWith("+++")) {
+          coloredLines.push({ line: "  " + (line.length > width - 2 ? line.slice(0, width - 3) + "…" : line), fg: "green" })
+        } else if (line.startsWith("-") && !line.startsWith("---")) {
+          coloredLines.push({ line: "  " + (line.length > width - 2 ? line.slice(0, width - 3) + "…" : line), fg: "red" })
+        } else {
+          coloredLines.push({ line: "  " + (line.length > width - 2 ? line.slice(0, width - 3) + "…" : line), fg: "white" })
+        }
+      }
+      if (action.diff.includes("(truncated)")) coloredLines.push({ line: "  ...", fg: "gray" })
+    } else if (action.content) {
+      lines.push("  Content preview:")
+      for (const line of action.content.split("\n").slice(0, 12)) {
         lines.push("    " + (line.length > width - 6 ? line.slice(0, width - 7) + "…" : line))
       }
     }
@@ -3496,16 +3601,28 @@ function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number
     lines.push("⚠ Potential infinite loop")
     lines.push(`  ${action.description}`)
   } else {
-    lines.push(`Allow: ${action.tool}`)
+    lines.push(`Permission: ${action.tool}`)
     lines.push(`  ${action.description}`)
   }
+  const hint =
+    action.type === "execute"
+      ? "y Allow once  n Deny  a Always allow  s Allow all  e Add to allowed (folder)"
+      : "y Allow once  n Deny  a Always allow  s Allow all"
+  lines.push("")
+  lines.push(`  ${hint}`)
   return (
     <box borderStyle="single" borderColor="yellow" paddingLeft={1} paddingRight={1} marginBottom={0}>
       {lines.map((line, i) => (
-        <text key={i} fg={i === 0 ? "yellow" : "white"} bold={i === 0}>
+        <text key={i} fg={i === 0 ? "yellow" : i >= lines.length - 2 ? "gray" : "white"} bold={i === 0}>
           {line}
         </text>
       ))}
+      {coloredLines.length > 0 &&
+        coloredLines.map(({ line, fg }, i) => (
+          <text key={`diff-${i}`} fg={fg}>
+            {line}
+          </text>
+        ))}
     </box>
   )
 }
@@ -3542,10 +3659,10 @@ function InputBar({
   const borderColor = awaitingApproval ? THEME.warning : isRunning ? THEME.danger : THEME.accent
   const approvalPrompt =
     pendingApprovalAction?.type === "execute"
-      ? "Allow? y/n a/s e(allow for folder)"
+      ? "Allow once (y) / Deny (n) / Always allow (a) / Allow all (s) / Add to allowed (e)"
       : pendingApprovalAction?.type === "doom_loop"
         ? "Continue? y / n (abort)"
-        : "Allow? y/n a/s"
+        : "Allow once (y) / Deny (n) / Always allow (a) / Allow all (s)"
   const prompt = awaitingApproval
     ? approvalPrompt
     : isRunning
@@ -3962,7 +4079,7 @@ function Footer({
   const shortSession = sessionId ? fit(sessionId, compact ? 10 : 14) : fit(sessionTitle ?? "untitled", compact ? 10 : 14)
   const vector = noIndex ? "off" : vectorIndexEnabled ? "on" : "off"
   const mcpPart = (mcpServersCount ?? 0) > 0 ? ` MCP:${mcpServersCount}` : " MCP:0"
-  const presetPart = appliedPresetName ? ` preset:${fit(appliedPresetName, 12)}` : ""
+  const presetPart = ` preset:${fit(appliedPresetName ?? "Default", 12)}`
   const lineCols = Math.max(20, cols - 4)
   const left = fit(projectDir ? shortenPath(projectDir, Math.max(18, Math.floor((compact ? 0.55 : 0.38) * lineCols))) : "~", Math.max(12, Math.floor((compact ? 0.55 : 0.38) * lineCols)))
   const maxW = Math.max(20, lineCols)

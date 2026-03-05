@@ -11,13 +11,13 @@ import { useChatStore } from "../stores/chat.js"
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file"])
 const BASH_OUTPUT_TAIL_LINES = 80
 
-/** Approval request inline (same field as tool card); organic colors to match card. */
+/** Approval request inline (Cline/Roo-style: Allow once, Always allow, Deny, Add to allowed for folder, Allow all session). */
 function ApprovalInline({
   action,
   onResolve,
 }: {
   action: { type: string; tool: string; description: string; content?: string }
-  onResolve: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string) => void
+  onResolve: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
 }) {
   const label =
     action.type === "execute"
@@ -33,13 +33,13 @@ function ApprovalInline({
       <span className="nexus-approval-inline-text text-xs text-[var(--vscode-foreground)] truncate flex-1 min-w-0">
         {label}
       </span>
-      <div className="nexus-approval-inline-buttons flex items-center gap-1.5 flex-shrink-0">
+      <div className="nexus-approval-inline-buttons flex items-center gap-1.5 flex-shrink-0 flex-wrap">
         <button
           type="button"
           className="nexus-approval-inline-btn nexus-approval-inline-btn-allow"
           onClick={() => onResolve(true)}
         >
-          Allow
+          Allow once
         </button>
         {action.type === "execute" && (
           <button
@@ -55,7 +55,14 @@ function ApprovalInline({
           className="nexus-approval-inline-btn nexus-approval-inline-btn-always"
           onClick={() => onResolve(true, true)}
         >
-          Allow Always
+          Always allow
+        </button>
+        <button
+          type="button"
+          className="nexus-approval-inline-btn nexus-approval-inline-btn-session"
+          onClick={() => onResolve(true, false, undefined, true)}
+        >
+          Allow all (session)
         </button>
         <button
           type="button"
@@ -202,7 +209,7 @@ function MessageBubble({
   message: SessionMessage
   isComplete: boolean
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
-  onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string) => void
+  onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
 }) {
   if (message.summary) {
     return (
@@ -399,7 +406,7 @@ function AssistantParts({
   parts: MessagePart[]
   isComplete: boolean
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
-  onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string) => void
+  onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
   showReasoningInChat: boolean
 }) {
   const { prefixItems, prefixIndices, hasContentAfterPrefix } = getExploredPrefixFromParts(parts)

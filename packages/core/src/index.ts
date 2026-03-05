@@ -68,4 +68,4 @@ export { buildReviewPromptBranch, buildReviewPromptUncommitted } from "./review/
 export type { DiffFile, DiffHunk, DiffResult } from "./review/types.js"
 
 // Checkpoint
-export { CheckpointTracker } from "./checkpoint/tracker.js"
+export { CheckpointTracker, writeCheckpointEntries, readCheckpointEntries } from "./checkpoint/index.js"

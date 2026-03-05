@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useState } from "react"
 import { useChatStore } from "../stores/chat.js"
 
 /** Bookmark icon (Cline-style checkpoint indicator) */
-function BookmarkIcon({ className }: { className?: string }) {
+function BookmarkIcon({ className, checkedOut }: { className?: string; checkedOut?: boolean }) {
   return (
     <svg
       className={className}
@@ -16,7 +16,7 @@ function BookmarkIcon({ className }: { className?: string }) {
       strokeLinejoin="round"
       aria-hidden
     >
-            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+      <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
     </svg>
   )
 }
@@ -32,10 +32,14 @@ export function CheckpointStrip() {
   const store = useChatStore()
   const entries = store.checkpointEntries
   const [openHash, setOpenHash] = useState<string | null>(null)
+  const [showMoreOptions, setShowMoreOptions] = useState(false)
   const popoverRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (!openHash) return
+    if (!openHash) {
+      setShowMoreOptions(false)
+      return
+    }
     const close = (e: MouseEvent) => {
       if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
         setOpenHash(null)
@@ -49,13 +53,13 @@ export function CheckpointStrip() {
 
   const label = (entry: CheckpointEntry) =>
     entry.description
-      ? (entry.description.length > 28 ? entry.description.slice(0, 28) + "…" : entry.description)
+      ? (entry.description.length > 20 ? entry.description.slice(0, 20) + "…" : entry.description)
       : entry.hash.slice(0, 7)
 
   return (
-    <div className="nexus-checkpoint-strip">
+    <div className="nexus-checkpoint-strip nexus-checkpoint-strip-cline">
       <div className="nexus-checkpoint-strip-inner">
-        <BookmarkIcon className="nexus-checkpoint-icon" />
+        <BookmarkIcon className="nexus-checkpoint-icon" checkedOut={false} />
         <div className="nexus-checkpoint-dotted" aria-hidden />
         <span className="nexus-checkpoint-label">Checkpoints</span>
         <div className="nexus-checkpoint-dotted" aria-hidden />
@@ -68,48 +72,94 @@ export function CheckpointStrip() {
                 </span>
                 <button
                   type="button"
-                  className="nexus-checkpoint-restore-btn"
+                  className="nexus-checkpoint-btn nexus-checkpoint-compare"
                   onClick={(e) => {
                     e.stopPropagation()
-                    setOpenHash(openHash === entry.hash ? null : entry.hash)
+                    store.showCheckpointDiff(entry.hash)
                   }}
-                  aria-expanded={openHash === entry.hash}
-                  aria-haspopup="dialog"
+                  title="Compare with current state"
                 >
-                  Restore
+                  Compare
                 </button>
-              </div>
-              {openHash === entry.hash && (
-                <div
-                  ref={popoverRef}
-                  className="nexus-checkpoint-popover"
-                  role="dialog"
-                  aria-label="Restore checkpoint"
-                >
-                  <p className="nexus-checkpoint-popover-desc">
-                    Restore workspace files to this snapshot. Open tabs will reload from disk.
-                  </p>
-                  <div className="nexus-checkpoint-popover-actions">
-                    <button
-                      type="button"
-                      className="nexus-checkpoint-popover-cancel"
-                      onClick={() => setOpenHash(null)}
+                <div className="nexus-checkpoint-restore-wrap" ref={openHash === entry.hash ? popoverRef : undefined}>
+                  <button
+                    type="button"
+                    className={`nexus-checkpoint-btn nexus-checkpoint-restore ${openHash === entry.hash ? "is-active" : ""}`}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setOpenHash(openHash === entry.hash ? null : entry.hash)
+                    }}
+                    aria-expanded={openHash === entry.hash}
+                    aria-haspopup="dialog"
+                    title="Restore"
+                  >
+                    Restore
+                  </button>
+                  {openHash === entry.hash && (
+                    <div
+                      className="nexus-checkpoint-tooltip"
+                      role="dialog"
+                      aria-label="Restore options"
+                      onMouseDown={(e) => e.stopPropagation()}
                     >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="nexus-checkpoint-popover-confirm"
-                      onClick={() => {
-                        store.restoreCheckpoint(entry.hash)
-                        setOpenHash(null)
-                      }}
-                    >
-                      Restore
-                    </button>
-                  </div>
+                      <div className="nexus-checkpoint-tooltip-primary">
+                        <button
+                          type="button"
+                          className="nexus-checkpoint-tooltip-btn primary"
+                          onClick={() => {
+                            store.restoreCheckpoint(entry.hash, "taskAndWorkspace")
+                            setOpenHash(null)
+                          }}
+                        >
+                          <span className="codicon codicon-debug-restart" aria-hidden />
+                          Restore Files & Task
+                        </button>
+                        <p>Revert files and clear messages after this point</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="nexus-checkpoint-more-toggle"
+                        onClick={() => setShowMoreOptions(!showMoreOptions)}
+                      >
+                        More options
+                        <span className={`codicon codicon-chevron-${showMoreOptions ? "up" : "down"}`} aria-hidden />
+                      </button>
+                      {showMoreOptions && (
+                        <div className="nexus-checkpoint-tooltip-more">
+                          <div className="nexus-checkpoint-tooltip-option">
+                            <button
+                              type="button"
+                              className="nexus-checkpoint-tooltip-btn secondary"
+                              onClick={() => {
+                                store.restoreCheckpoint(entry.hash, "workspace")
+                                setOpenHash(null)
+                              }}
+                            >
+                              <span className="codicon codicon-file-symlink-directory" aria-hidden />
+                              Restore Files Only
+                            </button>
+                            <p>Revert files to this checkpoint</p>
+                          </div>
+                          <div className="nexus-checkpoint-tooltip-option">
+                            <button
+                              type="button"
+                              className="nexus-checkpoint-tooltip-btn secondary"
+                              onClick={() => {
+                                store.restoreCheckpoint(entry.hash, "task")
+                                setOpenHash(null)
+                              }}
+                            >
+                              <span className="codicon codicon-comment-discussion" aria-hidden />
+                              Restore Task Only
+                            </button>
+                            <p>Clear messages after this point</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
           ))}
         </div>

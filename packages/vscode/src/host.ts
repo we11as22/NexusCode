@@ -10,9 +10,12 @@ export class VsCodeHost implements IHost {
   private eventEmitter: (event: AgentEvent) => void
   readonly cwd: string
   private alwaysApproved = new Set<string>()
+  private sessionAutoApprove = false
   private checkpointTracker?: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> }
   private useWebviewApproval: boolean
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } | null = null
+
+  private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean; leftUri?: vscode.Uri; rightUri?: vscode.Uri }>()
 
   constructor(
     cwd: string,
@@ -119,6 +122,27 @@ export class VsCodeHost implements IHost {
     cwd: string,
     signal?: AbortSignal
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const runInTerminal = vscode.workspace.getConfiguration("nexuscode").get<boolean>("runCommandsInTerminal") ?? true
+    if (runInTerminal) {
+      try {
+        return await this.runCommandInTerminal(command, cwd, signal)
+      } catch (e) {
+        // Fallback to execa if terminal run fails (e.g. timeout, no terminal)
+        const { execa } = await import("execa")
+        const result = await execa(command, {
+          shell: true,
+          cwd,
+          reject: false,
+          timeout: 120_000,
+          signal,
+        })
+        return {
+          stdout: result.stdout ?? "",
+          stderr: result.stderr ?? "",
+          exitCode: result.exitCode ?? 0,
+        }
+      }
+    }
     const { execa } = await import("execa")
     const result = await execa(command, {
       shell: true,
@@ -132,6 +156,72 @@ export class VsCodeHost implements IHost {
       stderr: result.stderr ?? "",
       exitCode: result.exitCode ?? 0,
     }
+  }
+
+  /** Run command in VS Code integrated terminal (Cline-style); capture output via end marker. */
+  private async runCommandInTerminal(
+    command: string,
+    cwd: string,
+    signal?: AbortSignal
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const START_MARKER = "__NEXUSCODE_START__"
+    const DONE_MARKER = "__NEXUSCODE_DONE_"
+    const timeoutMs = 120_000
+
+    const term = this.getOrCreateNexusTerminal(cwd)
+    term.show(true)
+
+    return new Promise((resolve, reject) => {
+      let buffer = ""
+      let started = false
+      const cleanup = () => {
+        sub?.dispose()
+        signal?.removeEventListener("abort", onAbort)
+        clearTimeout(timeoutId)
+      }
+      const onAbort = () => {
+        cleanup()
+        reject(new DOMException("Command aborted", "AbortError"))
+      }
+      signal?.addEventListener("abort", onAbort)
+      const timeoutId = setTimeout(() => {
+        cleanup()
+        const match = buffer.match(new RegExp(`${DONE_MARKER}(\\d+)`))
+        const exitCode = match ? parseInt(match[1]!, 10) : 124
+        const out = started
+          ? buffer.replace(new RegExp(`\\n?[^\\n]*${DONE_MARKER}\\d+[^\\n]*`, "g"), "").trim()
+          : buffer.trim()
+        resolve({ stdout: out, stderr: "", exitCode })
+      }, timeoutMs)
+
+      const sub = term.onDidWriteData((data: string) => {
+        buffer += data
+        if (!started && buffer.includes(START_MARKER)) {
+          started = true
+          buffer = buffer.slice(buffer.indexOf(START_MARKER) + START_MARKER.length)
+        }
+        if (!started) return
+        const match = buffer.match(new RegExp(`${DONE_MARKER}(\\d+)`))
+        if (match) {
+          cleanup()
+          const exitCode = parseInt(match[1]!, 10)
+          const out = buffer.replace(new RegExp(`\\n?[^\\n]*${DONE_MARKER}\\d+[^\\n]*`, "g"), "").trim()
+          resolve({ stdout: out, stderr: "", exitCode })
+        }
+      })
+
+      term.sendText(`echo '${START_MARKER}'; ${command}; echo '${DONE_MARKER}'$?`)
+    })
+  }
+
+  private getOrCreateNexusTerminal(cwd: string): vscode.Terminal {
+    const name = "NexusCode"
+    const existing = vscode.window.terminals.find((t) => t.name === name)
+    if (existing) return existing
+    return vscode.window.createTerminal({
+      name,
+      cwd: cwd || this.cwd,
+    })
   }
 
   async showApprovalDialog(action: ApprovalAction): Promise<PermissionResult> {
@@ -148,6 +238,10 @@ export class VsCodeHost implements IHost {
       return { approved: true }
     }
 
+    if (this.sessionAutoApprove) {
+      return { approved: true }
+    }
+
     const alwaysKey = `${action.type}:${action.tool}`
     if (this.alwaysApproved.has(alwaysKey)) {
       return { approved: true, alwaysApprove: true }
@@ -157,18 +251,19 @@ export class VsCodeHost implements IHost {
       return new Promise<PermissionResult>((resolve) => {
         this.approvalResolveRef!.current = (result: PermissionResult) => {
           if (result.alwaysApprove) this.alwaysApproved.add(alwaysKey)
+          if (result.skipAll) this.sessionAutoApprove = true
           this.approvalResolveRef!.current = null
           resolve(result)
         }
       })
     }
 
-    // Native dialog fallback
+    // Native dialog fallback (Cline/Roo-style labels)
     const actionStr = action.type === "write" ? "Write" : "Bash"
     const buttons: string[] =
       action.type === "execute"
-        ? ["Allow", "Add to allowed for this folder", "Allow Always", "Deny"]
-        : ["Allow", "Allow Always", "Deny"]
+        ? ["Allow once", "Add to allowed for this folder", "Always allow", "Allow all (session)", "Deny"]
+        : ["Allow once", "Always allow", "Allow all (session)", "Deny"]
 
     const message =
       action.type === "execute"
@@ -181,8 +276,9 @@ export class VsCodeHost implements IHost {
       ...buttons
     )
 
-    const approved = choice === "Allow" || choice === "Allow Always" || (action.type === "execute" && choice === "Add to allowed for this folder")
-    const alwaysApprove = choice === "Allow Always"
+    const approved = choice === "Allow once" || choice === "Always allow" || (action.type === "execute" && choice === "Add to allowed for this folder") || choice === "Allow all (session)"
+    const alwaysApprove = choice === "Always allow"
+    const skipAll = choice === "Allow all (session)"
     const addToAllowedCommand =
       action.type === "execute" && choice === "Add to allowed for this folder" && action.content
         ? action.content
@@ -190,7 +286,10 @@ export class VsCodeHost implements IHost {
     if (alwaysApprove) {
       this.alwaysApproved.add(alwaysKey)
     }
-    return { approved, alwaysApprove, addToAllowedCommand }
+    if (skipAll) {
+      this.sessionAutoApprove = true
+    }
+    return { approved, alwaysApprove, skipAll, addToAllowedCommand }
   }
 
   emit(event: AgentEvent): void {
@@ -269,6 +368,35 @@ export class VsCodeHost implements IHost {
     }
 
     return diagnostics.slice(0, 100)
+  }
+
+  async openFileEdit(filePath: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void> {
+    const key = filePath.replace(/\\/g, "/")
+    const absPath = filePath.startsWith("/") ? filePath : path.join(this.cwd, filePath)
+    const base = path.basename(absPath)
+    const leftUri = vscode.Uri.parse(`untitled:${absPath}.nexus-original`)
+    const rightUri = vscode.Uri.parse(`untitled:${absPath}.nexus-modified`)
+    const leftDoc = await vscode.workspace.openTextDocument(leftUri)
+    const rightDoc = await vscode.workspace.openTextDocument(rightUri)
+    const we = new vscode.WorkspaceEdit()
+    we.insert(leftUri, new vscode.Position(0, 0), options.originalContent)
+    we.insert(rightUri, new vscode.Position(0, 0), options.newContent)
+    await vscode.workspace.applyEdit(we)
+    await vscode.commands.executeCommand("vscode.diff", leftDoc.uri, rightDoc.uri, `${base}: NexusCode (Approve to save, Deny to revert)`, { viewColumn: vscode.ViewColumn.Beside, preview: true })
+    this.pendingFileEdits.set(key, { originalContent: options.originalContent, newContent: options.newContent, isNewFile: options.isNewFile, leftUri, rightUri })
+  }
+
+  async saveFileEdit(filePath: string): Promise<void> {
+    const key = filePath.replace(/\\/g, "/")
+    const pending = this.pendingFileEdits.get(key)
+    if (!pending) throw new Error(`No pending file edit for ${filePath}`)
+    await this.writeFile(filePath, pending.newContent)
+    this.pendingFileEdits.delete(key)
+  }
+
+  async revertFileEdit(filePath: string): Promise<void> {
+    const key = filePath.replace(/\\/g, "/")
+    this.pendingFileEdits.delete(key)
   }
 }
 

@@ -1235,6 +1235,15 @@ button, input, textarea {
   background: var(--vscode-list-hoverBackground);
   color: var(--vscode-foreground);
 }
+.nexus-approval-inline-btn-session {
+  background: var(--vscode-editor-inactiveSelectionBackground);
+  color: var(--vscode-descriptionForeground);
+  border-color: var(--vscode-panel-border);
+}
+.nexus-approval-inline-btn-session:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
+}
 .nexus-approval-inline-btn-deny {
   background: rgba(244, 67, 54, 0.12);
   color: var(--vscode-errorForeground, #f48771);
@@ -1357,6 +1366,50 @@ input[type="text"]:focus-visible {
   white-space: nowrap;
 }
 
+.nexus-checkpoint-diff-btn {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--vscode-descriptionForeground);
+  background: transparent;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.nexus-checkpoint-diff-btn:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-checkpoint-btn { flex-shrink: 0; padding: 2px 6px; font-size: 9px; font-weight: 500; border: none; border-radius: 2px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+.nexus-checkpoint-compare { color: var(--vscode-descriptionForeground); background: transparent; border: 1px solid transparent; background-image: linear-gradient(to right, var(--vscode-descriptionForeground) 50%, transparent 50%), linear-gradient(to bottom, var(--vscode-descriptionForeground) 50%, transparent 50%); background-size: 4px 1px, 1px 4px; background-repeat: repeat-x, repeat-y; background-position: 0 0, 100% 0; }
+.nexus-checkpoint-compare:hover { color: var(--vscode-editor-background); background: var(--vscode-descriptionForeground); background-image: none; }
+.nexus-checkpoint-restore { color: var(--vscode-descriptionForeground); background: transparent; border: 1px solid transparent; background-image: linear-gradient(to right, var(--vscode-descriptionForeground) 50%, transparent 50%), linear-gradient(to bottom, var(--vscode-descriptionForeground) 50%, transparent 50%); background-size: 4px 1px, 1px 4px; background-repeat: repeat-x, repeat-y; background-position: 0 0, 100% 0; }
+.nexus-checkpoint-restore:hover, .nexus-checkpoint-restore.is-active { color: var(--vscode-editor-background); background: var(--vscode-descriptionForeground); background-image: none; }
+.nexus-checkpoint-restore-wrap { position: relative; }
+.nexus-checkpoint-tooltip { position: absolute; top: calc(100% + 8px); left: 0; z-index: 1000; min-width: 200px; max-width: min(calc(100vw - 54px), 220px); padding: 14px; background: var(--vscode-editor-background); border: 1px solid var(--vscode-editorGroup-border); border-radius: 5px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+.nexus-checkpoint-tooltip::before { content: ""; position: absolute; top: -8px; left: 0; right: 0; height: 8px; }
+.nexus-checkpoint-tooltip::after { content: ""; position: absolute; top: -6px; left: 12px; width: 10px; height: 10px; background: var(--vscode-editor-background); border-left: 1px solid var(--vscode-editorGroup-border); border-top: 1px solid var(--vscode-editorGroup-border); transform: rotate(45deg); z-index: 1; }
+.nexus-checkpoint-tooltip-primary { margin-bottom: 12px; }
+.nexus-checkpoint-tooltip-primary p { margin: 8px 0 0 0; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 14px; }
+.nexus-checkpoint-tooltip-btn { width: 100%; padding: 6px 10px; font-size: 11px; font-weight: 500; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; justify-content: flex-start; gap: 6px; border: 1px solid transparent; }
+.nexus-checkpoint-tooltip-btn.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: var(--vscode-button-border); }
+.nexus-checkpoint-tooltip-btn.primary:hover { background: var(--vscode-button-hoverBackground); }
+.nexus-checkpoint-tooltip-btn.secondary { color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); border-color: var(--vscode-button-secondaryBorder); }
+.nexus-checkpoint-tooltip-btn.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+.nexus-checkpoint-tooltip-btn .codicon { font-size: 14px; flex-shrink: 0; }
+.nexus-checkpoint-more-toggle { width: 100%; padding: 4px 0; background: transparent; color: var(--vscode-textLink-foreground); border: none; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px; opacity: 0.9; margin-bottom: -4px; }
+.nexus-checkpoint-more-toggle:hover { opacity: 1; }
+.nexus-checkpoint-more-toggle .codicon { font-size: 10px; }
+.nexus-checkpoint-tooltip-more { padding-top: 8px; margin-top: 6px; border-top: 1px solid var(--vscode-editorGroup-border); animation: nexus-checkpoint-slide-down 0.15s ease-out; }
+@keyframes nexus-checkpoint-slide-down { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.nexus-checkpoint-tooltip-option { margin-bottom: 12px; }
+.nexus-checkpoint-tooltip-option:last-child { margin-bottom: 0; }
+.nexus-checkpoint-tooltip-option p { margin: 8px 0 0 0; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 14px; }
+
 .nexus-checkpoint-restore-btn {
   flex-shrink: 0;
   padding: 2px 8px;
@@ -1412,6 +1465,7 @@ input[type="text"]:focus-visible {
 
 .nexus-checkpoint-popover-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
 }

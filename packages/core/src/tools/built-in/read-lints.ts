@@ -30,19 +30,20 @@ function filterByPaths(items: DiagnosticItem[], paths: string[], cwd: string): D
 
 export const readLintsTool: ToolDef<z.infer<typeof readLintsSchema>> = {
   name: "read_lints",
-  description: `Read linter/compiler diagnostics (errors, warnings) from the workspace. Use when you need to check for issues in specific files after editing or before finishing.
+  description: `Read linter/compiler diagnostics (errors, warnings) from the workspace.
+
+**NEVER call this tool on a file unless you have edited it or are about to edit it.** Avoid calling read_lints with a very wide scope; results can include pre-existing issues. Prefer passing specific paths you changed.
 
 When to use:
 - After editing files: call read_lints with the paths you changed to see current errors/warnings.
 - Before final_report_to_user (when finishing): optionally check that your changes did not introduce new errors.
-- Prefer passing paths to limit output; the system prompt may already include a snapshot of active diagnostics at turn start.
 
 When NOT to use:
-- NEVER call this tool on a file unless you have edited it or are about to edit it. Do not call read_lints on the whole workspace without paths unless you need a global snapshot (output is capped).
+- On files you have not edited and are not about to edit. Do not call read_lints on the whole workspace without paths unless you need a global snapshot (output is capped at ${MAX_DIAGNOSTICS}).
 - In CLI/server mode diagnostics are not available (only in the VS Code extension); the tool will return an explanatory message — use execute_command to run the linter (e.g. eslint, tsc) if needed.
 
 Parameters:
-- paths: optional array of file or directory paths (relative to project root). If omitted, returns up to ${MAX_DIAGNOSTICS} diagnostics from the whole workspace.`,
+- paths: optional array of file or directory paths (relative to project root). If provided, returns diagnostics only for those paths. If omitted, returns up to ${MAX_DIAGNOSTICS} diagnostics from the whole workspace.`,
   parameters: readLintsSchema,
   readOnly: true,
 

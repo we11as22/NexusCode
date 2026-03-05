@@ -27,13 +27,14 @@ const searchSchema = z.object({
 
 export const grepTool: ToolDef<z.infer<typeof searchSchema>> = {
   name: "grep",
-  description: `Search file contents with regex (ripgrep). Use for exact text, identifiers, or complex patterns. Use grep to locate code before reading; then use read_file with start_line/end_line for only those ranges.
+  description: `Search file contents with regex (ripgrep). Prefer grep for exact symbol/string searches instead of running terminal grep/rg — this tool is faster and respects .gitignore. Use grep to locate code before reading; then use read_file with start_line/end_line for only those ranges.
 
 When to use:
 - **Locate before reading** — Use grep (and list_code_definitions) to find where code lives; then use read_file with start_line/end_line to read only that section. Use grep early and often when discovering structure or finding usages.
 - Find exact strings, identifiers, or regex patterns in the codebase.
-- Complex patterns (e.g. "function\\\\s+\\\\w+", "class\\\\s+[A-Z]\\\\w*", "TODO|FIXME").
+- Complex patterns (e.g. "function\\\\s+\\\\w+", "class\\\\s+[A-Z]\\\\w*", "TODO|FIXME"). Pattern syntax is ripgrep: literal braces need escaping (e.g. \`interface\\{\\}\` for Go).
 - Restrict to a folder (path/paths), file types (include), or exclude files (exclude).
+- For cross-line patterns (e.g. struct with multiple lines), use context_lines to get surrounding lines; multiline regex is not directly supported — use multiple grep calls or read_file with range.
 
 Parameters:
 - pattern / patterns: regex (ripgrep syntax). Escape special chars — e.g. to match literal \`interface{}\` in Go use \`interface\\{\\}\`. Use raw string or escape backslashes.
@@ -42,7 +43,7 @@ Parameters:
 - exclude: glob to exclude.
 - context_lines: lines before/after match (0-10).
 - case_sensitive: default false.
-- max_results: cap total matches (default 500, max 2000).
+- max_results: cap total matches (default 500, max 2000). Results may be truncated; truncated output indicates "at least" counts.
 
 Use codebase_search for semantic/meaning-based search when vector index is available.`,
   parameters: searchSchema,

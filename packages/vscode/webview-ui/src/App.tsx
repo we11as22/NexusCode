@@ -151,7 +151,7 @@ function ChatView() {
       {store.awaitingApproval && !store.pendingApproval && (
         <div className="nexus-approval-banner">
           <span className="nexus-approval-icon">⚠</span>
-          <span>Action awaiting your approval — check the VS Code notification (Allow / Allow Always / Deny).</span>
+          <span>Action awaiting your approval — use notification or chat buttons: Allow once / Always allow / Deny / Allow all (session).</span>
         </div>
       )}
 

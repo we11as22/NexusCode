@@ -112,6 +112,13 @@ export function activate(context: vscode.ExtensionContext): void {
         await provider?.clearIndex()
         vscode.window.showInformationMessage("NexusCode: Index cleared. Re-indexing...")
       }
+    }),
+
+    vscode.commands.registerCommand("nexuscode.openTerminal", () => {
+      const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()
+      const existing = vscode.window.terminals.find((t) => t.name === "NexusCode")
+      const term = existing ?? vscode.window.createTerminal({ name: "NexusCode", cwd })
+      term.show()
     })
   )
 }

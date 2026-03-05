@@ -104,7 +104,7 @@ When to use:
 
 When NOT to use:
 - Trivial 1–2 step tasks: optional.
-- Do not put exploratory or operational steps as todo items (e.g. "search codebase", "run lint", "run tests", "read file X") — focus on deliverable milestones (e.g. "Add dark mode toggle", "Fix login validation").
+- **NEVER include operational steps in todos** — Do not add items like "run lint", "run tests", "search codebase", "read file X", or "examine Y". Todos are deliverable milestones (e.g. "Add dark mode toggle", "Fix login validation"), not actions you do in service of the task.
 
 Use description to add a note for yourself (e.g. scope, file names, acceptance criteria); it is shown only in your context, not in the UI. Create only when the session has no current todo list (see "Current Todo List" in context). If a list already exists, pass the full list with your edits (add/check/uncheck items); do not replace with a brand new list. When you call final_report_to_user to finish the turn, the list is cleared after your response so you can create a new one next time.`,
   parameters: todoSchema,

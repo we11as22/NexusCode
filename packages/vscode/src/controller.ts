@@ -77,12 +77,13 @@ export type WebviewMessage =
   | { type: "openMcpConfig" }
   | { type: "testMcpServers" }
   | { type: "openSkillFolder"; path: string }
-  | { type: "approvalResponse"; partId: string; approved: boolean; alwaysApprove?: boolean; addToAllowedCommand?: string }
+  | { type: "approvalResponse"; partId: string; approved: boolean; alwaysApprove?: boolean; addToAllowedCommand?: string; skipAll?: boolean }
   | { type: "openExternal"; url: string }
   | { type: "showConfirm"; id: string; message: string }
   | { type: "openNexusignore" }
   | { type: "getModelsCatalog" }
-  | { type: "restoreCheckpoint"; hash: string }
+  | { type: "restoreCheckpoint"; hash: string; restoreType: "task" | "workspace" | "taskAndWorkspace" }
+  | { type: "showCheckpointDiff"; fromHash: string; toHash?: string }
   | { type: "getAgentPresets" }
   | { type: "getAgentPresetOptions" }
   | { type: "createAgentPreset"; preset: { name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string } }
@@ -145,6 +146,13 @@ export class Controller {
   private session?: Session
   private config?: NexusConfig
   private defaultModelProfile?: NexusConfig["model"]
+  /** Snapshot of skills/mcp/rules/indexing at first config load; used for "Default" preset. */
+  private initialFullConfigSnapshot?: {
+    skills: string[]
+    mcp: { servers: NexusConfig["mcp"]["servers"] }
+    rules: { files: string[] }
+    indexing: NexusConfig["indexing"]
+  }
   private mode: Mode = "agent"
   /** Mode of the previous run; used to prepend a reminder when user switches mode in the same session. */
   private lastRunMode: Mode | null = null
@@ -323,6 +331,14 @@ export class Controller {
       }
       if (!this.config) {
         this.config = NexusConfigSchema.parse({}) as NexusConfig
+      }
+      if (!this.initialFullConfigSnapshot && this.config) {
+        this.initialFullConfigSnapshot = {
+          skills: [...(this.config.skills ?? [])],
+          mcp: { servers: [...(this.config.mcp?.servers ?? [])] },
+          rules: { files: [...(this.config.rules?.files ?? [])] },
+          indexing: { ...this.config.indexing },
+        }
       }
       this.postMessageToWebview({ type: "configLoaded", config: this.config })
       void this.loadAndSendSkillDefinitions()
@@ -639,6 +655,7 @@ export class Controller {
             approved: msg.approved,
             alwaysApprove: msg.alwaysApprove,
             addToAllowedCommand: msg.addToAllowedCommand,
+            skipAll: msg.skipAll,
           })
         }
         break
@@ -671,8 +688,13 @@ export class Controller {
         break
       }
       case "restoreCheckpoint":
-        if (msg.hash?.trim()) {
-          await this.restoreCheckpointToHash(msg.hash.trim())
+        if (msg.hash?.trim() && msg.restoreType) {
+          await this.restoreCheckpointToHash(msg.hash.trim(), msg.restoreType)
+        }
+        break
+      case "showCheckpointDiff":
+        if (msg.fromHash?.trim()) {
+          await this.showCheckpointDiff(msg.fromHash.trim(), msg.toHash?.trim())
         }
         break
       case "getAgentPresets": {
@@ -700,8 +722,8 @@ export class Controller {
         }
         break
       case "applyAgentPreset":
-        if (msg.presetName?.trim()) {
-          await this.applyAgentPreset(msg.presetName.trim())
+        if (msg.presetName != null) {
+          await this.applyAgentPreset(typeof msg.presetName === "string" ? msg.presetName : "Default")
         }
         break
       case "planFollowupChoice": {
@@ -738,38 +760,95 @@ export class Controller {
   }
 
   /**
-   * Restore workspace to a checkpoint (shadow git). After restoring files to disk,
-   * reverts any open editor tabs under cwd so their content matches disk (Cline-style).
+   * Restore workspace/chat to a checkpoint (Cline/Roo-Code style).
+   * restoreType: task = rewind chat only; workspace = files only; taskAndWorkspace = both.
    */
-  private async restoreCheckpointToHash(hash: string): Promise<void> {
+  private async restoreCheckpointToHash(hash: string, restoreType: "task" | "workspace" | "taskAndWorkspace"): Promise<void> {
     if (!this.checkpoint) {
       vscode.window.showWarningMessage("NexusCode: Checkpoints are not enabled or no checkpoint is available.", { modal: false })
       return
     }
     const cwd = this.getCwd()
-    try {
-      await this.checkpoint.resetHead(hash)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      vscode.window.showErrorMessage(`NexusCode: Failed to restore checkpoint — ${message}`)
-      return
+    const entry = this.checkpoint.getEntries().find((e) => e.hash === hash)
+    const checkpointTs = entry?.ts
+
+    if (restoreType === "taskAndWorkspace" || restoreType === "workspace") {
+      this.abortController?.abort()
+      this.isRunning = false
     }
-    // Sync editor "memory" with disk: revert all open docs under cwd so they show restored content
-    const cwdResolved = path.resolve(cwd)
-    for (const doc of vscode.workspace.textDocuments) {
-      if (doc.uri.scheme !== "file") continue
-      const rel = path.relative(cwdResolved, doc.uri.fsPath)
-      if (rel.startsWith("..") || path.isAbsolute(rel)) continue
-      if (!doc.isDirty) continue
+
+    if (restoreType === "workspace" || restoreType === "taskAndWorkspace") {
       try {
-        await vscode.window.showTextDocument(doc, { preserveFocus: false })
-        await vscode.commands.executeCommand("workbench.action.files.revert")
-      } catch {
-        // Ignore per-doc revert errors
+        await this.checkpoint.resetHead(hash)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        vscode.window.showErrorMessage(`NexusCode: Failed to restore checkpoint — ${message}`)
+        return
       }
     }
-    vscode.window.showInformationMessage("NexusCode: Workspace restored to checkpoint.", { modal: false })
+
+    if ((restoreType === "task" || restoreType === "taskAndWorkspace") && this.session && checkpointTs != null) {
+      this.session.rewindToTimestamp(checkpointTs)
+    }
+
+    if (restoreType === "workspace" || restoreType === "taskAndWorkspace") {
+      const cwdResolved = path.resolve(cwd)
+      for (const doc of vscode.workspace.textDocuments) {
+        if (doc.uri.scheme !== "file") continue
+        const rel = path.relative(cwdResolved, doc.uri.fsPath)
+        if (rel.startsWith("..") || path.isAbsolute(rel)) continue
+        if (!doc.isDirty) continue
+        try {
+          await vscode.window.showTextDocument(doc, { preserveFocus: false })
+          await vscode.commands.executeCommand("workbench.action.files.revert")
+        } catch {
+          // Ignore per-doc revert errors
+        }
+      }
+    }
+
+    const msg =
+      restoreType === "task"
+        ? "Chat restored to checkpoint."
+        : restoreType === "workspace"
+          ? "Workspace files restored to checkpoint."
+          : "Workspace and chat restored to checkpoint."
+    vscode.window.showInformationMessage(`NexusCode: ${msg}`, { modal: false })
     this.postStateToWebview()
+  }
+
+  /** Show diff between two checkpoints (or checkpoint and current). */
+  private async showCheckpointDiff(fromHash: string, toHash?: string): Promise<void> {
+    if (!this.checkpoint) {
+      vscode.window.showWarningMessage("NexusCode: Checkpoints are not enabled.", { modal: false })
+      return
+    }
+    try {
+      const files = await this.checkpoint.getDiff(fromHash, toHash)
+      if (files.length === 0) {
+        vscode.window.showInformationMessage("NexusCode: No changes between these checkpoints.", { modal: false })
+        return
+      }
+      if (files.length === 1) {
+        const f = files[0]!
+        const beforeDoc = await vscode.workspace.openTextDocument({ content: f.before, language: "plaintext" })
+        const afterDoc = await vscode.workspace.openTextDocument({ content: f.after, language: "plaintext" })
+        await vscode.commands.executeCommand("vscode.diff", beforeDoc.uri, afterDoc.uri, `${path.basename(f.path)}: Checkpoint diff`, { viewColumn: vscode.ViewColumn.Beside })
+        return
+      }
+      const chosen = await vscode.window.showQuickPick(
+        files.map((f) => ({ label: f.path, file: f })),
+        { title: "Select file to view diff", placeHolder: `${files.length} files changed` }
+      )
+      if (chosen) {
+        const beforeDoc = await vscode.workspace.openTextDocument({ content: chosen.file.before, language: "plaintext" })
+        const afterDoc = await vscode.workspace.openTextDocument({ content: chosen.file.after, language: "plaintext" })
+        await vscode.commands.executeCommand("vscode.diff", beforeDoc.uri, afterDoc.uri, `${path.basename(chosen.file.path)}: Checkpoint diff`, { viewColumn: vscode.ViewColumn.Beside })
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      vscode.window.showErrorMessage(`NexusCode: Failed to get checkpoint diff — ${message}`)
+    }
   }
 
   /** Read agent presets from .nexus/agent-configs.json (same format as CLI). */
@@ -850,12 +929,33 @@ export class Controller {
     vscode.window.showInformationMessage(`NexusCode: Preset "${presetName}" deleted.`, { modal: false })
   }
 
-  /** Apply an agent preset by name: merge vector, skills, MCP, rules (and optional model) into config and save. */
+  /** Apply an agent preset by name: merge vector, skills, MCP, rules (and optional model) into config and save. "Default" = restore initial full config. */
   private async applyAgentPreset(presetName: string): Promise<void> {
+    const trimmed = presetName.trim()
+    if (!this.config) {
+      vscode.window.showWarningMessage("NexusCode: No config loaded.", { modal: false })
+      return
+    }
+    if (trimmed === "Default" || trimmed === "") {
+      const snap = this.initialFullConfigSnapshot
+      if (!snap) {
+        vscode.window.showWarningMessage("NexusCode: Default preset not available (no initial config snapshot).", { modal: false })
+        return
+      }
+      const updates: Partial<NexusConfig> = {
+        indexing: { ...this.config.indexing, ...snap.indexing },
+        skills: snap.skills,
+        mcp: { servers: [...snap.mcp.servers] },
+        rules: { files: snap.rules.files.length > 0 ? [...snap.rules.files] : ["AGENTS.md", "CLAUDE.md"] },
+      }
+      await this.handleSaveConfig(updates)
+      vscode.window.showInformationMessage("NexusCode: Applied preset \"Default\" (all skills, MCP, rules).", { modal: false })
+      return
+    }
     const presets = await this.readAgentPresets()
-    const preset = presets.find((p) => p.name === presetName)
-    if (!preset || !this.config) {
-      vscode.window.showWarningMessage(`NexusCode: Preset "${presetName}" not found.`, { modal: false })
+    const preset = presets.find((p) => p.name === trimmed)
+    if (!preset) {
+      vscode.window.showWarningMessage(`NexusCode: Preset "${trimmed}" not found.`, { modal: false })
       return
     }
     const current = this.config
@@ -876,7 +976,7 @@ export class Controller {
       updates.model = { ...current.model, provider: preset.modelProvider, id: preset.modelId }
     }
     await this.handleSaveConfig(updates)
-    vscode.window.showInformationMessage(`NexusCode: Applied preset "${presetName}".`, { modal: false })
+    vscode.window.showInformationMessage(`NexusCode: Applied preset "${trimmed}".`, { modal: false })
   }
 
   private async handleSaveConfig(patch: Partial<NexusConfig>): Promise<void> {

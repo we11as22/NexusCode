@@ -1,5 +1,4 @@
 import { z } from "zod"
-import { execa } from "execa"
 import { spawn } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
@@ -84,6 +83,10 @@ When NOT to use:
 
 Provide an optional \`description\` (5–10 words) so the UI can show what the command does (e.g. "List TS files", "Run tests").
 
+**Non-interactive:** For any command that would require user interaction (prompts, confirmations), assume the user is not available. Pass non-interactive flags (e.g. \`--yes\` for npx, \`-y\` for npm install) so the command does not block.
+
+**Shell context:** If you are in a new shell, \`cd\` to the appropriate directory and do any necessary setup in addition to running the command. By default the shell starts in the project root. When chaining commands, use \`cd <path> && your_command\` so the working directory is explicit.
+
 Output: stdout+stderr, exit code; capped at 50KB (head+tail if larger). ANSI and progress bars stripped. Timeout: default 120s, max 600s. Chain sequential steps with &&.
 
 **Do not block on long-running work:** For builds, tests, servers, or anything that can take more than 1–2 minutes, set \`background: true\` (and optionally \`log_path\`). The tool returns immediately with PID and log path. Then in separate execute_command calls: (1) **Watch output:** \`tail -n 100 <log_path>\` to see recent lines. (2) **Poll with sleep:** \`sleep 10 && tail -n 100 <log_path>\` to wait and check again. (3) **Search for errors:** \`grep -E "error|Error|FAIL|exception" <log_path>\`. If you see failures, stop the process: \`kill <PID>\` (or \`pkill -f "part of command"\`), then notify the user with final_report_to_user or a clear message. Do not run long commands in blocking mode — they will time out and the user cannot see progress.`,
@@ -124,31 +127,25 @@ Output: stdout+stderr, exit code; capped at 50KB (head+tail if larger). ANSI and
 
     let result: { stdout: string; stderr: string; exitCode: number }
     try {
-      const proc = await execa(command, {
-        cwd: workingDir,
-        shell: true,
-        timeout,
-        all: true,
-        reject: false,
-      })
-
-      result = {
-        stdout: proc.stdout ?? "",
-        stderr: proc.stderr ?? "",
-        exitCode: proc.exitCode ?? 0,
+      const ac = new AbortController()
+      const timeoutId = setTimeout(() => ac.abort(), timeout)
+      try {
+        result = await ctx.host.runCommand(command, workingDir, ac.signal)
+      } finally {
+        clearTimeout(timeoutId)
       }
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stdout?: string; stderr?: string; exitCode?: number }
-      if (e.code === "ETIMEDOUT" || (err as Error).message?.includes("timed out")) {
+      if (e.code === "ABORT_ERR" || (err as Error).message?.includes("abort") || (err as Error).message?.includes("timed out")) {
         return {
           success: false,
           output: `Command timed out after ${timeout_seconds ?? 120}s: ${command}`,
         }
       }
       result = {
-        stdout: e.stdout ?? "",
-        stderr: e.stderr ?? (err as Error).message,
-        exitCode: e.exitCode ?? 1,
+        stdout: (e as { stdout?: string }).stdout ?? "",
+        stderr: (e as { stderr?: string }).stderr ?? (err as Error).message,
+        exitCode: (e as { exitCode?: number }).exitCode ?? 1,
       }
     }
 

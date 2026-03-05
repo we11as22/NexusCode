@@ -212,14 +212,15 @@ interface ChatState {
   reindex: () => void
   clearIndex: () => void
   saveConfig: (patch: Record<string, unknown>) => void
-  restoreCheckpoint: (hash: string) => void
+  restoreCheckpoint: (hash: string, restoreType: "task" | "workspace" | "taskAndWorkspace") => void
+  showCheckpointDiff: (fromHash: string, toHash?: string) => void
   handleStateUpdate: (state: Partial<ChatState>) => void
   handleConfigLoaded: (config: NexusConfigState) => void
   handleAgentEvent: (event: AgentEvent) => void
   handleIndexStatus: (status: IndexStatusKind) => void
   handleMcpServerStatus: (results: Array<{ name: string; status: "ok" | "error"; error?: string }>) => void
   handlePendingApproval: (partId: string, action: { type: string; tool: string; description: string; content?: string }) => void
-  resolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string) => void
+  resolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
   handleSessionList: (sessions: SessionPreview[]) => void
   handleSessionListLoading: (loading: boolean) => void
 }
@@ -388,8 +389,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     postMessage({ type: "saveConfig", config: patch })
   },
 
-  restoreCheckpoint: (hash) => {
-    postMessage({ type: "restoreCheckpoint", hash })
+  restoreCheckpoint: (hash, restoreType) => {
+    postMessage({ type: "restoreCheckpoint", hash, restoreType })
+  },
+
+  showCheckpointDiff: (fromHash, toHash) => {
+    postMessage({ type: "showCheckpointDiff", fromHash, toHash })
   },
 
   handleStateUpdate: (state) => {
@@ -426,7 +431,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ pendingApproval: { partId, action }, awaitingApproval: true })
   },
 
-  resolveApproval: (approved, alwaysApprove, addToAllowedCommand) => {
+  resolveApproval: (approved, alwaysApprove, addToAllowedCommand, skipAll) => {
     const { pendingApproval } = get()
     if (pendingApproval) {
       postMessage({
@@ -435,6 +440,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         approved,
         alwaysApprove,
         addToAllowedCommand,
+        skipAll,
       })
       set({ pendingApproval: null, awaitingApproval: false })
     }

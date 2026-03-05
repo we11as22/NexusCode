@@ -17,8 +17,8 @@ export class CliHost implements IHost {
   private autoApprove: boolean
   /** When set, approval is resolved via this ref (TUI mode — no readline). */
   private tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
-  /** Remember "always approve" decisions per tool type for this session */
   private alwaysApproved = new Set<string>()
+  private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
 
   constructor(
     cwd: string,
@@ -113,7 +113,19 @@ export class CliHost implements IHost {
       } else if (action.type === "write") {
         lines.push(`\x1b[1;32m✏ File write requested:\x1b[0m`)
         lines.push(`  \x1b[36m${action.description}\x1b[0m`)
-        if (action.content) {
+        if (action.diff) {
+          const diffPreview = action.diff.split("\n").slice(0, 40)
+          for (const line of diffPreview) {
+            if (line.startsWith("+") && !line.startsWith("+++")) {
+              lines.push(`  \x1b[32m${line}\x1b[0m`)
+            } else if (line.startsWith("-") && !line.startsWith("---")) {
+              lines.push(`  \x1b[31m${line}\x1b[0m`)
+            } else {
+              lines.push(`  \x1b[90m${line}\x1b[0m`)
+            }
+          }
+          if (action.diff.includes("(truncated)")) lines.push(`  \x1b[90m...\x1b[0m`)
+        } else if (action.content) {
           const preview = action.content.split("\n").slice(0, 5).join("\n")
           lines.push(`  \x1b[90m${preview}\x1b[0m`)
         }
@@ -127,8 +139,8 @@ export class CliHost implements IHost {
 
       const optionsLine =
         action.type === "execute"
-          ? `\x1b[90m[y]es [n]o [a]lways [s]kip [e] allow for folder\x1b[0m`
-          : `\x1b[90m[y]es [n]o [a]lways [s]kip all\x1b[0m`
+          ? `\x1b[90m[y] Allow once [n] Deny [a] Always allow [s] Allow all (session) [e] Add to allowed (folder)\x1b[0m`
+          : `\x1b[90m[y] Allow once [n] Deny [a] Always allow [s] Allow all (session)\x1b[0m`
       lines.push(optionsLine)
       lines.push("")
       process.stdout.write(lines.join("\n"))
@@ -216,6 +228,24 @@ export class CliHost implements IHost {
 
   async getProblems(): Promise<DiagnosticItem[]> {
     return []
+  }
+
+  async openFileEdit(filePath: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void> {
+    const key = filePath.replace(/\\/g, "/")
+    this.pendingFileEdits.set(key, { originalContent: options.originalContent, newContent: options.newContent, isNewFile: options.isNewFile })
+  }
+
+  async saveFileEdit(filePath: string): Promise<void> {
+    const key = filePath.replace(/\\/g, "/")
+    const pending = this.pendingFileEdits.get(key)
+    if (!pending) throw new Error(`No pending file edit for ${filePath}`)
+    this.pendingFileEdits.delete(key)
+    await this.writeFile(filePath, pending.newContent)
+  }
+
+  async revertFileEdit(filePath: string): Promise<void> {
+    const key = filePath.replace(/\\/g, "/")
+    this.pendingFileEdits.delete(key)
   }
 
   /** Resolve path relative to cwd if not absolute */

@@ -121,6 +121,14 @@ export class Session implements ISession {
     return new Session(generateSessionId(), this.cwd, JSON.parse(JSON.stringify(messages)))
   }
 
+  /** Rewind chat to timestamp (Cline/Roo-Code style). Keeps only messages with ts <= timestamp. */
+  rewindToTimestamp(timestamp: number): void {
+    const keep = this._messages.filter(m => m.ts <= timestamp)
+    if (keep.length < this._messages.length) {
+      this._messages = keep
+    }
+  }
+
   async save(): Promise<void> {
     const title = deriveSessionTitle(this._messages)
     const stored: StoredSession = {

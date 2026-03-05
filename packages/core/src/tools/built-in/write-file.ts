@@ -4,6 +4,15 @@ import * as diff from "diff"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { buildDiffHunks } from "./diff-hunks.js"
 
+const MAX_DIFF_PREVIEW_LINES = 80
+
+function createDiffPreview(oldContent: string, newContent: string, label: string): string {
+  const patch = diff.createTwoFilesPatch(label, label, oldContent, newContent, "", "", { context: 2 })
+  const lines = patch.split(/\r?\n/)
+  if (lines.length <= MAX_DIFF_PREVIEW_LINES) return patch
+  return lines.slice(0, MAX_DIFF_PREVIEW_LINES).join("\n") + "\n... (truncated)"
+}
+
 const schema = z.object({
   path: z.string().min(1).describe("Path to the file to create or overwrite"),
   content: z.string().describe("The complete content to write to the file"),
@@ -20,6 +29,7 @@ When to use:
 When NOT to use:
 - Small or targeted edits: use replace_in_file (faster, less error-prone).
 - Appending or patching: use replace_in_file with search/replace.
+- **Existing files:** If the file already exists, read it first with read_file so you have the exact content; then either use replace_in_file for targeted changes or write_to_file with complete final content. Do not create documentation files (*.md, README) unless the user explicitly requests them.
 
 WARNING: Replaces entire file content. Provide complete final content. Creates parent directories if needed.`,
   parameters: schema,
@@ -38,16 +48,60 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
       // File does not exist — new file
     }
 
-    try {
-      await ctx.host.writeFile(filePath, content)
-    } catch (err) {
-      return { success: false, output: `Failed to write ${filePath}: ${(err as Error).message}` }
+    const originalContentStr = oldContent ?? ""
+    const isNewFile = oldContent == null
+
+    // Roo/Cline-style: open → approve → save or revert (when host supports it)
+    const useFileEditFlow =
+      typeof ctx.host.openFileEdit === "function" &&
+      typeof ctx.host.saveFileEdit === "function" &&
+      typeof ctx.host.revertFileEdit === "function"
+
+    if (useFileEditFlow) {
+      const diffPreview = createDiffPreview(originalContentStr, content, filePath)
+      await ctx.host.openFileEdit!(filePath, {
+        originalContent: originalContentStr,
+        newContent: content,
+        isNewFile,
+      })
+      ctx.host.emit({
+        type: "tool_approval_needed",
+        action: {
+          type: "write",
+          tool: "write_to_file",
+          description: `Write to ${filePath}`,
+          content,
+          diff: diffPreview,
+        },
+        partId: ctx.partId ?? "",
+      })
+      const approval = await ctx.host.showApprovalDialog({
+        type: "write",
+        tool: "write_to_file",
+        description: `Write to ${filePath}`,
+        content,
+        diff: diffPreview,
+      })
+      if (!approval.approved) {
+        await ctx.host.revertFileEdit!(filePath)
+        return { success: false, output: `User denied write to ${filePath}` }
+      }
+      try {
+        await ctx.host.saveFileEdit!(filePath)
+      } catch (err) {
+        return { success: false, output: `Failed to write ${filePath}: ${(err as Error).message}` }
+      }
+    } else {
+      try {
+        await ctx.host.writeFile(filePath, content)
+      } catch (err) {
+        return { success: false, output: `Failed to write ${filePath}: ${(err as Error).message}` }
+      }
     }
 
     const newLines = content.split(/\r?\n/).length
     let addedLines: number
     let removedLines: number
-    const oldContentStr = oldContent ?? ""
     if (oldContent != null) {
       const changes = diff.diffLines(oldContent, content)
       addedLines = 0
@@ -69,7 +123,7 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
       await ctx.indexer.refreshFile(absPath).catch(() => {})
     }
 
-    const diffHunks = buildDiffHunks(oldContentStr, content)
+    const diffHunks = buildDiffHunks(originalContentStr, content)
     return {
       success: true,
       output: `Successfully wrote ${filePath} (${newLines} lines)`,
