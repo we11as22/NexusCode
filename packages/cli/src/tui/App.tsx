@@ -194,12 +194,9 @@ const TOOL_ICONS: Record<string, string> = {
   web_fetch: "🌐",
   web_search: "🔍",
   glob: "📋",
-  final_report_to_user: "✅",
   ask_followup_question: "❓",
-  progress_note: "📌",
   update_todo_list: "📋",
   use_skill: "🎯",
-  browser_action: "🌍",
   spawn_agent: "🤖",
 }
 
@@ -291,7 +288,7 @@ function isExploreTool(tool: string): boolean {
   return EXPLORE_FILE_TOOLS.has(tool) || EXPLORE_SEARCH_TOOLS.has(tool)
 }
 
-/** Extract the final reply to the user from assistant parts: final_report_to_user, ask_followup_question, user_message on text parts, or last text. Used so only one "NexusCode" block per turn shows the actual reply. */
+/** Extract the final reply to the user from assistant parts: ask_followup_question, user_message on text parts, or last text. Used so only one "NexusCode" block per turn shows the actual reply. */
 function getFinalReplyFromAssistantParts(parts: MessagePart[]): string | null {
   let lastAskQuestion: string | null = null
   let lastAskOptions: string[] | null = null
@@ -313,11 +310,6 @@ function getFinalReplyFromAssistantParts(parts: MessagePart[]): string | null {
         if (q) lastAskQuestion = q
         const opts = tp.input?.options as string[] | undefined
         if (opts?.length) lastAskOptions = opts
-      }
-      if (tp.tool === "final_report_to_user" && tp.status === "completed") {
-        const raw = tp.output ?? tp.input?.message
-        const msg = typeof raw === "string" ? raw.trim() : raw != null ? String(raw).trim() : ""
-        if (msg) lastReportToUser = msg
       }
     }
   }
@@ -955,20 +947,6 @@ export function App({
                     }
                   : p
               )
-              // Merge progress_note output into last text part so it shows as plain text; Explored block will collapse.
-              if (ev.tool === "progress_note" && ev.success && ev.output?.trim()) {
-                const lastTextIdx = nextParts.map((p, i) => (p.type === "text" ? i : -1)).filter((i) => i >= 0).pop()
-                if (lastTextIdx !== undefined) {
-                  const part = nextParts[lastTextIdx] as { type: "text"; text: string; user_message?: string }
-                  nextParts = [...nextParts]
-                  nextParts[lastTextIdx] = {
-                    ...part,
-                    user_message: (part.user_message ?? "").trim() ? `${part.user_message}\n${ev.output!.trim()}` : ev.output!.trim(),
-                  }
-                } else {
-                  nextParts = [...nextParts, { type: "text" as const, text: "", user_message: ev.output.trim() }]
-                }
-              }
               return {
                 ...s,
                 lastSpawnAgentPartId: ev.tool === "spawn_agent" ? null : s.lastSpawnAgentPartId,
@@ -4443,9 +4421,6 @@ function formatToolPreview(tool: LiveTool): string {
   } else if (tool.tool === "spawn_agent") {
     const desc = tool.input?.["description"]
     if (desc && typeof desc === "string") parts.push((desc.length > 40 ? desc.slice(0, 37) + "…" : desc).replace(/\s+/g, " "))
-  } else if (tool.tool === "progress_note" || tool.tool === "final_report_to_user") {
-    const msg = tool.input?.["message"]
-    if (msg && typeof msg === "string") parts.push((msg.length > 36 ? msg.slice(0, 33) + "…" : msg).replace(/\s+/g, " "))
   } else if (pathStr) {
     const base = pathStr.split("/").pop() ?? pathStr
     const short = base.length > 36 ? base.slice(0, 33) + "…" : base
@@ -4590,7 +4565,6 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
             i++
           }
           for (const g of toolGroups) {
-            if (g.tool === "progress_note") continue
             if (isExploreTool(g.tool)) continue
             const icon = TOOL_ICONS[g.tool] ?? "🔧"
             const status = g.status === "completed" ? "ok" : g.status === "error" ? "err" : "…"
@@ -4727,7 +4701,7 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
           const part = contentParts[idx]!
           if (part.type !== "tool") continue
           const tp = part as ToolPartWithSubagents
-          if (tp.tool === "thinking_preamble" || tp.tool === "progress_note") continue
+          if (tp.tool === "thinking_preamble") continue
           if (isExploreTool(tp.tool)) continue
           const icon = TOOL_ICONS[tp.tool] ?? "🔧"
           const status = tp.status === "completed" ? "ok" : tp.status === "error" ? "err" : "…"

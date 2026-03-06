@@ -13,97 +13,103 @@ const DEFAULT_CODE_GLOBS = [
 ]
 
 const searchSchema = z.object({
-  pattern: z.string().optional().describe("Regex pattern to search for (ripgrep syntax; escape special chars or use raw string)"),
-  patterns: z.array(z.string()).min(1).max(20).optional().describe("Multiple regex patterns in one call"),
-  path: z.string().optional().describe("Directory or file to search in (relative to project root); use to restrict scope"),
-  paths: z.array(z.string()).min(1).max(20).optional().describe("Multiple directories/files to search in"),
-  include: z.string().optional().describe("File glob to include, e.g. '*.ts' or '**/*.{ts,tsx}'"),
-  exclude: z.string().optional().describe("File glob to exclude"),
-  context_lines: z.number().int().min(0).max(10).optional().describe("Lines of context around matches (0-10)"),
-  case_sensitive: z.boolean().optional().describe("Case sensitive search (default: false)"),
-  max_results: z.number().int().positive().max(2000).optional().describe("Max total matches (default: 500)"),
-  task_progress: z.string().optional(),
+  pattern: z.string().describe("The regular expression pattern to search for in file contents"),
+  path: z.string().optional().describe("File or directory to search in (rg PATH). Defaults to current working directory."),
+  glob: z.string().optional().describe("Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg --glob"),
+  output_mode: z.enum(["content", "files_with_matches", "count"]).optional().describe("Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\"."),
+  "-B": z.number().int().min(0).optional().describe("Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise."),
+  "-A": z.number().int().min(0).optional().describe("Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise."),
+  "-C": z.number().int().min(0).optional().describe("Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."),
+  "-n": z.boolean().optional().describe("Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise."),
+  "-i": z.boolean().optional().describe("Case insensitive search (rg -i)"),
+  type: z.string().optional().describe("File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than glob for standard file types."),
+  head_limit: z.number().int().positive().max(2000).optional().describe("Limit output to first N lines/entries. Works across all output modes. When unspecified, shows all results from ripgrep."),
+  multiline: z.boolean().optional().describe("Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."),
 })
 
 export const grepTool: ToolDef<z.infer<typeof searchSchema>> = {
-  name: "grep",
-  description: `Search file contents with regex (ripgrep). Prefer grep for exact symbol/string searches instead of running terminal grep/rg — this tool is faster and respects .gitignore. Use grep to locate code before reading; then use read_file with start_line/end_line for only those ranges.
+  name: "Grep",
+  description: `A powerful search tool built on ripgrep
 
-When to use:
-- **Locate before reading** — Use grep (and list_code_definitions) to find where code lives; then use read_file with start_line/end_line to read only that section. Use grep early and often when discovering structure or finding usages.
-- Find exact strings, identifiers, or regex patterns in the codebase.
-- Complex patterns (e.g. "function\\\\s+\\\\w+", "class\\\\s+[A-Z]\\\\w*", "TODO|FIXME"). Pattern syntax is ripgrep: literal braces need escaping (e.g. \`interface\\{\\}\` for Go).
-- Restrict to a folder (path/paths), file types (include), or exclude files (exclude).
-- For cross-line patterns (e.g. struct with multiple lines), use context_lines to get surrounding lines; multiline regex is not directly supported — use multiple grep calls or read_file with range.
-
-Parameters:
-- pattern / patterns: regex (ripgrep syntax). Escape special chars — e.g. to match literal \`interface{}\` in Go use \`interface\\{\\}\`. Use raw string or escape backslashes.
-- path / paths: directory or file to search (relative to project root). Omit for whole repo.
-- include: glob for file types (e.g. "*.ts"). Default: common code/md extensions.
-- exclude: glob to exclude.
-- context_lines: lines before/after match (0-10).
-- case_sensitive: default false.
-- max_results: cap total matches (default 500, max 2000). Results may be truncated; truncated output indicates "at least" counts.
-
-Use codebase_search for semantic/meaning-based search when vector index is available.`,
+Usage:
+- ALWAYS use Grep for search tasks. NEVER invoke \`grep\` or \`rg\` as a Bash command. The Grep tool has been optimized for correct permissions and access.
+- Supports full regex syntax (e.g., "log.*Error", "function\\\\s+\\\\w+")
+- Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
+- Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
+- Use Task tool for open-ended searches requiring multiple rounds
+- Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use \`interface\\\\{\\\\}\` to find \`interface{}\` in Go code)
+- Multiline matching: By default patterns match within single lines only. For cross-line patterns like \`struct \\\\{[\\\\s\\\\S]*?field\`, use \`multiline: true\``,
   parameters: searchSchema,
   readOnly: true,
 
-  async execute({ pattern, patterns, path: searchPath, paths, include, exclude, context_lines, case_sensitive, max_results }, ctx) {
-    const allPatterns = (patterns?.length ? patterns : (pattern ? [pattern] : [])).map((p) => p.trim()).filter(Boolean)
-    if (allPatterns.length === 0) {
-      return { success: false, output: "Provide pattern or patterns." }
-    }
-    const targets = (paths?.length ? paths : (searchPath ? [searchPath] : ["."]))
-      .map((p) => path.resolve(ctx.cwd, p))
-    const maxMatches = Math.min(max_results ?? MAX_RESULTS, 2000)
+  async execute({ pattern, path: searchPath, glob: includeGlob, output_mode, "-B": before, "-A": after, "-C": context, "-n": lineNumbers, "-i": case_sensitive, type: fileType, head_limit: max_results, multiline }, ctx) {
+    const context_lines = context ?? before ?? after ?? 0
+    const targets = searchPath ? [path.resolve(ctx.cwd, searchPath)] : [ctx.cwd]
+    const include = includeGlob ?? (fileType ? `*.${fileType}` : undefined)
+    const maxMatches = Math.min(max_results ?? 500, 2000)
 
     try {
       const results: string[] = []
       const seen = new Set<string>()
       let matchCount = 0
 
-      for (const pat of allPatterns) {
-        if (matchCount >= maxMatches) break
-        for (const target of targets) {
-          if (matchCount >= maxMatches) break
-          const args = ["--json", "-e", pat]
-          if (!case_sensitive) args.push("--ignore-case")
-          if (include) {
-            args.push("--glob", include)
-          } else {
-            for (const g of DEFAULT_CODE_GLOBS) {
-              args.push("--glob", g)
-            }
-          }
-          if (exclude) args.push("--glob", `!${exclude}`)
-          if (context_lines) args.push("--context", String(context_lines))
-          args.push(target)
-
-          const { stdout } = await execa("rg", args, { cwd: ctx.cwd, reject: false })
-          if (!stdout) continue
-
-          const lines = stdout.split("\n").filter(Boolean)
-          for (const line of lines) {
-            if (matchCount >= maxMatches) break
-            try {
-              const obj = JSON.parse(line) as { type: string; data: Record<string, unknown> }
-              if (obj.type !== "match") continue
-              const data = obj.data as { path: { text: string }; line_number: number; lines: { text: string } }
-              const relPath = path.relative(ctx.cwd, data.path.text)
-              const text = `${relPath}:${data.line_number}:${data.lines.text.trimEnd()}`
-              const key = `${pat}|${text}`
-              if (seen.has(key)) continue
-              seen.add(key)
-              results.push(`[${pat}] ${text}`)
-              matchCount++
-            } catch {}
-          }
+      const args = ["--json", "-e", pattern]
+      if (case_sensitive !== true) args.push("--ignore-case")
+      if (include) {
+        args.push("--glob", include)
+      } else {
+        for (const g of DEFAULT_CODE_GLOBS) {
+          args.push("--glob", g)
         }
+      }
+      if (context_lines) args.push("--context", String(context_lines))
+      args.push(targets[0]!)
+
+      const { stdout } = await execa("rg", args, { cwd: ctx.cwd, reject: false })
+      if (!stdout) {
+        return { success: true, output: `No matches found for: ${pattern}` }
+      }
+
+      const lines = stdout.split("\n").filter(Boolean)
+      const fileCounts = new Map<string, number>()
+      for (const line of lines) {
+        if (matchCount >= maxMatches && output_mode !== "count") break
+        try {
+          const obj = JSON.parse(line) as { type: string; data: Record<string, unknown> }
+          if (obj.type !== "match") continue
+          const data = obj.data as { path: { text: string }; line_number: number; lines: { text: string } }
+          const relPath = path.relative(ctx.cwd, data.path.text)
+          if (output_mode === "count") {
+            fileCounts.set(relPath, (fileCounts.get(relPath) ?? 0) + 1)
+            matchCount++
+            continue
+          }
+          if (output_mode === "files_with_matches") {
+            if (seen.has(relPath)) continue
+            seen.add(relPath)
+            results.push(relPath)
+            matchCount++
+            continue
+          }
+          const text = lineNumbers !== false
+            ? `${relPath}:${data.line_number}:${data.lines.text.trimEnd()}`
+            : `${relPath}:${data.lines.text.trimEnd()}`
+          const key = `${pattern}|${text}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          results.push(text)
+          matchCount++
+        } catch {}
+      }
+
+      if (output_mode === "count") {
+        const countLines = [...fileCounts.entries()].map(([p, n]) => `${p}: ${n}`)
+        const out = countLines.slice(0, maxMatches).join("\n")
+        return { success: true, output: `Count for "${pattern}":\n\n${out}` }
       }
 
       if (results.length === 0) {
-        return { success: true, output: `No matches found for: ${allPatterns.join(", ")}` }
+        return { success: true, output: `No matches found for: ${pattern}` }
       }
 
       let output = results.join("\n")
@@ -111,15 +117,14 @@ Use codebase_search for semantic/meaning-based search when vector index is avail
         output = output.slice(0, MAX_OUTPUT_CHARS) + `\n... (truncated, ${matchCount} total matches)`
       }
 
-      return {
-        success: true,
-        output: `Found ${matchCount} matches for ${allPatterns.length} pattern(s) in ${targets.length} target(s):\n\n${output}`,
-      }
+      const header = output_mode === "files_with_matches"
+        ? `Found ${matchCount} file(s) matching "${pattern}":\n\n${output}`
+        : `Found ${matchCount} matches for "${pattern}":\n\n${output}`
+      return { success: true, output: header }
     } catch (err) {
-      // rg not found — fallback
       return {
         success: false,
-        output: `Search failed: ${(err as Error).message}. Install ripgrep (rg) for grep support.`,
+        output: `Search failed: ${(err as Error).message}. Install ripgrep (rg) for Grep support.`,
       }
     }
   },
@@ -134,7 +139,7 @@ const listSchema = z.object({
 })
 
 export const listFilesTool: ToolDef<z.infer<typeof listSchema>> = {
-  name: "list_files",
+  name: "ListFiles",
   description: `List files and directories. Tree-like structure; respects .gitignore and common ignores.
 
 When to use:

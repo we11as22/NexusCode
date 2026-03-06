@@ -29,7 +29,7 @@ function filterByPaths(items: DiagnosticItem[], paths: string[], cwd: string): D
 }
 
 export const readLintsTool: ToolDef<z.infer<typeof readLintsSchema>> = {
-  name: "read_lints",
+  name: "ReadLints",
   description: `Read linter/compiler diagnostics (errors, warnings) from the workspace.
 
 **NEVER call this tool on a file unless you have edited it or are about to edit it.** Avoid calling read_lints with a very wide scope; results can include pre-existing issues. Prefer passing specific paths you changed.
@@ -40,7 +40,7 @@ When to use:
 
 When NOT to use:
 - On files you have not edited and are not about to edit. Do not call read_lints on the whole workspace without paths unless you need a global snapshot (output is capped at ${MAX_DIAGNOSTICS}).
-- In CLI/server mode diagnostics are not available (only in the VS Code extension); the tool will return an explanatory message — use execute_command to run the linter (e.g. eslint, tsc) if needed.
+- In CLI/server mode diagnostics are not available (only in the VS Code extension); the tool will return an explanatory message — use Bash to run the linter (e.g. eslint, tsc) if needed.
 
 Parameters:
 - paths: optional array of file or directory paths (relative to project root). If provided, returns diagnostics only for those paths. If omitted, returns up to ${MAX_DIAGNOSTICS} diagnostics from the whole workspace.`,

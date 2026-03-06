@@ -212,7 +212,7 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
   const schema = spawnSchema(maxTasksPerCall)
 
   return {
-    name: "spawn_agent",
+    name: "SpawnAgent",
     description: `Launch one or more parallel sub-agents. Use for independent subtasks that don't depend on each other.
 **Single task:** pass \`description\` (and optional \`context_summary\`, \`mode\`).
 **Multiple tasks:** pass \`tasks\` array with up to ${maxTasksPerCall} items; each has \`description\` and optional \`context_summary\`, \`mode\`. All tasks in one call run in parallel (subject to max concurrent limit).

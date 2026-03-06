@@ -13,39 +13,29 @@ function createDiffPreview(oldContent: string, newContent: string, label: string
   return lines.slice(0, MAX_DIFF_PREVIEW_LINES).join("\n") + "\n... (truncated)"
 }
 
-const searchReplaceBlock = z.object({
-  search: z.string().min(1).describe("Exact text to find in the file (must match exactly, cannot be empty)"),
-  replace: z.string().describe("Text to replace the search block with"),
-})
-
 const schema = z.object({
-  path: z.string().min(1).describe("Path to the file to modify"),
-  diff: z.array(searchReplaceBlock).min(1).describe("All edits for this file in one call: one or more search/replace blocks (prefer many blocks in one call over multiple tool calls)"),
+  file_path: z.string().min(1).describe("The absolute path to the file to modify"),
+  old_string: z.string().min(1).describe("The text to replace"),
+  new_string: z.string().describe("The text to replace it with (must be different from old_string)"),
+  replace_all: z.boolean().optional().describe("Replace all occurrences of old_string (default false)"),
 })
 
-export const replaceInFileTool: ToolDef<z.infer<typeof schema>> = {
-  name: "replace_in_file",
-  description: `Make targeted edits with SEARCH/REPLACE blocks. Preferred over write_to_file for existing files.
+export const editTool: ToolDef<z.infer<typeof schema>> = {
+  name: "Edit",
+  description: `Performs exact string replacements in files.
 
-**One call per file:** Call this tool at most once per file per turn. Put ALL edits for that file in a single call by passing multiple blocks in \`diff\`. Multiple separate calls to the same file are slower, waste turns, and can fail (later searches may not find text after earlier edits). Ideal: one replace_in_file call per file with all changes in \`diff\`.
-
-When to use:
-- Bug fixes, adding/changing functions, updating imports, small edits.
-- Multiple related edits in one file (stack several blocks in one call).
-- When you know the exact text to change (read the file first if unsure).
-
-When NOT to use:
-- New files or >50% of file changing: use write_to_file.
-- Unclear exact content: read_file first to get exact text and indentation.
-
-Rules:
-- search must match exactly (whitespace and indentation). Include sufficient context in each block so the match is unique and the edit is unambiguous. Minimize unchanged code in the block; but each block should have enough surrounding context that the replacement is clear. Blocks are applied in order.
-- Tool returns full updated content — use it as reference for next edits.
-- If search appears multiple times, only the first occurrence is replaced.`,
+Usage:
+- You must use your Read tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
+- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
+- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
+- The edit will FAIL if old_string is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use replace_all to change every instance of old_string.
+- Use replace_all for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.`,
   parameters: schema,
   requiresApproval: true,
 
-  async execute({ path: filePath, diff: diffBlocks }, ctx: ToolContext) {
+  async execute({ file_path, old_string, new_string, replace_all }, ctx: ToolContext) {
+    const filePath = file_path
     let originalContent: string
     try {
       originalContent = await ctx.host.readFile(filePath)
@@ -53,39 +43,22 @@ Rules:
       return { success: false, output: `File not found: ${filePath}` }
     }
 
-    // Find all match positions in the ORIGINAL content so all blocks apply to the same snapshot.
-    // Apply from end to start so indices remain valid.
-    type Replacement = { start: number; end: number; replace: string; blockIndex: number; lineNum: number }
-    const replacements: Replacement[] = []
-    for (let i = 0; i < diffBlocks.length; i++) {
-      const block = diffBlocks[i]!
-      const idx = originalContent.indexOf(block.search)
+    let content: string
+    if (replace_all) {
+      content = originalContent.split(old_string).join(new_string)
+      if (content === originalContent) {
+        return { success: false, output: `No occurrences of old_string found in ${filePath}.` }
+      }
+    } else {
+      const idx = originalContent.indexOf(old_string)
       if (idx === -1) {
         return {
           success: false,
-          output: `Block ${i + 1}: SEARCH text not found in ${filePath}.\nSearch text:\n${block.search.slice(0, 200)}\n\nHint: Read the file first to verify the exact content.`,
+          output: `old_string not found in ${filePath}.\nHint: Read the file first to verify the exact content.`,
         }
       }
-      const lineNum = originalContent.slice(0, idx).split("\n").length
-      replacements.push({
-        start: idx,
-        end: idx + block.search.length,
-        replace: block.replace,
-        blockIndex: i,
-        lineNum,
-      })
+      content = originalContent.slice(0, idx) + new_string + originalContent.slice(idx + old_string.length)
     }
-
-    replacements.sort((a, b) => b.start - a.start)
-
-    let content = originalContent
-    for (const r of replacements) {
-      content = content.slice(0, r.start) + r.replace + content.slice(r.end)
-    }
-
-    const results = replacements
-      .sort((a, b) => a.blockIndex - b.blockIndex)
-      .map((r) => `Block ${r.blockIndex + 1}: replaced at line ~${r.lineNum}`)
 
     const changesForStats = diff.diffLines(originalContent, content)
     let addedLines = 0
@@ -97,7 +70,6 @@ Rules:
     }
     const diffStats = { added: addedLines, removed: removedLines }
 
-    // Roo/Cline-style: open → approve → save or revert (when host supports it)
     const useFileEditFlow =
       typeof ctx.host.openFileEdit === "function" &&
       typeof ctx.host.saveFileEdit === "function" &&
@@ -114,7 +86,7 @@ Rules:
         type: "tool_approval_needed",
         action: {
           type: "write",
-          tool: "replace_in_file",
+          tool: "Edit",
           description: `Edit ${filePath}`,
           content,
           diff: diffPreview,
@@ -124,7 +96,7 @@ Rules:
       })
       const approval = await ctx.host.showApprovalDialog({
         type: "write",
-        tool: "replace_in_file",
+        tool: "Edit",
         description: `Edit ${filePath}`,
         content,
         diff: diffPreview,
@@ -158,7 +130,7 @@ Rules:
     const diffHunks = buildDiffHunks(originalContent, content)
     return {
       success: true,
-      output: `Successfully updated ${filePath}:\n${results.join("\n")}\n\n<updated_content>\n${content}\n</updated_content>`,
+      output: `Successfully updated ${filePath}\n\n<updated_content>\n${content}\n</updated_content>`,
       metadata: { addedLines, removedLines, diffHunks, writtenContent: content },
     }
   },

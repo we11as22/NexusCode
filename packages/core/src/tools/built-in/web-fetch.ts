@@ -12,7 +12,7 @@ const schema = z.object({
 })
 
 export const webFetchTool: ToolDef<z.infer<typeof schema>> = {
-  name: "web_fetch",
+  name: "WebFetch",
   description: `Fetch content from a URL. HTML is converted to markdown; JSON/text returned as-is. Read-only.
 
 When to use:
@@ -104,7 +104,7 @@ const webSearchSchema = z.object({
 })
 
 export const webSearchTool: ToolDef<z.infer<typeof webSearchSchema>> = {
-  name: "web_search",
+  name: "WebSearch",
   description: `Search the web (Brave or Serper). Returns titles, URLs, snippets. Use web_fetch to read full pages. Requires BRAVE_API_KEY or SERPER_API_KEY.
 
 When to use:

@@ -20,8 +20,8 @@ const MCP_SERVER_SELECTION_SCHEMA = z.object({
 // Tools that are ALWAYS included regardless of classification
 const ALWAYS_INCLUDE_TOOLS = new Set([
   "final_report_to_user",
-  "ask_followup_question",
-  "update_todo_list",
+  "AskFollowupQuestion",
+  "TodoWrite",
 ])
 
 /**

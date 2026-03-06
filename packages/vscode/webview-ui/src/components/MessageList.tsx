@@ -580,14 +580,6 @@ function AssistantParts({
           if (toolPart.tool === "thinking_preamble") {
             return null
           }
-          if (toolPart.tool === "final_report_to_user") {
-            // Only final_report_to_user output is merged into text part's user_message (core + store). Show reply once via user_message; hide card to avoid duplicate.
-            return null
-          }
-          if (toolPart.tool === "progress_note") {
-            // progress_note output is merged into text part's user_message; show as plain text only, no card.
-            return null
-          }
           if (toolPart.tool === "spawn_agent") {
             const approval =
               pendingApproval?.partId === toolPart.id ? (

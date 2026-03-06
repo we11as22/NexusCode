@@ -9,7 +9,7 @@ const schema = z.object({
 })
 
 export const listDefinitionsTool: ToolDef<z.infer<typeof schema>> = {
-  name: "list_code_definitions",
+  name: "ListCodeDefinitions",
   description: `List top-level code definitions (classes, functions, methods, interfaces, types) for a file or directory. No full bodies — structure only. Use this before read_file to get symbol names and line numbers so you can call read_file with start_line/end_line.
 
 When to use:

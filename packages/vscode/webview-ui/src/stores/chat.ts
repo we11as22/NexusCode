@@ -562,26 +562,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }
             return p
           })
-          if (event.tool === "final_report_to_user" && event.success && ev.output?.trim() && parts.some((p) => p.type === "tool" && (p as ToolPart).id === event.partId)) {
-            // Only final_report_to_user merges into text part; no other tool does this — MessageList shows user_message once and hides final_report_to_user card.
-            const lastTextIdx = parts.map((p, i) => (p.type === "text" ? i : -1)).filter((i) => i >= 0).pop()
-            if (lastTextIdx !== undefined) {
-              const part = parts[lastTextIdx] as TextPart
-              parts[lastTextIdx] = { ...part, user_message: (part.user_message ?? "").trim() ? `${part.user_message}\n${ev.output!.trim()}` : ev.output!.trim() }
-            } else {
-              parts.push({ type: "text", text: "", user_message: ev.output.trim() })
-            }
-          }
-          if (event.tool === "progress_note" && event.success && ev.output?.trim() && parts.some((p) => p.type === "tool" && (p as ToolPart).id === event.partId)) {
-            // progress_note output is merged into text part's user_message; MessageList shows it as plain text and hides the progress_note card.
-            const lastTextIdx = parts.map((p, i) => (p.type === "text" ? i : -1)).filter((i) => i >= 0).pop()
-            if (lastTextIdx !== undefined) {
-              const part = parts[lastTextIdx] as TextPart
-              parts[lastTextIdx] = { ...part, user_message: (part.user_message ?? "").trim() ? `${part.user_message}\n${ev.output!.trim()}` : ev.output!.trim() }
-            } else {
-              parts.push({ type: "text", text: "", user_message: ev.output.trim() })
-            }
-          }
           return { ...msg, content: parts }
         })
         set({ messages: msgs, awaitingApproval: false })
@@ -775,16 +755,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         p.type === "text" &&
                         ((p as TextPart).text?.trim().length > 0 || (p as TextPart).user_message?.trim().length > 0)
                     )
-                    if (hasTextOrUserMessage) return true
-                    const hasFinalReport = parts.some(
-                      (p) =>
-                        p.type === "tool" &&
-                        (p as ToolPart).tool === "final_report_to_user" &&
-                        (p as ToolPart).status === "completed" &&
-                        typeof (p as ToolPart).output === "string" &&
-                        (p as ToolPart).output!.trim().length > 0
-                    )
-                    return !!hasFinalReport
+                    return hasTextOrUserMessage
                   })()
             )
 

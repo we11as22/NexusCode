@@ -1,53 +1,47 @@
 import type { ToolDef } from "../../types.js"
 import { readFileTool } from "./read-file.js"
 import { writeFileTool } from "./write-file.js"
-import { replaceInFileTool } from "./replace-in-file.js"
-import { executeCommandTool } from "./execute-command.js"
+import { editTool } from "./replace-in-file.js"
+import { bashTool } from "./execute-command.js"
+import { bashOutputTool } from "./bash-output.js"
+import { killBashTool } from "./kill-bash.js"
 import { grepTool, listFilesTool } from "./search-files.js"
 import { listDefinitionsTool } from "./list-definitions.js"
 import { readLintsTool } from "./read-lints.js"
 import { codebaseSearchTool } from "./codebase-search.js"
 import { webFetchTool, webSearchTool } from "./web-fetch.js"
 import { globFileSearchTool } from "./glob-file-search.js"
-import { useSkillTool, browserActionTool } from "./use-skill.js"
-import { condenseTool, summarizeTaskTool, planExitTool } from "./context-tools.js"
+import { useSkillTool } from "./use-skill.js"
+import { condenseTool, planExitTool } from "./context-tools.js"
 import {
   askFollowupTool,
-  updateTodoTool,
-  createRuleTool,
-  reportToUserTool,
-  progressNoteTool,
+  todoWriteTool,
 } from "./report-and-control.js"
+import { parallelTool } from "./parallel.js"
 
 export function getAllBuiltinTools(): ToolDef[] {
   return [
     askFollowupTool,
-    updateTodoTool,
-    reportToUserTool,
-    progressNoteTool,
+    todoWriteTool,
+    parallelTool,
     readFileTool,
     listFilesTool,
     listDefinitionsTool,
     readLintsTool,
     writeFileTool,
-    replaceInFileTool,
-    createRuleTool,
-    executeCommandTool,
+    editTool,
+    bashTool,
+    bashOutputTool,
+    killBashTool,
     grepTool,
     codebaseSearchTool,
     webFetchTool,
     webSearchTool,
     globFileSearchTool,
 
-    // Browser group
-    browserActionTool,
-
-    // Context (Cline-style)
     condenseTool,
-    summarizeTaskTool,
     planExitTool,
 
-    // Skills group
     useSkillTool,
   ]
 }
@@ -55,8 +49,11 @@ export function getAllBuiltinTools(): ToolDef[] {
 export {
   readFileTool,
   writeFileTool,
-  replaceInFileTool,
-  executeCommandTool,
+  editTool,
+  parallelTool,
+  bashTool,
+  bashOutputTool,
+  killBashTool,
   grepTool,
   listFilesTool,
   listDefinitionsTool,
@@ -65,14 +62,9 @@ export {
   webFetchTool,
   webSearchTool,
   globFileSearchTool,
-  browserActionTool,
   useSkillTool,
   askFollowupTool,
-  updateTodoTool,
-  createRuleTool,
+  todoWriteTool,
   condenseTool,
-  summarizeTaskTool,
   planExitTool,
-  reportToUserTool,
-  progressNoteTool,
 }

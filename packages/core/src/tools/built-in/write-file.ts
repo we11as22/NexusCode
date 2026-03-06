@@ -14,28 +14,28 @@ function createDiffPreview(oldContent: string, newContent: string, label: string
 }
 
 const schema = z.object({
-  path: z.string().min(1).describe("Path to the file to create or overwrite"),
+  file_path: z.string().min(1).describe("Path to the file to create or overwrite (absolute or relative to project root)"),
   content: z.string().describe("The complete content to write to the file"),
 })
 
 export const writeFileTool: ToolDef<z.infer<typeof schema>> = {
-  name: "write_to_file",
-  description: `Create a new file or overwrite an existing file entirely. Use only when replace_in_file is not suitable.
+  name: "Write",
+  description: `Create a new file or overwrite an existing file entirely. Use only when Edit is not suitable.
 
 When to use:
 - New files, boilerplate, or full rewrites.
 - When the change affects more than half of the file.
 
 When NOT to use:
-- Small or targeted edits: use replace_in_file (faster, less error-prone).
-- Appending or patching: use replace_in_file with search/replace.
-- **Existing files:** If the file already exists, read it first with read_file so you have the exact content; then either use replace_in_file for targeted changes or write_to_file with complete final content. Do not create documentation files (*.md, README) unless the user explicitly requests them.
+- Small or targeted edits: use Edit (faster, less error-prone).
+- Appending or patching: use Edit with search/replace.
+- **Existing files:** If the file already exists, read it first with Read so you have the exact content; then either use Edit for targeted changes or Write with complete final content. Do not create documentation files (*.md, README) unless the user explicitly requests them.
 
 WARNING: Replaces entire file content. Provide complete final content. Creates parent directories if needed.`,
   parameters: schema,
   requiresApproval: true,
 
-  async execute({ path: filePath, content }, ctx: ToolContext) {
+  async execute({ file_path: filePath, content }, ctx: ToolContext) {
     const absPath = path.resolve(ctx.cwd, filePath)
 
     let oldContent: string | null = null
@@ -86,7 +86,7 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
         type: "tool_approval_needed",
         action: {
           type: "write",
-          tool: "write_to_file",
+          tool: "Write",
           description: `Write to ${filePath}`,
           content,
           diff: diffPreview,
@@ -96,7 +96,7 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
       })
       const approval = await ctx.host.showApprovalDialog({
         type: "write",
-        tool: "write_to_file",
+        tool: "Write",
         description: `Write to ${filePath}`,
         content,
         diff: diffPreview,

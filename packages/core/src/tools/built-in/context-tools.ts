@@ -11,7 +11,7 @@ const condenseSchema = z.object({
 })
 
 export const condenseTool: ToolDef<z.infer<typeof condenseSchema>> = {
-  name: "condense",
+  name: "Condense",
   description: `Request conversation context compaction. Prior messages are summarized so you can continue within the context window.
 
 When to use:
@@ -72,7 +72,7 @@ const planExitSchema = z.object({
 })
 
 export const planExitTool: ToolDef<z.infer<typeof planExitSchema>> = {
-  name: "plan_exit",
+  name: "PlanExit",
   description: `Signal that planning is complete (plan mode only). Call once you have finalized the plan file and are confident it is ready. This ends your planning turn and hands control back to the user.
 
 Call this tool:

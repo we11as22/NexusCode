@@ -53,56 +53,53 @@ async function cleanupOldToolOutputs(toolOutputDir: string): Promise<void> {
   }
 }
 
+/** Registry of background bash jobs: bash_id -> { pid, logPath } for BashOutput and KillBash. */
+export const backgroundBashJobs = new Map<string, { pid: number; logPath: string }>()
+
 const schema = z.object({
-  command: z.string().describe("Shell command to execute"),
-  description: z.string().optional().describe("Short (5–10 word) description of what this command does, for progress display (e.g. \"List TS files\", \"Run tests\")"),
-  cwd: z.string().optional().describe("Working directory (defaults to project root)"),
-  timeout_seconds: z.number().int().positive().max(600).optional().describe("Timeout in seconds (default: 120)"),
-  task_progress: z.string().optional().describe("Updated todo list in markdown checklist format"),
-  background: z.boolean().optional().describe("Run in background (non-blocking). Returns log path and PID; monitor with tail/grep in follow-up execute_command. Use for long-running commands (builds, servers)."),
-  log_path: z.string().optional().describe("Output log path when background is true (default: .nexus/run_<timestamp>.log)."),
+  command: z.string().describe("The command to execute"),
+  timeout: z.number().int().positive().max(600000).optional().describe("Optional timeout in milliseconds (max 600000). If not specified, commands will timeout after 120000ms (2 minutes)."),
+  description: z.string().optional().describe("Clear, concise description of what this command does in active voice. For simple commands keep it brief (5-10 words). For complex commands add enough context to clarify what it does."),
+  run_in_background: z.boolean().optional().describe("Set to true to run this command in the background. Use BashOutput to read the output later."),
+  dangerouslyDisableSandbox: z.boolean().optional().describe("Set this to true to dangerously override sandbox mode and run commands without sandboxing."),
 })
 
-export const executeCommandTool: ToolDef<z.infer<typeof schema>> = {
-  name: "execute_command",
-  description: `Run a shell command in the project (or specified cwd). Use for real system/terminal operations only.
+export const bashTool: ToolDef<z.infer<typeof schema>> = {
+  name: "Bash",
+  description: `Executes a given bash command with optional timeout. Working directory persists between commands; shell state (everything else) does not. The shell environment is initialized from the user's profile (bash or zsh).
 
-**Working directory:** Always use a compound command with \`cd\` at the start so the command runs in the intended folder. Example: \`cd packages/core && npm test\`, \`cd src && ls -la\`. Do not rely on "current" directory — start with \`cd <path> &&\` so everything runs in the right place. You may use the optional \`cwd\` parameter as well, but the command itself should include \`cd ... &&\` when running in a subdirectory.
+IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
-When to use:
-- Tests, builds, package installs, git, linters, formatters.
-- **Simple one-off Python** (quick pandas exploration, one API call, small check): run code **in the terminal** with \`python -c "..."\` or a heredoc (\`python << 'EOF'\\n...\\nEOF\`) using system Python. No .py file needed for a few lines. For longer or multi-statement scripts, write a file (e.g. \`.nexus/scratch/script.py\`) with \`write_to_file\` and run \`python .nexus/scratch/script.py\`.
-- **Finding files by name (glob/find):** when you need to list files matching a pattern, use execute_command with \`find\` or \`ls\`. Prefer this when grep would require multiple rounds.
-- **Ripgrep (rg):** when you need a single quick content search with rich options (e.g. -l, -c, -A/-B, multiple patterns), you may use execute_command with \`rg\` (e.g. \`rg "pattern" --type-add 'ts:*.ts' -t ts -l\`). Prefer the \`grep\` tool for content search; use execute_command with rg when you need shell-specific flags.
-- Commands that cannot be done with read_file, grep, or write tools.
+Before executing the command, please follow these steps:
 
-When NOT to use:
-- Reading a single file: use read_file (not cat/head/tail).
-- One-off content search: use search_files (not grep/rg) when a single pattern is enough.
-- Editing files: use replace_in_file or write_to_file (not sed/awk/echo).
+1. Directory Verification:
+   - If the command will create new directories or files, first use ListFiles or Glob to verify the parent directory exists and is the correct location
 
-Provide an optional \`description\` (5–10 words) so the UI can show what the command does (e.g. "List TS files", "Run tests").
+2. Command Execution:
+   - Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt")
+   - After ensuring proper quoting, execute the command. Capture the output of the command.
 
-**Non-interactive:** For any command that would require user interaction (prompts, confirmations), assume the user is not available. Pass non-interactive flags (e.g. \`--yes\` for npx, \`-y\` for npm install) so the command does not block.
-
-**Shell context:** If you are in a new shell, \`cd\` to the appropriate directory and do any necessary setup in addition to running the command. By default the shell starts in the project root. When chaining commands, use \`cd <path> && your_command\` so the working directory is explicit.
-
-Output: stdout+stderr, exit code; capped at 50KB (head+tail if larger). ANSI and progress bars stripped. Timeout: default 120s, max 600s. Chain sequential steps with &&.
-
-**Do not block on long-running work:** For builds, tests, servers, or anything that can take more than 1–2 minutes, set \`background: true\` (and optionally \`log_path\`). The tool returns immediately with PID and log path. Then in separate execute_command calls: (1) **Watch output:** \`tail -n 100 <log_path>\` to see recent lines. (2) **Poll with sleep:** \`sleep 10 && tail -n 100 <log_path>\` to wait and check again. (3) **Search for errors:** \`grep -E "error|Error|FAIL|exception" <log_path>\`. If you see failures, stop the process: \`kill <PID>\` (or \`pkill -f "part of command"\`), then notify the user with final_report_to_user or a clear message. Do not run long commands in blocking mode — they will time out and the user cannot see progress.`,
+Usage notes:
+  - The command argument is required.
+  - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes).
+  - It is very helpful if you write a clear, concise description of what this command does. For simple commands, keep it brief (5-10 words).
+  - If the output exceeds 30000 characters, output will be truncated before being returned to you.
+  - You can use the run_in_background parameter to run the command in the background. Use BashOutput to read the output later. You do not need to use '&' at the end of the command when using this parameter.
+  - Avoid using Bash with find, grep, cat, head, tail, sed, awk, or echo commands, unless explicitly instructed. Instead, prefer: Glob (not find/ls), Grep (not grep/rg), Read (not cat/head/tail), Edit (not sed/awk), Write (not echo/cat).
+  - When issuing multiple commands, use ';' or '&&' to separate them. DO NOT use newlines to separate commands (newlines are ok in quoted strings).
+  - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of cd. You may use cd if the User explicitly requests it.`,
   parameters: schema,
   requiresApproval: true,
 
-  async execute({ command, cwd: cmdCwd, timeout_seconds, background, log_path: userLogPath }, ctx: ToolContext) {
-    const workingDir = cmdCwd ? (cmdCwd.startsWith("/") ? cmdCwd : `${ctx.cwd}/${cmdCwd}`) : ctx.cwd
+  async execute({ command, timeout: timeoutMs, run_in_background: background }, ctx: ToolContext) {
+    const workingDir = ctx.cwd
 
     if (background) {
       const nexusDir = path.join(ctx.cwd, ".nexus")
       try { fs.mkdirSync(nexusDir, { recursive: true }) } catch { /* ignore */ }
       await cleanupOldRunLogs(nexusDir)
-      const logPath = userLogPath
-        ? (path.isAbsolute(userLogPath) ? userLogPath : path.join(ctx.cwd, userLogPath))
-        : path.join(nexusDir, `run_${Date.now()}.log`)
+      const bashId = `run_${Date.now()}`
+      const logPath = path.join(nexusDir, `${bashId}.log`)
       const logStream = fs.createWriteStream(logPath, { flags: "a" })
 
       const child = spawn(command, [], {
@@ -115,15 +112,17 @@ Output: stdout+stderr, exit code; capped at 50KB (head+tail if larger). ANSI and
       child.stderr?.pipe(logStream)
       child.unref()
       const pid = child.pid ?? 0
+      backgroundBashJobs.set(bashId, { pid, logPath })
 
+      const relLog = path.relative(ctx.cwd, logPath) || logPath
       return {
         success: true,
-        output: `[background] PID: ${pid}\nLog: ${path.relative(ctx.cwd, logPath) || logPath}\n\nMonitor: tail -n 100 "${path.relative(ctx.cwd, logPath) || logPath}"\nPoll: sleep 10 && tail -n 100 "${path.relative(ctx.cwd, logPath) || logPath}"\nSearch errors: grep -E "error|Error|FAIL" "${path.relative(ctx.cwd, logPath) || logPath}"\nStop: kill ${pid}`,
-        metadata: { pid, logPath: path.relative(ctx.cwd, logPath) || logPath },
+        output: `[background] bash_id: ${bashId}\nPID: ${pid}\nLog: ${relLog}\n\nUse BashOutput with bash_id "${bashId}" to read output. Use KillBash with shell_id "${bashId}" to stop.`,
+        metadata: { bash_id: bashId, pid, logPath: relLog },
       }
     }
 
-    const timeout = (timeout_seconds ?? 120) * 1000
+    const timeout = timeoutMs ?? DEFAULT_TIMEOUT
 
     let result: { stdout: string; stderr: string; exitCode: number }
     try {
@@ -139,7 +138,7 @@ Output: stdout+stderr, exit code; capped at 50KB (head+tail if larger). ANSI and
       if (e.code === "ABORT_ERR" || (err as Error).message?.includes("abort") || (err as Error).message?.includes("timed out")) {
         return {
           success: false,
-          output: `Command timed out after ${timeout_seconds ?? 120}s: ${command}`,
+          output: `Command timed out after ${(timeoutMs ?? 120000) / 1000}s: ${command}`,
         }
       }
       result = {

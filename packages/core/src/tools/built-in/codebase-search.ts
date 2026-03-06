@@ -3,41 +3,34 @@ import * as path from "node:path"
 import type { ToolDef, ToolContext } from "../../types.js"
 
 const schema = z.object({
-  query: z.string().optional().describe("Semantic search query (natural language description of what you're looking for)"),
-  queries: z.array(z.string()).min(1).max(20).optional().describe("Multiple semantic queries in one call"),
-  path: z.string().optional().describe("Optional path scope (file or directory, relative to project root)"),
-  paths: z.array(z.string()).min(1).max(20).optional().describe("Multiple path scopes (files and/or directories)"),
+  query: z.string().describe("A complete question about what you want to understand. Ask as if talking to a colleague: 'How does X work?', 'What happens when Y?', 'Where is Z handled?'"),
+  target_directories: z.array(z.string()).optional().describe("Prefix directory paths to limit search scope (single directory only, no glob patterns). Omit or empty to search the whole repo."),
+  explanation: z.string().optional().describe("One sentence explanation as to why this tool is being used, and how it contributes to the goal."),
   kind: z.enum(["class", "function", "method", "interface", "type", "enum", "const", "any"]).optional().describe("Filter by symbol type"),
   limit: z.number().int().positive().max(50).optional().describe("Max results (default: 10)"),
-  task_progress: z.string().optional(),
 })
 
 export const codebaseSearchTool: ToolDef<z.infer<typeof schema>> = {
-  name: "codebase_search",
-  description: `Semantic (vector) search over the indexed codebase. Finds code by meaning, not exact text. Use for discovery before read_file; then use read_file with path:line from results to load only those sections.
-Only available when vector search is enabled (indexing.vector + vectorDb.enabled in .nexus/nexus.yaml) and the index is built (embeddings configured, Qdrant running).
+  name: "CodebaseSearch",
+  description: `Semantic (vector) search over the indexed codebase. Finds code by meaning, not exact text.
 
-When to use:
-- Explore codebase by intent: "where is auth validated", "error handling for API calls", "how does caching work". Ask as if talking to a colleague: "How does X work?", "What happens when Y?", "Where is Z handled?"
-- Use the query field for natural-language descriptions of what you want to find.
-- path/paths: optional scope (ONE directory or file; omit or empty to search whole repo). Do not use multiple directories in one scope; no globs or wildcards (e.g. avoid "frontend/", "backend/" together or "*.ts").
-- kind: filter by symbol type (class, function, interface, etc.).
-- limit: max results (default 10). Use read_file with path:line from results to load only relevant sections.
-
-Search strategy: Start with a broad query (e.g. empty path) if unsure where code lives; review results and rerun with a narrower path if a directory stands out. Break large questions into smaller focused queries (e.g. "Where are user roles checked?" in backend/auth/). For big files (>1K lines), run codebase_search scoped to that file or use grep for exact symbols.
+Use CodebaseSearch when you need to:
+- Explore unfamiliar codebases
+- Ask "how / where / what" questions to understand behavior
+- Find code by meaning rather than exact text
 
 When NOT to use:
-- Exact text or regex: use grep instead.
-- Reading a known file: use read_file.
-- Single identifier or symbol overview: use grep or list_code_definitions.
+- Exact text or regex: use Grep instead.
+- Reading a known file: use Read.
+- Single identifier or symbol overview: use Grep or ListCodeDefinitions.
 
-Usage: When full chunk contents are provided in results, avoid re-reading the exact same chunk with read_file. When only chunk signatures (e.g. function/class names) are shown, use read_file or grep to explore those files or ranges.
-
-Query examples: Good — "Where is user authentication validated before login?" (complete question with context). Bad — "AuthService" (single word; use grep). Bad — "What is X? How does Y work?" (split into separate queries).`,
+Query: A complete question with context (e.g. "Where is user authentication validated before login?"). Avoid single words; use full questions.
+target_directories: Optional list of directory paths to limit scope. Omit or empty to search whole repo. Start broad then narrow based on results.
+Only available when vector search is enabled (indexing.vector + vectorDb.enabled in .nexus/nexus.yaml) and the index is built.`,
   parameters: schema,
   readOnly: true,
 
-  async execute({ query, queries, path, paths, kind, limit }, ctx: ToolContext) {
+  async execute({ query, target_directories, kind, limit }, ctx: ToolContext) {
     const vectorEnabled = Boolean(ctx.config.indexing?.vector && ctx.config.vectorDb?.enabled)
     if (!vectorEnabled) {
       return {
@@ -61,15 +54,12 @@ Query examples: Good — "Where is user authentication validated before login?" 
     }
 
     try {
-      const allQueries = (queries?.length ? queries : (query ? [query] : [])).map((q) => q.trim()).filter(Boolean)
+      const allQueries = query?.trim() ? [query.trim()] : []
       if (allQueries.length === 0) {
-        return { success: false, output: "Provide query or queries." }
+        return { success: false, output: "Provide query." }
       }
 
-      const scopeCandidates = [
-        ...(path ? [path] : []),
-        ...(Array.isArray(paths) ? paths : []),
-      ]
+      const scopeCandidates = Array.isArray(target_directories) ? target_directories : []
       const normalizedScopes = Array.from(new Set(
         scopeCandidates
           .map((p) => normalizeScopePath(p, ctx.cwd))

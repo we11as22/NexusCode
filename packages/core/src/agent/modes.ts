@@ -1,6 +1,6 @@
 import type { Mode, PermissionAction, ModeConfig } from "../types.js"
 
-export type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit"
+export type ToolGroup = "read" | "write" | "execute" | "search" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit"
 
 /**
  * Core built-in tool groups per mode.
@@ -8,10 +8,10 @@ export type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "m
  * prompts only describe behaviour — they do not grant or revoke tool access.
  */
 export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
-  agent: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents", "context"],
-  plan:  ["always", "read", "write", "search", "browser", "mcp", "skills", "agents", "context", "plan_exit"],
-  ask:   ["always", "read", "search", "browser", "mcp", "skills", "agents", "context"],
-  debug: ["always", "read", "write", "execute", "search", "browser", "mcp", "skills", "agents", "context"],
+  agent: ["always", "read", "write", "execute", "search", "mcp", "skills", "agents", "context"],
+  plan:  ["always", "read", "write", "search", "mcp", "skills", "agents", "context", "plan_exit"],
+  ask:   ["always", "read", "search", "mcp", "skills", "agents", "context"],
+  debug: ["always", "read", "write", "execute", "search", "mcp", "skills", "agents", "context"],
 }
 
 /**
@@ -21,10 +21,10 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
  * Ask: read-only + no plan work — no write, no execute, no plan_exit (spawn_agent allowed with ask permissions).
  */
 export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
-  agent: ["plan_exit"],
-  plan:  ["execute_command"],
-  ask:   ["write_to_file", "replace_in_file", "execute_command", "create_rule", "plan_exit"],
-  debug: ["plan_exit"],
+  agent: ["PlanExit"],
+  plan:  ["Bash"],
+  ask:   ["Write", "Edit", "Bash", "PlanExit"],
+  debug: ["PlanExit"],
 }
 
 /**
@@ -44,17 +44,16 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
  * Tools in "always" group are available in every mode.
  */
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
-  always:  ["ask_followup_question", "update_todo_list", "final_report_to_user", "progress_note"],
-  read:    ["read_file", "list_files", "list_code_definitions", "read_lints"],
-  write:   ["write_to_file", "replace_in_file", "create_rule"],
-  execute: ["execute_command"],
-  search:  ["grep", "codebase_search", "web_fetch", "web_search", "glob"],
-  browser: ["browser_action"],
-  mcp:     [], // populated dynamically from MCP registry
-  skills:  ["use_skill"],
-  agents:  ["spawn_agent"],
-  context: ["condense", "summarize_task"],
-  plan_exit: ["plan_exit"],
+  always:  ["AskFollowupQuestion", "TodoWrite", "Parallel"],
+  read:    ["Read", "ListFiles", "ListCodeDefinitions", "ReadLints"],
+  write:   ["Write", "Edit"],
+  execute: ["Bash"],
+  search:  ["Grep", "CodebaseSearch", "WebFetch", "WebSearch", "Glob"],
+  mcp:     [],
+  skills:  ["Skill"],
+  agents:  ["SpawnAgent"],
+  context: ["Condense"],
+  plan_exit: ["PlanExit"],
 }
 
 /**
@@ -67,30 +66,30 @@ export const PLAN_MODE_ALLOWED_WRITE_PATTERN = /^\.nexus[\\/]plans[\\/].+\.(md|t
  * Read-only tools that can be parallelized safely.
  */
 export const READ_ONLY_TOOLS = new Set([
-  "read_file",
-  "list_files",
-  "list_code_definitions",
-  "read_lints",
-  "grep",
-  "codebase_search",
-  "web_fetch",
-  "web_search",
-  "glob",
-  "use_skill",
-  "condense",
-  "summarize_task",
-  "progress_note",
+  "Read",
+  "ListFiles",
+  "ListCodeDefinitions",
+  "ReadLints",
+  "Grep",
+  "CodebaseSearch",
+  "WebFetch",
+  "WebSearch",
+  "Glob",
+  "Skill",
+  "Condense",
+  "BashOutput",
 ])
 
 /**
  * Mandatory tool that must be called at the end of a turn per mode.
  * If the model finishes (returns text, no more tool calls) without calling it, the loop will force-call it.
+ * Empty string for agent/ask/debug means no mandatory tool — turn ends when model stops.
  */
 export const MANDATORY_END_TOOL: Record<Mode, string> = {
-  agent: "final_report_to_user",
-  plan:  "plan_exit",
-  ask:   "final_report_to_user",
-  debug: "final_report_to_user",
+  agent: "",
+  plan:  "PlanExit",
+  ask:   "",
+  debug: "",
 }
 
 /**

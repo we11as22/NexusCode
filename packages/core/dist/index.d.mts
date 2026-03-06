@@ -1005,8 +1005,10 @@ interface PermissionResult {
     alwaysApprove?: boolean;
     /** When true, host should set autoApprove for the rest of the session (e.g. "Skip all") */
     skipAll?: boolean;
-    /** For execute_command: add this command to the project allowlist so it is not asked again in this folder */
+    /** For Bash: add this command to the project allowlist so it is not asked again in this folder */
     addToAllowedCommand?: string;
+    /** When set with approved: false, the user declined the action and asked to do this instead; agent continues with this instruction. */
+    whatToDoInstead?: string;
 }
 interface ToolDef<TArgs = Record<string, unknown>> {
     name: string;
@@ -1046,6 +1048,8 @@ interface ToolContext {
     compactSession?: () => Promise<void>;
     /** Current tool call part id (e.g. part_xyz). Set by loop for write/replace so tool can emit tool_approval_needed. */
     partId?: string;
+    /** All resolved tools for this run (set by loop). Used e.g. by Parallel to run multiple tools in one call. */
+    resolvedTools?: ToolDef[];
 }
 interface ApprovalAction {
     type: "write" | "execute" | "mcp" | "browser" | "read" | "doom_loop";
@@ -1083,6 +1087,8 @@ interface IHost {
     getCheckpointEntries?(): Promise<CheckpointEntry[]>;
     /** Get diff between two checkpoints for preview. */
     getCheckpointDiff?(fromHash: string, toHash?: string): Promise<ChangedFile[]>;
+    /** Called by the loop after a checkpoint is committed so the host can push updated entries to the UI. */
+    notifyCheckpointEntriesUpdated?(): void;
     /**
      * Roo/Cline-style file edit flow: open → [approval] → save or revert.
      * openFileEdit: open diff view (extension) or store pending edit (CLI). Do not write to disk yet.
@@ -1731,7 +1737,7 @@ interface AgentLoopOptions {
  */
 declare function runAgentLoop(opts: AgentLoopOptions): Promise<void>;
 
-type ToolGroup = "read" | "write" | "execute" | "search" | "browser" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit";
+type ToolGroup = "read" | "write" | "execute" | "search" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit";
 /**
  * Core built-in tool groups per mode.
  * Access control is enforced in the backend (getBuiltinToolsForMode + getBlockedToolsForMode in loop);

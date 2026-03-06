@@ -31,7 +31,7 @@ import { estimateTokens } from "../context/condense.js"
 import * as path from "node:path"
 
 const DOOM_LOOP_THRESHOLD = 3
-/** execute_command: allow more repeats so init/scripts can run same command a few times (e.g. retries) without triggering. */
+/** execute_command: allow more repeats → Bash: allow more repeats so init/scripts can run same command a few times (e.g. retries) without triggering. */
 const DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND = 5
 /** OpenCode-style: generous tool budgets so "study codebase" and multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
@@ -41,7 +41,7 @@ const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   debug: 200,
 }
 
-/** When final_report_to_user or progress_note tool completes, set its output as user_message on the last text part of the message (so UI and context see it). */
+/** When a mandatory end tool (e.g. PlanExit) completes, set its output as user_message on the last text part of the message (so UI and context see it). */
 function setReportToUserMessage(session: ISession, messageId: string, userMessage: string): void {
   const msg = session.messages.find((m) => m.id === messageId)
   if (!msg || !userMessage.trim()) return
@@ -59,7 +59,7 @@ function setReportToUserMessage(session: ISession, messageId: string, userMessag
   session.updateMessage(messageId, { content: parts })
 }
 
-/** Returns true if the given message contains a write_to_file or replace_in_file to .nexus/plans/ (for plan_exit gate). */
+/** Returns true if the given message contains a Write or Edit to .nexus/plans/ (for PlanExit gate). */
 function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: string): boolean {
   const msg = session.messages.find((m) => m.id === messageId)
   if (!msg || !Array.isArray(msg.content)) return false
@@ -67,8 +67,8 @@ function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: stri
   for (const p of parts) {
     if (p.type !== "tool") continue
     const tp = p as ToolPart
-    if (tp.tool !== "write_to_file" && tp.tool !== "replace_in_file") continue
-    const raw = (tp.input?.path ?? tp.input?.file_path) as string | undefined
+    if (tp.tool !== "Write" && tp.tool !== "Edit") continue
+    const raw = (tp.input?.file_path ?? tp.input?.path) as string | undefined
     if (!raw || typeof raw !== "string") continue
     const rel = path.isAbsolute(raw) ? path.relative(cwd, raw) : raw
     const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
@@ -227,6 +227,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     mode,
     indexer,
     signal,
+    resolvedTools,
     compactSession: async () => {
       host.emit({ type: "compaction_start" })
       await handleCompaction(session, activeClient, config, host, compaction, signal)
@@ -402,8 +403,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     let currentText = ""
     let currentReasoning = ""
-    /** True after we've parsed the optional JSON preamble line (reasoning only) or decided to skip. */
-    let preambleParsed = false
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
     lastToolName = ""
     let sawNativeToolCall = false
@@ -424,37 +423,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       })
     }
 
-    /** Persist reasoning + text + tool parts to session (for reasoning/thinking models — Kilo Code style). */
+    /** Persist reasoning + text + tool parts to session. Reasoning comes only from reasoning_delta (model's internal reasoning); text_delta is always stored as text. */
     const flushAssistantContent = () => {
       const msg = session.messages.find((m) => m.id === newMessageId)
       const existingParts = msg && Array.isArray(msg.content) ? (msg.content as MessagePart[]) : []
       const toolParts = existingParts.filter((p): p is ToolPart => p.type === "tool")
       const parts: MessagePart[] = []
       if (currentReasoning) parts.push({ type: "reasoning", text: currentReasoning } as ReasoningPart)
-      // Parse first line as JSON: { reasoning } only — shown as Thought in UI. Progress notes use progress_note tool.
-      if (!preambleParsed && currentText.includes("\n")) {
-        preambleParsed = true
-        const firstNewline = currentText.indexOf("\n")
-        const line = currentText.slice(0, firstNewline).trim()
-        const rest = currentText.slice(firstNewline + 1)
-        let parsedReasoning: string | null = null
-        if (line.startsWith("{")) {
-          try {
-            const v = JSON.parse(line) as unknown
-            if (v && typeof v === "object" && !Array.isArray(v)) {
-              const o = v as Record<string, unknown>
-              if (typeof o.reasoning === "string" && o.reasoning.trim()) parsedReasoning = o.reasoning.trim()
-            }
-          } catch {
-            // Not valid JSON — leave as normal text
-          }
-        }
-        if (parsedReasoning) {
-          currentReasoning += (currentReasoning ? "\n\n" : "") + parsedReasoning
-          host.emit({ type: "reasoning_delta", delta: parsedReasoning, messageId: newMessageId })
-          currentText = rest
-        }
-      }
       if (currentText) {
         parts.push({ type: "text", text: currentText } as TextPart)
       }
@@ -491,7 +466,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           messageId: newMessageId,
           success: result.success,
         })
-        if (tc.toolName === "update_todo_list") {
+        if (tc.toolName === "TodoWrite") {
           host.emit({ type: "todo_updated", todo: session.getTodo() })
         }
         executedToolThisIteration = true
@@ -574,16 +549,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             host.emit({ type: "tool_start", tool: toolName, partId, messageId: newMessageId, input: toolInput })
 
             // Inform host of available tools list so UI/user knows context
-            // Check task_progress parameter
-            if (toolInput["task_progress"] && typeof toolInput["task_progress"] === "string") {
-              session.updateTodo(toolInput["task_progress"])
-            }
+            // TodoWrite updates session in its execute(); no task_progress here.
 
             // DOOM LOOP DETECTION — halt if same tool called 3x with identical args
             if (await detectDoomLoop(session, toolName, toolInput)) {
               host.emit({ type: "doom_loop_detected", tool: toolName })
               // In non-interactive mode always abort to prevent infinite loops
-              const threshold = toolName === "execute_command" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
+              const threshold = toolName === "Bash" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
               if (typeof process !== "undefined" && process.stdin && !process.stdin.isTTY) {
                 throw new Error(`Doom loop: tool "${toolName}" called ${threshold} times with same arguments. Aborting.`)
               }
@@ -614,11 +586,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               // Sequential: flush pending reads first
               await flushPendingReads()
 
-              // Plan mode: force writing the plan to .nexus/plans/ before plan_exit
-              if (toolName === "plan_exit" && mode === "plan") {
+              // Plan mode: force writing the plan to .nexus/plans/ before PlanExit
+              if (toolName === "PlanExit" && mode === "plan") {
                 if (!messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd)) {
                   const errMsg =
-                    "You must write the plan to a file in .nexus/plans/ (e.g. .nexus/plans/plan.md) before calling plan_exit. Create or update the plan file now, then call plan_exit again."
+                    "You must write the plan to a file in .nexus/plans/ (e.g. .nexus/plans/plan.md) before calling PlanExit. Create or update the plan file now, then call PlanExit again."
                   session.updateToolPart(newMessageId, partId, {
                     status: "error",
                     output: errMsg,
@@ -659,7 +631,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 output: result.output,
                 error: result.success ? undefined : result.output,
                 compacted: (result as { compacted?: boolean }).compacted,
-                ...(result.success && (toolName === "write_to_file" || toolName === "replace_in_file")
+                ...(result.success && (toolName === "Write" || toolName === "Edit")
                   ? {
                       path: extractWriteTargetPath(toolName, toolInput),
                       writtenContent: typeof (result as { metadata?: { writtenContent?: string } }).metadata?.writtenContent === "string"
@@ -676,15 +648,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                   : {}),
               })
 
-              if (toolName === "update_todo_list") {
+              if (toolName === "TodoWrite") {
                 host.emit({ type: "todo_updated", todo: session.getTodo() })
-              }
-
-              if (toolName === "final_report_to_user" && result.success && result.output?.trim()) {
-                setReportToUserMessage(session, newMessageId, result.output)
-              }
-              if (toolName === "progress_note" && result.success && result.output?.trim()) {
-                setReportToUserMessage(session, newMessageId, result.output)
               }
 
               lastToolName = toolName
@@ -773,10 +738,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           })
           host.emit({ type: "tool_start", tool: call.toolName, partId, messageId: newMessageId, input: call.toolInput })
 
-          if (call.toolInput["task_progress"] && typeof call.toolInput["task_progress"] === "string") {
-            session.updateTodo(call.toolInput["task_progress"])
-          }
-
           if (await detectDoomLoop(session, call.toolName, call.toolInput)) {
             host.emit({ type: "doom_loop_detected", tool: call.toolName })
             throw new Error(`Doom loop: tool "${call.toolName}" repeatedly called via textual tool-call markup.`)
@@ -813,7 +774,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             output: result.output,
             error: result.success ? undefined : result.output,
             compacted: (result as { compacted?: boolean }).compacted,
-            ...(result.success && (call.toolName === "write_to_file" || call.toolName === "replace_in_file")
+            ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
               ? {
                   path: extractWriteTargetPath(call.toolName, call.toolInput),
                   writtenContent: typeof (result as { metadata?: { writtenContent?: string } }).metadata?.writtenContent === "string"
@@ -830,15 +791,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               : {}),
           })
 
-          if (call.toolName === "update_todo_list") {
+          if (call.toolName === "TodoWrite") {
             host.emit({ type: "todo_updated", todo: session.getTodo() })
-          }
-
-          if (call.toolName === "final_report_to_user" && result.success && result.output?.trim()) {
-            setReportToUserMessage(session, newMessageId, result.output)
-          }
-          if (call.toolName === "progress_note" && result.success && result.output?.trim()) {
-            setReportToUserMessage(session, newMessageId, result.output)
           }
 
           lastToolName = call.toolName
@@ -863,20 +817,21 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       continue
     }
 
-    // Check if done — mandatory end tool (per mode) ends the turn: final_report_to_user (agent/ask/debug), plan_exit (plan).
+    // Check if done — mandatory end tool (per mode) ends the turn: plan_exit (plan only). Agent/ask/debug have no mandatory tool.
     const mandatoryEnd = MANDATORY_END_TOOL[mode]
     if (
       attemptedCompletionThisIteration ||
-      (mandatoryEnd != null && lastToolName === mandatoryEnd)
+      (mandatoryEnd && lastToolName === mandatoryEnd)
     )
       break
     if (finishReason === "stop" && !executedToolThisIteration) {
       let mandatoryTool = MANDATORY_END_TOOL[mode]
+      if (!mandatoryTool) break
       const alreadyCalled = messageHasMandatoryEndTool(session, newMessageId, mode)
       if (mandatoryTool && !alreadyCalled && resolvedTools.some((t) => t.name === mandatoryTool)) {
-        // Plan mode: if no plan file was written, force final_report_to_user instead of plan_exit so user still gets a message
-        if (mode === "plan" && mandatoryTool === "plan_exit" && !messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd)) {
-          mandatoryTool = "final_report_to_user"
+        // Plan mode: if no plan file was written, still force plan_exit so user gets a message
+        if (mode === "plan" && mandatoryTool === "PlanExit" && !messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd)) {
+          // Keep plan_exit; pass summary that plan file is missing
         }
         if (!resolvedTools.some((t) => t.name === mandatoryTool)) {
           break
@@ -886,9 +841,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         const partId = `part_${syntheticId}`
         const summary = (currentText || "").trim().slice(0, 2000) || "Work completed."
         let toolInput: Record<string, unknown>
-        if (mandatoryTool === "final_report_to_user") {
-          toolInput = { message: summary }
-        } else if (mandatoryTool === "plan_exit") {
+        if (mandatoryTool === "PlanExit") {
           toolInput = { summary: (currentText || "").trim().slice(0, 500) || "Plan ready." }
         } else {
           toolInput = { message: summary }
@@ -930,7 +883,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           success: forcedResult.success,
           output: forcedResult.output,
         })
-        if (mandatoryTool === "final_report_to_user" && forcedResult.success && forcedResult.output?.trim()) {
+        if (forcedResult.success && forcedResult.output?.trim()) {
           setReportToUserMessage(session, newMessageId, forcedResult.output)
         }
         lastToolName = mandatoryTool
@@ -1045,30 +998,15 @@ async function executeToolCall(
     const availableList = tools.map(t => t.name).join(", ")
     return {
       success: false,
-      output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use execute_command. To present final results, use final_report_to_user.`,
+      output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use Bash.`,
     }
   }
 
   const ctxWithPartId = ctx as ToolContext & { partId?: string }
   ctxWithPartId.partId = `part_${toolCallId}`
 
-  // Cline-style double-check (agent mode): first final_report_to_user is rejected; model must re-verify and call again
-  if (
-    toolName === "final_report_to_user" &&
-    mode === "agent" &&
-    completionState?.doubleCheckEnabled &&
-    !completionState.pending.current
-  ) {
-    completionState.pending.current = true
-    return {
-      success: false,
-      output:
-        "Before completing, re-verify your work against the original task. Check that: (1) All requested changes were made, (2) No steps were skipped, (3) Edge cases are addressed, (4) The solution matches what was asked. If everything checks out, call final_report_to_user again with your final result.",
-    }
-  }
-
   // Plan mode: allow writes only to .nexus/plans/*.md|*.txt (no source code edits)
-  if (mode === "plan" && ["write_to_file", "replace_in_file"].includes(toolName)) {
+  if (mode === "plan" && ["Write", "Edit"].includes(toolName)) {
     const targetPath = extractWriteTargetPath(toolName, toolInput)
     if (!targetPath) {
       return {
@@ -1084,7 +1022,7 @@ async function executeToolCall(
       if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
         return {
           success: false,
-          output: `In plan mode you cannot modify source code files (${ext}). Write only the plan to .nexus/plans/*.md or .txt, then call plan_exit.`,
+          output: `In plan mode you cannot modify source code files (${ext}). Write only the plan to .nexus/plans/*.md or .txt, then call PlanExit.`,
         }
       }
       return {
@@ -1111,18 +1049,19 @@ async function executeToolCall(
   }
 
   // --- Legacy deny patterns (kept for backwards compat) ---
-  if (ruleResult === null && toolInput["path"] && typeof toolInput["path"] === "string") {
+  const writePath = (toolInput["file_path"] ?? toolInput["path"]) as string | undefined
+  if (ruleResult === null && writePath) {
     for (const pattern of config.permissions.denyPatterns) {
-      if (matchesGlob(toolInput["path"], pattern)) {
+      if (matchesGlob(writePath, pattern)) {
         return { success: false, output: `Access denied: path matches deny pattern "${pattern}"` }
       }
     }
   }
 
   // --- Standard approval flow (only when no explicit rule matched) ---
-  // For write_to_file/replace_in_file with host file-edit API: tool does open → approve → save/revert; skip here.
+  // For Write/Edit with host file-edit API: tool does open → approve → save/revert; skip here.
   const useFileEditFlow =
-    (toolName === "write_to_file" || toolName === "replace_in_file") &&
+    (toolName === "Write" || toolName === "Edit") &&
     typeof host.openFileEdit === "function" &&
     typeof host.saveFileEdit === "function" &&
     typeof host.revertFileEdit === "function"
@@ -1147,7 +1086,7 @@ async function executeToolCall(
         }
         return { success: false, output: `User denied ${toolName}` }
       }
-      if (approval.addToAllowedCommand != null && toolName === "execute_command") {
+      if (approval.addToAllowedCommand != null && toolName === "Bash") {
         const toAdd = normalizeCommand(approval.addToAllowedCommand)
         if (toAdd) {
           await host.addAllowedCommand?.(ctx.cwd, toAdd)
@@ -1172,22 +1111,8 @@ async function executeToolCall(
   try {
     const result = await tool.execute(validatedArgs as Record<string, unknown>, ctx)
 
-    // On successful final_report_to_user (agent): save checkpoint (Cline-style) and clear double-check state
-    if (toolName === "final_report_to_user" && result.success && mode === "agent" && completionState) {
-      completionState.pending.current = false
-      if (completionState.checkpoint) {
-        try {
-          const hash = await completionState.checkpoint.commit("final_report_to_user")
-          result.output += `\n\nCheckpoint saved: ${hash}`
-          ctx.host.notifyCheckpointEntriesUpdated?.()
-        } catch (e) {
-          result.output += `\n\nCheckpoint save failed: ${(e as Error).message}`
-        }
-      }
-    }
-
     // Keep code index fresh after successful file edits in both CLI and VSCode hosts.
-    if (result.success && ctx.indexer && ["write_to_file", "replace_in_file"].includes(toolName)) {
+    if (result.success && ctx.indexer && ["Write", "Edit"].includes(toolName)) {
       const targetPath = extractWriteTargetPath(toolName, validatedArgs as Record<string, unknown>)
       const refreshFile = ctx.indexer.refreshFile
       const refreshFileNow = ctx.indexer.refreshFileNow
@@ -1217,7 +1142,7 @@ async function detectDoomLoop(
   toolName: string,
   toolInput: Record<string, unknown>
 ): Promise<boolean> {
-  const threshold = toolName === "execute_command" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
+  const threshold = toolName === "Bash" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
   const allParts = session.messages
     .flatMap(m => {
       if (!Array.isArray(m.content)) return []
@@ -1230,13 +1155,13 @@ async function detectDoomLoop(
   if (allParts.length < threshold) return false
 
   const currentSig = getDoomLoopSignature(toolName, toolInput)
-  if (toolName === "execute_command" && currentSig === "") return false
+  if (toolName === "Bash" && currentSig === "") return false
   return allParts.every(p => getDoomLoopSignature(toolName, (p ?? {}) as Record<string, unknown>) === currentSig)
 }
 
 /** Canonical signature for doom-loop comparison. For execute_command we compare only the command string so different commands are not treated as a loop. */
 function getDoomLoopSignature(toolName: string, input: Record<string, unknown>): string {
-  if (toolName === "execute_command") {
+  if (toolName === "Bash") {
     const cmd = input?.command != null ? String(input.command).trim() : ""
     return cmd
   }
@@ -1449,9 +1374,6 @@ function toolNeedsApproval(
   config: NexusConfig,
   mcpToolNames: Set<string>
 ): boolean {
-  if (toolName === "browser_action") {
-    return !(config.permissions.autoApproveBrowser ?? false)
-  }
   if (mcpToolNames.has(toolName)) {
     return !(config.permissions.autoApproveMcp ?? false)
   }
@@ -1463,12 +1385,17 @@ function toolNeedsApproval(
         if (matchesGlob(toolInput["path"], pattern)) return false
       }
     }
+    if (toolInput["file_path"] && typeof toolInput["file_path"] === "string") {
+      for (const pattern of config.permissions.autoApproveReadPatterns) {
+        if (matchesGlob(toolInput["file_path"], pattern)) return false
+      }
+    }
     return !config.permissions.autoApproveRead
   }
-  if (["write_to_file", "replace_in_file"].includes(toolName)) {
+  if (["Write", "Edit"].includes(toolName)) {
     return !config.permissions.autoApproveWrite && !autoApproveActions.has("write")
   }
-  if (toolName === "execute_command") {
+  if (toolName === "Bash") {
     const cmd = typeof toolInput["command"] === "string" ? toolInput["command"] : ""
     const normalized = normalizeCommand(cmd)
     const denyPatterns = config.permissions.denyCommandPatterns ?? []
@@ -1485,27 +1412,20 @@ function toolNeedsApproval(
 }
 
 function buildApprovalAction(toolName: string, toolInput: Record<string, unknown>): ApprovalAction {
-  if (["write_to_file", "replace_in_file"].includes(toolName)) {
+  if (["Write", "Edit"].includes(toolName)) {
     return {
       type: "write",
       tool: toolName,
-      description: `Write to ${toolInput["path"] ?? "file"}`,
+      description: `Write to ${(toolInput["file_path"] ?? toolInput["path"]) ?? "file"}`,
       content: toolInput["content"] as string | undefined,
     }
   }
-  if (toolName === "execute_command") {
+  if (toolName === "Bash") {
     return {
       type: "execute",
       tool: toolName,
       description: `Run: ${toolInput["command"]}`,
       content: typeof toolInput["command"] === "string" ? toolInput["command"] : undefined,
-    }
-  }
-  if (toolName === "browser_action") {
-    return {
-      type: "browser",
-      tool: toolName,
-      description: `Browser: ${toolName}`,
     }
   }
   if (toolName.includes("__")) {
@@ -1562,7 +1482,7 @@ function ruleMatchesTool(pattern: string | undefined, toolName: string): boolean
 }
 
 function ruleMatchesPath(pathPattern: string, toolInput: Record<string, unknown>): boolean {
-  const filePath = toolInput["path"] as string | undefined
+  const filePath = (toolInput["file_path"] ?? toolInput["path"]) as string | undefined
   if (!filePath) return false
   return matchesGlob(filePath, pathPattern)
 }
@@ -1641,9 +1561,8 @@ function isContextOverflowError(message: string): boolean {
 }
 
 function extractWriteTargetPath(toolName: string, toolInput: Record<string, unknown>): string | undefined {
-  if (typeof toolInput["path"] === "string" && toolInput["path"]) {
-    return toolInput["path"] as string
-  }
+  const pathVal = toolInput["file_path"] ?? toolInput["path"]
+  if (typeof pathVal === "string" && pathVal) return pathVal
   return undefined
 }
 

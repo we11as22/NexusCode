@@ -53,7 +53,7 @@ const askSchema = z.object({
 })
 
 export const askFollowupTool: ToolDef<z.infer<typeof askSchema>> = {
-  name: "ask_followup_question",
+  name: "AskFollowupQuestion",
   description: `Ask the user a clarifying question when you cannot proceed without their input.
 
 When to use:
@@ -75,7 +75,7 @@ When NOT to use:
     // Show approval dialog to get user response
     const result = await ctx.host.showApprovalDialog({
       type: "read",
-      tool: "ask_followup_question",
+      tool: "AskFollowupQuestion",
       description: formatted,
     })
 
@@ -87,31 +87,63 @@ When NOT to use:
 }
 
 const todoSchema = z.object({
-  items: z.array(z.object({
-    done: z.boolean().describe("Whether this item is completed"),
-    text: z.string().describe("Short label for the item"),
-    description: z.string().optional().describe("Optional note for yourself (not shown in UI); use to clarify scope or context of this step."),
-  })).describe("Full list of todo items; pass the complete list each time with your updates (add/check/uncheck)."),
+  merge: z.boolean().describe("Whether to merge the todos with the existing todos. If true, the todos will be merged into the existing todos based on the id field. If false, the new todos will replace the existing todos."),
+  todos: z.array(z.object({
+    id: z.string().describe("Unique identifier for the todo item"),
+    content: z.string().describe("The description/content of the todo item"),
+    status: z.enum(["pending", "in_progress", "completed", "cancelled"]).describe("The current status of the todo item"),
+  })).describe("Array of todo items to write. When merge is true, items are merged by id; when false, they replace the list."),
 })
 
-export const updateTodoTool: ToolDef<z.infer<typeof todoSchema>> = {
-  name: "update_todo_list",
-  description: `Update the task checklist. Use frequently on multi-step tasks so the user sees progress. Structured output: pass an array of items, each with done (boolean), text (string), and optional description (string).
+export const todoWriteTool: ToolDef<z.infer<typeof todoSchema>> = {
+  name: "TodoWrite",
+  description: `Use this tool to create and manage a structured task list for the current conversation. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
 
 When to use:
-- Complex tasks (3+ steps): start with a checklist, update as you complete items.
-- Scope changes: rewrite the list to match new steps.
+- Complex multi-step tasks (3+ distinct steps)
+- Non-trivial tasks requiring careful planning
+- User explicitly requests todo list
+- User provides multiple tasks (numbered/comma-separated)
+- After receiving new instructions — capture requirements as todos (use merge=false to add new ones)
+- After completing tasks — mark complete with merge=true and add follow-ups
+- When starting new tasks — mark as in_progress (ideally only one at a time)
 
 When NOT to use:
-- Trivial 1–2 step tasks: optional.
-- **NEVER include operational steps in todos** — Do not add items like "run lint", "run tests", "search codebase", "read file X", or "examine Y". Todos are deliverable milestones (e.g. "Add dark mode toggle", "Fix login validation"), not actions you do in service of the task.
+- Single, straightforward tasks
+- Trivial tasks with no organizational benefit
+- Tasks completable in < 3 trivial steps
+- Purely conversational/informational requests
+- NEVER include operational steps in todos (e.g. "run lint", "run tests", "search codebase"). Todos are deliverable milestones (e.g. "Add dark mode toggle", "Fix login validation").
 
-Use description to add a note for yourself (e.g. scope, file names, acceptance criteria); it is shown only in your context, not in the UI. Create only when the session has no current todo list (see "Current Todo List" in context). If a list already exists, pass the full list with your edits (add/check/uncheck items); do not replace with a brand new list. When you call final_report_to_user to finish the turn, the list is cleared after your response so you can create a new one next time.`,
+Task states: pending | in_progress | completed | cancelled. Use merge=true to update existing todos by id; use merge=false to replace the entire list. Prefer creating the first todo as in_progress and batch todo updates with other tool calls.`,
   parameters: todoSchema,
 
-  async execute({ items }, ctx: ToolContext) {
-    const json = JSON.stringify(items)
-    ctx.session.updateTodo(json)
+  async execute({ merge, todos }, ctx: ToolContext) {
+    const raw = ctx.session.getTodo().trim()
+    let current: Array<{ id: string; content: string; status: string }> = []
+    if (raw && raw.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(raw) as Array<{ id?: string; content?: string; status?: string }>
+        if (Array.isArray(parsed)) {
+          current = parsed
+            .filter((i): i is { id: string; content: string; status: string } =>
+              typeof i.id === "string" && typeof i.content === "string" && typeof i.status === "string")
+            .map(i => ({ id: i.id, content: i.content, status: i.status }))
+        }
+      } catch {
+        // ignore invalid JSON
+      }
+    }
+    const next = merge
+      ? (() => {
+          const byId = new Map(current.map(t => [t.id, t]))
+          for (const t of todos) {
+            byId.set(t.id, { id: t.id, content: t.content, status: t.status })
+          }
+          return Array.from(byId.values())
+        })()
+      : todos.map(t => ({ id: t.id, content: t.content, status: t.status }))
+    ctx.session.updateTodo(JSON.stringify(next))
     return { success: true, output: "Todo list updated." }
   },
 }

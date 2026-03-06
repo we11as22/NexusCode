@@ -21,7 +21,7 @@ export interface PermissionResult {
   alwaysApprove?: boolean
   /** When true, host should set autoApprove for the rest of the session (e.g. "Skip all") */
   skipAll?: boolean
-  /** For execute_command: add this command to the project allowlist so it is not asked again in this folder */
+  /** For Bash: add this command to the project allowlist so it is not asked again in this folder */
   addToAllowedCommand?: string
   /** When set with approved: false, the user declined the action and asked to do this instead; agent continues with this instruction. */
   whatToDoInstead?: string
@@ -70,6 +70,8 @@ export interface ToolContext {
   compactSession?: () => Promise<void>
   /** Current tool call part id (e.g. part_xyz). Set by loop for write/replace so tool can emit tool_approval_needed. */
   partId?: string
+  /** All resolved tools for this run (set by loop). Used e.g. by Parallel to run multiple tools in one call. */
+  resolvedTools?: ToolDef[]
 }
 
 // ─── Host Interface ───────────────────────────────────────────────────────────
