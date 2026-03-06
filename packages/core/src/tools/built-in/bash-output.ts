@@ -11,12 +11,19 @@ const schema = z.object({
 
 export const bashOutputTool: ToolDef<z.infer<typeof schema>> = {
   name: "BashOutput",
-  description: `Retrieves output from a running or completed background bash shell.
+  description: `Read output from a background bash shell started with run_in_background: true.
 
-- Takes a bash_id parameter identifying the shell (returned by Bash when run_in_background is true).
-- Returns stdout and stderr output from the log file.
-- Supports optional regex filtering to show only lines matching a pattern.
-- Use this tool when you need to monitor or check the output of a long-running shell.`,
+Usage:
+- Call with the bash_id returned by Bash when run_in_background is true.
+- Returns all stdout and stderr output logged so far (from .nexus/<bash_id>.log).
+- Use the optional filter parameter (regex) to show only matching lines — useful for finding errors or specific progress messages without reading all output.
+- Call periodically to poll progress on long-running commands (builds, tests, servers).
+- When the command is done, BashOutput returns the complete log. Use KillBash to stop a still-running process.
+
+Example flow:
+1. Bash({ command: "npm run build", run_in_background: true }) → returns bash_id "run_1234567890"
+2. BashOutput({ bash_id: "run_1234567890" }) → reads build output so far
+3. BashOutput({ bash_id: "run_1234567890", filter: "error|Error|ERROR" }) → find any errors`,
   parameters: schema,
   readOnly: true,
 

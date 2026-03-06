@@ -26,15 +26,22 @@ Assume this tool is able to read all files on the machine. If the User provides 
 Usage:
 - The file_path parameter must be an absolute path, not a relative path
 - By default, it reads up to ${DEFAULT_LIMIT} lines starting from the beginning of the file
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
+- You can optionally specify a line offset and limit (especially handy for long files), but it is recommended to read the whole file by not providing these parameters
 - Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
-- You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files in a batch that are potentially useful
+- You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel as a batch — do not drip one-at-a-time.
 - If you read a file that exists but has empty contents you will receive 'File is empty.'
 
 Image Support:
-- This tool can also read image files when called with the appropriate path.
-- Supported image formats: jpeg/jpg, png, gif, webp.`,
+- This tool can read image files when called with the appropriate path.
+- Supported image formats: jpeg/jpg, png, gif, webp.
+- You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view it. This tool works with all temporary file paths.
+
+PDF Support:
+- This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), provide the pages parameter to read specific page ranges (e.g. pages: "1-5"). Reading a large PDF without pages will fail. Maximum 20 pages per request.
+
+Jupyter Notebooks:
+- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.`,
   parameters: schema,
   readOnly: true,
 

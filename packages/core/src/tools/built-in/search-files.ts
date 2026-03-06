@@ -19,11 +19,13 @@ const searchSchema = z.object({
   output_mode: z.enum(["content", "files_with_matches", "count"]).optional().describe("Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\"."),
   "-B": z.number().int().min(0).optional().describe("Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise."),
   "-A": z.number().int().min(0).optional().describe("Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise."),
-  "-C": z.number().int().min(0).optional().describe("Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."),
-  "-n": z.boolean().optional().describe("Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise."),
+  "-C": z.number().int().min(0).optional().describe("Alias for context. Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."),
+  context: z.number().int().min(0).optional().describe("Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."),
+  "-n": z.boolean().optional().describe("Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise. Defaults to true."),
   "-i": z.boolean().optional().describe("Case insensitive search (rg -i)"),
   type: z.string().optional().describe("File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than glob for standard file types."),
-  head_limit: z.number().int().positive().max(2000).optional().describe("Limit output to first N lines/entries. Works across all output modes. When unspecified, shows all results from ripgrep."),
+  head_limit: z.number().int().positive().max(2000).optional().describe("Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). When unspecified, shows all results from ripgrep."),
+  offset: z.number().int().min(0).optional().describe("Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0."),
   multiline: z.boolean().optional().describe("Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."),
 })
 
@@ -35,18 +37,23 @@ Usage:
 - ALWAYS use Grep for search tasks. NEVER invoke \`grep\` or \`rg\` as a Bash command. The Grep tool has been optimized for correct permissions and access.
 - Supports full regex syntax (e.g., "log.*Error", "function\\\\s+\\\\w+")
 - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
-- Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
-- Use Task tool for open-ended searches requiring multiple rounds
-- Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use \`interface\\\\{\\\\}\` to find \`interface{}\` in Go code)
-- Multiline matching: By default patterns match within single lines only. For cross-line patterns like \`struct \\\\{[\\\\s\\\\S]*?field\`, use \`multiline: true\``,
+- Output modes: "content" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), "files_with_matches" shows only file paths (default), "count" shows match counts per file
+- Use Agent tool for open-ended searches requiring multiple rounds
+- Pattern syntax: Uses ripgrep (not grep) — literal braces need escaping (use \`interface\\\\{\\\\}\` to find \`interface{}\` in Go code)
+- Multiline matching: By default patterns match within single lines only. For cross-line patterns like \`struct \\\\{[\\\\s\\\\S]*?field\`, use \`multiline: true\`
+- Results are capped for responsiveness; truncated results show "at least" counts.
+- Content output follows ripgrep format: \`-\` for context lines, \`:\` for match lines.
+- Unsaved or out-of-workspace active editors are also searched and show "(unsaved)" or "(out of workspace)". Use absolute paths to read/edit these.`,
   parameters: searchSchema,
   readOnly: true,
 
-  async execute({ pattern, path: searchPath, glob: includeGlob, output_mode, "-B": before, "-A": after, "-C": context, "-n": lineNumbers, "-i": case_sensitive, type: fileType, head_limit: max_results, multiline }, ctx) {
-    const context_lines = context ?? before ?? after ?? 0
+  async execute({ pattern, path: searchPath, glob: includeGlob, output_mode, "-B": before, "-A": after, "-C": contextC, context: contextAlias, "-n": lineNumbers, "-i": case_sensitive, type: fileType, head_limit, offset: skipOffset, multiline }, ctx) {
+    const context_lines = contextC ?? contextAlias ?? before ?? after ?? 0
     const targets = searchPath ? [path.resolve(ctx.cwd, searchPath)] : [ctx.cwd]
     const include = includeGlob ?? (fileType ? `*.${fileType}` : undefined)
-    const maxMatches = Math.min(max_results ?? 500, 2000)
+    const skipN = skipOffset ?? 0
+    const maxResults = Math.min(head_limit ?? 500, 2000)
+    const collectLimit = skipN + maxResults
 
     try {
       const results: string[] = []
@@ -62,6 +69,7 @@ Usage:
           args.push("--glob", g)
         }
       }
+      if (multiline) args.push("-U", "--multiline-dotall")
       if (context_lines) args.push("--context", String(context_lines))
       args.push(targets[0]!)
 
@@ -73,7 +81,7 @@ Usage:
       const lines = stdout.split("\n").filter(Boolean)
       const fileCounts = new Map<string, number>()
       for (const line of lines) {
-        if (matchCount >= maxMatches && output_mode !== "count") break
+        if (matchCount >= collectLimit && output_mode !== "count") break
         try {
           const obj = JSON.parse(line) as { type: string; data: Record<string, unknown> }
           if (obj.type !== "match") continue
@@ -104,27 +112,29 @@ Usage:
 
       if (output_mode === "count") {
         const countLines = [...fileCounts.entries()].map(([p, n]) => `${p}: ${n}`)
-        const out = countLines.slice(0, maxMatches).join("\n")
+        const sliced = countLines.slice(skipN, skipN + maxResults)
+        const out = sliced.join("\n")
         return { success: true, output: `Count for "${pattern}":\n\n${out}` }
       }
 
-      if (results.length === 0) {
+      const displayed = results.slice(skipN, skipN + maxResults)
+      if (displayed.length === 0) {
         return { success: true, output: `No matches found for: ${pattern}` }
       }
 
-      let output = results.join("\n")
+      let output = displayed.join("\n")
       if (output.length > MAX_OUTPUT_CHARS) {
         output = output.slice(0, MAX_OUTPUT_CHARS) + `\n... (truncated, ${matchCount} total matches)`
       }
 
       const header = output_mode === "files_with_matches"
-        ? `Found ${matchCount} file(s) matching "${pattern}":\n\n${output}`
-        : `Found ${matchCount} matches for "${pattern}":\n\n${output}`
+        ? `Found ${displayed.length} file(s) matching "${pattern}":\n\n${output}`
+        : `Found ${displayed.length} matches for "${pattern}":\n\n${output}`
       return { success: true, output: header }
     } catch (err) {
       return {
         success: false,
-        output: `Search failed: ${(err as Error).message}. Install ripgrep (rg) for Grep support.`,
+        output: `Search Failed: ${(err as Error).message}. Install ripgrep (rg) for Grep support.`,
       }
     }
   },
@@ -140,23 +150,27 @@ const listSchema = z.object({
 
 export const listFilesTool: ToolDef<z.infer<typeof listSchema>> = {
   name: "ListFiles",
-  description: `List files and directories. Tree-like structure; respects .gitignore and common ignores.
+  description: `List files and directories in a tree-like structure. Respects .gitignore and common ignores (node_modules, .git, .nexus).
 
-When to use:
-- **Discover project layout first** — Use list_files (root and key dirs like ., src, packages) at the start of a task. Use once or twice for layout; do not list every nested folder. Then use list_code_definitions and grep to find code; use read_file only for targeted ranges.
-- Find file names or directory structure.
-- Check presence of config files, scripts, or modules.
+### When to Use
 
-When NOT to use:
-- Finding by content: use codebase_search (semantic) or grep (regex).
-- Reading a file: use read_file (prefer after list_code_definitions or grep so you have start_line/end_line).
-- Glob by extension: use path + include (e.g. include="*.ts").
+- **Project layout discovery** — Use at the start of a task on root and key dirs (e.g. \`.\`, \`src\`, \`packages\`) to understand structure. Use once or twice; do not list every nested folder.
+- **Find file names or check presence** — Config files, scripts, modules. Use \`include\` to filter by extension.
+- **Check if a directory or file exists.**
 
-Parameters:
-- path: directory to list (default: project root). Relative to cwd.
-- recursive: include subdirectories (default: false for root, true for subdirs).
-- include: glob to filter entries (e.g. "*.ts").
-- max_entries: cap output (default 200, max 5000).`,
+### When NOT to Use
+
+- **Finding by content** — Use CodebaseSearch (semantic) or Grep (regex/exact).
+- **Reading a file** — Use Read (with offset/limit from Grep or ListCodeDefinitions results).
+- **Finding by extension recursively** — Use Glob with a pattern like \`**/*.ts\` instead.
+
+### Tips
+
+- \`path\`: directory to list (default: project root). Relative to cwd.
+- \`recursive\`: include subdirectories (default: false for root, true for subdirs).
+- \`include\`: glob to filter entries (e.g. \`"*.ts"\`, \`"*.json"\`).
+- \`max_entries\`: cap output (default 200, max 5000).
+- Results are sorted alphabetically; directories shown with trailing \`/\`.`,
   parameters: listSchema,
   readOnly: true,
 

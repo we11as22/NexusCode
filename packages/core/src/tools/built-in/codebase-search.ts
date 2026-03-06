@@ -14,18 +14,57 @@ export const codebaseSearchTool: ToolDef<z.infer<typeof schema>> = {
   name: "CodebaseSearch",
   description: `Semantic (vector) search over the indexed codebase. Finds code by meaning, not exact text.
 
+### When to Use
+
 Use CodebaseSearch when you need to:
-- Explore unfamiliar codebases
-- Ask "how / where / what" questions to understand behavior
-- Find code by meaning rather than exact text
+- Explore unfamiliar codebases and understand how things work
+- Ask "how / where / what" questions about behavior or intent
+- Find code by meaning rather than exact text (e.g. "where is the payment processed?")
+- Narrow down to a directory once you have initial results
 
-When NOT to use:
-- Exact text or regex: use Grep instead.
-- Reading a known file: use Read.
-- Single identifier or symbol overview: use Grep or ListCodeDefinitions.
+<example>
+Query: "Where is interface MyInterface implemented in the frontend?"
+Good: complete question asking about implementation location with specific context.
+</example>
 
-Query: A complete question with context (e.g. "Where is user authentication validated before login?"). Avoid single words; use full questions.
-target_directories: Optional list of directory paths to limit scope. Omit or empty to search whole repo. Start broad then narrow based on results.
+<example>
+Query: "Where do we encrypt user passwords before saving?"
+Good: clear question about a specific process with context about when it happens.
+</example>
+
+### When NOT to Use
+
+- **Exact text / regex / symbol** → use Grep instead (faster and more precise for known strings).
+- **Reading a known file** → use Read (with start_line/end_line from grep or ListCodeDefinitions results).
+- **Single identifier or symbol name** → use Grep or ListCodeDefinitions for exact matching.
+- **Finding a file by name** → use Glob.
+
+<example>
+Query: "AuthService"
+Bad: single-word searches should use Grep for exact text matching instead.
+</example>
+
+<example>
+Query: "What is AuthService? How does AuthService work?"
+Bad: combines two separate queries — split into parallel searches like "What is AuthService?" and "How does AuthService work?"
+</example>
+
+### Query Strategy
+
+- Write a complete question as if asking a colleague: "How does X work?", "What happens when Y?", "Where is Z handled?"
+- Run multiple searches in parallel with different phrasings; first-pass results often miss key details.
+- Start with \`target_directories: []\` (whole repo) if unsure; then rerun scoped to a directory when results point there.
+- Break multi-part questions into focused sub-queries and run them in parallel.
+
+### Target Directories
+
+- Provide ONE directory or file path; \`[]\` searches the whole repo. No globs or wildcards.
+  - Good: \`["backend/api/"]\` — scope to a directory
+  - Good: \`["src/components/Button.tsx"]\` — scope to a file
+  - Good: \`[]\` — search everywhere when unsure
+  - Bad: \`["frontend/", "backend/"]\` — multiple paths (use one per call, run in parallel)
+  - Bad: \`["src/**/utils/**"]\` — no globs
+
 Only available when vector search is enabled (indexing.vector + vectorDb.enabled in .nexus/nexus.yaml) and the index is built.`,
   parameters: schema,
   readOnly: true,

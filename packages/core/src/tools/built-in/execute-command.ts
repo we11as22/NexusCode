@@ -68,26 +68,100 @@ export const bashTool: ToolDef<z.infer<typeof schema>> = {
   name: "Bash",
   description: `Executes a given bash command with optional timeout. Working directory persists between commands; shell state (everything else) does not. The shell environment is initialized from the user's profile (bash or zsh).
 
-IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+IMPORTANT: This tool is for terminal operations like git, npm, docker, builds, tests, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) — use the dedicated tools instead.
 
-Before executing the command, please follow these steps:
+Before executing the command, follow these steps:
 
 1. Directory Verification:
-   - If the command will create new directories or files, first use ListFiles or Glob to verify the parent directory exists and is the correct location
+   - If the command will create new directories or files, first use ListFiles or Glob to verify the parent directory exists and is the correct location.
 
 2. Command Execution:
-   - Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt")
-   - After ensuring proper quoting, execute the command. Capture the output of the command.
+   - Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt").
+   - After ensuring proper quoting, execute the command. Capture the output.
 
 Usage notes:
   - The command argument is required.
-  - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes).
-  - It is very helpful if you write a clear, concise description of what this command does. For simple commands, keep it brief (5-10 words).
-  - If the output exceeds 30000 characters, output will be truncated before being returned to you.
-  - You can use the run_in_background parameter to run the command in the background. Use BashOutput to read the output later. You do not need to use '&' at the end of the command when using this parameter.
-  - Avoid using Bash with find, grep, cat, head, tail, sed, awk, or echo commands, unless explicitly instructed. Instead, prefer: Glob (not find/ls), Grep (not grep/rg), Read (not cat/head/tail), Edit (not sed/awk), Write (not echo/cat).
-  - When issuing multiple commands, use ';' or '&&' to separate them. DO NOT use newlines to separate commands (newlines are ok in quoted strings).
-  - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of cd. You may use cd if the User explicitly requests it.`,
+  - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Default timeout is 120000ms (2 minutes).
+  - Write a clear, concise description of what this command does. For simple commands keep it brief (5-10 words). For complex piped commands or obscure flags, add enough context to clarify what it does. Never use words like "complex" or "risk" in the description.
+    - ls → "List files in current directory"
+    - git status → "Show working tree status"
+    - npm install → "Install package dependencies"
+    - find . -name "*.tmp" -exec rm {} \\; → "Find and delete all .tmp files recursively"
+  - If output exceeds 50KB, it will be truncated (head+tail shown); full output is saved to .nexus/tool-output/ for further inspection.
+  - Use run_in_background: true for long-running commands (builds, servers, tests). Bash returns immediately with a bash_id; use BashOutput to read the log and KillBash to stop it. Do NOT use '&' in the command itself.
+  - Avoid using Bash with find, grep, cat, head, tail, sed, awk, or echo unless explicitly instructed. Instead use dedicated tools:
+    - File search: Glob (NOT find or ls)
+    - Content search: Grep (NOT grep or rg)
+    - Read files: Read (NOT cat/head/tail)
+    - Edit files: Edit (NOT sed/awk)
+    - Write files: Write (NOT echo >/cat <<EOF)
+    - Communication: output text directly (NOT echo/printf)
+  - When issuing multiple commands: if they are independent, make multiple Bash calls in a single response (parallel). If they depend on each other, use '&&' to chain them. Use ';' only when you don't care if earlier commands fail. DO NOT use newlines to separate commands (newlines are ok in quoted strings).
+  - Use absolute paths and avoid cd. If you must run in a subdirectory, prefix with the absolute path:
+    <good-example>
+    pytest /foo/bar/tests
+    </good-example>
+    <bad-example>
+    cd /foo/bar && pytest tests
+    </bad-example>
+
+### Committing changes with git
+
+Only create commits when the user explicitly requests it. If unclear, ask first.
+
+Git Safety Protocol:
+- NEVER update the git config.
+- NEVER run destructive git commands (push --force, reset --hard, checkout ., restore ., clean -f, branch -D) unless the user explicitly requests them.
+- NEVER skip hooks (--no-verify, --no-gpg-sign, etc.) unless the user explicitly asks.
+- NEVER force-push to main/master; warn the user if they request it.
+- CRITICAL: Always create NEW commits rather than amending, unless the user explicitly requests git amend. When a pre-commit hook fails, the commit did NOT happen — so --amend would corrupt the previous commit. Fix the issue, re-stage, and create a NEW commit instead.
+- When staging files, prefer adding specific files by name rather than "git add -A" or "git add ." to avoid accidentally including secrets (.env, credentials) or large binaries.
+- NEVER commit unless the user explicitly asks. It is VERY IMPORTANT to only commit when asked.
+
+When the user asks for a git commit:
+1. Run in parallel: git status (to see untracked files — NEVER use -uall flag, it can OOM on large repos), git diff (to see staged and unstaged changes), git log --oneline -10 (to understand commit message style).
+2. Draft a commit message: summarize the nature of changes (feat/fix/refactor/docs/test); focus on "why" not "what"; 1-2 sentences; do not commit files that may contain secrets (.env, credentials.json).
+3. Run in parallel: git add <specific-files>, then create the commit; run git status after to verify.
+4. If the commit fails due to a pre-commit hook: fix the issue and create a NEW commit (do not amend).
+
+Always pass the commit message via a HEREDOC:
+<example>
+git commit -m "$(cat <<'EOF'
+feat: add user authentication flow
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+EOF
+)"
+</example>
+
+Important: NEVER push to remote unless the user explicitly asks. NEVER use git commands with -i flag (rebase -i, add -i) as they require interactive input.
+
+### Creating pull requests
+
+Use the gh command for ALL GitHub-related tasks (issues, PRs, checks, releases). If given a GitHub URL, use gh to fetch the information.
+
+When the user asks to create a pull request:
+1. Run in parallel: git status (no -uall), git diff, git log + git diff [base-branch]...HEAD (full history since diverging from base).
+2. Analyze ALL commits that will be included (not just the latest). Draft a PR title (under 70 characters) and body.
+3. Run in parallel: create branch if needed, push with -u flag if needed, create PR with gh pr create using a HEREDOC for the body:
+<example>
+gh pr create --title "feat: add user authentication" --body "$(cat <<'EOF'
+## Summary
+- Add JWT-based authentication middleware
+- Implement login/logout endpoints
+- Add token refresh logic
+
+## Test plan
+- [ ] Run auth unit tests: npm test src/auth
+- [ ] Test login flow manually in staging
+- [ ] Verify token expiry behavior
+
+🤖 Generated with NexusCode
+EOF
+)"
+</example>
+
+Return the PR URL when done. Do NOT push unless explicitly asked.`,
   parameters: schema,
   requiresApproval: true,
 
