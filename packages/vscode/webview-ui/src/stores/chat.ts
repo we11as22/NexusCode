@@ -166,10 +166,12 @@ interface ChatState {
   /** MCP server test results: name -> status (ok/error) and optional error message */
   mcpStatus: Array<{ name: string; status: "ok" | "error"; error?: string }>
   /** When set, show in-webview approval bar (Allow / Deny) instead of only VS Code notification */
-  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
+  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
 
   /** Checkpoint entries for rollback (Cline-style). */
   checkpointEntries: Array<{ hash: string; ts: number; description?: string; messageId?: string }>
+  /** Whether checkpoints are enabled (from config or current run). */
+  checkpointEnabled: boolean
 
   /** Plan mode: plan_exit was called; show New session / Continue / Dismiss (Kilocode-style). */
   planCompleted: boolean
@@ -225,7 +227,7 @@ interface ChatState {
   handleIndexStatus: (status: IndexStatusKind) => void
   handleMcpServerStatus: (results: Array<{ name: string; status: "ok" | "error"; error?: string }>) => void
   handlePendingApproval: (partId: string, action: { type: string; tool: string; description: string; content?: string }) => void
-  resolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
+  resolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean, whatToDoInstead?: string) => void
   handleSessionList: (sessions: SessionPreview[]) => void
   handleSessionListLoading: (loading: boolean) => void
 }
@@ -281,6 +283,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   modelsCatalog: null,
   modelsCatalogLoading: false,
   checkpointEntries: [],
+  checkpointEnabled: false,
   planCompleted: false,
   planFollowupText: null,
   hasOlderMessages: false,
@@ -438,7 +441,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ pendingApproval: { partId, action }, awaitingApproval: true })
   },
 
-  resolveApproval: (approved, alwaysApprove, addToAllowedCommand, skipAll) => {
+  resolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean, whatToDoInstead?: string) => {
     const { pendingApproval } = get()
     if (pendingApproval) {
       postMessage({
@@ -448,6 +451,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         alwaysApprove,
         addToAllowedCommand,
         skipAll,
+        whatToDoInstead,
       })
       set({ pendingApproval: null, awaitingApproval: false })
     }

@@ -14,18 +14,20 @@ export class VsCodeHost implements IHost {
   private checkpointTracker?: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> }
   private useWebviewApproval: boolean
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } | null = null
+  private onCheckpointEntriesUpdated?: () => void
 
-  private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean; leftUri?: vscode.Uri; rightUri?: vscode.Uri }>()
+  private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
 
   constructor(
     cwd: string,
     onEvent: (event: AgentEvent) => void,
-    options?: { useWebviewApproval?: boolean; approvalResolveRef?: { current: ((r: PermissionResult) => void) | null } }
+    options?: { useWebviewApproval?: boolean; approvalResolveRef?: { current: ((r: PermissionResult) => void) | null }; onCheckpointEntriesUpdated?: () => void }
   ) {
     this.cwd = cwd
     this.eventEmitter = onEvent
     this.useWebviewApproval = options?.useWebviewApproval ?? false
     this.approvalResolveRef = options?.approvalResolveRef ?? null
+    this.onCheckpointEntriesUpdated = options?.onCheckpointEntriesUpdated
   }
 
   setCheckpoint(tracker: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> } | undefined): void {
@@ -45,6 +47,10 @@ export class VsCodeHost implements IHost {
   async getCheckpointDiff(fromHash: string, toHash?: string): Promise<ChangedFile[]> {
     if (!this.checkpointTracker?.getDiff) return []
     return (this.checkpointTracker as { getDiff(from: string, to?: string): Promise<ChangedFile[]> }).getDiff(fromHash, toHash)
+  }
+
+  notifyCheckpointEntriesUpdated(): void {
+    this.onCheckpointEntriesUpdated?.()
   }
 
   async readFile(filePath: string): Promise<string> {
@@ -111,7 +117,7 @@ export class VsCodeHost implements IHost {
       beforeDoc.uri,
       afterDoc.uri,
       `${fileName}: NexusCode Changes`,
-      { viewColumn: vscode.ViewColumn.Beside, preview: true }
+      { viewColumn: vscode.ViewColumn.Active, preview: true }
     )
 
     return true
@@ -262,8 +268,8 @@ export class VsCodeHost implements IHost {
     const actionStr = action.type === "write" ? "Write" : "Bash"
     const buttons: string[] =
       action.type === "execute"
-        ? ["Allow once", "Add to allowed for this folder", "Always allow", "Allow all (session)", "Deny"]
-        : ["Allow once", "Always allow", "Allow all (session)", "Deny"]
+        ? ["Allow once", "Add to allowed for this folder", "Always allow", "Allow all (session)", "Say what to do instead", "Deny"]
+        : ["Allow once", "Always allow", "Allow all (session)", "Say what to do instead", "Deny"]
 
     const message =
       action.type === "execute"
@@ -275,6 +281,20 @@ export class VsCodeHost implements IHost {
       { modal: false },
       ...buttons
     )
+
+    if (choice === "Say what to do instead") {
+      const whatToDoInstead = await vscode.window.showInputBox({
+        title: "What should the agent do instead?",
+        placeHolder: "e.g. Use npm instead of pnpm",
+        prompt: "The proposed action will be cancelled; the agent will continue with your instruction.",
+      })
+      if (whatToDoInstead != null) {
+        const trimmed = whatToDoInstead.trim()
+        return { approved: false, whatToDoInstead: trimmed || undefined }
+      }
+      // User cancelled the input — treat as deny
+      return { approved: false }
+    }
 
     const approved = choice === "Allow once" || choice === "Always allow" || (action.type === "execute" && choice === "Add to allowed for this folder") || choice === "Allow all (session)"
     const alwaysApprove = choice === "Always allow"
@@ -372,24 +392,19 @@ export class VsCodeHost implements IHost {
 
   async openFileEdit(filePath: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void> {
     const key = filePath.replace(/\\/g, "/")
-    const absPath = filePath.startsWith("/") ? filePath : path.join(this.cwd, filePath)
-    const base = path.basename(absPath)
-    const leftUri = vscode.Uri.parse(`untitled:${absPath}.nexus-original`)
-    const rightUri = vscode.Uri.parse(`untitled:${absPath}.nexus-modified`)
-    const leftDoc = await vscode.workspace.openTextDocument(leftUri)
-    const rightDoc = await vscode.workspace.openTextDocument(rightUri)
-    const we = new vscode.WorkspaceEdit()
-    we.insert(leftUri, new vscode.Position(0, 0), options.originalContent)
-    we.insert(rightUri, new vscode.Position(0, 0), options.newContent)
-    await vscode.workspace.applyEdit(we)
-    await vscode.commands.executeCommand("vscode.diff", leftDoc.uri, rightDoc.uri, `${base}: NexusCode (Approve to save, Deny to revert)`, { viewColumn: vscode.ViewColumn.Beside, preview: true })
-    this.pendingFileEdits.set(key, { originalContent: options.originalContent, newContent: options.newContent, isNewFile: options.isNewFile, leftUri, rightUri })
+    // Store pending edit only; do not open diff/editor — user opens file by clicking in chat/UI.
+    this.pendingFileEdits.set(key, {
+      originalContent: options.originalContent,
+      newContent: options.newContent,
+      isNewFile: options.isNewFile,
+    })
   }
 
   async saveFileEdit(filePath: string): Promise<void> {
     const key = filePath.replace(/\\/g, "/")
     const pending = this.pendingFileEdits.get(key)
     if (!pending) throw new Error(`No pending file edit for ${filePath}`)
+    // Persist approved content to disk (file does not open here; user opens by clicking in chat/UI).
     await this.writeFile(filePath, pending.newContent)
     this.pendingFileEdits.delete(key)
   }
@@ -466,6 +481,6 @@ export async function showDiffForPath(cwd: string, filePath: string): Promise<vo
     beforeDoc.uri,
     afterDoc.uri,
     `${fileName}: NexusCode Changes`,
-    { viewColumn: vscode.ViewColumn.Beside, preview: true }
+    { viewColumn: vscode.ViewColumn.Active, preview: true }
   )
 }

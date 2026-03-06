@@ -12,20 +12,66 @@ import { useChatStore } from "../stores/chat.js"
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file"])
 const BASH_OUTPUT_TAIL_LINES = 80
 
-/** Approval request inline (Cline/Roo-style: Allow once, Always allow, Deny, Add to allowed for folder, Allow all session). */
+/** Approval request inline (Cline/Roo-style: Allow once, Always allow, Deny, Add to allowed for folder, Allow all session, Say what to do instead). */
 function ApprovalInline({
   action,
   onResolve,
 }: {
-  action: { type: string; tool: string; description: string; content?: string }
-  onResolve: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
+  action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } }
+  onResolve: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean, whatToDoInstead?: string) => void
 }) {
+  const [showWhatToDoInstead, setShowWhatToDoInstead] = useState(false)
+  const [whatToDoText, setWhatToDoText] = useState("")
+
   const label =
     action.type === "execute"
       ? (action.content ? `Run: ${action.content}` : action.description)
       : action.type === "write"
-        ? `Write: ${action.description}`
+        ? `Edit file: ${action.description}`
         : action.description
+
+  const submitWhatToDoInstead = () => {
+    const trimmed = whatToDoText.trim()
+    if (trimmed) {
+      onResolve(false, undefined, undefined, undefined, trimmed)
+      setShowWhatToDoInstead(false)
+      setWhatToDoText("")
+    }
+  }
+
+  if (showWhatToDoInstead) {
+    return (
+      <div className="nexus-approval-inline border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 px-3 py-2 flex flex-col gap-2">
+        <span className="text-xs text-[var(--vscode-foreground)]">What should the agent do instead?</span>
+        <textarea
+          value={whatToDoText}
+          onChange={(e) => setWhatToDoText(e.target.value)}
+          placeholder="e.g. Use npm instead of pnpm"
+          className="nexus-input w-full text-sm min-h-[60px] resize-y"
+          rows={2}
+          autoFocus
+        />
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="nexus-approval-inline-btn nexus-approval-inline-btn-allow"
+            onClick={submitWhatToDoInstead}
+            disabled={!whatToDoText.trim()}
+          >
+            Send
+          </button>
+          <button
+            type="button"
+            className="nexus-approval-inline-btn nexus-approval-inline-btn-deny"
+            onClick={() => { setShowWhatToDoInstead(false); setWhatToDoText("") }}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="nexus-approval-inline border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 px-3 py-2 flex flex-wrap items-center gap-2">
       <span className="nexus-approval-inline-icon text-[var(--vscode-editorWarning-foreground)]" title="Permission required">
@@ -34,6 +80,12 @@ function ApprovalInline({
       <span className="nexus-approval-inline-text text-xs text-[var(--vscode-foreground)] truncate flex-1 min-w-0">
         {label}
       </span>
+      {action.diffStats != null && (action.diffStats.added > 0 || action.diffStats.removed > 0) && (
+        <span className="nexus-approval-inline-stats flex items-center gap-1 flex-shrink-0 text-[10px]">
+          {action.diffStats.added > 0 && <span className="text-green-500">+{action.diffStats.added}</span>}
+          {action.diffStats.removed > 0 && <span className="text-red-400">-{action.diffStats.removed}</span>}
+        </span>
+      )}
       <div className="nexus-approval-inline-buttons flex items-center gap-1.5 flex-shrink-0 flex-wrap">
         <button
           type="button"
@@ -64,6 +116,13 @@ function ApprovalInline({
           onClick={() => onResolve(true, false, undefined, true)}
         >
           Allow all (session)
+        </button>
+        <button
+          type="button"
+          className="nexus-approval-inline-btn text-[var(--vscode-descriptionForeground)]"
+          onClick={() => setShowWhatToDoInstead(true)}
+        >
+          Say what to do instead
         </button>
         <button
           type="button"
@@ -198,6 +257,17 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
           )}
           style={{ height: "100%" }}
           className="message-list-virtuoso-inner"
+          components={{
+            Scroller: React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+              (props, ref) => (
+                <div
+                  {...props}
+                  ref={ref}
+                  className={`${props.className ?? ""} nexus-message-list-scroller`.trim()}
+                />
+              )
+            ),
+          }}
         />
       </div>
       {!stickToBottom && (
@@ -222,7 +292,7 @@ function MessageBubble({
 }: {
   message: SessionMessage
   isComplete: boolean
-  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
+  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
 }) {
   if (message.summary) {
@@ -357,8 +427,8 @@ const SUBAGENT_TOOL_LABELS: Record<string, string> = {
   list_code_definitions: "Listing definitions",
   search_files: "Searching files",
   codebase_search: "Searching codebase",
-  write_to_file: "Writing file",
-  replace_in_file: "Editing file",
+  write_to_file: "Edit file",
+  replace_in_file: "Edit file",
   execute_command: "Bash",
   web_fetch: "Fetching URL",
   web_search: "Web search",
@@ -419,17 +489,12 @@ function AssistantParts({
 }: {
   parts: MessagePart[]
   isComplete: boolean
-  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string } } | null
+  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
   showReasoningInChat: boolean
 }) {
-  const { prefixItems, prefixIndices, hasContentAfterPrefix } = getExploredPrefixFromParts(parts)
+  const { prefixItems, prefixIndices } = getExploredPrefixFromParts(parts)
   const hasExploredBlock = prefixItems.length > 0
-  const hasTextPartWithUserMessage = parts.some(
-    (p) => p.type === "text" && (p as { user_message?: string }).user_message?.trim()
-  )
-  /** Collapse when complete and: there is content after exploration, or text step has user_message (second optional field). */
-  const defaultCollapsed = isComplete && (hasContentAfterPrefix || hasTextPartWithUserMessage)
 
   // Single reply per message: show only one block (canonical part) to avoid multiple identical bubbles.
   const textPartIndices = parts
@@ -448,11 +513,11 @@ function AssistantParts({
 
   return (
     <div className="space-y-3">
-      {/* Explored: reasoning + exploration tools in order; ends at user_message or non-exploration tool. Thoughts expandable. */}
+      {/* Explored: reasoning + exploration tools in order. Collapsed by default so user can expand to see Thoughts and tools. */}
       {hasExploredBlock && (
         <ExploredSummaryInline
           prefixItems={prefixItems}
-          defaultCollapsed={defaultCollapsed}
+          defaultCollapsed={true}
           onOpenFile={(path, line, endLine) =>
             postMessage({ type: "openFileAtLocation", path, line, endLine })
           }

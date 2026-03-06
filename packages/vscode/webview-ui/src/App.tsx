@@ -5,6 +5,7 @@ import { MessageList } from "./components/MessageList.js"
 import { InputBar } from "./components/InputBar.js"
 import { ModeDropdown } from "./components/ModeDropdown.js"
 import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
+import { AutoApproveDropdown } from "./components/AutoApproveDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import { CheckpointStrip } from "./components/CheckpointStrip.js"
 import type { ExtensionMessage } from "./types/messages.js"
@@ -151,7 +152,7 @@ function ChatView() {
       {store.awaitingApproval && !store.pendingApproval && (
         <div className="nexus-approval-banner">
           <span className="nexus-approval-icon">⚠</span>
-          <span>Action awaiting your approval — use notification or chat buttons: Allow once / Always allow / Deny / Allow all (session).</span>
+          <span>Action awaiting your approval — use notification or chat buttons: Allow once / Always allow / Deny / Allow all (session) / Say what to do instead.</span>
         </div>
       )}
 
@@ -238,6 +239,7 @@ function ChatBottomBar() {
         <div className="chat-bottom-bar-left">
           <ModeDropdown />
           <AgentPresetDropdown />
+          <AutoApproveDropdown />
         </div>
         <div className="chat-bottom-bar-input-wrap">
           {store.isRunning && (

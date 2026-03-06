@@ -216,6 +216,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
 
   const resolvedTools = [...builtinTools, ...resolvedDynamicTools, ...blockedFallbackTools]
+  const mcpToolNames = new Set(resolvedDynamicTools.filter(t => t.name.includes("__")).map(t => t.name))
 
   // Tool context
   const toolCtx: ToolContext = {
@@ -465,7 +466,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       if (pendingReads.length === 0) return
 
       const tasks = pendingReads.map(tc =>
-        executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode)
+        executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode, mcpToolNames)
           .catch(err => ({ success: false, output: `Error: ${err.message}` }))
       )
 
@@ -640,7 +641,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
               const result = await executeToolCall(
                 toolCallId, toolName, toolInput,
-                resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode
+                resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode, mcpToolNames
               )
 
               session.updateToolPart(newMessageId, partId, {
@@ -793,7 +794,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             session,
             newMessageId,
             completionState,
-            mode
+            mode,
+            mcpToolNames
           )
 
           session.updateToolPart(newMessageId, partId, {
@@ -912,7 +914,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           session,
           newMessageId,
           completionState,
-          mode
+          mode,
+          mcpToolNames
         )
         session.updateToolPart(newMessageId, partId, {
           status: forcedResult.success ? "completed" : "error",
@@ -1034,7 +1037,8 @@ async function executeToolCall(
   session: ISession,
   messageId: string,
   completionState: { doubleCheckEnabled: boolean; pending: { current: boolean }; checkpoint?: { commit(description?: string): Promise<string> } } | undefined,
-  mode: Mode
+  mode: Mode,
+  mcpToolNames: Set<string>
 ): Promise<ToolResult> {
   const tool = tools.find(t => t.name === toolName)
   if (!tool) {
@@ -1124,13 +1128,23 @@ async function executeToolCall(
     typeof host.revertFileEdit === "function"
 
   if (ruleResult === null && !useFileEditFlow) {
-    const needsApproval = toolNeedsApproval(toolName, toolInput, autoApproveActions, config)
+    const needsApproval = toolNeedsApproval(toolName, toolInput, autoApproveActions, config, mcpToolNames)
     if (needsApproval) {
       const action = buildApprovalAction(toolName, toolInput)
       host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` })
 
       const approval = await host.showApprovalDialog(action)
       if (!approval.approved) {
+        if (approval.whatToDoInstead?.trim()) {
+          session.addMessage({
+            role: "user",
+            content: `[Regarding the declined action: ${action.description}]\n\nDo this instead: ${approval.whatToDoInstead.trim()}`,
+          })
+          return {
+            success: false,
+            output: `User declined this action and asked to do the following instead:\n\n${approval.whatToDoInstead.trim()}\n\nContinue your work following this instruction; do not repeat the declined action.`,
+          }
+        }
         return { success: false, output: `User denied ${toolName}` }
       }
       if (approval.addToAllowedCommand != null && toolName === "execute_command") {
@@ -1165,6 +1179,7 @@ async function executeToolCall(
         try {
           const hash = await completionState.checkpoint.commit("final_report_to_user")
           result.output += `\n\nCheckpoint saved: ${hash}`
+          ctx.host.notifyCheckpointEntriesUpdated?.()
         } catch (e) {
           result.output += `\n\nCheckpoint save failed: ${(e as Error).message}`
         }
@@ -1431,8 +1446,15 @@ function toolNeedsApproval(
   toolName: string,
   toolInput: Record<string, unknown>,
   autoApproveActions: Set<string>,
-  config: NexusConfig
+  config: NexusConfig,
+  mcpToolNames: Set<string>
 ): boolean {
+  if (toolName === "browser_action") {
+    return !(config.permissions.autoApproveBrowser ?? false)
+  }
+  if (mcpToolNames.has(toolName)) {
+    return !(config.permissions.autoApproveMcp ?? false)
+  }
   if (READ_ONLY_TOOLS.has(toolName)) {
     if (autoApproveActions.has("read")) return false
     // Check auto-approve patterns
@@ -1477,6 +1499,20 @@ function buildApprovalAction(toolName: string, toolInput: Record<string, unknown
       tool: toolName,
       description: `Run: ${toolInput["command"]}`,
       content: typeof toolInput["command"] === "string" ? toolInput["command"] : undefined,
+    }
+  }
+  if (toolName === "browser_action") {
+    return {
+      type: "browser",
+      tool: toolName,
+      description: `Browser: ${toolName}`,
+    }
+  }
+  if (toolName.includes("__")) {
+    return {
+      type: "mcp",
+      tool: toolName,
+      description: `MCP: ${toolName}`,
     }
   }
   return {

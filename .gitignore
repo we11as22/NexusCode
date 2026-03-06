@@ -51,6 +51,7 @@ Thumbs.db
 .nexus/nexus.yaml
 .nexus/settings.json
 .nexus/settings.local.json
+.nexus/secrets.json
 .nexus/agent-configs.json
 
 # Generated / temp

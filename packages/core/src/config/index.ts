@@ -3,6 +3,12 @@ import * as path from "node:path"
 import * as os from "node:os"
 import { NexusConfigSchema, type NexusConfigInput } from "./schema.js"
 import type { NexusConfig } from "../types.js"
+import {
+  applySecretsToConfig,
+  stripSecretsFromConfig,
+  stripProfileSecrets,
+  type NexusSecretsStore,
+} from "./secrets.js"
 
 import * as yaml from "js-yaml"
 function getYaml() { return yaml }
@@ -16,9 +22,12 @@ const DEFAULT_FREE_MODELS_BASE_URL = "https://api.kilo.ai/api/gateway"
 /**
  * Load config by walking up from cwd.
  * Merges project config over global config.
- * Applies env overrides.
+ * Applies env overrides, then optional secrets store (API keys).
  */
-export async function loadConfig(cwd?: string): Promise<NexusConfig> {
+export async function loadConfig(
+  cwd?: string,
+  options?: { secrets?: NexusSecretsStore }
+): Promise<NexusConfig> {
   const startDir = cwd ?? process.cwd()
   loadEnvFileFromTree(startDir)
 
@@ -70,7 +79,12 @@ export async function loadConfig(cwd?: string): Promise<NexusConfig> {
   applyEnvOverrides(merged)
   normalizeProviderAliases(merged)
 
-  // 5. Parse and validate
+  // 5. Apply secrets store (API keys) if provided — after env so env takes precedence
+  if (options?.secrets) {
+    await applySecretsToConfig(merged as Record<string, unknown>, options.secrets)
+  }
+
+  // 6. Parse and validate
   const result = NexusConfigSchema.safeParse(merged)
   if (!result.success) {
     console.warn("[nexus] Config validation warnings:", result.error.issues.map(i => i.message).join(", "))
@@ -138,7 +152,31 @@ function loadEnvFile(filePath: string): void {
 function readConfigFile(filePath: string): NexusConfigInput | null {
   try {
     if (!fs.existsSync(filePath)) return null
-    const content = fs.readFileSync(filePath, "utf8")
+    let content = fs.readFileSync(filePath, "utf8")
+    // KiloCode-style env substitution: {env:VAR_NAME} → process.env.VAR_NAME
+    content = content.replace(/\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, varName: string) => {
+      return process.env[varName] ?? ""
+    })
+    // KiloCode-style file substitution: {file:path} → contents of file (path relative to config dir or ~/...)
+    const fileMatches = content.match(/\{file:[^}]+\}/g)
+    if (fileMatches) {
+      const configDir = path.dirname(filePath)
+      for (const match of fileMatches) {
+        let filePathRel = match.replace(/^\{file:/, "").replace(/\}$/, "").trim()
+        if (filePathRel.startsWith("~/")) {
+          filePathRel = path.join(os.homedir(), filePathRel.slice(2))
+        } else if (!path.isAbsolute(filePathRel)) {
+          filePathRel = path.resolve(configDir, filePathRel)
+        }
+        try {
+          const fileContent = fs.readFileSync(filePathRel, "utf8").trim()
+          const escaped = JSON.stringify(fileContent).slice(1, -1)
+          content = content.replace(match, () => escaped)
+        } catch {
+          content = content.replace(match, "")
+        }
+      }
+    }
     if (filePath.endsWith(".json")) {
       return JSON.parse(content)
     }
@@ -335,23 +373,33 @@ function deepMerge(base: Record<string, unknown>, override: Record<string, unkno
 }
 
 /**
- * Write config to project .nexus/nexus.yaml
+ * Write config to project .nexus/nexus.yaml.
+ * By default strips API keys so they are never persisted to YAML (use secrets store instead).
  */
-export function writeConfig(config: Partial<NexusConfig>, cwd?: string) {
+export function writeConfig(
+  config: Partial<NexusConfig>,
+  cwd?: string,
+  options?: { stripSecrets?: boolean }
+): void {
+  const stripSecrets = options?.stripSecrets !== false
+  const toWrite = stripSecrets
+    ? stripSecretsFromConfig(config as Record<string, unknown>)
+    : (config as Record<string, unknown>)
   const dir = path.join(cwd ?? process.cwd(), ".nexus")
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, "nexus.yaml")
-  const content = getYaml().dump(config, { indent: 2, lineWidth: 120 })
+  const content = getYaml().dump(toWrite, { indent: 2, lineWidth: 120 })
   fs.writeFileSync(filePath, content, "utf8")
 }
 
 /**
  * Persist profiles to global ~/.nexus/nexus.yaml so they are available across all projects.
+ * Strips apiKey from each profile so keys are never written to YAML (use secrets store).
  */
 export function writeGlobalProfiles(profiles: Record<string, unknown>): void {
   ensureGlobalConfigDir()
   const current = (readConfigFile(GLOBAL_CONFIG_PATH) ?? {}) as Record<string, unknown>
-  current["profiles"] = profiles
+  current["profiles"] = stripProfileSecrets(profiles)
   const content = getYaml().dump(current, { indent: 2, lineWidth: 120 })
   fs.writeFileSync(GLOBAL_CONFIG_PATH, content, "utf8")
 }
@@ -382,6 +430,16 @@ export function ensureGlobalConfigDir() {
 
 export { NexusConfigSchema }
 export type { NexusConfig }
+export {
+  applySecretsToConfig,
+  stripSecretsFromConfig,
+  stripProfileSecrets,
+  getSecretsPayloadFromConfig,
+  persistSecretsFromConfig,
+  createFileSecretsStore,
+  NEXUS_SECRETS_STORAGE_KEY,
+} from "./secrets.js"
+export type { NexusSecretsStore, NexusSecretsPayload } from "./secrets.js"
 
 /** Format like .claude: { permissions: { allow: string[], deny: string[], ask: string[] } } */
 export interface ProjectSettings {

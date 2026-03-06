@@ -87,6 +87,16 @@ Rules:
       .sort((a, b) => a.blockIndex - b.blockIndex)
       .map((r) => `Block ${r.blockIndex + 1}: replaced at line ~${r.lineNum}`)
 
+    const changesForStats = diff.diffLines(originalContent, content)
+    let addedLines = 0
+    let removedLines = 0
+    for (const c of changesForStats) {
+      const lineCount = c.value.split(/\r?\n/).length
+      if (c.added) addedLines += lineCount
+      if (c.removed) removedLines += lineCount
+    }
+    const diffStats = { added: addedLines, removed: removedLines }
+
     // Roo/Cline-style: open → approve → save or revert (when host supports it)
     const useFileEditFlow =
       typeof ctx.host.openFileEdit === "function" &&
@@ -108,6 +118,7 @@ Rules:
           description: `Edit ${filePath}`,
           content,
           diff: diffPreview,
+          diffStats,
         },
         partId: ctx.partId ?? "",
       })
@@ -117,6 +128,7 @@ Rules:
         description: `Edit ${filePath}`,
         content,
         diff: diffPreview,
+        diffStats,
       })
       if (!approval.approved) {
         await ctx.host.revertFileEdit!(filePath)
@@ -141,15 +153,6 @@ Rules:
       await indexer.refreshFileNow(absPath).catch(() => {})
     } else if (ctx.indexer?.refreshFile) {
       await ctx.indexer.refreshFile(absPath).catch(() => {})
-    }
-
-    const changes = diff.diffLines(originalContent, content)
-    let addedLines = 0
-    let removedLines = 0
-    for (const c of changes) {
-      const lineCount = c.value.split(/\r?\n/).length
-      if (c.added) addedLines += lineCount
-      if (c.removed) removedLines += lineCount
     }
 
     const diffHunks = buildDiffHunks(originalContent, content)

@@ -595,6 +595,8 @@ html, body, #root {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  /* Prevent chat scroll from overlapping todo/input below */
+  isolation: isolate;
 }
 
 .chat-messages {
@@ -622,6 +624,8 @@ html, body, #root {
   padding: 8px 12px 10px;
   /* Keep input area above bottom safe area; ensure it never gets clipped */
   margin-bottom: 0;
+  position: relative;
+  z-index: 1;
 }
 
 /* Single unified background: text area and buttons share the same color; no inner margin so no dark band */
@@ -683,6 +687,8 @@ html, body, #root {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  position: relative;
+  z-index: 1;
 }
 .nexus-todo-panel [data-todo-list] {
   overflow: hidden;
@@ -891,8 +897,18 @@ html, body, #root {
   overflow: hidden;
 }
 
+/* Scrollable area: reserve space for scrollbar so it doesn't overlap tool cards / content */
+.nexus-message-list-scroller {
+  height: 100% !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  scrollbar-gutter: stable;
+  padding-right: 2px;
+}
+
 .message-list-virtuoso-inner {
   padding: 12px;
+  padding-right: 16px; /* space for scrollbar so it doesn't overlap tool cards and content */
   background: var(--nexus-chat-bg);
 }
 
@@ -1377,6 +1393,13 @@ input[type="text"]:focus-visible {
   text-transform: uppercase;
   color: var(--vscode-descriptionForeground);
   opacity: 0.95;
+}
+
+.nexus-checkpoint-empty-hint {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.8;
 }
 
 .nexus-checkpoint-entries {

@@ -15,6 +15,7 @@ import {
   writeConfig,
   writeGlobalProfiles,
   loadProjectSettings,
+  persistSecretsFromConfig,
   Session,
   listSessions,
   deleteSession,
@@ -80,7 +81,7 @@ export type WebviewMessage =
   | { type: "openMcpConfig" }
   | { type: "testMcpServers" }
   | { type: "openSkillFolder"; path: string }
-  | { type: "approvalResponse"; partId: string; approved: boolean; alwaysApprove?: boolean; addToAllowedCommand?: string; skipAll?: boolean }
+  | { type: "approvalResponse"; partId: string; approved: boolean; alwaysApprove?: boolean; addToAllowedCommand?: string; skipAll?: boolean; whatToDoInstead?: string }
   | { type: "openExternal"; url: string }
   | { type: "showConfirm"; id: string; message: string }
   | { type: "openNexusignore" }
@@ -128,6 +129,7 @@ export interface WebviewState {
   contextPercent: number
   serverUrl?: string
   modelsCatalog?: import("@nexuscode/core").ModelsCatalog | null
+  checkpointEnabled?: boolean
   checkpointEntries?: CheckpointEntry[]
   /** Plan mode: plan_exit was called; show New session / Continue / Dismiss. */
   planCompleted?: boolean
@@ -182,6 +184,11 @@ export class Controller {
   private indexerFileWatcher?: vscode.Disposable
   private disposables: vscode.Disposable[] = []
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
+  /** VS Code Secret Storage for API keys (Roo-Code best practice — keys never in YAML). */
+  private readonly secretsStore = {
+    getSecret: (key: string) => this.context.secrets.get(key),
+    setSecret: (key: string, value: string) => this.context.secrets.store(key, value),
+  }
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -267,6 +274,7 @@ export class Controller {
       contextPercent,
       serverUrl: this.getServerUrl(),
       modelsCatalog: this.modelsCatalogCache ?? null,
+      checkpointEnabled: this.config?.checkpoint?.enabled === true || this.checkpoint != null,
       checkpointEntries: this.checkpoint?.getEntries() ?? [],
       planCompleted:
         this.session && this.mode === "plan" && !this.isRunning && hadPlanExit(this.session),
@@ -334,13 +342,13 @@ export class Controller {
       this.initialized = true
       const cwd = this.getCwd()
       try {
-        this.config = await loadConfig(cwd)
+        this.config = await loadConfig(cwd, { secrets: this.secretsStore })
       } catch {
         this.config = undefined
       }
       if (!this.config) {
         try {
-          this.config = await loadConfig(process.cwd())
+          this.config = await loadConfig(process.cwd(), { secrets: this.secretsStore })
         } catch {}
       }
       if (!this.config) {
@@ -547,7 +555,7 @@ export class Controller {
           try {
             const doc = await vscode.workspace.openTextDocument(uri)
             const editor = await vscode.window.showTextDocument(doc, {
-              viewColumn: vscode.ViewColumn.One,
+              viewColumn: vscode.ViewColumn.Active,
               selection: new vscode.Range(line, 0, endLine, 0),
               preview: false,
             })
@@ -595,7 +603,7 @@ export class Controller {
           const uri = vscode.Uri.file(configPath)
           const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
           if (doc) {
-            await vscode.window.showTextDocument(doc, { preview: false })
+            await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
           } else {
             await vscode.commands.executeCommand("revealInExplorer", dirUri)
           }
@@ -608,13 +616,13 @@ export class Controller {
         const uri = vscode.Uri.file(filePath)
         const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
         if (doc) {
-          await vscode.window.showTextDocument(doc, { preview: false })
+          await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
         } else {
           const wsEdit = new vscode.WorkspaceEdit()
           wsEdit.createFile(uri, { ignoreIfExists: true })
           await vscode.workspace.applyEdit(wsEdit)
           const newDoc = await vscode.workspace.openTextDocument(uri)
-          await vscode.window.showTextDocument(newDoc, { preview: false })
+          await vscode.window.showTextDocument(newDoc, { viewColumn: vscode.ViewColumn.Active, preview: false })
         }
         break
       }
@@ -631,7 +639,7 @@ export class Controller {
           await vscode.workspace.fs.writeFile(uri, Buffer.from(defaultContent, "utf8"))
           return vscode.workspace.openTextDocument(uri)
         })
-        await vscode.window.showTextDocument(doc, { preview: false })
+        await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
         break
       }
       case "testMcpServers": {
@@ -676,6 +684,7 @@ export class Controller {
             alwaysApprove: msg.alwaysApprove,
             addToAllowedCommand: msg.addToAllowedCommand,
             skipAll: msg.skipAll,
+            whatToDoInstead: msg.whatToDoInstead,
           })
         }
         break
@@ -697,13 +706,13 @@ export class Controller {
         const uri = vscode.Uri.file(filePath)
         const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
         if (doc) {
-          await vscode.window.showTextDocument(doc, { preview: false })
+          await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
         } else {
           const wsEdit = new vscode.WorkspaceEdit()
           wsEdit.createFile(uri, { ignoreIfExists: true })
           await vscode.workspace.applyEdit(wsEdit)
           const newDoc = await vscode.workspace.openTextDocument(uri)
-          await vscode.window.showTextDocument(newDoc, { preview: false })
+          await vscode.window.showTextDocument(newDoc, { viewColumn: vscode.ViewColumn.Active, preview: false })
         }
         break
       }
@@ -819,7 +828,7 @@ export class Controller {
         if (rel.startsWith("..") || path.isAbsolute(rel)) continue
         if (!doc.isDirty) continue
         try {
-          await vscode.window.showTextDocument(doc, { preserveFocus: false })
+          await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preserveFocus: false })
           await vscode.commands.executeCommand("workbench.action.files.revert")
         } catch {
           // Ignore per-doc revert errors
@@ -853,7 +862,7 @@ export class Controller {
         const f = files[0]!
         const beforeDoc = await vscode.workspace.openTextDocument({ content: f.before, language: "plaintext" })
         const afterDoc = await vscode.workspace.openTextDocument({ content: f.after, language: "plaintext" })
-        await vscode.commands.executeCommand("vscode.diff", beforeDoc.uri, afterDoc.uri, `${path.basename(f.path)}: Checkpoint diff`, { viewColumn: vscode.ViewColumn.Beside })
+        await vscode.commands.executeCommand("vscode.diff", beforeDoc.uri, afterDoc.uri, `${path.basename(f.path)}: Checkpoint diff`, { viewColumn: vscode.ViewColumn.Active })
         return
       }
       const chosen = await vscode.window.showQuickPick(
@@ -863,7 +872,7 @@ export class Controller {
       if (chosen) {
         const beforeDoc = await vscode.workspace.openTextDocument({ content: chosen.file.before, language: "plaintext" })
         const afterDoc = await vscode.workspace.openTextDocument({ content: chosen.file.after, language: "plaintext" })
-        await vscode.commands.executeCommand("vscode.diff", beforeDoc.uri, afterDoc.uri, `${path.basename(chosen.file.path)}: Checkpoint diff`, { viewColumn: vscode.ViewColumn.Beside })
+        await vscode.commands.executeCommand("vscode.diff", beforeDoc.uri, afterDoc.uri, `${path.basename(chosen.file.path)}: Checkpoint diff`, { viewColumn: vscode.ViewColumn.Active })
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -1032,6 +1041,12 @@ export class Controller {
         void this.loadAndSendSkillDefinitions()
       this.postStateToWebview()
       return
+    }
+    try {
+      await persistSecretsFromConfig(this.config as Record<string, unknown>, this.secretsStore)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      vscode.window.showErrorMessage(`NexusCode: Failed to save API keys — ${message}`)
     }
     const toWrite = { ...this.config } as Record<string, unknown>
     if (toWrite.skillsConfig && Array.isArray(toWrite.skillsConfig)) {
@@ -1290,13 +1305,13 @@ export class Controller {
           const uri = vscode.Uri.file(absPath)
           const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === uri.fsPath)
           if (doc?.isDirty) {
-            void vscode.window.showTextDocument(doc, { preserveFocus: true }).then(() =>
+            void vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preserveFocus: true }).then(() =>
               vscode.commands.executeCommand("workbench.action.files.revert")
             )
           }
         }
       }
-    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef })
+    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, onCheckpointEntriesUpdated: () => this.postStateToWebview() })
 
     const timeoutMs = 10 * 60_000
     const timeout = setTimeout(() => {

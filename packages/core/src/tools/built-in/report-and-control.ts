@@ -28,9 +28,9 @@ const progressNoteSchema = z.object({
 
 export const progressNoteTool: ToolDef<z.infer<typeof progressNoteSchema>> = {
   name: "progress_note",
-  description: `Show the user a brief progress update. Call this so the user sees what you are doing without waiting for the final summary.
+  description: `Send a short progress message to the user. The message is shown as **plain text** in the chat (no card). Use it so the user always sees what you are doing.
 
-Always output the first-line JSON preamble with \`reasoning\` before calling this tool — the loop's built-in thought (Thought in UI) must come first; then call progress_note.
+Always output the first-line JSON with \`reasoning\` (Thought) before calling this tool — the loop shows that as Thought in the UI; then call progress_note for the user-facing message.
 
 When to use:
 - Before the first tool call each turn: one short note (e.g. "Scanning the codebase for auth logic.").

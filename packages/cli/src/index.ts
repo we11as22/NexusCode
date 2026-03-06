@@ -13,6 +13,7 @@ import {
   CodebaseIndexer, createCodebaseIndexer, listSessions, deleteSession as coreDeleteSession,
   hadPlanExit, getPlanContentForFollowup,
   CheckpointTracker, writeCheckpointEntries, readCheckpointEntries,
+  getGlobalConfigDir, createFileSecretsStore, persistSecretsFromConfig,
   MODES, type Mode, type AgentEvent, type IndexStatus, type PermissionResult,
 } from "@nexuscode/core"
 import { CliHost } from "./host.js"
@@ -170,8 +171,9 @@ if (positionalArgs[0] === "task") {
   process.exit(1)
 }
 
-// Load config
-let config = await loadConfig(cwd)
+// Load config (with file-based secrets store for API keys — Cline-style ~/.nexus/secrets.json)
+const secretsStore = createFileSecretsStore(getGlobalConfigDir())
+let config = await loadConfig(cwd, { secrets: secretsStore })
 // Merge project allowlist from .nexus/allowed-commands.json
 try {
   const allowPath = path.join(cwd, ".nexus", "allowed-commands.json")
@@ -601,6 +603,9 @@ function saveConfig(updates: Partial<typeof config>): void {
   if (updates.modes) {
     config.modes = { ...config.modes, ...updates.modes }
   }
+  if (updates.permissions) {
+    config.permissions = { ...config.permissions, ...updates.permissions }
+  }
   if (updates.profiles) {
     config.profiles = { ...config.profiles, ...updates.profiles }
   }
@@ -612,7 +617,12 @@ function saveConfig(updates: Partial<typeof config>): void {
   }
   if (updates.indexing) config.indexing = { ...config.indexing, ...updates.indexing }
   if (updates.vectorDb) config.vectorDb = config.vectorDb ? { ...config.vectorDb, ...updates.vectorDb } : (updates.vectorDb as any)
-  writeConfig(config, cwd)
+  void persistSecretsFromConfig(config as Record<string, unknown>, secretsStore).then(() => {
+    writeConfig(config, cwd)
+  }).catch((err) => {
+    pushEvent({ type: "error", error: `Failed to save API keys: ${err instanceof Error ? err.message : String(err)}` })
+    writeConfig(config, cwd)
+  })
 
   if (updates.indexing || updates.vectorDb || updates.embeddings) {
     rebuildIndexer().catch((err) => {
@@ -647,6 +657,16 @@ function buildConfigSnapshot(conf: typeof config): typeof appProps.configSnapsho
     skills: conf.skills ?? [],
     skillsConfig: conf.skillsConfig,
     rules: { files: conf.rules?.files ?? [] },
+    permissions:
+      conf.permissions
+        ? {
+            autoApproveRead: conf.permissions.autoApproveRead,
+            autoApproveWrite: conf.permissions.autoApproveWrite,
+            autoApproveCommand: conf.permissions.autoApproveCommand,
+            autoApproveMcp: conf.permissions.autoApproveMcp ?? false,
+            autoApproveBrowser: conf.permissions.autoApproveBrowser ?? false,
+          }
+        : undefined,
     modes: {
       agent: { customInstructions: conf.modes?.agent?.customInstructions },
       plan: { customInstructions: conf.modes?.plan?.customInstructions },

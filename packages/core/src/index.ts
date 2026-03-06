@@ -1,6 +1,20 @@
 // Config
-export { loadConfig, writeConfig, writeGlobalProfiles, getGlobalConfigDir, ensureGlobalConfigDir, loadProjectSettings } from "./config/index.js"
-export type { ProjectSettings } from "./config/index.js"
+export {
+  loadConfig,
+  writeConfig,
+  writeGlobalProfiles,
+  getGlobalConfigDir,
+  ensureGlobalConfigDir,
+  loadProjectSettings,
+  applySecretsToConfig,
+  stripSecretsFromConfig,
+  stripProfileSecrets,
+  getSecretsPayloadFromConfig,
+  persistSecretsFromConfig,
+  createFileSecretsStore,
+  NEXUS_SECRETS_STORAGE_KEY,
+} from "./config/index.js"
+export type { ProjectSettings, NexusSecretsStore, NexusSecretsPayload } from "./config/index.js"
 export { NexusConfigSchema } from "./config/schema.js"
 export type { NexusConfig, ProviderConfig, EmbeddingConfig, McpServerConfig, SkillDef, ModeConfig } from "./types.js"
 

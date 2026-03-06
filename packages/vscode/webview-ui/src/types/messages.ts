@@ -54,7 +54,7 @@ export type ExtensionMessage =
   | { type: "addToChatContent"; content: string }
   | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings" }
   | { type: "mcpServerStatus"; results: Array<{ name: string; status: "ok" | "error"; error?: string }> }
-  | { type: "pendingApproval"; partId: string; action: { type: string; tool: string; description: string; content?: string } }
+  | { type: "pendingApproval"; partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } }
   | { type: "confirmResult"; id: string; ok: boolean }
   | { type: "modelsCatalog"; catalog: ModelsCatalogFromCore }
   | { type: "agentPresets"; presets: AgentPresetFromCore[] }

@@ -302,6 +302,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveRead: z.ZodDefault<z.ZodBoolean>;
         autoApproveWrite: z.ZodDefault<z.ZodBoolean>;
         autoApproveCommand: z.ZodDefault<z.ZodBoolean>;
+        autoApproveMcp: z.ZodDefault<z.ZodBoolean>;
+        autoApproveBrowser: z.ZodDefault<z.ZodBoolean>;
         autoApproveReadPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
         allowedCommands: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
@@ -333,6 +335,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveRead: boolean;
         autoApproveWrite: boolean;
         autoApproveCommand: boolean;
+        autoApproveMcp: boolean;
+        autoApproveBrowser: boolean;
         autoApproveReadPatterns: string[];
         allowedCommands: string[];
         allowCommandPatterns: string[];
@@ -350,6 +354,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveRead?: boolean | undefined;
         autoApproveWrite?: boolean | undefined;
         autoApproveCommand?: boolean | undefined;
+        autoApproveMcp?: boolean | undefined;
+        autoApproveBrowser?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
         allowedCommands?: string[] | undefined;
         allowCommandPatterns?: string[] | undefined;
@@ -692,6 +698,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveRead: boolean;
         autoApproveWrite: boolean;
         autoApproveCommand: boolean;
+        autoApproveMcp: boolean;
+        autoApproveBrowser: boolean;
         autoApproveReadPatterns: string[];
         allowedCommands: string[];
         allowCommandPatterns: string[];
@@ -906,6 +914,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveRead?: boolean | undefined;
         autoApproveWrite?: boolean | undefined;
         autoApproveCommand?: boolean | undefined;
+        autoApproveMcp?: boolean | undefined;
+        autoApproveBrowser?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
         allowedCommands?: string[] | undefined;
         allowCommandPatterns?: string[] | undefined;
@@ -1043,6 +1053,11 @@ interface ApprovalAction {
     description: string;
     content?: string;
     diff?: string;
+    /** For write/replace_in_file: lines added and removed, shown in approval UI and after completion. */
+    diffStats?: {
+        added: number;
+        removed: number;
+    };
 }
 interface IHost {
     readonly cwd: string;
@@ -1340,6 +1355,8 @@ interface NexusConfig {
         autoApproveRead: boolean;
         autoApproveWrite: boolean;
         autoApproveCommand: boolean;
+        autoApproveMcp?: boolean;
+        autoApproveBrowser?: boolean;
         autoApproveReadPatterns: string[];
         /** Commands allowed without approval for this project (from .nexus/allowed-commands.json) */
         allowedCommands: string[];
@@ -1463,17 +1480,70 @@ interface ChangedFile {
 }
 
 /**
+ * Secrets store abstraction (Roo-Code / Cline best practice).
+ * API keys are never written to YAML; they are stored in a secure store and
+ * applied at load time after env overrides.
+ */
+/** Key used in secrets store (VS Code secretStorage or file) for API keys payload. */
+declare const NEXUS_SECRETS_STORAGE_KEY = "nexuscode_api";
+interface NexusSecretsPayload {
+    model?: string;
+    embeddings?: string;
+    /** API keys per profile name (global profiles in ~/.nexus/nexus.yaml). */
+    profiles?: Record<string, string>;
+}
+interface NexusSecretsStore {
+    getSecret(key: string): Promise<string | undefined>;
+    setSecret(key: string, value: string): Promise<void>;
+}
+/**
+ * Apply secrets from store into config (in-place).
+ * Only sets model.apiKey, embeddings.apiKey, and profiles[name].apiKey if not already set (env/config takes precedence).
+ */
+declare function applySecretsToConfig(config: Record<string, unknown>, store: NexusSecretsStore): Promise<void>;
+/**
+ * Strip secret fields from config for persisting to YAML (never write apiKey to repo).
+ * Returns a deep copy with model.apiKey, embeddings.apiKey, and each profiles[name].apiKey removed.
+ */
+declare function stripSecretsFromConfig<T extends Record<string, unknown>>(config: T): T;
+/**
+ * Strip apiKey from each profile for writing to global YAML (~/.nexus/nexus.yaml).
+ * Call before writeGlobalProfiles so profile keys are never persisted in plain text.
+ */
+declare function stripProfileSecrets(profiles: Record<string, unknown>): Record<string, unknown>;
+/**
+ * Build payload from current config (model.apiKey, embeddings.apiKey, profile apiKeys) for persisting to secrets store.
+ */
+declare function getSecretsPayloadFromConfig(config: Record<string, unknown>): NexusSecretsPayload;
+/**
+ * Persist model and embeddings API keys from config into the secrets store.
+ * Call after merging user config; then persist config with stripSecretsFromConfig.
+ */
+declare function persistSecretsFromConfig(config: Record<string, unknown>, store: NexusSecretsStore): Promise<void>;
+/**
+ * File-based secrets store for CLI (Cline-style: single file with mode 0o600).
+ * Path: {globalConfigDir}/secrets.json
+ */
+declare function createFileSecretsStore(globalConfigDir: string): NexusSecretsStore;
+
+/**
  * Load config by walking up from cwd.
  * Merges project config over global config.
- * Applies env overrides.
+ * Applies env overrides, then optional secrets store (API keys).
  */
-declare function loadConfig(cwd?: string): Promise<NexusConfig>;
+declare function loadConfig(cwd?: string, options?: {
+    secrets?: NexusSecretsStore;
+}): Promise<NexusConfig>;
 /**
- * Write config to project .nexus/nexus.yaml
+ * Write config to project .nexus/nexus.yaml.
+ * By default strips API keys so they are never persisted to YAML (use secrets store instead).
  */
-declare function writeConfig(config: Partial<NexusConfig>, cwd?: string): void;
+declare function writeConfig(config: Partial<NexusConfig>, cwd?: string, options?: {
+    stripSecrets?: boolean;
+}): void;
 /**
  * Persist profiles to global ~/.nexus/nexus.yaml so they are available across all projects.
+ * Strips apiKey from each profile so keys are never written to YAML (use secrets store).
  */
 declare function writeGlobalProfiles(profiles: Record<string, unknown>): void;
 /**
@@ -2081,4 +2151,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, type NexusConfig, NexusConfigSchema, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getPlanContentForFollowup, hadPlanExit, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getPlanContentForFollowup, getSecretsPayloadFromConfig, hadPlanExit, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles };

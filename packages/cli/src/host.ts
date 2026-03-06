@@ -139,8 +139,8 @@ export class CliHost implements IHost {
 
       const optionsLine =
         action.type === "execute"
-          ? `\x1b[90m[y] Allow once [n] Deny [a] Always allow [s] Allow all (session) [e] Add to allowed (folder)\x1b[0m`
-          : `\x1b[90m[y] Allow once [n] Deny [a] Always allow [s] Allow all (session)\x1b[0m`
+          ? `\x1b[90m[y] Allow once [n] Deny [a] Always allow [s] Allow all (session) [e] Add to allowed (folder) [i] Say what to do instead\x1b[0m`
+          : `\x1b[90m[y] Allow once [n] Deny [a] Always allow [s] Allow all (session) [i] Say what to do instead\x1b[0m`
       lines.push(optionsLine)
       lines.push("")
       process.stdout.write(lines.join("\n"))
@@ -153,8 +153,19 @@ export class CliHost implements IHost {
       })
 
       rl.once("line", (answer: string) => {
-        rl.close()
         const lower = answer.trim().toLowerCase()
+        if (lower === "i" || lower === "instruct") {
+          process.stdout.write(`\x1b[90mWhat to do instead? \x1b[0m`)
+          rl.once("line", (instruction: string) => {
+            rl.close()
+            resolve({
+              approved: false,
+              whatToDoInstead: instruction.trim() || undefined,
+            })
+          })
+          return
+        }
+        rl.close()
         const addToAllowed = action.type === "execute" && (lower === "e" || lower === "add")
         const approved = ["y", "yes", "a", "always", "s", "skip"].includes(lower) || addToAllowed
         const alwaysApprove = lower === "a" || lower === "always"

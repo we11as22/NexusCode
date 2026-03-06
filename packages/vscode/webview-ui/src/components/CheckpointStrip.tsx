@@ -31,6 +31,7 @@ export interface CheckpointEntry {
 export function CheckpointStrip() {
   const store = useChatStore()
   const entries = store.checkpointEntries
+  const checkpointEnabled = store.checkpointEnabled
   const [openHash, setOpenHash] = useState<string | null>(null)
   const [showMoreOptions, setShowMoreOptions] = useState(false)
   const popoverRef = useRef<HTMLDivElement>(null)
@@ -49,7 +50,21 @@ export function CheckpointStrip() {
     return () => document.removeEventListener("click", close, true)
   }, [openHash])
 
-  if (entries.length === 0) return null
+  if (!checkpointEnabled) return null
+
+  if (entries.length === 0) {
+    return (
+      <div className="nexus-checkpoint-strip nexus-checkpoint-strip-cline">
+        <div className="nexus-checkpoint-strip-inner">
+          <BookmarkIcon className="nexus-checkpoint-icon" checkedOut={false} />
+          <div className="nexus-checkpoint-dotted" aria-hidden />
+          <span className="nexus-checkpoint-label">Checkpoints</span>
+          <div className="nexus-checkpoint-dotted" aria-hidden />
+          <span className="nexus-checkpoint-empty-hint">No checkpoints yet (saved when a task completes)</span>
+        </div>
+      </div>
+    )
+  }
 
   const label = (entry: CheckpointEntry) =>
     entry.description

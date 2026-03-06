@@ -51,6 +51,24 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
     const originalContentStr = oldContent ?? ""
     const isNewFile = oldContent == null
 
+    const newLines = content.split(/\r?\n/).length
+    let addedLines: number
+    let removedLines: number
+    if (oldContent != null) {
+      const changes = diff.diffLines(oldContent, content)
+      addedLines = 0
+      removedLines = 0
+      for (const c of changes) {
+        const lineCount = c.value.split(/\r?\n/).length
+        if (c.added) addedLines += lineCount
+        if (c.removed) removedLines += lineCount
+      }
+    } else {
+      addedLines = newLines
+      removedLines = 0
+    }
+    const diffStats = { added: addedLines, removed: removedLines }
+
     // Roo/Cline-style: open → approve → save or revert (when host supports it)
     const useFileEditFlow =
       typeof ctx.host.openFileEdit === "function" &&
@@ -72,6 +90,7 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
           description: `Write to ${filePath}`,
           content,
           diff: diffPreview,
+          diffStats,
         },
         partId: ctx.partId ?? "",
       })
@@ -81,6 +100,7 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
         description: `Write to ${filePath}`,
         content,
         diff: diffPreview,
+        diffStats,
       })
       if (!approval.approved) {
         await ctx.host.revertFileEdit!(filePath)
@@ -97,23 +117,6 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
       } catch (err) {
         return { success: false, output: `Failed to write ${filePath}: ${(err as Error).message}` }
       }
-    }
-
-    const newLines = content.split(/\r?\n/).length
-    let addedLines: number
-    let removedLines: number
-    if (oldContent != null) {
-      const changes = diff.diffLines(oldContent, content)
-      addedLines = 0
-      removedLines = 0
-      for (const c of changes) {
-        const lineCount = c.value.split(/\r?\n/).length
-        if (c.added) addedLines += lineCount
-        if (c.removed) removedLines += lineCount
-      }
-    } else {
-      addedLines = newLines
-      removedLines = 0
     }
 
     const indexer = ctx.indexer as { refreshFileNow?: (filePath: string) => Promise<void> } | undefined

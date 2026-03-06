@@ -53,6 +53,8 @@ interface AppState {
   contextPercent: number
   lastError: string | null
   awaitingApproval: boolean
+  /** When true, next line is "what to do instead" text (after user pressed i during approval). */
+  awaitingWhatToDoInstead: boolean
   /** Pending action to approve (Cline/Opencode-style: show what is being approved) */
   pendingApprovalAction: ApprovalAction | null
   compacting: boolean
@@ -100,6 +102,13 @@ interface AppProps {
     skills?: string[]
     skillsConfig?: Array<{ path: string; enabled: boolean }>
     rules?: { files: string[] }
+    permissions?: {
+      autoApproveRead?: boolean
+      autoApproveWrite?: boolean
+      autoApproveCommand?: boolean
+      autoApproveMcp?: boolean
+      autoApproveBrowser?: boolean
+    }
     modes?: {
       agent?: { customInstructions?: string }
       plan?: { customInstructions?: string }
@@ -513,6 +522,7 @@ export function App({
     contextPercent: 0,
     lastError: null,
     awaitingApproval: false,
+    awaitingWhatToDoInstead: false,
     pendingApprovalAction: null,
     compacting: false,
     currentStreaming: "",
@@ -581,6 +591,8 @@ export function App({
   const inputHistory = useRef<string[]>([])
   const [checkpointList, setCheckpointList] = useState<Array<{ hash: string; ts: number; description?: string }>>([])
   const [checkpointRestorePrompt, setCheckpointRestorePrompt] = useState<string | null>(null)
+  /** When checkpointRestorePrompt === "type", index into checkpointList (0-based) for the chosen checkpoint. */
+  const [checkpointRestoreSelectedIndex, setCheckpointRestoreSelectedIndex] = useState<number | null>(null)
   const eventQueueRef = useRef<AgentEvent[]>([])
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastFlushTimeRef = useRef<number>(0)
@@ -924,6 +936,7 @@ export function App({
               success: boolean
               output?: string
               error?: string
+              path?: string
               diffStats?: { added: number; removed: number }
               diffHunks?: Array<{ type: string; lineNum: number; line: string }>
             }
@@ -936,6 +949,7 @@ export function App({
                       output: ev.output,
                       error: ev.error,
                       timeEnd: Date.now(),
+                      ...(ev.path != null ? { path: ev.path } : {}),
                       ...(ev.diffStats != null ? { diffStats: ev.diffStats } : {}),
                       ...(Array.isArray(ev.diffHunks) ? { diffHunks: ev.diffHunks } : {}),
                     }
@@ -1075,11 +1089,13 @@ export function App({
             break
           }
           case "done": {
-            // Set ref immediately so a second "done" in the same batch skips (setState updater runs async).
             const wasAlreadyAdded = addedAssistantInBatchRef.current
-            addedAssistantInBatchRef.current = true
-            if (wasAlreadyAdded) break
+            if (wasAlreadyAdded) {
+              addedAssistantInBatchRef.current = true
+              break
+            }
             setState((s) => {
+              if (addedAssistantInBatchRef.current) return s
               const text = stripToolCallMarkup(s.currentStreaming)
               const parts = [...s.currentAssistantParts]
               if (text.trim()) parts.push({ type: "text", text })
@@ -1109,10 +1125,11 @@ export function App({
                         : "No final text response was produced. Retry with a narrower prompt or switch to agent mode.",
                   }
                 : null
-              if (duplicateAssistant) addedAssistantInBatchRef.current = false
+              if (duplicateAssistant) return s
+              addedAssistantInBatchRef.current = true
               return {
                 ...s,
-                messages: newMsg && !duplicateAssistant
+                messages: newMsg
                   ? [...s.messages, newMsg]
                   : (noFinalTextMsg ? [...s.messages, noFinalTextMsg] : s.messages),
                 currentAssistantParts: [],
@@ -1122,6 +1139,7 @@ export function App({
                 currentStreaming: "",
                 isRunning: false,
                 awaitingApproval: false,
+                awaitingWhatToDoInstead: false,
                 pendingApprovalAction: null,
                 lastError: null,
                 planFollowupText: null,
@@ -1138,6 +1156,7 @@ export function App({
                 isRunning: s.awaitingApproval ? s.isRunning : false,
                 lastError: event.error,
                 awaitingApproval: false,
+                awaitingWhatToDoInstead: false,
                 pendingApprovalAction: null,
                 currentAssistantParts: [],
                 lastSpawnAgentPartId: null,
@@ -1276,6 +1295,19 @@ export function App({
     if (state.awaitingApproval && onResolveApproval) {
       const raw = currentInput.trim().toLowerCase()
       const isExecute = state.pendingApprovalAction?.type === "execute"
+      if (!state.awaitingWhatToDoInstead && (raw === "i" || raw === "instruct")) {
+        setInput("")
+        setState((s) => ({ ...s, awaitingWhatToDoInstead: true }))
+        return
+      }
+      if (state.awaitingWhatToDoInstead) {
+        const whatToDoInstead = currentInput.trim()
+        setInput("")
+        setChatScrollLines(0)
+        setState((s) => ({ ...s, awaitingApproval: false, awaitingWhatToDoInstead: false, pendingApprovalAction: null }))
+        onResolveApproval({ approved: false, whatToDoInstead: whatToDoInstead || undefined })
+        return
+      }
       const addToAllowed = isExecute && (raw === "e" || raw === "add")
       const allowedKeys = ["y", "yes", "n", "no", "a", "always", "s", "skip"]
       if (allowedKeys.includes(raw) || addToAllowed) {
@@ -1285,7 +1317,7 @@ export function App({
         const addToAllowedCommand = addToAllowed ? state.pendingApprovalAction?.content : undefined
         setInput("")
         setChatScrollLines(0)
-        setState((s) => ({ ...s, awaitingApproval: false, pendingApprovalAction: null }))
+        setState((s) => ({ ...s, awaitingApproval: false, awaitingWhatToDoInstead: false, pendingApprovalAction: null }))
         onResolveApproval({
           approved,
           alwaysApprove,
@@ -1691,7 +1723,16 @@ export function App({
     if (key.ctrl && ctrlKey === "c") {
       if (state.isRunning) {
         onAbort()
-        setState((s) => ({ ...s, isRunning: false, liveTools: [], subAgents: [], lastSpawnAgentPartId: null, awaitingApproval: false, pendingApprovalAction: null }))
+                setState((s) => ({
+                  ...s,
+                  isRunning: false,
+                  liveTools: [],
+                  subAgents: [],
+                  lastSpawnAgentPartId: null,
+                  awaitingApproval: false,
+                  awaitingWhatToDoInstead: false,
+                  pendingApprovalAction: null,
+                }))
       } else {
         onExit?.()
       }
@@ -1725,6 +1766,30 @@ export function App({
       return
     }
 
+    // Chat view: R/W/E/M/B toggle auto-approve (same as extension dropdown)
+    if (
+      view === "chat" &&
+      !state.isRunning &&
+      !state.awaitingApproval &&
+      saveConfig &&
+      configSnapshot &&
+      (lowerChar === "r" || lowerChar === "w" || lowerChar === "e" || lowerChar === "m" || lowerChar === "b")
+    ) {
+      const keyMap = {
+        r: "autoApproveRead" as const,
+        w: "autoApproveWrite" as const,
+        e: "autoApproveCommand" as const,
+        m: "autoApproveMcp" as const,
+        b: "autoApproveBrowser" as const,
+      }
+      const permKey = keyMap[lowerChar as keyof typeof keyMap]
+      if (permKey) {
+        const current = configSnapshot.permissions?.[permKey] ?? (permKey === "autoApproveRead")
+        saveConfig({ permissions: { [permKey]: !current } })
+      }
+      return
+    }
+
     // Plan mode: after plan_exit, [N]ew session / [C]ontinue / [D]ismiss (Kilocode-style)
     if (
       view === "chat" &&
@@ -1750,7 +1815,28 @@ export function App({
       }
     }
 
-    // Checkpoints (Cline-style): r = restore, then 1–N to pick checkpoint (taskAndWorkspace)
+    // Checkpoints (Cline-style): r = restore, then 1–N to pick checkpoint, then 1/2/3 for type (like extension)
+    if (view === "chat" && checkpointRestorePrompt === "type" && checkpointRestoreSelectedIndex != null && checkpointList.length > 0 && onRestoreCheckpoint) {
+      const entry = checkpointList[checkpointRestoreSelectedIndex]
+      if (key.escape) {
+        setCheckpointRestorePrompt(null)
+        setCheckpointRestoreSelectedIndex(null)
+        return
+      }
+      let restoreType: "task" | "workspace" | "taskAndWorkspace" = "taskAndWorkspace"
+      if (lowerChar === "1" || key.name === "return") restoreType = "taskAndWorkspace"
+      else if (lowerChar === "2") restoreType = "workspace"
+      else if (lowerChar === "3") restoreType = "task"
+      else return
+      if (entry) {
+        setCheckpointRestorePrompt(null)
+        setCheckpointRestoreSelectedIndex(null)
+        onRestoreCheckpoint(entry.hash, restoreType).then(() => {
+          getCheckpointList?.().then((list) => setCheckpointList(list)).catch(() => {})
+        }).catch(() => {})
+      }
+      return
+    }
     if (view === "chat" && checkpointRestorePrompt === "which" && checkpointList.length > 0 && onRestoreCheckpoint) {
       if (key.escape) {
         setCheckpointRestorePrompt(null)
@@ -1758,13 +1844,8 @@ export function App({
       }
       const digit = lowerChar >= "1" && lowerChar <= "9" ? parseInt(lowerChar, 10) : 0
       if (digit >= 1 && digit <= checkpointList.length) {
-        const entry = checkpointList[digit - 1]
-        if (entry) {
-          setCheckpointRestorePrompt(null)
-          onRestoreCheckpoint(entry.hash, "taskAndWorkspace").then(() => {
-            getCheckpointList?.().then((list) => setCheckpointList(list)).catch(() => {})
-          }).catch(() => {})
-        }
+        setCheckpointRestoreSelectedIndex(digit - 1)
+        setCheckpointRestorePrompt("type")
         return
       }
     }
@@ -2534,8 +2615,11 @@ export function App({
           slashSelected={slashSelected}
           isRunning={state.isRunning}
           awaitingApproval={state.awaitingApproval}
+          awaitingWhatToDoInstead={state.awaitingWhatToDoInstead}
           pendingApprovalAction={state.pendingApprovalAction}
           indexReady={state.indexReady}
+          configSnapshot={configSnapshot}
+          saveConfig={saveConfig}
           onInputChange={(value) => setInput(value)}
           onSubmit={submitChatInput}
         />
@@ -2573,9 +2657,18 @@ export function App({
             {state.awaitingApproval && state.pendingApprovalAction && (
               <ApprovalBanner action={state.pendingApprovalAction} cols={shellW} />
             )}
+            {view === "chat" && configSnapshot && saveConfig && (
+              <AutoApproveRow
+                permissions={configSnapshot.permissions}
+                saveConfig={saveConfig}
+                cols={shellW}
+              />
+            )}
             {checkpointList.length > 0 && onRestoreCheckpoint && (
               <box flexDirection="row" paddingTop={1} paddingBottom={0} flexWrap="wrap">
-                {checkpointRestorePrompt === "which" ? (
+                {checkpointRestorePrompt === "type" ? (
+                  <text fg={THEME.accent}>Restore type: 1=Files &amp; Task, 2=Files only, 3=Task only [1] </text>
+                ) : checkpointRestorePrompt === "which" ? (
                   <text fg={THEME.accent}>Restore which (1–{checkpointList.length})? </text>
                 ) : (
                   <>
@@ -2596,6 +2689,7 @@ export function App({
               modeColor={modeColor}
               isRunning={state.isRunning}
               awaitingApproval={state.awaitingApproval}
+              awaitingWhatToDoInstead={state.awaitingWhatToDoInstead}
               pendingApprovalAction={state.pendingApprovalAction}
               indexReady={state.indexReady}
               provider={state.provider}
@@ -3370,8 +3464,11 @@ function HomeLanding({
   slashSelected,
   isRunning,
   awaitingApproval,
+  awaitingWhatToDoInstead = false,
   pendingApprovalAction,
   indexReady,
+  configSnapshot,
+  saveConfig,
   onInputChange,
   onSubmit,
 }: {
@@ -3389,8 +3486,11 @@ function HomeLanding({
   slashSelected: number
   isRunning: boolean
   awaitingApproval: boolean
+  awaitingWhatToDoInstead?: boolean
   pendingApprovalAction: ApprovalAction | null
   indexReady: boolean
+  configSnapshot?: AppProps["configSnapshot"]
+  saveConfig?: (updates: Record<string, unknown>) => void
   onInputChange: (value: string) => void
   onSubmit: (value?: string) => void
 }) {
@@ -3417,6 +3517,13 @@ function HomeLanding({
         {awaitingApproval && pendingApprovalAction && (
           <ApprovalBanner action={pendingApprovalAction} cols={shellW} />
         )}
+        {configSnapshot && saveConfig && (
+          <AutoApproveRow
+            permissions={configSnapshot.permissions}
+            saveConfig={saveConfig}
+            cols={shellW}
+          />
+        )}
         <InputBar
           input={input}
           cols={shellW}
@@ -3424,6 +3531,7 @@ function HomeLanding({
           modeColor={modeColor}
           isRunning={isRunning}
           awaitingApproval={awaitingApproval}
+          awaitingWhatToDoInstead={awaitingWhatToDoInstead}
           pendingApprovalAction={pendingApprovalAction}
           indexReady={indexReady}
           provider={provider}
@@ -3565,13 +3673,55 @@ function PresetPickerPopup({
 
 // ─── Input bar ──────────────────────────────────────────────────────────────
 
+const AUTO_APPROVE_KEYS = ["autoApproveRead", "autoApproveWrite", "autoApproveCommand", "autoApproveMcp", "autoApproveBrowser"] as const
+const AUTO_APPROVE_LABELS: Record<(typeof AUTO_APPROVE_KEYS)[number], string> = {
+  autoApproveRead: "Read",
+  autoApproveWrite: "Write",
+  autoApproveCommand: "Execute",
+  autoApproveMcp: "MCP",
+  autoApproveBrowser: "Browser",
+}
+
+function AutoApproveRow({
+  permissions,
+  saveConfig,
+  cols,
+}: {
+  permissions?: { autoApproveRead?: boolean; autoApproveWrite?: boolean; autoApproveCommand?: boolean; autoApproveMcp?: boolean; autoApproveBrowser?: boolean }
+  saveConfig: (updates: Record<string, unknown>) => void
+  cols: number
+}) {
+  const perms = {
+    autoApproveRead: permissions?.autoApproveRead ?? true,
+    autoApproveWrite: permissions?.autoApproveWrite ?? false,
+    autoApproveCommand: permissions?.autoApproveCommand ?? false,
+    autoApproveMcp: permissions?.autoApproveMcp ?? false,
+    autoApproveBrowser: permissions?.autoApproveBrowser ?? false,
+  }
+  const count = AUTO_APPROVE_KEYS.filter((k) => perms[k]).length
+  const label = count === 0 ? "Off" : count === AUTO_APPROVE_KEYS.length ? "All" : AUTO_APPROVE_KEYS.filter((k) => perms[k]).map((k) => AUTO_APPROVE_LABELS[k]).join(", ")
+  return (
+    <box flexDirection="row" paddingTop={0} paddingBottom={0} paddingLeft={0} paddingRight={0}>
+      <text fg={THEME.textMuted}>Auto-approve: </text>
+      <text fg={THEME.text}>{label}</text>
+      <text fg={THEME.textMuted}>  (R/W/E/M/B: toggle)</text>
+    </box>
+  )
+}
+
 function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number }) {
   const width = Math.max(20, cols - 4)
   const lines: string[] = []
   const coloredLines: { line: string; fg: string }[] = []
   if (action.type === "write") {
-    lines.push("✏ File write")
+    lines.push("✏ Edit file")
     lines.push(`  ${action.description}`)
+    if (action.diffStats != null && (action.diffStats.added > 0 || action.diffStats.removed > 0)) {
+      const parts: string[] = []
+      if (action.diffStats.added > 0) parts.push(`+${action.diffStats.added}`)
+      if (action.diffStats.removed > 0) parts.push(`-${action.diffStats.removed}`)
+      lines.push(`  Lines: ${parts.join(" ")}`)
+    }
     if (action.diff) {
       const diffPreview = action.diff.split("\n").slice(0, 25)
       for (const line of diffPreview) {
@@ -3606,8 +3756,8 @@ function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number
   }
   const hint =
     action.type === "execute"
-      ? "y Allow once  n Deny  a Always allow  s Allow all  e Add to allowed (folder)"
-      : "y Allow once  n Deny  a Always allow  s Allow all"
+      ? "y Allow once  n Deny  a Always allow  s Allow all  e Add to allowed (folder)  i Say what to do instead"
+      : "y Allow once  n Deny  a Always allow  s Allow all  i Say what to do instead"
   lines.push("")
   lines.push(`  ${hint}`)
   return (
@@ -3634,6 +3784,7 @@ function InputBar({
   modeColor,
   isRunning,
   awaitingApproval,
+  awaitingWhatToDoInstead = false,
   pendingApprovalAction,
   indexReady,
   provider,
@@ -3648,6 +3799,7 @@ function InputBar({
   modeColor: string
   isRunning: boolean
   awaitingApproval: boolean
+  awaitingWhatToDoInstead?: boolean
   pendingApprovalAction: ApprovalAction | null
   indexReady: boolean
   provider: string
@@ -3659,12 +3811,12 @@ function InputBar({
   const borderColor = awaitingApproval ? THEME.warning : isRunning ? THEME.danger : THEME.accent
   const approvalPrompt =
     pendingApprovalAction?.type === "execute"
-      ? "Allow once (y) / Deny (n) / Always allow (a) / Allow all (s) / Add to allowed (e)"
+      ? "Allow once (y) / Deny (n) / Always allow (a) / Allow all (s) / Add to allowed (e) / Say what to do instead (i)"
       : pendingApprovalAction?.type === "doom_loop"
         ? "Continue? y / n (abort)"
-        : "Allow once (y) / Deny (n) / Always allow (a) / Allow all (s)"
+        : "Allow once (y) / Deny (n) / Always allow (a) / Allow all (s) / Say what to do instead (i)"
   const prompt = awaitingApproval
-    ? approvalPrompt
+    ? (awaitingWhatToDoInstead ? "What to do instead? (type and press Enter)" : approvalPrompt)
     : isRunning
       ? "[Abort: Ctrl+C]"
       : mode === "agent" ? "Agent" : mode === "plan" ? "Plan" : mode === "debug" ? "Debug" : "Ask"
@@ -4400,30 +4552,7 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
       if (exploreFiles > 0) labelParts.push(exploreFiles === 1 ? "1 file" : `${exploreFiles} files`)
       if (exploreSearches > 0) labelParts.push(exploreSearches === 1 ? "1 search" : `${exploreSearches} searches`)
       out.push({ text: `  Explored${labelParts.length > 0 ? ` ${labelParts.join(", ")}` : ""}`, color: "gray" })
-      const collapseExplored = parts.some(
-        (p) =>
-          (p.type === "text" && (p as { user_message?: string }).user_message?.trim()) ||
-          (p.type === "tool" && (p as { tool: string; status: string }).tool === "progress_note" && (p as { status: string }).status === "completed")
-      )
-      if (!collapseExplored) {
-        for (const item of prefixItems) {
-        if (item.type === "reasoning") {
-          const durationStr = item.durationMs != null ? ` (${(item.durationMs / 1000).toFixed(1)}s)` : ""
-          out.push({ text: `  Thought${durationStr}`, color: "magenta" })
-          if (state.showThinking && item.text.trim()) {
-            for (const line of wrapToWidth(sanitizeText(item.text).slice(-600), wrapW))
-              out.push({ text: `    ${line}`, color: "magenta" })
-          }
-        } else {
-          const tp = item.part
-          const icon = TOOL_ICONS[tp.tool] ?? "🔧"
-          const status = tp.status === "completed" ? "ok" : tp.status === "error" ? "err" : "…"
-          const preview = formatToolPreview({ id: tp.id, tool: tp.tool, status: tp.status as "running" | "completed" | "error", input: tp.input, timeStart: tp.timeStart ?? 0 })
-          const line = preview ? `  [${status}] ${icon} ${toolDisplayName(tp.tool)} — ${preview}` : `  [${status}] ${icon} ${toolDisplayName(tp.tool)}`
-          for (const l of wrapToWidth(line, width)) out.push({ text: l, color: "gray" })
-        }
-      }
-      }
+      // Explored is always collapsed in CLI; use /show-details to see Thought and tool details
     }
     let i = 0
     while (i < parts.length) {
@@ -4573,19 +4702,60 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
       if (Array.isArray(msg.content)) {
         const contentParts = msg.content as MessagePart[]
         const finalReply = getFinalReplyFromAssistantParts(contentParts)
+        const { items: prefixItems, prefixIndices } = getExploredPrefixItems(contentParts)
         out.push({ text: "NexusCode", color: "green", bold: true })
-        for (const part of contentParts) {
-          if (part.type === "tool" && (part as ToolPartWithSubagents).tool === "spawn_agent") {
-            const icon = TOOL_ICONS["spawn_agent"] ?? "🤖"
-            out.push({ text: `  ${icon} ${toolDisplayName("spawn_agent")}`, color: "gray" })
-            const subagents = (part as ToolPartWithSubagents).subagents ?? []
+        // Explored block: summary line only (collapsed by default; use /show-details for Thought/tool lines)
+        if (prefixItems.length > 0) {
+          const exploreFiles = prefixItems.filter(
+            (x) => x.type === "tool" && EXPLORE_FILE_COUNT_TOOLS.has(x.part.tool)
+          ).length
+          const exploreSearches = prefixItems.filter(
+            (x) => x.type === "tool" && EXPLORE_SEARCH_TOOLS.has(x.part.tool)
+          ).length
+          const labelParts: string[] = []
+          if (exploreFiles > 0) labelParts.push(exploreFiles === 1 ? "1 file" : `${exploreFiles} files`)
+          if (exploreSearches > 0)
+            labelParts.push(exploreSearches === 1 ? "1 search" : `${exploreSearches} searches`)
+          out.push({
+            text: `  Explored${labelParts.length > 0 ? ` ${labelParts.join(", ")}` : ""}`,
+            color: "gray",
+          })
+        }
+        // Non-explored tools (including spawn_agent with subagents)
+        for (let idx = 0; idx < contentParts.length; idx++) {
+          if (prefixIndices.has(idx)) continue
+          const part = contentParts[idx]!
+          if (part.type !== "tool") continue
+          const tp = part as ToolPartWithSubagents
+          if (tp.tool === "thinking_preamble" || tp.tool === "progress_note") continue
+          if (isExploreTool(tp.tool)) continue
+          const icon = TOOL_ICONS[tp.tool] ?? "🔧"
+          const status = tp.status === "completed" ? "ok" : tp.status === "error" ? "err" : "…"
+          const preview = formatToolPreview({
+            id: tp.id ?? "",
+            tool: tp.tool,
+            status: tp.status as "running" | "completed" | "error",
+            input: tp.input,
+            output: typeof (tp as { output?: string }).output === "string" ? (tp as { output: string }).output : undefined,
+            timeStart: tp.timeStart ?? 0,
+          })
+          const line = preview
+            ? `  [${status}] ${icon} ${toolDisplayName(tp.tool)} — ${preview}`
+            : `  [${status}] ${icon} ${toolDisplayName(tp.tool)}`
+          for (const l of wrapToWidth(line, width)) out.push({ text: l, color: "gray" })
+          if (tp.tool === "spawn_agent") {
+            const subagents = tp.subagents ?? []
             if (subagents.length > 0) {
               out.push({ text: "\x1b[43m\x1b[1m\x1b[30m Tasks \x1b[0m", ansi: true })
               for (const sa of subagents) {
-                out.push({ text: "    " + truncateTask(sanitizeText(sa.task ?? ""), 56), color: "white" })
+                out.push({
+                  text: "    " + truncateTask(sanitizeText(sa.task ?? ""), 56),
+                  color: "white",
+                })
                 out.push({ text: "    " + subagentStatusLine(sa), color: "gray" })
                 if (sa.error && sa.status === "error")
-                  for (const l of wrapToWidth("      " + sanitizeText(sa.error), wrapW)) out.push({ text: l, color: "red" })
+                  for (const l of wrapToWidth("      " + sanitizeText(sa.error), wrapW))
+                    out.push({ text: l, color: "red" })
               }
             }
           }

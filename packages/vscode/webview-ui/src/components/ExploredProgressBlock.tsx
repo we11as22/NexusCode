@@ -177,7 +177,7 @@ export function ExploredSummaryInline({
   defaultCollapsed: boolean
   onOpenFile?: (path: string, line?: number, endLine?: number) => void
 }) {
-  const [open, setOpen] = useState(!defaultCollapsed)
+  const [open, setOpen] = useState(false)
   useEffect(() => {
     if (defaultCollapsed) setOpen(false)
   }, [defaultCollapsed])

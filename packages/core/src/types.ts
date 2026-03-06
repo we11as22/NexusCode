@@ -23,6 +23,8 @@ export interface PermissionResult {
   skipAll?: boolean
   /** For execute_command: add this command to the project allowlist so it is not asked again in this folder */
   addToAllowedCommand?: string
+  /** When set with approved: false, the user declined the action and asked to do this instead; agent continues with this instruction. */
+  whatToDoInstead?: string
 }
 
 // ─── Tool Types ───────────────────────────────────────────────────────────────
@@ -78,6 +80,8 @@ export interface ApprovalAction {
   description: string
   content?: string
   diff?: string
+  /** For write/replace_in_file: lines added and removed, shown in approval UI and after completion. */
+  diffStats?: { added: number; removed: number }
 }
 
 export interface IHost {
@@ -104,6 +108,8 @@ export interface IHost {
   getCheckpointEntries?(): Promise<CheckpointEntry[]>
   /** Get diff between two checkpoints for preview. */
   getCheckpointDiff?(fromHash: string, toHash?: string): Promise<ChangedFile[]>
+  /** Called by the loop after a checkpoint is committed so the host can push updated entries to the UI. */
+  notifyCheckpointEntriesUpdated?(): void
 
   /**
    * Roo/Cline-style file edit flow: open → [approval] → save or revert.
@@ -345,6 +351,8 @@ export interface NexusConfig {
     autoApproveRead: boolean
     autoApproveWrite: boolean
     autoApproveCommand: boolean
+    autoApproveMcp?: boolean
+    autoApproveBrowser?: boolean
     autoApproveReadPatterns: string[]
     /** Commands allowed without approval for this project (from .nexus/allowed-commands.json) */
     allowedCommands: string[]

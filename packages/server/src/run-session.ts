@@ -3,6 +3,8 @@ import type { AgentEvent } from "@nexuscode/core"
 import { runAgentLoop } from "@nexuscode/core"
 import {
   loadConfig,
+  getGlobalConfigDir,
+  createFileSecretsStore,
   createLLMClient,
   ToolRegistry,
   loadRules,
@@ -45,8 +47,9 @@ export interface RunSessionOptions {
 export async function runSession(opts: RunSessionOptions): Promise<void> {
   const { session, cwd, content, mode, onEvent, signal, configOverride } = opts
 
-  let config = await loadConfig(cwd).catch(() => undefined)
-  if (!config) config = await loadConfig(process.cwd()).catch(() => undefined)
+  const secretsStore = createFileSecretsStore(getGlobalConfigDir())
+  let config = await loadConfig(cwd, { secrets: secretsStore }).catch(() => undefined)
+  if (!config) config = await loadConfig(process.cwd(), { secrets: secretsStore }).catch(() => undefined)
   if (!config) config = NexusConfigSchema.parse({}) as NexusConfig
 
   const host = new ServerHost(cwd, onEvent)
