@@ -695,12 +695,16 @@ process.on("uncaughtException", onUncaughtException)
 
 /** Mode of the previous run; used only for CLI display. Reminder is NOT prepended — mode is in system prompt and API. */
 let lastRunMode: Mode | null = null
+const runInProgressRef = { current: false }
 
 function getModeReminder(_mode: Mode): string {
   return ""
 }
 
 async function runMessage(content: string, msgMode: Mode) {
+  if (runInProgressRef.current) return
+  runInProgressRef.current = true
+  try {
   lastRunMode = msgMode
 
   let actualContent = content
@@ -815,6 +819,9 @@ async function runMessage(content: string, msgMode: Mode) {
     const planText = await getPlanContentForFollowup(sessionRef.current, cwd)
     pushEvent({ type: "plan_followup_ask", planText })
   }
+  } finally {
+    runInProgressRef.current = false
+  }
 }
 
 async function refreshIndexerFromGit(indexer: CodebaseIndexer | undefined, projectCwd: string): Promise<void> {
@@ -879,7 +886,7 @@ try {
     exitOnCtrlC: false,
     targetFps: 60,
     gatherStats: false,
-    autoFocus: false,
+    autoFocus: true,
     useMouse: false,
     enableMouseMovement: false,
     useKittyKeyboard: { disambiguate: true, alternateKeys: true, events: true },

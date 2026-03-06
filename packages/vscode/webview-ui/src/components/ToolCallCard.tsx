@@ -31,32 +31,59 @@ interface Props {
 
 const TOOL_ICONS: Record<string, string> = {
   read_file: "📄",
+  Read: "📄",
   write_to_file: "✍️",
+  Write: "✍️",
   replace_in_file: "✏️",
+  Edit: "✏️",
   execute_command: "⌨️",
+  Bash: "⌨️",
   search_files: "🔍",
+  Grep: "🔍",
   list_files: "📁",
+  ListFiles: "📁",
   list_code_definitions: "🏗️",
+  ListCodeDefinitions: "🏗️",
   read_lints: "⚠️",
+  ReadLints: "⚠️",
   codebase_search: "🔎",
+  CodebaseSearch: "🔎",
   web_fetch: "🌐",
+  WebFetch: "🌐",
   web_search: "🌍",
+  WebSearch: "🌍",
   glob: "📋",
+  Glob: "📋",
   browser_action: "🖥️",
   spawn_agent: "🤖",
   use_skill: "💡",
+  Skill: "💡",
   final_report_to_user: "✅",
   ask_followup_question: "❓",
+  AskFollowupQuestion: "❓",
   progress_note: "📌",
   update_todo_list: "📝",
+  TodoWrite: "📝",
   thinking_preamble: "💭",
   create_rule: "📏",
   batch: "📦",
 }
 
 function toolDisplayName(tool: string): string {
-  if (tool === "execute_command") return "bash"
-  return tool
+  if (tool === "execute_command" || tool === "Bash") return "Bash"
+  const labels: Record<string, string> = {
+    read_file: "Read", Read: "Read",
+    write_to_file: "Write", Write: "Write",
+    replace_in_file: "Edit", Edit: "Edit",
+    list_files: "ListFiles", ListFiles: "ListFiles",
+    search_files: "Grep", Grep: "Grep",
+    codebase_search: "CodebaseSearch", CodebaseSearch: "CodebaseSearch",
+    list_code_definitions: "ListCodeDefinitions", ListCodeDefinitions: "ListCodeDefinitions",
+    read_lints: "ReadLints", ReadLints: "ReadLints",
+    glob: "Glob", Glob: "Glob",
+    update_todo_list: "TodoWrite", TodoWrite: "TodoWrite",
+  }
+  return labels[tool] ?? tool
 }
 
 /* Tool cards (except file edit): on chat background, only subtle status bar */
@@ -89,7 +116,7 @@ function getDiffStats(output: string): { add: number; del: number } {
 }
 
 function isFileEditTool(part: ToolPart): boolean {
-  return ["read_file", "write_to_file", "replace_in_file"].includes(part.tool)
+  return ["read_file", "Read", "write_to_file", "Write", "replace_in_file", "Edit"].includes(part.tool)
 }
 
 /** Up to 4 lines: first added/removed line, 1 line above, then window of 4 lines down (or until 1 context line inclusive). */
@@ -129,7 +156,7 @@ function buildFallbackDiffHunks(content: string, maxLines = 4): Array<{ type: "a
 
 function getFileEditPath(part: ToolPart): string | null {
   if (part.path != null && String(part.path).trim()) return String(part.path).trim()
-  const pathVal = part.input?.path
+  const pathVal = part.input?.path ?? part.input?.file_path
   if (pathVal != null && String(pathVal).trim()) return String(pathVal).trim()
   const m = part.output?.match(/<file_content\s+path="([^"]+)"/)
   if (m) return m[1]!
@@ -142,7 +169,7 @@ function getEditStatLabel(part: ToolPart): string {
     return [added > 0 ? `+${added}` : "", removed > 0 ? `-${removed}` : ""].filter(Boolean).join(" ")
   }
   const output = part.output ?? ""
-  if (part.tool === "read_file") {
+  if (part.tool === "read_file" || part.tool === "Read") {
     const m = output.match(/<file_content\s+path="[^"]+"\s+lines="([^"]+)"\s+total="([^"]+)">/)
     if (m) {
       const [, linesAttr, total] = m
@@ -159,7 +186,7 @@ function getEditStatLabel(part: ToolPart): string {
   if (isDiff && (stats.add > 0 || stats.del > 0)) {
     return [stats.add > 0 ? `+${stats.add}` : "", stats.del > 0 ? `-${stats.del}` : ""].filter(Boolean).join(" ")
   }
-  if (part.tool === "write_to_file") {
+  if (part.tool === "write_to_file" || part.tool === "Write") {
     const m = output.match(/\((\d+)\s+lines?\)/)
     if (m) return `+${m[1]}`
   }
@@ -305,7 +332,7 @@ function FileEditBlock({ part }: { part: ToolPart }) {
   const fallbackLabel =
     isDiff && (stats.add > 0 || stats.del > 0)
       ? [stats.add > 0 ? `+${stats.add}` : "", stats.del > 0 ? `-${stats.del}` : ""].filter(Boolean).join(" ")
-      : part.tool === "read_file"
+      : part.tool === "read_file" || part.tool === "Read"
         ? getEditStatLabel(part)
         : ""
 
@@ -373,10 +400,11 @@ function FileEditBlock({ part }: { part: ToolPart }) {
 /** One-line progress preview: file path + lines, folder, or other key args (same idea as CLI formatToolPreview). */
 function formatToolInputPreview(part: ToolPart): string {
   const inp = part.input ?? {}
-  const pathVal = inp["path"]
+  const pathVal = inp["path"] ?? inp["file_path"]
   const pathStr = pathVal != null ? String(pathVal).trim() : ""
-  const startLine = inp["start_line"]
+  const startLine = inp["start_line"] ?? inp["offset"]
   const endLine = inp["end_line"]
+  const limit = inp["limit"]
   const pattern = inp["pattern"]
   const patterns = inp["patterns"]
   const pathsArr = inp["paths"]
@@ -386,7 +414,8 @@ function formatToolInputPreview(part: ToolPart): string {
   const short = (s: string, max: number) => (s.length > max ? s.slice(0, max - 1) + "…" : s)
 
   switch (part.tool) {
-    case "read_file": {
+    case "read_file":
+    case "Read": {
       if (!pathStr) return ""
       let range = ""
       const out = part.output ?? ""
@@ -399,16 +428,22 @@ function formatToolInputPreview(part: ToolPart): string {
           if (!isFull) range = ` (lines ${linesAttr})`
         }
       }
-      if (!range && typeof startLine === "number" && typeof endLine === "number") range = ` (lines ${startLine}–${endLine})`
-      else if (!range && typeof startLine === "number") range = ` (line ${startLine})`
+      if (!range && typeof startLine === "number" && (typeof endLine === "number" || typeof limit === "number")) {
+        const end = typeof endLine === "number" ? endLine : (typeof limit === "number" ? (startLine as number) + limit - 1 : undefined)
+        range = end != null ? ` (lines ${startLine}–${end})` : ` (line ${startLine})`
+      } else if (!range && typeof startLine === "number") range = ` (line ${startLine})`
       return short(pathStr, 56) + range
     }
     case "list_files":
+    case "ListFiles":
       return pathStr ? `folder ${short(pathStr, 48)}` : "folder ."
     case "write_to_file":
+    case "Write":
     case "replace_in_file":
+    case "Edit":
       return pathStr ? short(pathStr, 56) : ""
-    case "search_files": {
+    case "search_files":
+    case "Grep": {
       const pat = Array.isArray(patterns) && patterns.length
         ? `patterns(${patterns.length})`
         : pattern && typeof pattern === "string"
@@ -421,7 +456,8 @@ function formatToolInputPreview(part: ToolPart): string {
           : ""
       return [pat, scope].filter(Boolean).join(" in ") || "search"
     }
-    case "codebase_search": {
+    case "codebase_search":
+    case "CodebaseSearch": {
       const q = query && typeof query === "string" ? short(String(query).replace(/\s+/g, " "), 36) : ""
       const scope = Array.isArray(pathsArr) && pathsArr.length
         ? pathsArr.slice(0, 1).join("")
@@ -429,20 +465,26 @@ function formatToolInputPreview(part: ToolPart): string {
       return scope ? `${q} in ${short(scope, 24)}` : q || "search"
     }
     case "execute_command":
+    case "Bash":
       return command && typeof command === "string" ? short(String(command).replace(/\s+/g, " "), 48) : ""
     case "web_fetch":
+    case "WebFetch":
     case "web_search":
+    case "WebSearch":
       return url && typeof url === "string" ? short(String(url), 52) : ""
     case "glob":
-      return (inp["glob_pattern"] && typeof inp["glob_pattern"] === "string")
-        ? short(String(inp["glob_pattern"]), 48)
+    case "Glob":
+      return (inp["glob_pattern"] ?? inp["pattern"]) && typeof (inp["glob_pattern"] ?? inp["pattern"]) === "string"
+        ? short(String(inp["glob_pattern"] ?? inp["pattern"]), 48)
         : ""
-    case "read_lints": {
+    case "read_lints":
+    case "ReadLints": {
       const paths = inp["paths"]
       if (Array.isArray(paths) && paths.length > 0) return short(paths.slice(0, 3).join(", "), 52)
       return "workspace"
     }
     case "list_code_definitions":
+    case "ListCodeDefinitions":
       return pathStr ? short(pathStr, 56) : ""
     case "batch": {
       const reads = (inp["reads"] as unknown[])?.length ?? 0

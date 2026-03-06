@@ -233,6 +233,7 @@ interface ChatState {
 }
 
 export type AgentEvent =
+  | { type: "assistant_message_started"; messageId: string }
   | { type: "text_delta"; delta: string; messageId: string; user_message_delta?: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
@@ -408,7 +409,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   handleStateUpdate: (state) => {
-    set((prev) => ({ ...prev, ...state }))
+    set((prev) => {
+      const next = { ...prev, ...state }
+      // Keep streamed assistant content: if incoming messages have an empty last assistant message
+      // but we have a richer one (from streaming), keep ours so the reply does not disappear.
+      if (state.messages != null && Array.isArray(state.messages) && prev.messages.length > 0 && state.messages.length > 0) {
+        const lastIn = state.messages[state.messages.length - 1]
+        const lastPrev = prev.messages[prev.messages.length - 1]
+        if (lastIn?.role === "assistant" && lastPrev?.role === "assistant" && !hasAssistantContent(lastIn.content) && hasAssistantContent(lastPrev.content)) {
+          next.messages = [
+            ...state.messages.slice(0, -1),
+            { ...lastIn, content: lastPrev.content },
+          ]
+        }
+      }
+      return next
+    })
   },
 
   handleConfigLoaded: (config) => {
@@ -665,7 +681,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const updated = { ...target }
         const parts = Array.isArray(updated.content)
           ? [...(updated.content as MessagePart[])]
-          : [{ type: "text" as const, text: updated.content as string }]
+          : (typeof updated.content === "string" && updated.content.length > 0 ? [{ type: "text" as const, text: updated.content }] : [])
         const lastPart = parts[parts.length - 1]
         if (lastPart?.type === "reasoning") {
           parts[parts.length - 1] = { ...lastPart, text: lastPart.text + event.delta } as ReasoningPart
@@ -838,6 +854,14 @@ function ensureAssistantMessage(messages: SessionMessage[], messageId?: string):
     },
   ]
   return { list, index: list.length - 1 }
+}
+
+function hasAssistantContent(content: string | MessagePart[]): boolean {
+  if (typeof content === "string") return content.trim().length > 0
+  const parts = content as MessagePart[]
+  return parts.some(
+    (p) => p.type === "text" && (((p as TextPart).text?.trim().length ?? 0) > 0 || ((p as TextPart).user_message?.trim().length ?? 0) > 0)
+  )
 }
 
 function stripToolCallMarkup(value: string): string {

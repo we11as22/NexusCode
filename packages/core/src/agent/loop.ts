@@ -289,6 +289,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
   let lastToolName = ""
   let attemptedCompletionThisIteration = false
+  let doneEmitted = false
   while (!signal.aborted) {
     loopIterations++
 
@@ -465,6 +466,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           partId,
           messageId: newMessageId,
           success: result.success,
+          output: result.output,
+          error: result.success ? undefined : result.output,
         })
         if (tc.toolName === "TodoWrite") {
           host.emit({ type: "todo_updated", todo: session.getTodo() })
@@ -908,7 +911,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     emitContextUsage()
   }
 
-  if (!signal.aborted && lastAssistantMessageId) {
+  if (!signal.aborted && lastAssistantMessageId && !doneEmitted) {
+    doneEmitted = true
     // When mandatory end tool was executed, clear todo so it's removed from session.
     if (attemptedCompletionThisIteration || lastToolName === MANDATORY_END_TOOL[mode]) {
       session.updateTodo("")

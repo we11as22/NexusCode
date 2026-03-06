@@ -12,10 +12,16 @@ export interface ExploredEntry {
   durationSec?: number
 }
 
-const FILE_TOOLS = new Set(["read_file", "list_files"])
-const SEARCH_TOOLS = new Set(["grep", "codebase_search", "search_files", "list_code_definitions"])
-/** Only these increase "N files" in Explored label. list_files is in Explored but not counted. */
-const FILE_COUNT_TOOLS = new Set(["read_file"])
+const FILE_TOOLS = new Set([
+  "read_file", "list_files",
+  "Read", "ListFiles", // core built-in names
+])
+const SEARCH_TOOLS = new Set([
+  "grep", "codebase_search", "search_files", "list_code_definitions",
+  "Grep", "CodebaseSearch", "Glob", "ListCodeDefinitions", // core built-in names
+])
+/** Only these increase "N files" in Explored label. list_files/ListFiles is in Explored but not counted. */
+const FILE_COUNT_TOOLS = new Set(["read_file", "Read"])
 
 /** Whether this tool counts as exploration (file read/list or search) for the collapsed "Explored" block. */
 export function isExplorationTool(tool: string): boolean {
@@ -75,10 +81,12 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
   const dur = durationSec != null ? ` (${durationSec.toFixed(1)}s)` : ""
 
   switch (part.tool) {
-    case "read_file": {
-      const path = part.input?.path as string | undefined
-      const start = part.input?.startLine as number | undefined
-      const end = part.input?.endLine as number | undefined
+    case "read_file":
+    case "Read": {
+      const path = (part.input?.path ?? part.input?.file_path) as string | undefined
+      const start = (part.input?.startLine ?? part.input?.offset) as number | undefined
+      const limit = part.input?.limit as number | undefined
+      const end = start != null && limit != null ? start + limit - 1 : undefined
       const pathStr = path ?? "file"
       const lineStr =
         start != null && end != null ? ` L${start}-${end}` : start != null ? ` L${start}` : ""
@@ -92,8 +100,9 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
         durationSec,
       }
     }
-    case "list_files": {
-      const path = (part.input?.path as string) ?? (part.input?.directory as string) ?? "."
+    case "list_files":
+    case "ListFiles": {
+      const path = (part.input?.path ?? part.input?.directory) as string | undefined ?? "."
       return {
         id,
         kind: "list",
@@ -102,9 +111,10 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
         durationSec,
       }
     }
-    case "grep": {
-      const pattern = (part.input?.pattern as string) ?? (part.input?.query as string) ?? "…"
-      const pathScope = (part.input?.pathScope as string) ?? (part.input?.path as string)
+    case "grep":
+    case "Grep": {
+      const pattern = (part.input?.pattern ?? part.input?.query) as string ?? "…"
+      const pathScope = (part.input?.pathScope ?? part.input?.path) as string
       const scope = pathScope ? ` in ${pathScope}` : ""
       const shortPattern = pattern.length > 40 ? pattern.slice(0, 37) + "…" : pattern
       return {
@@ -115,7 +125,8 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
         durationSec,
       }
     }
-    case "codebase_search": {
+    case "codebase_search":
+    case "CodebaseSearch": {
       const query = (part.input?.query as string) ?? "…"
       const short = query.length > 50 ? query.slice(0, 47) + "…" : query
       return { id, kind: "search", label: `Codebase search: ${short}${dur}`, durationSec }
@@ -124,11 +135,19 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
       const q = (part.input?.query as string) ?? "…"
       return { id, kind: "search", label: `Search files: ${q}${dur}`, durationSec }
     }
-    case "list_code_definitions": {
-      const scope = (part.input?.pathScope as string) ?? "codebase"
+    case "list_code_definitions":
+    case "ListCodeDefinitions": {
+      const scope = (part.input?.pathScope ?? part.input?.path) as string ?? "codebase"
       return { id, kind: "search", label: `List definitions in ${scope}${dur}`, durationSec }
     }
+    case "glob":
+    case "Glob": {
+      const pattern = (part.input?.pattern ?? part.input?.glob_pattern) as string ?? "…"
+      const short = pattern.length > 40 ? pattern.slice(0, 37) + "…" : pattern
+      return { id, kind: "search", label: `Glob: ${short}${dur}`, durationSec }
+    }
     case "execute_command":
+    case "Bash":
       return null
     default:
       return {
@@ -141,9 +160,15 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
 }
 
 function formatToolName(tool: string): string {
-  if (tool === "execute_command") return "bash"
-  if (tool === "spawn_agent") return "spawn_agent"
-  return tool
+  if (tool === "execute_command" || tool === "Bash") return "Bash"
+  const core: Record<string, string> = {
+    read_file: "Read", list_files: "ListFiles",
+    replace_in_file: "Edit", write_to_file: "Write",
+    grep: "Grep", search_files: "Grep",
+    codebase_search: "CodebaseSearch", list_code_definitions: "ListCodeDefinitions",
+    glob: "Glob", read_lints: "ReadLints", update_todo_list: "TodoWrite",
+  }
+  return core[tool] ?? tool
 }
 
 /** Per-message: compute files/searches count and entries from tool parts only. list_files is in entries but not counted in files (files = read_file only). */

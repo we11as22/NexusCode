@@ -183,26 +183,54 @@ const CLI_VERSION = "0.1.0"
 
 const TOOL_ICONS: Record<string, string> = {
   read_file: "📄",
+  Read: "📄",
   write_to_file: "✏️",
+  Write: "✏️",
   replace_in_file: "🔧",
+  Edit: "🔧",
   execute_command: "⌨️",
+  Bash: "⌨️",
   search_files: "🔍",
   list_files: "📂",
+  ListFiles: "📂",
   list_code_definitions: "🏗️",
+  ListCodeDefinitions: "🏗️",
   read_lints: "⚠️",
+  ReadLints: "⚠️",
   codebase_search: "🔎",
+  CodebaseSearch: "🔎",
+  Grep: "🔍",
+  grep: "🔍",
+  Glob: "📋",
   web_fetch: "🌐",
   web_search: "🔍",
-  glob: "📋",
   ask_followup_question: "❓",
   update_todo_list: "📋",
+  TodoWrite: "📋",
   use_skill: "🎯",
   spawn_agent: "🤖",
 }
 
-/** Display name for tools (e.g. execute_command → bash) */
+/** Display name for tools (e.g. execute_command/Bash → bash) */
 const TOOL_LABELS: Record<string, string> = {
   execute_command: "bash",
+  Bash: "bash",
+  read_file: "Read",
+  Read: "Read",
+  replace_in_file: "Edit",
+  Edit: "Edit",
+  write_to_file: "Write",
+  Write: "Write",
+  list_files: "ListFiles",
+  ListFiles: "ListFiles",
+  grep: "Grep",
+  Grep: "Grep",
+  codebase_search: "CodebaseSearch",
+  CodebaseSearch: "CodebaseSearch",
+  list_code_definitions: "ListCodeDefinitions",
+  ListCodeDefinitions: "ListCodeDefinitions",
+  glob: "Glob",
+  Glob: "Glob",
 }
 function toolDisplayName(tool: string): string {
   return TOOL_LABELS[tool] ?? tool
@@ -223,11 +251,14 @@ function truncateTask(s: string, max = 56): string {
 }
 
 /** Tools that are exploration (go into Explored block): read_file, list_files, and search tools. */
-const EXPLORE_FILE_TOOLS = new Set(["read_file", "list_files"])
-/** Tools that count as "files" in Explored label: read_file only. list_files is in block but not counted. */
-const EXPLORE_FILE_COUNT_TOOLS = new Set(["read_file"])
+const EXPLORE_FILE_TOOLS = new Set(["read_file", "list_files", "Read", "ListFiles"])
+/** Tools that count as "files" in Explored label: read_file/Read only. list_files/ListFiles is in block but not counted. */
+const EXPLORE_FILE_COUNT_TOOLS = new Set(["read_file", "Read"])
 /** Tools that count as "searches" in Explored label. */
-const EXPLORE_SEARCH_TOOLS = new Set(["grep", "codebase_search", "search_files", "list_code_definitions", "glob"])
+const EXPLORE_SEARCH_TOOLS = new Set([
+  "grep", "codebase_search", "search_files", "list_code_definitions", "glob",
+  "Grep", "CodebaseSearch", "ListCodeDefinitions", "Glob",
+])
 function getExploredCounts(parts: MessagePart[]): { files: number; searches: number } {
   let files = 0
   let searches = 0
@@ -890,9 +921,26 @@ export function App({
           case "text_delta":
             setState((s) => ({ ...s, currentStreaming: s.currentStreaming + (event.delta ?? "") }))
             break
-          case "reasoning_delta":
-            // Reasoning is internal only (not streamed to user); core no longer emits this.
+          case "reasoning_delta": {
+            const delta = (event as { delta?: string }).delta ?? ""
+            if (!delta) break
+            setState((s) => {
+              const flushed = s.currentStreaming.trim()
+                ? [...s.currentAssistantParts, { type: "text" as const, text: s.currentStreaming }]
+                : s.currentAssistantParts
+              const last = flushed[flushed.length - 1]
+              const nextParts =
+                last?.type === "reasoning"
+                  ? [...flushed.slice(0, -1), { ...last, text: (last as { text: string }).text + delta }]
+                  : [...flushed, { type: "reasoning" as const, text: delta }]
+              return {
+                ...s,
+                currentAssistantParts: nextParts,
+                currentStreaming: "",
+              }
+            })
             break
+          }
           case "tool_start": {
             const ev = event as { partId: string; tool: string; input?: Record<string, unknown> }
             setState((s) => {
@@ -1067,13 +1115,9 @@ export function App({
             break
           }
           case "done": {
-            const wasAlreadyAdded = addedAssistantInBatchRef.current
-            if (wasAlreadyAdded) {
-              addedAssistantInBatchRef.current = true
-              break
-            }
+            if (addedAssistantInBatchRef.current) break
+            addedAssistantInBatchRef.current = true
             setState((s) => {
-              if (addedAssistantInBatchRef.current) return s
               const text = stripToolCallMarkup(s.currentStreaming)
               const parts = [...s.currentAssistantParts]
               if (text.trim()) parts.push({ type: "text", text })
@@ -1084,6 +1128,7 @@ export function App({
                 lastMessage?.role === "assistant" &&
                 Array.isArray(lastMessage.content) &&
                 JSON.stringify(lastMessage.content) === JSON.stringify(parts)
+              if (duplicateAssistant) return s
               const newMsg: SessionMessage | null = hasContent
                 ? {
                     id: `r_${Date.now()}`,
@@ -1103,8 +1148,6 @@ export function App({
                         : "No final text response was produced. Retry with a narrower prompt or switch to agent mode.",
                   }
                 : null
-              if (duplicateAssistant) return s
-              addedAssistantInBatchRef.current = true
               return {
                 ...s,
                 messages: newMsg
@@ -2633,7 +2676,7 @@ export function App({
             />
             )}
             {state.awaitingApproval && state.pendingApprovalAction && (
-              <ApprovalBanner action={state.pendingApprovalAction} cols={shellW} />
+              <ApprovalBanner action={state.pendingApprovalAction} cols={shellW} rows={rows} />
             )}
             {view === "chat" && configSnapshot && saveConfig && (
               <AutoApproveRow
@@ -3493,7 +3536,7 @@ function HomeLanding({
               />
         )}
         {awaitingApproval && pendingApprovalAction && (
-          <ApprovalBanner action={pendingApprovalAction} cols={shellW} />
+          <ApprovalBanner action={pendingApprovalAction} cols={shellW} rows={rows} />
         )}
         {configSnapshot && saveConfig && (
           <AutoApproveRow
@@ -3687,8 +3730,10 @@ function AutoApproveRow({
   )
 }
 
-function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number }) {
+function ApprovalBanner({ action, cols, rows }: { action: ApprovalAction; cols: number; rows?: number }) {
   const width = Math.max(20, cols - 4)
+  /** Keep banner short so it never overlaps the input bar. Reserve space for input + footer. */
+  const maxDiffLines = Math.max(6, Math.min(12, (rows ?? 24) - 14))
   const lines: string[] = []
   const coloredLines: { line: string; fg: string }[] = []
   if (action.type === "write") {
@@ -3701,7 +3746,8 @@ function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number
       lines.push(`  Lines: ${parts.join(" ")}`)
     }
     if (action.diff) {
-      const diffPreview = action.diff.split("\n").slice(0, 25)
+      const allDiffLines = action.diff.split("\n")
+      const diffPreview = allDiffLines.slice(0, maxDiffLines)
       for (const line of diffPreview) {
         if (line.startsWith("+") && !line.startsWith("+++")) {
           coloredLines.push({ line: "  " + (line.length > width - 2 ? line.slice(0, width - 3) + "…" : line), fg: "green" })
@@ -3711,12 +3757,16 @@ function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number
           coloredLines.push({ line: "  " + (line.length > width - 2 ? line.slice(0, width - 3) + "…" : line), fg: "white" })
         }
       }
-      if (action.diff.includes("(truncated)")) coloredLines.push({ line: "  ...", fg: "gray" })
+      if (allDiffLines.length > maxDiffLines || action.diff.includes("(truncated)")) {
+        coloredLines.push({ line: "  ...", fg: "gray" })
+      }
     } else if (action.content) {
       lines.push("  Content preview:")
-      for (const line of action.content.split("\n").slice(0, 12)) {
+      const contentLines = action.content.split("\n").slice(0, Math.min(8, maxDiffLines - 2))
+      for (const line of contentLines) {
         lines.push("    " + (line.length > width - 6 ? line.slice(0, width - 7) + "…" : line))
       }
+      if (action.content.split("\n").length > contentLines.length) lines.push("    ...")
     }
   } else if (action.type === "execute") {
     const cmd = action.content || action.description.replace(/^Run:\s*/i, "")
@@ -3738,8 +3788,16 @@ function ApprovalBanner({ action, cols }: { action: ApprovalAction; cols: number
       : "y Allow once  n Deny  a Always allow  s Allow all  i Say what to do instead"
   lines.push("")
   lines.push(`  ${hint}`)
+  const maxBannerHeight = Math.min(16, Math.max(8, (rows ?? 24) - 10))
   return (
-    <box borderStyle="single" borderColor="yellow" paddingLeft={1} paddingRight={1} marginBottom={0}>
+    <box
+      borderStyle="single"
+      borderColor="yellow"
+      paddingLeft={1}
+      paddingRight={1}
+      marginBottom={0}
+      style={{ maxHeight: maxBannerHeight, overflowY: "hidden" }}
+    >
       {lines.map((line, i) => (
         <text key={i} fg={i === 0 ? "yellow" : i >= lines.length - 2 ? "gray" : "white"} bold={i === 0}>
           {line}
@@ -4370,10 +4428,12 @@ function getDiffPreviewHunksCli(
 }
 
 function formatToolPreview(tool: LiveTool): string {
-  const pathVal = tool.input?.["path"]
+  const pathVal = tool.input?.["path"] ?? tool.input?.["file_path"]
   const pathStr = pathVal != null ? String(pathVal) : ""
-  let startLine = tool.input?.["start_line"]
-  let endLine = tool.input?.["end_line"]
+  let startLine = tool.input?.["start_line"] ?? tool.input?.["startLine"] ?? tool.input?.["offset"]
+  let endLine = tool.input?.["end_line"] ?? tool.input?.["endLine"]
+  const limit = tool.input?.["limit"]
+  if (startLine != null && limit != null && endLine == null) endLine = Number(startLine) + Number(limit) - 1
   const pattern = tool.input?.["pattern"]
   const patterns = tool.input?.["patterns"]
   const pathsArr = tool.input?.["paths"]
@@ -4382,7 +4442,8 @@ function formatToolPreview(tool: LiveTool): string {
   const url = tool.input?.["url"]
   const parts: string[] = []
 
-  if (tool.tool === "read_file" && pathStr) {
+  const isRead = tool.tool === "read_file" || tool.tool === "Read"
+  if (isRead && pathStr) {
     const base = pathStr.split("/").pop() ?? pathStr
     const short = base.length > 36 ? base.slice(0, 33) + "…" : base
     parts.push(short)
@@ -4398,18 +4459,17 @@ function formatToolPreview(tool: LiveTool): string {
     }
     if (parts.length === 1 && typeof startLine === "number" && typeof endLine === "number") parts.push(`L${startLine}-${endLine}`)
     else if (parts.length === 1 && typeof startLine === "number") parts.push(`L${startLine}`)
-  } else if (tool.tool === "list_files") {
+  } else if (tool.tool === "list_files" || tool.tool === "ListFiles") {
     const dir = pathStr || "."
     const short = dir.length > 36 ? dir.slice(0, 33) + "…" : dir
     parts.push(`folder ${short}`)
-  } else if (tool.tool === "glob") {
-    const gp = tool.input?.["glob_pattern"]
+  } else if (tool.tool === "glob" || tool.tool === "Glob") {
+    const gp = tool.input?.["glob_pattern"] ?? tool.input?.["pattern"]
     if (gp && typeof gp === "string") parts.push((gp.length > 32 ? gp.slice(0, 29) + "…" : gp))
-  } else if (tool.tool === "read_lints") {
-    const pathsArr = tool.input?.["paths"]
+  } else if (tool.tool === "read_lints" || tool.tool === "ReadLints") {
     if (Array.isArray(pathsArr) && pathsArr.length > 0) parts.push(pathsArr.slice(0, 2).join(", "))
     else parts.push("workspace")
-  } else if (tool.tool === "execute_command" && command && typeof command === "string") {
+  } else if ((tool.tool === "execute_command" || tool.tool === "Bash") && command && typeof command === "string") {
     parts.push((command.length > 48 ? command.slice(0, 45) + "…" : command).replace(/\s+/g, " "))
   } else if (tool.tool === "batch") {
     const reads = (tool.input?.["reads"] as unknown[])?.length ?? 0
@@ -4432,7 +4492,7 @@ function formatToolPreview(tool: LiveTool): string {
   if (Array.isArray(pathsArr) && pathsArr.length > 0) parts.push(pathsArr.slice(0, 2).join(", "))
   if (pattern && typeof pattern === "string") parts.push((pattern.length > 24 ? pattern.slice(0, 21) + "…" : pattern).replace(/\s+/g, " "))
   if (Array.isArray(patterns) && patterns.length > 0) parts.push(`pat:${patterns.length}`)
-  if (tool.tool !== "execute_command" && command && typeof command === "string") parts.push((command.length > 32 ? command.slice(0, 29) + "…" : command).replace(/\s+/g, " "))
+  if (tool.tool !== "execute_command" && tool.tool !== "Bash" && command && typeof command === "string") parts.push((command.length > 32 ? command.slice(0, 29) + "…" : command).replace(/\s+/g, " "))
   if (query && typeof query === "string") parts.push((query.length > 28 ? query.slice(0, 25) + "…" : query).replace(/\s+/g, " "))
   if (url && typeof url === "string") parts.push((url.length > 36 ? url.slice(0, 33) + "…" : url))
   return parts.length > 0 ? parts.join(" · ") : ""
@@ -4543,6 +4603,9 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
         if (um) out.push(...plainTextToChatLines(um, wrapW))
         if (t.trim()) out.push(...plainTextToChatLines(t, wrapW))
         i++
+      } else if (part.type === "reasoning") {
+        out.push({ text: "  Thought", color: "gray" })
+        i++
       } else if (part.type === "tool") {
         const tp = part as { tool: string; status: string; input?: Record<string, unknown> }
         if (tp.tool === "thinking_preamble") {
@@ -4583,8 +4646,6 @@ function buildRunProgressLines(state: AppState, width: number): ChatLine[] {
             }
           }
         }
-      } else if (part.type === "reasoning") {
-        i++
       } else {
         i++
       }
@@ -4699,6 +4760,10 @@ function buildChatLines(state: AppState, width: number): ChatLine[] {
         for (let idx = 0; idx < contentParts.length; idx++) {
           if (prefixIndices.has(idx)) continue
           const part = contentParts[idx]!
+          if (part.type === "reasoning") {
+            out.push({ text: "  Thought", color: "gray" })
+            continue
+          }
           if (part.type !== "tool") continue
           const tp = part as ToolPartWithSubagents
           if (tp.tool === "thinking_preamble") continue

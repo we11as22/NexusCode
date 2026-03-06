@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, ToolPart } from "../stores/chat.js"
 
-const EDIT_TOOLS = new Set(["replace_in_file", "write_to_file"])
+const EDIT_TOOLS = new Set(["replace_in_file", "write_to_file", "Edit", "Write"])
 
 function getLangBadge(filePath: string): string {
   const ext = filePath.split(".").pop()?.toLowerCase() ?? ""
@@ -27,7 +27,7 @@ function getDiffStats(output: string): { add: number; del: number } {
 
 function getFileEditPath(part: ToolPart): string | null {
   if (part.path != null && String(part.path).trim()) return String(part.path).trim()
-  const pathVal = part.input?.path
+  const pathVal = part.input?.path ?? part.input?.file_path
   if (pathVal != null && String(pathVal).trim()) return String(pathVal).trim()
   const m = part.output?.match(/<file_content\s+path="([^"]+)"/)
   if (m) return m[1]!
@@ -45,7 +45,7 @@ function getStatLabel(part: ToolPart): string {
   if (isDiff && (stats.add > 0 || stats.del > 0)) {
     return [stats.add > 0 ? `+${stats.add}` : "", stats.del > 0 ? `-${stats.del}` : ""].filter(Boolean).join(" ")
   }
-  if (part.tool === "write_to_file") {
+  if (part.tool === "write_to_file" || part.tool === "Write") {
     const m = output.match(/\((\d+)\s+lines?\)/)
     if (m) return `+${m[1]}`
   }

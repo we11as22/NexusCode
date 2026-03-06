@@ -9,7 +9,7 @@ import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 import type { SubAgentState } from "../stores/chat.js"
 import { useChatStore } from "../stores/chat.js"
 
-const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file"])
+const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file", "Edit", "Write"])
 const BASH_OUTPUT_TAIL_LINES = 80
 
 /** Approval request inline (Cline/Roo-style: Allow once, Always allow, Deny, Add to allowed for folder, Allow all session, Say what to do instead). */
@@ -423,13 +423,22 @@ function AssistantText({ text, streaming, variant = "normal" }: { text: string; 
 
 const SUBAGENT_TOOL_LABELS: Record<string, string> = {
   read_file: "Reading file",
+  Read: "Reading file",
   list_files: "Listing directory",
+  ListFiles: "Listing directory",
   list_code_definitions: "Listing definitions",
+  ListCodeDefinitions: "Listing definitions",
   search_files: "Searching files",
   codebase_search: "Searching codebase",
+  CodebaseSearch: "Searching codebase",
+  grep: "Searching files",
+  Grep: "Searching files",
   write_to_file: "Edit file",
   replace_in_file: "Edit file",
+  Write: "Edit file",
+  Edit: "Edit file",
   execute_command: "Bash",
+  Bash: "Bash",
   web_fetch: "Fetching URL",
   web_search: "Web search",
   use_skill: "Using skill",
@@ -542,9 +551,9 @@ function AssistantParts({
           const isLastPart = i === parts.length - 1
           const showStreaming = !isComplete && isLastPart
           if (i !== canonicalReplyIndex) return null
-          // Main reply: only tool-written text (user_message). Text_delta is not shown here unless showReasoningInChat.
+          // Main reply: prefer tool-written summary (user_message); otherwise show streamed/model text so it never disappears.
           const hasToolReply = !!userMessage
-          const hasRawText = !!(text?.trim())
+          const displayText = text?.trim() ?? ""
           if (hasToolReply) {
             return (
               <div key={i} className="space-y-0">
@@ -552,25 +561,24 @@ function AssistantParts({
               </div>
             )
           }
-          if (!showReasoningInChat) return null
-          const displayText = text?.trim() ?? ""
+          // Show model's text as main reply (always, so streamed content stays visible after done/stateUpdate).
           if (!showStreaming && !displayText) return null
           return (
             <div key={i} className="space-y-0">
-              <AssistantText text={displayText} streaming={showStreaming} variant="muted" />
+              <AssistantText text={displayText} streaming={showStreaming} variant={showReasoningInChat ? "muted" : "normal"} />
             </div>
           )
         }
         if (part.type === "tool") {
           const toolPart = part as ToolPart
-          if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file") {
+          if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file" || toolPart.tool === "Edit" || toolPart.tool === "Write") {
             const approval =
               pendingApproval?.partId === toolPart.id ? (
                 <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
               ) : undefined
             return <InlineFileEditBlock key={i} part={toolPart} approval={approval} />
           }
-          if (toolPart.tool === "execute_command") {
+          if (toolPart.tool === "execute_command" || toolPart.tool === "Bash") {
             const approval =
               pendingApproval?.partId === toolPart.id ? (
                 <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
