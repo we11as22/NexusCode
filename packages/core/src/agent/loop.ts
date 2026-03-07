@@ -682,6 +682,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             }
             emitContextUsage()
 
+            // CLI/UI can show assistant message (text + tool_use blocks) before tool execution
+            host.emit({ type: "assistant_content_complete", messageId: newMessageId })
+
             break
 
           case "error":

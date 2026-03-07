@@ -142,6 +142,8 @@ Usage:
 
 const listSchema = z.object({
   path: z.string().optional().describe("Directory to list (relative to project root, default: root)"),
+  /** Alternate form: some providers/models send paths array; we use the first string element as path. */
+  paths: z.array(z.union([z.string(), z.undefined()])).optional().describe("(Alternate) Directory path as first element; ignored if path is set."),
   recursive: z.boolean().optional().describe("List recursively (default: false for top-level, true for subdirs)"),
   include: z.string().optional().describe("Glob pattern to filter files"),
   max_entries: z.number().int().positive().max(5000).optional().describe("Max entries (default: 200)"),
@@ -174,7 +176,13 @@ export const listFilesTool: ToolDef<z.infer<typeof listSchema>> = {
   parameters: listSchema,
   readOnly: true,
 
-  async execute({ path: listPath, recursive, include, max_entries }, ctx) {
+  async execute({ path: listPathArg, paths: pathsArg, recursive, include, max_entries }, ctx) {
+    const listPath =
+      typeof listPathArg === "string" && listPathArg.length > 0
+        ? listPathArg
+        : Array.isArray(pathsArg)
+          ? pathsArg.find((p): p is string => typeof p === "string" && p.length > 0)
+          : undefined
     const targetDir = listPath ? path.resolve(ctx.cwd, listPath) : ctx.cwd
     const maxEntries = max_entries ?? 200
     const maxActual = Math.min(maxEntries, 2000)

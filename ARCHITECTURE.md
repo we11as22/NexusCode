@@ -6,9 +6,22 @@ NexusCode has three runtime layers:
 
 1. **`packages/core`** — Agent runtime: LLM loop, modes, tool execution, permissions, MCP client, skills, indexing, session, compaction, checkpoints. No VS Code or CLI dependencies.
 2. **`packages/vscode`** — VS Code host + React webview UI (settings, chat, sessions, agent presets).
-3. **`packages/cli`** — Terminal host + TUI (OpenTUI/React). Same agent loop as the extension.
+3. **`packages/cli`** — Terminal host + TUI (Ink/React, reference UI from claude-code). Same agent loop as the extension.
 
-Both hosts call the same `runAgentLoop()` in core, so behavior is consistent across VS Code and CLI.
+Both hosts call the same `runAgentLoop()` in core, so behavior is consistent across VS Code and CLI. The CLI uses a **Nexus query bridge** (`nexus-query.ts`): when started with Nexus bootstrap (interactive mode), the REPL calls `queryNexus()` instead of the reference Anthropic `query()`. The bridge runs `runAgentLoop()` with a `CliHost` that queues `AgentEvent`s and maps them to the REPL’s `Message` types (AssistantMessage, ProgressMessage, UserMessage) so the existing Ink UI renders tool progress and responses. Model, mode, index, session, checkpoints, and profile are passed via CLI options and bootstrap; task checkpoints and restore are available as `nexus task checkpoints` and `nexus task restore <id>`.
+
+#### Nexus CLI feature wiring
+
+| Feature | Where | Notes |
+|--------|--------|--------|
+| **Mode** (agent / ask / plan / debug) | `--mode` + bootstrap | Passed to `runAgentLoop`; Logo shows `mode=…` when Nexus is active. |
+| **Model** | `--model` + config / bootstrap | Override in bootstrap; Logo shows `model=…`. |
+| **Vector index** | `--no-index` + config | `indexEnabled` in bootstrap; Logo shows `index=on|off`. |
+| **Profile** | `--profile` + config | Merges profile into model config in bootstrap. |
+| **Session** | `--session`, `--continue` | Session create/resume in bootstrap; `nexusSessionId` passed to REPL. |
+| **Checkpoints** | `nexus task checkpoints` / `nexus task restore <id>` | REPL receives `nexusGetCheckpointList`, `nexusOnRestoreCheckpoint`. |
+| **Progress display** | REPL + `utils/messages.tsx` | Matches reference: `reorderMessages`, `getInProgressToolUseIDs`, ProgressMessage with `content[0]` = tool_use, MessageResponse + loader semantics. |
+| **Permissions** | CliHost `showApprovalDialog` | Approval via readline (or future tuiApprovalRef). |
 
 Optional **`packages/server`** stores sessions and messages in SQLite; extension and CLI can connect to it for shared sessions and pagination (no OOM on long chats).
 

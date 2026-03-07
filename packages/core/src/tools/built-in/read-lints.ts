@@ -4,7 +4,7 @@ import type { ToolDef, ToolContext, DiagnosticItem } from "../../types.js"
 
 const readLintsSchema = z.object({
   paths: z
-    .array(z.string())
+    .array(z.union([z.string(), z.undefined()]))
     .optional()
     .describe(
       "Optional. Paths to files or directories (relative to project root). If provided, returns diagnostics only for these paths. If omitted, returns diagnostics for the whole workspace (capped)."
@@ -47,7 +47,11 @@ Parameters:
   parameters: readLintsSchema,
   readOnly: true,
 
-  async execute({ paths: pathsArg }, ctx: ToolContext) {
+  async execute({ paths: pathsArgRaw }, ctx: ToolContext) {
+    const pathsArg =
+      pathsArgRaw && Array.isArray(pathsArgRaw)
+        ? (pathsArgRaw as (string | undefined)[]).filter((p): p is string => typeof p === "string" && p.length > 0)
+        : undefined
     if (!ctx.host.getProblems) {
       return {
         success: true,

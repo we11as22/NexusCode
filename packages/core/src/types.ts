@@ -257,6 +257,7 @@ export type IndexStatus =
 
 export type AgentEvent =
   | { type: "assistant_message_started"; messageId: string }
+  | { type: "assistant_content_complete"; messageId: string }
   | { type: "text_delta"; delta: string; messageId: string; user_message_delta?: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }

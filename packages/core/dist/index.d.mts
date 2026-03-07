@@ -1215,6 +1215,9 @@ type AgentEvent = {
     type: "assistant_message_started";
     messageId: string;
 } | {
+    type: "assistant_content_complete";
+    messageId: string;
+} | {
     type: "text_delta";
     delta: string;
     messageId: string;
