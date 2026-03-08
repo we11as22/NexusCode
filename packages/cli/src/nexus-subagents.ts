@@ -1,5 +1,5 @@
 /**
- * Subagent state for spawn_agent tool display (single and multiple).
+ * Subagent state for SpawnAgents tool display (single and multiple).
  * Updated from AgentEvent subagent_* in nexus-query and rendered under the tool in AssistantToolUseMessage.
  */
 import type { Mode } from '@nexuscode/core'

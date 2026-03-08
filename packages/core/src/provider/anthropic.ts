@@ -26,15 +26,19 @@ class AnthropicClient extends BaseLLMClient {
   }
 
   /**
-   * Override stream to add cache_control markers on system blocks.
-   * Anthropic prompt caching: mark the first N system blocks as ephemeral.
-   * Order: [role+capabilities] [rules] [skills] [dynamic...]
-   * Blocks 1-3 (if present) get cache_control.
+   * Override stream to enable extended thinking by default (reasoning streamed as reasoning_delta).
+   * Uses providerOptions.anthropic.thinking so Claude models that support it emit reasoning parts.
    */
   override async *stream(opts: StreamOptions): AsyncIterable<LLMStreamEvent> {
-    // For Anthropic, we handle cache markers by building a special system
-    // The base implementation handles this via the model's cacheControl:true option
-    // and Vercel AI SDK automatically adds cache_control to the last few system blocks
-    yield* super.stream(opts)
+    const providerOptions = {
+      ...opts.providerOptions,
+      anthropic: {
+        ...(typeof opts.providerOptions?.anthropic === "object" && opts.providerOptions?.anthropic !== null
+          ? opts.providerOptions.anthropic
+          : {}),
+        thinking: { type: "enabled" as const, budgetTokens: 10_000 },
+      },
+    }
+    yield* super.stream({ ...opts, providerOptions })
   }
 }

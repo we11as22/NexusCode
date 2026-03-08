@@ -273,6 +273,26 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
           if (!toolCallId || !toolName || !toolInput) break
           sawNativeToolCall = true
 
+          // Normalize ListDir: some providers/models send "paths" (array) or omit path; we only accept "path". Default ".".
+          let normalizedToolInput: Record<string, unknown> =
+            typeof toolInput === "object" && toolInput !== null ? { ...toolInput } : {}
+          if (toolName === "ListDir") {
+            const pathVal =
+              typeof normalizedToolInput.path === "string" && normalizedToolInput.path.length > 0
+                ? normalizedToolInput.path
+                : Array.isArray(normalizedToolInput.paths) && typeof normalizedToolInput.paths[0] === "string"
+                  ? normalizedToolInput.paths[0]
+                  : "."
+            normalizedToolInput = {
+              path: pathVal,
+              ignore: normalizedToolInput.ignore,
+              recursive: normalizedToolInput.recursive,
+              include: normalizedToolInput.include,
+              max_entries: normalizedToolInput.max_entries,
+              task_progress: normalizedToolInput.task_progress,
+            }
+          }
+
           const isKnownTool = resolvedTools.some(t => t.name === toolName)
           if (!isKnownTool) {
             consecutiveInvalidToolCallsRef.current++
@@ -297,13 +317,13 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
             id: partId,
             tool: toolName,
             status: "pending",
-            input: toolInput,
+            input: normalizedToolInput,
             timeStart: Date.now(),
           })
 
-          await emit({ type: "tool_start", tool: toolName, partId, messageId: newMessageId, input: toolInput })
+          await emit({ type: "tool_start", tool: toolName, partId, messageId: newMessageId, input: normalizedToolInput })
 
-          if (await detectDoomLoop(session, toolName, toolInput)) {
+          if (await detectDoomLoop(session, toolName, normalizedToolInput)) {
             await emit({ type: "doom_loop_detected", tool: toolName })
             const threshold = toolName === "Bash" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
             if (typeof process !== "undefined" && process.stdin && !process.stdin.isTTY) {
@@ -326,8 +346,8 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
             }
           }
 
-          if (READ_ONLY_TOOLS.has(toolName) && config.tools.parallelReads && !toolInput["task_progress"]) {
-            pendingReads.push({ toolCallId, toolName, toolInput })
+          if (READ_ONLY_TOOLS.has(toolName) && config.tools.parallelReads && !normalizedToolInput["task_progress"]) {
+            pendingReads.push({ toolCallId, toolName, toolInput: normalizedToolInput })
             if (pendingReads.length >= config.tools.maxParallelReads) {
               await flushPendingReads()
             }
@@ -362,7 +382,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
             const result = await executeToolCall(
               toolCallId,
               toolName,
-              toolInput,
+              normalizedToolInput,
               resolvedTools,
               toolCtx,
               autoApproveActions,
@@ -381,7 +401,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
               timeEnd: Date.now(),
             })
 
-            await emitToolEndPayload(toolName, toolInput, partId, result)
+            await emitToolEndPayload(toolName, normalizedToolInput, partId, result)
 
             if (toolName === "TodoWrite") {
               await emit({ type: "todo_updated", todo: session.getTodo() })

@@ -57,6 +57,8 @@ type Props = {
   /** When set (Nexus), show current mode below input and allow Shift+Tab to cycle */
   nexusMode?: string
   onCycleNexusMode?: () => void
+  /** Called when a Nexus panel (e.g. /model) saves config so the header can refresh */
+  onNexusConfigSaved?: () => void | Promise<void>
 }
 
 function getPastedTextPrompt(text: string): string {
@@ -90,6 +92,7 @@ function PromptInput({
   readFileTimestamps,
   nexusMode,
   onCycleNexusMode,
+  onNexusConfigSaved,
 }: Props): React.ReactNode {
   const [isAutoUpdating, setIsAutoUpdating] = useState(false)
   const [exitMessage, setExitMessage] = useState<{
@@ -183,13 +186,12 @@ function PromptInput({
 
     let finalInput = input
     if (pastedText) {
-      // Create the prompt pattern that would have been used for this pasted text
       const pastedPrompt = getPastedTextPrompt(pastedText)
       if (finalInput.includes(pastedPrompt)) {
         finalInput = finalInput.replace(pastedPrompt, pastedText)
-      } // otherwise, ignore the pastedText if the user has modified the prompt
+      }
     }
-    onInputChange('')
+    // Don't clear input yet for slash commands that open a panel; clear only when sending messages
     onModeChange('prompt')
     clearSuggestions()
     setPastedImage(null)
@@ -218,14 +220,20 @@ function PromptInput({
         abortController,
         readFileTimestamps,
         setForkConvoWithMessagesOnTheNextRender,
+        onNexusConfigSaved,
       },
       pastedImage ?? null,
     )
 
     if (messages.length) {
+      onInputChange('')
       onQuery(messages, abortController)
     } else {
-      // Local JSX commands
+      // Local JSX commands (e.g. /model panel): close without adding messages.
+      // Clear loading state and input so the spinner stops and the slash command
+      // text is not left in the input (avoid accidental submit on next Enter).
+      setIsLoading(false)
+      onInputChange('')
       addToHistory(input)
       resetHistory()
       return

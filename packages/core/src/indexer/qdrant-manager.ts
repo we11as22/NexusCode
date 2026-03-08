@@ -11,6 +11,8 @@ export interface EnsureQdrantOptions {
   url: string
   autoStart: boolean
   log?: (message: string) => void
+  /** Progress messages during startup (e.g. "Checking Qdrant...", "Starting Qdrant (binary)..."). */
+  onProgress?: (message: string) => void
   /** Max ms to wait for Qdrant to become healthy after starting (e.g. 2500 for fast first message). Default 20_000. */
   maxWaitMs?: number
 }
@@ -26,9 +28,15 @@ export interface EnsureQdrantResult {
  * Ensures Qdrant is reachable. If autoStart is enabled, tries to start a local instance.
  */
 export async function ensureQdrantRunning(opts: EnsureQdrantOptions): Promise<EnsureQdrantResult> {
-  const { url, autoStart, log, maxWaitMs = DEFAULT_START_TIMEOUT_MS } = opts
+  const { url, autoStart, log, onProgress, maxWaitMs = DEFAULT_START_TIMEOUT_MS } = opts
+  const progress = (msg: string) => {
+    onProgress?.(msg)
+    log?.(msg)
+  }
 
+  progress("Checking Qdrant…")
   if (await isQdrantHealthy(url)) {
+    progress("Qdrant is already running.")
     return { available: true, started: false, method: "existing" }
   }
 
@@ -61,16 +69,20 @@ export async function ensureQdrantRunning(opts: EnsureQdrantOptions): Promise<En
 
   const waitMs = Math.max(1000, maxWaitMs)
 
-  // 1) Try local qdrant binary
+  progress("Starting Qdrant (trying local binary)…")
   if (await tryStartLocalBinary(port, log)) {
+    progress("Waiting for Qdrant to be ready…")
     if (await waitForHealthy(url, waitMs)) {
+      progress("Qdrant is ready.")
       return { available: true, started: true, method: "binary" }
     }
   }
 
-  // 2) Try docker fallback
+  progress("Starting Qdrant (trying Docker)…")
   if (await tryStartDocker(port, log)) {
+    progress("Waiting for Qdrant to be ready…")
     if (await waitForHealthy(url, waitMs)) {
+      progress("Qdrant is ready.")
       return { available: true, started: true, method: "docker" }
     }
   }

@@ -73,7 +73,8 @@ IMPORTANT: This tool is for terminal operations like git, npm, docker, builds, t
 Before executing the command, follow these steps:
 
 1. Directory Verification:
-   - If the command will create new directories or files, first use ListFiles or Glob to verify the parent directory exists and is the correct location.
+   - If the command will create new directories or files, first use ListDir or Glob to verify the parent directory exists and is the correct location.
+   - For example, before running "mkdir foo/bar", first use ListDir to check that "foo" exists and is the intended parent directory.
 
 2. Command Execution:
    - Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt").
@@ -88,7 +89,7 @@ Usage notes:
     - npm install → "Install package dependencies"
     - find . -name "*.tmp" -exec rm {} \\; → "Find and delete all .tmp files recursively"
   - If output exceeds 50KB, it will be truncated (head+tail shown); full output is saved to .nexus/tool-output/ for further inspection.
-  - Use run_in_background: true for long-running commands (builds, servers, tests). Bash returns immediately with a bash_id; use BashOutput to read the log and KillBash to stop it. Do NOT use '&' in the command itself.
+  - **Blocking vs background:** Use blocking (default) for short commands where you need the result immediately (e.g. git status, npm run lint, short scripts). Use run_in_background: true for long-running commands (builds, servers, tests, migrations). With background: Bash returns immediately with bash_id; output is written to .nexus/<bash_id>.log in real time. Use BashOutput(bash_id) to read progress — the response includes [Process status: running | exited]. Poll until exited or use KillBash(shell_id) to stop. Do NOT use '&' in the command itself.
   - Avoid using Bash with find, grep, cat, head, tail, sed, awk, or echo unless explicitly instructed. Instead use dedicated tools:
     - File search: Glob (NOT find or ls)
     - Content search: Grep (NOT grep or rg)
@@ -191,7 +192,7 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
       const relLog = path.relative(ctx.cwd, logPath) || logPath
       return {
         success: true,
-        output: `[background] bash_id: ${bashId}\nPID: ${pid}\nLog: ${relLog}\n\nUse BashOutput with bash_id "${bashId}" to read output. Use KillBash with shell_id "${bashId}" to stop.`,
+        output: `[background] bash_id: ${bashId}\nPID: ${pid}\nLog: ${relLog}\n\nOutput is written to the log file in real time. Use BashOutput(bash_id: "${bashId}") to read progress; the response includes [Process status: running | exited]. Use KillBash(shell_id: "${bashId}") to stop the process.`,
         metadata: { bash_id: bashId, pid, logPath: relLog },
       }
     }

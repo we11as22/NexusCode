@@ -147,13 +147,13 @@ NexusCode/
 ## Built-in tools (by group)
 
 - **always:** `final_report_to_user`, `ask_followup_question`, `update_todo_list`
-- **read:** `read_file`, `list_files`, `list_code_definitions`, `read_lints`
+- **read:** `read_file`, `list_dir`, `list_code_definitions`, `read_lints`
 - **write:** `write_to_file`, `replace_in_file`, `create_rule`
 - **execute:** `execute_command`
 - **search:** `grep`, `codebase_search`, `web_fetch`, `web_search`, `glob`
 - **browser:** `browser_action`
 - **skills:** `use_skill`
-- **agents:** `spawn_agent`
+- **agents:** `SpawnAgents`
 - **context:** `condense`, `summarize_task`
 - **plan_exit:** `plan_exit` (plan mode only)
 
@@ -175,6 +175,19 @@ Mode-specific blocks: **plan** blocks `execute_command`; **ask** blocks `write_t
 
 - **Node.js**: **20+** is required for packaging the VS Code extension (`pnpm package:vscode`) — `vsce` needs the global `File` API. The rest of the build (`pnpm build`, core, webview, extension bundle) runs on Node 18+. `.nvmrc` is set to `20` for nvm/fnm.
 - **pnpm**: used for the workspace and scripts; no minimum version enforced in code.
+
+---
+
+## Tool schemas and provider quirks
+
+Built-in tool schemas are **strict** (Zod `.strict()` or explicit required/optional). We send a single **`path`** (string) for **ListDir**; we do **not** use a **`paths`** array for that tool.
+
+Some providers or gateways (e.g. Minimax, Kilo gateway) may expose a list-dir–style tool with a **`paths`** (array) schema or validate model tool-call args against such a schema. If the model returns `{}` or `{ paths: [] }`, the gateway can respond with an error like *"paths[0] must be string, got undefined"* **before** we see the tool_call. To avoid that:
+
+1. We **normalize** as soon as we receive a **tool_call** for ListDir: if the payload has **paths**, we set **path** from **paths[0]** and default to **"."** when missing.
+2. We use a **distinct tool name** (**ListDir**) and a **strict schema** so the provider is less likely to map our tool to an internal "LS" that expects **paths**.
+
+So the **paths[0]** error, when it appears, comes from **provider-side validation**, not from our Zod. Normalization at receive + at execute ensures our code always works with **path** only.
 
 ---
 

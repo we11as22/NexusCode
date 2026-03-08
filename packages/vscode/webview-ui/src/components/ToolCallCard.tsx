@@ -40,8 +40,8 @@ const TOOL_ICONS: Record<string, string> = {
   Bash: "⌨️",
   search_files: "🔍",
   Grep: "🔍",
-  list_files: "📁",
-  ListFiles: "📁",
+  list_dir: "📁",
+  ListDir: "📁",
   list_code_definitions: "🏗️",
   ListCodeDefinitions: "🏗️",
   read_lints: "⚠️",
@@ -55,7 +55,8 @@ const TOOL_ICONS: Record<string, string> = {
   glob: "📋",
   Glob: "📋",
   browser_action: "🖥️",
-  spawn_agent: "🤖",
+  spawn_agents: "🤖",
+  SpawnAgents: "🤖",
   use_skill: "💡",
   Skill: "💡",
   final_report_to_user: "✅",
@@ -75,7 +76,7 @@ function toolDisplayName(tool: string): string {
     read_file: "Read", Read: "Read",
     write_to_file: "Write", Write: "Write",
     replace_in_file: "Edit", Edit: "Edit",
-    list_files: "ListFiles", ListFiles: "ListFiles",
+    list_dir: "ListDir", ListDir: "ListDir",
     search_files: "Grep", Grep: "Grep",
     codebase_search: "CodebaseSearch", CodebaseSearch: "CodebaseSearch",
     list_code_definitions: "ListCodeDefinitions", ListCodeDefinitions: "ListCodeDefinitions",
@@ -198,7 +199,6 @@ export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approv
   const path = getFileEditPath(part)
   const output = part.output ?? ""
   const [expanded, setExpanded] = useState(true)
-  const [hovered, setHovered] = useState(false)
   if (!path && !output && !(part.diffHunks?.length)) return null
   const lang = path ? getLangBadge(path) : "FILE"
   const fileName = path ? path.split("/").pop() ?? path : "file"
@@ -211,33 +211,19 @@ export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approv
       ? buildFallbackDiffHunks(fallback.content, DIFF_PREVIEW_MAX_LINES)
       : []
   const showDiffPreview = previewHunks.length > 0
+  const totalHunks = hasDiffHunks ? part.diffHunks!.length : 0
+  const hiddenLinesCount = totalHunks > previewHunks.length ? totalHunks - previewHunks.length : 0
+
   return (
-    <div
-      className="nexus-file-edit-block my-2"
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <div className="nexus-file-edit-header flex items-center gap-2">
-        <button
-          type="button"
-          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
-          onClick={(e) => {
-            e.stopPropagation()
-            setExpanded((prev) => !prev)
-          }}
-          aria-label={expanded ? "Collapse" : "Expand"}
-        >
-          {hovered ? (
-            <span
-              className="text-[var(--vscode-descriptionForeground)] transition-transform inline-flex"
-              style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
-            >
-              ▼
-            </span>
-          ) : (
-            <span className="nexus-file-edit-badge">{lang}</span>
-          )}
-        </button>
+    <div className="nexus-file-edit-block my-2">
+      <div
+        className="nexus-file-edit-header flex items-center gap-2"
+        role="button"
+        tabIndex={0}
+        onClick={() => setExpanded((prev) => !prev)}
+        onKeyDown={(e) => e.key === "Enter" && setExpanded((prev) => !prev)}
+      >
+        <span className="nexus-file-edit-badge flex-shrink-0">{lang}</span>
         <button
           type="button"
           className="nexus-file-edit-path flex-1 min-w-0 text-left truncate font-medium text-[var(--vscode-foreground)] hover:underline"
@@ -308,6 +294,12 @@ export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approv
                   )
                 })}
               </pre>
+              {hiddenLinesCount > 0 && (
+                <div className="nexus-diff-hidden-lines flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] text-[var(--vscode-descriptionForeground)] border-t border-[var(--vscode-panel-border)]">
+                  <span>{hiddenLinesCount} hidden lines</span>
+                  <span className="text-[10px]">▼</span>
+                </div>
+              )}
             </div>
           ) : (
             <ToolOutputBlock output={output} compacted={part.compacted} />
@@ -434,8 +426,8 @@ function formatToolInputPreview(part: ToolPart): string {
       } else if (!range && typeof startLine === "number") range = ` (line ${startLine})`
       return short(pathStr, 56) + range
     }
-    case "list_files":
-    case "ListFiles":
+    case "list_dir":
+    case "ListDir":
       return pathStr ? `folder ${short(pathStr, 48)}` : "folder ."
     case "write_to_file":
     case "Write":
@@ -492,7 +484,8 @@ function formatToolInputPreview(part: ToolPart): string {
       const replaces = (inp["replaces"] as unknown[])?.length ?? 0
       return [reads && `${reads} read(s)`, searches && `${searches} search(es)`, replaces && `${replaces} replace(s)`].filter(Boolean).join(", ") || "batch"
     }
-    case "spawn_agent": {
+    case "spawn_agents":
+    case "SpawnAgents": {
       const desc = inp["description"]
       return desc && typeof desc === "string" ? short(desc.replace(/\s+/g, " "), 48) : "subtask"
     }

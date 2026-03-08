@@ -8,13 +8,42 @@ type Position = {
 
 export class Cursor {
   readonly offset: number
+  readonly selection: number
   constructor(
     readonly measuredText: MeasuredText,
     offset: number = 0,
-    readonly selection: number = 0,
+    selection: number = 0,
   ) {
-    // it's ok for the cursor to be 1 char beyond the end of the string
     this.offset = Math.max(0, Math.min(this.measuredText.text.length, offset))
+    this.selection = Math.max(0, Math.min(this.measuredText.text.length, selection))
+  }
+
+  getSelectionStart(): number {
+    return Math.min(this.offset, this.selection)
+  }
+  getSelectionEnd(): number {
+    return Math.max(this.offset, this.selection)
+  }
+  hasSelection(): boolean {
+    return this.selection !== this.offset
+  }
+  getSelectedText(): string {
+    if (!this.hasSelection()) return ''
+    return this.text.slice(this.getSelectionStart(), this.getSelectionEnd())
+  }
+  replaceSelected(insertStr: string): Cursor {
+    if (!this.hasSelection()) return this.insert(insertStr)
+    const start = this.getSelectionStart()
+    const end = this.getSelectionEnd()
+    const newText = this.text.slice(0, start) + insertStr + this.text.slice(end)
+    const newOffset = start + insertStr.length
+    return Cursor.fromText(newText, this.columns, newOffset, newOffset)
+  }
+  withAnchor(anchor: number): Cursor {
+    return new Cursor(this.measuredText, this.offset, Math.max(0, Math.min(this.measuredText.text.length, anchor)))
+  }
+  collapseSelection(): Cursor {
+    return new Cursor(this.measuredText, this.offset, this.offset)
   }
 
   static fromText(
@@ -29,6 +58,9 @@ export class Cursor {
 
   render(cursorChar: string, mask: string, invert: (text: string) => string) {
     const { line, column } = this.getPosition()
+    const selStart = this.getSelectionStart()
+    const selEnd = this.getSelectionEnd()
+    const hasSel = this.hasSelection()
     return this.measuredText
       .getWrappedText()
       .map((text, currentLine, allLines) => {
@@ -37,24 +69,37 @@ export class Cursor {
           const lastSixStart = Math.max(0, text.length - 6)
           displayText = mask.repeat(lastSixStart) + text.slice(lastSixStart)
         }
-        // looking for the line with the cursor
-        if (line != currentLine) return displayText.trimEnd()
-
-        return (
-          displayText.slice(0, column) +
-          invert(displayText[column] || cursorChar) +
-          displayText.trimEnd().slice(column + 1)
-        )
+        if (line !== currentLine) {
+          if (!hasSel) return displayText.trimEnd()
+          let result = ''
+          for (let col = 0; col < displayText.length; col++) {
+            const off = this.measuredText.getOffsetFromPosition({ line: currentLine, column: col })
+            const isSelected = off >= selStart && off < selEnd
+            result += isSelected ? invert(displayText[col] ?? '') : (displayText[col] ?? '')
+          }
+          return result.trimEnd()
+        }
+        let result = ''
+        for (let col = 0; col <= displayText.length; col++) {
+          const off = this.measuredText.getOffsetFromPosition({ line: currentLine, column: col })
+          const isSelected = hasSel && off >= selStart && off < selEnd
+          const isCursor = col === column
+          const ch = col < displayText.length ? displayText[col] : cursorChar
+          result += isCursor || isSelected ? invert(ch || ' ') : (ch || '')
+        }
+        return result
       })
       .join('\n')
   }
 
   left(): Cursor {
-    return new Cursor(this.measuredText, this.offset - 1)
+    const next = Math.max(0, this.offset - 1)
+    return new Cursor(this.measuredText, next, next)
   }
 
   right(): Cursor {
-    return new Cursor(this.measuredText, this.offset + 1)
+    const next = Math.min(this.measuredText.text.length, this.offset + 1)
+    return new Cursor(this.measuredText, next, next)
   }
 
   up(): Cursor {
@@ -62,38 +107,31 @@ export class Cursor {
     if (line == 0) {
       return new Cursor(this.measuredText, 0, 0)
     }
-
     const newOffset = this.getOffset({ line: line - 1, column })
-    return new Cursor(this.measuredText, newOffset, 0)
+    return new Cursor(this.measuredText, newOffset, newOffset)
   }
 
   down(): Cursor {
     const { line, column } = this.getPosition()
     if (line >= this.measuredText.lineCount - 1) {
-      return new Cursor(this.measuredText, this.text.length, 0)
+      const end = this.measuredText.text.length
+      return new Cursor(this.measuredText, end, end)
     }
-
     const newOffset = this.getOffset({ line: line + 1, column })
-    return new Cursor(this.measuredText, newOffset, 0)
+    return new Cursor(this.measuredText, newOffset, newOffset)
   }
 
   startOfLine(): Cursor {
     const { line } = this.getPosition()
-    return new Cursor(
-      this.measuredText,
-      this.getOffset({
-        line,
-        column: 0,
-      }),
-      0,
-    )
+    const off = this.getOffset({ line, column: 0 })
+    return new Cursor(this.measuredText, off, off)
   }
 
   endOfLine(): Cursor {
     const { line } = this.getPosition()
     const column = this.measuredText.getLineLength(line)
-    const offset = this.getOffset({ line, column })
-    return new Cursor(this.measuredText, offset, 0)
+    const off = this.getOffset({ line, column })
+    return new Cursor(this.measuredText, off, off)
   }
 
   nextWord(): Cursor {
@@ -151,11 +189,13 @@ export class Cursor {
   }
 
   insert(insertString: string): Cursor {
+    if (this.hasSelection()) return this.replaceSelected(insertString)
     const newCursor = this.modifyText(this, insertString)
     return newCursor
   }
 
   del(): Cursor {
+    if (this.hasSelection()) return this.replaceSelected('')
     if (this.isAtEnd()) {
       return this
     }
@@ -163,6 +203,7 @@ export class Cursor {
   }
 
   backspace(): Cursor {
+    if (this.hasSelection()) return this.replaceSelected('')
     if (this.isAtStart()) {
       return this
     }
@@ -204,7 +245,9 @@ export class Cursor {
 
   equals(other: Cursor): boolean {
     return (
-      this.offset === other.offset && this.measuredText == other.measuredText
+      this.offset === other.offset &&
+      this.selection === other.selection &&
+      this.measuredText === other.measuredText
     )
   }
 

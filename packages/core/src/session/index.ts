@@ -129,6 +129,14 @@ export class Session implements ISession {
     }
   }
 
+  /** Rewind so that only messages strictly before this timestamp remain (used for rollback before a given message). */
+  rewindBeforeTimestamp(timestamp: number): void {
+    const keep = this._messages.filter(m => m.ts < timestamp)
+    if (keep.length < this._messages.length) {
+      this._messages = keep
+    }
+  }
+
   async save(): Promise<void> {
     const title = deriveSessionTitle(this._messages)
     const stored: StoredSession = {

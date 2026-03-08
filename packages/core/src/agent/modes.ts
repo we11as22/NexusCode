@@ -18,7 +18,7 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
  * Tools that are explicitly BLOCKED per mode (even if passed as dynamic tools).
  * Enforced in the agent loop: blocked tools are never included in resolvedTools and never sent to the LLM.
  * Plan: only write to .nexus/plans/*.md|.txt; no execute.
- * Ask: read-only + no plan work — no write, no execute, no plan_exit (spawn_agent allowed with ask permissions).
+ * Ask: read-only + no plan work — no write, no execute, no plan_exit (SpawnAgents allowed with ask permissions).
  */
 export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   agent: ["PlanExit"],
@@ -45,13 +45,13 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
  */
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   always:  ["AskFollowupQuestion", "TodoWrite", "Parallel"],
-  read:    ["Read", "ListFiles", "ListCodeDefinitions", "ReadLints"],
+  read:    ["Read", "ListDir", "ListCodeDefinitions", "ReadLints"],
   write:   ["Write", "Edit"],
   execute: ["Bash"],
   search:  ["Grep", "CodebaseSearch", "WebFetch", "WebSearch", "Glob"],
   mcp:     [],
   skills:  ["Skill"],
-  agents:  ["SpawnAgent"],
+  agents:  ["SpawnAgents"],
   context: ["Condense"],
   plan_exit: ["PlanExit"],
 }
@@ -67,7 +67,7 @@ export const PLAN_MODE_ALLOWED_WRITE_PATTERN = /^\.nexus[\\/]plans[\\/].+\.(md|t
  */
 export const READ_ONLY_TOOLS = new Set([
   "Read",
-  "ListFiles",
+  "ListDir",
   "ListCodeDefinitions",
   "ReadLints",
   "Grep",
@@ -142,7 +142,7 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
  */
 export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   agent: "AGENT mode: full access — read/write files, run commands, search, browser, MCP, skills, spawn sub-agents (with full agent permissions). Execute tasks end-to-end. After plan approval, run with the approved plan and a detailed todo (fuller task descriptions).",
-  plan:  "PLAN mode: (1) Study the task thoroughly — read codebase, search, browser, MCP, skills; write only the plan to .nexus/plans/*.md or .txt. (2) You may use spawn_agent for parallel research subtasks (sub-agents run in ask mode). (3) Call plan_exit only after at least one plan file exists in .nexus/plans/; user may then approve (execution continues in agent mode), revise, or abandon.",
-  ask:   "ASK mode: read-only. Answer questions, explain code, analyze — use read, search, browser, MCP, skills. You may use spawn_agent for parallel read-only subtasks (sub-agents run in ask mode). Do NOT modify files, run commands, or use plan_exit.",
+  plan:  "PLAN mode: (1) Study the task thoroughly — read codebase, search, browser, MCP, skills; write only the plan to .nexus/plans/*.md or .txt. (2) You may use SpawnAgents for parallel research subtasks (sub-agents run in ask mode). (3) Call plan_exit only after at least one plan file exists in .nexus/plans/; user may then approve (execution continues in agent mode), revise, or abandon.",
+  ask:   "ASK mode: read-only. Answer questions, explain code, analyze — use read, search, browser, MCP, skills. You may use SpawnAgents for parallel read-only subtasks (sub-agents run in ask mode). Do NOT modify files, run commands, or use plan_exit.",
   debug: "DEBUG mode: diagnose first, then fix. Use read/search/execute/write with strict discipline: list likely root causes, validate with evidence (logs/tests/repro), then apply minimal targeted fixes and re-verify.",
 }

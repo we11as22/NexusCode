@@ -52,7 +52,7 @@ export class ParallelAgentManager {
         sessionId: "",
         success: true,
         output:
-          "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call spawn_agent again for the same task.",
+          "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call SpawnAgents again for the same task.",
       }
     }
     this.recentSpawnTasks.push(taskKey)
@@ -188,31 +188,43 @@ export class ParallelAgentManager {
   }
 }
 
-const taskItemSchema = z.object({
-  description: z.string().describe("Clear, self-contained task description for this sub-agent."),
-  context_summary: z.string().optional().describe("Optional brief context for this task (e.g. background, relevant files)."),
-  mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for this sub-agent (default: agent). 'search'/'explore' → ask."),
-})
+const taskItemSchema = z
+  .object({
+    description: z.string().describe("Clear, self-contained task description for this sub-agent."),
+    context_summary: z.string().optional().describe("Optional brief context for this task (e.g. background, relevant files)."),
+    mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for this sub-agent (default: agent). 'search'/'explore' → ask."),
+  })
+  .strict()
 
-const spawnSchema = (maxTasksPerCall: number) => z.object({
-  description: z.string().optional().describe("Single task: what should the sub-agent do? (Use when launching one sub-agent.)"),
-  context_summary: z.string().optional().describe("Optional context for the single task (used only when tasks is not provided)."),
-  mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for the single sub-agent (default: agent)."),
-  task_progress: z.string().optional(),
-  tasks: z.array(taskItemSchema).max(maxTasksPerCall).optional().describe(
-    `Optional list of tasks to run in parallel (up to ${maxTasksPerCall} per call). When provided, all run concurrently; omit or use single \`description\` for one task.`,
-  ),
-}).refine(
-  (data) => (data.tasks != null && data.tasks.length > 0) || (typeof data.description === "string" && data.description.trim().length > 0),
-  { message: "Provide either description (single task) or non-empty tasks array." },
-)
+const spawnSchema = (maxTasksPerCall: number) =>
+  z
+    .object({
+      description: z.string().optional().describe("Single task: what should the sub-agent do? (Use when launching one sub-agent.)"),
+      context_summary: z.string().optional().describe("Optional context for the single task (used only when tasks is not provided)."),
+      mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for the single sub-agent (default: agent)."),
+      task_progress: z.string().optional(),
+      tasks: z
+        .array(taskItemSchema)
+        .max(maxTasksPerCall)
+        .optional()
+        .describe(
+          `Optional list of tasks to run in parallel (up to ${maxTasksPerCall} per call). When provided, all run concurrently; omit or use single \`description\` for one task.`
+        ),
+    })
+    .strict()
+    .refine(
+      (data) =>
+        (data.tasks != null && data.tasks.length > 0) ||
+        (typeof data.description === "string" && data.description.trim().length > 0),
+      { message: "Provide either description (single task) or non-empty tasks array." }
+    )
 
 export function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef {
   const maxTasksPerCall = config.parallelAgents?.maxTasksPerCall ?? 12
   const schema = spawnSchema(maxTasksPerCall)
 
   return {
-    name: "SpawnAgent",
+    name: "SpawnAgents",
     description: `Launch one or more parallel sub-agents. Use for independent subtasks that don't depend on each other.
 **Single task:** pass \`description\` (and optional \`context_summary\`, \`mode\`).
 **Multiple tasks:** pass \`tasks\` array with up to ${maxTasksPerCall} items; each has \`description\` and optional \`context_summary\`, \`mode\`. All tasks in one call run in parallel (subject to max concurrent limit).

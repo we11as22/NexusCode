@@ -278,7 +278,10 @@ export async function bootstrapNexus(opts: {
 
   let indexer: CodebaseIndexer | undefined
   if (indexEnabled && config.indexing.enabled) {
-    indexer = await createCodebaseIndexer(cwd, config, { onWarning: () => {} }).catch(() => undefined)
+    indexer = await createCodebaseIndexer(cwd, config, {
+      onWarning: (msg) => console.warn(msg),
+      onProgress: (msg) => console.warn("[nexus]", msg),
+    }).catch(() => undefined)
     indexer?.startIndexing().catch(() => {})
   }
 

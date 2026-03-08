@@ -4,6 +4,7 @@ import ProjectOnboarding, {
   markProjectOnboardingComplete,
 } from '../ProjectOnboarding.js'
 import { CostThresholdDialog } from '../components/CostThresholdDialog.js'
+import { NexusApprovalPanel } from '../components/NexusApprovalPanel.js'
 import * as React from 'react'
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Command } from '../commands.js'
@@ -35,6 +36,7 @@ import {
   query,
 } from '../query.js'
 import { queryNexus } from '../nexus-query.js'
+import type { NexusApprovalMessage, NexusBannerMessage } from '../nexus-query.js'
 import type { WrappedClient } from '../services/mcpClient.js'
 import type { Tool } from '../Tool.js'
 import { AutoUpdaterResult } from '../utils/autoUpdater.js'
@@ -101,6 +103,8 @@ type Props = {
   nexusOnReindex?: () => void
   /** Full bootstrap result for Nexus agent (when set, REPL uses queryNexus instead of query) */
   nexusBootstrap?: import('../nexus-bootstrap.js').NexusBootstrapResult
+  /** Called when a Nexus panel saves config so the header can show the new model/index */
+  onNexusConfigSaved?: () => void | Promise<void>
 }
 
 function getUserPromptFromMessage(m: MessageType): string {
@@ -147,6 +151,7 @@ export function REPL({
   nexusSaveConfig,
   nexusOnReindex,
   nexusBootstrap,
+  onNexusConfigSaved,
 }: Props): React.ReactNode {
   // TODO: probably shouldn't re-read config from file synchronously on every keystroke
   const verbose = verboseFromCLI ?? getGlobalConfig().verbose
@@ -187,7 +192,12 @@ export function REPL({
   const [binaryFeedbackContext, setBinaryFeedbackContext] =
     useState<BinaryFeedbackContext | null>(null)
 
-  /** Subagents per spawn_agent tool partId (single and multiple). Updated via onSubagentEvent from queryNexus. */
+  /** Ref for Nexus agent approval dialog (write/execute/mcp/doom_loop). When set, panel calls it to resolve. */
+  const tuiApprovalRef = useRef<((r: import('@nexuscode/core').PermissionResult) => void) | null>(null)
+  /** Banner above input (e.g. "Compacting conversation…", "Loop detected…"). */
+  const [nexusBannerText, setNexusBannerText] = useState('')
+
+  /** Subagents per SpawnAgents tool partId (single and multiple). Updated via onSubagentEvent from queryNexus. */
   const [subagentsByPartId, setSubagentsByPartId] = useState<
     Record<string, import('../nexus-subagents.js').SubAgentState[]>
   >({})
@@ -333,6 +343,7 @@ export function REPL({
           signal: abortController.signal,
           autoApprove: dangerouslySkipPermissions,
           modeOverride: nexusModeOverride,
+          tuiApprovalRef,
           onSubagentEvent: (partId, event) => {
             setSubagentsByPartId(prev => ({
               ...prev,
@@ -340,7 +351,26 @@ export function REPL({
             }))
           },
         })) {
-          setMessages(oldMessages => [...oldMessages, message])
+          if (message && 'type' in message && message.type === 'nexus_approval') {
+            const approvalMsg = message as NexusApprovalMessage
+            setToolJSX({
+              jsx: (
+                <NexusApprovalPanel
+                  action={approvalMsg.action}
+                  partId={approvalMsg.partId}
+                  approvalRef={tuiApprovalRef}
+                  onClose={() => setToolJSX(null)}
+                />
+              ),
+              shouldHidePromptInput: true,
+            })
+            continue
+          }
+          if (message && 'type' in message && message.type === 'nexus_banner') {
+            setNexusBannerText((message as NexusBannerMessage).text)
+            continue
+          }
+          setMessages(oldMessages => [...oldMessages, message as MessageType])
         }
       } else {
         for await (const message of query(
@@ -429,6 +459,7 @@ export function REPL({
         signal: abortController.signal,
         autoApprove: dangerouslySkipPermissions,
         modeOverride: nexusModeOverride,
+        tuiApprovalRef,
         onSubagentEvent: (partId, event) => {
           setSubagentsByPartId(prev => ({
             ...prev,
@@ -436,7 +467,26 @@ export function REPL({
           }))
         },
       })) {
-        setMessages(oldMessages => [...oldMessages, message])
+        if (message && 'type' in message && message.type === 'nexus_approval') {
+          const approvalMsg = message as NexusApprovalMessage
+          setToolJSX({
+            jsx: (
+              <NexusApprovalPanel
+                action={approvalMsg.action}
+                partId={approvalMsg.partId}
+                approvalRef={tuiApprovalRef}
+                onClose={() => setToolJSX(null)}
+              />
+            ),
+            shouldHidePromptInput: true,
+          })
+          continue
+        }
+        if (message && 'type' in message && message.type === 'nexus_banner') {
+          setNexusBannerText((message as NexusBannerMessage).text)
+          continue
+        }
+        setMessages(oldMessages => [...oldMessages, message as MessageType])
       }
     } else {
       for await (const message of query(
@@ -525,9 +575,12 @@ export function REPL({
             <Logo
               mcpClients={mcpClients}
               isDefaultModel={isDefaultModel}
-              nexusMode={nexusBootstrap?.mode}
+              nexusMode={nexusBootstrap ? nexusModeOverride : undefined}
               nexusModel={nexusConfigSnapshot?.model?.id}
-              nexusIndexEnabled={nexusBootstrap ? nexusBootstrap.indexEnabled : undefined}
+              nexusIndexEnabled={
+                nexusConfigSnapshot?.indexing?.enabled ??
+                (nexusBootstrap ? nexusBootstrap.indexEnabled : undefined)
+              }
             />
             <ProjectOnboarding workspaceDir={getOriginalCwd()} />
           </Box>
@@ -650,6 +703,7 @@ export function REPL({
     isDefaultModel,
     nexusBootstrap,
     nexusConfigSnapshot,
+    nexusModeOverride,
     subagentsByPartId,
   ])
 
@@ -728,6 +782,11 @@ export function REPL({
           !binaryFeedbackContext &&
           !showingCostDialog && (
             <>
+              {nexusBannerText ? (
+                <Box paddingX={1} marginTop={1}>
+                  <Text dimColor>{nexusBannerText}</Text>
+                </Box>
+              ) : null}
               <PromptInput
                 commands={commands}
                 forkNumber={forkNumber}
@@ -763,6 +822,7 @@ export function REPL({
                     ? () => setNexusModeOverride(prev => cycleNexusMode(prev))
                     : undefined
                 }
+                onNexusConfigSaved={onNexusConfigSaved}
               />
             </>
           )}

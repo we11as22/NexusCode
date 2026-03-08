@@ -81,11 +81,13 @@ export function NexusEmbeddingsPanel({
         setCustomInput('')
         return
       }
-      if (key.backspace || input === '\x7f') {
+      if (key.backspace || input === '\x7f' || key.delete) {
         setCustomInput((s) => s.slice(0, -1))
         return
       }
-      if (input && input.length === 1) setCustomInput((s) => s + input)
+      if (input != null && input !== '') {
+        setCustomInput((s) => s + input.replace(/\r\n?/g, ' ').replace(/\r/g, ' '))
+      }
       return
     }
 

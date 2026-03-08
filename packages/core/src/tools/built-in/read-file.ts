@@ -57,7 +57,7 @@ Jupyter Notebooks:
     }
 
     if (stat.isDirectory()) {
-      return { success: false, output: `Path is a directory, not a file: ${filePath}. Use ListFiles instead.` }
+      return { success: false, output: `Path is a directory, not a file: ${filePath}. Use ListDir instead.` }
     }
 
     if (await isBinaryFile(absPath)) {

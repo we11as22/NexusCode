@@ -15,6 +15,7 @@ import type {
   TextPart,
   ReasoningPart,
   ToolPart,
+  ImagePart,
   SessionRole,
   MessagePart,
   DiagnosticItem,
@@ -24,6 +25,7 @@ import { buildSystemPrompt, type PromptContext } from "./prompts/components/inde
 import { getInitialProjectContext } from "./prompts/initial-context.js"
 import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN, MANDATORY_END_TOOL } from "./modes.js"
 import { classifyMcpServers, classifySkills } from "./classifier.js"
+import { normalizeToolInputForParse } from "./tool-execution.js"
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
@@ -404,6 +406,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     let currentText = ""
     let currentReasoning = ""
+    /** Buffer for first line of assistant output; if it parses as JSON with reasoning, we emit it as Thought. */
+    let firstLineBuffer = ""
+    let firstLineConsumed = false
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
     lastToolName = ""
     let sawNativeToolCall = false
@@ -422,6 +427,29 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         error: `Tool-call budget reached (${toolCallBudget}). Forcing final answer without additional tools.`,
         fatal: false,
       })
+    }
+
+    /** When we leave text_delta without having seen a newline, flush buffered first line so no text is lost (e.g. model sends "OK." then tool_call). */
+    const flushFirstLineBuffer = () => {
+      if (firstLineConsumed || firstLineBuffer.length === 0) return
+      firstLineConsumed = true
+      const toEmit = firstLineBuffer
+      firstLineBuffer = ""
+      const line = toEmit.trim()
+      try {
+        const parsed = JSON.parse(line) as { reasoning?: string }
+        if (typeof parsed.reasoning === "string" && parsed.reasoning.length > 0) {
+          currentReasoning += parsed.reasoning
+          host.emit({ type: "reasoning_delta", delta: parsed.reasoning, messageId: newMessageId })
+        } else {
+          currentText += toEmit
+          host.emit({ type: "text_delta", delta: toEmit, messageId: newMessageId })
+        }
+      } catch {
+        currentText += toEmit
+        host.emit({ type: "text_delta", delta: toEmit, messageId: newMessageId })
+      }
+      flushAssistantContent()
     }
 
     /** Persist reasoning + text + tool parts to session. Reasoning comes only from reasoning_delta (model's internal reasoning); text_delta is always stored as text. */
@@ -500,9 +528,38 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         switch (event.type) {
           case "text_delta":
             if (event.delta) {
-              currentText += event.delta
-              flushAssistantContent()
-              host.emit({ type: "text_delta", delta: event.delta, messageId: newMessageId })
+              const d = event.delta
+              if (!firstLineConsumed) {
+                firstLineBuffer += d
+                if (firstLineBuffer.includes("\n")) {
+                  const newlineIdx = firstLineBuffer.indexOf("\n")
+                  const line = firstLineBuffer.slice(0, newlineIdx).trim()
+                  const rest = firstLineBuffer.slice(newlineIdx + 1)
+                  firstLineConsumed = true
+                  try {
+                    const parsed = JSON.parse(line) as { reasoning?: string }
+                    if (typeof parsed.reasoning === "string" && parsed.reasoning.length > 0) {
+                      currentReasoning += parsed.reasoning
+                      host.emit({ type: "reasoning_delta", delta: parsed.reasoning, messageId: newMessageId })
+                      if (rest.length > 0) {
+                        currentText += "\n" + rest
+                        host.emit({ type: "text_delta", delta: "\n" + rest, messageId: newMessageId })
+                      }
+                    } else {
+                      currentText += firstLineBuffer
+                      host.emit({ type: "text_delta", delta: firstLineBuffer, messageId: newMessageId })
+                    }
+                  } catch {
+                    currentText += firstLineBuffer
+                    host.emit({ type: "text_delta", delta: firstLineBuffer, messageId: newMessageId })
+                  }
+                  flushAssistantContent()
+                }
+              } else {
+                currentText += d
+                flushAssistantContent()
+                host.emit({ type: "text_delta", delta: d, messageId: newMessageId })
+              }
             }
             break
 
@@ -515,8 +572,28 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             break
 
           case "tool_call": {
-            const { toolCallId, toolName, toolInput } = event
+            flushFirstLineBuffer()
+            let { toolCallId, toolName, toolInput } = event
             if (!toolCallId || !toolName || !toolInput) break
+            // CLI/gateway may send list_dir; resolve to builtin name so we find the tool and normalize args
+            if (toolName === "list_dir") toolName = "ListDir"
+            // Normalize ListDir: some providers send "paths" (array); we only accept "path". Default path to ".".
+            if (toolName === "ListDir" && typeof toolInput === "object") {
+              const pathVal =
+                (toolInput as Record<string, unknown>).path ??
+                (Array.isArray((toolInput as Record<string, unknown>).paths) &&
+                typeof ((toolInput as Record<string, unknown>).paths as unknown[])?.[0] === "string"
+                  ? ((toolInput as Record<string, unknown>).paths as string[])[0]
+                  : undefined)
+              toolInput = {
+                path: pathVal ?? ".",
+                ignore: (toolInput as Record<string, unknown>).ignore,
+                recursive: (toolInput as Record<string, unknown>).recursive,
+                include: (toolInput as Record<string, unknown>).include,
+                max_entries: (toolInput as Record<string, unknown>).max_entries,
+                task_progress: (toolInput as Record<string, unknown>).task_progress,
+              }
+            }
             sawNativeToolCall = true
 
             // Track invalid tool calls — if model keeps calling non-existent tools, stop it
@@ -666,6 +743,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           }
 
           case "finish":
+            flushFirstLineBuffer()
             await flushPendingReads()
             finishReason = event.finishReason
 
@@ -688,6 +766,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             break
 
           case "error":
+            flushFirstLineBuffer()
             if (event.error) {
               await flushPendingReads()
               const message = event.error.message
@@ -700,6 +779,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             break
         }
         if (budgetExceededThisIteration) {
+          flushFirstLineBuffer()
           await flushPendingReads()
           break streamLoop
         }
@@ -1000,7 +1080,9 @@ async function executeToolCall(
   mode: Mode,
   mcpToolNames: Set<string>
 ): Promise<ToolResult> {
-  const tool = tools.find(t => t.name === toolName)
+  // Resolve gateway name to builtin name so we always use our ListDir (path-only schema)
+  const resolvedToolName = toolName === "list_dir" ? "ListDir" : toolName
+  const tool = tools.find(t => t.name === resolvedToolName)
   if (!tool) {
     const availableList = tools.map(t => t.name).join(", ")
     return {
@@ -1013,8 +1095,8 @@ async function executeToolCall(
   ctxWithPartId.partId = `part_${toolCallId}`
 
   // Plan mode: allow writes only to .nexus/plans/*.md|*.txt (no source code edits)
-  if (mode === "plan" && ["Write", "Edit"].includes(toolName)) {
-    const targetPath = extractWriteTargetPath(toolName, toolInput)
+  if (mode === "plan" && ["Write", "Edit"].includes(resolvedToolName)) {
+    const targetPath = extractWriteTargetPath(resolvedToolName, toolInput)
     if (!targetPath) {
       return {
         success: false,
@@ -1106,10 +1188,13 @@ async function executeToolCall(
     }
   }
 
-  // Validate args
+  // Validate args — normalize all tools so gateway/API quirks (paths vs path, [undefined] in arrays) don't cause parse errors.
   let validatedArgs: unknown
   try {
-    validatedArgs = tool.parameters.parse(toolInput)
+    let inputToParse: Record<string, unknown> =
+      toolInput && typeof toolInput === "object" ? { ...toolInput } : {}
+    inputToParse = normalizeToolInputForParse(resolvedToolName, inputToParse) as Record<string, unknown>
+    validatedArgs = tool.parameters.parse(inputToParse)
   } catch (err) {
     return { success: false, output: `Invalid arguments for ${toolName}: ${err}` }
   }
@@ -1257,13 +1342,21 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
     if (!Array.isArray(parts) || parts.length === 0) continue
 
     if (msg.role === "user") {
-      // User messages with parts (mentions, etc.)
-      const textContent = parts
-        .filter((p): p is TextPart => p.type === "text")
+      // User messages with parts (text, images)
+      const textParts = parts.filter((p): p is TextPart => p.type === "text")
+      const imageParts = parts.filter((p): p is ImagePart => p.type === "image")
+      const textContent = textParts
         .map(p => p.text)
         .join("")
         .trim()
-      if (textContent) {
+      if (imageParts.length > 0) {
+        const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = []
+        if (textContent) content.push({ type: "text", text: textContent })
+        for (const ip of imageParts) {
+          content.push({ type: "image", data: ip.data, mimeType: ip.mimeType })
+        }
+        messages.push({ role: "user", content })
+      } else if (textContent) {
         messages.push({ role: "user", content: textContent })
       }
       continue

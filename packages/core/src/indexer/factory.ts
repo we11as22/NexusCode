@@ -6,6 +6,8 @@ import { ensureQdrantRunning } from "./qdrant-manager.js"
 
 export interface IndexerFactoryOptions {
   onWarning?: (message: string) => void
+  /** Progress messages during Qdrant startup and indexer creation (e.g. for UI or terminal). */
+  onProgress?: (message: string) => void
   /** Max ms to wait for Qdrant when vector is enabled (e.g. 2500 for fast first message). Omit for default 20s. */
   maxQdrantWaitMs?: number
 }
@@ -20,6 +22,7 @@ export async function createCodebaseIndexer(
   options: IndexerFactoryOptions = {}
 ): Promise<CodebaseIndexer> {
   const warn = options.onWarning ?? (() => {})
+  const progress = options.onProgress ?? (() => {})
   const maxQdrantWaitMs = options.maxQdrantWaitMs
   const wantsVector = Boolean(config.indexing.vector && config.vectorDb?.enabled)
 
@@ -39,10 +42,12 @@ export async function createCodebaseIndexer(
 
   const vectorUrl = config.vectorDb?.url ?? "http://127.0.0.1:6333"
   const autoStart = config.vectorDb?.autoStart ?? true
+  progress("Starting vector DB (Qdrant)…")
   const qdrant = await ensureQdrantRunning({
     url: vectorUrl,
     autoStart,
     log: warn,
+    onProgress: progress,
     ...(maxQdrantWaitMs != null && { maxWaitMs: maxQdrantWaitMs }),
   })
   if (!qdrant.available) {
@@ -50,6 +55,7 @@ export async function createCodebaseIndexer(
     return new CodebaseIndexer(projectRoot, config)
   }
 
+  progress("Creating embedding client…")
   let embeddingClient
   try {
     embeddingClient = createEmbeddingClient(config.embeddings)
@@ -60,5 +66,6 @@ export async function createCodebaseIndexer(
   }
   const projectHash = crypto.createHash("sha1").update(projectRoot).digest("hex").slice(0, 16)
 
+  progress("Vector DB ready. Preparing index…")
   return new CodebaseIndexer(projectRoot, config, embeddingClient, vectorUrl, projectHash)
 }

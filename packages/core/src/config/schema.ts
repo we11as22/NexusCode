@@ -164,7 +164,7 @@ export const NexusConfigSchema = z.object({
 
   parallelAgents: z.object({
     maxParallel: z.number().int().positive().default(4),
-    /** Max tasks per single spawn_agent call when using \`tasks\` array (default 12). */
+    /** Max tasks per single SpawnAgents call when using \`tasks\` array (default 12). */
     maxTasksPerCall: z.number().int().positive().default(12),
   }).default({}),
 

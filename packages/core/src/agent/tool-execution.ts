@@ -59,6 +59,65 @@ function canonicalJson(obj: Record<string, unknown>): string {
   return JSON.stringify(obj, keys as unknown as string[])
 }
 
+/** Ensure optional string-array param is undefined or an array of strings (gateway may send [undefined] or mixed). */
+function normalizeOptionalStringArray(val: unknown): string[] | undefined {
+  if (val === undefined || val === null) return undefined
+  if (!Array.isArray(val)) return undefined
+  const filtered = (val as unknown[]).filter((x): x is string => typeof x === "string")
+  return filtered.length === 0 ? undefined : filtered
+}
+
+/**
+ * Normalize tool input before Zod parse so gateway/API quirks (paths vs path, [undefined] in arrays) don't cause validation errors.
+ * Applied to all built-in tools that have optional string arrays or path/paths.
+ */
+export function normalizeToolInputForParse(
+  toolName: string,
+  input: Record<string, unknown>
+): Record<string, unknown> {
+  const raw = input
+  // Resolve gateway name so we apply the right normalizer
+  const name = toolName === "list_dir" ? "ListDir" : toolName
+  // ListDir: only "path" (string); gateway may send "paths" (array)
+  if (name === "ListDir") {
+    const pathVal =
+      typeof raw.path === "string" && raw.path.length > 0
+        ? raw.path
+        : Array.isArray(raw.paths) && typeof raw.paths[0] === "string"
+          ? (raw.paths[0] as string)
+          : "."
+    return {
+      path: pathVal,
+      ignore: raw.ignore,
+      recursive: raw.recursive,
+      include: raw.include,
+      max_entries: raw.max_entries,
+      task_progress: raw.task_progress,
+    }
+  }
+  // ReadLints: paths optional array of strings
+  if (name === "ReadLints") {
+    const paths = normalizeOptionalStringArray(raw.paths)
+    return { ...raw, paths: paths ?? undefined }
+  }
+  // CodebaseSearch: target_directories optional array of strings
+  if (name === "CodebaseSearch") {
+    const target_directories = normalizeOptionalStringArray(raw.target_directories)
+    return { ...raw, target_directories: target_directories ?? undefined }
+  }
+  // AskFollowupQuestion: options optional array of strings
+  if (name === "AskFollowupQuestion") {
+    const options = normalizeOptionalStringArray(raw.options)
+    return { ...raw, options: options ?? undefined }
+  }
+  // Grep: ignore optional array of strings
+  if (name === "Grep") {
+    const ignore = normalizeOptionalStringArray(raw.ignore)
+    return { ...raw, ignore: ignore ?? undefined }
+  }
+  return raw
+}
+
 function normalizeCommand(command: string): string {
   return command.trim().replace(/\s+/g, " ")
 }
@@ -376,7 +435,10 @@ export async function executeToolCall(
 
   let validatedArgs: unknown
   try {
-    validatedArgs = tool.parameters.parse(toolInput)
+    let inputToParse: Record<string, unknown> =
+      typeof toolInput === "object" && toolInput !== null ? { ...toolInput } : {}
+    inputToParse = normalizeToolInputForParse(toolName, inputToParse) as Record<string, unknown>
+    validatedArgs = tool.parameters.parse(inputToParse)
   } catch (err) {
     return { success: false, output: `Invalid arguments for ${toolName}: ${err}` }
   }

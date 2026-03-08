@@ -62,7 +62,7 @@ export interface ToolContext {
   host: IHost
   session: ISession
   config: NexusConfig
-  /** Current loop mode (agent / plan / ask). Used e.g. by spawn_agent to set sub-agent permissions. */
+  /** Current loop mode (agent / plan / ask). Used e.g. by SpawnAgents to set sub-agent permissions. */
   mode?: Mode
   indexer?: IIndexer
   signal: AbortSignal
@@ -148,6 +148,8 @@ export interface ISession {
   fork(messageId: string): ISession
   /** Rewind chat to timestamp; keeps only messages with ts <= timestamp (for checkpoint restore). */
   rewindToTimestamp(timestamp: number): void
+  /** Rewind so that only messages with ts < timestamp remain (for rollback before a message). */
+  rewindBeforeTimestamp(timestamp: number): void
   save(): Promise<void>
   load(): Promise<void>
 }
@@ -168,8 +170,6 @@ export interface SessionMessage {
   todo?: string
 }
 
-export type MessagePart = TextPart | ToolPart | ReasoningPart
-
 export interface TextPart {
   type: "text"
   text: string
@@ -180,6 +180,13 @@ export interface TextPart {
 export interface ReasoningPart {
   type: "reasoning"
   text: string
+}
+
+/** User message part: image (base64 data URL or raw base64, with mimeType). */
+export interface ImagePart {
+  type: "image"
+  data: string
+  mimeType: string
 }
 
 export interface ToolPart {
@@ -195,6 +202,8 @@ export interface ToolPart {
   /** If true, output has been pruned for compaction */
   compacted?: boolean
 }
+
+export type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart
 
 // ─── Indexer Interface ────────────────────────────────────────────────────────
 

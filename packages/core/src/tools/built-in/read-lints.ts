@@ -2,15 +2,17 @@ import { z } from "zod"
 import * as path from "node:path"
 import type { ToolDef, ToolContext, DiagnosticItem } from "../../types.js"
 
-const readLintsSchema = z.object({
-  paths: z
-    .array(z.union([z.string(), z.undefined()]))
-    .optional()
-    .describe(
-      "Optional. Paths to files or directories (relative to project root). If provided, returns diagnostics only for these paths. If omitted, returns diagnostics for the whole workspace (capped)."
-    ),
-  task_progress: z.string().optional(),
-})
+const readLintsSchema = z
+  .object({
+    paths: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Optional. Paths to files or directories (relative to project root). If provided, returns diagnostics only for these paths. If omitted, returns diagnostics for the whole workspace (capped)."
+      ),
+    task_progress: z.string().optional(),
+  })
+  .strict()
 
 const MAX_DIAGNOSTICS = 100
 
@@ -50,7 +52,7 @@ Parameters:
   async execute({ paths: pathsArgRaw }, ctx: ToolContext) {
     const pathsArg =
       pathsArgRaw && Array.isArray(pathsArgRaw)
-        ? (pathsArgRaw as (string | undefined)[]).filter((p): p is string => typeof p === "string" && p.length > 0)
+        ? (pathsArgRaw as string[]).filter((p): p is string => typeof p === "string" && p.length > 0)
         : undefined
     if (!ctx.host.getProblems) {
       return {

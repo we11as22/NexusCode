@@ -187,6 +187,7 @@ function buildLLMMessages(messages: SessionMessage[]) {
       const parts = m.content as MessagePart[]
       text = parts.map(p => {
         if (p.type === "reasoning") return "" // do not include reasoning in compaction summary
+        if (p.type === "image") return "" // images not included in compaction summary
         if (p.type === "text") {
           const t = p as { text: string; user_message?: string }
           const um = t.user_message?.trim()

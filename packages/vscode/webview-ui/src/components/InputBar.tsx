@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useLayoutEffect, useState } from "react"
 import { useChatStore } from "../stores/chat.js"
+import { AttachedImagesStripWithPicker } from "./AttachedImagesStrip.js"
 
 const AT_MENTION_SUGGESTIONS = [
   { value: "@file:", label: "@file — attach a file" },
@@ -9,19 +10,25 @@ const AT_MENTION_SUGGESTIONS = [
   { value: "@git", label: "@git — git status/diff" },
 ]
 
-export function InputBar() {
-  const { inputValue, isRunning, awaitingApproval, setInputValue, sendMessage, abort } = useChatStore()
+export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTrigger?: (trigger: () => void) => void }) {
+  const { inputValue, isRunning, awaitingApproval, setInputValue, sendMessage, abort, addAttachedImage, attachedImages } = useChatStore()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [suggestions, setSuggestions] = useState(AT_MENTION_SUGGESTIONS)
 
   const autosize = () => {
-    if (!textareaRef.current) return
-    const base = 54
-    const max = 240
+    if (!textareaRef.current || !containerRef.current) return
+    const initialHeight = 44
+    const areaMax = 220
+    const container = containerRef.current
+    const containerRect = container.getBoundingClientRect()
+    const imagesRow = container.querySelector(".nexus-attached-images-row") as HTMLElement | null
+    const imagesHeight = imagesRow ? imagesRow.getBoundingClientRect().height + 6 : 0
+    const availableForText = Math.max(initialHeight, (containerRect.height || areaMax) - imagesHeight)
+    const maxHeight = Math.min(areaMax, availableForText)
     textareaRef.current.style.height = "auto"
-    textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, max)}px`
+    textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, maxHeight)}px`
     scrollCaretIntoView()
   }
 
@@ -47,7 +54,7 @@ export function InputBar() {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      if (!isRunning && !awaitingApproval && inputValue.trim()) {
+      if (!isRunning && !awaitingApproval && (inputValue.trim() || attachedImages.length > 0)) {
         sendMessage(inputValue.trim())
       }
       return
@@ -97,7 +104,60 @@ export function InputBar() {
 
   useLayoutEffect(() => {
     autosize()
-  }, [inputValue])
+  }, [inputValue, attachedImages.length])
+
+  const handlePaste = async (e: React.ClipboardEvent) => {
+    const dt = e.clipboardData
+    if (!dt) return
+
+    const readFileAsBase64 = (file: File): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => {
+          const result = reader.result as string
+          resolve(result.includes(",") ? result.split(",")[1]! : result)
+        }
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(file)
+      })
+
+    let added = 0
+
+    // clipboardData.items — скриншоты (Ctrl+V после копирования экрана) часто приходят сюда
+    const itemList = dt.items
+    if (itemList) {
+      for (let i = 0; i < itemList.length; i++) {
+        const item = itemList[i]
+        if (!item || item.kind !== "file" || !item.type.startsWith("image/")) continue
+        const file = item.getAsFile()
+        if (!file) continue
+        try {
+          const data = await readFileAsBase64(file)
+          addAttachedImage(data, file.type || "image/png")
+          added++
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    // clipboardData.files — вставка через «Вставить файл» или перетаскивание
+    if (added === 0 && dt.files?.length) {
+      for (let i = 0; i < dt.files.length; i++) {
+        const file = dt.files[i]!
+        if (!file.type.startsWith("image/")) continue
+        try {
+          const data = await readFileAsBase64(file)
+          addAttachedImage(data, file.type || "image/png")
+          added++
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (added > 0) e.preventDefault()
+  }
 
   return (
     <div ref={containerRef} className="relative flex-1 min-w-0 flex flex-col overflow-hidden">
@@ -116,6 +176,8 @@ export function InputBar() {
         </div>
       )}
 
+      <AttachedImagesStripWithPicker registerImagePickerTrigger={registerImagePickerTrigger} />
+
       <div className="prompt-input-container flex-1 min-h-0 min-w-0 flex flex-col">
         <div className="prompt-input-wrapper">
           <textarea
@@ -123,12 +185,13 @@ export function InputBar() {
             value={inputValue}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
           placeholder={
             awaitingApproval
               ? "Awaiting your approval (check VS Code notification)…"
               : isRunning
                 ? "Running… (Esc to abort)"
-                : ""
+                : "Add a follow-up"
           }
           disabled={false}
           rows={1}

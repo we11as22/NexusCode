@@ -27,6 +27,7 @@ const MESSAGES = [
   'Conjuring',
   'Considering',
   'Cooking',
+  'Clauding',
   'Crafting',
   'Creating',
   'Crunching',

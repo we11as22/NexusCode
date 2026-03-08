@@ -450,6 +450,189 @@ html, body, #root {
   box-shadow: inset 0 0 0 1px var(--nexus-accent-muted);
 }
 
+/* Horizontal session tab bar (scrollable tabs + new + dropdown) */
+.nexus-session-tab-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  background: var(--nexus-panel-bg);
+  min-height: 36px;
+}
+
+.nexus-session-tab-bar-scroll {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-height: 4px;
+  padding: 4px 0;
+}
+
+.nexus-session-tab {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-radius: 6px;
+  margin-left: 2px;
+  max-width: 180px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-session-tab:hover {
+  color: var(--vscode-foreground);
+}
+
+.nexus-session-tab-active {
+  background: var(--vscode-list-activeSelectionBackground, rgba(255, 255, 255, 0.1));
+  color: var(--vscode-foreground);
+}
+
+.nexus-session-tab-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px 4px 10px;
+  border: none;
+  border-radius: 6px 0 0 6px;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+  font-size: 12px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexus-session-tab-close {
+  flex-shrink: 0;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 0 6px 6px 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nexus-session-tab-close:hover {
+  color: var(--vscode-errorForeground, #f14c4c);
+  background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.15));
+}
+
+.nexus-session-tab-bar-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px 0 4px;
+}
+
+.nexus-session-tab-add {
+  padding: 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nexus-session-tab-add:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-session-tab-dropdown-wrap {
+  position: relative;
+}
+
+.nexus-session-tab-dropdown-btn {
+  padding: 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nexus-session-tab-dropdown-btn:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-session-tab-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 2px;
+  min-width: 200px;
+  max-width: 320px;
+  max-height: 280px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  background: var(--vscode-editor-background);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.nexus-session-tab-dropdown-list {
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.nexus-session-tab-dropdown-item {
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-foreground);
+  font-size: 12px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexus-session-tab-dropdown-item:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-session-tab-dropdown-item-active {
+  background: var(--vscode-list-activeSelectionBackground);
+}
+
+.nexus-session-tab-dropdown-more {
+  padding: 8px 12px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-textLink-foreground);
+  font-size: 12px;
+  text-align: left;
+}
+
+.nexus-session-tab-dropdown-more:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
 .nexus-section {
   margin-top: 12px;
   border: 1px solid var(--vscode-panel-border);
@@ -613,41 +796,294 @@ html, body, #root {
   overflow: hidden;
 }
 
+/* Floating panel above input: "N File(s)" + Undo / Keep / Review */
+.nexus-input-context-panel {
+  flex-shrink: 0;
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-input-context-panel:last-of-type {
+  margin-bottom: 6px;
+  /* линия-разделитель над полем ввода сохраняем */
+}
+
+/* Свёрнутый вид: одна компактная строка (chevron + подпись) */
+.nexus-input-context-panel-collapsed .nexus-input-context-panel-inner {
+  border-radius: 0;
+}
+
+.nexus-input-context-panel-collapsed .nexus-input-context-top-row {
+  padding: 4px 10px;
+  min-height: 28px;
+}
+
+.nexus-input-context-panel-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--vscode-editor-inactiveSelectionBackground, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--vscode-panel-border);
+  border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  overflow: hidden;
+}
+
+.nexus-input-context-panel:not(:first-of-type) .nexus-input-context-panel-inner {
+  border-radius: 0;
+}
+
+.nexus-input-context-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 4px 10px;
+}
+
+.nexus-input-context-files-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-foreground);
+  font-size: 12px;
+  text-align: left;
+}
+
+.nexus-input-context-files-toggle:hover {
+  background: var(--vscode-list-hoverBackground);
+  border-radius: 6px;
+}
+
+.nexus-input-context-chevron {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-input-context-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 6px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+}
+
+.nexus-input-context-file-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--vscode-symbolIcon-fileForeground, var(--vscode-descriptionForeground));
+}
+
+.nexus-input-context-file-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--vscode-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexus-input-context-file-diff {
+  margin-left: 6px;
+  font-size: 11px;
+}
+
+.nexus-input-context-file-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+.nexus-input-context-file-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
+}
+
+.nexus-input-context-file-dismiss:hover {
+  color: var(--vscode-errorForeground);
+  background: var(--vscode-inputValidation-errorBackground);
+}
+
+.nexus-input-context-file-allow:hover {
+  color: var(--vscode-testing-iconPassed);
+  background: rgba(44, 186, 92, 0.15);
+}
+
+.nexus-input-context-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 0;
+  background: transparent;
+}
+
+.nexus-input-context-btn {
+  padding: 4px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-foreground);
+  font-size: 11px;
+}
+
+.nexus-input-context-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-input-context-btn-active {
+  background: var(--vscode-list-activeSelectionBackground, rgba(255, 255, 255, 0.1));
+  color: var(--vscode-foreground);
+}
+
 .chat-input {
   flex-shrink: 0;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--vscode-input-background, var(--vscode-editor-background));
-  border-top: 1px solid var(--vscode-panel-border);
   padding: 8px 12px 10px;
-  /* Keep input area above bottom safe area; ensure it never gets clipped */
   margin-bottom: 0;
   position: relative;
   z-index: 1;
 }
 
-/* Single unified background: text area and buttons share the same color; no inner margin so no dark band */
-.chat-input .chat-bottom-bar {
+/* Single rounded container for input + buttons — no visible box, blends with background */
+.chat-input .chat-input-inner {
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  flex: 1;
   overflow: hidden;
   background: transparent;
-  margin: 0;
+  border: none;
+  border-radius: 0;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+.chat-input .chat-input-inner:focus-within {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+/* Text area zone — grows upward; max height leaves room for images row */
 .chat-input .chat-input-area {
   flex: 1;
-  min-height: 54px;
-  max-height: 260px;
+  min-height: 44px;
+  max-height: min(50vh, 280px);
   display: flex;
   flex-direction: column;
-  padding: 0 0 6px;
+  padding: 10px 12px 8px;
   min-width: 0;
+  overflow: hidden;
+}
+
+/* Attached images: thumbnails above text + pick button; remove (×) on hover */
+.nexus-attached-images-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-bottom: 6px;
+}
+
+.nexus-attached-images-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.nexus-attached-image-wrap {
+  position: relative;
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-inactiveSelectionBackground);
+}
+
+.nexus-attached-image-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.nexus-attached-image-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.nexus-attached-image-wrap:hover .nexus-attached-image-remove {
+  opacity: 1;
+}
+
+.nexus-attached-image-remove:hover {
+  background: var(--vscode-errorForeground, #f14c4c);
+}
+
+.nexus-attached-images-input-hidden {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.nexus-attached-image-pick-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nexus-attached-image-pick-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
 }
 
 .chat-input .chat-control-row {
@@ -655,7 +1091,7 @@ html, body, #root {
   flex-direction: row;
   align-items: center;
   gap: 8px;
-  padding: 6px 0 0;
+  padding: 8px 12px 8px;
   min-height: 0;
   flex-shrink: 0;
   min-width: 0;
@@ -755,6 +1191,93 @@ html, body, #root {
   color: #ff8a8a;
 }
 
+/* Explored block — как на референсе: полоска-заголовок + простой список строк */
+.nexus-explored-block {
+  border-radius: 6px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+.nexus-explored-header {
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 94%, var(--vscode-panel-border) 6%);
+  border-bottom: 1px solid transparent;
+  transition: background 0.12s ease;
+}
+
+.nexus-explored-block:has(.nexus-explored-content) .nexus-explored-header {
+  border-bottom-color: var(--vscode-panel-border);
+}
+
+.nexus-explored-header:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-explored-chevron {
+  display: inline-block;
+}
+
+.nexus-explored-content {
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.nexus-explored-entry {
+  padding: 0;
+}
+
+.nexus-explored-entry-btn,
+.nexus-explored-entry-text {
+  display: block;
+  width: 100%;
+  padding: 4px 10px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--vscode-foreground);
+  text-align: left;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexus-explored-entry-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-textLink-foreground);
+}
+
+.nexus-explored-entry-text {
+  cursor: default;
+  color: var(--vscode-foreground);
+}
+
+.nexus-explored-thought-chevron {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  transition: transform 0.15s ease;
+}
+
+.nexus-explored-thought-expanded {
+  padding: 8px 10px 10px;
+  margin: 0 6px 6px;
+  font-size: 11px;
+  color: var(--vscode-foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  max-height: min(50vh, 320px);
+  overflow-y: auto;
+}
+
 /* File edit/add block — language badge + path + diff stats, code with green/red (reference design) */
 .nexus-file-edit-block {
   border-radius: 10px;
@@ -802,6 +1325,10 @@ html, body, #root {
   font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
   color: var(--vscode-descriptionForeground);
   font-size: 10px;
+}
+
+.nexus-diff-hidden-lines {
+  background: var(--vscode-editor-inactiveSelectionBackground, rgba(255, 255, 255, 0.04));
 }
 
 .nexus-file-edit-content {
@@ -895,6 +1422,95 @@ html, body, #root {
   width: 100%;
   padding: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.nexus-message-list-top-indicator {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-editor-inactiveSelectionBackground);
+  border-bottom: 1px solid var(--vscode-panel-border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexus-message-list-top-preview {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message-list-virtuoso-wrap {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.nexus-rollback-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.nexus-rollback-btn-corner {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+}
+
+.nexus-rollback-btn:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-rollback-arrow {
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* User message bubble — same rounded style as input panel */
+.nexus-user-msg-wrap {
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+  min-width: 0;
+}
+
+.nexus-user-msg-bubble {
+  position: relative;
+  max-width: 92%;
+  border-radius: 16px;
+  padding: 10px 12px 10px;
+  text-align: left;
+  background: color-mix(in srgb, var(--vscode-input-background, var(--vscode-editor-inactiveSelectionBackground)) 92%, black);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  box-shadow: 0 0 0 0 transparent;
+}
+
+.nexus-user-msg-bubble-has-rollback {
+  padding-right: 38px;
+}
+
+.nexus-user-msg-content {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--vscode-input-foreground, var(--vscode-foreground));
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* Scrollable area: reserve space for scrollbar so it doesn't overlap tool cards / content */
@@ -999,22 +1615,20 @@ html, body, #root {
   position: relative;
   flex: 1;
   min-width: 0;
-  min-height: 54px;
-  max-height: 240px;
+  min-height: 44px;
+  max-height: none;
   margin: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--vscode-input-background, var(--vscode-editor-inactiveSelectionBackground));
-  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
-  border-radius: 14px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  transition: none;
 }
 
-.prompt-input-container:focus-within {
-  border-color: var(--vscode-focusBorder, var(--vscode-input-border));
-  box-shadow: 0 0 0 1px var(--vscode-focusBorder, transparent);
-  outline: none;
+.chat-input .chat-input-inner .prompt-input-container:focus-within {
+  box-shadow: none;
 }
 
 .prompt-input-wrapper {
@@ -1027,12 +1641,12 @@ html, body, #root {
   overflow: hidden;
 }
 
-/* Grows upward when content wraps; max height allows ~4 lines */
+/* Grows upward; max height leaves room for images row in .chat-input-area */
 .prompt-input {
   flex: 1;
   min-height: 44px;
-  max-height: 240px;
-  padding: 10px 12px 10px;
+  max-height: 220px;
+  padding: 6px 0;
   font-family: var(--vscode-font-family);
   font-size: 13px;
   line-height: 1.5;
@@ -1150,11 +1764,63 @@ html, body, #root {
   cursor: not-allowed;
 }
 .nexus-send-btn.nexus-send-btn-primary {
-  background: var(--nexus-accent);
+  background: #4b5563;
   color: #fff;
 }
 .nexus-send-btn.nexus-send-btn-primary:hover:not(:disabled) {
+  background: #6b7280;
+}
+.nexus-send-btn.nexus-send-btn-stop {
+  background: rgba(239, 68, 68, 0.9);
+  color: #fff;
+}
+.nexus-send-btn.nexus-send-btn-stop:hover:not(:disabled) {
   filter: brightness(1.1);
+}
+
+.nexus-context-ring-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.nexus-context-ring-btn .nexus-context-ring-bg {
+  opacity: 0.35;
+  transition: stroke-dashoffset 0.2s ease;
+}
+.nexus-context-ring-btn .nexus-context-ring-fill {
+  transition: stroke-dashoffset 0.2s ease;
+}
+.nexus-context-ring-btn:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-image-pick-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.nexus-image-pick-btn:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
 }
 
 /* Smooth transitions */

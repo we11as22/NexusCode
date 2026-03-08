@@ -39,7 +39,7 @@ export interface ToolPart {
   diffStats?: { added: number; removed: number }
   /** Line-by-line diff for UI (red/green); set from tool_end when available */
   diffHunks?: Array<{ type: string; lineNum: number; line: string }>
-  /** Subagents for spawn_agent: filled by subagent_start/tool_start/done, shown inline under this tool card */
+  /** Subagents for SpawnAgents: filled by subagent_start/tool_start/done, shown inline under this tool card */
   subagents?: SubAgentState[]
 }
 
@@ -144,18 +144,24 @@ interface ChatState {
   todo: string
   indexReady: boolean
   indexStatus: IndexStatusKind
+  /** Shown when vector DB is starting (Qdrant + indexer). Cleared on vector_db_ready or index_update. */
+  vectorDbProgressMessage: string | null
   contextUsedTokens: number
   contextLimitTokens: number
   contextPercent: number
   inputValue: string
   view: AppView
+  /** Images attached to the next message (base64 data, no data URL prefix). */
+  attachedImages: Array<{ id: string; data: string; mimeType: string }>
+  /** Queued messages to send one by one when agent finishes. */
+  queuedMessages: Array<{ id: string; text: string }>
   sessions: SessionPreview[]
   /** True while session list is being fetched (e.g. from server). */
   sessionsLoading: boolean
   config: NexusConfigState | null
   isCompacting: boolean
   subagents: SubAgentState[]
-  /** partId of the last tool_start(spawn_agent); used to attach subagent_start to that part */
+  /** partId of the last tool_start(SpawnAgents); used to attach subagent_start to that part */
   lastSpawnAgentPartId: string | null
   selectedProfile: string
   projectDir: string
@@ -207,6 +213,13 @@ interface ChatState {
   setView: (view: AppView) => void
   setInputValue: (v: string) => void
   appendToInput: (v: string) => void
+  addAttachedImage: (data: string, mimeType: string) => void
+  removeAttachedImage: (id: string) => void
+  addToQueue: (text: string) => void
+  removeFromQueue: (id: string) => void
+  addToQueueFront: (text: string) => void
+  editQueuedToInput: (id: string) => void
+  sendQueuedImmediately: (id: string) => void
   setMode: (mode: Mode) => void
   setProfile: (profileName: string) => void
   sendMessage: (content: string) => void
@@ -215,6 +228,7 @@ interface ChatState {
   clearChat: () => void
   forkSession: (messageId: string) => void
   switchSession: (sessionId: string) => void
+  createNewSession: () => void
   deleteSession: (sessionId: string) => void
   reindex: () => void
   clearIndex: () => void
@@ -263,11 +277,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   todo: "",
   indexReady: false,
   indexStatus: { state: "idle" },
+  vectorDbProgressMessage: null,
   contextUsedTokens: 0,
   contextLimitTokens: 128000,
   contextPercent: 0,
   inputValue: "",
   view: "chat",
+  attachedImages: [],
+  queuedMessages: [],
   sessions: [],
   sessionsLoading: false,
   config: null,
@@ -324,6 +341,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   setInputValue: (v) => set({ inputValue: v }),
 
+  addAttachedImage: (data, mimeType) => set((prev) => ({
+    attachedImages: [...prev.attachedImages, { id: `img_${Date.now()}_${Math.random().toString(36).slice(2)}`, data, mimeType }],
+  })),
+  removeAttachedImage: (id) => set((prev) => ({
+    attachedImages: prev.attachedImages.filter((img) => img.id !== id),
+  })),
+
+  addToQueue: (text) => set((prev) => {
+    const trimmed = text.trim()
+    if (!trimmed) return prev
+    return {
+      queuedMessages: [
+        ...prev.queuedMessages,
+        { id: `q_${Date.now()}_${Math.random().toString(36).slice(2)}`, text: trimmed },
+      ],
+    }
+  }),
+  removeFromQueue: (id) => set((prev) => ({
+    queuedMessages: prev.queuedMessages.filter((q) => q.id !== id),
+  })),
+  addToQueueFront: (text) => set((prev) => {
+    const trimmed = text.trim()
+    if (!trimmed) return prev
+    return {
+      queuedMessages: [
+        { id: `q_${Date.now()}_${Math.random().toString(36).slice(2)}`, text: trimmed },
+        ...prev.queuedMessages,
+      ],
+    }
+  }),
+  editQueuedToInput: (id) => {
+    const item = get().queuedMessages.find((q) => q.id === id)
+    if (item) {
+      set((prev) => ({
+        inputValue: item.text,
+        queuedMessages: prev.queuedMessages.filter((q) => q.id !== id),
+      }))
+    }
+  },
+  sendQueuedImmediately: (id) => {
+    const item = get().queuedMessages.find((q) => q.id === id)
+    if (!item) return
+    const { isRunning, sendMessage, removeFromQueue, addToQueueFront } = get()
+    removeFromQueue(id)
+    if (isRunning) addToQueueFront(item.text)
+    else sendMessage(item.text)
+  },
+
   appendToInput: (v) => set((prev) => ({
     inputValue: prev.inputValue ? `${prev.inputValue}\n\n${v}` : v,
   })),
@@ -339,10 +404,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendMessage: (content) => {
-    const { mode, isRunning } = get()
+    const { mode, isRunning, attachedImages } = get()
     if (isRunning) return
+    const text = (typeof content === "string" ? content : "").trim()
     set((prev) => ({
       inputValue: "",
+      attachedImages: [],
       isRunning: true,
       view: "chat",
       messages: [
@@ -351,11 +418,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           id: `local_user_${Date.now()}`,
           ts: Date.now(),
           role: "user",
-          content,
+          content: text,
         },
       ],
     }))
-    postMessage({ type: "newMessage", content, mode })
+    postMessage({
+      type: "newMessage",
+      content: text,
+      mode,
+      images: attachedImages.length > 0 ? attachedImages.map((img) => ({ data: img.data, mimeType: img.mimeType })) : undefined,
+    })
   },
 
   abort: () => {
@@ -378,6 +450,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   switchSession: (sessionId) => {
     postMessage({ type: "switchSession", sessionId })
+    set({ view: "chat" })
+  },
+
+  createNewSession: () => {
+    postMessage({ type: "createNewSession" })
     set({ view: "chat" })
   },
 
@@ -439,6 +516,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       indexStatus: status,
       indexReady: status.state === "ready",
+      vectorDbProgressMessage: null,
     })
   },
 
@@ -529,8 +607,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "tool_start": {
-        const ev = event as { input?: Record<string, unknown> }
-        if (ev.tool === "spawn_agent") set({ lastSpawnAgentPartId: event.partId })
+        const ev = event as { input?: Record<string, unknown>; tool?: string }
+        if (ev.tool === "SpawnAgents") set({ lastSpawnAgentPartId: event.partId })
         const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
@@ -558,7 +636,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "tool_end": {
         const ev = event as { output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
-        if (event.tool === "spawn_agent") set({ lastSpawnAgentPartId: null })
+        if (event.tool === "SpawnAgents") set({ lastSpawnAgentPartId: null })
         set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
         const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg
@@ -726,7 +804,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({
           indexStatus: status,
           indexReady: status.state === "ready",
+          vectorDbProgressMessage: null,
         })
+        break
+      }
+
+      case "vector_db_progress": {
+        const message = (event as { message?: string }).message
+        set({ vectorDbProgressMessage: typeof message === "string" ? message : "Starting vector DB…" })
+        break
+      }
+
+      case "vector_db_ready": {
+        set({ vectorDbProgressMessage: null })
         break
       }
 
@@ -796,6 +886,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
             reasoningStartTime: null,
           }
         })
+        // Send next queued message when agent has finished
+        const state = get()
+        if (state.queuedMessages.length > 0) {
+          const first = state.queuedMessages[0]
+          state.removeFromQueue(first!.id)
+          state.sendMessage(first!.text)
+        }
         break
 
       case "error":

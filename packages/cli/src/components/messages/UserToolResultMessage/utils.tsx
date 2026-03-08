@@ -12,15 +12,20 @@ function getToolUseFromMessages(
 ): ToolUseBlockParam | null {
   let toolUse: ToolUseBlockParam | null = null
   for (const message of messages) {
-    if (
-      message.type !== 'assistant' ||
-      !Array.isArray(message.message.content)
-    ) {
-      continue
+    if (message.type === 'assistant' && Array.isArray(message.message.content)) {
+      for (const content of message.message.content) {
+        if (content.type === 'tool_use' && content.id === toolUseID) {
+          return content
+        }
+      }
     }
-    for (const content of message.message.content) {
-      if (content.type === 'tool_use' && content.id === toolUseID) {
-        toolUse = content
+    // Nexus path: tool_use is first emitted inside a ProgressMessage (tool_start);
+    // assistant_content_complete may come later. So we must resolve tool_use from progress too.
+    if (message.type === 'progress' && Array.isArray(message.content?.message?.content)) {
+      for (const content of message.content.message.content) {
+        if (content.type === 'tool_use' && content.id === toolUseID) {
+          return content
+        }
       }
     }
   }

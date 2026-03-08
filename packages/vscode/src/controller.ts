@@ -34,6 +34,7 @@ import {
   CheckpointTracker,
   CodebaseIndexer,
   createCodebaseIndexer,
+  ensureQdrantRunning,
   NexusConfigSchema,
   getModelsCatalog,
   hadPlanExit,
@@ -58,7 +59,7 @@ function stripModeReminderFromMessages(messages: SessionMessage[]): SessionMessa
 }
 
 export type WebviewMessage =
-  | { type: "newMessage"; content: string; mode: Mode; mentions?: string }
+  | { type: "newMessage"; content: string; mode: Mode; mentions?: string; images?: Array<{ data: string; mimeType: string }> }
   | { type: "abort" }
   | { type: "compact" }
   | { type: "clearChat" }
@@ -69,6 +70,7 @@ export type WebviewMessage =
   | { type: "openSettings" }
   | { type: "saveConfig"; config: Partial<NexusConfig> }
   | { type: "switchSession"; sessionId: string }
+  | { type: "createNewSession" }
   | { type: "forkSession"; messageId: string }
   | { type: "deleteSession"; sessionId: string }
   | { type: "reindex" }
@@ -95,6 +97,8 @@ export type WebviewMessage =
   | { type: "applyAgentPreset"; presetName: string }
   | { type: "planFollowupChoice"; choice: "new_session" | "continue" | "dismiss"; planText?: string }
   | { type: "loadOlderMessages" }
+  | { type: "rollbackToBeforeMessage"; messageId: string }
+  | { type: "startOrConnectVectorDb"; url: string; autoStart?: boolean }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
@@ -423,7 +427,7 @@ export class Controller {
     switch (msg.type) {
       case "newMessage":
         await this.ensureInitialized()
-        await this.runAgent(msg.content, msg.mode)
+        await this.runAgent(msg.content, msg.mode, msg.images)
         break
       case "abort":
         this.abortController?.abort()
@@ -520,8 +524,27 @@ export class Controller {
       case "switchSession":
         await this.switchSession(msg.sessionId)
         break
+      case "createNewSession":
+        await this.createNewSession()
+        break
       case "loadOlderMessages":
         await this.loadOlderMessages()
+        break
+      case "rollbackToBeforeMessage":
+        if (this.session) {
+          const msgs = this.session.messages
+          const idx = msgs.findIndex((m) => m.id === msg.messageId)
+          if (idx > 0) {
+            const target = msgs[idx]!
+            if (target.role === "user") {
+              this.session.rewindToTimestamp(msgs[idx - 1]!.ts)
+            } else {
+              this.session.rewindBeforeTimestamp(target.ts)
+            }
+            await this.session.save().catch(() => {})
+            this.postStateToWebview()
+          }
+        }
         break
       case "deleteSession":
         await this.deleteSession(msg.sessionId)
@@ -542,6 +565,36 @@ export class Controller {
       case "clearIndex":
         await this.clearIndex()
         break
+      case "startOrConnectVectorDb": {
+        const url = (msg as { url: string; autoStart?: boolean }).url?.trim() || "http://127.0.0.1:6333"
+        const autoStart = (msg as { autoStart?: boolean }).autoStart !== false
+        void (async () => {
+          try {
+            const result = await ensureQdrantRunning({
+              url,
+              autoStart,
+              onProgress: (message: string) => {
+                this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_progress", message } })
+              },
+              maxWaitMs: 20_000,
+            })
+            if (result.available) {
+              this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_ready" } })
+            } else {
+              this.postMessageToWebview({
+                type: "agentEvent",
+                event: { type: "error", error: result.warning ?? "Qdrant is not available." },
+              })
+              this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_ready" } })
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[vector db] ${message}` } })
+            this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_ready" } })
+          }
+        })()
+        break
+      }
       case "openFileAtLocation": {
         const cwd = this.getCwd()
         const absPath = path.isAbsolute(msg.path) ? msg.path : path.join(cwd, msg.path)
@@ -1091,7 +1144,7 @@ export class Controller {
     return ""
   }
 
-  private async runAgent(content: string, mode?: Mode): Promise<void> {
+  private async runAgent(content: string, mode?: Mode, images?: Array<{ data: string; mimeType: string }>): Promise<void> {
     if (this.isRunning) return
     if (!this.session || !this.config) {
       this.isRunning = false
@@ -1129,7 +1182,14 @@ export class Controller {
     }
 
     // Do NOT prepend mode reminder to user message — mode is in system prompt and API; keeps UI clean.
-    this.session.addMessage({ role: "user", content: actualContent })
+    const userContent: string | import("@nexuscode/core").MessagePart[] =
+      images != null && images.length > 0
+        ? [
+            ...(actualContent.trim() ? [{ type: "text" as const, text: actualContent }] : []),
+            ...images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType })),
+          ]
+        : actualContent
+    this.session.addMessage({ role: "user", content: userContent })
     this.postStateToWebview()
 
     const cwd = this.getCwd()
@@ -1612,6 +1672,38 @@ export class Controller {
     }
   }
 
+  private async createNewSession(): Promise<void> {
+    this.lastRunMode = null
+    const cwd = this.getCwd()
+    const serverUrl = this.getServerUrl()
+    if (serverUrl) {
+      try {
+        const res = await fetch(`${serverUrl.replace(/\/$/, "")}/session`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
+          body: "{}",
+        })
+        if (res.ok) {
+          const created = (await res.json()) as { id: string }
+          this.session = new Session(created.id, cwd, [])
+          this.serverSessionId = created.id
+          this.serverSessionOldestLoadedOffset = undefined
+        }
+      } catch {
+        // fallback to local session
+        this.session = Session.create(cwd)
+        this.serverSessionId = undefined
+      }
+    } else {
+      this.session = Session.create(cwd)
+      this.serverSessionId = undefined
+    }
+    this.serverSessionOldestLoadedOffset = undefined
+    this.checkpoint = undefined
+    this.postStateToWebview()
+    await this.sendSessionList()
+  }
+
   private async deleteSession(sessionId: string): Promise<void> {
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
@@ -1703,6 +1795,9 @@ export class Controller {
     this.indexer = await Promise.race([
       createCodebaseIndexer(cwd, this.config, {
         onWarning: (message: string) => console.warn(message),
+        onProgress: (message: string) => {
+          this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_progress", message } })
+        },
         maxQdrantWaitMs: INDEXER_CREATE_TIMEOUT_MS,
       }),
       new Promise<undefined>((r) => setTimeout(() => r(undefined), INDEXER_CREATE_TIMEOUT_MS)),
@@ -1710,8 +1805,10 @@ export class Controller {
     if (!this.indexer) {
       console.warn("[nexus] Indexer creation timed out; running without vector search.")
       this.sendIndexStatus({ state: "idle" })
+      this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_ready" } })
       return
     }
+    this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_ready" } })
     this.indexStatusUnsubscribe = this.indexer.onStatusChange((status: IndexStatus) => {
       this.sendIndexStatus(status)
       this.postMessageToWebview({ type: "agentEvent", event: { type: "index_update", status } })

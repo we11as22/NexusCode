@@ -13,7 +13,7 @@ export const listDefinitionsTool: ToolDef<z.infer<typeof schema>> = {
   description: `List top-level code definitions (classes, functions, methods, interfaces, types) for a file or directory. No full bodies — structure only. Use this before read_file to get symbol names and line numbers so you can call read_file with start_line/end_line.
 
 When to use:
-- **Get symbols and line numbers before reading** — Use list_code_definitions on a file or directory first; then use read_file with start_line/end_line to read only the definitions you need. Use on every relevant file or dir when exploring, not only list_files.
+- **Get symbols and line numbers before reading** — Use list_code_definitions on a file or directory first; then use read_file with start_line/end_line to read only the definitions you need. Use on every relevant file or dir when exploring, not only list_dir.
 - Understand file or module structure before reading or searching.
 - Find where a symbol is defined (then use read_file or codebase_search for details).
 - Quick overview of many files in a directory.

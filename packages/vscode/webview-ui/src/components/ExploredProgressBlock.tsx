@@ -13,14 +13,14 @@ export interface ExploredEntry {
 }
 
 const FILE_TOOLS = new Set([
-  "read_file", "list_files",
-  "Read", "ListFiles", // core built-in names
+  "read_file", "list_dir",
+  "Read", "ListDir", // core built-in names
 ])
 const SEARCH_TOOLS = new Set([
   "grep", "codebase_search", "search_files", "list_code_definitions",
   "Grep", "CodebaseSearch", "Glob", "ListCodeDefinitions", // core built-in names
 ])
-/** Only these increase "N files" in Explored label. list_files/ListFiles is in Explored but not counted. */
+/** Only these increase "N files" in Explored label. list_dir/ListDir is in Explored but not counted. */
 const FILE_COUNT_TOOLS = new Set(["read_file", "Read"])
 
 /** Whether this tool counts as exploration (file read/list or search) for the collapsed "Explored" block. */
@@ -33,7 +33,7 @@ export type ExploredPrefixItem =
   | { type: "reasoning"; text: string; durationMs?: number }
   | { type: "tool"; part: ToolPart; entry: ExploredEntry }
 
-/** Parts: collect ALL reasoning and ALL exploration tools in the message (in order). Block is shown only when there is at least one tool; if only reasoning, return empty so we show Thought(s) as-is. We do not stop at first text — so list_files etc. later in the message are still inside Explored. */
+/** Parts: collect ALL reasoning and ALL exploration tools in the message (in order). Block is shown only when there is at least one tool; if only reasoning, return empty so we show Thought(s) as-is. We do not stop at first text — so list_dir etc. later in the message are still inside Explored. */
 export function getExploredPrefixFromParts(parts: MessagePart[]): {
   prefixItems: ExploredPrefixItem[]
   prefixIndices: Set<number>
@@ -100,8 +100,8 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
         durationSec,
       }
     }
-    case "list_files":
-    case "ListFiles": {
+    case "list_dir":
+    case "ListDir": {
       const path = (part.input?.path ?? part.input?.directory) as string | undefined ?? "."
       return {
         id,
@@ -162,7 +162,7 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
 function formatToolName(tool: string): string {
   if (tool === "execute_command" || tool === "Bash") return "Bash"
   const core: Record<string, string> = {
-    read_file: "Read", list_files: "ListFiles",
+    read_file: "Read", list_dir: "ListDir",
     replace_in_file: "Edit", write_to_file: "Write",
     grep: "Grep", search_files: "Grep",
     codebase_search: "CodebaseSearch", list_code_definitions: "ListCodeDefinitions",
@@ -171,7 +171,7 @@ function formatToolName(tool: string): string {
   return core[tool] ?? tool
 }
 
-/** Per-message: compute files/searches count and entries from tool parts only. list_files is in entries but not counted in files (files = read_file only). */
+/** Per-message: compute files/searches count and entries from tool parts only. list_dir is in entries but not counted in files (files = read_file only). */
 export function getExploredFromParts(parts: MessagePart[]): {
   filesCount: number
   searchesCount: number
@@ -192,7 +192,7 @@ export function getExploredFromParts(parts: MessagePart[]): {
   return { filesCount, searchesCount, entries }
 }
 
-/** Inline collapsible "Explored [N files,] [M searches]" — list_files is in the block but not counted; N = read_file only, M = grep/search. If N or M is 0 that part is omitted. */
+/** Inline collapsible "Explored [N files,] [M searches]" — list_dir is in the block but not counted; N = read_file only, M = grep/search. If N or M is 0 that part is omitted. */
 export function ExploredSummaryInline({
   prefixItems,
   defaultCollapsed,
@@ -206,7 +206,7 @@ export function ExploredSummaryInline({
   useEffect(() => {
     if (defaultCollapsed) setOpen(false)
   }, [defaultCollapsed])
-  // list_files is in Explored but not counted; N files = FILE_COUNT_TOOLS only, M searches = SEARCH_TOOLS
+  // list_dir is in Explored but not counted; N files = FILE_COUNT_TOOLS only, M searches = SEARCH_TOOLS
   const filesCount = prefixItems.filter((x) => x.type === "tool" && FILE_COUNT_TOOLS.has(x.part.tool)).length
   const searchesCount = prefixItems.filter((x) => x.type === "tool" && SEARCH_TOOLS.has(x.part.tool)).length
   const labelParts: string[] = []
@@ -214,31 +214,30 @@ export function ExploredSummaryInline({
   if (searchesCount > 0) labelParts.push(`${searchesCount} search${searchesCount === 1 ? "" : "es"}`)
   const total = prefixItems.length
   if (total === 0) return null
+  const headerLabel = labelParts.length > 0 ? `Explored ${labelParts.join(", ")}` : "Explored"
 
   return (
     <div
       data-explored-inline
-      className="my-2 overflow-hidden bg-transparent"
+      className="nexus-explored-block my-2 overflow-hidden"
     >
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 px-2 py-1.5 text-left cursor-pointer select-none text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] rounded"
+        className="nexus-explored-header w-full flex items-center gap-2 text-left cursor-pointer select-none"
       >
-        <ExploredIcon className="w-4 h-4 flex-shrink-0 text-[var(--vscode-descriptionForeground)]" />
-        <span className="flex-1 min-w-0 truncate">
-          Explored
-          {labelParts.length > 0 && ` ${labelParts.join(", ")}`}
+        <span className="flex-1 min-w-0 truncate text-[var(--vscode-foreground)] text-xs">
+          {headerLabel}
         </span>
         <span
-          className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform"
+          className="nexus-explored-chevron flex-shrink-0 text-[var(--vscode-descriptionForeground)] text-[10px] transition-transform"
           style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}
         >
           ▼
         </span>
       </button>
       {open && (
-        <div className="max-h-[280px] overflow-y-auto py-1.5 px-2 space-y-1">
+        <div className="nexus-explored-content">
           {prefixItems.map((item, idx) => {
             if (item.type === "reasoning") {
               return (
@@ -251,18 +250,18 @@ export function ExploredSummaryInline({
             }
             const e = item.entry
             return (
-              <div key={e.id} className="text-[11px] leading-snug text-[var(--vscode-descriptionForeground)]">
+              <div key={e.id} className="nexus-explored-entry">
                 {e.path != null && (e.line != null || e.endLine != null) && onOpenFile ? (
                   <button
                     type="button"
                     onClick={() => onOpenFile(e.path!, e.line, e.endLine)}
-                    className="text-left w-full rounded px-1.5 py-0.5 hover:bg-[var(--vscode-list-hoverBackground)] text-[var(--vscode-textLink-foreground)] truncate block"
+                    className="nexus-explored-entry-btn"
                     title={e.path}
                   >
                     {e.label}
                   </button>
                 ) : (
-                  <span className="px-1.5 py-0.5 block truncate">{e.label}</span>
+                  <span className="nexus-explored-entry-text">{e.label}</span>
                 )}
               </div>
             )
@@ -273,22 +272,28 @@ export function ExploredSummaryInline({
   )
 }
 
-/** One thought row inside Explored block — expandable on click. */
+/** One thought row inside Explored block — one line "Thought for Xs" / "Thought briefly", expandable on click for full text. */
 function ExploredThoughtRow({ text, durationMs }: { text: string; durationMs?: number }) {
   const [expanded, setExpanded] = useState(false)
-  const durationStr = durationMs != null ? ` (${(durationMs / 1000).toFixed(1)}s)` : ""
+  const label =
+    durationMs != null
+      ? `Thought for ${(durationMs / 1000).toFixed(0)}s`
+      : text.trim().length < 80
+        ? "Thought briefly"
+        : "Thought"
+
   return (
-    <div className="space-y-0">
+    <div className="nexus-explored-entry">
       <button
         type="button"
         onClick={() => setExpanded((e) => !e)}
-        className="w-full text-left px-1.5 py-0.5 hover:bg-[var(--vscode-list-hoverBackground)] rounded text-[11px] text-[var(--vscode-descriptionForeground)] flex items-center gap-1"
+        className="nexus-explored-entry-btn w-full text-left"
       >
-        <span className="flex-shrink-0 transition-transform" style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
-        <span>Thought{durationStr}</span>
+        <span className="nexus-explored-thought-chevron" style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
+        <span>{label}</span>
       </button>
       {expanded && text.trim() && (
-        <div className="pl-4 pr-1 py-1.5 text-[11px] text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans max-h-[min(50vh,320px)] overflow-y-auto overflow-x-hidden rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+        <div className="nexus-explored-thought-expanded">
           {text.trim()}
         </div>
       )}
@@ -344,7 +349,7 @@ export function useExploredFromMessages(
 function ChevronDownIcon({ open }: { open: boolean }) {
   return (
     <span
-      className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform"
+      className="nexus-explored-chevron flex-shrink-0 text-[var(--vscode-descriptionForeground)] text-[10px] transition-transform"
       style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}
     >
       ▼
@@ -376,7 +381,7 @@ export function ExploredProgressBlock({ messages, isRunning, reasoningStartTime 
   )
 
   const total = filesCount + searchesCount
-  // Do not show "Explored" when there are no file reads or searches (list_files is in entries but not counted)
+  // Do not show "Explored" when there are no file reads or searches (list_dir is in entries but not counted)
   if (total === 0 && entries.length === 0) return null
   const labelParts: string[] = []
   if (filesCount > 0) labelParts.push(`${filesCount} file${filesCount === 1 ? "" : "s"}`)
@@ -386,27 +391,24 @@ export function ExploredProgressBlock({ messages, isRunning, reasoningStartTime 
   return (
     <div
       data-explored-block
-      className="flex-shrink-0 overflow-hidden bg-transparent"
+      className="nexus-explored-block flex-shrink-0 overflow-hidden"
     >
       <div
         role="button"
         tabIndex={0}
         onClick={() => setOpen((o) => !o)}
         onKeyDown={(e) => e.key === "Enter" && setOpen((o) => !o)}
-        className="flex items-center gap-2 px-2 py-1.5 cursor-pointer select-none text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] rounded"
+        className="nexus-explored-header flex items-center gap-2 cursor-pointer select-none"
       >
-        <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center text-[var(--vscode-descriptionForeground)]">
-          <ExploredIcon className="w-4 h-4" />
-        </span>
-        <span className="flex-1 min-w-0 truncate">
+        <span className="flex-1 min-w-0 truncate text-[var(--vscode-foreground)] text-xs">
           {label}
         </span>
         <ChevronDownIcon open={open} />
       </div>
       {open && (
-        <div className="max-h-[280px] overflow-y-auto py-1.5 px-2 space-y-1">
+        <div className="nexus-explored-content">
           {entries.map((e) => (
-            <div key={e.id} className="text-[11px] leading-snug text-[var(--vscode-descriptionForeground)]">
+            <div key={e.id} className="nexus-explored-entry">
               {e.path != null && (e.line != null || e.endLine != null) ? (
                 <button
                   type="button"
@@ -418,13 +420,13 @@ export function ExploredProgressBlock({ messages, isRunning, reasoningStartTime 
                       endLine: e.endLine,
                     })
                   }
-                  className="text-left w-full rounded px-1.5 py-0.5 hover:bg-[var(--vscode-list-hoverBackground)] text-[var(--vscode-textLink-foreground)] truncate block"
+                  className="nexus-explored-entry-btn"
                   title={e.path}
                 >
                   {e.label}
                 </button>
               ) : (
-                <span className="px-1.5 py-0.5 block truncate">{e.label}</span>
+                <span className="nexus-explored-entry-text">{e.label}</span>
               )}
             </div>
           ))}

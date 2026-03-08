@@ -56,6 +56,8 @@ export interface StreamOptions {
   maxTokens?: number
   temperature?: number
   maxRetries?: number
+  /** Provider-specific options (e.g. anthropic: { thinking: { type: 'enabled', budgetTokens } }) */
+  providerOptions?: Record<string, unknown>
 }
 
 export interface GenerateOptions<T> {

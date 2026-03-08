@@ -3,9 +3,11 @@ import { useChatStore, type NexusConfigState } from "./stores/chat.js"
 import type { MessagePart } from "./stores/chat.js"
 import { MessageList } from "./components/MessageList.js"
 import { InputBar } from "./components/InputBar.js"
+import { ImageIcon } from "./components/AttachedImagesStrip.js"
+import { InputContextPanel } from "./components/InputContextPanel.js"
+import { QueuedMessagesPanel } from "./components/QueuedMessagesPanel.js"
 import { ModeDropdown } from "./components/ModeDropdown.js"
 import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
-import { AutoApproveDropdown } from "./components/AutoApproveDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import { CheckpointStrip } from "./components/CheckpointStrip.js"
 import type { ExtensionMessage } from "./types/messages.js"
@@ -106,6 +108,12 @@ export function App() {
         <IndexProgress status={store.indexStatus} />
       )}
 
+      {store.vectorDbProgressMessage && (
+        <div className="flex-shrink-0 px-3 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-badge-background)] text-[11px] text-[var(--vscode-descriptionForeground)]">
+          {store.vectorDbProgressMessage}
+        </div>
+      )}
+
       <div className="nexus-main flex-1 min-h-0 overflow-hidden flex flex-col">
       {store.view === "chat" && <ChatView />}
       {store.view === "sessions" && <SessionsView />}
@@ -159,6 +167,7 @@ function ChatView() {
       <CheckpointStrip />
 
       <div className="chat-view">
+        <SessionTabBar />
         <div className="nexus-status">
           <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
             {store.provider}/{store.model}
@@ -220,6 +229,8 @@ function ChatView() {
         )}
 
         <div className="chat-input">
+          <QueuedMessagesPanel />
+          <InputContextPanel />
           <ChatBottomBar />
         </div>
       </div>
@@ -229,53 +240,63 @@ function ChatView() {
 
 function ChatBottomBar() {
   const store = useChatStore()
+  const [imagePickerTrigger, setImagePickerTrigger] = useState<(() => void) | null>(null)
+  const canSend = !store.isRunning && !store.awaitingApproval && (store.inputValue.trim().length > 0 || store.attachedImages.length > 0)
+  const contextPercent = store.contextPercent
 
   return (
-    <div className="chat-bottom-bar">
+    <div className="chat-input-inner">
       <div className="chat-input-area">
-        <InputBar />
+        <InputBar registerImagePickerTrigger={setImagePickerTrigger} />
       </div>
       <div className="chat-control-row">
-        <div className="chat-bottom-bar-left">
-          <ModeDropdown />
-          <AgentPresetDropdown />
-          <AutoApproveDropdown />
-        </div>
-        <div className="chat-bottom-bar-input-wrap">
+          <div className="chat-bottom-bar-left">
+            <ModeDropdown />
+            <AgentPresetDropdown />
+          </div>
+          <div className="chat-bottom-bar-input-wrap">
           {store.isRunning && (
             <span className="flex items-center justify-center w-8 h-8 flex-shrink-0" title="Running">
               <SpinnerIcon className="w-5 h-5 text-[var(--vscode-descriptionForeground)]" />
             </span>
           )}
+          <button
+            type="button"
+            className="nexus-context-ring-btn"
+            title={contextPercent != null ? `${Math.round(contextPercent)}% context used` : "Context"}
+            aria-label="Context"
+          >
+            <ContextRingIcon className="w-4 h-4" percent={contextPercent} />
+          </button>
+          <button
+            type="button"
+            className="nexus-image-pick-btn"
+            onClick={() => imagePickerTrigger?.()}
+            title="Attach image"
+            aria-label="Attach image"
+          >
+            <ImageIcon className="w-4 h-4" />
+          </button>
           {store.isRunning || store.awaitingApproval ? (
             <button
               type="button"
               onClick={store.abort}
               title="Stop (Esc)"
-              className="nexus-send-btn"
-              style={{ background: "rgba(239, 68, 68, 0.9)", color: "#fff" }}
+              className="nexus-send-btn nexus-send-btn-stop"
             >
               <StopIcon />
             </button>
           ) : (
             <button
               type="button"
-              onClick={() => store.inputValue.trim() && store.sendMessage(store.inputValue.trim())}
-              disabled={!store.inputValue.trim()}
+              onClick={() => canSend && store.sendMessage(store.inputValue.trim())}
+              disabled={!canSend}
               title="Send (Enter)"
-              className={`nexus-send-btn ${store.inputValue.trim() ? "nexus-send-btn-primary" : ""}`}
+              className={`nexus-send-btn ${canSend ? "nexus-send-btn-primary" : ""}`}
             >
               <SendIcon />
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => store.setView("settings")}
-            title="Settings"
-            className={`${BTN_SM_CLASS} flex-shrink-0`}
-          >
-            <GearIcon className="w-3 h-3" />
-          </button>
         </div>
       </div>
     </div>
@@ -283,7 +304,7 @@ function ChatBottomBar() {
 }
 
 function SessionsView() {
-  const { sessions, sessionId, switchSession, deleteSession, sessionsLoading } = useChatStore()
+  const { sessions, sessionId, switchSession, createNewSession, deleteSession, sessionsLoading } = useChatStore()
 
   const handleDelete = async (e: React.MouseEvent, s: { id: string; title?: string }) => {
     e.stopPropagation()
@@ -295,6 +316,14 @@ function SessionsView() {
   return (
     <div className="nexus-pane">
       <div className="nexus-pane-title">Session History</div>
+      <button
+        type="button"
+        className="nexus-primary-btn mt-2 flex items-center gap-2"
+        onClick={() => createNewSession()}
+      >
+        <PlusIcon className="w-3.5 h-3.5" />
+        New session
+      </button>
       {sessionsLoading && (
         <div className="nexus-loading-dots flex items-center gap-2 py-4 text-[var(--vscode-descriptionForeground)] text-sm">
           <span className="nexus-dot" />
@@ -343,6 +372,134 @@ function SessionsView() {
             </div>
           )
         })}
+      </div>
+    </div>
+  )
+}
+
+/** Horizontal session tab bar: scrollable tabs, each with close (X), + new session, dropdown of all sessions. */
+function SessionTabBar() {
+  const store = useChatStore()
+  const { sessions, sessionId, switchSession, createNewSession, deleteSession, setView, sessionsLoading } = store
+  const [dropdownOpen, setDropdownOpen] = React.useState(false)
+  const dropdownRef = React.useRef<HTMLDivElement>(null)
+
+  React.useEffect(() => {
+    if (!dropdownOpen) return
+    const onDocClick = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) setDropdownOpen(false)
+    }
+    document.addEventListener("click", onDocClick)
+    return () => document.removeEventListener("click", onDocClick)
+  }, [dropdownOpen])
+
+  const hasCurrentInList = sessions.some((s) => s.id === sessionId)
+  const displaySessions = hasCurrentInList
+    ? sessions
+    : [{ id: sessionId, ts: Date.now(), title: "New chat", messageCount: 0 }, ...sessions]
+
+  const handleDelete = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation()
+    const s = sessions.find((x) => x.id === id)
+    const label = s?.title?.trim() || id.slice(0, 12)
+    if (!(await confirmAsync(`Delete session "${label}"? This cannot be undone.`))) return
+    deleteSession(id)
+  }
+
+  return (
+    <div className="nexus-session-tab-bar">
+      <div className="nexus-session-tab-bar-scroll" role="tablist">
+        {displaySessions.map((s) => {
+          const isActive = s.id === sessionId
+          const title = (s.title?.trim() || "Untitled session").slice(0, 40)
+          return (
+            <div
+              key={s.id}
+              role="tab"
+              aria-selected={isActive}
+              className={`nexus-session-tab ${isActive ? "nexus-session-tab-active" : ""}`}
+            >
+              <button
+                type="button"
+                className="nexus-session-tab-btn"
+                onClick={() => switchSession(s.id)}
+              >
+                {title}
+              </button>
+              <button
+                type="button"
+                className="nexus-session-tab-close"
+                onClick={(e) => handleDelete(e, s.id)}
+                title="Delete session"
+                aria-label="Delete session"
+              >
+                <CloseIcon className="w-3 h-3" />
+              </button>
+            </div>
+          )
+        })}
+      </div>
+      <div className="nexus-session-tab-bar-actions">
+        <button
+          type="button"
+          className="nexus-session-tab-add"
+          onClick={() => createNewSession()}
+          title="New session"
+          aria-label="New session"
+        >
+          <PlusIcon className="w-3.5 h-3.5" />
+        </button>
+        <div className="nexus-session-tab-dropdown-wrap" ref={dropdownRef}>
+          <button
+            type="button"
+            className="nexus-session-tab-dropdown-btn"
+            onClick={() => setDropdownOpen((v) => !v)}
+            title="All sessions"
+            aria-label="All sessions"
+            aria-expanded={dropdownOpen}
+          >
+            <EllipsisIcon className="w-3.5 h-3.5" />
+          </button>
+          {dropdownOpen && (
+            <div className="nexus-session-tab-dropdown">
+              <div className="nexus-session-tab-dropdown-list">
+                {sessionsLoading ? (
+                  <div className="nexus-muted text-xs px-2 py-1.5">Loading...</div>
+                ) : sessions.length === 0 ? (
+                  <div className="nexus-muted text-xs px-2 py-1.5">No sessions</div>
+                ) : (
+                  sessions.map((s) => {
+                    const isActive = s.id === sessionId
+                    const title = (s.title?.trim() || "Untitled session").slice(0, 60)
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        className={`nexus-session-tab-dropdown-item ${isActive ? "nexus-session-tab-dropdown-item-active" : ""}`}
+                        onClick={() => {
+                          switchSession(s.id)
+                          setDropdownOpen(false)
+                        }}
+                      >
+                        {title}
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+              <button
+                type="button"
+                className="nexus-session-tab-dropdown-more"
+                onClick={() => {
+                  setView("sessions")
+                  setDropdownOpen(false)
+                }}
+              >
+                Session history…
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -977,6 +1134,7 @@ function IndexingAndDocsView({
   onOpenNexusignore: () => void
 }) {
   const indexStatus = useChatStore((s) => s.indexStatus)
+  const vectorDbProgressMessage = useChatStore((s) => s.vectorDbProgressMessage)
   const filesTotal = indexStatus.state === "indexing" ? indexStatus.total : 0
   const filesDone = indexStatus.state === "indexing" ? indexStatus.progress : 0
   const chunksTotal = indexStatus.state === "indexing" && typeof indexStatus.chunksTotal === "number" ? indexStatus.chunksTotal : 0
@@ -1086,10 +1244,23 @@ function IndexingAndDocsView({
       <details className="mt-3">
         <summary className="nexus-muted text-xs cursor-pointer">Vector DB &amp; advanced</summary>
         <div className="mt-2 space-y-2">
-          <SettingsToggle label="Vector index enabled" checked={draft.indexingVector} onChange={(checked) => setDraft({ ...draft, indexingVector: checked })} />
+          {vectorDbProgressMessage ? (
+            <p className="text-[11px] text-[var(--vscode-descriptionForeground)]">{vectorDbProgressMessage}</p>
+          ) : null}
+          <SettingsToggle label="Vector index (semantic search)" checked={draft.indexingVector} onChange={(checked) => setDraft({ ...draft, indexingVector: checked })} />
+          <SettingsInput label="Vector DB URL (Qdrant)" value={draft.vectorDbUrl} onChange={(v) => setDraft({ ...draft, vectorDbUrl: v })} />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="nexus-secondary-btn text-xs"
+              onClick={() => postMessage({ type: "startOrConnectVectorDb", url: draft.vectorDbUrl.trim() || "http://127.0.0.1:6333", autoStart: true })}
+            >
+              Connect / Start Qdrant
+            </button>
+            <span className="text-[11px] text-[var(--vscode-descriptionForeground)]">Connect to existing or auto-start (binary/Docker)</span>
+          </div>
+          <SettingsToggle label="Vector DB enabled (use for indexer)" checked={draft.vectorDbEnabled} onChange={(checked) => setDraft({ ...draft, vectorDbEnabled: checked })} />
           <SettingsInput label="Embedding batch size" value={draft.embeddingBatchSize} onChange={(v) => setDraft({ ...draft, embeddingBatchSize: v })} />
-          <SettingsToggle label="Vector DB enabled" checked={draft.vectorDbEnabled} onChange={(checked) => setDraft({ ...draft, vectorDbEnabled: checked })} />
-          <SettingsInput label="Vector DB URL" value={draft.vectorDbUrl} onChange={(v) => setDraft({ ...draft, vectorDbUrl: v })} />
         </div>
       </details>
     </div>
@@ -2332,6 +2503,25 @@ function TrashIcon({ className }: { className?: string }) {
   )
 }
 
+function CloseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  )
+}
+
+function EllipsisIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+      <circle cx="12" cy="12" r="1.5" />
+      <circle cx="6" cy="12" r="1.5" />
+      <circle cx="18" cy="12" r="1.5" />
+    </svg>
+  )
+}
+
 function GearIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2355,6 +2545,36 @@ function SendIcon() {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <line x1="12" y1="19" x2="12" y2="5" />
       <polyline points="5 12 12 5 19 12" />
+    </svg>
+  )
+}
+
+/** Ring that fills from 0 to 100% with context usage (progress). */
+function ContextRingIcon({ className, percent = 0 }: { className?: string; percent?: number }) {
+  const r = 9
+  const circumference = 2 * Math.PI * r
+  const clamped = Math.min(100, Math.max(0, Number(percent)))
+  const offset = circumference * (1 - clamped / 100)
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <circle
+        cx="12"
+        cy="12"
+        r={r}
+        className="nexus-context-ring-bg"
+        strokeDasharray={circumference}
+        strokeDashoffset={0}
+        transform="rotate(-90 12 12)"
+      />
+      <circle
+        cx="12"
+        cy="12"
+        r={r}
+        className="nexus-context-ring-fill"
+        strokeDasharray={circumference}
+        strokeDashoffset={offset}
+        transform="rotate(-90 12 12)"
+      />
     </svg>
   )
 }

@@ -36,7 +36,7 @@ type Props = {
   shouldAnimate: boolean
   shouldShowDot: boolean
   width?: number | string
-  /** Subagents per spawn_agent partId (Nexus); only passed when nexusBootstrap is set. */
+  /** Subagents per SpawnAgents partId (Nexus); only passed when nexusBootstrap is set. */
   subagentsByPartId?: Record<string, SubAgentState[]>
 }
 

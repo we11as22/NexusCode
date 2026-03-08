@@ -140,25 +140,31 @@ Usage:
   },
 }
 
-const listSchema = z.object({
-  path: z.string().optional().describe("Directory to list (relative to project root, default: root)"),
-  /** Alternate form: some providers/models send paths array; we use the first string element as path. */
-  paths: z.array(z.union([z.string(), z.undefined()])).optional().describe("(Alternate) Directory path as first element; ignored if path is set."),
-  recursive: z.boolean().optional().describe("List recursively (default: false for top-level, true for subdirs)"),
-  include: z.string().optional().describe("Glob pattern to filter files"),
-  max_entries: z.number().int().positive().max(5000).optional().describe("Max entries (default: 200)"),
-  task_progress: z.string().optional(),
-})
+// ListDir: single "path" parameter only. No "paths" array — gateways may expose list_dir with paths; we accept only path.
+const listSchema = z
+  .object({
+    path: z
+      .string()
+      .describe("Single directory to list (relative to project root or absolute). Use \".\" for root. Do NOT use 'paths' (array). Example: \"src\", \"packages\"."),
+    ignore: z.array(z.string()).optional().describe("List of glob patterns to ignore (e.g. \"*.log\", \"**/node_modules/**\")"),
+    recursive: z.boolean().optional().describe("List recursively (default: false for top-level, true for subdirs)"),
+    include: z.string().optional().describe("Glob pattern to filter files (e.g. \"*.ts\", \"*.json\")"),
+    max_entries: z.number().int().positive().max(5000).optional().describe("Max entries (default: 200)"),
+    task_progress: z.string().optional(),
+  })
+  .strict()
 
-export const listFilesTool: ToolDef<z.infer<typeof listSchema>> = {
-  name: "ListFiles",
-  description: `List files and directories in a tree-like structure. Respects .gitignore and common ignores (node_modules, .git, .nexus).
+export const listDirTool: ToolDef<z.infer<typeof listSchema>> = {
+  name: "ListDir",
+  description: `Lists files and directories in a given path.
+
+**Input: exactly one parameter \`path\` (string).** Do not use \`paths\` (array). Use \`path\` only (e.g. \".\", \"src\", \"packages\").
 
 ### When to Use
 
 - **Project layout discovery** — Use at the start of a task on root and key dirs (e.g. \`.\`, \`src\`, \`packages\`) to understand structure. Use once or twice; do not list every nested folder.
+- **Verify directory exists** — Before running commands that create files/dirs (e.g. \`mkdir foo/bar\`), use ListDir to check the parent directory exists and is the correct location.
 - **Find file names or check presence** — Config files, scripts, modules. Use \`include\` to filter by extension.
-- **Check if a directory or file exists.**
 
 ### When NOT to Use
 
@@ -166,9 +172,10 @@ export const listFilesTool: ToolDef<z.infer<typeof listSchema>> = {
 - **Reading a file** — Use Read (with offset/limit from Grep or ListCodeDefinitions results).
 - **Finding by extension recursively** — Use Glob with a pattern like \`**/*.ts\` instead.
 
-### Tips
+### Parameters
 
-- \`path\`: directory to list (default: project root). Relative to cwd.
+- \`path\`: directory to list (default: \".\"). **Single string only — do not use \`paths\` (array).**
+- \`ignore\`: optional list of glob patterns to ignore (e.g. \`[\"*.log\", \"**/build/**\"]\`).
 - \`recursive\`: include subdirectories (default: false for root, true for subdirs).
 - \`include\`: glob to filter entries (e.g. \`"*.ts"\`, \`"*.json"\`).
 - \`max_entries\`: cap output (default 200, max 5000).
@@ -176,13 +183,9 @@ export const listFilesTool: ToolDef<z.infer<typeof listSchema>> = {
   parameters: listSchema,
   readOnly: true,
 
-  async execute({ path: listPathArg, paths: pathsArg, recursive, include, max_entries }, ctx) {
+  async execute({ path: listPathArg, ignore: ignorePatterns, recursive, include, max_entries }, ctx) {
     const listPath =
-      typeof listPathArg === "string" && listPathArg.length > 0
-        ? listPathArg
-        : Array.isArray(pathsArg)
-          ? pathsArg.find((p): p is string => typeof p === "string" && p.length > 0)
-          : undefined
+      typeof listPathArg === "string" && listPathArg.length > 0 ? listPathArg : undefined
     const targetDir = listPath ? path.resolve(ctx.cwd, listPath) : ctx.cwd
     const maxEntries = max_entries ?? 200
     const maxActual = Math.min(maxEntries, 2000)
@@ -205,6 +208,9 @@ export const listFilesTool: ToolDef<z.infer<typeof listSchema>> = {
         } catch {}
       }
       ig.add([".git", "node_modules", ".nexus"])
+      if (ignorePatterns?.length) {
+        ig.add(ignorePatterns)
+      }
 
       const entries: string[] = []
 

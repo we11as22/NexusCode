@@ -7,6 +7,7 @@ import type { SessionMessage, MessagePart, TextPart, ToolPart } from '@nexuscode
 import {
   runAgentLoop,
   createLLMClient,
+  loadConfig,
   type AgentEvent,
   type ToolDef,
 } from '@nexuscode/core'
@@ -25,6 +26,11 @@ import type {
 } from './query.js'
 import type { Tool } from './Tool.js'
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
+import type { ApprovalAction } from '@nexuscode/core'
+
+export type NexusApprovalMessage = { type: 'nexus_approval'; action: ApprovalAction; partId: string }
+/** Shown above input (e.g. "Compacting conversation..."). text empty clears. */
+export type NexusBannerMessage = { type: 'nexus_banner'; text: string }
 
 function sessionMessageToAssistantContent(msg: SessionMessage): ContentBlockParam[] {
   const content = msg.content
@@ -84,22 +90,26 @@ export interface QueryNexusOptions {
   autoApprove?: boolean
   /** Override mode for this run (agent/plan/ask/debug). Defaults to nexus.mode. */
   modeOverride?: string
-  /** When set, called for each subagent_* event; partId is the spawn_agent tool_use id. */
+  /** When set, called for each subagent_* event; partId is the SpawnAgents tool_use id. */
   onSubagentEvent?: (partId: string, event: SubagentEvent) => void
 }
 
 /**
  * Run the Nexus agent loop and yield REPL Message types.
+ * Yields NexusApprovalMessage when tool_approval_needed so REPL can show the approval panel and resolve tuiApprovalRef.
+ * Loads config from disk at start so that model/LLM settings saved in the CLI are applied.
  */
-export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType, void> {
+export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage, void> {
   const { nexus, userPrompt, repoTools, signal, tuiApprovalRef, autoApprove = false, modeOverride, onSubagentEvent } = opts
-  const { session, config, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer } = nexus
+  const { session, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer } = nexus
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug'
+
+  const config = await loadConfig(nexus.cwd, { secrets: nexus.secretsStore })
 
   const eventQueue: AgentEvent[] = []
   let resolveNext: (() => void) | null = null
   let runError: Error | null = null
-  /** partId of the last tool_start(spawn_agent); subagent_* events attach to this part. */
+  /** partId of the last tool_start(SpawnAgents); subagent_* events attach to this part. */
   let lastSpawnAgentPartId: string | null = null
 
   const host = new CliHost(nexus.cwd, (event: AgentEvent) => {
@@ -135,9 +145,25 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
 
   const consumed: MessageType[] = []
 
-  function* drainQueue(): Generator<MessageType, boolean, unknown> {
+  function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage, boolean, unknown> {
     while (eventQueue.length > 0) {
       const event = eventQueue.shift()!
+      if (event.type === 'compaction_start') {
+        yield { type: 'nexus_banner', text: 'Compacting conversation…' }
+        continue
+      }
+      if (event.type === 'compaction_end') {
+        yield { type: 'nexus_banner', text: '' }
+        continue
+      }
+      if (event.type === 'doom_loop_detected') {
+        yield { type: 'nexus_banner', text: `Loop detected (tool: ${event.tool}). Approve or deny in the dialog below.` }
+        continue
+      }
+      if (event.type === 'tool_approval_needed') {
+        yield { type: 'nexus_approval', action: event.action, partId: event.partId }
+        continue
+      }
       if (event.type === 'assistant_content_complete') {
         const last = session.messages[session.messages.length - 1]
         if (last && last.role === 'assistant') {
@@ -146,7 +172,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           yield am
         }
       } else if (event.type === 'tool_start') {
-        if (event.tool === 'spawn_agent') lastSpawnAgentPartId = event.partId
+        if (event.tool === 'SpawnAgents') lastSpawnAgentPartId = event.partId
         // Match reference: ProgressMessage content must have content[0] = tool_use so REPL shows ToolUseLoader
         const toolUseBlock: ContentBlockParam = {
           type: 'tool_use',
@@ -180,7 +206,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         consumed.push(pm)
         yield pm
       } else if (event.type === 'tool_end') {
-        if (event.tool === 'spawn_agent') lastSpawnAgentPartId = null
+        if (event.tool === 'SpawnAgents') lastSpawnAgentPartId = null
         const userMsg = createUserMessage([
           {
             type: 'tool_result',

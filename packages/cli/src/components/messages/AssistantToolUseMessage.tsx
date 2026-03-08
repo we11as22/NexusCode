@@ -25,7 +25,7 @@ type Props = {
   unresolvedToolUseIDs: Set<string>
   shouldAnimate: boolean
   shouldShowDot: boolean
-  /** Subagents for spawn_agent (single or multiple); shown under the tool line. */
+  /** Subagents for SpawnAgents (single or multiple); shown under the tool line. */
   subagents?: SubAgentState[]
 }
 
@@ -112,7 +112,7 @@ export function AssistantToolUseMessage({
       <Cost costUSD={costUSD} durationMs={durationMs} debug={debug} />
     </Box>
   )
-  const showSubagents = param.name === 'spawn_agent' && subagents.length > 0
+  const showSubagents = param.name === 'SpawnAgents' && subagents.length > 0
   if (!showSubagents) return mainBlock
   return (
     <Box flexDirection="column" width="100%">

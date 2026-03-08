@@ -126,6 +126,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
+        orchestrator: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
     }, "strip", z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -191,6 +204,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
+        orchestrator: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
     }, z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -244,6 +270,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             customInstructions?: string | undefined;
         }>>;
         debug: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        orchestrator: z.ZodOptional<z.ZodObject<{
             autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
             systemPrompt: z.ZodOptional<z.ZodString>;
             customInstructions: z.ZodOptional<z.ZodString>;
@@ -521,7 +560,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     }>>;
     parallelAgents: z.ZodDefault<z.ZodObject<{
         maxParallel: z.ZodDefault<z.ZodNumber>;
-        /** Max tasks per single spawn_agent call when using \`tasks\` array (default 12). */
+        /** Max tasks per single SpawnAgents call when using \`tasks\` array (default 12). */
         maxTasksPerCall: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
         maxParallel: number;
@@ -670,6 +709,11 @@ declare const NexusConfigSchema: z.ZodObject<{
             customInstructions?: string | undefined;
         } | undefined;
         debug?: {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        } | undefined;
+        orchestrator?: {
             autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
@@ -884,6 +928,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
+        orchestrator: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
     }, z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -997,7 +1054,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     }> | undefined;
 }>;
 
-type Mode = "agent" | "plan" | "ask" | "debug";
+type Mode = "agent" | "plan" | "ask" | "debug" | "orchestrator";
 declare const MODES: Mode[];
 type PermissionAction = "read" | "write" | "execute" | "mcp" | "browser" | "search";
 interface PermissionResult {
@@ -1040,7 +1097,7 @@ interface ToolContext {
     host: IHost;
     session: ISession;
     config: NexusConfig;
-    /** Current loop mode (agent / plan / ask). Used e.g. by spawn_agent to set sub-agent permissions. */
+    /** Current loop mode (agent / plan / ask). Used e.g. by SpawnAgents to set sub-agent permissions. */
     mode?: Mode;
     indexer?: IIndexer;
     signal: AbortSignal;
@@ -1124,6 +1181,8 @@ interface ISession {
     fork(messageId: string): ISession;
     /** Rewind chat to timestamp; keeps only messages with ts <= timestamp (for checkpoint restore). */
     rewindToTimestamp(timestamp: number): void;
+    /** Rewind so that only messages with ts < timestamp remain (for rollback before a message). */
+    rewindBeforeTimestamp(timestamp: number): void;
     save(): Promise<void>;
     load(): Promise<void>;
 }
@@ -1146,7 +1205,6 @@ interface SessionMessage {
     summary?: boolean;
     todo?: string;
 }
-type MessagePart = TextPart | ToolPart | ReasoningPart;
 interface TextPart {
     type: "text";
     text: string;
@@ -1156,6 +1214,12 @@ interface TextPart {
 interface ReasoningPart {
     type: "reasoning";
     text: string;
+}
+/** User message part: image (base64 data URL or raw base64, with mimeType). */
+interface ImagePart {
+    type: "image";
+    data: string;
+    mimeType: string;
 }
 interface ToolPart {
     type: "tool";
@@ -1170,6 +1234,7 @@ interface ToolPart {
     /** If true, output has been pruned for compaction */
     compacted?: boolean;
 }
+type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart;
 interface IIndexer {
     search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]>;
     status(): IndexStatus;
@@ -1632,6 +1697,8 @@ interface StreamOptions {
     maxTokens?: number;
     temperature?: number;
     maxRetries?: number;
+    /** Provider-specific options (e.g. anthropic: { thinking: { type: 'enabled', budgetTokens } }) */
+    providerOptions?: Record<string, unknown>;
 }
 interface GenerateOptions<T> {
     messages: LLMMessage[];
@@ -1690,6 +1757,8 @@ declare class Session implements ISession {
     fork(messageId: string): ISession;
     /** Rewind chat to timestamp (Cline/Roo-Code style). Keeps only messages with ts <= timestamp. */
     rewindToTimestamp(timestamp: number): void;
+    /** Rewind so that only messages strictly before this timestamp remain (used for rollback before a given message). */
+    rewindBeforeTimestamp(timestamp: number): void;
     save(): Promise<void>;
     load(): Promise<void>;
     static create(cwd: string): Session;
@@ -1847,9 +1916,11 @@ declare function createSpawnAgentTool(manager: ParallelAgentManager, config: Nex
 
 /**
  * Tool registry — manages built-in, MCP, and custom tools.
+ * Built-in tools are never overwritten by MCP/custom registration (same name = keep built-in).
  */
 declare class ToolRegistry {
     private tools;
+    private static readonly BUILTIN_NAMES;
     constructor();
     register(tool: ToolDef): void;
     getAll(): ToolDef[];
@@ -1931,6 +2002,8 @@ declare function getIndexDir(projectRoot: string): string;
 
 interface IndexerFactoryOptions {
     onWarning?: (message: string) => void;
+    /** Progress messages during Qdrant startup and indexer creation (e.g. for UI or terminal). */
+    onProgress?: (message: string) => void;
     /** Max ms to wait for Qdrant when vector is enabled (e.g. 2500 for fast first message). Omit for default 20s. */
     maxQdrantWaitMs?: number;
 }
@@ -1944,6 +2017,8 @@ interface EnsureQdrantOptions {
     url: string;
     autoStart: boolean;
     log?: (message: string) => void;
+    /** Progress messages during startup (e.g. "Checking Qdrant...", "Starting Qdrant (binary)..."). */
+    onProgress?: (message: string) => void;
     /** Max ms to wait for Qdrant to become healthy after starting (e.g. 2500 for fast first message). Default 20_000. */
     maxWaitMs?: number;
 }
@@ -2021,7 +2096,7 @@ interface ResolveBundledOptions {
     /** Project directory (agent cwd); passed as CLAUDE_PROJECT_DIR to bundled servers */
     cwd: string;
     /**
-     * NexusCode repo root (where sources/claude-context-mode lives).
+     * NexusCode repo root for resolving relative bundle paths.
      * When null/undefined or path does not exist, bundled entries are skipped.
      */
     nexusRoot: string | null | undefined;

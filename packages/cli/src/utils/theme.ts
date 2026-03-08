@@ -23,9 +23,9 @@ export interface Theme {
 }
 
 const lightTheme: Theme = {
-  bashBorder: '#ff0087',
-  primary: '#D97757',
-  claude: '#D97757',
+  bashBorder: '#0066cc',
+  primary: '#4A90D9',
+  claude: '#4A90D9',
   permission: '#5769f7',
   secondaryBorder: '#999',
   text: '#000',
@@ -33,7 +33,7 @@ const lightTheme: Theme = {
   suggestion: '#5769f7',
   success: '#2c7a39',
   error: '#ab2b3f',
-  warning: '#966c1e',
+  warning: '#5B9BD5',
   diff: {
     added: '#69db7c',
     removed: '#ffa8b4',
@@ -44,8 +44,8 @@ const lightTheme: Theme = {
 
 const lightDaltonizedTheme: Theme = {
   bashBorder: '#0066cc',
-  primary: '#ff9933',
-  claude: '#ff9933',
+  primary: '#3366ff',
+  claude: '#3366ff',
   permission: '#3366ff', // Brighter blue for better visibility
   secondaryBorder: '#999',
   text: '#000',
@@ -53,7 +53,7 @@ const lightDaltonizedTheme: Theme = {
   suggestion: '#3366ff',
   success: '#006699', // Blue instead of green
   error: '#cc0000', // Pure red for better distinction
-  warning: '#ff9900', // Orange adjusted for deuteranopia
+  warning: '#5B9BD5', // Blue (was orange for deuteranopia)
   diff: {
     added: '#99ccff', // Light blue instead of green
     removed: '#ffcccc', // Light red for better contrast
@@ -63,9 +63,9 @@ const lightDaltonizedTheme: Theme = {
 }
 
 const darkTheme: Theme = {
-  bashBorder: '#fd5db1',
-  primary: '#D97757',
-  claude: '#D97757',
+  bashBorder: '#4A90D9',
+  primary: '#6BB3FF',
+  claude: '#6BB3FF',
   permission: '#b1b9f9',
   secondaryBorder: '#888',
   text: '#fff',
@@ -73,7 +73,7 @@ const darkTheme: Theme = {
   suggestion: '#b1b9f9',
   success: '#4eba65',
   error: '#ff6b80',
-  warning: '#ffc107',
+  warning: '#5B9BD5',
   diff: {
     added: '#225c2b',
     removed: '#7a2936',
@@ -84,8 +84,8 @@ const darkTheme: Theme = {
 
 const darkDaltonizedTheme: Theme = {
   bashBorder: '#3399ff',
-  primary: '#ff9933',
-  claude: '#ff9933',
+  primary: '#99ccff',
+  claude: '#99ccff',
   permission: '#99ccff', // Light blue for better contrast
   secondaryBorder: '#888',
   text: '#fff',
@@ -93,7 +93,7 @@ const darkDaltonizedTheme: Theme = {
   suggestion: '#99ccff',
   success: '#3399ff', // Bright blue instead of green
   error: '#ff6666', // Bright red for better visibility
-  warning: '#ffcc00', // Yellow-orange for deuteranopia
+  warning: '#5B9BD5', // Blue (was yellow-orange for deuteranopia)
   diff: {
     added: '#004466', // Dark blue instead of green
     removed: '#660000', // Dark red for better contrast

@@ -114,7 +114,7 @@ function DiffPreview({ output }: { output: string }) {
   )
 }
 
-interface Props {
+function ChevronIcon({ expanded }: { expanded: boolean }) {
   return (
     <span
       className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform inline-flex"

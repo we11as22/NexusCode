@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
 import { getExploredPrefixFromParts, ExploredSummaryInline } from "./ExploredProgressBlock.js"
+import { ThoughtBlock } from "./ThoughtBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 import type { SubAgentState } from "../stores/chat.js"
@@ -197,12 +198,31 @@ interface Props {
 export function MessageList({ messages, isRunning = false, hasOlderMessages = false, loadingOlderMessages = false }: Props) {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const [stickToBottom, setStickToBottom] = useState(true)
+  const [topVisibleIndex, setTopVisibleIndex] = useState<number | null>(null)
   const store = useChatStore()
 
   const jumpToLatest = useCallback(() => {
     setStickToBottom(true)
     virtuosoRef.current?.scrollToIndex({ index: messages.length - 1, behavior: "smooth" })
   }, [messages.length])
+
+  const rangeChanged = useCallback((range: { startIndex: number; endIndex: number }) => {
+    setTopVisibleIndex(range.startIndex)
+  }, [])
+
+  const topMessage = topVisibleIndex != null && topVisibleIndex > 0 && messages[topVisibleIndex]
+  const topPreview = topMessage
+    ? (() => {
+        const m = topMessage as SessionMessage
+        if (m.role === "user") {
+          const c = m.content
+          if (typeof c === "string") return c.trim().slice(0, 60)
+          const text = (c as MessagePart[]).filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("")
+          return text.trim().slice(0, 60)
+        }
+        return null
+      })()
+    : null
 
   if (messages.length === 0) {
     return (
@@ -238,17 +258,31 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
         </div>
       )}
       <div className="message-list message-list-virtuoso">
+        {topVisibleIndex != null && topVisibleIndex > 0 && (
+          <div className="nexus-message-list-top-indicator">
+            {topPreview ? (
+              <span className="nexus-message-list-top-preview" title={topPreview}>
+                {topPreview}{topPreview.length >= 60 ? "…" : ""}
+              </span>
+            ) : (
+              <span className="nexus-message-list-top-preview">Above</span>
+            )}
+          </div>
+        )}
+        <div className="message-list-virtuoso-wrap">
         <Virtuoso
           ref={virtuosoRef}
           data={messages}
           initialTopMostItemIndex={messages.length - 1}
-          followOutput="smooth"
+          followOutput={stickToBottom ? "smooth" : false}
           atBottomStateChange={setStickToBottom}
+          rangeChanged={rangeChanged}
           computeItemKey={(_, msg) => (msg as SessionMessage).id}
           itemContent={(idx, msg) => (
             <div className="message-list-item">
               <MessageBubble
                 message={msg}
+                messageIndex={idx}
                 isComplete={!isRunning || idx < messages.length - 1}
                 pendingApproval={store.pendingApproval}
                 onResolveApproval={store.resolveApproval}
@@ -269,6 +303,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
             ),
           }}
         />
+        </div>
       </div>
       {!stickToBottom && (
         <button
@@ -286,15 +321,19 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
 
 function MessageBubble({
   message,
+  messageIndex,
   isComplete,
   pendingApproval,
   onResolveApproval,
 }: {
   message: SessionMessage
+  messageIndex: number
   isComplete: boolean
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
 }) {
+  const canRollback = messageIndex > 0 && message.role === "user"
+
   if (message.summary) {
     return (
       <div className="text-xs text-[var(--vscode-descriptionForeground)] py-2">
@@ -308,17 +347,27 @@ function MessageBubble({
 
   if (message.role === "user") {
     return (
-      <div className="flex justify-start w-full min-w-0">
-        <div
-          className="max-w-[92%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm bg-[var(--vscode-editor-inactiveSelectionBackground)] border border-[var(--vscode-panel-border)]"
-          style={{ background: "var(--vscode-editor-inactiveSelectionBackground)", borderColor: "var(--vscode-panel-border)" }}
-        >
-          {typeof message.content === "string"
-            ? message.content
-            : (message.content as MessagePart[])
-                .filter(p => p.type === "text")
-                .map(p => (p as { text: string }).text)
-                .join("")}
+      <div className="nexus-user-msg-wrap">
+        <div className={`nexus-user-msg-bubble${canRollback ? " nexus-user-msg-bubble-has-rollback" : ""}`}>
+          <div className="nexus-user-msg-content">
+            {typeof message.content === "string"
+              ? message.content
+              : (message.content as MessagePart[])
+                  .filter(p => p.type === "text")
+                  .map(p => (p as { text: string }).text)
+                  .join("")}
+          </div>
+          {canRollback && (
+            <button
+              type="button"
+              onClick={() => postMessage({ type: "rollbackToBeforeMessage", messageId: message.id })}
+              className="nexus-rollback-btn nexus-rollback-btn-corner"
+              title="Откатить чат и изменения до состояния до этого сообщения"
+              aria-label="Rollback"
+            >
+              <span className="nexus-rollback-arrow">↶</span>
+            </button>
+          )}
         </div>
       </div>
     )
@@ -334,6 +383,8 @@ function MessageBubble({
 
   // Assistant — on chat background, no frame (only user messages are in a bubble)
   const showReasoningInChat = useChatStore((s) => s.config?.ui?.showReasoningInChat ?? false)
+  const reasoningStartTime = useChatStore((s) => s.reasoningStartTime)
+  const isRunning = useChatStore((s) => s.isRunning)
   return (
     <div className="w-full min-w-0">
       {typeof message.content === "string" ? (
@@ -342,6 +393,8 @@ function MessageBubble({
         <AssistantParts
           parts={message.content as MessagePart[]}
           isComplete={isComplete}
+          isRunning={isRunning}
+          reasoningStartTime={reasoningStartTime}
           pendingApproval={pendingApproval}
           onResolveApproval={onResolveApproval}
           showReasoningInChat={showReasoningInChat}
@@ -424,8 +477,8 @@ function AssistantText({ text, streaming, variant = "normal" }: { text: string; 
 const SUBAGENT_TOOL_LABELS: Record<string, string> = {
   read_file: "Reading file",
   Read: "Reading file",
-  list_files: "Listing directory",
-  ListFiles: "Listing directory",
+  list_dir: "Listing directory",
+  ListDir: "Listing directory",
   list_code_definitions: "Listing definitions",
   ListCodeDefinitions: "Listing definitions",
   search_files: "Searching files",
@@ -457,7 +510,7 @@ function truncateTask(s: string, max = 56): string {
   return one.length <= max ? one : one.slice(0, max - 1) + "…"
 }
 
-/** Subagents inline under the spawn_agent tool card; one line per subagent (task + dynamic status). */
+/** Subagents inline under the SpawnAgents tool card; one line per subagent (task + dynamic status). */
 function SubagentInlineList({ subagents }: { subagents: SubAgentState[] }) {
   return (
     <div className="mt-1.5 ml-1 space-y-1">
@@ -492,12 +545,16 @@ function SubagentInlineList({ subagents }: { subagents: SubAgentState[] }) {
 function AssistantParts({
   parts,
   isComplete,
+  isRunning,
+  reasoningStartTime,
   pendingApproval,
   onResolveApproval,
   showReasoningInChat,
 }: {
   parts: MessagePart[]
   isComplete: boolean
+  isRunning: boolean
+  reasoningStartTime: number | null
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
   showReasoningInChat: boolean
@@ -536,6 +593,18 @@ function AssistantParts({
         if (prefixIndices.has(i)) return null
         if (part.type === "reasoning") {
           const r = part as { text: string; durationMs?: number }
+          const isLastPart = i === parts.length - 1
+          const showLiveThought = !isComplete && isRunning && isLastPart && reasoningStartTime != null
+          if (showLiveThought) {
+            return (
+              <ThoughtBlock
+                key={i}
+                reasoningText={r.text}
+                startTime={reasoningStartTime}
+                isRunning={true}
+              />
+            )
+          }
           return (
             <ThoughtInlineBlock
               key={i}
@@ -586,9 +655,19 @@ function AssistantParts({
             return <BashCommandBlock key={i} part={toolPart} approval={approval} />
           }
           if (toolPart.tool === "thinking_preamble") {
+            const reasoning = (toolPart.input?.reasoning_and_next_actions as string)?.trim()
+            if (reasoning) {
+              return (
+                <ThoughtInlineBlock
+                  key={i}
+                  text={reasoning}
+                  durationMs={toolPart.timeStart != null && toolPart.timeEnd != null ? toolPart.timeEnd - toolPart.timeStart : undefined}
+                />
+              )
+            }
             return null
           }
-          if (toolPart.tool === "spawn_agent") {
+          if (toolPart.tool === "SpawnAgents") {
             const approval =
               pendingApproval?.partId === toolPart.id ? (
                 <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />

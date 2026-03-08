@@ -93,6 +93,9 @@ export class BaseLLMClient implements LLMClient {
       temperature: opts.temperature,
       abortSignal: opts.signal,
       maxSteps: 1, // We handle multi-step manually in agentLoop
+      ...(opts.providerOptions && Object.keys(opts.providerOptions).length > 0
+        ? { providerOptions: opts.providerOptions }
+        : {}),
     })
 
     for await (const part of result.fullStream) {
@@ -117,14 +120,37 @@ export class BaseLLMClient implements LLMClient {
           }
           break
 
-        case "tool-call":
+        case "tool-call": {
+          let name = part.toolName
+          let args = part.args as Record<string, unknown>
+          // CLI/gateway often sends list_dir with paths[]; we only accept ListDir with path. Normalize here so loop never sees paths.
+          if (name === "ListDir" || name === "list_dir") {
+            name = "ListDir"
+            if (args && typeof args === "object") {
+              const pathVal =
+                typeof args.path === "string" && args.path.length > 0
+                  ? args.path
+                  : Array.isArray(args.paths) && typeof args.paths[0] === "string"
+                    ? args.paths[0]
+                    : "."
+              args = {
+                path: pathVal,
+                ignore: args.ignore,
+                recursive: args.recursive,
+                include: args.include,
+                max_entries: args.max_entries,
+                task_progress: args.task_progress,
+              }
+            }
+          }
           yield {
             type: "tool_call",
             toolCallId: part.toolCallId,
-            toolName: part.toolName,
-            toolInput: part.args as Record<string, unknown>,
+            toolName: name,
+            toolInput: args,
           }
           break
+        }
 
         case "finish": {
           const usage = result.usage

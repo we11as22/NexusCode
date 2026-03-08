@@ -10,13 +10,14 @@ export interface ResolveBundledOptions {
   /** Project directory (agent cwd); passed as CLAUDE_PROJECT_DIR to bundled servers */
   cwd: string
   /**
-   * NexusCode repo root (where sources/claude-context-mode lives).
+   * NexusCode repo root for resolving relative bundle paths.
    * When null/undefined or path does not exist, bundled entries are skipped.
    */
   nexusRoot: string | null | undefined
 }
 
-const CONTEXT_MODE_START = "sources/claude-context-mode/start.mjs"
+/** Path to context-mode start script. Override with NEXUS_CONTEXT_MODE_PATH (absolute or relative to nexusRoot). */
+const CONTEXT_MODE_START = process.env.NEXUS_CONTEXT_MODE_PATH ?? "context-mode/start.mjs"
 
 /**
  * Resolves any server with bundle === "context-mode" to a full config
@@ -35,7 +36,7 @@ export function resolveBundledMcpServers(
   const resolved: McpServerConfig[] = []
   for (const server of servers) {
     if (server.bundle === "context-mode") {
-      const startPath = path.join(root, CONTEXT_MODE_START)
+      const startPath = path.isAbsolute(CONTEXT_MODE_START) ? CONTEXT_MODE_START : path.join(root, CONTEXT_MODE_START)
       if (!fs.existsSync(startPath)) {
         continue
       }

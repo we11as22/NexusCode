@@ -80,11 +80,13 @@ import {
   bootstrapNexus,
   listSessions,
   readCheckpointEntries,
+  buildConfigSnapshot,
 } from '../nexus-bootstrap.js'
 import { runTaskRestore } from '../task-restore.js'
 import { createNexusConfigCommand } from '../commands/nexusConfig.js'
 import { createNexusModelCommand } from '../commands/nexusModel.js'
 import { createNexusIndexCommand } from '../commands/nexusIndex.js'
+import { createNexusVectorCommand } from '../commands/nexusVector.js'
 import { createNexusEmbeddingsCommand } from '../commands/nexusEmbeddings.js'
 
 export function completeOnboarding(): void {
@@ -454,11 +456,35 @@ ${commandList}`,
             createNexusConfigCommand(nexus),
             createNexusModelCommand(nexus),
             createNexusIndexCommand(nexus),
+            createNexusVectorCommand(nexus),
             createNexusEmbeddingsCommand(nexus),
           ]
 
+          function NexusREPLWithConfigRefresh({
+            nexus: n,
+            ...replProps
+          }: {
+            nexus: Awaited<ReturnType<typeof bootstrapNexus>>
+          } & Omit<React.ComponentProps<typeof REPL>, 'nexusConfigSnapshot' | 'onNexusConfigSaved'>) {
+            const [configSnapshot, setConfigSnapshot] = React.useState(n.configSnapshot)
+            const refreshConfig = React.useCallback(async () => {
+              const { loadConfig } = await import('@nexuscode/core')
+              const config = await loadConfig(n.cwd, { secrets: n.secretsStore })
+              setConfigSnapshot(buildConfigSnapshot(config))
+            }, [n.cwd, n.secretsStore])
+            return (
+              <REPL
+                {...replProps}
+                nexusConfigSnapshot={configSnapshot}
+                onNexusConfigSaved={refreshConfig}
+                nexusBootstrap={n}
+              />
+            )
+          }
+
           render(
-            <REPL
+            <NexusREPLWithConfigRefresh
+              nexus={nexus}
               commands={commandsToUse}
               debug={debug}
               initialPrompt={inputPrompt}
@@ -469,7 +495,6 @@ ${commandList}`,
               dangerouslySkipPermissions={dangerouslySkipPermissions}
               mcpClients={mcpClients}
               isDefaultModel={isDefaultModel}
-              nexusConfigSnapshot={nexus.configSnapshot}
               nexusInitialMode={nexus.mode}
               nexusNoIndex={!nexus.indexer}
               nexusSessionId={nexus.session.id}
@@ -483,7 +508,6 @@ ${commandList}`,
                 writeConfig(nexus.config, effectiveCwd)
               }}
               nexusOnReindex={() => nexus.indexer?.startIndexing()}
-              nexusBootstrap={nexus}
             />,
             renderContext,
           )

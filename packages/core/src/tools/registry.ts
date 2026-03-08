@@ -4,18 +4,20 @@ import { getAllBuiltinTools } from "./built-in/index.js"
 
 /**
  * Tool registry — manages built-in, MCP, and custom tools.
+ * Built-in tools are never overwritten by MCP/custom registration (same name = keep built-in).
  */
 export class ToolRegistry {
   private tools: Map<string, ToolDef> = new Map()
+  private static readonly BUILTIN_NAMES = new Set(getAllBuiltinTools().map((t) => t.name))
 
   constructor() {
-    // Register all built-in tools
     for (const tool of getAllBuiltinTools()) {
       this.tools.set(tool.name, tool)
     }
   }
 
   register(tool: ToolDef): void {
+    if (ToolRegistry.BUILTIN_NAMES.has(tool.name)) return
     this.tools.set(tool.name, tool)
   }
 
