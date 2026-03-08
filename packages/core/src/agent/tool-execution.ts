@@ -147,11 +147,14 @@ export function buildApprovalAction(toolName: string, toolInput: Record<string, 
     }
   }
   if (toolName === "Bash") {
+    const cmd = typeof toolInput["command"] === "string" ? toolInput["command"] : ""
+    const shortDesc = typeof toolInput["description"] === "string" ? toolInput["description"] : undefined
     return {
       type: "execute",
       tool: toolName,
-      description: `Run: ${toolInput["command"]}`,
-      content: typeof toolInput["command"] === "string" ? toolInput["command"] : undefined,
+      description: `Run: ${cmd}`,
+      content: cmd || undefined,
+      shortDescription: shortDesc,
     }
   }
   if (toolName.includes("__")) {
@@ -176,6 +179,8 @@ export function toolNeedsApproval(
   mcpToolNames: Set<string>
 ): boolean {
   if (mcpToolNames.has(toolName)) {
+    const allowedMcp = config.permissions.allowedMcpTools ?? []
+    if (allowedMcp.includes(toolName)) return false
     return !(config.permissions.autoApproveMcp ?? false)
   }
   if (READ_ONLY_TOOLS.has(toolName)) {
@@ -427,6 +432,26 @@ export async function executeToolCall(
           if (!config.permissions.allowedCommands) config.permissions.allowedCommands = []
           if (!config.permissions.allowedCommands.includes(toAdd)) {
             config.permissions.allowedCommands.push(toAdd)
+          }
+        }
+      }
+      if (approval.addToAllowedPattern != null && toolName === "Bash") {
+        const pattern = approval.addToAllowedPattern.trim()
+        if (pattern) {
+          await host.addAllowedPattern?.(ctx.cwd, pattern)
+          if (!config.permissions.allowCommandPatterns) config.permissions.allowCommandPatterns = []
+          if (!config.permissions.allowCommandPatterns.includes(pattern)) {
+            config.permissions.allowCommandPatterns.push(pattern)
+          }
+        }
+      }
+      if (approval.addToAllowedMcpTool != null && mcpToolNames.has(toolName)) {
+        const tool = approval.addToAllowedMcpTool.trim()
+        if (tool) {
+          await host.addAllowedMcpTool?.(ctx.cwd, tool)
+          if (!config.permissions.allowedMcpTools) config.permissions.allowedMcpTools = []
+          if (!config.permissions.allowedMcpTools.includes(tool)) {
+            config.permissions.allowedMcpTools.push(tool)
           }
         }
       }

@@ -63,7 +63,12 @@ When to use:
 When NOT to use:
 - Info you can get via tools (read config, search codebase).
 - Obvious or multiple questions; prefer making a reasonable choice and stating it.
-- Permission prompts ("Should I run tests?"); just run them if relevant.`,
+- Permission prompts ("Should I run tests?"); just run them if relevant.
+
+Prefer making a reasonable choice and stating the assumption over asking. Examples of when NOT to ask:
+- "Should I run tests?" → just run them
+- "Which file format?" → pick the one already used in the project
+- "Is it okay if I create X file?" → just create it`,
   parameters: askSchema,
 
   async execute({ question, options }, ctx: ToolContext) {

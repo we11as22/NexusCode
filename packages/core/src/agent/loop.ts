@@ -1185,6 +1185,26 @@ async function executeToolCall(
           }
         }
       }
+      if (approval.addToAllowedPattern != null && toolName === "Bash") {
+        const pattern = approval.addToAllowedPattern.trim()
+        if (pattern) {
+          await host.addAllowedPattern?.(ctx.cwd, pattern)
+          if (!config.permissions.allowCommandPatterns) config.permissions.allowCommandPatterns = []
+          if (!config.permissions.allowCommandPatterns.includes(pattern)) {
+            config.permissions.allowCommandPatterns.push(pattern)
+          }
+        }
+      }
+      if (approval.addToAllowedMcpTool != null && mcpToolNames.has(toolName)) {
+        const tool = approval.addToAllowedMcpTool.trim()
+        if (tool) {
+          await host.addAllowedMcpTool?.(ctx.cwd, tool)
+          if (!config.permissions.allowedMcpTools) config.permissions.allowedMcpTools = []
+          if (!config.permissions.allowedMcpTools.includes(tool)) {
+            config.permissions.allowedMcpTools.push(tool)
+          }
+        }
+      }
     }
   }
 
@@ -1475,6 +1495,8 @@ function toolNeedsApproval(
   mcpToolNames: Set<string>
 ): boolean {
   if (mcpToolNames.has(toolName)) {
+    const allowedMcp = config.permissions.allowedMcpTools ?? []
+    if (allowedMcp.includes(toolName)) return false
     return !(config.permissions.autoApproveMcp ?? false)
   }
   if (READ_ONLY_TOOLS.has(toolName)) {

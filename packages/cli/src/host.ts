@@ -218,6 +218,41 @@ export class CliHost implements IHost {
     await fs.writeFile(filePath, JSON.stringify({ commands }, null, 2), "utf8")
 
     // Also append to .nexus/settings.local.json (like .claude)
+    await this.appendToSettingsAllow(dir, normalized)
+  }
+
+  async addAllowedPattern(cwd: string, pattern: string): Promise<void> {
+    const dir = path.join(cwd, ".nexus")
+    const trimmed = pattern.trim()
+    if (!trimmed) return
+    await this.appendToSettingsAllow(dir, trimmed)
+  }
+
+  async addAllowedMcpTool(cwd: string, toolName: string): Promise<void> {
+    const dir = path.join(cwd, ".nexus")
+    const trimmed = toolName.trim()
+    if (!trimmed) return
+    const settingsLocalPath = path.join(dir, "settings.local.json")
+    let settings: { permissions?: { allowedMcpTools?: string[]; allow?: string[]; deny?: string[]; ask?: string[] } } = {}
+    try {
+      const raw = await fs.readFile(settingsLocalPath, "utf8")
+      settings = JSON.parse(raw) as typeof settings
+    } catch {
+      // File missing or invalid
+    }
+    if (!settings.permissions) settings.permissions = {}
+    const list = settings.permissions.allowedMcpTools ?? []
+    if (!list.includes(trimmed)) {
+      list.push(trimmed)
+      settings.permissions.allowedMcpTools = list
+      if (!settings.permissions.deny) settings.permissions.deny = []
+      if (!settings.permissions.ask) settings.permissions.ask = []
+      await fs.mkdir(dir, { recursive: true })
+      await fs.writeFile(settingsLocalPath, JSON.stringify(settings, null, 2), "utf8")
+    }
+  }
+
+  private async appendToSettingsAllow(dir: string, entry: string): Promise<void> {
     const settingsLocalPath = path.join(dir, "settings.local.json")
     let settings: { permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } } = {}
     try {
@@ -228,8 +263,8 @@ export class CliHost implements IHost {
     }
     if (!settings.permissions) settings.permissions = {}
     const allow = settings.permissions.allow ?? []
-    if (!allow.includes(normalized)) {
-      allow.push(normalized)
+    if (!allow.includes(entry)) {
+      allow.push(entry)
       settings.permissions.allow = allow
       if (!settings.permissions.deny) settings.permissions.deny = []
       if (!settings.permissions.ask) settings.permissions.ask = []

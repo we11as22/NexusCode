@@ -2,7 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/* VS Code + Cursor-style chat (blue accent) */
+/* VS Code + Cursor-style chat — NexusCode theme is blue (not orange) */
 :root {
   color-scheme: dark;
   --nexus-accent: #0078d4;

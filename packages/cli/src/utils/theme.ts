@@ -1,8 +1,12 @@
 import { getGlobalConfig } from './config.js'
 
+/**
+ * NexusCode CLI theme: primary/accent is blue (not orange).
+ * All themes use blue for primary, permission, suggestion, and warning.
+ */
 export interface Theme {
   bashBorder: string
-  /** Primary/accent color (brand) */
+  /** Primary/accent color (brand) — blue */
   primary: string
   claude: string
   permission: string
@@ -53,7 +57,7 @@ const lightDaltonizedTheme: Theme = {
   suggestion: '#3366ff',
   success: '#006699', // Blue instead of green
   error: '#cc0000', // Pure red for better distinction
-  warning: '#5B9BD5', // Blue (was orange for deuteranopia)
+  warning: '#5B9BD5',
   diff: {
     added: '#99ccff', // Light blue instead of green
     removed: '#ffcccc', // Light red for better contrast
@@ -93,7 +97,7 @@ const darkDaltonizedTheme: Theme = {
   suggestion: '#99ccff',
   success: '#3399ff', // Bright blue instead of green
   error: '#ff6666', // Bright red for better visibility
-  warning: '#5B9BD5', // Blue (was yellow-orange for deuteranopia)
+  warning: '#5B9BD5',
   diff: {
     added: '#004466', // Dark blue instead of green
     removed: '#660000', // Dark red for better contrast

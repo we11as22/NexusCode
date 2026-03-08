@@ -54,7 +54,7 @@ type Props = {
     forkConvoWithMessages: Message[],
   ) => void
   readFileTimestamps: { [filename: string]: number }
-  /** When set (Nexus), show current mode below input and allow Shift+Tab to cycle */
+  /** When set (Nexus), show current mode below input; cycle mode with Shift+Tab. */
   nexusMode?: string
   onCycleNexusMode?: () => void
   /** Called when a Nexus panel (e.g. /model) saves config so the header can refresh */
@@ -106,6 +106,12 @@ function PromptInput({
   const [pastedImage, setPastedImage] = useState<string | null>(null)
   const [placeholder, setPlaceholder] = useState('')
   const [cursorOffset, setCursorOffset] = useState<number>(input.length)
+  const cursorOffsetRef = React.useRef(cursorOffset)
+  cursorOffsetRef.current = cursorOffset
+  const setCursorOffsetAndRef = React.useCallback((off: number) => {
+    cursorOffsetRef.current = off
+    setCursorOffset(off)
+  }, [])
   const [pastedText, setPastedText] = useState<string | null>(null)
 
   useEffect(() => {
@@ -147,6 +153,7 @@ function PromptInput({
   const { resetHistory, onHistoryUp, onHistoryDown } = useArrowKeyHistory(
     (value: string, mode: 'bash' | 'prompt') => {
       onChange(value)
+      setCursorOffsetAndRef(value.length)
       onModeChange(mode)
     },
     input,
@@ -260,15 +267,15 @@ function PromptInput({
     // Get prompt with newline count
     const pastedPrompt = getPastedTextPrompt(text)
 
-    // Update the input with a visual indicator that text has been pasted
+    // Use ref so we have the cursor position when paste started (before 100ms callback)
+    const offset = cursorOffsetRef.current
+    const currentInput = input
     const newInput =
-      input.slice(0, cursorOffset) + pastedPrompt + input.slice(cursorOffset)
+      currentInput.slice(0, offset) + pastedPrompt + currentInput.slice(offset)
     onInputChange(newInput)
 
-    // Update cursor position to be after the inserted indicator
-    setCursorOffset(cursorOffset + pastedPrompt.length)
+    setCursorOffsetAndRef(offset + pastedPrompt.length)
 
-    // Still set the pastedText state for actual submission
     setPastedText(text)
   }
 
@@ -333,7 +340,7 @@ function PromptInput({
             isDimmed={isDisabled || isLoading}
             disableCursorMovementForUpDownKeys={suggestions.length > 0}
             cursorOffset={cursorOffset}
-            onChangeCursorOffset={setCursorOffset}
+            onChangeCursorOffset={setCursorOffsetAndRef}
             onPaste={onTextPaste}
             onShiftTab={onCycleNexusMode}
           />
@@ -343,7 +350,7 @@ function PromptInput({
         <Box paddingX={2} paddingY={0}>
           <Text dimColor>Mode: </Text>
           <Text bold color={getTheme().primary}>{nexusMode}</Text>
-          <Text dimColor> · Shift+Tab to change</Text>
+          <Text dimColor> · Shift+Tab to change mode</Text>
         </Box>
       )}
       {suggestions.length === 0 && (

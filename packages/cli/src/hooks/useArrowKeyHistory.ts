@@ -11,8 +11,7 @@ export function useArrowKeyHistory(
   const updateInput = (input: string | undefined) => {
     if (input !== undefined) {
       const mode = input.startsWith('!') ? 'bash' : 'prompt'
-      const value = mode === 'bash' ? input.slice(1) : input
-      onSetInput(value, mode)
+      onSetInput(input, mode)
     }
   }
 

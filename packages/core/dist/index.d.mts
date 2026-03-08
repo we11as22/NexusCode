@@ -309,6 +309,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         allowedCommands: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         /** Command patterns from .nexus/settings.json + settings.local.json */
         allowCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        /** MCP tool names allowed without approval for this project (e.g. ["codex - codex"]) */
+        allowedMcpTools: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         denyCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         askCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         denyPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
@@ -340,6 +342,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveReadPatterns: string[];
         allowedCommands: string[];
         allowCommandPatterns: string[];
+        allowedMcpTools: string[];
         denyCommandPatterns: string[];
         askCommandPatterns: string[];
         denyPatterns: string[];
@@ -359,6 +362,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveReadPatterns?: string[] | undefined;
         allowedCommands?: string[] | undefined;
         allowCommandPatterns?: string[] | undefined;
+        allowedMcpTools?: string[] | undefined;
         denyCommandPatterns?: string[] | undefined;
         askCommandPatterns?: string[] | undefined;
         denyPatterns?: string[] | undefined;
@@ -703,6 +707,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveReadPatterns: string[];
         allowedCommands: string[];
         allowCommandPatterns: string[];
+        allowedMcpTools: string[];
         denyCommandPatterns: string[];
         askCommandPatterns: string[];
         denyPatterns: string[];
@@ -919,6 +924,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveReadPatterns?: string[] | undefined;
         allowedCommands?: string[] | undefined;
         allowCommandPatterns?: string[] | undefined;
+        allowedMcpTools?: string[] | undefined;
         denyCommandPatterns?: string[] | undefined;
         askCommandPatterns?: string[] | undefined;
         denyPatterns?: string[] | undefined;
@@ -1009,6 +1015,10 @@ interface PermissionResult {
     addToAllowedCommand?: string;
     /** When set with approved: false, the user declined the action and asked to do this instead; agent continues with this instruction. */
     whatToDoInstead?: string;
+    /** For Bash: add this command pattern to allowCommandPatterns so matching commands are not asked again in this folder (e.g. "npm run:*"). */
+    addToAllowedPattern?: string;
+    /** For MCP: add this tool name to allowed list so it is not asked again in this folder (e.g. "codex - codex"). */
+    addToAllowedMcpTool?: string;
 }
 interface ToolDef<TArgs = Record<string, unknown>> {
     name: string;
@@ -1056,6 +1066,10 @@ interface ApprovalAction {
     tool: string;
     description: string;
     content?: string;
+    /** Short human-readable description for approval UI (e.g. "List prompts and built-in tools"). */
+    shortDescription?: string;
+    /** Optional warning to show in approval UI (e.g. "Command contains quoted characters in flag names"). */
+    warning?: string;
     diff?: string;
     /** For write/replace_in_file: lines added and removed, shown in approval UI and after completion. */
     diffStats?: {
@@ -1079,6 +1093,10 @@ interface IHost {
     emit(event: AgentEvent): void;
     /** Persist command to .nexus/allowed-commands.json for this cwd so it is not asked for approval again */
     addAllowedCommand?(cwd: string, command: string): Promise<void>;
+    /** Persist command pattern to .nexus/settings.local.json permissions.allow so matching commands are not asked again (e.g. "npm run:*"). */
+    addAllowedPattern?(cwd: string, pattern: string): Promise<void>;
+    /** Persist MCP tool name to project allow list so it is not asked again (e.g. "codex - codex"). */
+    addAllowedMcpTool?(cwd: string, toolName: string): Promise<void>;
     resolveAtMention?(mention: string): Promise<string | null>;
     getProblems?(): Promise<DiagnosticItem[]>;
     /** Restore workspace to a checkpoint (Cline-style). Optional if host has no checkpoint. */
@@ -1379,6 +1397,8 @@ interface NexusConfig {
         allowedCommands: string[];
         /** Command patterns from .nexus/settings.json + settings.local.json (allow = no approval) */
         allowCommandPatterns: string[];
+        /** MCP tool names allowed without approval for this project */
+        allowedMcpTools?: string[];
         /** Command patterns that always require approval (deny list) */
         denyCommandPatterns: string[];
         /** Command patterns that always ask (ask list) */

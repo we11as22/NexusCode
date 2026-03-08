@@ -31,6 +31,8 @@ import type { ApprovalAction } from '@nexuscode/core'
 export type NexusApprovalMessage = { type: 'nexus_approval'; action: ApprovalAction; partId: string }
 /** Shown above input (e.g. "Compacting conversation..."). text empty clears. */
 export type NexusBannerMessage = { type: 'nexus_banner'; text: string }
+/** Todo list update from agent (TodoWrite tool). Rendered above input, below progress. */
+export type NexusTodoMessage = { type: 'nexus_todo'; todo: string }
 
 function sessionMessageToAssistantContent(msg: SessionMessage): ContentBlockParam[] {
   const content = msg.content
@@ -99,7 +101,7 @@ export interface QueryNexusOptions {
  * Yields NexusApprovalMessage when tool_approval_needed so REPL can show the approval panel and resolve tuiApprovalRef.
  * Loads config from disk at start so that model/LLM settings saved in the CLI are applied.
  */
-export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage, void> {
+export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage, void> {
   const { nexus, userPrompt, repoTools, signal, tuiApprovalRef, autoApprove = false, modeOverride, onSubagentEvent } = opts
   const { session, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer } = nexus
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug'
@@ -145,9 +147,13 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
 
   const consumed: MessageType[] = []
 
-  function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage, boolean, unknown> {
+  function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage, boolean, unknown> {
     while (eventQueue.length > 0) {
       const event = eventQueue.shift()!
+      if (event.type === 'todo_updated') {
+        yield { type: 'nexus_todo', todo: event.todo ?? '' }
+        continue
+      }
       if (event.type === 'compaction_start') {
         yield { type: 'nexus_banner', text: 'Compacting conversation…' }
         continue

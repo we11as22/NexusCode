@@ -207,6 +207,9 @@ export async function bootstrapNexus(opts: {
       if (Array.isArray(perms.allow)) config.permissions.allowCommandPatterns = perms.allow
       if (Array.isArray(perms.deny)) config.permissions.denyCommandPatterns = perms.deny
       if (Array.isArray(perms.ask)) config.permissions.askCommandPatterns = perms.ask
+      if (Array.isArray((perms as { allowedMcpTools?: string[] }).allowedMcpTools)) {
+        config.permissions.allowedMcpTools = (perms as { allowedMcpTools: string[] }).allowedMcpTools
+      }
     }
   } catch {
     // ignore

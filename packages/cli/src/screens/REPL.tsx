@@ -1,10 +1,12 @@
 import { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
-import { Box, Newline, Static } from 'ink'
+import { Box, Newline, Static, Text } from 'ink'
 import ProjectOnboarding, {
   markProjectOnboardingComplete,
 } from '../ProjectOnboarding.js'
 import { CostThresholdDialog } from '../components/CostThresholdDialog.js'
 import { NexusApprovalPanel } from '../components/NexusApprovalPanel.js'
+import { NexusSubagentBlock } from '../components/NexusSubagentBlock.js'
+import { NexusTodoBlock } from '../components/NexusTodoBlock.js'
 import * as React from 'react'
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Command } from '../commands.js'
@@ -36,7 +38,7 @@ import {
   query,
 } from '../query.js'
 import { queryNexus } from '../nexus-query.js'
-import type { NexusApprovalMessage, NexusBannerMessage } from '../nexus-query.js'
+import type { NexusApprovalMessage, NexusBannerMessage, NexusTodoMessage } from '../nexus-query.js'
 import type { WrappedClient } from '../services/mcpClient.js'
 import type { Tool } from '../Tool.js'
 import { AutoUpdaterResult } from '../utils/autoUpdater.js'
@@ -196,13 +198,15 @@ export function REPL({
   const tuiApprovalRef = useRef<((r: import('@nexuscode/core').PermissionResult) => void) | null>(null)
   /** Banner above input (e.g. "Compacting conversation…", "Loop detected…"). */
   const [nexusBannerText, setNexusBannerText] = useState('')
+  /** Todo list from agent (TodoWrite). Rendered above input, below progress. */
+  const [nexusTodo, setNexusTodo] = useState('')
 
   /** Subagents per SpawnAgents tool partId (single and multiple). Updated via onSubagentEvent from queryNexus. */
   const [subagentsByPartId, setSubagentsByPartId] = useState<
     Record<string, import('../nexus-subagents.js').SubAgentState[]>
   >({})
 
-  /** Nexus mode for the next run (agent/plan/ask/debug). Shown below input; cycle with Shift+Tab. */
+  /** Nexus mode for the next run (agent/plan/ask/debug). Shown below input; Shift+Tab to change mode. */
   const [nexusModeOverride, setNexusModeOverride] = useState<string>(
     () => nexusInitialMode ?? 'agent',
   )
@@ -360,6 +364,7 @@ export function REPL({
                   partId={approvalMsg.partId}
                   approvalRef={tuiApprovalRef}
                   onClose={() => setToolJSX(null)}
+                  cwd={getOriginalCwd()}
                 />
               ),
               shouldHidePromptInput: true,
@@ -368,6 +373,10 @@ export function REPL({
           }
           if (message && 'type' in message && message.type === 'nexus_banner') {
             setNexusBannerText((message as NexusBannerMessage).text)
+            continue
+          }
+          if (message && 'type' in message && message.type === 'nexus_todo') {
+            setNexusTodo((message as NexusTodoMessage).todo)
             continue
           }
           setMessages(oldMessages => [...oldMessages, message as MessageType])
@@ -476,6 +485,7 @@ export function REPL({
                 partId={approvalMsg.partId}
                 approvalRef={tuiApprovalRef}
                 onClose={() => setToolJSX(null)}
+                cwd={getOriginalCwd()}
               />
             ),
             shouldHidePromptInput: true,
@@ -484,6 +494,10 @@ export function REPL({
         }
         if (message && 'type' in message && message.type === 'nexus_banner') {
           setNexusBannerText((message as NexusBannerMessage).text)
+          continue
+        }
+        if (message && 'type' in message && message.type === 'nexus_todo') {
+          setNexusTodo((message as NexusTodoMessage).todo)
           continue
         }
         setMessages(oldMessages => [...oldMessages, message as MessageType])
@@ -541,6 +555,19 @@ export function REPL({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Print resume hint on exit when in Nexus mode
+  useEffect(() => {
+    return () => {
+      if (nexusSessionId) {
+        process.stdout.write(
+          '\nResume this session with:\nnexus --session ' +
+            nexusSessionId +
+            '\n',
+        )
+      }
+    }
+  }, [nexusSessionId])
+
   const normalizedMessages = useMemo(
     () => normalizeMessages(messages).filter(isNotEmptyMessage),
     [messages],
@@ -581,6 +608,7 @@ export function REPL({
                 nexusConfigSnapshot?.indexing?.enabled ??
                 (nexusBootstrap ? nexusBootstrap.indexEnabled : undefined)
               }
+              nexusSessionId={nexusSessionId}
             />
             <ProjectOnboarding workspaceDir={getOriginalCwd()} />
           </Box>
@@ -704,11 +732,33 @@ export function REPL({
     nexusBootstrap,
     nexusConfigSnapshot,
     nexusModeOverride,
+    nexusSessionId,
     subagentsByPartId,
   ])
 
   // only show the dialog once not loading
   const showingCostDialog = !isLoading && showCostDialog
+
+  // When approval is requested (Nexus), show todo list above the approval panel instead of chat
+  if (toolJSX) {
+    return (
+      <>
+        <Box flexDirection="column" width="100%">
+          {nexusBootstrap ? (
+            <NexusSubagentBlock
+              subagentsByPartId={subagentsByPartId}
+              isLoading={isLoading}
+            />
+          ) : null}
+          {nexusBootstrap && nexusTodo.trim() ? (
+            <NexusTodoBlock todo={nexusTodo} />
+          ) : null}
+          {toolJSX.jsx}
+        </Box>
+        <Newline />
+      </>
+    )
+  }
 
   return (
     <>
@@ -725,10 +775,9 @@ export function REPL({
         flexDirection="column"
         width="100%"
       >
-        {!toolJSX && !toolUseConfirm && !binaryFeedbackContext && isLoading && (
+        {!toolUseConfirm && !binaryFeedbackContext && isLoading && (
           <Spinner />
         )}
-        {toolJSX ? toolJSX.jsx : null}
         {!toolJSX && binaryFeedbackContext && !isMessageSelectorVisible && (
           <BinaryFeedback
             m1={binaryFeedbackContext.m1}
@@ -776,7 +825,6 @@ export function REPL({
           )}
 
         {!toolUseConfirm &&
-          !toolJSX?.shouldHidePromptInput &&
           shouldShowPromptInput &&
           !isMessageSelectorVisible &&
           !binaryFeedbackContext &&
@@ -786,6 +834,23 @@ export function REPL({
                 <Box paddingX={1} marginTop={1}>
                   <Text dimColor>{nexusBannerText}</Text>
                 </Box>
+              ) : null}
+              {nexusBootstrap &&
+                !isLoading &&
+                normalizedMessages.length > 0 &&
+                normalizedMessages[normalizedMessages.length - 1]?.type === 'assistant' && (
+                  <Box paddingX={1} marginTop={0} flexDirection="column">
+                    <Text dimColor>▶▶ Accept edits: 1–9, Enter (in panel) · Mode: Shift+Tab · esc to interrupt · ctrl+t to hide tasks</Text>
+                  </Box>
+                )}
+              {nexusBootstrap ? (
+                <NexusSubagentBlock
+                  subagentsByPartId={subagentsByPartId}
+                  isLoading={isLoading}
+                />
+              ) : null}
+              {nexusBootstrap && nexusTodo.trim() ? (
+                <NexusTodoBlock todo={nexusTodo} />
               ) : null}
               <PromptInput
                 commands={commands}

@@ -14,6 +14,7 @@ const DEFAULT_CODE_GLOBS = [
 
 const searchSchema = z.object({
   pattern: z.string().describe("The regular expression pattern to search for in file contents"),
+  explanation: z.string().optional().describe("One sentence explanation of why this search is needed and how it contributes to the goal."),
   path: z.string().optional().describe("File or directory to search in (rg PATH). Defaults to current working directory."),
   glob: z.string().optional().describe("Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg --glob"),
   output_mode: z.enum(["content", "files_with_matches", "count"]).optional().describe("Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\"."),
@@ -31,7 +32,9 @@ const searchSchema = z.object({
 
 export const grepTool: ToolDef<z.infer<typeof searchSchema>> = {
   name: "Grep",
-  description: `A powerful search tool built on ripgrep
+  description: `**ALWAYS use Grep for exact text/symbol/pattern searches.** Grep is your primary tool for finding known identifiers, imports, strings, and patterns.
+
+A powerful search tool built on ripgrep
 
 Usage:
 - ALWAYS use Grep for search tasks. NEVER invoke \`grep\` or \`rg\` as a Bash command. The Grep tool has been optimized for correct permissions and access.

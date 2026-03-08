@@ -14,6 +14,7 @@ export function Logo({
   nexusMode,
   nexusModel,
   nexusIndexEnabled,
+  nexusSessionId,
 }: {
   mcpClients: WrappedClient[]
   isDefaultModel?: boolean
@@ -21,6 +22,8 @@ export function Logo({
   nexusMode?: string
   nexusModel?: string
   nexusIndexEnabled?: boolean
+  /** When set (Nexus), show session id in the header for resume command */
+  nexusSessionId?: string
 }): React.ReactNode {
   const width = Math.max(MIN_LOGO_WIDTH, getCwd().length + 12)
   const theme = getTheme()
@@ -68,6 +71,9 @@ export function Logo({
                 )}
                 {nexusIndexEnabled != null && (
                   <> · index={nexusIndexEnabled ? 'on' : 'off'}</>
+                )}
+                {nexusSessionId != null && (
+                  <> · session=<Text bold>{nexusSessionId}</Text></>
                 )}
               </Text>
             )}

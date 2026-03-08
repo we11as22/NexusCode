@@ -96,6 +96,8 @@ export const NexusConfigSchema = z.object({
     allowedCommands: z.array(z.string()).default([]),
     /** Command patterns from .nexus/settings.json + settings.local.json */
     allowCommandPatterns: z.array(z.string()).default([]),
+    /** MCP tool names allowed without approval for this project (e.g. ["codex - codex"]) */
+    allowedMcpTools: z.array(z.string()).default([]),
     denyCommandPatterns: z.array(z.string()).default([]),
     askCommandPatterns: z.array(z.string()).default([]),
     denyPatterns: z.array(z.string()).default(["**/.env", "**/secrets/**", "**/*.key", "**/*.pem"]),

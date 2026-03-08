@@ -97,6 +97,7 @@ Usage notes:
     - Edit files: Edit (NOT sed/awk)
     - Write files: Write (NOT echo >/cat <<EOF)
     - Communication: output text directly (NOT echo/printf)
+  - **Non-interactive commands** — For any command that would prompt for user input (confirmations, passwords, selections), assume the user is NOT available. Pass non-interactive flags: \`--yes\` / \`-y\` for package managers, \`--force\` / \`-f\` when appropriate, \`--non-interactive\` for CLIs that support it. Never run a command that will block waiting for input.
   - When issuing multiple commands: if they are independent, make multiple Bash calls in a single response (parallel). If they depend on each other, use '&&' to chain them. Use ';' only when you don't care if earlier commands fail. DO NOT use newlines to separate commands (newlines are ok in quoted strings).
   - Use absolute paths and avoid cd. If you must run in a subdirectory, prefix with the absolute path:
     <good-example>

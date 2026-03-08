@@ -5,8 +5,6 @@ import { BashTool } from '../BashTool/BashTool.js'
 import { FileWriteTool } from '../FileWriteTool/FileWriteTool.js'
 import { FileEditTool } from '../FileEditTool/FileEditTool.js'
 import { NotebookEditTool } from '../NotebookEditTool/NotebookEditTool.js'
-import { GlobTool } from '../GlobTool/GlobTool.js'
-import { FileReadTool } from '../FileReadTool/FileReadTool.js'
 
 export async function getAgentTools(
   dangerouslySkipPermissions: boolean,
@@ -22,11 +20,14 @@ export async function getPrompt(
 ): Promise<string> {
   const tools = await getAgentTools(dangerouslySkipPermissions)
   const toolNames = tools.map(_ => _.name).join(', ')
+  // Use literal names to avoid bundler/circular-dependency issues (GlobTool/FileReadTool may be undefined at eval time)
+  const fileReadName = 'View'
+  const globName = 'GlobTool'
   return `Launch a new agent that has access to the following tools: ${toolNames}. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you. For example:
 
 - If you are searching for a keyword like "config" or "logger", the Agent tool is appropriate
-- If you want to read a specific file path, use the ${FileReadTool.name} or ${GlobTool.name} tool instead of the Agent tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the ${GlobTool.name} tool instead, to find the match more quickly
+- If you want to read a specific file path, use the ${fileReadName} or ${globName} tool instead of the Agent tool, to find the match more quickly
+- If you are searching for a specific class definition like "class Foo", use the ${globName} tool instead, to find the match more quickly
 
 Usage notes:
 1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
@@ -36,6 +37,6 @@ Usage notes:
     dangerouslySkipPermissions
       ? ''
       : `
-5. IMPORTANT: The agent can not use ${BashTool.name}, ${FileWriteTool.name}, ${FileEditTool.name}, ${NotebookEditTool.name}, so can not modify files. If you want to use these tools, use them directly instead of going through the agent.`
+5. IMPORTANT: The agent can not use ${BashTool?.name ?? 'BashTool'}, ${FileWriteTool?.name ?? 'FileWriteTool'}, ${FileEditTool?.name ?? 'FileEditTool'}, ${NotebookEditTool?.name ?? 'NotebookEditTool'}, so can not modify files. If you want to use these tools, use them directly instead of going through the agent.`
   }`
 }

@@ -74,11 +74,38 @@ export function useTextInput({
   const offset = externalOffset
   const setOffset = onOffsetChange
   const [selectionAnchor, setSelectionAnchor] = useState(0)
-  const cursor = Cursor.fromText(originalValue, columns, offset, selectionAnchor)
+
+  // Refs so we always use the latest value when handling input (avoids losing
+  // characters when React hasn't re-rendered yet after previous keystroke).
+  const valueRef = useRef(originalValue)
+  const prevOriginalRef = useRef<string | undefined>(undefined)
+  const offsetRef = useRef(externalOffset)
+  const selectionAnchorRef = useRef(selectionAnchor)
+
+  // Sync from parent when they set a new value (e.g. history navigation).
+  if (originalValue !== prevOriginalRef.current) {
+    prevOriginalRef.current = originalValue
+    valueRef.current = originalValue
+    offsetRef.current = externalOffset
+    selectionAnchorRef.current = externalOffset
+  }
+  // Build cursor from refs so display and input handling use the same source of truth.
+  const cursor = Cursor.fromText(
+    valueRef.current,
+    columns,
+    offsetRef.current,
+    selectionAnchorRef.current,
+  )
+  // Ref used inside onInput so handlers always see the cursor built from latest refs.
+  const currentCursorRef = useRef(cursor)
+  currentCursorRef.current = cursor
 
   function applyCursor(next: Cursor): void {
+    valueRef.current = next.text
+    offsetRef.current = next.offset
+    selectionAnchorRef.current = next.selection
     setOffset(next.offset)
-    if (cursor.text !== next.text) onChange(next.text)
+    if (currentCursorRef.current.text !== next.text) onChange(next.text)
     setSelectionAnchor(next.selection)
   }
   const escapeBufferRef = useRef('')
@@ -148,20 +175,20 @@ export function useTextInput({
 
   function handleCtrlD(): MaybeCursor {
     maybeClearImagePasteErrorTimeout()
-    if (cursor.text === '') {
+    if (currentCursorRef.current.text === '') {
       // When input is empty, handle double-press
       handleEmptyCtrlD()
-      return cursor
+      return currentCursorRef.current
     }
     // When input is not empty, delete forward like iPython
-    return cursor.del()
+    return currentCursorRef.current.del()
   }
 
   function tryImagePaste() {
     const base64Image = getImageFromClipboard()
     if (base64Image === null) {
       if (process.platform !== 'darwin') {
-        return cursor
+        return currentCursorRef.current
       }
       onMessage?.(true, CLIPBOARD_ERROR_MESSAGE)
       maybeClearImagePasteErrorTimeout()
@@ -171,40 +198,40 @@ export function useTextInput({
           onMessage?.(false)
         }, 4000),
       )
-      return cursor
+      return currentCursorRef.current
     }
 
     onImagePaste?.(base64Image)
-    return cursor.insert(IMAGE_PLACEHOLDER)
+    return currentCursorRef.current.insert(IMAGE_PLACEHOLDER)
   }
 
   const handleMeta = mapInput([
-    ['b', () => cursor.prevWord()],
-    ['f', () => cursor.nextWord()],
-    ['d', () => cursor.deleteWordAfter()],
+    ['b', () => currentCursorRef.current.prevWord()],
+    ['f', () => currentCursorRef.current.nextWord()],
+    ['d', () => currentCursorRef.current.deleteWordAfter()],
   ])
 
   function handleEnter(key: Key) {
     if (
       multiline &&
-      cursor.offset > 0 &&
-      cursor.text[cursor.offset - 1] === '\\'
+      currentCursorRef.current.offset > 0 &&
+      currentCursorRef.current.text[currentCursorRef.current.offset - 1] === '\\'
     ) {
-      return cursor.backspace().insert('\n')
+      return currentCursorRef.current.backspace().insert('\n')
     }
     if (key.meta) {
-      return cursor.insert('\n')
+      return currentCursorRef.current.insert('\n')
     }
-    onSubmit?.(originalValue)
+    onSubmit?.(valueRef.current)
   }
 
   function upOrHistoryUp() {
     if (disableCursorMovementForUpDownKeys) {
       onHistoryUp?.()
-      return cursor
+      return currentCursorRef.current
     }
-    const cursorUp = cursor.up()
-    if (cursorUp.equals(cursor)) {
+    const cursorUp = currentCursorRef.current.up()
+    if (cursorUp.equals(currentCursorRef.current)) {
       // already at beginning
       onHistoryUp?.()
     }
@@ -213,10 +240,10 @@ export function useTextInput({
   function downOrHistoryDown() {
     if (disableCursorMovementForUpDownKeys) {
       onHistoryDown?.()
-      return cursor
+      return currentCursorRef.current
     }
-    const cursorDown = cursor.down()
-    if (cursorDown.equals(cursor)) {
+    const cursorDown = currentCursorRef.current.down()
+    if (cursorDown.equals(currentCursorRef.current)) {
       onHistoryDown?.()
     }
     return cursorDown
@@ -224,21 +251,21 @@ export function useTextInput({
 
   const handleCtrl = (k: Key) =>
     mapInput([
-      ['a', () => (k.shift ? cursor.startOfLine().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.startOfLine().collapseSelection())],
-      ['b', () => (k.shift ? cursor.left().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.left().collapseSelection())],
-      ['c', () => (cursor.hasSelection() ? (setClipboardText(cursor.getSelectedText()), cursor) : (handleCtrlC(input), cursor))],
+      ['a', () => (k.shift ? currentCursorRef.current.startOfLine().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset) : currentCursorRef.current.startOfLine().collapseSelection())],
+      ['b', () => (k.shift ? currentCursorRef.current.left().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset) : currentCursorRef.current.left().collapseSelection())],
+      ['c', () => (currentCursorRef.current.hasSelection() ? (setClipboardText(currentCursorRef.current.getSelectedText()), currentCursorRef.current) : (handleCtrlC(), currentCursorRef.current))],
       ['d', handleCtrlD],
-      ['e', () => (k.shift ? cursor.endOfLine().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.endOfLine().collapseSelection())],
-      ['f', () => (k.shift ? cursor.right().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.right().collapseSelection())],
-      ['h', () => cursor.backspace()],
-      ['k', () => cursor.deleteToLineEnd()],
+      ['e', () => (k.shift ? currentCursorRef.current.endOfLine().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset) : currentCursorRef.current.endOfLine().collapseSelection())],
+      ['f', () => (k.shift ? currentCursorRef.current.right().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset) : currentCursorRef.current.right().collapseSelection())],
+      ['h', () => currentCursorRef.current.backspace()],
+      ['k', () => currentCursorRef.current.deleteToLineEnd()],
       ['l', () => clear()],
       ['n', () => downOrHistoryDown()],
       ['p', () => upOrHistoryUp()],
-      ['u', () => cursor.deleteToLineStart()],
-      ['v', () => { const afterImage = tryImagePaste(); if (!cursor.equals(afterImage)) return afterImage; const pasted = getClipboardText(); return pasted ? cursor.replaceSelected(pasted) : cursor }],
-      ['w', () => cursor.deleteWordBefore()],
-      ['x', () => (cursor.hasSelection() ? (setClipboardText(cursor.getSelectedText()), cursor.replaceSelected('')) : cursor)],
+      ['u', () => currentCursorRef.current.deleteToLineStart()],
+      ['v', () => { const afterImage = tryImagePaste(); if (!currentCursorRef.current.equals(afterImage)) return afterImage; const pasted = getClipboardText(); return pasted ? currentCursorRef.current.replaceSelected(pasted) : currentCursorRef.current }],
+      ['w', () => currentCursorRef.current.deleteWordBefore()],
+      ['x', () => (currentCursorRef.current.hasSelection() ? (setClipboardText(currentCursorRef.current.getSelectedText()), currentCursorRef.current.replaceSelected('')) : currentCursorRef.current)],
     ])
 
   function mapKey(key: Key): InputMapper {
@@ -246,25 +273,25 @@ export function useTextInput({
       case key.escape:
         return handleEscape
       case key.leftArrow && (key.ctrl || key.meta || key.fn):
-        return () => cursor.prevWord()
+        return () => currentCursorRef.current.prevWord()
       case key.rightArrow && (key.ctrl || key.meta || key.fn):
-        return () => cursor.nextWord()
+        return () => currentCursorRef.current.nextWord()
       case key.backspace:
         return key.meta
-          ? () => cursor.deleteWordBefore()
-          : () => cursor.backspace()
+          ? () => currentCursorRef.current.deleteWordBefore()
+          : () => currentCursorRef.current.backspace()
       case key.delete:
-        return key.meta ? () => cursor.deleteToLineEnd() : () => cursor.del()
+        return key.meta ? () => currentCursorRef.current.deleteToLineEnd() : () => currentCursorRef.current.del()
       case key.ctrl:
         return handleCtrl(key)
       case key.home:
-        return () => cursor.startOfLine().collapseSelection()
+        return () => currentCursorRef.current.startOfLine().collapseSelection()
       case key.end:
-        return () => cursor.endOfLine().collapseSelection()
+        return () => currentCursorRef.current.endOfLine().collapseSelection()
       case key.pageDown:
-        return () => cursor.endOfLine()
+        return () => currentCursorRef.current.endOfLine()
       case key.pageUp:
-        return () => cursor.startOfLine()
+        return () => currentCursorRef.current.startOfLine()
       case key.meta:
         return handleMeta
       case key.return:
@@ -276,34 +303,34 @@ export function useTextInput({
       case key.downArrow:
         return downOrHistoryDown
       case key.leftArrow && key.shift:
-        return () => cursor.left().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset)
+        return () => currentCursorRef.current.left().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset)
       case key.rightArrow && key.shift:
-        return () => cursor.right().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset)
+        return () => currentCursorRef.current.right().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset)
       case key.home && key.shift:
-        return () => cursor.startOfLine().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset)
+        return () => currentCursorRef.current.startOfLine().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset)
       case key.end && key.shift:
-        return () => cursor.endOfLine().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset)
+        return () => currentCursorRef.current.endOfLine().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset)
       case key.leftArrow:
-        return () => cursor.left().collapseSelection()
+        return () => currentCursorRef.current.left().collapseSelection()
       case key.rightArrow:
-        return () => cursor.right().collapseSelection()
+        return () => currentCursorRef.current.right().collapseSelection()
     }
     return function (input: string) {
       switch (true) {
         // Backspace (some terminals send character instead of key.backspace)
         case input === '\x7f' || input === '\b':
-          return cursor.backspace()
+          return currentCursorRef.current.backspace()
         // Delete (many terminals send escape sequence instead of key.delete)
         case input === '\x1b[3~':
-          return cursor.del()
+          return currentCursorRef.current.del()
         // Home key
         case input == '\x1b[H' || input == '\x1b[1~':
-          return cursor.startOfLine()
+          return currentCursorRef.current.startOfLine()
         // End key
         case input == '\x1b[F' || input == '\x1b[4~':
-          return cursor.endOfLine()
+          return currentCursorRef.current.endOfLine()
         default:
-          return cursor.insert(input.replace(/\r/g, '\n'))
+          return currentCursorRef.current.insert(input.replace(/\r/g, '\n'))
       }
     }
   }
@@ -328,6 +355,16 @@ export function useTextInput({
    * META+DELETE: key.delete + key.meta → mapKey → cursor.deleteToLineEnd().
    */
   function onInput(input: string, key: Key): void {
+    // Rebuild cursor from refs so we have the latest value when multiple keystrokes
+    // are processed before React re-renders (fixes "only last character shown").
+    const cursor = Cursor.fromText(
+      valueRef.current,
+      columns,
+      offsetRef.current,
+      selectionAnchorRef.current,
+    )
+    currentCursorRef.current = cursor
+
     // Escape sequence buffer: terminals may send e.g. Delete \x1b[3~ in multiple chunks
     const buf = escapeBufferRef.current
     if (buf.length > 0) {
