@@ -126,19 +126,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
-        orchestrator: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
     }, "strip", z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -204,19 +191,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
-        orchestrator: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
     }, z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -270,19 +244,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             customInstructions?: string | undefined;
         }>>;
         debug: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        orchestrator: z.ZodOptional<z.ZodObject<{
             autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
             systemPrompt: z.ZodOptional<z.ZodString>;
             customInstructions: z.ZodOptional<z.ZodString>;
@@ -713,11 +674,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         } | undefined;
-        orchestrator?: {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        } | undefined;
     } & {
         [k: string]: {
             autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
@@ -928,19 +884,6 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
-        orchestrator: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
     }, z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -1054,7 +997,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     }> | undefined;
 }>;
 
-type Mode = "agent" | "plan" | "ask" | "debug" | "orchestrator";
+type Mode = "agent" | "plan" | "ask" | "debug";
 declare const MODES: Mode[];
 type PermissionAction = "read" | "write" | "execute" | "mcp" | "browser" | "search";
 interface PermissionResult {

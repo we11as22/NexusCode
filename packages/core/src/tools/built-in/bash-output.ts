@@ -9,6 +9,17 @@ const schema = z.object({
   filter: z.string().optional().describe("Optional regular expression to filter the output lines. Only lines matching this regex will be included in the result."),
 })
 
+/** Check if a process is still running (Unix: signal 0; Windows: may be unreliable). */
+function isProcessRunning(pid: number): boolean {
+  if (pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export const bashOutputTool: ToolDef<z.infer<typeof schema>> = {
   name: "BashOutput",
   description: `Read output from a background bash shell started with run_in_background: true.
@@ -28,17 +39,6 @@ Example flow:
 3. BashOutput({ bash_id: "run_1234567890" }) → [Process status: exited] + full log (or use filter: "error|Error|ERROR" to find errors)`,
   parameters: schema,
   readOnly: true,
-
-/** Check if a process is still running (Unix: signal 0; Windows: may be unreliable). */
-function isProcessRunning(pid: number): boolean {
-  if (pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
 
   async execute({ bash_id, filter }, ctx: ToolContext) {
     const job = backgroundBashJobs.get(bash_id)
