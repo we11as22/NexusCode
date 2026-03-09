@@ -269,18 +269,26 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
           break
 
         case "tool_call": {
-          const { toolCallId, toolName, toolInput } = event
+          let { toolCallId, toolName, toolInput } = event
           if (!toolCallId || !toolName || !toolInput) break
           sawNativeToolCall = true
 
-          // Normalize ListDir: some providers/models send "paths" (array) or omit path; we only accept "path". Default ".".
+          // CLI/gateway may send list_dir or ListDirectory; resolve to builtin "List"
+          if (
+            toolName === "list_dir" ||
+            toolName === "ListDirectory" ||
+            toolName === "list_directory"
+          )
+            toolName = "List"
+
+          // Normalize List: some providers/models send "paths" (array) or omit path; we only accept "path". Default ".".
           let normalizedToolInput: Record<string, unknown> =
             typeof toolInput === "object" && toolInput !== null ? { ...toolInput } : {}
-          if (toolName === "ListDir") {
+          if (toolName === "List") {
             const pathVal =
               typeof normalizedToolInput.path === "string" && normalizedToolInput.path.length > 0
                 ? normalizedToolInput.path
-                : Array.isArray(normalizedToolInput.paths) && typeof normalizedToolInput.paths[0] === "string"
+                : Array.isArray(normalizedToolInput.paths) && normalizedToolInput.paths.length > 0 && typeof normalizedToolInput.paths[0] === "string"
                   ? normalizedToolInput.paths[0]
                   : "."
             normalizedToolInput = {
@@ -399,6 +407,15 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
               status: result.success ? "completed" : "error",
               output: result.output,
               timeEnd: Date.now(),
+              ...(result.success && (toolName === "Write" || toolName === "Edit")
+                ? {
+                    path: extractWriteTargetPath(toolName, normalizedToolInput),
+                    ...(typeof (result.metadata as { addedLines?: number; removedLines?: number })?.addedLines === "number" &&
+                    typeof (result.metadata as { addedLines?: number; removedLines?: number })?.removedLines === "number"
+                      ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
+                      : {}),
+                  }
+                : {}),
             })
 
             await emitToolEndPayload(toolName, normalizedToolInput, partId, result)

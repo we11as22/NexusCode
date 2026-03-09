@@ -45,7 +45,7 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
  */
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   always:  ["AskFollowupQuestion", "TodoWrite", "Parallel"],
-  read:    ["Read", "ListDir", "ListCodeDefinitions", "ReadLints"],
+  read:    ["Read", "List", "ListCodeDefinitions", "ReadLints"],
   write:   ["Write", "Edit"],
   execute: ["Bash"],
   search:  ["Grep", "CodebaseSearch", "WebFetch", "WebSearch", "Glob"],
@@ -67,7 +67,7 @@ export const PLAN_MODE_ALLOWED_WRITE_PATTERN = /^\.nexus[\\/]plans[\\/].+\.(md|t
  */
 export const READ_ONLY_TOOLS = new Set([
   "Read",
-  "ListDir",
+  "List",
   "ListCodeDefinitions",
   "ReadLints",
   "Grep",

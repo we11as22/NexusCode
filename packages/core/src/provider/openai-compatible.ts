@@ -54,6 +54,7 @@ export function createOllamaClient(config: ProviderConfig) {
 
 function detectProviderFromUrl(baseUrl: string): string {
   const url = baseUrl.toLowerCase()
+  if (url.includes("api.kilo.ai")) return "kilo"
   if (url.includes("groq")) return "groq"
   if (url.includes("together")) return "together"
   if (url.includes("mistral")) return "mistral"

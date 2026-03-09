@@ -143,7 +143,7 @@ Usage:
   },
 }
 
-// ListDir: single "path" parameter only. No "paths" array — gateways may expose list_dir with paths; we accept only path.
+// List: single "path" parameter only. No "paths" array — gateways may expose list_dir with paths; we accept only path.
 const listSchema = z
   .object({
     path: z
@@ -157,8 +157,23 @@ const listSchema = z
   })
   .strict()
 
-export const listDirTool: ToolDef<z.infer<typeof listSchema>> = {
-  name: "ListDir",
+/** Schema sent to gateways (Minimax, OpenRouter, etc.) that replace List with list_dir and validate paths[0]. Model must send paths: [". "] so gateway validation passes; we normalize paths → path on receive. */
+export const listSchemaForGateway = z
+  .object({
+    paths: z
+      .array(z.string())
+      .min(1)
+      .describe("Directory path(s) to list. Use a single path, e.g. [\".\"] for root or [\"src\"] for a folder."),
+    ignore: z.array(z.string()).optional(),
+    recursive: z.boolean().optional(),
+    include: z.string().optional(),
+    max_entries: z.number().int().positive().max(5000).optional(),
+    task_progress: z.string().optional(),
+  })
+  .strict()
+
+export const listTool: ToolDef<z.infer<typeof listSchema>> = {
+  name: "List",
   description: `Lists files and directories in a given path.
 
 **Input: exactly one parameter \`path\` (string).** Do not use \`paths\` (array). Use \`path\` only (e.g. \".\", \"src\", \"packages\").
@@ -166,7 +181,7 @@ export const listDirTool: ToolDef<z.infer<typeof listSchema>> = {
 ### When to Use
 
 - **Project layout discovery** — Use at the start of a task on root and key dirs (e.g. \`.\`, \`src\`, \`packages\`) to understand structure. Use once or twice; do not list every nested folder.
-- **Verify directory exists** — Before running commands that create files/dirs (e.g. \`mkdir foo/bar\`), use ListDir to check the parent directory exists and is the correct location.
+- **Verify directory exists** — Before running commands that create files/dirs (e.g. \`mkdir foo/bar\`), use List to check the parent directory exists and is the correct location.
 - **Find file names or check presence** — Config files, scripts, modules. Use \`include\` to filter by extension.
 
 ### When NOT to Use

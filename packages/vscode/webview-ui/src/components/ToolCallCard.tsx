@@ -41,7 +41,7 @@ const TOOL_ICONS: Record<string, string> = {
   search_files: "🔍",
   Grep: "🔍",
   list_dir: "📁",
-  ListDir: "📁",
+  List: "📁",
   list_code_definitions: "🏗️",
   ListCodeDefinitions: "🏗️",
   read_lints: "⚠️",
@@ -76,7 +76,7 @@ function toolDisplayName(tool: string): string {
     read_file: "Read", Read: "Read",
     write_to_file: "Write", Write: "Write",
     replace_in_file: "Edit", Edit: "Edit",
-    list_dir: "ListDir", ListDir: "ListDir",
+    list_dir: "List", List: "List",
     search_files: "Grep", Grep: "Grep",
     codebase_search: "CodebaseSearch", CodebaseSearch: "CodebaseSearch",
     list_code_definitions: "ListCodeDefinitions", ListCodeDefinitions: "ListCodeDefinitions",
@@ -427,7 +427,7 @@ function formatToolInputPreview(part: ToolPart): string {
       return short(pathStr, 56) + range
     }
     case "list_dir":
-    case "ListDir":
+    case "List":
       return pathStr ? `folder ${short(pathStr, 48)}` : "folder ."
     case "write_to_file":
     case "Write":

@@ -73,8 +73,8 @@ IMPORTANT: This tool is for terminal operations like git, npm, docker, builds, t
 Before executing the command, follow these steps:
 
 1. Directory Verification:
-   - If the command will create new directories or files, first use ListDir or Glob to verify the parent directory exists and is the correct location.
-   - For example, before running "mkdir foo/bar", first use ListDir to check that "foo" exists and is the intended parent directory.
+   - If the command will create new directories or files, first use List or Glob to verify the parent directory exists and is the correct location.
+   - For example, before running "mkdir foo/bar", first use List to check that "foo" exists and is the intended parent directory.
 
 2. Command Execution:
    - Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt").

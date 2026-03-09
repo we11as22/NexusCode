@@ -772,28 +772,31 @@ html, body, #root {
 
 .chat-messages-wrapper {
   position: relative;
-  flex: 1;
-  overflow: hidden;
+  flex: 1 1 0%;
   min-height: 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  /* Prevent chat scroll from overlapping todo/input below */
   isolation: isolate;
+  /* Kilo-style: let the messages area take all remaining height so scroll has a definite viewport */
+  overflow: hidden;
 }
 
 .chat-messages {
-  flex: 1;
+  flex: 1 1 0%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  height: 100%;
 }
 .chat-messages > * {
-  flex: 1;
+  flex: 1 1 0%;
   min-height: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Floating panel above input: "N File(s)" + Undo / Keep / Review */
@@ -871,6 +874,35 @@ html, body, #root {
   padding: 4px 10px 6px;
   border-top: 1px solid var(--vscode-panel-border);
   background: var(--vscode-editor-background);
+}
+
+.nexus-input-context-file-list {
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-input-context-file-list .nexus-input-context-file-row {
+  border-top: none;
+}
+
+.nexus-input-context-file-row-clickable {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  border: none;
+}
+
+.nexus-input-context-file-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  background: transparent;
+}
+
+.nexus-input-context-file-row-clickable:hover {
+  background: var(--vscode-list-hoverBackground);
 }
 
 .nexus-input-context-file-icon {
@@ -964,34 +996,42 @@ html, body, #root {
   z-index: 1;
 }
 
-/* Single rounded container for input + buttons — no visible box, blends with background */
+/* Single gray rounded box: textarea zone + button row inside */
 .chat-input .chat-input-inner {
   display: flex;
   flex-direction: column;
-  min-height: 0;
   min-width: 0;
   overflow: hidden;
-  background: transparent;
-  border: none;
-  border-radius: 0;
+  background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-foreground) 8%);
+  border: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.08));
+  border-radius: 12px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
 .chat-input .chat-input-inner:focus-within {
-  border-color: transparent;
-  box-shadow: none;
+  border-color: var(--vscode-focusBorder, var(--nexus-accent));
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder, var(--nexus-accent));
 }
 
-/* Text area zone — grows upward; max height leaves room for images row */
+/* Input + images zone — no own box, part of .chat-input-inner */
 .chat-input .chat-input-area {
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 44px;
-  max-height: min(50vh, 280px);
+  max-height: 320px;
   display: flex;
   flex-direction: column;
   padding: 10px 12px 8px;
   min-width: 0;
   overflow: hidden;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.chat-input .chat-input-area:focus-within {
+  box-shadow: none;
 }
 
 /* Attached images: thumbnails above text + pick button; remove (×) on hover */
@@ -1095,6 +1135,7 @@ html, body, #root {
   min-height: 0;
   flex-shrink: 0;
   min-width: 0;
+  border-top: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.06));
   background: transparent;
 }
 
@@ -1375,8 +1416,7 @@ html, body, #root {
 
 .message-list-container {
   position: relative;
-  height: 100%;
-  flex: 1;
+  flex: 1 1 0%;
   min-height: 0;
   min-width: 0;
   width: 100%;
@@ -1384,6 +1424,8 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Kilo-style: explicit height so scroll viewport is defined */
+  height: 100%;
 }
 
 .message-list-load-older {
@@ -1416,7 +1458,7 @@ html, body, #root {
 }
 
 .message-list-virtuoso {
-  flex: 1;
+  flex: 1 1 0%;
   min-height: 0;
   min-width: 0;
   width: 100%;
@@ -1424,6 +1466,9 @@ html, body, #root {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  position: relative;
+  /* Kilo-style: fill parent so scroll area gets a definite height */
+  height: 100%;
 }
 
 .nexus-message-list-top-indicator {
@@ -1444,11 +1489,18 @@ html, body, #root {
   text-overflow: ellipsis;
 }
 
+/* Kilo-style: flex-based scroll viewport. Use absolute fill so the scroll area always has a definite height (fixes webview stick-to-top). */
 .message-list-virtuoso-wrap {
-  flex: 1;
+  position: absolute;
+  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   min-height: 0;
-  min-width: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .nexus-rollback-btn {
@@ -1513,9 +1565,11 @@ html, body, #root {
   word-break: break-word;
 }
 
-/* Scrollable area: reserve space for scrollbar so it doesn't overlap tool cards / content */
+/* Scrollable area: fills the wrap; reserve space for scrollbar so it doesn't overlap content */
 .nexus-message-list-scroller {
-  height: 100% !important;
+  flex: 1 1 0%;
+  min-height: 0;
+  width: 100%;
   overflow-y: auto !important;
   overflow-x: hidden !important;
   scrollbar-gutter: stable;
@@ -1526,6 +1580,14 @@ html, body, #root {
   padding: 12px;
   padding-right: 16px; /* space for scrollbar so it doesn't overlap tool cards and content */
   background: var(--nexus-chat-bg);
+}
+
+/* Virtuoso root must fill the wrap and form a flex column so the Scroller gets a definite height (Kilo-style) */
+.message-list-virtuoso-wrap .message-list-virtuoso-inner {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
 }
 
 .message-list-item {
@@ -1553,14 +1615,16 @@ html, body, #root {
   position: absolute;
   right: 12px;
   bottom: 12px;
+  z-index: 10;
   border: 1px solid color-mix(in srgb, var(--nexus-accent) 65%, #000 35%);
   border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 10px;
+  padding: 6px 12px;
+  font-size: 11px;
   font-weight: 600;
   color: #fff;
   background: color-mix(in srgb, var(--nexus-accent) 88%, #000 12%);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.26);
+  cursor: pointer;
 }
 
 .nexus-jump-latest:hover {
@@ -1627,7 +1691,7 @@ html, body, #root {
   transition: none;
 }
 
-.chat-input .chat-input-inner .prompt-input-container:focus-within {
+.chat-input .chat-input-area .prompt-input-container:focus-within {
   box-shadow: none;
 }
 
@@ -1641,11 +1705,11 @@ html, body, #root {
   overflow: hidden;
 }
 
-/* Grows upward; max height leaves room for images row in .chat-input-area */
+/* Grows upward with text; higher max so multiline expands properly */
 .prompt-input {
   flex: 1;
   min-height: 44px;
-  max-height: 220px;
+  max-height: 280px;
   padding: 6px 0;
   font-family: var(--vscode-font-family);
   font-size: 13px;

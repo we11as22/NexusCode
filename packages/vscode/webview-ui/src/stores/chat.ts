@@ -189,6 +189,9 @@ interface ChatState {
   /** True while older messages are being fetched. */
   loadingOlderMessages: boolean
 
+  /** Session unaccepted edits for "N Files" panel (Undo All / Keep All / Review). */
+  sessionUnacceptedEdits: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
+
   /** Models catalog from models.dev (for Select model in Settings). Same shape as core ModelsCatalog. */
   modelsCatalog: ModelsCatalogFromCore | null
   modelsCatalogLoading: boolean
@@ -235,6 +238,11 @@ interface ChatState {
   saveConfig: (patch: Record<string, unknown>) => void
   restoreCheckpoint: (hash: string, restoreType: "task" | "workspace" | "taskAndWorkspace") => void
   showCheckpointDiff: (fromHash: string, toHash?: string) => void
+  openSessionEditDiff: (path: string) => void
+  undoSessionEdits: () => void
+  keepAllSessionEdits: () => void
+  revertSessionEditFile: (path: string) => void
+  acceptSessionEditFile: (path: string) => void
   handleStateUpdate: (state: Partial<ChatState>) => void
   handleConfigLoaded: (config: NexusConfigState) => void
   handleAgentEvent: (event: AgentEvent) => void
@@ -306,6 +314,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   planFollowupText: null,
   hasOlderMessages: false,
   loadingOlderMessages: false,
+  sessionUnacceptedEdits: [],
   requestModelsCatalog: () => {
     set({ modelsCatalogLoading: true })
     postMessage({ type: "getModelsCatalog" })
@@ -483,6 +492,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   showCheckpointDiff: (fromHash, toHash) => {
     postMessage({ type: "showCheckpointDiff", fromHash, toHash })
+  },
+
+  openSessionEditDiff: (path) => {
+    postMessage({ type: "openSessionEditDiff", path })
+  },
+  undoSessionEdits: () => {
+    postMessage({ type: "undoSessionEdits" })
+  },
+  keepAllSessionEdits: () => {
+    postMessage({ type: "keepAllSessionEdits" })
+  },
+  revertSessionEditFile: (path) => {
+    postMessage({ type: "revertSessionEditFile", path })
+  },
+  acceptSessionEditFile: (path) => {
+    postMessage({ type: "acceptSessionEditFile", path })
   },
 
   handleStateUpdate: (state) => {

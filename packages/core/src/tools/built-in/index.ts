@@ -5,7 +5,7 @@ import { editTool } from "./replace-in-file.js"
 import { bashTool } from "./execute-command.js"
 import { bashOutputTool } from "./bash-output.js"
 import { killBashTool } from "./kill-bash.js"
-import { grepTool, listDirTool } from "./search-files.js"
+import { grepTool, listTool } from "./search-files.js"
 import { listDefinitionsTool } from "./list-definitions.js"
 import { readLintsTool } from "./read-lints.js"
 import { codebaseSearchTool } from "./codebase-search.js"
@@ -25,7 +25,7 @@ export function getAllBuiltinTools(): ToolDef[] {
     todoWriteTool,
     parallelTool,
     readFileTool,
-    listDirTool,
+    listTool,
     listDefinitionsTool,
     readLintsTool,
     writeFileTool,
@@ -55,7 +55,7 @@ export {
   bashOutputTool,
   killBashTool,
   grepTool,
-  listDirTool,
+  listTool,
   listDefinitionsTool,
   readLintsTool,
   codebaseSearchTool,

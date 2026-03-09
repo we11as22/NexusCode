@@ -43,12 +43,12 @@ export async function applySecretsToConfig(
   if (!config.model || typeof config.model !== "object") config.model = {}
   const model = config.model as Record<string, unknown>
   if (payload.model && !isNonEmptyString(model["apiKey"])) {
-    model["apiKey"] = payload.model
+    model["apiKey"] = payload.model.trim()
   }
   if (config.embeddings && typeof config.embeddings === "object") {
     const emb = config.embeddings as Record<string, unknown>
     if (payload.embeddings && !isNonEmptyString(emb["apiKey"])) {
-      emb["apiKey"] = payload.embeddings
+      emb["apiKey"] = payload.embeddings.trim()
     }
   }
   if (payload.profiles && config.profiles && typeof config.profiles === "object") {
@@ -57,7 +57,7 @@ export async function applySecretsToConfig(
       if (!key || !profiles[name]) continue
       const p = profiles[name]
       if (p && typeof p === "object" && !isNonEmptyString(p["apiKey"])) {
-        p["apiKey"] = key
+        p["apiKey"] = key.trim()
       }
     }
   }

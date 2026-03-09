@@ -2,8 +2,7 @@ import { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { Message } from '../../../query.js'
 import { useMemo } from 'react'
 import { Tool } from '../../../Tool.js'
-import { GlobTool } from '../../../tools/GlobTool/GlobTool.js'
-import { GrepTool } from '../../../tools/GrepTool/GrepTool.js'
+import { getGenericToolForCoreName } from '../../../tools/GenericCoreTool.js'
 import { logEvent } from '../../../services/statsig.js'
 
 function getToolUseFromMessages(
@@ -44,17 +43,11 @@ export function useGetToolFromMessages(
         `Tool use not found for tool_use_id ${toolUseID}`,
       )
     }
-    // Hack: we don't expose GlobTool and GrepTool in getTools anymore,
-    // but we still want to be able to load old transcripts.
-    // TODO: Remove this when logging hits zero
-    const tool = [...tools, GlobTool, GrepTool].find(
-      _ => _.name === toolUse.name,
-    )
-    if (tool === GlobTool || tool === GrepTool) {
-      logEvent('tengu_legacy_tool_lookup', {})
-    }
-    if (!tool) {
-      throw new ReferenceError(`Tool not found for ${toolUse.name}`)
+    // Single naming as in core: CLI tools use same names (Grep, Glob); rest use generic display.
+    const found = tools.find(_ => _.name === toolUse.name)
+    const tool = found ?? getGenericToolForCoreName(toolUse.name)
+    if (!found) {
+      logEvent('tengu_nexus_generic_tool_display', { name: toolUse.name })
     }
     return { tool, toolUse }
   }, [toolUseID, messages, tools])

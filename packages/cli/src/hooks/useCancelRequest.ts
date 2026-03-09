@@ -12,9 +12,13 @@ export function useCancelRequest(
   isLoading: boolean,
   isMessageSelectorVisible: boolean,
   abortSignal?: AbortSignal,
+  isPanelOrOverlayOpen?: boolean,
 ) {
   useInput((_, key) => {
     if (!key.escape) {
+      return
+    }
+    if (isPanelOrOverlayOpen) {
       return
     }
     if (abortSignal?.aborted) {

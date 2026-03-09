@@ -122,32 +122,36 @@ export class BaseLLMClient implements LLMClient {
 
         case "tool-call": {
           let name = part.toolName
-          let args = part.args as Record<string, unknown>
-          // CLI/gateway often sends list_dir with paths[]; we only accept ListDir with path. Normalize here so loop never sees paths.
-          if (name === "ListDir" || name === "list_dir") {
-            name = "ListDir"
-            if (args && typeof args === "object") {
-              const pathVal =
-                typeof args.path === "string" && args.path.length > 0
-                  ? args.path
-                  : Array.isArray(args.paths) && typeof args.paths[0] === "string"
-                    ? args.paths[0]
-                    : "."
-              args = {
-                path: pathVal,
-                ignore: args.ignore,
-                recursive: args.recursive,
-                include: args.include,
-                max_entries: args.max_entries,
-                task_progress: args.task_progress,
-              }
+          let args = part.args as Record<string, unknown> | undefined
+          // Kilo may return "ListDirectory"; gateway/CLI often send list_dir with paths[] or paths[0] undefined. Normalize to List with path only.
+          if (
+            name === "List" ||
+            name === "list_dir" ||
+            name === "ListDirectory" ||
+            name === "list_directory"
+          ) {
+            name = "List"
+            const raw = args && typeof args === "object" ? args : {}
+            const pathVal =
+              typeof raw.path === "string" && raw.path.length > 0
+                ? raw.path
+                : Array.isArray(raw.paths) && raw.paths.length > 0 && typeof raw.paths[0] === "string"
+                  ? raw.paths[0]
+                  : "."
+            args = {
+              path: pathVal,
+              ignore: raw.ignore,
+              recursive: raw.recursive,
+              include: raw.include,
+              max_entries: raw.max_entries,
+              task_progress: raw.task_progress,
             }
           }
           yield {
             type: "tool_call",
             toolCallId: part.toolCallId,
             toolName: name,
-            toolInput: args,
+            toolInput: args ?? {},
           }
           break
         }

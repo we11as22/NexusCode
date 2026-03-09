@@ -65,6 +65,8 @@ export function useTextInput({
   multiline = false,
   cursorChar,
   invert,
+  themeText: _themeText,
+  highlightPastedText: _highlightPastedText,
   columns,
   onImagePaste,
   disableCursorMovementForUpDownKeys = false,

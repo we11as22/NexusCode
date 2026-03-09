@@ -1194,6 +1194,12 @@ interface ToolPart {
     timeEnd?: number;
     /** If true, output has been pruned for compaction */
     compacted?: boolean;
+    /** Set when tool is Write/Edit and completed; used for session diff (e.g. CLI "N files" block). */
+    path?: string;
+    diffStats?: {
+        added: number;
+        removed: number;
+    };
 }
 type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart;
 interface IIndexer {

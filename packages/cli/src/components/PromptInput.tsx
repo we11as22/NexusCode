@@ -57,8 +57,13 @@ type Props = {
   /** When set (Nexus), show current mode below input; cycle mode with Shift+Tab. */
   nexusMode?: string
   onCycleNexusMode?: () => void
+  /** When set (Nexus), show "Accept edits: on|off" and allow Ctrl+Y to toggle. */
+  nexusAcceptEditsEnabled?: boolean
+  onNexusToggleAcceptEdits?: () => void
   /** Called when a Nexus panel (e.g. /model) saves config so the header can refresh */
   onNexusConfigSaved?: () => void | Promise<void>
+  /** When set (Nexus), /undo reverts the last message and file changes. */
+  onNexusUndo?: () => Promise<void>
 }
 
 function getPastedTextPrompt(text: string): string {
@@ -92,7 +97,10 @@ function PromptInput({
   readFileTimestamps,
   nexusMode,
   onCycleNexusMode,
+  nexusAcceptEditsEnabled = true,
+  onNexusToggleAcceptEdits,
   onNexusConfigSaved,
+  onNexusUndo,
 }: Props): React.ReactNode {
   const [isAutoUpdating, setIsAutoUpdating] = useState(false)
   const [exitMessage, setExitMessage] = useState<{
@@ -206,6 +214,15 @@ function PromptInput({
     onSubmitCountChange(_ => _ + 1)
     setIsLoading(true)
 
+    const trimmed = finalInput.trim()
+    if (trimmed === '/undo' && onNexusUndo) {
+      await onNexusUndo()
+      onInputChange('')
+      setIsLoading(false)
+      addToHistory(trimmed)
+      return
+    }
+
     const abortController = new AbortController()
     setAbortController(abortController)
     const model = await getSlowAndCapableModel()
@@ -279,9 +296,13 @@ function PromptInput({
     setPastedText(text)
   }
 
-  useInput((_, key) => {
+  useInput((inputChar, key) => {
     if (input === '' && (key.escape || key.backspace || key.delete)) {
       onModeChange('prompt')
+    }
+    if (key.ctrl && (inputChar === 'y' || inputChar === 'Y' || inputChar === '\x19') && onNexusToggleAcceptEdits) {
+      onNexusToggleAcceptEdits()
+      return
     }
     // esc is a little overloaded:
     // - when we're loading a response, it's used to cancel the request
@@ -351,6 +372,15 @@ function PromptInput({
           <Text dimColor>Mode: </Text>
           <Text bold color={getTheme().primary}>{nexusMode}</Text>
           <Text dimColor> · Shift+Tab to change mode</Text>
+          {onNexusToggleAcceptEdits != null && (
+            <>
+              <Text dimColor> · Accept edits: </Text>
+              <Text bold color={nexusAcceptEditsEnabled ? getTheme().primary : undefined} dimColor={!nexusAcceptEditsEnabled}>
+                {nexusAcceptEditsEnabled ? 'on' : 'off'}
+              </Text>
+              <Text dimColor> · Ctrl+Y to toggle</Text>
+            </>
+          )}
         </Box>
       )}
       {suggestions.length === 0 && (

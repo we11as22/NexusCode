@@ -246,10 +246,10 @@ function ChatBottomBar() {
 
   return (
     <div className="chat-input-inner">
-      <div className="chat-input-area">
-        <InputBar registerImagePickerTrigger={setImagePickerTrigger} />
-      </div>
-      <div className="chat-control-row">
+        <div className="chat-input-area">
+          <InputBar registerImagePickerTrigger={setImagePickerTrigger} />
+        </div>
+        <div className="chat-control-row">
           <div className="chat-bottom-bar-left">
             <ModeDropdown />
             <AgentPresetDropdown />
@@ -541,7 +541,7 @@ function PlanActionsBar({
   )
 }
 
-/** Modal for selecting model. Uses same catalog as CLI: core getModelsCatalog() (models.dev + Nexus Gateway); free models first. */
+/** Modal for selecting model. Same as Kilo: one list grouped by provider, Recommended first, Free tag, search. */
 function ModelPickerModal({
   catalog,
   loading,
@@ -560,12 +560,18 @@ function ModelPickerModal({
   const options = useMemo(() => {
     if (!catalog) return []
     const q = query.trim().toLowerCase()
-    const rec = catalog.recommended.map((r) => ({ ...r, category: r.free ? "Free (Recommended)" as const : "Recommended" as const }))
-    const rest: Array<{ providerId: string; modelId: string; name: string; free: boolean; category: string }> = []
+    const recommendedKeys = new Set(catalog.recommended.map((r) => `${r.providerId}:${r.modelId}`))
+    const list: Array<{ providerId: string; modelId: string; name: string; free: boolean; category: string }> = []
+    for (const r of catalog.recommended) {
+      list.push({
+        ...r,
+        category: r.providerId === "nexus" ? "Recommended" : catalog.providers.find((p) => p.id === r.providerId)?.name ?? r.providerId,
+      })
+    }
     for (const prov of catalog.providers) {
       for (const m of prov.models) {
-        if (rec.some((r) => r.providerId === prov.id && r.modelId === m.id)) continue
-        rest.push({
+        if (recommendedKeys.has(`${prov.id}:${m.id}`)) continue
+        list.push({
           providerId: prov.id,
           modelId: m.id,
           name: m.name,
@@ -574,14 +580,18 @@ function ModelPickerModal({
         })
       }
     }
-    const all = [...rec, ...rest]
-    if (!q) return all
-    return all.filter((o) => o.name.toLowerCase().includes(q) || o.modelId.toLowerCase().includes(q))
+    list.sort((a, b) => {
+      if (a.category === "Recommended" && b.category !== "Recommended") return -1
+      if (a.category !== "Recommended" && b.category === "Recommended") return 1
+      if (a.free !== b.free) return a.free ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
+    if (!q) return list
+    return list.filter((o) => o.name.toLowerCase().includes(q) || o.modelId.toLowerCase().includes(q) || o.category.toLowerCase().includes(q))
   }, [catalog, query])
 
-  const displayName = (name: string, free: boolean) => {
-    const normalized = name.replace(/\s*\(\s*free\s*\)\s*/gi, "").trim()
-    return free ? `${normalized} (free)` : normalized
+  const displayName = (name: string) => {
+    return name.replace(/\s*\(\s*free\s*\)\s*/gi, "").trim()
   }
 
   const provById = useMemo(() => {
@@ -608,7 +618,7 @@ function ModelPickerModal({
           </button>
         </div>
         <p className="px-3 py-1.5 text-[10px] text-[var(--vscode-descriptionForeground)] border-b border-[var(--vscode-panel-border)]">
-          Same as CLI: models.dev + Nexus Gateway. Free models first — no API key for free tier.
+          Same as CLI: models.dev + Nexus Gateway. Recommended first, then free. Search by name or provider.
         </p>
         <div className="p-2 border-b border-[var(--vscode-panel-border)]">
           <input
@@ -625,23 +635,28 @@ function ModelPickerModal({
           {!loading && catalog && (
             <>
               {options.length === 0 && <div className="nexus-muted text-xs py-2">No models match.</div>}
-              {options.slice(0, 50).map((opt) => {
+              {options.slice(0, 80).map((opt) => {
                 const baseUrl = provById.get(opt.providerId)?.baseUrl ?? "https://openrouter.ai/api/v1"
                 return (
                   <button
                     key={`${opt.providerId}/${opt.modelId}`}
                     type="button"
-                    className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-[var(--vscode-list-hoverBackground)] flex items-center justify-between gap-2"
+                    className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-[var(--vscode-list-hoverBackground)] flex items-center justify-between gap-2 flex-wrap"
                     onClick={() => onSelect(opt.providerId, opt.modelId, baseUrl)}
                   >
-                    <span className="truncate text-[var(--vscode-foreground)]">
-                      {displayName(opt.name, opt.free)}
+                    <span className="truncate text-[var(--vscode-foreground)] flex items-center gap-1.5">
+                      {displayName(opt.name)}
+                      {opt.free && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--vscode-badge-background)] text-[var(--vscode-badge-foreground)]">
+                          Free
+                        </span>
+                      )}
                     </span>
                     <span className="text-[10px] text-[var(--vscode-descriptionForeground)] flex-shrink-0">{opt.category}</span>
                   </button>
                 )
               })}
-              {options.length > 50 && <div className="nexus-muted text-[10px] py-1">… and {options.length - 50} more. Narrow search.</div>}
+              {options.length > 80 && <div className="nexus-muted text-[10px] py-1">… and {options.length - 80} more. Narrow search.</div>}
             </>
           )}
         </div>
@@ -800,10 +815,10 @@ function SettingsView() {
                   if (!modelsCatalog) requestModelsCatalog()
                 }}
               >
-                Select model (same free list as CLI — models.dev + gateway)
+                Select model (same as CLI — models.dev + Nexus Gateway)
               </button>
               <span className="text-[10px] text-[var(--vscode-descriptionForeground)]">
-                Same catalog as CLI: models.dev + Nexus Gateway; free models first.
+                Same catalog as CLI: Recommended first, Free tag. Search by name or provider.
               </span>
             </div>
             {modelPickerOpen && (

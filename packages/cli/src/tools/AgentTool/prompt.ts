@@ -20,9 +20,9 @@ export async function getPrompt(
 ): Promise<string> {
   const tools = await getAgentTools(dangerouslySkipPermissions)
   const toolNames = tools.map(_ => _.name).join(', ')
-  // Use literal names to avoid bundler/circular-dependency issues (GlobTool/FileReadTool may be undefined at eval time)
+  // Use literal names to avoid bundler/circular-dependency issues (Glob/FileReadTool may be undefined at eval time)
   const fileReadName = 'View'
-  const globName = 'GlobTool'
+  const globName = 'Glob'
   return `Launch a new agent that has access to the following tools: ${toolNames}. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you. For example:
 
 - If you are searching for a keyword like "config" or "logger", the Agent tool is appropriate

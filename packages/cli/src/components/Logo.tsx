@@ -60,6 +60,7 @@ export function Logo({
           <Box paddingLeft={2} flexDirection="column" gap={1}>
             <Text color={theme.secondaryText} italic>
               /help for help
+              {nexusMode != null && <> · Use /undo to revert the last message and file changes</>}
               {process.env.USER_TYPE === 'ant' && <> · NexusCode</>}
             </Text>
             <Text color={theme.secondaryText}>cwd: {getCwd()}</Text>

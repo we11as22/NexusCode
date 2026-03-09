@@ -56,8 +56,10 @@ export function AttachedImagesStripWithPicker({ registerImagePickerTrigger }: { 
         type="file"
         accept="image/*"
         multiple
+        tabIndex={-1}
         className="nexus-attached-images-input-hidden"
         onChange={handleFileSelect}
+        aria-hidden="true"
         aria-label="Attach image"
       />
       {attachedImages.length > 0 && (

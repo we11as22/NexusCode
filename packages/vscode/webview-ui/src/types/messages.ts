@@ -42,6 +42,8 @@ export interface WebviewState {
   hasOlderMessages?: boolean
   /** True while older messages are being fetched. */
   loadingOlderMessages?: boolean
+  /** Session unaccepted edits: path + diffStats for "N Files" panel. */
+  sessionUnacceptedEdits?: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
 }
 
 export type ExtensionMessage =

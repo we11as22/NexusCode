@@ -1,6 +1,5 @@
 import { Box, Text } from 'ink'
 import React from 'react'
-import { logError } from '../../utils/log.js'
 import { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { Tool } from '../../Tool.js'
 import { Cost } from '../Cost.js'
@@ -8,6 +7,7 @@ import { ToolUseLoader } from '../ToolUseLoader.js'
 import { getTheme } from '../../utils/theme.js'
 import { BLACK_CIRCLE } from '../../constants/figures.js'
 import { ThinkTool } from '../../tools/ThinkTool/ThinkTool.js'
+import { getGenericToolForCoreName } from '../../tools/GenericCoreTool.js'
 import type { SubAgentState } from '../../nexus-subagents.js'
 import { subagentStatusLine, truncateTask } from '../../nexus-subagents.js'
 import { AssistantThinkingMessage } from './AssistantThinkingMessage.js'
@@ -44,11 +44,8 @@ export function AssistantToolUseMessage({
   shouldShowDot,
   subagents = [],
 }: Props): React.ReactNode {
-  const tool = tools.find(_ => _.name === param.name)
-  if (!tool) {
-    logError(`Tool ${param.name} not found`)
-    return null
-  }
+  const tool =
+    tools.find(_ => _.name === param.name) ?? getGenericToolForCoreName(param.name)
   const isQueued =
     !inProgressToolUseIDs.has(param.id) && unresolvedToolUseIDs.has(param.id)
   // Keeping color undefined makes the OS use the default color regardless of appearance

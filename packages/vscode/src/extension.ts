@@ -32,15 +32,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand("nexuscode.chatClicked", () => {
       provider?.switchView("chat")
-      vscode.commands.executeCommand("nexuscode.sidebar.focus").catch(() => {})
+      /* Do not run sidebar.focus here — it can open the Explorer on some setups. */
     }),
     vscode.commands.registerCommand("nexuscode.sessionsClicked", () => {
       provider?.switchView("sessions")
-      vscode.commands.executeCommand("nexuscode.sidebar.focus").catch(() => {})
+      /* Do not run sidebar.focus here — it can open the Explorer on some setups. */
     }),
     vscode.commands.registerCommand("nexuscode.settingsClicked", () => {
       provider?.switchView("settings")
-      vscode.commands.executeCommand("nexuscode.sidebar.focus").catch(() => {})
+      /* Do not run sidebar.focus here — it can open the Explorer on some setups. */
     }),
 
     vscode.commands.registerCommand("nexuscode.newTask", () => {

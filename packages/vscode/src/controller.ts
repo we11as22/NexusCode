@@ -40,7 +40,7 @@ import {
   hadPlanExit,
   getPlanContentForFollowup,
 } from "@nexuscode/core"
-import { VsCodeHost, showDiffForPath } from "./host.js"
+import { VsCodeHost, showDiffForPath, showSessionEditDiff } from "./host.js"
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 
@@ -99,6 +99,11 @@ export type WebviewMessage =
   | { type: "loadOlderMessages" }
   | { type: "rollbackToBeforeMessage"; messageId: string }
   | { type: "startOrConnectVectorDb"; url: string; autoStart?: boolean }
+  | { type: "openSessionEditDiff"; path: string }
+  | { type: "undoSessionEdits" }
+  | { type: "keepAllSessionEdits" }
+  | { type: "revertSessionEditFile"; path: string }
+  | { type: "acceptSessionEditFile"; path: string }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
@@ -143,6 +148,8 @@ export interface WebviewState {
   hasOlderMessages?: boolean
   /** True while older messages are being fetched. */
   loadingOlderMessages?: boolean
+  /** Session unaccepted edits: files changed this session not yet accepted (Undo All / Keep All). */
+  sessionUnacceptedEdits?: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
 }
 
 function getContextLimit(modelId: string): number {
@@ -154,6 +161,18 @@ function getContextLimit(modelId: string): number {
   if (lower.includes("gemini-2")) return 1000000
   if (lower.includes("gemini")) return 200000
   return 128000
+}
+
+function simpleDiffStats(originalContent: string, newContent: string): { added: number; removed: number } {
+  const a = originalContent.split(/\r?\n/)
+  const b = newContent.split(/\r?\n/)
+  const setA = new Set(a)
+  const setB = new Set(b)
+  let removed = 0
+  let added = 0
+  for (const line of a) if (!setB.has(line)) removed++
+  for (const line of b) if (!setA.has(line)) added++
+  return { added, removed }
 }
 
 export class Controller {
@@ -193,6 +212,8 @@ export class Controller {
     getSecret: (key: string) => this.context.secrets.get(key),
     setSecret: (key: string, value: string) => this.context.secrets.store(key, value),
   }
+  /** Session unaccepted edits: full content for revert/diff; cleared on session change. */
+  private sessionUnacceptedEdits: Array<{ path: string; originalContent: string; newContent: string; isNewFile: boolean }> = []
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -253,6 +274,7 @@ export class Controller {
         contextPercent: 0,
         serverUrl: this.getServerUrl(),
         modelsCatalog: this.modelsCatalogCache ?? null,
+        sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
       }
     }
     const contextUsedTokens = this.session.getTokenEstimate()
@@ -285,7 +307,25 @@ export class Controller {
       planFollowupText: null,
       hasOlderMessages: this.serverSessionOldestLoadedOffset != null && this.serverSessionOldestLoadedOffset > 0,
       loadingOlderMessages: this.loadingOlderMessages,
+      sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
     }
+  }
+
+  /** Session unaccepted edits for webview: path + diffStats only. */
+  private getSessionUnacceptedEditsForState(): Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }> {
+    return this.sessionUnacceptedEdits.map((e) => ({
+      path: e.path,
+      diffStats: simpleDiffStats(e.originalContent, e.newContent),
+      isNewFile: e.isNewFile,
+    }))
+  }
+
+  /** Add an edit to session unaccepted after saveFileEdit (called from host callback). */
+  addSessionUnacceptedEdit(path: string, originalContent: string, newContent: string, isNewFile: boolean): void {
+    const key = path.replace(/\\/g, "/")
+    const existing = this.sessionUnacceptedEdits.findIndex((e) => e.path.replace(/\\/g, "/") === key)
+    if (existing >= 0) this.sessionUnacceptedEdits.splice(existing, 1)
+    this.sessionUnacceptedEdits.push({ path: key, originalContent, newContent, isNewFile })
   }
 
   /** Push current state to webview (Cline-style postStateToWebview). */
@@ -322,6 +362,7 @@ export class Controller {
   async clearTask(): Promise<void> {
     this.abortController?.abort()
     this.session = undefined
+    this.sessionUnacceptedEdits = []
     this.serverSessionOldestLoadedOffset = undefined
     this.checkpoint = undefined
     this.serverSessionId = undefined
@@ -440,6 +481,7 @@ export class Controller {
       case "clearChat":
         this.session = Session.create(this.getCwd())
         this.lastRunMode = null
+        this.sessionUnacceptedEdits = []
         this.checkpoint = undefined
         this.serverSessionId = undefined
         this.postStateToWebview()
@@ -633,6 +675,70 @@ export class Controller {
         }
         break
       }
+      case "openSessionEditDiff": {
+        const raw = (msg as { path: string }).path?.trim() ?? ""
+        if (raw.length === 0 || raw.length >= 2048 || raw.includes("\n")) break
+        const key = raw.replace(/\\/g, "/")
+        const entry = this.sessionUnacceptedEdits.find((e) => e.path.replace(/\\/g, "/") === key)
+        if (entry) {
+          await showSessionEditDiff(this.getCwd(), raw, entry.originalContent, entry.newContent)
+        }
+        break
+      }
+      case "undoSessionEdits": {
+        const cwd = this.getCwd()
+        for (const e of [...this.sessionUnacceptedEdits]) {
+          const absPath = path.isAbsolute(e.path) ? e.path : path.join(cwd, e.path)
+          const uri = vscode.Uri.file(absPath)
+          try {
+            if (e.isNewFile) {
+              await vscode.workspace.fs.delete(uri, { useTrash: true })
+            } else {
+              await vscode.workspace.fs.writeFile(uri, Buffer.from(e.originalContent, "utf8"))
+            }
+          } catch {
+            // Ignore per-file errors
+          }
+        }
+        this.sessionUnacceptedEdits = []
+        this.postStateToWebview()
+        break
+      }
+      case "keepAllSessionEdits":
+        this.sessionUnacceptedEdits = []
+        this.postStateToWebview()
+        break
+      case "revertSessionEditFile": {
+        const pathMsg = (msg as { path: string }).path?.trim() ?? ""
+        if (pathMsg.length === 0 || pathMsg.length >= 2048 || pathMsg.includes("\n")) break
+        const key = pathMsg.replace(/\\/g, "/")
+        const entry = this.sessionUnacceptedEdits.find((e) => e.path.replace(/\\/g, "/") === key)
+        if (entry) {
+          const cwd = this.getCwd()
+          const absPath = path.isAbsolute(entry.path) ? entry.path : path.join(cwd, entry.path)
+          const uri = vscode.Uri.file(absPath)
+          try {
+            if (entry.isNewFile) {
+              await vscode.workspace.fs.delete(uri, { useTrash: true })
+            } else {
+              await vscode.workspace.fs.writeFile(uri, Buffer.from(entry.originalContent, "utf8"))
+            }
+          } catch {
+            vscode.window.showErrorMessage(`NexusCode: Failed to revert ${entry.path}`)
+          }
+          this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter((e) => e.path.replace(/\\/g, "/") !== key)
+          this.postStateToWebview()
+        }
+        break
+      }
+      case "acceptSessionEditFile": {
+        const pathMsg = (msg as { path: string }).path?.trim() ?? ""
+        if (pathMsg.length === 0 || pathMsg.length >= 2048 || pathMsg.includes("\n")) break
+        const key = pathMsg.replace(/\\/g, "/")
+        this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter((e) => e.path.replace(/\\/g, "/") !== key)
+        this.postStateToWebview()
+        break
+      }
       case "setServerUrl": {
         const url = typeof msg.url === "string" ? msg.url.trim() : ""
         await vscode.workspace.getConfiguration("nexuscode").update("serverUrl", url || undefined, vscode.ConfigurationTarget.Global)
@@ -646,7 +752,13 @@ export class Controller {
           const dir = path.join(os.homedir(), ".nexus")
           const uri = vscode.Uri.file(dir)
           try { await vscode.workspace.fs.createDirectory(uri).catch(() => {}) } catch { /* noop */ }
-          await vscode.commands.executeCommand("revealInExplorer", uri)
+          const configPath = path.join(dir, "nexus.yaml")
+          const configUri = vscode.Uri.file(configPath)
+          const doc = await vscode.workspace.openTextDocument(configUri).catch(() => null)
+          if (doc) {
+            await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
+          }
+          /* Do not use revealInExplorer — on macOS it opens Finder. */
         } else {
           const cwd = this.getCwd()
           const dir = path.join(cwd, ".nexus")
@@ -658,8 +770,13 @@ export class Controller {
           if (doc) {
             await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
           } else {
-            await vscode.commands.executeCommand("revealInExplorer", dirUri)
+            const wsEdit = new vscode.WorkspaceEdit()
+            wsEdit.createFile(uri, { ignoreIfExists: true })
+            await vscode.workspace.applyEdit(wsEdit)
+            const newDoc = await vscode.workspace.openTextDocument(uri)
+            await vscode.window.showTextDocument(newDoc, { viewColumn: vscode.ViewColumn.Active, preview: false })
           }
+          /* Do not use revealInExplorer — on macOS it opens Finder. */
         }
         break
       }
@@ -722,11 +839,19 @@ export class Controller {
         const uri = vscode.Uri.file(absPath)
         const stat = await vscode.workspace.fs.stat(uri).catch(() => null)
         if (stat?.type === vscode.FileType.File) {
-          const dirUri = vscode.Uri.file(path.dirname(absPath))
-          await vscode.commands.executeCommand("revealInExplorer", dirUri)
+          const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
+          if (doc) {
+            await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
+          }
         } else {
-          await vscode.commands.executeCommand("revealInExplorer", uri)
+          const skillMd = path.join(absPath, "SKILL.md")
+          const skillUri = vscode.Uri.file(skillMd)
+          const doc = await vscode.workspace.openTextDocument(skillUri).catch(() => null)
+          if (doc) {
+            await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
+          }
         }
+        /* Do not use revealInExplorer — on macOS it opens Finder. */
         break
       }
       case "approvalResponse": {
@@ -1371,7 +1496,10 @@ export class Controller {
           }
         }
       }
-    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, onCheckpointEntriesUpdated: () => this.postStateToWebview() })
+    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onSessionEditSaved: (filePath, originalContent, newContent, isNewFile) => {
+      this.addSessionUnacceptedEdit(filePath, originalContent, newContent, isNewFile)
+      this.postStateToWebview()
+    } })
 
     const timeoutMs = 10 * 60_000
     const timeout = setTimeout(() => {
@@ -1665,6 +1793,7 @@ export class Controller {
     const loaded = await Session.resume(sessionId, cwd)
     if (loaded) {
       this.session = loaded
+      this.sessionUnacceptedEdits = []
       this.serverSessionId = undefined
       this.serverSessionOldestLoadedOffset = undefined
       this.checkpoint = undefined
@@ -1698,6 +1827,7 @@ export class Controller {
       this.session = Session.create(cwd)
       this.serverSessionId = undefined
     }
+    this.sessionUnacceptedEdits = []
     this.serverSessionOldestLoadedOffset = undefined
     this.checkpoint = undefined
     this.postStateToWebview()

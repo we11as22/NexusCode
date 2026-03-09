@@ -285,7 +285,7 @@ model:
 | **replace_in_file** | Несколько search/replace блоков в одном вызове | agent, debug |
 | **execute_command** | Выполнение shell-команды (таймаут, обрезка вывода) | agent, debug |
 | **grep** | Поиск по содержимому (ripgrep), regex | agent, plan, debug, ask |
-| **list_dir** | Список файлов/папок с опциональным glob include | все |
+| **list** | Список файлов/папок с опциональным glob include | все |
 | **list_code_definitions** | Список определений кода в файле/папке | все |
 | **read_lints** | Чтение диагностик (ошибки/предупреждения) по путям | все |
 | **codebase_search** | Семантический/ключевой поиск по индексу (FTS + опционально вектор) | все при включённом индексе |

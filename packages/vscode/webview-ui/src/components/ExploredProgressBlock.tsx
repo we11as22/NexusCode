@@ -14,13 +14,13 @@ export interface ExploredEntry {
 
 const FILE_TOOLS = new Set([
   "read_file", "list_dir",
-  "Read", "ListDir", // core built-in names
+  "Read", "List", // core built-in names
 ])
 const SEARCH_TOOLS = new Set([
   "grep", "codebase_search", "search_files", "list_code_definitions",
   "Grep", "CodebaseSearch", "Glob", "ListCodeDefinitions", // core built-in names
 ])
-/** Only these increase "N files" in Explored label. list_dir/ListDir is in Explored but not counted. */
+/** Only these increase "N files" in Explored label. list_dir/List is in Explored but not counted. */
 const FILE_COUNT_TOOLS = new Set(["read_file", "Read"])
 
 /** Whether this tool counts as exploration (file read/list or search) for the collapsed "Explored" block. */
@@ -101,7 +101,7 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
       }
     }
     case "list_dir":
-    case "ListDir": {
+    case "List": {
       const path = (part.input?.path ?? part.input?.directory) as string | undefined ?? "."
       return {
         id,
@@ -162,7 +162,7 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
 function formatToolName(tool: string): string {
   if (tool === "execute_command" || tool === "Bash") return "Bash"
   const core: Record<string, string> = {
-    read_file: "Read", list_dir: "ListDir",
+    read_file: "Read", list_dir: "List",
     replace_in_file: "Edit", write_to_file: "Write",
     grep: "Grep", search_files: "Grep",
     codebase_search: "CodebaseSearch", list_code_definitions: "ListCodeDefinitions",
@@ -171,7 +171,7 @@ function formatToolName(tool: string): string {
   return core[tool] ?? tool
 }
 
-/** Per-message: compute files/searches count and entries from tool parts only. list_dir is in entries but not counted in files (files = read_file only). */
+/** Per-message: compute files/searches count and entries from tool parts only. list_dir/List is in entries but not counted in files (files = read_file only). */
 export function getExploredFromParts(parts: MessagePart[]): {
   filesCount: number
   searchesCount: number
@@ -192,7 +192,7 @@ export function getExploredFromParts(parts: MessagePart[]): {
   return { filesCount, searchesCount, entries }
 }
 
-/** Inline collapsible "Explored [N files,] [M searches]" — list_dir is in the block but not counted; N = read_file only, M = grep/search. If N or M is 0 that part is omitted. */
+/** Inline collapsible "Explored [N files,] [M searches]" — list_dir/List is in the block but not counted; N = read_file only, M = grep/search. If N or M is 0 that part is omitted. */
 export function ExploredSummaryInline({
   prefixItems,
   defaultCollapsed,
@@ -206,7 +206,7 @@ export function ExploredSummaryInline({
   useEffect(() => {
     if (defaultCollapsed) setOpen(false)
   }, [defaultCollapsed])
-  // list_dir is in Explored but not counted; N files = FILE_COUNT_TOOLS only, M searches = SEARCH_TOOLS
+  // list_dir/List is in Explored but not counted; N files = FILE_COUNT_TOOLS only, M searches = SEARCH_TOOLS
   const filesCount = prefixItems.filter((x) => x.type === "tool" && FILE_COUNT_TOOLS.has(x.part.tool)).length
   const searchesCount = prefixItems.filter((x) => x.type === "tool" && SEARCH_TOOLS.has(x.part.tool)).length
   const labelParts: string[] = []
@@ -381,7 +381,7 @@ export function ExploredProgressBlock({ messages, isRunning, reasoningStartTime 
   )
 
   const total = filesCount + searchesCount
-  // Do not show "Explored" when there are no file reads or searches (list_dir is in entries but not counted)
+  // Do not show "Explored" when there are no file reads or searches (list_dir/List is in entries but not counted)
   if (total === 0 && entries.length === 0) return null
   const labelParts: string[] = []
   if (filesCount > 0) labelParts.push(`${filesCount} file${filesCount === 1 ? "" : "s"}`)

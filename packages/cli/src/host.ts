@@ -19,6 +19,10 @@ export class CliHost implements IHost {
   private tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
   private alwaysApproved = new Set<string>()
   private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
+  /** File edits from the current assistant turn (path → originalContent + isNewFile). Cleared on next assistant_message_started. */
+  private turnFileEdits: Array<{ path: string; originalContent: string; isNewFile: boolean }> = []
+  /** Previous turn's edits; used by revertLastTurn to restore files. */
+  private previousTurnFileEdits: Array<{ path: string; originalContent: string; isNewFile: boolean }> = []
 
   constructor(
     cwd: string,
@@ -285,8 +289,38 @@ export class CliHost implements IHost {
     const key = filePath.replace(/\\/g, "/")
     const pending = this.pendingFileEdits.get(key)
     if (!pending) throw new Error(`No pending file edit for ${filePath}`)
+    this.turnFileEdits.push({ path: filePath, originalContent: pending.originalContent, isNewFile: pending.isNewFile })
     this.pendingFileEdits.delete(key)
     await this.writeFile(filePath, pending.newContent)
+  }
+
+  /** Call when a new assistant turn starts (e.g. on assistant_message_started). Moves current turn edits to previous. */
+  startNewTurn(): void {
+    this.previousTurnFileEdits = [...this.turnFileEdits]
+    this.turnFileEdits = []
+  }
+
+  /** Edits from the last completed assistant turn; used by revertLastTurn to restore files. */
+  getLastTurnFileEdits(): Array<{ path: string; originalContent: string; isNewFile: boolean }> {
+    return [...this.previousTurnFileEdits]
+  }
+
+  /** Revert files from the last turn (write back originalContent, delete if was new file). Call after rewinding session. */
+  async revertLastTurnFiles(): Promise<void> {
+    for (const e of this.previousTurnFileEdits) {
+      const absPath = this.resolve(e.path)
+      try {
+        if (e.isNewFile) {
+          await fs.unlink(absPath)
+        } else {
+          await fs.writeFile(absPath, e.originalContent, "utf8")
+        }
+      } catch {
+        // Ignore per-file errors
+      }
+    }
+    this.previousTurnFileEdits = []
+    this.turnFileEdits = []
   }
 
   async revertFileEdit(filePath: string): Promise<void> {

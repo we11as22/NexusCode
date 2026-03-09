@@ -26,6 +26,7 @@ import { getInitialProjectContext } from "./prompts/initial-context.js"
 import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN, MANDATORY_END_TOOL } from "./modes.js"
 import { classifyMcpServers, classifySkills } from "./classifier.js"
 import { normalizeToolInputForParse } from "./tool-execution.js"
+import { listSchemaForGateway } from "../tools/built-in/search-files.js"
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
@@ -374,11 +375,20 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     emitContextUsage(systemPrompt)
 
     // 4. Build LLM tool definitions
-    const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedTools).map(t => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    }))
+    // Remote gateways (Minimax, OpenRouter, etc.) often replace "List" with list_dir and validate paths[0].
+    // For those we send a schema with "paths" (array) so the model sends paths: ["."]; we normalize paths → path on receive.
+    const useGatewayListSchema =
+      activeClient.providerName !== "ollama" && activeClient.providerName !== "local"
+    const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedTools).map(t => {
+      if (t.name === "List" && useGatewayListSchema) {
+        return {
+          name: t.name,
+          description: `${t.description}\n\n**Call with \`paths\` (array of one path), e.g. paths: [\".\"] or paths: [\"src\"].**`,
+          parameters: listSchemaForGateway,
+        }
+      }
+      return { name: t.name, description: t.description, parameters: t.parameters }
+    })
 
     // 5. Build messages from session
     const messages = buildMessagesFromSession(session)
@@ -406,9 +416,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     let currentText = ""
     let currentReasoning = ""
-    /** Buffer for first line of assistant output; if it parses as JSON with reasoning, we emit it as Thought. */
-    let firstLineBuffer = ""
-    let firstLineConsumed = false
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
     lastToolName = ""
     let sawNativeToolCall = false
@@ -429,30 +436,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       })
     }
 
-    /** When we leave text_delta without having seen a newline, flush buffered first line so no text is lost (e.g. model sends "OK." then tool_call). */
-    const flushFirstLineBuffer = () => {
-      if (firstLineConsumed || firstLineBuffer.length === 0) return
-      firstLineConsumed = true
-      const toEmit = firstLineBuffer
-      firstLineBuffer = ""
-      const line = toEmit.trim()
-      try {
-        const parsed = JSON.parse(line) as { reasoning?: string }
-        if (typeof parsed.reasoning === "string" && parsed.reasoning.length > 0) {
-          currentReasoning += parsed.reasoning
-          host.emit({ type: "reasoning_delta", delta: parsed.reasoning, messageId: newMessageId })
-        } else {
-          currentText += toEmit
-          host.emit({ type: "text_delta", delta: toEmit, messageId: newMessageId })
-        }
-      } catch {
-        currentText += toEmit
-        host.emit({ type: "text_delta", delta: toEmit, messageId: newMessageId })
-      }
-      flushAssistantContent()
-    }
-
-    /** Persist reasoning + text + tool parts to session. Reasoning comes only from reasoning_delta (model's internal reasoning); text_delta is always stored as text. */
+    /** Persist reasoning + text + tool parts to session. Reasoning only from provider reasoning_delta (Thought block); text_delta is plain text. */
     const flushAssistantContent = () => {
       const msg = session.messages.find((m) => m.id === newMessageId)
       const existingParts = msg && Array.isArray(msg.content) ? (msg.content as MessagePart[]) : []
@@ -528,38 +512,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         switch (event.type) {
           case "text_delta":
             if (event.delta) {
-              const d = event.delta
-              if (!firstLineConsumed) {
-                firstLineBuffer += d
-                if (firstLineBuffer.includes("\n")) {
-                  const newlineIdx = firstLineBuffer.indexOf("\n")
-                  const line = firstLineBuffer.slice(0, newlineIdx).trim()
-                  const rest = firstLineBuffer.slice(newlineIdx + 1)
-                  firstLineConsumed = true
-                  try {
-                    const parsed = JSON.parse(line) as { reasoning?: string }
-                    if (typeof parsed.reasoning === "string" && parsed.reasoning.length > 0) {
-                      currentReasoning += parsed.reasoning
-                      host.emit({ type: "reasoning_delta", delta: parsed.reasoning, messageId: newMessageId })
-                      if (rest.length > 0) {
-                        currentText += "\n" + rest
-                        host.emit({ type: "text_delta", delta: "\n" + rest, messageId: newMessageId })
-                      }
-                    } else {
-                      currentText += firstLineBuffer
-                      host.emit({ type: "text_delta", delta: firstLineBuffer, messageId: newMessageId })
-                    }
-                  } catch {
-                    currentText += firstLineBuffer
-                    host.emit({ type: "text_delta", delta: firstLineBuffer, messageId: newMessageId })
-                  }
-                  flushAssistantContent()
-                }
-              } else {
-                currentText += d
-                flushAssistantContent()
-                host.emit({ type: "text_delta", delta: d, messageId: newMessageId })
-              }
+              currentText += event.delta
+              flushAssistantContent()
+              host.emit({ type: "text_delta", delta: event.delta, messageId: newMessageId })
             }
             break
 
@@ -572,28 +527,33 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             break
 
           case "tool_call": {
-            flushFirstLineBuffer()
             let { toolCallId, toolName, toolInput } = event
             if (!toolCallId || !toolName || !toolInput) break
-            // CLI/gateway may send list_dir; resolve to builtin name so we find the tool and normalize args
-            if (toolName === "list_dir") toolName = "ListDir"
-            // Normalize ListDir: some providers send "paths" (array); we only accept "path". Default path to ".".
-            if (toolName === "ListDir" && typeof toolInput === "object") {
-              const pathVal =
-                (toolInput as Record<string, unknown>).path ??
-                (Array.isArray((toolInput as Record<string, unknown>).paths) &&
-                typeof ((toolInput as Record<string, unknown>).paths as unknown[])?.[0] === "string"
-                  ? ((toolInput as Record<string, unknown>).paths as string[])[0]
-                  : undefined)
-              toolInput = {
-                path: pathVal ?? ".",
-                ignore: (toolInput as Record<string, unknown>).ignore,
-                recursive: (toolInput as Record<string, unknown>).recursive,
-                include: (toolInput as Record<string, unknown>).include,
-                max_entries: (toolInput as Record<string, unknown>).max_entries,
-                task_progress: (toolInput as Record<string, unknown>).task_progress,
-              }
-            }
+            // CLI/gateway may send list_dir or ListDirectory (Kilo); resolve to builtin name and normalize args
+            if (
+              toolName === "list_dir" ||
+              toolName === "ListDirectory" ||
+              toolName === "list_directory"
+            )
+              toolName = "List"
+  // Normalize List: some providers send "paths" (array); we only accept "path". Default path to ".".
+  if (toolName === "List" && typeof toolInput === "object") {
+    const raw = toolInput as Record<string, unknown>
+    const pathVal =
+      typeof raw.path === "string" && raw.path.length > 0
+        ? raw.path
+        : Array.isArray(raw.paths) && raw.paths.length > 0 && typeof (raw.paths as unknown[])[0] === "string"
+          ? (raw.paths as string[])[0]
+          : "."
+    toolInput = {
+      path: pathVal,
+      ignore: raw.ignore,
+      recursive: raw.recursive,
+      include: raw.include,
+      max_entries: raw.max_entries,
+      task_progress: raw.task_progress,
+    }
+  }
             sawNativeToolCall = true
 
             // Track invalid tool calls — if model keeps calling non-existent tools, stop it
@@ -700,6 +660,15 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 status: result.success ? "completed" : "error",
                 output: result.output,
                 timeEnd: Date.now(),
+                ...(result.success && (toolName === "Write" || toolName === "Edit")
+                  ? {
+                      path: extractWriteTargetPath(toolName, toolInput),
+                      ...(typeof (result.metadata as { addedLines?: number; removedLines?: number })?.addedLines === "number" &&
+                      typeof (result.metadata as { addedLines?: number; removedLines?: number })?.removedLines === "number"
+                        ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
+                        : {}),
+                    }
+                  : {}),
               })
 
               host.emit({
@@ -743,7 +712,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           }
 
           case "finish":
-            flushFirstLineBuffer()
             await flushPendingReads()
             finishReason = event.finishReason
 
@@ -766,7 +734,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             break
 
           case "error":
-            flushFirstLineBuffer()
             if (event.error) {
               await flushPendingReads()
               const message = event.error.message
@@ -779,7 +746,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             break
         }
         if (budgetExceededThisIteration) {
-          flushFirstLineBuffer()
           await flushPendingReads()
           break streamLoop
         }
@@ -849,6 +815,15 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             status: result.success ? "completed" : "error",
             output: result.output,
             timeEnd: Date.now(),
+            ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
+              ? {
+                  path: extractWriteTargetPath(call.toolName, call.toolInput),
+                  ...(typeof (result.metadata as { addedLines?: number; removedLines?: number })?.addedLines === "number" &&
+                  typeof (result.metadata as { addedLines?: number; removedLines?: number })?.removedLines === "number"
+                    ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
+                    : {}),
+                }
+              : {}),
           })
 
           host.emit({
@@ -1080,8 +1055,11 @@ async function executeToolCall(
   mode: Mode,
   mcpToolNames: Set<string>
 ): Promise<ToolResult> {
-  // Resolve gateway name to builtin name so we always use our ListDir (path-only schema)
-  const resolvedToolName = toolName === "list_dir" ? "ListDir" : toolName
+  // Resolve gateway name to builtin name so we always use our List (path-only schema)
+  const resolvedToolName =
+    toolName === "list_dir" || toolName === "ListDirectory" || toolName === "list_directory"
+      ? "List"
+      : toolName
   const tool = tools.find(t => t.name === resolvedToolName)
   if (!tool) {
     const availableList = tools.map(t => t.name).join(", ")
@@ -1210,10 +1188,10 @@ async function executeToolCall(
 
   // Validate args — normalize all tools so gateway/API quirks (paths vs path, [undefined] in arrays) don't cause parse errors.
   let validatedArgs: unknown
+  let inputToParse: Record<string, unknown> =
+    toolInput && typeof toolInput === "object" ? { ...toolInput } : {}
+  inputToParse = normalizeToolInputForParse(resolvedToolName, inputToParse) as Record<string, unknown>
   try {
-    let inputToParse: Record<string, unknown> =
-      toolInput && typeof toolInput === "object" ? { ...toolInput } : {}
-    inputToParse = normalizeToolInputForParse(resolvedToolName, inputToParse) as Record<string, unknown>
     validatedArgs = tool.parameters.parse(inputToParse)
   } catch (err) {
     return { success: false, output: `Invalid arguments for ${toolName}: ${err}` }

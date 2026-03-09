@@ -94,6 +94,8 @@ export interface QueryNexusOptions {
   modeOverride?: string
   /** When set, called for each subagent_* event; partId is the SpawnAgents tool_use id. */
   onSubagentEvent?: (partId: string, event: SubagentEvent) => void
+  /** When set, called when a run completes with the host (for revert last turn /undo). */
+  onRunComplete?: (host: import('./host.js').CliHost) => void
 }
 
 /**
@@ -102,7 +104,7 @@ export interface QueryNexusOptions {
  * Loads config from disk at start so that model/LLM settings saved in the CLI are applied.
  */
 export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage, void> {
-  const { nexus, userPrompt, repoTools, signal, tuiApprovalRef, autoApprove = false, modeOverride, onSubagentEvent } = opts
+  const { nexus, userPrompt, repoTools, signal, tuiApprovalRef, autoApprove = false, modeOverride, onSubagentEvent, onRunComplete } = opts
   const { session, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer } = nexus
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug'
 
@@ -122,6 +124,9 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       fn()
     }
   }, autoApprove, tuiApprovalRef)
+
+  /** Start of this run: previous turn’s edits become revertable for /undo. */
+  host.startNewTurn()
 
   session.addMessage({ role: 'user', content: userPrompt })
 
@@ -229,6 +234,8 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         yield am
         if (event.fatal) return true
       } else if (event.type === 'done') {
+        host.startNewTurn()
+        onRunComplete?.(host)
         return true
       } else if (
         onSubagentEvent &&

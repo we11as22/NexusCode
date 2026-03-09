@@ -1,4 +1,4 @@
-import React, { useRef, useState, useCallback } from "react"
+import React, { useRef, useState, useCallback, useEffect } from "react"
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -203,12 +203,34 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
 
   const jumpToLatest = useCallback(() => {
     setStickToBottom(true)
-    virtuosoRef.current?.scrollToIndex({ index: messages.length - 1, behavior: "smooth" })
+    virtuosoRef.current?.scrollToIndex({
+      index: messages.length - 1,
+      behavior: "smooth",
+      align: "end",
+    })
   }, [messages.length])
 
   const rangeChanged = useCallback((range: { startIndex: number; endIndex: number }) => {
     setTopVisibleIndex(range.startIndex)
   }, [])
+
+  // Keep scroll at bottom when new messages arrive or last message content grows (streaming).
+  // Store updates replace the messages array reference on every chunk, which can make Virtuoso reset scroll.
+  const lastMsg = messages[messages.length - 1]
+  const lastMsgScrollKey = lastMsg
+    ? `${(lastMsg as SessionMessage).id}-${typeof lastMsg.content === "string" ? (lastMsg.content as string).length : (lastMsg.content as MessagePart[])?.length ?? 0}`
+    : ""
+  useEffect(() => {
+    if (!stickToBottom || messages.length === 0) return
+    const raf = requestAnimationFrame(() => {
+      virtuosoRef.current?.scrollToIndex({
+        index: messages.length - 1,
+        behavior: "auto",
+        align: "end",
+      })
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [stickToBottom, messages.length, lastMsgScrollKey])
 
   const topMessage = topVisibleIndex != null && topVisibleIndex > 0 && messages[topVisibleIndex]
   const topPreview = topMessage
@@ -227,17 +249,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
   if (messages.length === 0) {
     return (
       <div className="message-list-container">
-        <div className="message-list">
-          <div className="message-list-content-empty">
-            <div className="message-list-empty">
-              <div className="w-10 h-10 rounded-xl border border-[var(--nexus-accent)]/40 bg-[var(--nexus-accent-muted)] flex items-center justify-center text-[var(--nexus-accent)] font-bold">NX</div>
-              <p className="text-[var(--vscode-foreground)] text-sm font-semibold mb-1.5">NexusCode</p>
-              <p className="text-[var(--vscode-descriptionForeground)] text-xs leading-relaxed max-w-[260px]">
-                AI coding agent. Ask anything or describe a task — use @ to add files or context.
-              </p>
-            </div>
-          </div>
-        </div>
+        <div className="message-list message-list-content-empty" />
       </div>
     )
   }
@@ -273,7 +285,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
         <Virtuoso
           ref={virtuosoRef}
           data={messages}
-          initialTopMostItemIndex={messages.length - 1}
+          initialTopMostItemIndex={messages.length > 0 ? messages.length - 1 : 0}
           followOutput={stickToBottom ? "smooth" : false}
           atBottomStateChange={setStickToBottom}
           rangeChanged={rangeChanged}
@@ -289,7 +301,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
               />
             </div>
           )}
-          style={{ height: "100%" }}
+          style={{ height: "100%", minHeight: 0 }}
           className="message-list-virtuoso-inner"
           components={{
             Scroller: React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
@@ -298,6 +310,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
                   {...props}
                   ref={ref}
                   className={`${props.className ?? ""} nexus-message-list-scroller`.trim()}
+                  style={{ ...props.style, minHeight: 0 }}
                 />
               )
             ),
@@ -478,7 +491,7 @@ const SUBAGENT_TOOL_LABELS: Record<string, string> = {
   read_file: "Reading file",
   Read: "Reading file",
   list_dir: "Listing directory",
-  ListDir: "Listing directory",
+  List: "Listing directory",
   list_code_definitions: "Listing definitions",
   ListCodeDefinitions: "Listing definitions",
   search_files: "Searching files",

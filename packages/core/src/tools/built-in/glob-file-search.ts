@@ -17,7 +17,7 @@ export const globFileSearchTool: ToolDef<z.infer<typeof globSchema>> = {
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths sorted by modification time
 - Use Glob when you know the file name pattern (e.g. \`**/*.ts\`, \`**/package.json\`).
-- When NOT to use: finding files by content → use Grep; finding by meaning → CodebaseSearch; listing directory structure → ListDir.
+- When NOT to use: finding files by content → use Grep; finding by meaning → CodebaseSearch; listing directory structure → List.
 - When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
 - You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.`,
   parameters: globSchema,

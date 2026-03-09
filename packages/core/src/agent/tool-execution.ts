@@ -77,13 +77,16 @@ export function normalizeToolInputForParse(
 ): Record<string, unknown> {
   const raw = input
   // Resolve gateway name so we apply the right normalizer
-  const name = toolName === "list_dir" ? "ListDir" : toolName
-  // ListDir: only "path" (string); gateway may send "paths" (array)
-  if (name === "ListDir") {
+  const name =
+    toolName === "list_dir" || toolName === "ListDirectory" || toolName === "list_directory"
+      ? "List"
+      : toolName
+  // List: only "path" (string); gateway may send "paths" (array) or paths[0] undefined
+  if (name === "List") {
     const pathVal =
       typeof raw.path === "string" && raw.path.length > 0
         ? raw.path
-        : Array.isArray(raw.paths) && typeof raw.paths[0] === "string"
+        : Array.isArray(raw.paths) && raw.paths.length > 0 && typeof raw.paths[0] === "string"
           ? (raw.paths[0] as string)
           : "."
     return {
@@ -337,7 +340,11 @@ export async function executeToolCall(
   mode: Mode,
   mcpToolNames: Set<string>
 ): Promise<ToolResult> {
-  const tool = tools.find(t => t.name === toolName)
+  const resolvedToolName =
+    toolName === "list_dir" || toolName === "ListDirectory" || toolName === "list_directory"
+      ? "List"
+      : toolName
+  const tool = tools.find(t => t.name === resolvedToolName)
   if (!tool) {
     const availableList = tools.map(t => t.name).join(", ")
     return {
@@ -349,7 +356,7 @@ export async function executeToolCall(
   const ctxWithPartId = ctx as ToolContext & { partId?: string }
   ctxWithPartId.partId = `part_${toolCallId}`
 
-  if (mode === "plan" && ["Write", "Edit"].includes(toolName)) {
+  if (mode === "plan" && ["Write", "Edit"].includes(resolvedToolName)) {
     const targetPath = extractWriteTargetPath(toolName, toolInput)
     if (!targetPath) {
       return {
@@ -462,10 +469,10 @@ export async function executeToolCall(
   try {
     let inputToParse: Record<string, unknown> =
       typeof toolInput === "object" && toolInput !== null ? { ...toolInput } : {}
-    inputToParse = normalizeToolInputForParse(toolName, inputToParse) as Record<string, unknown>
+    inputToParse = normalizeToolInputForParse(resolvedToolName, inputToParse) as Record<string, unknown>
     validatedArgs = tool.parameters.parse(inputToParse)
   } catch (err) {
-    return { success: false, output: `Invalid arguments for ${toolName}: ${err}` }
+    return { success: false, output: `Invalid arguments for ${resolvedToolName}: ${err}` }
   }
 
   try {

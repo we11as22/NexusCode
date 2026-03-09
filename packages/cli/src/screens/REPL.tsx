@@ -67,11 +67,36 @@ import { getOriginalCwd } from '../utils/state.js'
 import type { ConfigSnapshot } from '../nexus-bootstrap.js'
 import { reduceSubagentEvent } from '../nexus-subagents.js'
 import type { RestoreType } from '../task-restore.js'
+import type { SessionMessage, ToolPart } from '@nexuscode/core'
+import type { SessionDiffEntry } from '../components/NexusSessionDiffBlock.js'
+import { NexusSessionDiffBlock } from '../components/NexusSessionDiffBlock.js'
 
 const NEXUS_MODES = ['agent', 'plan', 'ask', 'debug'] as const
 function cycleNexusMode(current: string): string {
   const i = NEXUS_MODES.indexOf(current as (typeof NEXUS_MODES)[number])
   return NEXUS_MODES[(i + 1) % NEXUS_MODES.length] ?? 'agent'
+}
+
+function getSessionDiffFromMessages(messages: SessionMessage[] | undefined): SessionDiffEntry[] {
+  if (!messages?.length) return []
+  const entries: SessionDiffEntry[] = []
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue
+    const content = msg.content
+    if (!Array.isArray(content)) continue
+    for (const p of content) {
+      if (p.type !== 'tool') continue
+      const tp = p as ToolPart
+      if ((tp.tool === 'Write' || tp.tool === 'Edit') && tp.status === 'completed' && tp.path) {
+        entries.push({
+          file: tp.path,
+          additions: tp.diffStats?.added ?? 0,
+          deletions: tp.diffStats?.removed ?? 0,
+        })
+      }
+    }
+  }
+  return entries
 }
 
 type Props = {
@@ -196,6 +221,8 @@ export function REPL({
 
   /** Ref for Nexus agent approval dialog (write/execute/mcp/doom_loop). When set, panel calls it to resolve. */
   const tuiApprovalRef = useRef<((r: import('@nexuscode/core').PermissionResult) => void) | null>(null)
+  /** Host from last completed Nexus run; used by /undo to revert file edits. */
+  const lastNexusHostRef = useRef<import('../host.js').CliHost | null>(null)
   /** Banner above input (e.g. "Compacting conversation…", "Loop detected…"). */
   const [nexusBannerText, setNexusBannerText] = useState('')
   /** Todo list from agent (TodoWrite). Rendered above input, below progress. */
@@ -210,6 +237,30 @@ export function REPL({
   const [nexusModeOverride, setNexusModeOverride] = useState<string>(
     () => nexusInitialMode ?? 'agent',
   )
+
+  /** When true, show approval panel for writes/execute; when false, auto-accept. Toggle with Ctrl+Y. */
+  const [nexusAcceptEditsEnabled, setNexusAcceptEditsEnabled] = useState(true)
+
+  const sessionDiffEntries = useMemo(
+    () => getSessionDiffFromMessages(nexusBootstrap?.session?.messages),
+    [nexusBootstrap?.session?.messages, messages.length],
+  )
+
+  /** Revert last assistant turn and file edits (/undo). */
+  const onNexusUndo = useCallback(async () => {
+    const host = lastNexusHostRef.current
+    const session = nexusBootstrap?.session
+    if (!host || !session || session.messages.length < 2) return
+    const msgs = session.messages
+    const lastUserIdx = [...msgs].reverse().findIndex(m => m.role === 'user')
+    if (lastUserIdx === -1) return
+    const lastUserMessage = msgs[msgs.length - 1 - lastUserIdx]
+    if (!lastUserMessage) return
+    session.rewindBeforeTimestamp(lastUserMessage.ts)
+    await host.revertLastTurnFiles()
+    await session.save().catch(() => {})
+    setMessages(prev => (prev.length >= 2 ? prev.slice(0, -2) : prev))
+  }, [nexusBootstrap])
 
   const getBinaryFeedbackResponse = useCallback(
     (
@@ -253,6 +304,7 @@ export function REPL({
     isLoading,
     isMessageSelectorVisible,
     abortController?.signal,
+    !!toolJSX,
   )
 
   useEffect(() => {
@@ -345,7 +397,7 @@ export function REPL({
           userPrompt,
           repoTools: tools,
           signal: abortController.signal,
-          autoApprove: dangerouslySkipPermissions,
+          autoApprove: dangerouslySkipPermissions || !nexusAcceptEditsEnabled,
           modeOverride: nexusModeOverride,
           tuiApprovalRef,
           onSubagentEvent: (partId, event) => {
@@ -354,6 +406,7 @@ export function REPL({
               [partId]: reduceSubagentEvent(prev[partId] ?? [], event),
             }))
           },
+          onRunComplete: (h) => { lastNexusHostRef.current = h },
         })) {
           if (message && 'type' in message && message.type === 'nexus_approval') {
             const approvalMsg = message as NexusApprovalMessage
@@ -466,7 +519,7 @@ export function REPL({
         userPrompt,
         repoTools: tools,
         signal: abortController.signal,
-        autoApprove: dangerouslySkipPermissions,
+        autoApprove: dangerouslySkipPermissions || !nexusAcceptEditsEnabled,
         modeOverride: nexusModeOverride,
         tuiApprovalRef,
         onSubagentEvent: (partId, event) => {
@@ -475,6 +528,7 @@ export function REPL({
             [partId]: reduceSubagentEvent(prev[partId] ?? [], event),
           }))
         },
+        onRunComplete: (h) => { lastNexusHostRef.current = h },
       })) {
         if (message && 'type' in message && message.type === 'nexus_approval') {
           const approvalMsg = message as NexusApprovalMessage
@@ -593,28 +647,8 @@ export function REPL({
     [normalizedMessages],
   )
 
-  const messagesJSX = useMemo(() => {
-    return [
-      {
-        type: 'static',
-        jsx: (
-          <Box flexDirection="column" key={`logo${forkNumber}`}>
-            <Logo
-              mcpClients={mcpClients}
-              isDefaultModel={isDefaultModel}
-              nexusMode={nexusBootstrap ? nexusModeOverride : undefined}
-              nexusModel={nexusConfigSnapshot?.model?.id}
-              nexusIndexEnabled={
-                nexusConfigSnapshot?.indexing?.enabled ??
-                (nexusBootstrap ? nexusBootstrap.indexEnabled : undefined)
-              }
-              nexusSessionId={nexusSessionId}
-            />
-            <ProjectOnboarding workspaceDir={getOriginalCwd()} />
-          </Box>
-        ),
-      },
-      ...reorderMessages(normalizedMessages).map(_ => {
+  const messagesJSX = useMemo(() =>
+    reorderMessages(normalizedMessages).map(_ => {
         const toolUseID = getToolUseID(_)
         const message =
           _.type === 'progress' ? (
@@ -714,9 +748,7 @@ export function REPL({
           ),
         }
       }),
-    ]
-  }, [
-    forkNumber,
+  [
     normalizedMessages,
     tools,
     verbose,
@@ -735,6 +767,12 @@ export function REPL({
     nexusSessionId,
     subagentsByPartId,
   ])
+
+  const staticMessageItems = messagesJSX.filter(_ => _.type === 'static')
+  const staticItemsWithHeader = useMemo(
+    () => [{ id: 'header' as const }, ...staticMessageItems],
+    [staticMessageItems],
+  )
 
   // only show the dialog once not loading
   const showingCostDialog = !isLoading && showCostDialog
@@ -764,9 +802,28 @@ export function REPL({
     <>
       <Static
         key={`static-messages-${forkNumber}`}
-        items={messagesJSX.filter(_ => _.type === 'static')}
+        items={staticItemsWithHeader}
       >
-        {_ => _.jsx}
+        {item =>
+          item.id === 'header' ? (
+            <Box key="nexus-header" flexDirection="column">
+              <Logo
+                mcpClients={mcpClients}
+                isDefaultModel={isDefaultModel}
+                nexusMode={nexusBootstrap ? nexusModeOverride : undefined}
+                nexusModel={nexusConfigSnapshot?.model?.id}
+                nexusIndexEnabled={
+                  nexusConfigSnapshot?.indexing?.enabled ??
+                  (nexusBootstrap ? nexusBootstrap.indexEnabled : undefined)
+                }
+                nexusSessionId={nexusSessionId}
+              />
+              <ProjectOnboarding workspaceDir={getOriginalCwd()} />
+            </Box>
+          ) : (
+            item.jsx
+          )
+        }
       </Static>
       {messagesJSX.filter(_ => _.type === 'transient').map(_ => _.jsx)}
       <Box
@@ -835,14 +892,6 @@ export function REPL({
                   <Text dimColor>{nexusBannerText}</Text>
                 </Box>
               ) : null}
-              {nexusBootstrap &&
-                !isLoading &&
-                normalizedMessages.length > 0 &&
-                normalizedMessages[normalizedMessages.length - 1]?.type === 'assistant' && (
-                  <Box paddingX={1} marginTop={0} flexDirection="column">
-                    <Text dimColor>▶▶ Accept edits: 1–9, Enter (in panel) · Mode: Shift+Tab · esc to interrupt · ctrl+t to hide tasks</Text>
-                  </Box>
-                )}
               {nexusBootstrap ? (
                 <NexusSubagentBlock
                   subagentsByPartId={subagentsByPartId}
@@ -851,6 +900,9 @@ export function REPL({
               ) : null}
               {nexusBootstrap && nexusTodo.trim() ? (
                 <NexusTodoBlock todo={nexusTodo} />
+              ) : null}
+              {nexusBootstrap && sessionDiffEntries.length > 0 ? (
+                <NexusSessionDiffBlock entries={sessionDiffEntries} />
               ) : null}
               <PromptInput
                 commands={commands}
@@ -887,7 +939,14 @@ export function REPL({
                     ? () => setNexusModeOverride(prev => cycleNexusMode(prev))
                     : undefined
                 }
+                nexusAcceptEditsEnabled={nexusAcceptEditsEnabled}
+                onNexusToggleAcceptEdits={
+                  nexusBootstrap
+                    ? () => setNexusAcceptEditsEnabled(prev => !prev)
+                    : undefined
+                }
                 onNexusConfigSaved={onNexusConfigSaved}
+                onNexusUndo={nexusBootstrap ? onNexusUndo : undefined}
               />
             </>
           )}

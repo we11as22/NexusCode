@@ -20,15 +20,10 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
   const autosize = () => {
     if (!textareaRef.current || !containerRef.current) return
     const initialHeight = 44
-    const areaMax = 220
-    const container = containerRef.current
-    const containerRect = container.getBoundingClientRect()
-    const imagesRow = container.querySelector(".nexus-attached-images-row") as HTMLElement | null
-    const imagesHeight = imagesRow ? imagesRow.getBoundingClientRect().height + 6 : 0
-    const availableForText = Math.max(initialHeight, (containerRect.height || areaMax) - imagesHeight)
-    const maxHeight = Math.min(areaMax, availableForText)
+    const areaMax = 280 /* allow multiline to expand */
     textareaRef.current.style.height = "auto"
-    textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, maxHeight)}px`
+    const h = Math.min(textareaRef.current.scrollHeight, areaMax)
+    textareaRef.current.style.height = `${Math.max(initialHeight, h)}px`
     scrollCaretIntoView()
   }
 

@@ -15,19 +15,22 @@ export class VsCodeHost implements IHost {
   private useWebviewApproval: boolean
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } | null = null
   private onCheckpointEntriesUpdated?: () => void
+  /** Called after an approved edit is written to disk; used to add to session unaccepted list. */
+  private onSessionEditSaved?: (path: string, originalContent: string, newContent: string, isNewFile: boolean) => void
 
   private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
 
   constructor(
     cwd: string,
     onEvent: (event: AgentEvent) => void,
-    options?: { useWebviewApproval?: boolean; approvalResolveRef?: { current: ((r: PermissionResult) => void) | null }; onCheckpointEntriesUpdated?: () => void }
+    options?: { useWebviewApproval?: boolean; approvalResolveRef?: { current: ((r: PermissionResult) => void) | null }; onCheckpointEntriesUpdated?: () => void; onSessionEditSaved?: (path: string, originalContent: string, newContent: string, isNewFile: boolean) => void }
   ) {
     this.cwd = cwd
     this.eventEmitter = onEvent
     this.useWebviewApproval = options?.useWebviewApproval ?? false
     this.approvalResolveRef = options?.approvalResolveRef ?? null
     this.onCheckpointEntriesUpdated = options?.onCheckpointEntriesUpdated
+    this.onSessionEditSaved = options?.onSessionEditSaved
   }
 
   setCheckpoint(tracker: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> } | undefined): void {
@@ -406,6 +409,7 @@ export class VsCodeHost implements IHost {
     if (!pending) throw new Error(`No pending file edit for ${filePath}`)
     // Persist approved content to disk (file does not open here; user opens by clicking in chat/UI).
     await this.writeFile(filePath, pending.newContent)
+    this.onSessionEditSaved?.(filePath, pending.originalContent, pending.newContent, pending.isNewFile)
     this.pendingFileEdits.delete(key)
   }
 
@@ -481,6 +485,31 @@ export async function showDiffForPath(cwd: string, filePath: string): Promise<vo
     beforeDoc.uri,
     afterDoc.uri,
     `${fileName}: NexusCode Changes`,
+    { viewColumn: vscode.ViewColumn.Active, preview: true }
+  )
+}
+
+/**
+ * Open VS Code diff view for a session edit: before = original content, after = new content.
+ * Used when user clicks a file in the "N Files" panel to review unaccepted session edits.
+ */
+export async function showSessionEditDiff(cwd: string, filePath: string, before: string, after: string): Promise<void> {
+  const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
+  const fileName = path.basename(filePath)
+  const lang = getLanguageFromExtension(path.extname(filePath))
+  const beforeDoc = await vscode.workspace.openTextDocument({
+    content: before,
+    language: lang,
+  })
+  const afterDoc = await vscode.workspace.openTextDocument({
+    content: after,
+    language: lang,
+  })
+  await vscode.commands.executeCommand(
+    "vscode.diff",
+    beforeDoc.uri,
+    afterDoc.uri,
+    `${fileName}: Session changes`,
     { viewColumn: vscode.ViewColumn.Active, preview: true }
   )
 }
