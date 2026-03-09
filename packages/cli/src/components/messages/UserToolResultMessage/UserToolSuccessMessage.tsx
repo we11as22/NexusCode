@@ -4,6 +4,7 @@ import * as React from 'react'
 import { Tool } from '../../../Tool.js'
 import { Message, UserMessage } from '../../../query.js'
 import { useGetToolFromMessages } from './utils.js'
+import { getGenericToolForCoreName } from '../../../tools/GenericCoreTool.js'
 
 type Props = {
   param: ToolResultBlockParam
@@ -23,13 +24,26 @@ export function UserToolSuccessMessage({
   width,
 }: Props): React.ReactNode {
   const { tool } = useGetToolFromMessages(param.tool_use_id, tools, messages)
+  const generic = getGenericToolForCoreName(tool.name)
+  const resultData = message.toolUseResult?.data ?? param.content
+
+  let rendered: React.ReactNode
+  try {
+    rendered = tool.renderToolResultMessage?.(resultData as never, {
+      verbose,
+    })
+  } catch {
+    // Some legacy CLI tool renderers expect old structured result shapes.
+    // Nexus/core tools often return plain text, so fall back to a generic renderer.
+    rendered = generic.renderToolResultMessage?.(param.content as never, {
+      verbose,
+    })
+  }
 
   return (
     // TODO: Distinguish UserMessage from UserToolResultMessage
     <Box flexDirection="column" width={width}>
-      {tool.renderToolResultMessage?.(message.toolUseResult!.data as never, {
-        verbose,
-      })}
+      {rendered}
     </Box>
   )
 }

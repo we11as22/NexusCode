@@ -44,8 +44,10 @@ export function AssistantToolUseMessage({
   shouldShowDot,
   subagents = [],
 }: Props): React.ReactNode {
+  const isNexusToolUse = typeof param.id === 'string' && param.id.startsWith('part_')
   const tool =
-    tools.find(_ => _.name === param.name) ?? getGenericToolForCoreName(param.name)
+    (isNexusToolUse ? undefined : tools.find(_ => _.name === param.name)) ??
+    getGenericToolForCoreName(param.name)
   const isQueued =
     !inProgressToolUseIDs.has(param.id) && unresolvedToolUseIDs.has(param.id)
   // Keeping color undefined makes the OS use the default color regardless of appearance

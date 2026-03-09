@@ -9,6 +9,7 @@ NexusCode has three runtime layers:
 3. **`packages/cli`** — Terminal host + TUI (Ink/React, reference UI from claude-code). Same agent loop as the extension.
 
 Both hosts call the same `runAgentLoop()` in core, so behavior is consistent across VS Code and CLI. The CLI uses a **Nexus query bridge** (`nexus-query.ts`): when started with Nexus bootstrap (interactive mode), the REPL calls `queryNexus()` instead of the reference Anthropic `query()`. The bridge runs `runAgentLoop()` with a `CliHost` that queues `AgentEvent`s and maps them to the REPL’s `Message` types (AssistantMessage, ProgressMessage, UserMessage) so the existing Ink UI renders tool progress and responses. Model, mode, index, session, checkpoints, and profile are passed via CLI options and bootstrap; task checkpoints and restore are available as `nexus task checkpoints` and `nexus task restore <id>`.
+`bootstrapNexus` is an object-argument API; CLI must call it as `bootstrapNexus({ cwd, ... })` so host/tool paths resolve against the real project root.
 
 #### Nexus CLI feature wiring
 
@@ -20,7 +21,7 @@ Both hosts call the same `runAgentLoop()` in core, so behavior is consistent acr
 | **Profile** | `--profile` + config | Merges profile into model config in bootstrap. |
 | **Session** | `--session`, `--continue` | Session create/resume in bootstrap; `nexusSessionId` passed to REPL. |
 | **Checkpoints** | `nexus task checkpoints` / `nexus task restore <id>` | REPL receives `nexusGetCheckpointList`, `nexusOnRestoreCheckpoint`. |
-| **Progress display** | REPL + `utils/messages.tsx` | Matches reference: `reorderMessages`, `getInProgressToolUseIDs`, ProgressMessage with `content[0]` = tool_use, MessageResponse + loader semantics. |
+| **Progress display** | REPL + `utils/messages.tsx` | Matches reference: `reorderMessages`, `getInProgressToolUseIDs`, ProgressMessage with `content[0]` = tool_use, MessageResponse + loader semantics. Nexus `part_*` tool events render through generic core tool views to avoid legacy-shape crashes. |
 | **Permissions** | CliHost `showApprovalDialog` | Approval via readline (or future tuiApprovalRef). |
 
 Optional **`packages/server`** stores sessions and messages in SQLite; extension and CLI can connect to it for shared sessions and pagination (no OOM on long chats).
@@ -180,14 +181,17 @@ Mode-specific blocks: **plan** blocks `execute_command`; **ask** blocks `write_t
 
 ## Tool schemas and provider quirks
 
-Built-in tool schemas are **strict** (Zod `.strict()` or explicit required/optional). We send a single **`path`** (string) for **List**; we do **not** use a **`paths`** array for that tool.
+Built-in tool schemas are **strict** (Zod `.strict()` or explicit required/optional). Runtime List execution uses a single **`path`** (string).
 
 Some providers or gateways (e.g. Minimax, Kilo gateway) may expose a list-dir–style tool with a **`paths`** (array) schema or validate model tool-call args against such a schema. If the model returns `{}` or `{ paths: [] }`, the gateway can respond with an error like *"paths[0] must be string, got undefined"* **before** we see the tool_call. To avoid that:
 
-1. We **normalize** as soon as we receive a **tool_call** for List: if the payload has **paths**, we set **path** from **paths[0]** and default to **"."** when missing.
-2. We use a **distinct tool name** (**List**) and a **strict schema** so the provider is less likely to map our tool to an internal "LS" that expects **paths**.
+1. For non-local gateways, tool definitions can expose a gateway-facing List schema with **`paths`** while runtime execution still normalizes to **`path`**.
+2. We **normalize** as soon as we receive a **tool_call** for List: if the payload has **paths**, we set **path** from **paths[0]** and default to **"."** when missing.
+3. We normalize again before argument parse in execution, so provider quirks cannot leak into built-in tool contracts.
 
-So the **paths[0]** error, when it appears, comes from **provider-side validation**, not from our Zod. Normalization at receive + at execute ensures our code always works with **path** only.
+So the **paths[0]** error, when it appears, comes from **provider-side validation**, not from our built-in execution schema. Normalization at receive + at execute ensures our code always works with **path** only.
+
+Additionally, List ignores `.nexus` only for top-level discovery; when user explicitly lists `.nexus` (or its children), it is not filtered out.
 
 ---
 

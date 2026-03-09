@@ -218,14 +218,18 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         yield pm
       } else if (event.type === 'tool_end') {
         if (event.tool === 'SpawnAgents') lastSpawnAgentPartId = null
+        const toolResultText = event.output ?? (event.error ?? '')
         const userMsg = createUserMessage([
           {
             type: 'tool_result',
             tool_use_id: event.partId,
-            content: event.output ?? (event.error ?? ''),
+            content: toolResultText,
             is_error: !event.success,
           } as { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean },
-        ])
+        ], {
+          data: toolResultText,
+          resultForAssistant: toolResultText,
+        })
         consumed.push(userMsg)
         yield userMsg
       } else if (event.type === 'error') {

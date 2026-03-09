@@ -43,10 +43,12 @@ export function useGetToolFromMessages(
         `Tool use not found for tool_use_id ${toolUseID}`,
       )
     }
-    // Single naming as in core: CLI tools use same names (Grep, Glob); rest use generic display.
-    const found = tools.find(_ => _.name === toolUse.name)
+    // Nexus runAgentLoop uses part_* ids; those tool result/input payloads differ from legacy CLI tools.
+    // Use generic renderer for Nexus tool uses to avoid shape-mismatch crashes in legacy renderers.
+    const isNexusToolUse = toolUseID.startsWith('part_')
+    const found = isNexusToolUse ? undefined : tools.find(_ => _.name === toolUse.name)
     const tool = found ?? getGenericToolForCoreName(toolUse.name)
-    if (!found) {
+    if (!found && !isNexusToolUse) {
       logEvent('tengu_nexus_generic_tool_display', { name: toolUse.name })
     }
     return { tool, toolUse }

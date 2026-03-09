@@ -225,7 +225,15 @@ export const listTool: ToolDef<z.infer<typeof listSchema>> = {
           ig = ig.add(gitignoreContent)
         } catch {}
       }
-      ig.add([".git", "node_modules", ".nexus"])
+      // Hide heavy internals by default, but do not hide .nexus when the user
+      // is explicitly listing it (or any of its children).
+      ig.add([".git", "node_modules"])
+      const targetRel = path.relative(ctx.cwd, targetDir).replace(/\\/g, "/")
+      const listingInsideNexus =
+        targetRel === ".nexus" || targetRel.startsWith(".nexus/")
+      if (!listingInsideNexus) {
+        ig.add([".nexus"])
+      }
       if (ignorePatterns?.length) {
         ig.add(ignorePatterns)
       }

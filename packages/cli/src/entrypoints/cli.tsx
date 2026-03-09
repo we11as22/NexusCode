@@ -440,7 +440,8 @@ ${commandList}`,
         } else {
           const isDefaultModel = await isDefaultSlowAndCapableModel()
 
-          const nexus = await bootstrapNexus(effectiveCwd, {
+          const nexus = await bootstrapNexus({
+            cwd: effectiveCwd,
             mode,
             indexEnabled: index !== false,
             sessionId: session ?? null,
