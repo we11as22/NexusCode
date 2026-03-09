@@ -1,4 +1,4 @@
-import { createOpenAI } from "@ai-sdk/openai"
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import type { ProviderConfig } from "../types.js"
 import { BaseLLMClient } from "./base.js"
 
@@ -24,16 +24,14 @@ export function createOpenAICompatibleClient(config: ProviderConfig) {
       "Missing API key for openai-compatible provider. Set model.apiKey or OPENAI_API_KEY/OPENROUTER_API_KEY/NEXUS_API_KEY."
     )
   }
-  const openai = createOpenAI({
-    apiKey,
-    baseURL: config.baseUrl,
-    compatibility: "compatible",
-  })
-
-  const model = openai.chat(config.id)
-
   // Detect provider name from baseUrl for better structured output support
   const providerName = detectProviderFromUrl(config.baseUrl)
+  const provider = createOpenAICompatible({
+    name: providerName,
+    apiKey,
+    baseURL: config.baseUrl,
+  })
+  const model = provider.chatModel(config.id)
 
   return new BaseLLMClient(model as any, providerName, config.id)
 }
@@ -42,13 +40,12 @@ export function createOpenAICompatibleClient(config: ProviderConfig) {
  * Ollama-specific client with correct base URL.
  */
 export function createOllamaClient(config: ProviderConfig) {
-  const openai = createOpenAI({
+  const provider = createOpenAICompatible({
+    name: "ollama",
     apiKey: "ollama",
     baseURL: config.baseUrl ?? "http://localhost:11434/v1",
-    compatibility: "compatible",
   })
-
-  const model = openai.chat(config.id)
+  const model = provider.chatModel(config.id)
   return new BaseLLMClient(model as any, "ollama", config.id)
 }
 

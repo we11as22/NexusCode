@@ -8,7 +8,7 @@ NexusCode has three runtime layers:
 2. **`packages/vscode`** — VS Code host + React webview UI (settings, chat, sessions, agent presets).
 3. **`packages/cli`** — Terminal host + TUI (Ink/React, reference UI from claude-code). Same agent loop as the extension.
 
-Both hosts call the same `runAgentLoop()` in core, so behavior is consistent across VS Code and CLI. The CLI uses a **Nexus query bridge** (`nexus-query.ts`): when started with Nexus bootstrap (interactive mode), the REPL calls `queryNexus()` instead of the reference Anthropic `query()`. The bridge runs `runAgentLoop()` with a `CliHost` that queues `AgentEvent`s and maps them to the REPL’s `Message` types (AssistantMessage, ProgressMessage, UserMessage) so the existing Ink UI renders tool progress and responses. Model, mode, index, session, checkpoints, and profile are passed via CLI options and bootstrap; task checkpoints and restore are available as `nexus task checkpoints` and `nexus task restore <id>`.
+Both hosts call the same `runAgentLoop()` in core, so behavior is consistent across VS Code and CLI. The CLI uses a **Nexus query bridge** (`nexus-query.ts`): REPL and `--print` both call `queryNexus()` (no legacy Anthropic-only print path). The bridge runs `runAgentLoop()` with a `CliHost` that queues `AgentEvent`s and maps them to the REPL’s `Message` types (AssistantMessage, ProgressMessage, UserMessage) so the existing Ink UI renders tool progress and responses. Model, mode, index, session, checkpoints, and profile are passed via CLI options and bootstrap; task checkpoints and restore are available as `nexus task checkpoints` and `nexus task restore <id>`.
 `bootstrapNexus` is an object-argument API; CLI must call it as `bootstrapNexus({ cwd, ... })` so host/tool paths resolve against the real project root.
 
 #### Nexus CLI feature wiring
@@ -22,7 +22,7 @@ Both hosts call the same `runAgentLoop()` in core, so behavior is consistent acr
 | **Session** | `--session`, `--continue` | Session create/resume in bootstrap; `nexusSessionId` passed to REPL. |
 | **Checkpoints** | `nexus task checkpoints` / `nexus task restore <id>` | REPL receives `nexusGetCheckpointList`, `nexusOnRestoreCheckpoint`. |
 | **Progress display** | REPL + `utils/messages.tsx` | Matches reference: `reorderMessages`, `getInProgressToolUseIDs`, ProgressMessage with `content[0]` = tool_use, MessageResponse + loader semantics. Nexus `part_*` tool events render through generic core tool views to avoid legacy-shape crashes. |
-| **Permissions** | CliHost `showApprovalDialog` | Approval via readline (or future tuiApprovalRef). |
+| **Permissions** | CliHost `showApprovalDialog` | Approval can render inline in TUI (`NexusApprovalPanel`) and resolves through `tuiApprovalRef` in Nexus mode. |
 
 Optional **`packages/server`** stores sessions and messages in SQLite; extension and CLI can connect to it for shared sessions and pagination (no OOM on long chats).
 
@@ -69,6 +69,15 @@ Config is loaded from **`.nexus/nexus.yaml`** (project) and **`~/.nexus/nexus.ya
 
 When the number of **MCP servers** exceeds `tools.classifyThreshold` (default 20) and `tools.classifyToolsEnabled` is true, an LLM classifier selects **which MCP servers** to use for the task. All tools from selected servers are included; custom tools (no `serverName__toolName` pattern) are always included. Skill filtering uses `skillClassifyThreshold` (default 20) and selects skills by task. Thresholds default to 20 in schema and UI.
 
+### Inline reasoning fallback for gateway streams
+
+Core streaming supports provider-native `reasoning_delta` and fallback extraction from `text_delta` when gateways embed reasoning into plain text chunks:
+
+- first-line JSON preamble: `{"reasoning":"..."}`
+- inline `<think>...</think>` blocks
+
+Fallback extraction is disabled once native `reasoning_delta` is observed. This keeps extension/CLI thought blocks populated for providers that do not emit separate reasoning events.
+
 ### Vector index factory
 
 `createCodebaseIndexer()` wires embeddings and vector store only when prerequisites are valid. If embeddings or Qdrant are missing, the indexer falls back to FTS-only. This avoids silent misconfiguration.
@@ -98,6 +107,7 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 - **MCP config**: enable/disable is per **server** (all tools of that server). The classifier selects servers, not individual tools.
 - If vector prerequisites are invalid, the agent runs with **FTS-only** search.
 - Host UI must not change `runAgentLoop` contracts (options, events, tool results).
+- `write_to_file` and `replace_in_file` skip explicit approval dialogs in file-edit flow when `autoApproveWrite` (or mode auto-approve `write`) is enabled; otherwise they emit `tool_approval_needed` and wait for host approval.
 - When the **tool-call budget** is exceeded, the loop allows one more iteration with tools disabled so the model can emit a final text-only answer.
 - **`config.agentLoop.toolCallBudget`** and **`config.agentLoop.maxIterations`** override per-mode limits when set.
 - **Models catalog**: CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) and live gateway model list where applicable; unavailable free IDs are filtered from pickers.

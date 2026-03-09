@@ -115,6 +115,17 @@ export function Config({ onClose }: Props): React.ReactNode {
       },
     },
     {
+      id: 'showToolOutputs',
+      label: 'Tool outputs',
+      value: globalConfig.showToolOutputs ?? true,
+      type: 'boolean',
+      onChange(showToolOutputs: boolean) {
+        const config = { ...getGlobalConfig(), showToolOutputs }
+        saveGlobalConfig(config)
+        setGlobalConfig(config)
+      },
+    },
+    {
       id: 'theme',
       label: 'Theme',
       value: globalConfig.theme,
@@ -174,6 +185,14 @@ export function Config({ onClose }: Props): React.ReactNode {
 
       if (globalConfig.verbose !== initialConfig.current.verbose) {
         changes.push(`  ⎿  Set verbose to ${chalk.bold(globalConfig.verbose)}`)
+      }
+      if (
+        (globalConfig.showToolOutputs ?? true) !==
+        (initialConfig.current.showToolOutputs ?? true)
+      ) {
+        changes.push(
+          `  ⎿  Set tool outputs to ${chalk.bold(globalConfig.showToolOutputs ?? true)}`,
+        )
       }
       if (globalConfig.theme !== initialConfig.current.theme) {
         changes.push(`  ⎿  Set theme to ${chalk.bold(globalConfig.theme)}`)

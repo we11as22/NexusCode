@@ -108,7 +108,18 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   const { session, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer } = nexus
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug'
 
-  const config = await loadConfig(nexus.cwd, { secrets: nexus.secretsStore })
+  let config = await loadConfig(nexus.cwd, { secrets: nexus.secretsStore })
+  if (autoApprove) {
+    config = {
+      ...config,
+      permissions: {
+        ...config.permissions,
+        autoApproveWrite: true,
+        autoApproveCommand: true,
+        autoApproveMcp: true,
+      },
+    }
+  }
 
   const eventQueue: AgentEvent[] = []
   let resolveNext: (() => void) | null = null

@@ -13,8 +13,6 @@ import { REPL } from '../screens/REPL.js'
 import { addToHistory } from '../history.js'
 import { getContext, setContext, removeContext } from '../context.js'
 import { Command } from '@commander-js/extra-typings'
-import { ask } from '../utils/ask.js'
-import { hasPermissionsToUseTool } from '../permissions.js'
 import { getTools } from '../tools.js'
 import {
   getGlobalConfig,
@@ -88,6 +86,7 @@ import { createNexusModelCommand } from '../commands/nexusModel.js'
 import { createNexusIndexCommand } from '../commands/nexusIndex.js'
 import { createNexusVectorCommand } from '../commands/nexusVector.js'
 import { createNexusEmbeddingsCommand } from '../commands/nexusEmbeddings.js'
+import { queryNexus } from '../nexus-query.js'
 
 export function completeOnboarding(): void {
   const config = getGlobalConfig()
@@ -426,16 +425,47 @@ ${commandList}`,
           }
 
           addToHistory(inputPrompt)
-          const { resultText: response } = await ask({
-            commands,
-            hasPermissionsToUseTool,
-            messageLogName: dateToFilename(new Date()),
-            prompt: inputPrompt,
+          const nexus = await bootstrapNexus({
             cwd: effectiveCwd,
-            tools,
-            dangerouslySkipPermissions,
+            mode,
+            indexEnabled: index !== false,
+            sessionId: session ?? null,
+            continue: Boolean(continueSession),
+            serverUrl: server ?? null,
+            modelOverride: model,
+            temperatureOverride: temperature,
+            profileOverride: profile ?? undefined,
           })
-          console.log(response)
+
+          let lastAssistantText = ''
+          for await (const message of queryNexus({
+            nexus,
+            userPrompt: inputPrompt,
+            repoTools: tools,
+            signal: AbortSignal.timeout(10 * 60 * 1000),
+            autoApprove: true,
+            modeOverride: mode,
+          })) {
+            if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'assistant') {
+              continue
+            }
+            const content = (message as { message?: { content?: unknown[] } }).message?.content
+            if (!Array.isArray(content)) continue
+            const text = content
+              .filter((b): b is { type: 'text'; text: string } => (
+                typeof b === 'object' &&
+                b !== null &&
+                (b as { type?: unknown }).type === 'text' &&
+                typeof (b as { text?: unknown }).text === 'string'
+              ))
+              .map(b => b.text.trim())
+              .filter(Boolean)
+              .join('\n\n')
+              .trim()
+            if (text) lastAssistantText = text
+          }
+
+          console.log(lastAssistantText)
           process.exit(0)
         } else {
           const isDefaultModel = await isDefaultSlowAndCapableModel()

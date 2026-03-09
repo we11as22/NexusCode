@@ -74,6 +74,10 @@ Usage:
       typeof ctx.host.openFileEdit === "function" &&
       typeof ctx.host.saveFileEdit === "function" &&
       typeof ctx.host.revertFileEdit === "function"
+    const modeAutoApprove = new Set(
+      (ctx.mode ? ctx.config.modes?.[ctx.mode]?.autoApprove : undefined) ?? []
+    )
+    const skipApproval = ctx.config.permissions.autoApproveWrite || modeAutoApprove.has("write")
 
     if (useFileEditFlow) {
       const diffPreview = createDiffPreview(originalContent, content, filePath)
@@ -82,29 +86,31 @@ Usage:
         newContent: content,
         isNewFile: false,
       })
-      ctx.host.emit({
-        type: "tool_approval_needed",
-        action: {
+      if (!skipApproval) {
+        ctx.host.emit({
+          type: "tool_approval_needed",
+          action: {
+            type: "write",
+            tool: "Edit",
+            description: `Edit ${filePath}`,
+            content,
+            diff: diffPreview,
+            diffStats,
+          },
+          partId: ctx.partId ?? "",
+        })
+        const approval = await ctx.host.showApprovalDialog({
           type: "write",
           tool: "Edit",
           description: `Edit ${filePath}`,
           content,
           diff: diffPreview,
           diffStats,
-        },
-        partId: ctx.partId ?? "",
-      })
-      const approval = await ctx.host.showApprovalDialog({
-        type: "write",
-        tool: "Edit",
-        description: `Edit ${filePath}`,
-        content,
-        diff: diffPreview,
-        diffStats,
-      })
-      if (!approval.approved) {
-        await ctx.host.revertFileEdit!(filePath)
-        return { success: false, output: `User denied edit to ${filePath}` }
+        })
+        if (!approval.approved) {
+          await ctx.host.revertFileEdit!(filePath)
+          return { success: false, output: `User denied edit to ${filePath}` }
+        }
       }
       try {
         await ctx.host.saveFileEdit!(filePath)

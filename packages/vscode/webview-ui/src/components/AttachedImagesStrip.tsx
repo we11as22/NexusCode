@@ -28,10 +28,13 @@ export function ImageIcon({ className }: { className?: string }) {
 export function AttachedImagesStripWithPicker({ registerImagePickerTrigger }: { registerImagePickerTrigger?: (trigger: () => void) => void }) {
   const { attachedImages, addAttachedImage, removeAttachedImage } = useChatStore()
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const triggerPicker = React.useCallback(() => {
+    fileInputRef.current?.click()
+  }, [])
 
   React.useEffect(() => {
-    registerImagePickerTrigger?.(() => fileInputRef.current?.click())
-  }, [registerImagePickerTrigger])
+    registerImagePickerTrigger?.(triggerPicker)
+  }, [registerImagePickerTrigger, triggerPicker])
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files

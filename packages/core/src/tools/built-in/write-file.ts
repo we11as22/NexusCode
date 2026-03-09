@@ -74,6 +74,10 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
       typeof ctx.host.openFileEdit === "function" &&
       typeof ctx.host.saveFileEdit === "function" &&
       typeof ctx.host.revertFileEdit === "function"
+    const modeAutoApprove = new Set(
+      (ctx.mode ? ctx.config.modes?.[ctx.mode]?.autoApprove : undefined) ?? []
+    )
+    const skipApproval = ctx.config.permissions.autoApproveWrite || modeAutoApprove.has("write")
 
     if (useFileEditFlow) {
       const diffPreview = createDiffPreview(originalContentStr, content, filePath)
@@ -82,29 +86,31 @@ WARNING: Replaces entire file content. Provide complete final content. Creates p
         newContent: content,
         isNewFile,
       })
-      ctx.host.emit({
-        type: "tool_approval_needed",
-        action: {
+      if (!skipApproval) {
+        ctx.host.emit({
+          type: "tool_approval_needed",
+          action: {
+            type: "write",
+            tool: "Write",
+            description: `Write to ${filePath}`,
+            content,
+            diff: diffPreview,
+            diffStats,
+          },
+          partId: ctx.partId ?? "",
+        })
+        const approval = await ctx.host.showApprovalDialog({
           type: "write",
           tool: "Write",
           description: `Write to ${filePath}`,
           content,
           diff: diffPreview,
           diffStats,
-        },
-        partId: ctx.partId ?? "",
-      })
-      const approval = await ctx.host.showApprovalDialog({
-        type: "write",
-        tool: "Write",
-        description: `Write to ${filePath}`,
-        content,
-        diff: diffPreview,
-        diffStats,
-      })
-      if (!approval.approved) {
-        await ctx.host.revertFileEdit!(filePath)
-        return { success: false, output: `User denied write to ${filePath}` }
+        })
+        if (!approval.approved) {
+          await ctx.host.revertFileEdit!(filePath)
+          return { success: false, output: `User denied write to ${filePath}` }
+        }
       }
       try {
         await ctx.host.saveFileEdit!(filePath)

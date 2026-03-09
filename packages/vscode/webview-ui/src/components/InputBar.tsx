@@ -155,7 +155,7 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
   }
 
   return (
-    <div ref={containerRef} className="relative flex-1 min-w-0 flex flex-col overflow-hidden">
+    <div ref={containerRef} className="relative min-w-0 flex flex-col">
       {showSuggestions && (
         <div className="absolute bottom-full left-0 right-0 bg-[var(--vscode-editor-background)] border border-[var(--vscode-panel-border)] rounded-t-xl overflow-hidden shadow-lg z-10">
           {suggestions.map(s => (
@@ -173,7 +173,7 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
 
       <AttachedImagesStripWithPicker registerImagePickerTrigger={registerImagePickerTrigger} />
 
-      <div className="prompt-input-container flex-1 min-h-0 min-w-0 flex flex-col">
+      <div className="prompt-input-container min-h-0 min-w-0 flex flex-col">
         <div className="prompt-input-wrapper">
           <textarea
             ref={textareaRef}
@@ -190,7 +190,7 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
           }
           disabled={false}
           rows={1}
-          className={`prompt-input flex-1 min-w-0 w-full ${isRunning || awaitingApproval ? "opacity-70" : ""}`}
+          className={`prompt-input min-w-0 w-full ${isRunning || awaitingApproval ? "opacity-70" : ""}`}
           style={{ minHeight: "44px" }}
           onSelect={scrollCaretIntoView}
           onKeyUp={scrollCaretIntoView}

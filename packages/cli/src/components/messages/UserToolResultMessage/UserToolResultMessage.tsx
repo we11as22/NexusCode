@@ -7,6 +7,7 @@ import { UserToolCanceledMessage } from './UserToolCanceledMessage.js'
 import { UserToolErrorMessage } from './UserToolErrorMessage.js'
 import { UserToolRejectMessage } from './UserToolRejectMessage.js'
 import { UserToolSuccessMessage } from './UserToolSuccessMessage.js'
+import { getGlobalConfig } from '../../../utils/config.js'
 
 type Props = {
   param: ToolResultBlockParam
@@ -25,6 +26,8 @@ export function UserToolResultMessage({
   verbose,
   width,
 }: Props): React.ReactNode {
+  const showToolOutputs = getGlobalConfig().showToolOutputs ?? true
+
   if (param.content === CANCEL_MESSAGE) {
     return <UserToolCanceledMessage />
   }
@@ -42,6 +45,10 @@ export function UserToolResultMessage({
 
   if (param.is_error) {
     return <UserToolErrorMessage param={param} verbose={verbose} />
+  }
+
+  if (!showToolOutputs) {
+    return null
   }
 
   return (

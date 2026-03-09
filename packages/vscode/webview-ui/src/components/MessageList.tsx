@@ -1,4 +1,4 @@
-import React, { useRef, useState, useCallback, useEffect } from "react"
+import React, { useRef, useState, useCallback, useEffect, useMemo } from "react"
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -12,6 +12,18 @@ import { useChatStore } from "../stores/chat.js"
 
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file", "Edit", "Write"])
 const BASH_OUTPUT_TAIL_LINES = 80
+
+const MessageListScroller = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  (props, ref) => (
+    <div
+      {...props}
+      ref={ref}
+      className={`${props.className ?? ""} nexus-message-list-scroller`.trim()}
+      style={{ ...props.style, minHeight: 0 }}
+    />
+  )
+)
+MessageListScroller.displayName = "MessageListScroller"
 
 /** Approval request inline (Cline/Roo-style: Allow once, Always allow, Deny, Add to allowed for folder, Allow all session, Say what to do instead). */
 function ApprovalInline({
@@ -198,55 +210,19 @@ interface Props {
 export function MessageList({ messages, isRunning = false, hasOlderMessages = false, loadingOlderMessages = false }: Props) {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const [stickToBottom, setStickToBottom] = useState(true)
-  const [topVisibleIndex, setTopVisibleIndex] = useState<number | null>(null)
   const store = useChatStore()
+  const renderedMessages = useMemo(() => mergeConsecutiveAssistantMessages(messages), [messages])
 
   const jumpToLatest = useCallback(() => {
     setStickToBottom(true)
     virtuosoRef.current?.scrollToIndex({
-      index: messages.length - 1,
+      index: renderedMessages.length - 1,
       behavior: "smooth",
       align: "end",
     })
-  }, [messages.length])
+  }, [renderedMessages.length])
 
-  const rangeChanged = useCallback((range: { startIndex: number; endIndex: number }) => {
-    setTopVisibleIndex(range.startIndex)
-  }, [])
-
-  // Keep scroll at bottom when new messages arrive or last message content grows (streaming).
-  // Store updates replace the messages array reference on every chunk, which can make Virtuoso reset scroll.
-  const lastMsg = messages[messages.length - 1]
-  const lastMsgScrollKey = lastMsg
-    ? `${(lastMsg as SessionMessage).id}-${typeof lastMsg.content === "string" ? (lastMsg.content as string).length : (lastMsg.content as MessagePart[])?.length ?? 0}`
-    : ""
-  useEffect(() => {
-    if (!stickToBottom || messages.length === 0) return
-    const raf = requestAnimationFrame(() => {
-      virtuosoRef.current?.scrollToIndex({
-        index: messages.length - 1,
-        behavior: "auto",
-        align: "end",
-      })
-    })
-    return () => cancelAnimationFrame(raf)
-  }, [stickToBottom, messages.length, lastMsgScrollKey])
-
-  const topMessage = topVisibleIndex != null && topVisibleIndex > 0 && messages[topVisibleIndex]
-  const topPreview = topMessage
-    ? (() => {
-        const m = topMessage as SessionMessage
-        if (m.role === "user") {
-          const c = m.content
-          if (typeof c === "string") return c.trim().slice(0, 60)
-          const text = (c as MessagePart[]).filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("")
-          return text.trim().slice(0, 60)
-        }
-        return null
-      })()
-    : null
-
-  if (messages.length === 0) {
+  if (renderedMessages.length === 0) {
     return (
       <div className="message-list-container">
         <div className="message-list message-list-content-empty" />
@@ -269,33 +245,21 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
           </button>
         </div>
       )}
-      <div className="message-list message-list-virtuoso">
-        {topVisibleIndex != null && topVisibleIndex > 0 && (
-          <div className="nexus-message-list-top-indicator">
-            {topPreview ? (
-              <span className="nexus-message-list-top-preview" title={topPreview}>
-                {topPreview}{topPreview.length >= 60 ? "…" : ""}
-              </span>
-            ) : (
-              <span className="nexus-message-list-top-preview">Above</span>
-            )}
-          </div>
-        )}
+      <div className="message-list-virtuoso">
         <div className="message-list-virtuoso-wrap">
         <Virtuoso
           ref={virtuosoRef}
-          data={messages}
-          initialTopMostItemIndex={messages.length > 0 ? messages.length - 1 : 0}
-          followOutput={stickToBottom ? "smooth" : false}
+          data={renderedMessages}
+          initialTopMostItemIndex={renderedMessages.length > 0 ? renderedMessages.length - 1 : undefined}
+          followOutput={stickToBottom ? "auto" : false}
           atBottomStateChange={setStickToBottom}
-          rangeChanged={rangeChanged}
           computeItemKey={(_, msg) => (msg as SessionMessage).id}
           itemContent={(idx, msg) => (
             <div className="message-list-item">
               <MessageBubble
                 message={msg}
                 messageIndex={idx}
-                isComplete={!isRunning || idx < messages.length - 1}
+                isComplete={!isRunning || idx < renderedMessages.length - 1}
                 pendingApproval={store.pendingApproval}
                 onResolveApproval={store.resolveApproval}
               />
@@ -304,16 +268,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
           style={{ height: "100%", minHeight: 0 }}
           className="message-list-virtuoso-inner"
           components={{
-            Scroller: React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-              (props, ref) => (
-                <div
-                  {...props}
-                  ref={ref}
-                  className={`${props.className ?? ""} nexus-message-list-scroller`.trim()}
-                  style={{ ...props.style, minHeight: 0 }}
-                />
-              )
-            ),
+            Scroller: MessageListScroller,
           }}
         />
         </div>
@@ -330,6 +285,31 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
       )}
     </div>
   )
+}
+
+function mergeConsecutiveAssistantMessages(messages: SessionMessage[]): SessionMessage[] {
+  if (messages.length < 2) return messages
+  const merged: SessionMessage[] = []
+  for (const message of messages) {
+    const prev = merged[merged.length - 1]
+    if (
+      prev?.role === "assistant" &&
+      message.role === "assistant" &&
+      !prev.summary &&
+      !message.summary &&
+      Array.isArray(prev.content) &&
+      Array.isArray(message.content)
+    ) {
+      merged[merged.length - 1] = {
+        ...prev,
+        ts: message.ts,
+        content: [...(prev.content as MessagePart[]), ...(message.content as MessagePart[])],
+      }
+      continue
+    }
+    merged.push(message)
+  }
+  return merged
 }
 
 function MessageBubble({

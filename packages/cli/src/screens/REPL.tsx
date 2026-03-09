@@ -221,6 +221,10 @@ export function REPL({
 
   /** Ref for Nexus agent approval dialog (write/execute/mcp/doom_loop). When set, panel calls it to resolve. */
   const tuiApprovalRef = useRef<((r: import('@nexuscode/core').PermissionResult) => void) | null>(null)
+  /** Active Nexus approval request shown inline below chat (prevents scroll jump to top). */
+  const [nexusApprovalAction, setNexusApprovalAction] = useState<
+    { action: import('@nexuscode/core').ApprovalAction; partId: string } | null
+  >(null)
   /** Host from last completed Nexus run; used by /undo to revert file edits. */
   const lastNexusHostRef = useRef<import('../host.js').CliHost | null>(null)
   /** Banner above input (e.g. "Compacting conversation…", "Loop detected…"). */
@@ -238,8 +242,16 @@ export function REPL({
     () => nexusInitialMode ?? 'agent',
   )
 
-  /** When true, show approval panel for writes/execute; when false, auto-accept. Toggle with Ctrl+Y. */
+  /** When true, auto-accept approvals (write/execute/mcp/doom_loop). Toggle with Ctrl+Y. */
   const [nexusAcceptEditsEnabled, setNexusAcceptEditsEnabled] = useState(true)
+
+  const hasRunningSubagent = useMemo(
+    () =>
+      Object.values(subagentsByPartId)
+        .flat()
+        .some(sa => sa.status === 'running'),
+    [subagentsByPartId],
+  )
 
   const sessionDiffEntries = useMemo(
     () => getSessionDiffFromMessages(nexusBootstrap?.session?.messages),
@@ -397,7 +409,7 @@ export function REPL({
           userPrompt,
           repoTools: tools,
           signal: abortController.signal,
-          autoApprove: dangerouslySkipPermissions || !nexusAcceptEditsEnabled,
+          autoApprove: dangerouslySkipPermissions || nexusAcceptEditsEnabled,
           modeOverride: nexusModeOverride,
           tuiApprovalRef,
           onSubagentEvent: (partId, event) => {
@@ -410,17 +422,9 @@ export function REPL({
         })) {
           if (message && 'type' in message && message.type === 'nexus_approval') {
             const approvalMsg = message as NexusApprovalMessage
-            setToolJSX({
-              jsx: (
-                <NexusApprovalPanel
-                  action={approvalMsg.action}
-                  partId={approvalMsg.partId}
-                  approvalRef={tuiApprovalRef}
-                  onClose={() => setToolJSX(null)}
-                  cwd={getOriginalCwd()}
-                />
-              ),
-              shouldHidePromptInput: true,
+            setNexusApprovalAction({
+              action: approvalMsg.action,
+              partId: approvalMsg.partId,
             })
             continue
           }
@@ -470,6 +474,7 @@ export function REPL({
       getGlobalConfig().hasAcknowledgedCostThreshold || false,
     )
 
+    setNexusApprovalAction(null)
     setIsLoading(false)
   }
 
@@ -519,7 +524,7 @@ export function REPL({
         userPrompt,
         repoTools: tools,
         signal: abortController.signal,
-        autoApprove: dangerouslySkipPermissions || !nexusAcceptEditsEnabled,
+        autoApprove: dangerouslySkipPermissions || nexusAcceptEditsEnabled,
         modeOverride: nexusModeOverride,
         tuiApprovalRef,
         onSubagentEvent: (partId, event) => {
@@ -532,17 +537,9 @@ export function REPL({
       })) {
         if (message && 'type' in message && message.type === 'nexus_approval') {
           const approvalMsg = message as NexusApprovalMessage
-          setToolJSX({
-            jsx: (
-              <NexusApprovalPanel
-                action={approvalMsg.action}
-                partId={approvalMsg.partId}
-                approvalRef={tuiApprovalRef}
-                onClose={() => setToolJSX(null)}
-                cwd={getOriginalCwd()}
-              />
-            ),
-            shouldHidePromptInput: true,
+          setNexusApprovalAction({
+            action: approvalMsg.action,
+            partId: approvalMsg.partId,
           })
           continue
         }
@@ -583,6 +580,7 @@ export function REPL({
         setMessages(oldMessages => [...oldMessages, message])
       }
     }
+    setNexusApprovalAction(null)
     setIsLoading(false)
   }
 
@@ -833,7 +831,7 @@ export function REPL({
         width="100%"
       >
         {!toolUseConfirm && !binaryFeedbackContext && isLoading && (
-          <Spinner />
+          !(nexusBootstrap && hasRunningSubagent) ? <Spinner /> : null
         )}
         {!toolJSX && binaryFeedbackContext && !isMessageSelectorVisible && (
           <BinaryFeedback
@@ -866,6 +864,32 @@ export function REPL({
           !toolUseConfirm &&
           !isMessageSelectorVisible &&
           !binaryFeedbackContext &&
+          nexusApprovalAction && (
+            <>
+              {nexusBootstrap ? (
+                <NexusSubagentBlock
+                  subagentsByPartId={subagentsByPartId}
+                  isLoading={isLoading}
+                />
+              ) : null}
+              {nexusBootstrap && nexusTodo.trim() ? (
+                <NexusTodoBlock todo={nexusTodo} />
+              ) : null}
+              <NexusApprovalPanel
+                action={nexusApprovalAction.action}
+                partId={nexusApprovalAction.partId}
+                approvalRef={tuiApprovalRef}
+                onClose={() => setNexusApprovalAction(null)}
+                cwd={getOriginalCwd()}
+              />
+            </>
+          )}
+
+        {!toolJSX &&
+          !toolUseConfirm &&
+          !isMessageSelectorVisible &&
+          !binaryFeedbackContext &&
+          !nexusApprovalAction &&
           showingCostDialog && (
             <CostThresholdDialog
               onDone={() => {
@@ -885,6 +909,7 @@ export function REPL({
           shouldShowPromptInput &&
           !isMessageSelectorVisible &&
           !binaryFeedbackContext &&
+          !nexusApprovalAction &&
           !showingCostDialog && (
             <>
               {nexusBannerText ? (

@@ -105,6 +105,8 @@ export type GlobalConfig = {
   mcpServers?: Record<string, McpServerConfig>
   preferredNotifChannel: NotificationChannel
   verbose: boolean
+  /** Show successful tool outputs in chat. */
+  showToolOutputs?: boolean
   customApiKeyResponses?: {
     approved?: string[]
     rejected?: string[]
@@ -122,6 +124,7 @@ export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
   theme: 'dark' as ThemeNames,
   preferredNotifChannel: 'iterm2',
   verbose: false,
+  showToolOutputs: true,
   customApiKeyResponses: {
     approved: [],
     rejected: [],
@@ -135,6 +138,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'lastOnboardingVersion',
   'lastReleaseNotesSeen',
   'verbose',
+  'showToolOutputs',
   'customApiKeyResponses',
   'primaryApiKey',
   'preferredNotifChannel',

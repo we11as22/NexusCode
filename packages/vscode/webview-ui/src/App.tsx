@@ -241,13 +241,16 @@ function ChatView() {
 function ChatBottomBar() {
   const store = useChatStore()
   const [imagePickerTrigger, setImagePickerTrigger] = useState<(() => void) | null>(null)
+  const registerImagePickerTrigger = React.useCallback((trigger: () => void) => {
+    setImagePickerTrigger(() => trigger)
+  }, [])
   const canSend = !store.isRunning && !store.awaitingApproval && (store.inputValue.trim().length > 0 || store.attachedImages.length > 0)
   const contextPercent = store.contextPercent
 
   return (
     <div className="chat-input-inner">
         <div className="chat-input-area">
-          <InputBar registerImagePickerTrigger={setImagePickerTrigger} />
+          <InputBar registerImagePickerTrigger={registerImagePickerTrigger} />
         </div>
         <div className="chat-control-row">
           <div className="chat-bottom-bar-left">
