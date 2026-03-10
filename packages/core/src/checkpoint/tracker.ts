@@ -5,6 +5,7 @@ import { simpleGit, type SimpleGit } from "simple-git"
 import { glob } from "glob"
 import type { ChangedFile, CheckpointEntry } from "../types.js"
 import { hashWorkingDir, validateWorkspacePath, writeExcludesFile } from "./utils.js"
+import { readCheckpointEntries, writeCheckpointEntries } from "./storage.js"
 
 const CHECKPOINT_WARN_MS = 7_000
 const GIT_DISABLED_SUFFIX = "_disabled"
@@ -81,6 +82,7 @@ export class CheckpointTracker {
         throw new Error(`Checkpoints can only be used in the original workspace: ${configured}`)
       }
       await writeExcludesFile(gitPath)
+      this.entries = await readCheckpointEntries(this.workspaceRoot, this.taskId).catch(() => [])
       return
     }
 
@@ -92,6 +94,7 @@ export class CheckpointTracker {
     await this.getGit().addConfig("user.name", "NexusCode")
     await this.getGit().addConfig("commit.gpgSign", "false")
     await writeExcludesFile(gitPath)
+    this.entries = await readCheckpointEntries(this.workspaceRoot, this.taskId).catch(() => [])
 
     await this.addCheckpointFiles()
     try {
@@ -146,6 +149,18 @@ export class CheckpointTracker {
   }
 
   async commit(description?: string): Promise<string> {
+    return this.commitInternal(description, "")
+  }
+
+  /**
+   * Commit a checkpoint associated with a specific user message.
+   * Used by rollback-to-message flow in extension/CLI.
+   */
+  async commitForMessage(messageId: string, description?: string): Promise<string> {
+    return this.commitInternal(description, messageId)
+  }
+
+  private async commitInternal(description?: string, messageId: string = ""): Promise<string> {
     if (!this.initialized) {
       await this.init()
     }
@@ -159,7 +174,8 @@ export class CheckpointTracker {
     } catch {
       hash = (await this.getGit().revparse(["HEAD"])).trim()
     }
-    this.entries.push({ hash, ts: Date.now(), description, messageId: "" })
+    this.entries.push({ hash, ts: Date.now(), description, messageId })
+    await writeCheckpointEntries(this.workspaceRoot, this.taskId, this.entries).catch(() => {})
     return hash
   }
 
@@ -170,8 +186,8 @@ export class CheckpointTracker {
   async resetHead(hash: string): Promise<void> {
     if (!this.initialized) throw new Error("Checkpoint not initialized")
     const cleanHash = hash.startsWith("HEAD ") ? hash.slice(5) : hash.trim()
-    await this.getGit().clean(["-f", "-d"])
-    await this.getGit().reset(["--hard", cleanHash])
+    await this.getGit().clean("f", ["-d"])
+    await this.getGit().raw(["reset", "--hard", cleanHash])
   }
 
   async getDiff(fromHash: string, toHash?: string): Promise<ChangedFile[]> {

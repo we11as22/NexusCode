@@ -20,6 +20,11 @@ export class VsCodeHost implements IHost {
 
   private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
 
+  private normalizePendingEditKey(filePath: string): string {
+    const absPath = path.isAbsolute(filePath) ? filePath : path.join(this.cwd, filePath)
+    return path.normalize(absPath).replace(/\\/g, "/")
+  }
+
   constructor(
     cwd: string,
     onEvent: (event: AgentEvent) => void,
@@ -143,7 +148,7 @@ export class VsCodeHost implements IHost {
           cwd,
           reject: false,
           timeout: 120_000,
-          signal,
+          cancelSignal: signal,
         })
         return {
           stdout: result.stdout ?? "",
@@ -158,7 +163,7 @@ export class VsCodeHost implements IHost {
       cwd,
       reject: false,
       timeout: 120_000,
-      signal,
+      cancelSignal: signal,
     })
     return {
       stdout: result.stdout ?? "",
@@ -430,7 +435,7 @@ export class VsCodeHost implements IHost {
   }
 
   async openFileEdit(filePath: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void> {
-    const key = filePath.replace(/\\/g, "/")
+    const key = this.normalizePendingEditKey(filePath)
     // Store pending edit only; do not open diff/editor — user opens file by clicking in chat/UI.
     this.pendingFileEdits.set(key, {
       originalContent: options.originalContent,
@@ -439,8 +444,14 @@ export class VsCodeHost implements IHost {
     })
   }
 
+  /** Pending edit snapshot for preview before approval (used by controller showDiff). */
+  getPendingFileEdit(filePath: string): { originalContent: string; newContent: string; isNewFile: boolean } | undefined {
+    const key = this.normalizePendingEditKey(filePath)
+    return this.pendingFileEdits.get(key)
+  }
+
   async saveFileEdit(filePath: string): Promise<void> {
-    const key = filePath.replace(/\\/g, "/")
+    const key = this.normalizePendingEditKey(filePath)
     const pending = this.pendingFileEdits.get(key)
     if (!pending) throw new Error(`No pending file edit for ${filePath}`)
     // Persist approved content to disk (file does not open here; user opens by clicking in chat/UI).
@@ -450,7 +461,7 @@ export class VsCodeHost implements IHost {
   }
 
   async revertFileEdit(filePath: string): Promise<void> {
-    const key = filePath.replace(/\\/g, "/")
+    const key = this.normalizePendingEditKey(filePath)
     this.pendingFileEdits.delete(key)
   }
 }
@@ -475,12 +486,7 @@ function getLanguageFromExtension(ext: string): string {
 export async function showDiffForPath(cwd: string, filePath: string): Promise<void> {
   const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
   const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
-
-  // Use workspace folder URI so on SSH/remote we read the file from the same resource as the workspace.
-  const wf = vscode.workspace.workspaceFolders?.[0]
-  const fileUri = wf
-    ? vscode.Uri.joinPath(wf.uri, relPath)
-    : vscode.Uri.file(absPath)
+  const fileUri = resolveWorkspaceFileUri(cwd, absPath)
 
   try {
     await vscode.workspace.fs.readFile(fileUri)
@@ -518,7 +524,13 @@ export async function showDiffForPath(cwd: string, filePath: string): Promise<vo
  * Open VS Code diff view for a session edit: before = original content, after = new content.
  * Used when user clicks a file in the "N Files" panel to review unaccepted session edits.
  */
-export async function showSessionEditDiff(cwd: string, filePath: string, before: string, after: string): Promise<void> {
+export async function showSessionEditDiff(
+  cwd: string,
+  filePath: string,
+  before: string,
+  after: string,
+  options?: { useWorkspaceAfterFile?: boolean }
+): Promise<void> {
   const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
   const fileName = path.basename(filePath)
   const lang = getLanguageFromExtension(path.extname(filePath))
@@ -526,16 +538,21 @@ export async function showSessionEditDiff(cwd: string, filePath: string, before:
     content: before,
     language: lang,
   })
-  const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
-  const wf = vscode.workspace.workspaceFolders?.[0]
-  const fileUri = wf
-    ? vscode.Uri.joinPath(wf.uri, relPath)
-    : vscode.Uri.file(absPath)
-
-  let afterUri = fileUri
-  try {
-    await vscode.workspace.fs.stat(fileUri)
-  } catch {
+  const fileUri = resolveWorkspaceFileUri(cwd, absPath)
+  const useWorkspaceAfterFile = options?.useWorkspaceAfterFile !== false
+  let afterUri: vscode.Uri
+  if (useWorkspaceAfterFile) {
+    afterUri = fileUri
+    try {
+      await vscode.workspace.fs.stat(fileUri)
+    } catch {
+      const afterDoc = await vscode.workspace.openTextDocument({
+        content: after,
+        language: lang,
+      })
+      afterUri = afterDoc.uri
+    }
+  } else {
     const afterDoc = await vscode.workspace.openTextDocument({
       content: after,
       language: lang,
@@ -550,4 +567,14 @@ export async function showSessionEditDiff(cwd: string, filePath: string, before:
     `${fileName}: Session changes`,
     { viewColumn: vscode.ViewColumn.Active, preview: false, preserveFocus: false }
   )
+}
+
+function resolveWorkspaceFileUri(cwd: string, absPath: string): vscode.Uri {
+  const wf = vscode.workspace.workspaceFolders?.[0]
+  if (!wf) return vscode.Uri.file(absPath)
+  const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
+  if (relPath.startsWith("..") || path.isAbsolute(relPath)) {
+    return vscode.Uri.file(absPath)
+  }
+  return vscode.Uri.joinPath(wf.uri, relPath)
 }

@@ -8,6 +8,7 @@ import { InputContextPanel } from "./components/InputContextPanel.js"
 import { QueuedMessagesPanel } from "./components/QueuedMessagesPanel.js"
 import { ModeDropdown } from "./components/ModeDropdown.js"
 import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
+import { AutoApproveDropdown } from "./components/AutoApproveDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import { CheckpointStrip } from "./components/CheckpointStrip.js"
 import type { ExtensionMessage } from "./types/messages.js"
@@ -256,6 +257,7 @@ function ChatBottomBar() {
           <div className="chat-bottom-bar-left">
             <ModeDropdown />
             <AgentPresetDropdown />
+            <AutoApproveDropdown />
           </div>
           <div className="chat-bottom-bar-input-wrap">
           {store.isRunning && (
@@ -674,6 +676,7 @@ interface SettingsDraft {
   modelApiKey: string
   modelBaseUrl: string
   modelTemperature: string
+  modelReasoningEffort: string
   modelContextWindow: string
   embProvider: string
   embModel: string
@@ -853,6 +856,11 @@ function SettingsView() {
             />
             <SettingsInput label="Model" value={draft.modelId} onChange={(v) => setDraft({ ...draft, modelId: v })} />
             <SettingsInput label="Temperature (0-2)" value={draft.modelTemperature} onChange={(v) => setDraft({ ...draft, modelTemperature: v })} />
+            <SettingsInput
+              label="Reasoning effort (optional: none|minimal|low|medium|high|max)"
+              value={draft.modelReasoningEffort}
+              onChange={(v) => setDraft({ ...draft, modelReasoningEffort: v })}
+            />
             <SettingsInput
               label="Context window (tokens, optional override)"
               value={draft.modelContextWindow}
@@ -1954,6 +1962,7 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     modelApiKey: config.model.apiKey ?? "",
     modelBaseUrl: isOpenRouter && baseUrl ? baseUrl : (config.model.baseUrl ?? ""),
     modelTemperature: toInputNumber(config.model.temperature),
+    modelReasoningEffort: config.model.reasoningEffort ?? "",
     modelContextWindow: toInputNumber(config.model.contextWindow),
     embProvider: config.embeddings?.provider ?? "openai",
     embModel: config.embeddings?.model ?? "",
@@ -1998,6 +2007,7 @@ function getDefaultDraft(): SettingsDraft {
     modelApiKey: "",
     modelBaseUrl: "https://openrouter.ai/api/v1",
     modelTemperature: "0.7",
+    modelReasoningEffort: "",
     modelContextWindow: "",
     embProvider: "openai",
     embModel: "",
@@ -2039,6 +2049,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       ? (modelBaseUrl || "https://openrouter.ai/api/v1")
       : (modelBaseUrl || undefined)
   const modelTemperature = parseNumber(draft.modelTemperature)
+  const modelReasoningEffort = draft.modelReasoningEffort.trim() || undefined
   const modelContextWindow = parseIntOrUndefined(draft.modelContextWindow)
   const embDimensions = parseIntOrUndefined(draft.embDimensions)
   const embProviderRaw = draft.embProvider.trim() || "openai"
@@ -2066,6 +2077,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       apiKey: draft.modelApiKey.trim() || undefined,
       baseUrl: normalizedBaseUrl,
       temperature: modelTemperature,
+      reasoningEffort: modelReasoningEffort,
       contextWindow: modelContextWindow,
     },
     embeddings: draft.embModel.trim()

@@ -363,6 +363,7 @@ ${commandList}`,
     )
     .option('-m, --model <model>', 'Provider/model (e.g. anthropic/claude-sonnet-4-5, openai/gpt-4o)', String)
     .option('--temperature <n>', 'Sampling temperature (0-2)', parseFloat)
+    .option('--reasoning-effort <effort>', 'Reasoning effort (none|minimal|low|medium|high|max)')
     .option('--project <dir>', 'Project directory (default: current directory)', String)
     .option('--no-index', 'Disable codebase indexing', false)
     .option('-s, --session <id>', 'Session ID to resume', String)
@@ -382,6 +383,7 @@ ${commandList}`,
           dangerouslySkipPermissions,
           model,
           temperature,
+          reasoningEffort,
           project,
           index,
           session,
@@ -434,6 +436,7 @@ ${commandList}`,
             serverUrl: server ?? null,
             modelOverride: model,
             temperatureOverride: temperature,
+            reasoningEffortOverride: reasoningEffort,
             profileOverride: profile ?? undefined,
           })
 
@@ -479,6 +482,7 @@ ${commandList}`,
             serverUrl: server ?? null,
             modelOverride: model,
             temperatureOverride: temperature,
+            reasoningEffortOverride: reasoningEffort,
             profileOverride: profile ?? undefined,
           })
 

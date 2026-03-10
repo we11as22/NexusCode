@@ -1507,30 +1507,32 @@ html, body, #root {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: none;
-  border-radius: 6px;
-  background: transparent;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 65%, transparent);
   color: var(--vscode-descriptionForeground);
   cursor: pointer;
-  transition: color 0.12s ease, background 0.12s ease;
+  transition: color 0.12s ease, background 0.12s ease, transform 0.12s ease;
 }
 
 .nexus-rollback-btn-corner {
   position: absolute;
-  right: 6px;
-  bottom: 6px;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 .nexus-rollback-btn:hover {
   color: var(--vscode-foreground);
   background: var(--vscode-list-hoverBackground);
+  transform: translateY(-50%) scale(1.03);
 }
 
 .nexus-rollback-arrow {
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1;
 }
 
@@ -1554,7 +1556,7 @@ html, body, #root {
 }
 
 .nexus-user-msg-bubble-has-rollback {
-  padding-right: 38px;
+  padding-right: 46px;
 }
 
 .nexus-user-msg-content {

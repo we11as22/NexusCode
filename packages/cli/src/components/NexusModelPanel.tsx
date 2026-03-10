@@ -65,6 +65,9 @@ export function NexusModelPanel({
   const [ownTemperature, setOwnTemperature] = useState(
     String(initialConfig.model?.temperature ?? ''),
   )
+  const [ownReasoningEffort, setOwnReasoningEffort] = useState(
+    String(initialConfig.model?.reasoningEffort ?? ''),
+  )
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -73,6 +76,7 @@ export function NexusModelPanel({
   const apiKeyField = useFieldInput(ownApiKey, setOwnApiKey, invert, { maskChar: '•' })
   const modelIdField = useFieldInput(ownModelId, setOwnModelId, invert)
   const temperatureField = useFieldInput(ownTemperature, setOwnTemperature, invert)
+  const reasoningEffortField = useFieldInput(ownReasoningEffort, setOwnReasoningEffort, invert)
 
   const providerIndexRef = useRef(0)
   providerIndexRef.current = providerIndex
@@ -188,7 +192,7 @@ export function NexusModelPanel({
     }
 
     if (screen === 'custom') {
-      const fieldCount = 5
+      const fieldCount = 6
       if (ownFieldIndex > 0 && key.upArrow) {
         setOwnFieldIndex((i) => Math.max(0, i - 1))
         return
@@ -217,8 +221,14 @@ export function NexusModelPanel({
           return
         }
       }
-      if (ownFieldIndex >= 1 && ownFieldIndex <= 4) {
-        const handlers = [baseUrlField.handleInput, apiKeyField.handleInput, modelIdField.handleInput, temperatureField.handleInput]
+      if (ownFieldIndex >= 1 && ownFieldIndex <= 5) {
+        const handlers = [
+          baseUrlField.handleInput,
+          apiKeyField.handleInput,
+          modelIdField.handleInput,
+          temperatureField.handleInput,
+          reasoningEffortField.handleInput,
+        ]
         if (handlers[ownFieldIndex - 1](input ?? '', key)) return
       }
       if (isEnter(key, input ?? '')) {
@@ -243,6 +253,7 @@ export function NexusModelPanel({
             baseUrl: baseUrl || undefined,
             ...(ownApiKey.trim() ? { apiKey: ownApiKey.trim() } : {}),
             temperature: temp,
+            reasoningEffort: ownReasoningEffort.trim() || undefined,
           } as ProviderConfig,
         })
           .then(() => onClose({ saved: true }))
@@ -257,22 +268,23 @@ export function NexusModelPanel({
 
   // --- Custom model form (step 2b)
   if (screen === 'custom') {
-    const fieldCount = 5
+    const fieldCount = 6
     const fieldDisplays = [
       PROVIDER_OPTIONS.find((p) => p.id === ownProvider)?.label ?? ownProvider,
       ownFieldIndex === 1 ? baseUrlField.renderedValue : (ownBaseUrl || '(optional for some)'),
       ownFieldIndex === 2 ? apiKeyField.renderedValue : (ownApiKey ? '•'.repeat(ownApiKey.length) : '(optional)'),
       ownFieldIndex === 3 ? modelIdField.renderedValue : (ownModelId || ''),
       ownFieldIndex === 4 ? temperatureField.renderedValue : (ownTemperature || ''),
+      ownFieldIndex === 5 ? reasoningEffortField.renderedValue : (ownReasoningEffort || '(auto)'),
     ]
-    const fieldNames = ['Provider', 'Base URL', 'API key', 'Model ID', 'Temperature (0–2)']
+    const fieldNames = ['Provider', 'Base URL', 'API key', 'Model ID', 'Temperature (0–2)', 'Reasoning effort']
     return (
-      <Box flexDirection="column" borderStyle="round" borderColor={theme.secondaryBorder} paddingX={1} marginTop={1} height={14}>
+      <Box flexDirection="column" borderStyle="round" borderColor={theme.secondaryBorder} paddingX={1} marginTop={1} height={16}>
         <Box marginBottom={1}>
           <Text bold>Custom model</Text>
           <Text dimColor> · Esc back</Text>
         </Box>
-        <Box flexDirection="column" height={6}>
+        <Box flexDirection="column" height={7}>
           {fieldNames.map((name, i) => (
             <Box key={name} height={1}>
               <Text color={i === ownFieldIndex ? theme.primary : undefined}>

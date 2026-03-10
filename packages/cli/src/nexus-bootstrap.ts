@@ -65,7 +65,7 @@ export function normalizeModelConfig<T extends { provider?: unknown; id?: unknow
 }
 
 export type ConfigSnapshot = {
-  model: { provider: string; id: string; temperature?: number }
+  model: { provider: string; id: string; temperature?: number; reasoningEffort?: string }
   embeddings?: { provider: string; model: string; dimensions?: number }
   indexing: { enabled: boolean; vector: boolean }
   vectorDb?: { enabled: boolean; url: string }
@@ -103,6 +103,7 @@ export function buildConfigSnapshot(conf: NexusConfig): ConfigSnapshot {
       provider: conf.model.provider,
       id: conf.model.id,
       temperature: conf.model.temperature,
+      reasoningEffort: conf.model.reasoningEffort,
     },
     embeddings: conf.embeddings
       ? {
@@ -170,6 +171,7 @@ export async function bootstrapNexus(opts: {
   serverUrl?: string | null
   modelOverride?: string
   temperatureOverride?: number
+  reasoningEffortOverride?: string
   profileOverride?: string
 }): Promise<NexusBootstrapResult> {
   const {
@@ -181,6 +183,7 @@ export async function bootstrapNexus(opts: {
     serverUrl = null,
     modelOverride,
     temperatureOverride,
+    reasoningEffortOverride,
     profileOverride,
   } = opts
 
@@ -236,6 +239,13 @@ export async function bootstrapNexus(opts: {
 
   if (typeof temperatureOverride === 'number' && Number.isFinite(temperatureOverride)) {
     config.model.temperature = Math.max(0, Math.min(2, temperatureOverride))
+  }
+
+  if (typeof reasoningEffortOverride === 'string') {
+    const trimmed = reasoningEffortOverride.trim()
+    if (trimmed.length > 0) {
+      config.model.reasoningEffort = trimmed
+    }
   }
 
   if (profileOverride && (config as unknown as { profiles?: Record<string, unknown> }).profiles?.[profileOverride]) {

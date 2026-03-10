@@ -38,6 +38,7 @@ import {
 } from '../query.js'
 import { queryNexus } from '../nexus-query.js'
 import type { NexusApprovalMessage, NexusBannerMessage, NexusTodoMessage } from '../nexus-query.js'
+import type { AutoApprovePermissions } from '../nexus-query.js'
 import type { WrappedClient } from '../services/mcpClient.js'
 import type { Tool } from '../Tool.js'
 import { AutoUpdaterResult } from '../utils/autoUpdater.js'
@@ -74,6 +75,19 @@ const NEXUS_MODES = ['agent', 'plan', 'ask', 'debug'] as const
 function cycleNexusMode(current: string): string {
   const i = NEXUS_MODES.indexOf(current as (typeof NEXUS_MODES)[number])
   return NEXUS_MODES[(i + 1) % NEXUS_MODES.length] ?? 'agent'
+}
+
+function buildInitialAutoApproveState(
+  snapshot: ConfigSnapshot | undefined,
+): AutoApprovePermissions {
+  const perms = snapshot?.permissions
+  return {
+    read: perms?.autoApproveRead ?? true,
+    write: perms?.autoApproveWrite ?? false,
+    execute: perms?.autoApproveCommand ?? false,
+    mcp: perms?.autoApproveMcp ?? false,
+    browser: perms?.autoApproveBrowser ?? false,
+  }
 }
 
 function getSessionDiffFromMessages(messages: SessionMessage[] | undefined): SessionDiffEntry[] {
@@ -241,8 +255,23 @@ export function REPL({
     () => nexusInitialMode ?? 'agent',
   )
 
-  /** When true, auto-accept approvals (write/execute/mcp/doom_loop). Toggle with Ctrl+Y. */
-  const [nexusAcceptEditsEnabled, setNexusAcceptEditsEnabled] = useState(true)
+  /** Granular auto-approve controls for Nexus tools (read/write/execute/mcp/browser). */
+  const [nexusAutoApprove, setNexusAutoApprove] = useState<AutoApprovePermissions>(
+    () => buildInitialAutoApproveState(nexusConfigSnapshot),
+  )
+  useEffect(() => {
+    if (!nexusConfigSnapshot) return
+    setNexusAutoApprove(buildInitialAutoApproveState(nexusConfigSnapshot))
+  }, [nexusConfigSnapshot])
+  const nexusAcceptEditsEnabled = useMemo(
+    () =>
+      nexusAutoApprove.read &&
+      nexusAutoApprove.write &&
+      nexusAutoApprove.execute &&
+      nexusAutoApprove.mcp &&
+      nexusAutoApprove.browser,
+    [nexusAutoApprove],
+  )
   /** Collapsed/expanded details for tool inputs in chat. Toggle with Ctrl+O. */
   const [toolDetailsExpanded, setToolDetailsExpanded] = useState(false)
 
@@ -258,6 +287,26 @@ export function REPL({
     () => getSessionDiffFromMessages(nexusBootstrap?.session?.messages),
     [nexusBootstrap?.session?.messages, messages.length],
   )
+
+  const toggleNexusAutoApproveAction = useCallback(
+    (action: keyof AutoApprovePermissions) => {
+      setNexusAutoApprove(prev => ({ ...prev, [action]: !prev[action] }))
+    },
+    [],
+  )
+
+  const toggleNexusAutoApproveAll = useCallback(() => {
+    setNexusAutoApprove(prev => {
+      const enableAll = !(prev.read && prev.write && prev.execute && prev.mcp && prev.browser)
+      return {
+        read: enableAll,
+        write: enableAll,
+        execute: enableAll,
+        mcp: enableAll,
+        browser: enableAll,
+      }
+    })
+  }, [])
 
   /** Revert last assistant turn and file edits (/undo). */
   const onNexusUndo = useCallback(async () => {
@@ -410,7 +459,8 @@ export function REPL({
           userPrompt,
           repoTools: tools,
           signal: abortController.signal,
-          autoApprove: dangerouslySkipPermissions || nexusAcceptEditsEnabled,
+          autoApprove: !!dangerouslySkipPermissions,
+          autoApprovePermissions: nexusAutoApprove,
           modeOverride: nexusModeOverride,
           tuiApprovalRef,
           onSubagentEvent: (partId, event) => {
@@ -525,7 +575,8 @@ export function REPL({
         userPrompt,
         repoTools: tools,
         signal: abortController.signal,
-        autoApprove: dangerouslySkipPermissions || nexusAcceptEditsEnabled,
+        autoApprove: !!dangerouslySkipPermissions,
+        autoApprovePermissions: nexusAutoApprove,
         modeOverride: nexusModeOverride,
         tuiApprovalRef,
         onSubagentEvent: (partId, event) => {
@@ -984,7 +1035,13 @@ export function REPL({
                 nexusAcceptEditsEnabled={nexusAcceptEditsEnabled}
                 onNexusToggleAcceptEdits={
                   nexusBootstrap
-                    ? () => setNexusAcceptEditsEnabled(prev => !prev)
+                    ? toggleNexusAutoApproveAll
+                    : undefined
+                }
+                nexusAutoApprove={nexusAutoApprove}
+                onToggleNexusAutoApproveAction={
+                  nexusBootstrap
+                    ? toggleNexusAutoApproveAction
                     : undefined
                 }
                 onNexusConfigSaved={onNexusConfigSaved}

@@ -209,9 +209,14 @@ interface Props {
 
 export function MessageList({ messages, isRunning = false, hasOlderMessages = false, loadingOlderMessages = false }: Props) {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const initialTopMostItemIndexRef = useRef<number | undefined>(undefined)
   const [stickToBottom, setStickToBottom] = useState(true)
   const store = useChatStore()
   const renderedMessages = useMemo(() => mergeConsecutiveAssistantMessages(messages), [messages])
+
+  if (initialTopMostItemIndexRef.current == null && renderedMessages.length > 0) {
+    initialTopMostItemIndexRef.current = renderedMessages.length - 1
+  }
 
   const jumpToLatest = useCallback(() => {
     setStickToBottom(true)
@@ -250,9 +255,10 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
         <Virtuoso
           ref={virtuosoRef}
           data={renderedMessages}
-          initialTopMostItemIndex={renderedMessages.length > 0 ? renderedMessages.length - 1 : undefined}
+          initialTopMostItemIndex={initialTopMostItemIndexRef.current}
           followOutput={stickToBottom ? "auto" : false}
           atBottomStateChange={setStickToBottom}
+          atBottomThreshold={10}
           computeItemKey={(_, msg) => (msg as SessionMessage).id}
           itemContent={(idx, msg) => (
             <div className="message-list-item">
@@ -265,7 +271,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
               />
             </div>
           )}
-          style={{ height: "100%", minHeight: 0 }}
+          style={{ height: "100%", minHeight: 0, overflowAnchor: "none" }}
           className="message-list-virtuoso-inner"
           components={{
             Scroller: MessageListScroller,

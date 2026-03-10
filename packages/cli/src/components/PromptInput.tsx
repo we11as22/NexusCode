@@ -60,6 +60,18 @@ type Props = {
   /** When set (Nexus), show "Accept edits: on|off" and allow Ctrl+Y to toggle. */
   nexusAcceptEditsEnabled?: boolean
   onNexusToggleAcceptEdits?: () => void
+  /** Granular auto-approve state for Nexus actions. */
+  nexusAutoApprove?: {
+    read: boolean
+    write: boolean
+    execute: boolean
+    mcp: boolean
+    browser: boolean
+  }
+  /** Toggle one granular auto-approve action (read/write/execute/mcp/browser). */
+  onToggleNexusAutoApproveAction?: (
+    action: 'read' | 'write' | 'execute' | 'mcp' | 'browser',
+  ) => void
   /** Called when a Nexus panel (e.g. /model) saves config so the header can refresh */
   onNexusConfigSaved?: () => void | Promise<void>
   /** When set (Nexus), /undo reverts the last message and file changes. */
@@ -103,6 +115,8 @@ function PromptInput({
   onCycleNexusMode,
   nexusAcceptEditsEnabled = true,
   onNexusToggleAcceptEdits,
+  nexusAutoApprove,
+  onToggleNexusAutoApproveAction,
   onNexusConfigSaved,
   onNexusUndo,
   onToggleToolDetails,
@@ -318,6 +332,29 @@ function PromptInput({
       onNexusToggleAcceptEdits()
       return
     }
+    if (key.ctrl && onToggleNexusAutoApproveAction) {
+      const c = inputChar.toLowerCase()
+      if (c === 'r') {
+        onToggleNexusAutoApproveAction('read')
+        return
+      }
+      if (c === 'w') {
+        onToggleNexusAutoApproveAction('write')
+        return
+      }
+      if (c === 'e') {
+        onToggleNexusAutoApproveAction('execute')
+        return
+      }
+      if (c === 'p') {
+        onToggleNexusAutoApproveAction('mcp')
+        return
+      }
+      if (c === 'b') {
+        onToggleNexusAutoApproveAction('browser')
+        return
+      }
+    }
     // esc is a little overloaded:
     // - when we're loading a response, it's used to cancel the request
     // - otherwise, it's used to show the message selector
@@ -395,6 +432,31 @@ function PromptInput({
               <Text dimColor> · Ctrl+Y to toggle</Text>
             </>
           )}
+        </Box>
+      )}
+      {nexusMode != null && nexusAutoApprove != null && onToggleNexusAutoApproveAction != null && (
+        <Box paddingX={2} paddingY={0}>
+          <Text dimColor>Auto-approve: </Text>
+          <Text color={nexusAutoApprove.read ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.read}>
+            [{nexusAutoApprove.read ? 'x' : ' '}]Read
+          </Text>
+          <Text dimColor> </Text>
+          <Text color={nexusAutoApprove.write ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.write}>
+            [{nexusAutoApprove.write ? 'x' : ' '}]Write
+          </Text>
+          <Text dimColor> </Text>
+          <Text color={nexusAutoApprove.execute ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.execute}>
+            [{nexusAutoApprove.execute ? 'x' : ' '}]Exec
+          </Text>
+          <Text dimColor> </Text>
+          <Text color={nexusAutoApprove.mcp ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.mcp}>
+            [{nexusAutoApprove.mcp ? 'x' : ' '}]MCP
+          </Text>
+          <Text dimColor> </Text>
+          <Text color={nexusAutoApprove.browser ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.browser}>
+            [{nexusAutoApprove.browser ? 'x' : ' '}]Browser
+          </Text>
+          <Text dimColor> · Ctrl+R/W/E/P/B</Text>
         </Box>
       )}
       {suggestions.length === 0 && (

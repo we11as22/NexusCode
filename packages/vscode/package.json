@@ -201,6 +201,17 @@
           "maximum": 2,
           "description": "Model temperature (0-2). Lower is more deterministic."
         },
+        "nexuscode.reasoningEffort": {
+          "type": "string",
+          "default": "",
+          "description": "Reasoning effort hint for reasoning-capable models (e.g. none|minimal|low|medium|high|max). Leave empty for auto."
+        },
+        "nexuscode.contextWindow": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Optional context window override in tokens. Set 0 to use model/provider default."
+        },
         "nexuscode.enableIndexing": {
           "type": "boolean",
           "default": true,
@@ -292,6 +303,16 @@
           "type": "boolean",
           "default": false,
           "description": "Auto-approve terminal command execution"
+        },
+        "nexuscode.autoApproveMcp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve MCP tool calls"
+        },
+        "nexuscode.autoApproveBrowser": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve browser/web actions"
         },
         "nexuscode.runCommandsInTerminal": {
           "type": "boolean",

@@ -8,6 +8,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey: z.ZodOptional<z.ZodString>;
         baseUrl: z.ZodOptional<z.ZodString>;
         temperature: z.ZodOptional<z.ZodNumber>;
+        /** Optional reasoning effort hint for reasoning-capable models. */
+        reasoningEffort: z.ZodOptional<z.ZodString>;
         /** Optional explicit context window size override (tokens). */
         contextWindow: z.ZodOptional<z.ZodNumber>;
         resourceName: z.ZodOptional<z.ZodString>;
@@ -20,6 +22,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -31,6 +34,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -612,6 +616,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         baseUrl: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         temperature: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
+        reasoningEffort: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         contextWindow: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
         resourceName: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         deploymentId: z.ZodOptional<z.ZodOptional<z.ZodString>>;
@@ -623,6 +628,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -634,6 +640,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -647,6 +654,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -787,6 +795,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -814,6 +823,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -1006,6 +1016,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -1155,6 +1166,8 @@ interface ISession {
     rewindToTimestamp(timestamp: number): void;
     /** Rewind so that only messages with ts < timestamp remain (for rollback before a message). */
     rewindBeforeTimestamp(timestamp: number): void;
+    /** Rewind so that only messages strictly before the given message remain. */
+    rewindBeforeMessageId(messageId: string): void;
     save(): Promise<void>;
     load(): Promise<void>;
 }
@@ -1362,6 +1375,11 @@ interface ProviderConfig {
      * Most providers support range [0, 2].
      */
     temperature?: number;
+    /**
+     * Optional reasoning effort hint for reasoning-capable models.
+     * Supported values depend on provider/model (e.g. low/medium/high/minimal/none/max).
+     */
+    reasoningEffort?: string;
     /** Optional explicit context window override in tokens for this model. */
     contextWindow?: number;
     /** Azure-specific */
@@ -1681,8 +1699,13 @@ interface StreamOptions {
     maxTokens?: number;
     temperature?: number;
     maxRetries?: number;
+    initialRetryDelayMs?: number;
+    maxRetryDelayMs?: number;
+    retryOnStatus?: number[];
     /** Provider-specific options (e.g. anthropic: { thinking: { type: 'enabled', budgetTokens } }) */
     providerOptions?: Record<string, unknown>;
+    /** Ordered fallback options (strongest -> safest). Stream may retry with next candidate if provider rejects reasoning params. */
+    providerOptionsCandidates?: Array<Record<string, unknown> | undefined>;
 }
 interface GenerateOptions<T> {
     messages: LLMMessage[];
@@ -1743,6 +1766,8 @@ declare class Session implements ISession {
     rewindToTimestamp(timestamp: number): void;
     /** Rewind so that only messages strictly before this timestamp remain (used for rollback before a given message). */
     rewindBeforeTimestamp(timestamp: number): void;
+    /** Rewind so that only messages strictly before a specific message remain. */
+    rewindBeforeMessageId(messageId: string): void;
     save(): Promise<void>;
     load(): Promise<void>;
     static create(cwd: string): Session;
@@ -1847,7 +1872,7 @@ interface PromptContext {
     contextPercent?: number;
     /** When true, inject create-skill instructions and allow writes to skill dirs */
     createSkillMode?: boolean;
-    /** When true, inject JSON schema for first-line preamble (reasoning only). */
+    /** Capability flag from provider; reserved for future prompt branching. */
     supportsStructuredOutput?: boolean;
 }
 /**
@@ -2200,6 +2225,12 @@ declare class CheckpointTracker {
     private addCheckpointFiles;
     private renameNestedGitRepos;
     commit(description?: string): Promise<string>;
+    /**
+     * Commit a checkpoint associated with a specific user message.
+     * Used by rollback-to-message flow in extension/CLI.
+     */
+    commitForMessage(messageId: string, description?: string): Promise<string>;
+    private commitInternal;
     /**
      * Restore workspace to a checkpoint (Cline/Roo-Code style).
      * Runs git clean -fd then git reset --hard in the shadow repo; worktree = workspace so files are restored in place.

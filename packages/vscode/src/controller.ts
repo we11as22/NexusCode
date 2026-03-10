@@ -40,7 +40,7 @@ import {
   hadPlanExit,
   getPlanContentForFollowup,
 } from "@nexuscode/core"
-import { VsCodeHost, showDiffForPath, showSessionEditDiff } from "./host.js"
+import { VsCodeHost, showSessionEditDiff } from "./host.js"
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 
@@ -217,6 +217,142 @@ export class Controller {
   }
   /** Session unaccepted edits: full content for revert/diff; cleared on session change. */
   private sessionUnacceptedEdits: Array<{ path: string; originalContent: string; newContent: string; isNewFile: boolean }> = []
+  /** Active host for the running local loop; used for pending write/edit previews before approval. */
+  private activeRunHost: VsCodeHost | null = null
+
+  private normalizePathKey(filePath: string, cwd: string): string {
+    const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
+    return path.normalize(absPath).replace(/\\/g, "/")
+  }
+
+  private async revertDirtyWorkspaceDocs(cwd: string): Promise<void> {
+    const cwdResolved = path.resolve(cwd)
+    for (const doc of vscode.workspace.textDocuments) {
+      if (doc.uri.scheme !== "file") continue
+      const rel = path.relative(cwdResolved, doc.uri.fsPath)
+      if (rel.startsWith("..") || path.isAbsolute(rel)) continue
+      if (!doc.isDirty) continue
+      try {
+        await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preserveFocus: false })
+        await vscode.commands.executeCommand("workbench.action.files.revert")
+      } catch {
+        // Ignore per-doc revert errors
+      }
+    }
+  }
+
+  private async openWorkspaceFile(cwd: string, filePath: string): Promise<void> {
+    const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
+    const wf = vscode.workspace.workspaceFolders?.[0]
+    const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
+    const uri =
+      wf && !(relPath.startsWith("..") || path.isAbsolute(relPath))
+        ? vscode.Uri.joinPath(wf.uri, relPath)
+        : vscode.Uri.file(absPath)
+    try {
+      const doc = await vscode.workspace.openTextDocument(uri)
+      await vscode.window.showTextDocument(doc, {
+        viewColumn: vscode.ViewColumn.Active,
+        preview: false,
+        preserveFocus: false,
+      })
+    } catch {
+      vscode.window.showErrorMessage(`NexusCode: Could not open ${filePath}`)
+    }
+  }
+
+  private extractUserMessagePreview(message: SessionMessage): string {
+    const raw =
+      typeof message.content === "string"
+        ? message.content
+        : (message.content.find((part) => part.type === "text") as { text?: string } | undefined)?.text ?? ""
+    return raw.replace(/\s+/g, " ").trim().slice(0, 80) || "User message"
+  }
+
+  private async ensureCheckpointForCurrentSession(
+    sessionId: string,
+    cwd: string,
+    configForRun: NexusConfig
+  ): Promise<CheckpointTracker | undefined> {
+    if (!configForRun.checkpoint.enabled) return undefined
+    if (this.checkpoint) return this.checkpoint
+    const tracker = new CheckpointTracker(sessionId, cwd)
+    const ok = await tracker.init(configForRun.checkpoint.timeoutMs).catch(() => false)
+    if (!ok) return undefined
+    this.checkpoint = tracker
+    return tracker
+  }
+
+  private async commitCheckpointForUserMessage(
+    sessionId: string,
+    cwd: string,
+    configForRun: NexusConfig,
+    userMessage: SessionMessage
+  ): Promise<void> {
+    const tracker = await this.ensureCheckpointForCurrentSession(sessionId, cwd, configForRun)
+    if (!tracker) return
+    const description = `Before: ${this.extractUserMessagePreview(userMessage)}`
+    await tracker.commitForMessage(userMessage.id, description)
+    this.postStateToWebview()
+  }
+
+  private async rollbackToBeforeMessage(messageId: string): Promise<void> {
+    if (!this.session || !this.config) return
+    const msgs = this.session.messages
+    const idx = msgs.findIndex((m) => m.id === messageId)
+    if (idx <= 0) return
+    const target = msgs[idx]!
+    if (target.role !== "user") return
+
+    const choice = await vscode.window.showWarningMessage(
+      "Discard all changes and chat messages up to this checkpoint?",
+      { modal: true },
+      "Continue",
+      "Cancel"
+    )
+    if (choice !== "Continue") return
+
+    const cwd = this.getCwd()
+    const tracker = await this.ensureCheckpointForCurrentSession(this.session.id, cwd, this.config)
+    const entries = tracker?.getEntries() ?? []
+    const nextUserMessage = msgs.slice(idx + 1).find((m) => m.role === "user")
+    const exact = [...entries].reverse().find((e) => e.messageId === target.id)
+    // Backward compatibility for old entries without messageId:
+    // prefer the earliest checkpoint at/after target message time and before next user message.
+    const windowUpperTs = nextUserMessage?.ts ?? Number.POSITIVE_INFINITY
+    const forwardInWindow = entries.find((e) => e.ts >= target.ts && e.ts < windowUpperTs)
+    const fallbackByTime = [...entries].reverse().find((e) => e.ts <= target.ts)
+    const fallbackForward = forwardInWindow ?? undefined
+    const checkpointEntry = exact ?? fallbackForward ?? fallbackByTime
+
+    if (checkpointEntry && tracker) {
+      this.abortController?.abort()
+      this.isRunning = false
+      try {
+        await tracker.resetHead(checkpointEntry.hash)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        vscode.window.showErrorMessage(`NexusCode: Failed to rollback workspace — ${message}`)
+        return
+      }
+      await this.revertDirtyWorkspaceDocs(cwd)
+      this.session.rewindBeforeMessageId(target.id)
+      this.sessionUnacceptedEdits = []
+      await this.session.save().catch(() => {})
+      this.postStateToWebview()
+      vscode.window.showInformationMessage("NexusCode: Rolled back workspace and chat to before this message.", { modal: false })
+      return
+    }
+
+    // Fallback for old sessions without message-linked checkpoints.
+    this.session.rewindBeforeMessageId(target.id)
+    await this.session.save().catch(() => {})
+    this.postStateToWebview()
+    vscode.window.showWarningMessage(
+      "NexusCode: No workspace checkpoint found for this message. Chat was rolled back, but files were not changed.",
+      { modal: false }
+    )
+  }
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -578,20 +714,7 @@ export class Controller {
         await this.loadOlderMessages()
         break
       case "rollbackToBeforeMessage":
-        if (this.session) {
-          const msgs = this.session.messages
-          const idx = msgs.findIndex((m) => m.id === msg.messageId)
-          if (idx > 0) {
-            const target = msgs[idx]!
-            if (target.role === "user") {
-              this.session.rewindToTimestamp(msgs[idx - 1]!.ts)
-            } else {
-              this.session.rewindBeforeTimestamp(target.ts)
-            }
-            await this.session.save().catch(() => {})
-            this.postStateToWebview()
-          }
-        }
+        await this.rollbackToBeforeMessage(msg.messageId)
         break
       case "deleteSession":
         await this.deleteSession(msg.sessionId)
@@ -676,12 +799,19 @@ export class Controller {
         const raw = msg.path?.trim() ?? ""
         // Avoid using multi-line or huge strings as path (e.g. accidental content paste).
         if (raw.length > 0 && raw.length < 2048 && !raw.includes("\n")) {
-          const key = raw.replace(/\\/g, "/")
-          const sessionEdit = this.sessionUnacceptedEdits.find((e) => e.path.replace(/\\/g, "/") === key)
+          const key = this.normalizePathKey(raw, cwd)
+          const sessionEdit = this.sessionUnacceptedEdits.find((e) => this.normalizePathKey(e.path, cwd) === key)
           if (sessionEdit) {
             await showSessionEditDiff(cwd, raw, sessionEdit.originalContent, sessionEdit.newContent)
           } else {
-            await showDiffForPath(cwd, raw)
+            const pending = this.activeRunHost?.getPendingFileEdit(raw)
+            if (pending) {
+              await showSessionEditDiff(cwd, raw, pending.originalContent, pending.newContent, {
+                useWorkspaceAfterFile: false,
+              })
+            } else {
+              await this.openWorkspaceFile(cwd, raw)
+            }
           }
         }
         break
@@ -689,10 +819,11 @@ export class Controller {
       case "openSessionEditDiff": {
         const raw = (msg as { path: string }).path?.trim() ?? ""
         if (raw.length === 0 || raw.length >= 2048 || raw.includes("\n")) break
-        const key = raw.replace(/\\/g, "/")
-        const entry = this.sessionUnacceptedEdits.find((e) => e.path.replace(/\\/g, "/") === key)
+        const cwd = this.getCwd()
+        const key = this.normalizePathKey(raw, cwd)
+        const entry = this.sessionUnacceptedEdits.find((e) => this.normalizePathKey(e.path, cwd) === key)
         if (entry) {
-          await showSessionEditDiff(this.getCwd(), raw, entry.originalContent, entry.newContent)
+          await showSessionEditDiff(cwd, raw, entry.originalContent, entry.newContent)
         }
         break
       }
@@ -722,10 +853,10 @@ export class Controller {
       case "revertSessionEditFile": {
         const pathMsg = (msg as { path: string }).path?.trim() ?? ""
         if (pathMsg.length === 0 || pathMsg.length >= 2048 || pathMsg.includes("\n")) break
-        const key = pathMsg.replace(/\\/g, "/")
-        const entry = this.sessionUnacceptedEdits.find((e) => e.path.replace(/\\/g, "/") === key)
+        const cwd = this.getCwd()
+        const key = this.normalizePathKey(pathMsg, cwd)
+        const entry = this.sessionUnacceptedEdits.find((e) => this.normalizePathKey(e.path, cwd) === key)
         if (entry) {
-          const cwd = this.getCwd()
           const absPath = path.isAbsolute(entry.path) ? entry.path : path.join(cwd, entry.path)
           const uri = vscode.Uri.file(absPath)
           try {
@@ -737,7 +868,7 @@ export class Controller {
           } catch {
             vscode.window.showErrorMessage(`NexusCode: Failed to revert ${entry.path}`)
           }
-          this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter((e) => e.path.replace(/\\/g, "/") !== key)
+          this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter((e) => this.normalizePathKey(e.path, cwd) !== key)
           this.postStateToWebview()
         }
         break
@@ -745,8 +876,9 @@ export class Controller {
       case "acceptSessionEditFile": {
         const pathMsg = (msg as { path: string }).path?.trim() ?? ""
         if (pathMsg.length === 0 || pathMsg.length >= 2048 || pathMsg.includes("\n")) break
-        const key = pathMsg.replace(/\\/g, "/")
-        this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter((e) => e.path.replace(/\\/g, "/") !== key)
+        const cwd = this.getCwd()
+        const key = this.normalizePathKey(pathMsg, cwd)
+        this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter((e) => this.normalizePathKey(e.path, cwd) !== key)
         this.postStateToWebview()
         break
       }
@@ -982,12 +1114,14 @@ export class Controller {
    * restoreType: task = rewind chat only; workspace = files only; taskAndWorkspace = both.
    */
   private async restoreCheckpointToHash(hash: string, restoreType: "task" | "workspace" | "taskAndWorkspace"): Promise<void> {
-    if (!this.checkpoint) {
+    if (!this.session || !this.config) return
+    const cwd = this.getCwd()
+    const tracker = await this.ensureCheckpointForCurrentSession(this.session.id, cwd, this.config)
+    if (!tracker) {
       vscode.window.showWarningMessage("NexusCode: Checkpoints are not enabled or no checkpoint is available.", { modal: false })
       return
     }
-    const cwd = this.getCwd()
-    const entry = this.checkpoint.getEntries().find((e) => e.hash === hash)
+    const entry = tracker.getEntries().find((e) => e.hash === hash)
     const checkpointTs = entry?.ts
 
     if (restoreType === "taskAndWorkspace" || restoreType === "workspace") {
@@ -997,7 +1131,7 @@ export class Controller {
 
     if (restoreType === "workspace" || restoreType === "taskAndWorkspace") {
       try {
-        await this.checkpoint.resetHead(hash)
+        await tracker.resetHead(hash)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         vscode.window.showErrorMessage(`NexusCode: Failed to restore checkpoint — ${message}`)
@@ -1007,22 +1141,12 @@ export class Controller {
 
     if ((restoreType === "task" || restoreType === "taskAndWorkspace") && this.session && checkpointTs != null) {
       this.session.rewindToTimestamp(checkpointTs)
+      await this.session.save().catch(() => {})
     }
 
     if (restoreType === "workspace" || restoreType === "taskAndWorkspace") {
-      const cwdResolved = path.resolve(cwd)
-      for (const doc of vscode.workspace.textDocuments) {
-        if (doc.uri.scheme !== "file") continue
-        const rel = path.relative(cwdResolved, doc.uri.fsPath)
-        if (rel.startsWith("..") || path.isAbsolute(rel)) continue
-        if (!doc.isDirty) continue
-        try {
-          await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preserveFocus: false })
-          await vscode.commands.executeCommand("workbench.action.files.revert")
-        } catch {
-          // Ignore per-doc revert errors
-        }
-      }
+      await this.revertDirtyWorkspaceDocs(cwd)
+      this.sessionUnacceptedEdits = []
     }
 
     const msg =
@@ -1037,12 +1161,14 @@ export class Controller {
 
   /** Show diff between two checkpoints (or checkpoint and current). */
   private async showCheckpointDiff(fromHash: string, toHash?: string): Promise<void> {
-    if (!this.checkpoint) {
+    if (!this.session || !this.config) return
+    const tracker = await this.ensureCheckpointForCurrentSession(this.session.id, this.getCwd(), this.config)
+    if (!tracker) {
       vscode.window.showWarningMessage("NexusCode: Checkpoints are not enabled.", { modal: false })
       return
     }
     try {
-      const files = await this.checkpoint.getDiff(fromHash, toHash)
+      const files = await tracker.getDiff(fromHash, toHash)
       if (files.length === 0) {
         vscode.window.showInformationMessage("NexusCode: No changes between these checkpoints.", { modal: false })
         return
@@ -1325,11 +1451,14 @@ export class Controller {
             ...images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType })),
           ]
         : actualContent
-    this.session.addMessage({ role: "user", content: userContent })
+    const userMessage = this.session.addMessage({ role: "user", content: userContent })
     this.postStateToWebview()
 
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
+    await this.commitCheckpointForUserMessage(this.session.id, cwd, configForRun, userMessage).catch((err) => {
+      console.warn("[nexus] Failed to commit message checkpoint:", err)
+    })
 
     if (serverUrl) {
       try {
@@ -1511,6 +1640,7 @@ export class Controller {
       this.addSessionUnacceptedEdit(filePath, originalContent, newContent, isNewFile)
       this.postStateToWebview()
     } })
+    this.activeRunHost = host
 
     const timeoutMs = 10 * 60_000
     const timeout = setTimeout(() => {
@@ -1590,6 +1720,7 @@ export class Controller {
       }
     } finally {
       clearTimeout(timeout)
+      this.activeRunHost = null
       this.isRunning = false
       await this.session!.save().catch(() => {})
       this.postStateToWebview()
@@ -1910,6 +2041,14 @@ export class Controller {
     if (typeof temperature === "number" && Number.isFinite(temperature)) {
       config.model.temperature = Math.max(0, Math.min(2, temperature))
     }
+    const reasoningEffort = cfg.get<string>("reasoningEffort")
+    if (typeof reasoningEffort === "string" && reasoningEffort.trim() !== "") {
+      config.model.reasoningEffort = reasoningEffort.trim()
+    }
+    const contextWindow = cfg.get<number>("contextWindow")
+    if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+      config.model.contextWindow = Math.floor(contextWindow)
+    }
     const enableCheckpoints = cfg.get<boolean>("enableCheckpoints")
     if (typeof enableCheckpoints === "boolean") config.checkpoint.enabled = enableCheckpoints
     const autoApproveRead = cfg.get<boolean>("autoApproveRead")
@@ -1918,6 +2057,10 @@ export class Controller {
     if (typeof autoApproveWrite === "boolean") config.permissions.autoApproveWrite = autoApproveWrite
     const autoApproveCommand = cfg.get<boolean>("autoApproveCommand")
     if (typeof autoApproveCommand === "boolean") config.permissions.autoApproveCommand = autoApproveCommand
+    const autoApproveMcp = cfg.get<boolean>("autoApproveMcp")
+    if (typeof autoApproveMcp === "boolean") config.permissions.autoApproveMcp = autoApproveMcp
+    const autoApproveBrowser = cfg.get<boolean>("autoApproveBrowser")
+    if (typeof autoApproveBrowser === "boolean") config.permissions.autoApproveBrowser = autoApproveBrowser
   }
 
   private async initializeIndexer(cwd: string): Promise<void> {

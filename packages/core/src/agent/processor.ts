@@ -24,10 +24,9 @@ import {
 } from "./tool-execution.js"
 import type { ApprovalAction } from "../types.js"
 import {
-  createInlineReasoningState,
-  flushInlineReasoningPendingText,
-  splitInlineReasoningFromTextDelta,
-} from "./inline-reasoning.js"
+  buildReasoningProviderOptions,
+  buildReasoningProviderOptionsCandidates,
+} from "../provider/provider-options.js"
 
 const MAX_CONSECUTIVE_INVALID = 3
 
@@ -137,7 +136,6 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
   let fatalStreamError = false
   let budgetExceededThisIteration = false
   let needsCompaction = false
-  const inlineReasoningState = createInlineReasoningState()
 
   const emit = async (e: import("../types.js").AgentEvent) => {
     await (host.emit(e) ?? Promise.resolve())
@@ -246,6 +244,14 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
   }
 
   try {
+    const providerOptions = buildReasoningProviderOptions(config.model, client.providerName)
+    const providerOptionsCandidates = buildReasoningProviderOptionsCandidates(
+      config.model,
+      client.providerName
+    )
+    const retryMaxAttempts = config.retry?.enabled === false
+      ? 1
+      : Math.max(1, config.retry?.maxAttempts ?? 3)
     streamLoop: for await (const event of client.stream({
       messages,
       tools: llmTools,
@@ -254,35 +260,26 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
       cacheableSystemBlocks,
       maxTokens,
       temperature,
+      providerOptions,
+      providerOptionsCandidates,
+      maxRetries: retryMaxAttempts,
+      initialRetryDelayMs: config.retry?.initialDelayMs,
+      maxRetryDelayMs: config.retry?.maxDelayMs,
+      retryOnStatus: config.retry?.retryOnStatus,
     })) {
       if (signal.aborted) break
 
       switch (event.type) {
         case "text_delta":
           if (event.delta) {
-            const { textDelta, reasoningDeltas } = splitInlineReasoningFromTextDelta(
-              inlineReasoningState,
-              event.delta
-            )
-            for (const reasoningDelta of reasoningDeltas) {
-              if (!reasoningDelta) continue
-              currentReasoning += reasoningDelta
-              flushAssistantContent()
-              await emit({ type: "reasoning_delta", delta: reasoningDelta, messageId: newMessageId })
-            }
-            if (textDelta) {
-              currentText += textDelta
-              flushAssistantContent()
-              await emit({ type: "text_delta", delta: textDelta, messageId: newMessageId })
-            }
+            currentText += event.delta
+            flushAssistantContent()
+            await emit({ type: "text_delta", delta: event.delta, messageId: newMessageId })
           }
           break
 
         case "reasoning_delta":
           if (event.delta) {
-            // Native provider reasoning stream is available; disable first-line JSON fallback parsing.
-            inlineReasoningState.pendingFirstLine = false
-            inlineReasoningState.firstLineBuffer = ""
             currentReasoning += event.delta
             flushAssistantContent()
             await emit({ type: "reasoning_delta", delta: event.delta, messageId: newMessageId })
@@ -290,12 +287,6 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
           break
 
         case "tool_call": {
-          const pendingText = flushInlineReasoningPendingText(inlineReasoningState)
-          if (pendingText) {
-            currentText += pendingText
-            flushAssistantContent()
-            await emit({ type: "text_delta", delta: pendingText, messageId: newMessageId })
-          }
           let { toolCallId, toolName, toolInput } = event
           if (!toolCallId || !toolName || !toolInput) break
           sawNativeToolCall = true
@@ -462,14 +453,6 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
         }
 
         case "finish":
-          {
-            const pendingText = flushInlineReasoningPendingText(inlineReasoningState)
-            if (pendingText) {
-              currentText += pendingText
-              flushAssistantContent()
-              await emit({ type: "text_delta", delta: pendingText, messageId: newMessageId })
-            }
-          }
           await flushPendingReads()
           finishReason = event.finishReason
 

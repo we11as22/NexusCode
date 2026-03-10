@@ -50,6 +50,7 @@ export interface NexusConfigState {
     apiKey?: string
     baseUrl?: string
     temperature?: number
+    reasoningEffort?: string
     contextWindow?: number
   }
   embeddings?: {
@@ -110,10 +111,12 @@ export interface NexusConfigState {
     autoApproveRead: boolean
     autoApproveWrite: boolean
     autoApproveCommand: boolean
+    autoApproveMcp?: boolean
+    autoApproveBrowser?: boolean
   }
   /** UI preferences. showReasoningInChat: when true, text_delta shown as muted; when false, only tool text. */
   ui?: { showReasoningInChat?: boolean }
-  profiles: Record<string, Partial<{ provider: string; id: string; apiKey: string; baseUrl: string; temperature: number }>>
+  profiles: Record<string, Partial<{ provider: string; id: string; apiKey: string; baseUrl: string; temperature: number; reasoningEffort: string; contextWindow: number }>>
 }
 
 export interface SubAgentState {
@@ -125,6 +128,15 @@ export interface SubAgentState {
   startedAt: number
   finishedAt?: number
   error?: string
+}
+
+type ApprovalAction = {
+  type: "write" | "execute" | "mcp" | "browser" | "read" | "doom_loop"
+  tool: string
+  description: string
+  content?: string
+  diff?: string
+  diffStats?: { added: number; removed: number }
 }
 
 interface SessionPreview {
@@ -269,6 +281,8 @@ export type AgentEvent =
   | { type: "compaction_start" }
   | { type: "compaction_end" }
   | { type: "index_update"; status: IndexStatusKind }
+  | { type: "vector_db_progress"; message?: string }
+  | { type: "vector_db_ready" }
   | { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
   | { type: "error"; error: string; fatal?: boolean }
   | { type: "done"; messageId: string }
@@ -867,7 +881,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   (p) =>
                     p.type !== "text" ||
                     stripToolCallMarkup((p as TextPart).text).length > 0 ||
-                    (p as TextPart).user_message?.trim().length > 0
+                    ((p as TextPart).user_message?.trim()?.length ?? 0) > 0
                 )
                 .map((p) => (p.type === "text" ? { ...p, text: stripToolCallMarkup((p as TextPart).text) } : p))
               msgs[msgs.length - 1] = { ...last, content: cleanedParts }
@@ -885,7 +899,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     const hasTextOrUserMessage = parts.some(
                       (p) =>
                         p.type === "text" &&
-                        ((p as TextPart).text?.trim().length > 0 || (p as TextPart).user_message?.trim().length > 0)
+                        (((p as TextPart).text?.trim().length ?? 0) > 0 || ((p as TextPart).user_message?.trim()?.length ?? 0) > 0)
                     )
                     return hasTextOrUserMessage
                   })()

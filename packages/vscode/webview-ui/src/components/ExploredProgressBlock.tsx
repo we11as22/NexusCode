@@ -12,22 +12,145 @@ export interface ExploredEntry {
   durationSec?: number
 }
 
-const FILE_TOOLS = new Set([
-  "read_file", "list_dir",
-  "Read", "List", // core built-in names
-])
+const FILE_TOOLS = new Set(["read_file", "list_dir", "Read", "List"])
 const SEARCH_TOOLS = new Set([
-  "grep", "codebase_search", "search_files", "list_code_definitions",
-  "Grep", "CodebaseSearch", "Glob", "ListCodeDefinitions", // core built-in names
+  "grep", "codebase_search", "search_files", "list_code_definitions", "glob",
+  "Grep", "CodebaseSearch", "Glob", "ListCodeDefinitions",
 ])
 /** Only these increase "N files" in Explored label. */
 const FILE_COUNT_TOOLS = new Set(["read_file", "Read"])
 /** Count list tools separately in Explored label. */
 const LIST_COUNT_TOOLS = new Set(["list_dir", "List"])
+function canonicalToolName(raw: string): string {
+  return raw.trim().toLowerCase().replace(/[^a-z0-9]/g, "")
+}
+
+function normalizeNestedToolName(rawRecipientName: string): string {
+  const trimmed = rawRecipientName.trim()
+  if (!trimmed) return trimmed
+  const lower = trimmed.toLowerCase()
+  const prefixes = ["functions.", "function.", "multi_tool_use.", "tools.", "tool."]
+  const prefix = prefixes.find((item) => lower.startsWith(item))
+  const normalized = prefix ? trimmed.slice(prefix.length) : trimmed
+  const canonical = canonicalToolName(normalized)
+  switch (canonical) {
+    case "read":
+    case "readfile":
+    case "readfiletool":
+    case "read_file":
+      return "Read"
+    case "list":
+    case "listdir":
+    case "listdirectory":
+    case "list_dir":
+      return "List"
+    case "grep":
+    case "grepsearch":
+    case "searchfiles":
+      return "Grep"
+    case "glob":
+    case "filesearch":
+    case "globfilesearch":
+      return "Glob"
+    case "codebasesearch":
+      return "CodebaseSearch"
+    case "listcodedefinitions":
+    case "listdefinitions":
+      return "ListCodeDefinitions"
+    default:
+      return normalized
+  }
+}
+
+function isDirectExplorationToolName(tool: string): boolean {
+  return FILE_TOOLS.has(tool) || SEARCH_TOOLS.has(tool)
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === "object" ? (value as Record<string, unknown>) : null
+}
+
+function asObjectArray(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => asObject(item))
+    .filter((item): item is Record<string, unknown> => item != null)
+}
+
+function expandExplorationToolParts(part: ToolPart): ToolPart[] {
+  if (isDirectExplorationToolName(part.tool)) return [part]
+
+  if (part.tool === "Parallel" || part.tool === "parallel") {
+    const uses = asObjectArray(part.input?.tool_uses)
+    if (uses.length === 0) return []
+    const expanded = uses.map((use, index) => {
+      const recipient = typeof use.recipient_name === "string" ? use.recipient_name : ""
+      const tool = normalizeNestedToolName(recipient)
+      const input = asObject(use.parameters) ?? {}
+      return {
+        type: "tool" as const,
+        id: `${part.id}-parallel-${index + 1}`,
+        tool,
+        status: part.status,
+        input,
+        timeStart: part.timeStart,
+        timeEnd: part.timeEnd,
+      } satisfies ToolPart
+    })
+    return expanded.filter((item) => isDirectExplorationToolName(item.tool))
+  }
+
+  if (part.tool === "batch" || part.tool === "Batch") {
+    const inputObj = asObject(part.input) ?? {}
+    const reads = asObjectArray(inputObj.reads).map((p, i) => ({
+      type: "tool" as const,
+      id: `${part.id}-batch-read-${i + 1}`,
+      tool: "Read",
+      status: part.status,
+      input: p,
+      timeStart: part.timeStart,
+      timeEnd: part.timeEnd,
+    } satisfies ToolPart))
+    const lists = asObjectArray(inputObj.lists).map((p, i) => ({
+      type: "tool" as const,
+      id: `${part.id}-batch-list-${i + 1}`,
+      tool: "List",
+      status: part.status,
+      input: p,
+      timeStart: part.timeStart,
+      timeEnd: part.timeEnd,
+    } satisfies ToolPart))
+    const searches = asObjectArray(inputObj.searches).map((p, i) => ({
+      type: "tool" as const,
+      id: `${part.id}-batch-search-${i + 1}`,
+      tool:
+        typeof p.pattern === "string" || typeof p.query === "string"
+          ? "Grep"
+          : typeof p.glob_pattern === "string"
+            ? "Glob"
+            : "CodebaseSearch",
+      status: part.status,
+      input: p,
+      timeStart: part.timeStart,
+      timeEnd: part.timeEnd,
+    } satisfies ToolPart))
+    return [...reads, ...lists, ...searches]
+  }
+
+  return []
+}
+
+function countExplorationMetrics(tool: string): { files: number; lists: number; searches: number } {
+  return {
+    files: FILE_COUNT_TOOLS.has(tool) ? 1 : 0,
+    lists: LIST_COUNT_TOOLS.has(tool) ? 1 : 0,
+    searches: SEARCH_TOOLS.has(tool) ? 1 : 0,
+  }
+}
 
 /** Whether this tool counts as exploration (file read/list or search) for the collapsed "Explored" block. */
 export function isExplorationTool(tool: string): boolean {
-  return FILE_TOOLS.has(tool) || SEARCH_TOOLS.has(tool)
+  return isDirectExplorationToolName(tool)
 }
 
 /** One item in the explored block: either a thought (reasoning without user_message) or an exploration tool. */
@@ -68,10 +191,13 @@ export function getExploredPrefixFromParts(parts: MessagePart[]): {
     }
     if (part.type === "tool") {
       const toolPart = part as ToolPart
-      if (!isExplorationTool(toolPart.tool)) break
+      const expanded = expandExplorationToolParts(toolPart)
+      if (expanded.length === 0) break
       hasSeenExplorationTool = true
-      const entry = getToolEntry(toolPart, partIndex++)
-      if (entry) prefixItems.push({ type: "tool", part: toolPart, entry })
+      for (const expandedPart of expanded) {
+        const entry = getToolEntry(expandedPart, partIndex++)
+        if (entry) prefixItems.push({ type: "tool", part: expandedPart, entry })
+      }
       prefixIndices.add(i)
       continue
     }
@@ -98,7 +224,7 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
     case "read_file":
     case "Read": {
       const path = (part.input?.path ?? part.input?.file_path) as string | undefined
-      const start = (part.input?.startLine ?? part.input?.offset) as number | undefined
+      const start = (part.input?.startLine ?? part.input?.start_line ?? part.input?.offset) as number | undefined
       const limit = part.input?.limit as number | undefined
       const end = start != null && limit != null ? start + limit - 1 : undefined
       const pathStr = path ?? "file"
@@ -128,7 +254,11 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
     case "grep":
     case "Grep": {
       const pattern = (part.input?.pattern ?? part.input?.query) as string ?? "…"
-      const pathScope = (part.input?.pathScope ?? part.input?.path) as string
+      const pathScope =
+        (part.input?.pathScope ?? part.input?.path) as string ??
+        (Array.isArray(part.input?.paths) && typeof part.input?.paths?.[0] === "string"
+          ? (part.input?.paths?.[0] as string)
+          : undefined)
       const scope = pathScope ? ` in ${pathScope}` : ""
       const shortPattern = pattern.length > 40 ? pattern.slice(0, 37) + "…" : pattern
       return {
@@ -162,6 +292,10 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
     }
     case "execute_command":
     case "Bash":
+    case "Parallel":
+    case "parallel":
+    case "batch":
+    case "Batch":
       return null
     default:
       return {
@@ -200,11 +334,15 @@ export function getExploredFromParts(parts: MessagePart[]): {
   for (const part of parts) {
     if (part.type !== "tool") continue
     const toolPart = part as ToolPart
-    if (FILE_COUNT_TOOLS.has(toolPart.tool)) filesCount++
-    if (LIST_COUNT_TOOLS.has(toolPart.tool)) listCount++
-    if (SEARCH_TOOLS.has(toolPart.tool)) searchesCount++
-    const entry = getToolEntry(toolPart, partIndex++)
-    if (entry) entries.push(entry)
+    const expanded = expandExplorationToolParts(toolPart)
+    for (const expandedPart of expanded) {
+      const metric = countExplorationMetrics(expandedPart.tool)
+      filesCount += metric.files
+      listCount += metric.lists
+      searchesCount += metric.searches
+      const entry = getToolEntry(expandedPart, partIndex++)
+      if (entry) entries.push(entry)
+    }
   }
   return { filesCount, listCount, searchesCount, entries }
 }
@@ -224,9 +362,9 @@ export function ExploredSummaryInline({
     if (defaultCollapsed) setOpen(false)
   }, [defaultCollapsed])
   // list_dir/List is in Explored and counted as separate "lists" metric.
-  const filesCount = prefixItems.filter((x) => x.type === "tool" && FILE_COUNT_TOOLS.has(x.part.tool)).length
-  const listCount = prefixItems.filter((x) => x.type === "tool" && LIST_COUNT_TOOLS.has(x.part.tool)).length
-  const searchesCount = prefixItems.filter((x) => x.type === "tool" && SEARCH_TOOLS.has(x.part.tool)).length
+  const filesCount = prefixItems.filter((x) => x.type === "tool").reduce((acc, x) => acc + countExplorationMetrics(x.part.tool).files, 0)
+  const listCount = prefixItems.filter((x) => x.type === "tool").reduce((acc, x) => acc + countExplorationMetrics(x.part.tool).lists, 0)
+  const searchesCount = prefixItems.filter((x) => x.type === "tool").reduce((acc, x) => acc + countExplorationMetrics(x.part.tool).searches, 0)
   const labelParts: string[] = []
   if (filesCount > 0) labelParts.push(`${filesCount} file${filesCount === 1 ? "" : "s"}`)
   if (listCount > 0) labelParts.push(`${listCount} list${listCount === 1 ? "" : "s"}`)
@@ -346,11 +484,15 @@ export function useExploredFromMessages(
       }
       if (part.type === "tool") {
         const toolPart = part as ToolPart
-        if (FILE_COUNT_TOOLS.has(toolPart.tool)) filesCount++
-        if (LIST_COUNT_TOOLS.has(toolPart.tool)) listCount++
-        if (SEARCH_TOOLS.has(toolPart.tool)) searchesCount++
-        const entry = getToolEntry(toolPart, partIndex++)
-        if (entry) entries.push(entry)
+        const expanded = expandExplorationToolParts(toolPart)
+        for (const expandedPart of expanded) {
+          const metric = countExplorationMetrics(expandedPart.tool)
+          filesCount += metric.files
+          listCount += metric.lists
+          searchesCount += metric.searches
+          const entry = getToolEntry(expandedPart, partIndex++)
+          if (entry) entries.push(entry)
+        }
       }
     }
     }

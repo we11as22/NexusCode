@@ -34,6 +34,14 @@ export type NexusBannerMessage = { type: 'nexus_banner'; text: string }
 /** Todo list update from agent (TodoWrite tool). Rendered above input, below progress. */
 export type NexusTodoMessage = { type: 'nexus_todo'; todo: string }
 
+export type AutoApprovePermissions = {
+  read: boolean
+  write: boolean
+  execute: boolean
+  mcp: boolean
+  browser: boolean
+}
+
 function sessionMessageToAssistantContent(msg: SessionMessage): ContentBlockParam[] {
   const content = msg.content
   const blocks: ContentBlockParam[] = []
@@ -100,6 +108,7 @@ export interface QueryNexusOptions {
   repoTools: Tool[]
   signal: AbortSignal
   tuiApprovalRef?: { current: ((r: { approved: boolean; alwaysApprove?: boolean; skipAll?: boolean; whatToDoInstead?: string; addToAllowedCommand?: string }) => void) | null }
+  autoApprovePermissions?: Partial<AutoApprovePermissions>
   autoApprove?: boolean
   /** Override mode for this run (agent/plan/ask/debug). Defaults to nexus.mode. */
   modeOverride?: string
@@ -115,19 +124,55 @@ export interface QueryNexusOptions {
  * Loads config from disk at start so that model/LLM settings saved in the CLI are applied.
  */
 export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage, void> {
-  const { nexus, userPrompt, repoTools, signal, tuiApprovalRef, autoApprove = false, modeOverride, onSubagentEvent, onRunComplete } = opts
+  const {
+    nexus,
+    userPrompt,
+    repoTools,
+    signal,
+    tuiApprovalRef,
+    autoApprovePermissions,
+    autoApprove = false,
+    modeOverride,
+    onSubagentEvent,
+    onRunComplete,
+  } = opts
   const { session, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer } = nexus
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug'
 
   let config = await loadConfig(nexus.cwd, { secrets: nexus.secretsStore })
+  if (autoApprovePermissions) {
+    config = {
+      ...config,
+      permissions: {
+        ...config.permissions,
+        ...(typeof autoApprovePermissions.read === 'boolean'
+          ? { autoApproveRead: autoApprovePermissions.read }
+          : {}),
+        ...(typeof autoApprovePermissions.write === 'boolean'
+          ? { autoApproveWrite: autoApprovePermissions.write }
+          : {}),
+        ...(typeof autoApprovePermissions.execute === 'boolean'
+          ? { autoApproveCommand: autoApprovePermissions.execute }
+          : {}),
+        ...(typeof autoApprovePermissions.mcp === 'boolean'
+          ? { autoApproveMcp: autoApprovePermissions.mcp }
+          : {}),
+        ...(typeof autoApprovePermissions.browser === 'boolean'
+          ? { autoApproveBrowser: autoApprovePermissions.browser }
+          : {}),
+      },
+    }
+  }
   if (autoApprove) {
     config = {
       ...config,
       permissions: {
         ...config.permissions,
+        autoApproveRead: true,
         autoApproveWrite: true,
         autoApproveCommand: true,
         autoApproveMcp: true,
+        autoApproveBrowser: true,
       },
     }
   }
@@ -138,6 +183,14 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   /** partId of the last tool_start(SpawnAgents); subagent_* events attach to this part. */
   let lastSpawnAgentPartId: string | null = null
 
+  const allApprovalsEnabled =
+    !!autoApprovePermissions &&
+    autoApprovePermissions.read === true &&
+    autoApprovePermissions.write === true &&
+    autoApprovePermissions.execute === true &&
+    autoApprovePermissions.mcp === true &&
+    autoApprovePermissions.browser === true
+
   const host = new CliHost(nexus.cwd, (event: AgentEvent) => {
     eventQueue.push(event)
     if (resolveNext) {
@@ -145,7 +198,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       resolveNext = null
       fn()
     }
-  }, autoApprove, tuiApprovalRef)
+  }, autoApprove || allApprovalsEnabled, tuiApprovalRef)
 
   /** Start of this run: previous turn’s edits become revertable for /undo. */
   host.startNewTurn()

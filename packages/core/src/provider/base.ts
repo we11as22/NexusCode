@@ -11,7 +11,7 @@ import { generateStructuredWithFallback, supportsStructuredOutput } from "./stru
 const DEFAULT_MAX_RETRIES = 3
 const DEFAULT_INITIAL_DELAY = 1000
 const DEFAULT_MAX_DELAY = 30_000
-const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+const DEFAULT_RETRYABLE_STATUS = [429, 500, 502, 503, 504]
 
 /**
  * Base LLM client implementation using Vercel AI SDK.
@@ -51,29 +51,58 @@ export class BaseLLMClient implements LLMClient {
 
     let attempt = 0
     const maxAttempts = opts.maxRetries ?? DEFAULT_MAX_RETRIES
-    const initialDelay = DEFAULT_INITIAL_DELAY
-    const maxDelay = DEFAULT_MAX_DELAY
+    const initialDelay = opts.initialRetryDelayMs ?? DEFAULT_INITIAL_DELAY
+    const maxDelay = opts.maxRetryDelayMs ?? DEFAULT_MAX_DELAY
+    const retryableStatuses = new Set(opts.retryOnStatus ?? DEFAULT_RETRYABLE_STATUS)
+    const providerOptionsCandidates = normalizeProviderOptionsCandidates(
+      opts.providerOptionsCandidates,
+      opts.providerOptions
+    )
+    let providerOptionsIndex = 0
 
     while (true) {
       attempt++
       try {
-        yield* this._streamOnce(opts, messages, tools)
+        const activeProviderOptions = providerOptionsCandidates[providerOptionsIndex]
+        yield* this._streamOnce(
+          opts,
+          messages,
+          tools,
+          activeProviderOptions
+        )
         return
       } catch (err) {
         if (opts.signal?.aborted) throw err
+        if (
+          providerOptionsCandidates.length > 0 &&
+          providerOptionsIndex < providerOptionsCandidates.length - 1 &&
+          looksLikeUnsupportedProviderOptionsError(err)
+        ) {
+          providerOptionsIndex++
+          attempt--
+          continue
+        }
         const status = getErrorStatus(err)
-        const isRetryable = status ? RETRYABLE_STATUS.has(status) : isNetworkError(err)
+        const isRetryable =
+          (status != null && retryableStatuses.has(status)) || isNetworkError(err)
 
         if (!isRetryable || attempt >= maxAttempts) {
           throw err
         }
 
+        const retryAfterMs = getRetryAfterMs(err)
         // Exponential backoff with jitter
-        const delay = Math.min(
+        const backoffDelay = Math.min(
           initialDelay * Math.pow(2, attempt - 1) + Math.random() * 500,
           maxDelay
         )
-        yield { type: "error", error: new Error(`Retrying after error (attempt ${attempt}/${maxAttempts}): ${String(err)}`) }
+        const delay = retryAfterMs != null ? Math.min(retryAfterMs, maxDelay) : backoffDelay
+        yield {
+          type: "error",
+          error: new Error(
+            `Retrying after error (attempt ${attempt}/${maxAttempts}): ${String(err)}`
+          ),
+        }
         await sleep(delay, opts.signal)
       }
     }
@@ -82,8 +111,10 @@ export class BaseLLMClient implements LLMClient {
   private async *_streamOnce(
     opts: StreamOptions,
     messages: Parameters<typeof streamText>[0]["messages"],
-    tools: Record<string, { description: string; parameters: z.ZodType<unknown> }> | undefined
+    tools: Record<string, { description: string; parameters: z.ZodType<unknown> }> | undefined,
+    providerOptions: Record<string, unknown> | undefined
   ): AsyncIterable<LLMStreamEvent> {
+    const thinkTagParser = createThinkTagParser()
     const result = streamText({
       model: this.model,
       system: opts.systemPrompt,
@@ -93,8 +124,8 @@ export class BaseLLMClient implements LLMClient {
       temperature: opts.temperature,
       abortSignal: opts.signal,
       maxSteps: 1, // We handle multi-step manually in agentLoop
-      ...(opts.providerOptions && Object.keys(opts.providerOptions).length > 0
-        ? { providerOptions: opts.providerOptions }
+      ...(providerOptions && Object.keys(providerOptions).length > 0
+        ? { providerOptions: providerOptions as any }
         : {}),
     })
 
@@ -120,7 +151,16 @@ export class BaseLLMClient implements LLMClient {
 
       switch (partType) {
         case "text-delta":
-          yield { type: "text_delta", delta: extractTextDelta(part as Record<string, unknown>) }
+          {
+            const textDelta = extractTextDelta(part as Record<string, unknown>)
+            for (const chunk of thinkTagParser.push(textDelta)) {
+              if (chunk.kind === "reasoning") {
+                yield { type: "reasoning_delta", delta: chunk.text }
+              } else {
+                yield { type: "text_delta", delta: chunk.text }
+              }
+            }
+          }
           break
 
         case "reasoning":
@@ -144,8 +184,13 @@ export class BaseLLMClient implements LLMClient {
           break
 
         case "tool-call": {
-          let name = part.toolName
-          let args = part.args as Record<string, unknown> | undefined
+          const toolPart = part as {
+            toolName?: string
+            args?: Record<string, unknown>
+            toolCallId?: string
+          }
+          let name = toolPart.toolName
+          let args = toolPart.args as Record<string, unknown> | undefined
           // Kilo may return "ListDirectory"; gateway/CLI often send list_dir with paths[] or paths[0] undefined. Normalize to List with path only.
           if (
             name === "List" ||
@@ -172,7 +217,7 @@ export class BaseLLMClient implements LLMClient {
           }
           yield {
             type: "tool_call",
-            toolCallId: part.toolCallId,
+            toolCallId: toolPart.toolCallId ?? "",
             toolName: name,
             toolInput: args ?? {},
           }
@@ -180,11 +225,19 @@ export class BaseLLMClient implements LLMClient {
         }
 
         case "finish": {
+          const finishPart = part as { finishReason?: LLMStreamEvent["finishReason"] }
+          for (const chunk of thinkTagParser.flush()) {
+            if (chunk.kind === "reasoning") {
+              yield { type: "reasoning_delta", delta: chunk.text }
+            } else {
+              yield { type: "text_delta", delta: chunk.text }
+            }
+          }
           const usage = result.usage
           const usageData = await usage.catch(() => null)
           yield {
             type: "finish",
-            finishReason: part.finishReason as LLMStreamEvent["finishReason"],
+            finishReason: finishPart.finishReason ?? "stop",
             usage: {
               inputTokens: usageData?.promptTokens ?? 0,
               outputTokens: usageData?.completionTokens ?? 0,
@@ -194,7 +247,13 @@ export class BaseLLMClient implements LLMClient {
         }
 
         case "error":
-          yield { type: "error", error: part.error instanceof Error ? part.error : new Error(String(part.error)) }
+          {
+            const errPart = part as { error?: unknown }
+            yield {
+              type: "error",
+              error: errPart.error instanceof Error ? errPart.error : new Error(String(errPart.error)),
+            }
+          }
           break
       }
     }
@@ -235,6 +294,9 @@ function extractReasoningDelta(part: Record<string, unknown>, allowTextFallback:
     }
   }
 
+  const deep = findReasoningStringDeep(part, allowTextFallback)
+  if (deep) return deep
+
   return ""
 }
 
@@ -243,20 +305,92 @@ function pickReasoningString(obj: Record<string, unknown>, allowTextFallback: bo
     "reasoning",
     "reasoningText",
     "reasoning_text",
+    "reasoningDetails",
+    "reasoning_details",
     "reasoningContent",
     "reasoning_content",
+    "reasoningSummary",
+    "reasoning_summary",
+    "thinking",
+    "thinkingText",
+    "thinking_text",
+    "thought",
+    "thoughts",
   ]
   if (allowTextFallback) keys.push("textDelta", "text")
   for (const key of keys) {
     const val = obj[key]
-    if (typeof val === "string" && val.length > 0) return val
+    const extracted = stringifyReasoningValue(val)
+    if (extracted) return extracted
   }
+  return ""
+}
+
+function stringifyReasoningValue(val: unknown): string {
+  if (typeof val === "string" && val.length > 0) return val
+  if (Array.isArray(val)) {
+    const combined = val
+      .map((entry) => stringifyReasoningValue(entry))
+      .filter((entry) => entry.length > 0)
+      .join("")
+    return combined
+  }
+  const obj = asRecord(val)
+  if (!obj) return ""
+  const direct =
+    (typeof obj["text"] === "string" && obj["text"]) ||
+    (typeof obj["reasoning"] === "string" && obj["reasoning"]) ||
+    (typeof obj["reasoning_text"] === "string" && obj["reasoning_text"]) ||
+    (typeof obj["reasoning_content"] === "string" && obj["reasoning_content"]) ||
+    (typeof obj["reasoning_summary"] === "string" && obj["reasoning_summary"]) ||
+    (typeof obj["thinking"] === "string" && obj["thinking"]) ||
+    (typeof obj["thought"] === "string" && obj["thought"]) ||
+    ""
+  if (direct) return direct
+  const parts =
+    stringifyReasoningValue(obj["reasoning_details"]) ||
+    stringifyReasoningValue(obj["reasoningDetails"]) ||
+    stringifyReasoningValue(obj["thoughts"])
+  if (parts) return parts
+  const nestedDelta = stringifyReasoningValue(obj["delta"])
+  if (nestedDelta) return nestedDelta
   return ""
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") return null
   return value as Record<string, unknown>
+}
+
+function findReasoningStringDeep(
+  value: unknown,
+  allowTextFallback: boolean,
+  seen: Set<unknown> = new Set(),
+  depth = 0
+): string {
+  if (depth > 6 || value == null) return ""
+  if (typeof value !== "object") return ""
+  if (seen.has(value)) return ""
+  seen.add(value)
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = findReasoningStringDeep(item, allowTextFallback, seen, depth + 1)
+      if (nested) return nested
+    }
+    return ""
+  }
+
+  const obj = value as Record<string, unknown>
+  const direct = pickReasoningString(obj, allowTextFallback)
+  if (direct) return direct
+
+  for (const nestedValue of Object.values(obj)) {
+    const nested = findReasoningStringDeep(nestedValue, allowTextFallback, seen, depth + 1)
+    if (nested) return nested
+  }
+
+  return ""
 }
 
 function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typeof streamText>[0]["messages"] {
@@ -327,6 +461,101 @@ function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typ
   return result
 }
 
+function normalizeProviderOptionsCandidates(
+  explicitCandidates: StreamOptions["providerOptionsCandidates"] | undefined,
+  singleProviderOptions: StreamOptions["providerOptions"] | undefined
+): Array<Record<string, unknown> | undefined> {
+  if (Array.isArray(explicitCandidates) && explicitCandidates.length > 0) {
+    return explicitCandidates
+  }
+  if (singleProviderOptions && Object.keys(singleProviderOptions).length > 0) {
+    return [singleProviderOptions, undefined]
+  }
+  return [undefined]
+}
+
+type ThinkChunk = { kind: "text" | "reasoning"; text: string }
+
+function createThinkTagParser(): { push: (delta: string) => ThinkChunk[]; flush: () => ThinkChunk[] } {
+  const OPEN_TAGS = ["<think>", "<thinking>", "<reasoning>"]
+  const CLOSE_TAGS = ["</think>", "</thinking>", "</reasoning>"]
+  const MAX_OPEN_TAG_LEN = Math.max(...OPEN_TAGS.map((t) => t.length))
+  const MAX_CLOSE_TAG_LEN = Math.max(...CLOSE_TAGS.map((t) => t.length))
+
+  let buffer = ""
+  let inThink = false
+
+  const maybePush = (out: ThinkChunk[], kind: ThinkChunk["kind"], text: string) => {
+    if (!text) return
+    out.push({ kind, text })
+  }
+
+  const findFirstTag = (haystackLower: string, tags: string[]): { index: number; tag: string } | null => {
+    let bestIndex = -1
+    let bestTag = ""
+    for (const tag of tags) {
+      const idx = haystackLower.indexOf(tag)
+      if (idx !== -1 && (bestIndex === -1 || idx < bestIndex)) {
+        bestIndex = idx
+        bestTag = tag
+      }
+    }
+    return bestIndex === -1 ? null : { index: bestIndex, tag: bestTag }
+  }
+
+  const push = (delta: string): ThinkChunk[] => {
+    if (!delta) return []
+    const out: ThinkChunk[] = []
+    buffer += delta
+
+    while (buffer.length > 0) {
+      const lower = buffer.toLowerCase()
+      if (inThink) {
+        const close = findFirstTag(lower, CLOSE_TAGS)
+        if (!close) {
+          const keep = Math.min(buffer.length, MAX_CLOSE_TAG_LEN - 1)
+          const emitLen = buffer.length - keep
+          if (emitLen > 0) {
+            maybePush(out, "reasoning", buffer.slice(0, emitLen))
+            buffer = buffer.slice(emitLen)
+          }
+          break
+        }
+        if (close.index > 0) maybePush(out, "reasoning", buffer.slice(0, close.index))
+        buffer = buffer.slice(close.index + close.tag.length)
+        inThink = false
+        continue
+      }
+
+      const open = findFirstTag(lower, OPEN_TAGS)
+      if (!open) {
+        const keep = Math.min(buffer.length, MAX_OPEN_TAG_LEN - 1)
+        const emitLen = buffer.length - keep
+        if (emitLen > 0) {
+          maybePush(out, "text", buffer.slice(0, emitLen))
+          buffer = buffer.slice(emitLen)
+        }
+        break
+      }
+      if (open.index > 0) maybePush(out, "text", buffer.slice(0, open.index))
+      buffer = buffer.slice(open.index + open.tag.length)
+      inThink = true
+    }
+
+    return out
+  }
+
+  const flush = (): ThinkChunk[] => {
+    if (!buffer) return []
+    const out: ThinkChunk[] = []
+    maybePush(out, inThink ? "reasoning" : "text", buffer)
+    buffer = ""
+    return out
+  }
+
+  return { push, flush }
+}
+
 function getErrorStatus(err: unknown): number | null {
   if (err && typeof err === "object") {
     const status = (err as Record<string, unknown>)["statusCode"]
@@ -349,6 +578,68 @@ function isNetworkError(err: unknown): boolean {
     msg.includes("socket") ||
     msg.includes("fetch failed")
   )
+}
+
+function getRetryAfterMs(err: unknown): number | null {
+  if (!err || typeof err !== "object") return null
+  const rawHeaders =
+    (err as { headers?: unknown }).headers ??
+    (err as { response?: { headers?: unknown } }).response?.headers
+
+  const retryAfterRaw = getHeaderValue(rawHeaders, "retry-after")
+  if (!retryAfterRaw) return null
+  const retryAfter = Array.isArray(retryAfterRaw) ? retryAfterRaw[0] : retryAfterRaw
+  if (!retryAfter) return null
+
+  const seconds = Number.parseInt(String(retryAfter), 10)
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000
+  }
+
+  const asDate = Date.parse(String(retryAfter))
+  if (Number.isFinite(asDate)) {
+    return Math.max(0, asDate - Date.now())
+  }
+  return null
+}
+
+function getHeaderValue(
+  headers: unknown,
+  key: string
+): string | string[] | undefined {
+  if (!headers) return undefined
+  const lowerKey = key.toLowerCase()
+  const HeadersCtor = (globalThis as { Headers?: { new (...args: unknown[]): { get(name: string): string | null } } }).Headers
+  if (typeof HeadersCtor === "function" && headers instanceof HeadersCtor) {
+    const val = headers.get(lowerKey)
+    return val ?? undefined
+  }
+  if (typeof headers === "object") {
+    const asRecord = headers as Record<string, unknown>
+    const direct = asRecord[key] ?? asRecord[lowerKey] ?? asRecord[key.toUpperCase()]
+    if (typeof direct === "string" || Array.isArray(direct)) {
+      return direct as string | string[]
+    }
+  }
+  return undefined
+}
+
+function looksLikeUnsupportedProviderOptionsError(err: unknown): boolean {
+  const msg = String(err).toLowerCase()
+  const mentionsReasoning =
+    msg.includes("reasoning_effort") ||
+    msg.includes("reasoningeffort") ||
+    msg.includes("reasoning") ||
+    msg.includes("thinking")
+  const indicatesUnsupported =
+    msg.includes("unsupported") ||
+    msg.includes("unknown") ||
+    msg.includes("unrecognized") ||
+    msg.includes("invalid") ||
+    msg.includes("not allowed") ||
+    msg.includes("not supported") ||
+    msg.includes("unexpected")
+  return mentionsReasoning && indicatesUnsupported
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

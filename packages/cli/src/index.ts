@@ -25,6 +25,7 @@ Options:
   --dangerously-skip-permissions  Skip permission checks (Docker only)
   -m, --model <model>   Provider/model (e.g. anthropic/claude-sonnet-4-5, openai/gpt-4o)
   --temperature <n>     Sampling temperature (0-2)
+  --reasoning-effort <effort>  Reasoning effort (none|minimal|low|medium|high|max)
   --project <dir>       Project directory (default: current directory)
   --no-index            Disable codebase indexing
   -s, --session <id>    Session ID to resume

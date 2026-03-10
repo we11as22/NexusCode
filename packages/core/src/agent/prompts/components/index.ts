@@ -25,7 +25,7 @@ export interface PromptContext {
   contextPercent?: number
   /** When true, inject create-skill instructions and allow writes to skill dirs */
   createSkillMode?: boolean
-  /** When true, inject JSON schema for first-line preamble (reasoning only). */
+  /** Capability flag from provider; reserved for future prompt branching. */
   supportsStructuredOutput?: boolean
 }
 
@@ -68,14 +68,6 @@ export function buildRoleBlock(ctx: PromptContext): string {
   lines.push(TASK_PROGRESS_GUIDE)
   lines.push("")
   lines.push(RESPONSE_STYLE)
-  if (ctx.supportsStructuredOutput) {
-    lines.push("")
-    lines.push(`**First-line JSON schema (use this exact shape when the model supports structured output):**`)
-    lines.push("```json")
-    lines.push(JSON.stringify(AGENT_TURN_PREAMBLE_SCHEMA, null, 2))
-    lines.push("```")
-    lines.push("Output one line of JSON matching this schema, then a newline, then your response.")
-  }
   lines.push("")
   lines.push(CODE_REFERENCES_FORMAT)
   lines.push("")
@@ -101,7 +93,7 @@ You have complete access: read/write files, run shell commands, search the codeb
 - **Search first, then read parts** — Do not read whole files to explore. Run grep, CodebaseSearch, glob, ListCodeDefinitions (and List for layout) first; then use \`Read\` with \`offset\`/\`limit\` only for the ranges you need. One Edit per file (all edits in one call).
 - Read all relevant context before making changes; prefer \`Edit\` over \`Write\` for existing files.
 - **Verify** — After changes, run tests/build; fix failures before marking the task complete.
-- **Flow** — On a new goal, run a brief read-only discovery (multiple grep/CodebaseSearch in parallel, then targeted Read). Before each logical group of tool calls, output the first-line JSON with \`reasoning\`. Use parallel tool calls for independent operations.
+- **Flow** — On a new goal, run a brief read-only discovery (multiple grep/CodebaseSearch in parallel, then targeted Read). Before each logical group of tool calls, write one short plain-text progress sentence and then execute the tools. Use parallel tool calls for independent operations.
 - **Sub-agents** — Use \`Agent\` (SpawnAgents) early for focused sub-tasks (e.g. "analyze X", "implement Y"). For parallel subtasks, pass a \`tasks\` array in one call. Do not call \`Agent\` repeatedly for the same or very similar task.
 - **Decomposition & parallelization** — When a task is complex or spans multiple areas: (1) Decompose into subtasks and identify which are independent vs dependent. (2) Independent subtasks (different files/areas) → run in parallel via SpawnAgents with a \`tasks\` array in one call. (3) Dependent subtasks → different waves; wait for one wave to complete before starting the next. (4) If two agents might touch the same file → run them sequentially (different waves). (5) You can do implementation yourself or delegate to sub-agents; use sub-agents when it saves context or when subtasks are clearly separable.
 - **Always end your turn with a text reply to the user.** After using tools, summarize what you did. Never end with only tool calls.`,
@@ -173,7 +165,7 @@ const TONE_AND_OBJECTIVITY = `## Tone & Objectivity
 - **No time estimates** — Do not say how long something will take ("a few minutes", "quick fix", "2–3 weeks"). Describe what you will do; let the user judge timing.
 - **Output** — All text you write is shown to the user. Do not use tool calls or code comments to communicate; write directly. Do not put a colon before a tool call (e.g. "Reading the file." not "Reading the file:").
 - **Files** — Never create files (including markdown) unless necessary for the task. Prefer editing existing files. Never guess or fabricate URLs; use only URLs from the user or from tool results.
-- **Think and report progress** — Before each logical group of tool calls, output your first-line JSON with \`reasoning\` (what you are about to do and why — shown as Thought in UI). Do this at the start of the turn and before each new batch of tools. The user sees Thoughts (expandable).`
+- **Think and report progress** — Before each logical group of tool calls, write one concise plain-text progress sentence about what you are about to do and why. Do this at the start of the turn and before each new batch of tools.`
 
 const DOING_TASKS = `## Doing Tasks
 
@@ -311,7 +303,7 @@ Write readable, high-quality code. Optimize for clarity, not cleverness. Code wi
 
 const TOOL_USE_GUIDE = `## Tool Usage
 
-- **Reasoning first (Thought)** — Before every logical batch of tool calls, output your **first line as JSON** with a \`reasoning\` field: your actual reasoning — what you are about to do, why, and how it fits the task. This is shown as **Thought** in the UI (expandable). Never fire tools without this: the user must see your reasoning. Use it: (1) at the start of each turn before any tools, (2) before each new batch (e.g. after exploration, before edits).
+- **Progress before tool batches** — Before every logical batch of tool calls, write one brief plain-text progress line that states what you are about to do and why. Then call the tools immediately. Do this at the start of each turn and before each new batch (e.g. after exploration, before edits).
 
 - **Always end with a reply** — In every mode you MUST end your turn with a clear text response to the user. After using any tools (Read, List, CodebaseSearch, grep, etc.) provide a short summary or answer. Never end your turn with only tool calls — the user always expects a reply.
 
@@ -427,7 +419,7 @@ Skip for:
 const RESPONSE_STYLE = `## Response Style
 
 - **Always give a final answer** — Every turn must end with a text response to the user. After tool use, summarize what you did or found. Never end with only tool calls.
-- **First line = JSON with \`reasoning\` (Thought)** — Your first token output must be a **single line of JSON** with one field: \`reasoning\` (string). Put your real reasoning there: what you are about to do and why. It is shown as **Thought** in the UI (expandable). After this line and a newline, output your response: text and/or tool calls.
+- **Use plain text, not JSON preambles** — Do not emit JSON preambles for reasoning. Write normal plain text and tool calls.
 - **Status before tool batches** — Before the first tool call each turn, write a brief progress note about what you are about to do. Before each new batch of tools, add another short note. If you say you are about to do something, do it in the same turn — call the tool right after. Do not announce actions without following through in the same turn.
 - **Concise**: Be direct and to the point. Match verbosity to task complexity.
 - **No preamble**: Do not start with filler phrases like "Great!", "Sure!", "Certainly!", "Of course!", "I'd be happy to help!", "Absolutely!". Go straight to the answer or action.
@@ -441,16 +433,6 @@ const RESPONSE_STYLE = `## Response Style
 - **State assumptions and continue** — When an assumption is reasonable (e.g. "I'll use port 3000 since none is specified"), state it briefly and proceed. Do not stop for confirmation unless you are genuinely blocked by ambiguity that cannot be resolved with tools.
 - **If you must ask**: do all non-blocked work first, ask exactly one targeted question at the end of the turn.
 - **One word answers**: For simple factual questions, give the shortest correct answer. Examples: "2 + 2?" → "4". "Is 11 prime?" → "Yes". "List files in src/?" → run the tool and reply with just the result.`
-
-/** JSON schema for the first part of text_delta: reasoning only (Thought in UI). */
-export const AGENT_TURN_PREAMBLE_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    reasoning: { type: "string" as const, description: "Reasoning or plan for this step; shown as Thought (expandable, scrollable) in UI." },
-  },
-  required: ["reasoning"] as const,
-  additionalProperties: false,
-}
 
 const CODE_REFERENCES_FORMAT = `## Code References
 

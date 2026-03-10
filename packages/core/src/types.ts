@@ -162,6 +162,8 @@ export interface ISession {
   rewindToTimestamp(timestamp: number): void
   /** Rewind so that only messages with ts < timestamp remain (for rollback before a message). */
   rewindBeforeTimestamp(timestamp: number): void
+  /** Rewind so that only messages strictly before the given message remain. */
+  rewindBeforeMessageId(messageId: string): void
   save(): Promise<void>
   load(): Promise<void>
 }
@@ -314,6 +316,11 @@ export interface ProviderConfig {
    * Most providers support range [0, 2].
    */
   temperature?: number
+  /**
+   * Optional reasoning effort hint for reasoning-capable models.
+   * Supported values depend on provider/model (e.g. low/medium/high/minimal/none/max).
+   */
+  reasoningEffort?: string
   /** Optional explicit context window override in tokens for this model. */
   contextWindow?: number
   /** Azure-specific */

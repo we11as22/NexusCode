@@ -137,6 +137,16 @@ export class Session implements ISession {
     }
   }
 
+  /** Rewind so that only messages strictly before a specific message remain. */
+  rewindBeforeMessageId(messageId: string): void {
+    const idx = this._messages.findIndex((m) => m.id === messageId)
+    if (idx <= 0) {
+      if (idx === 0) this._messages = []
+      return
+    }
+    this._messages = this._messages.slice(0, idx)
+  }
+
   async save(): Promise<void> {
     const title = deriveSessionTitle(this._messages)
     const stored: StoredSession = {

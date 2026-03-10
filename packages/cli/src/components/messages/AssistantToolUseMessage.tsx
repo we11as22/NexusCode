@@ -143,8 +143,21 @@ function summarizeInput(
   input: Record<string, unknown>,
   renderedInput: string,
 ): string {
-  if (toolName === 'Parallel') {
+  if (toolName === 'Parallel' || toolName === 'parallel') {
     return summarizeParallelInput(input) ?? 'Run tools'
+  }
+  if (toolName === 'batch' || toolName === 'Batch') {
+    const reads = Array.isArray(input.reads) ? input.reads.length : 0
+    const lists = Array.isArray(input.lists) ? input.lists.length : 0
+    const searches = Array.isArray(input.searches) ? input.searches.length : 0
+    const replaces = Array.isArray(input.replaces) ? input.replaces.length : 0
+    const parts = [
+      reads > 0 ? `${reads} read${reads === 1 ? '' : 's'}` : '',
+      lists > 0 ? `${lists} list${lists === 1 ? '' : 's'}` : '',
+      searches > 0 ? `${searches} search${searches === 1 ? '' : 'es'}` : '',
+      replaces > 0 ? `${replaces} replace${replaces === 1 ? '' : 's'}` : '',
+    ].filter(Boolean)
+    return parts.join(', ') || 'batch'
   }
   if (Array.isArray(input.paths)) {
     const count = input.paths.length
@@ -170,7 +183,7 @@ function shouldShowExpandHint(
 ): boolean {
   const keys = Object.keys(input)
   if (keys.length === 0) return false
-  if (toolName === 'Parallel') return getParallelToolUses(input).length > 0
+  if (toolName === 'Parallel' || toolName === 'parallel') return getParallelToolUses(input).length > 0
   const firstValue = keys.length === 1 ? input[keys[0]!] : undefined
   if (
     keys.length === 1 &&
@@ -231,7 +244,7 @@ export function AssistantToolUseMessage({
   let renderedInput = ''
   if (hasInput) {
     try {
-      if (param.name === 'Parallel') {
+      if (param.name === 'Parallel' || param.name === 'parallel') {
         renderedInput =
           renderParallelInput(inputRecord) ??
           tool.renderToolUseMessage(param.input as never, { verbose })
@@ -248,7 +261,7 @@ export function AssistantToolUseMessage({
     ? summarizeInput(param.name, inputRecord, renderedInput)
     : ''
   const collapsedLine =
-    param.name === 'Parallel'
+    param.name === 'Parallel' || param.name === 'parallel'
       ? (collapsedInput || userFacingToolName)
       : [userFacingToolName, collapsedInput].filter(Boolean).join(' ')
   const showExpandHint =

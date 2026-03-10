@@ -56,8 +56,13 @@ export interface StreamOptions {
   maxTokens?: number
   temperature?: number
   maxRetries?: number
+  initialRetryDelayMs?: number
+  maxRetryDelayMs?: number
+  retryOnStatus?: number[]
   /** Provider-specific options (e.g. anthropic: { thinking: { type: 'enabled', budgetTokens } }) */
   providerOptions?: Record<string, unknown>
+  /** Ordered fallback options (strongest -> safest). Stream may retry with next candidate if provider rejects reasoning params. */
+  providerOptionsCandidates?: Array<Record<string, unknown> | undefined>
 }
 
 export interface GenerateOptions<T> {

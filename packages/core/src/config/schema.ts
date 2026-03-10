@@ -12,6 +12,8 @@ const providerSchema = z.object({
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
+  /** Optional reasoning effort hint for reasoning-capable models. */
+  reasoningEffort: z.string().optional(),
   /** Optional explicit context window size override (tokens). */
   contextWindow: z.number().int().positive().optional(),
   resourceName: z.string().optional(),

@@ -68,6 +68,8 @@ const TOOL_ICONS: Record<string, string> = {
   thinking_preamble: "💭",
   create_rule: "📏",
   batch: "📦",
+  Parallel: "🧩",
+  parallel: "🧩",
 }
 
 function toolDisplayName(tool: string): string {
@@ -83,8 +85,51 @@ function toolDisplayName(tool: string): string {
     read_lints: "ReadLints", ReadLints: "ReadLints",
     glob: "Glob", Glob: "Glob",
     update_todo_list: "TodoWrite", TodoWrite: "TodoWrite",
+    Parallel: "Parallel", parallel: "Parallel",
+    batch: "Batch", Batch: "Batch",
   }
   return labels[tool] ?? tool
+}
+
+function getParallelUses(input: Record<string, unknown>): Array<{ recipient_name?: unknown; parameters?: unknown }> {
+  const uses = input["tool_uses"]
+  if (!Array.isArray(uses)) return []
+  return uses.filter((item): item is { recipient_name?: unknown; parameters?: unknown } => item != null && typeof item === "object")
+}
+
+function normalizeParallelRecipientName(raw: string): string {
+  const trimmed = raw.trim()
+  if (!trimmed) return trimmed
+  const lower = trimmed.toLowerCase()
+  const prefixes = ["functions.", "function.", "multi_tool_use.", "tools.", "tool."]
+  const prefix = prefixes.find((item) => lower.startsWith(item))
+  const normalized = prefix ? trimmed.slice(prefix.length) : trimmed
+  const canonical = normalized.toLowerCase().replace(/[^a-z0-9]/g, "")
+  switch (canonical) {
+    case "read":
+    case "readfile":
+    case "read_file":
+      return "Read"
+    case "list":
+    case "listdir":
+    case "listdirectory":
+    case "list_dir":
+      return "List"
+    case "grep":
+    case "grepsearch":
+    case "searchfiles":
+      return "Grep"
+    case "glob":
+    case "filesearch":
+    case "globfilesearch":
+      return "Glob"
+    case "codebasesearch":
+      return "CodebaseSearch"
+    case "listcodedefinitions":
+      return "ListCodeDefinitions"
+    default:
+      return normalized
+  }
 }
 
 /* Tool cards (except file edit): on chat background, only subtle status bar */
@@ -478,11 +523,35 @@ function formatToolInputPreview(part: ToolPart): string {
     case "list_code_definitions":
     case "ListCodeDefinitions":
       return pathStr ? short(pathStr, 56) : ""
-    case "batch": {
+    case "batch":
+    case "Batch": {
       const reads = (inp["reads"] as unknown[])?.length ?? 0
       const searches = (inp["searches"] as unknown[])?.length ?? 0
+      const lists = (inp["lists"] as unknown[])?.length ?? 0
       const replaces = (inp["replaces"] as unknown[])?.length ?? 0
-      return [reads && `${reads} read(s)`, searches && `${searches} search(es)`, replaces && `${replaces} replace(s)`].filter(Boolean).join(", ") || "batch"
+      return [
+        reads && `${reads} read(s)`,
+        lists && `${lists} list(s)`,
+        searches && `${searches} search(es)`,
+        replaces && `${replaces} replace(s)`,
+      ].filter(Boolean).join(", ") || "batch"
+    }
+    case "Parallel":
+    case "parallel": {
+      const uses = getParallelUses(inp)
+      if (uses.length === 0) return "parallel"
+      const names = uses
+        .map((u) => (typeof u.recipient_name === "string" ? normalizeParallelRecipientName(u.recipient_name) : ""))
+        .filter(Boolean)
+      const unique = [...new Set(names)]
+      if (unique.length === 1) {
+        if (unique[0] === "Read") return `Read ${uses.length} ${uses.length === 1 ? "file" : "files"}`
+        if (unique[0] === "List") return `List ${uses.length} ${uses.length === 1 ? "dir" : "dirs"}`
+        if (unique[0] === "Grep" || unique[0] === "Glob" || unique[0] === "CodebaseSearch") {
+          return `${unique[0]} ${uses.length} ${uses.length === 1 ? "query" : "queries"}`
+        }
+      }
+      return `${uses.length} parallel ${uses.length === 1 ? "tool" : "tools"}`
     }
     case "spawn_agents":
     case "SpawnAgents": {
