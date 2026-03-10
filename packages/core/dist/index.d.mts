@@ -8,6 +8,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey: z.ZodOptional<z.ZodString>;
         baseUrl: z.ZodOptional<z.ZodString>;
         temperature: z.ZodOptional<z.ZodNumber>;
+        /** Optional explicit context window size override (tokens). */
+        contextWindow: z.ZodOptional<z.ZodNumber>;
         resourceName: z.ZodOptional<z.ZodString>;
         deploymentId: z.ZodOptional<z.ZodString>;
         apiVersion: z.ZodOptional<z.ZodString>;
@@ -18,6 +20,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -28,6 +31,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -608,6 +612,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         baseUrl: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         temperature: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
+        contextWindow: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
         resourceName: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         deploymentId: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         apiVersion: z.ZodOptional<z.ZodOptional<z.ZodString>>;
@@ -618,6 +623,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -628,6 +634,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -640,6 +647,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -779,6 +787,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -805,6 +814,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -996,6 +1006,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
+        contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
@@ -1284,6 +1295,7 @@ type AgentEvent = {
         lineNum: number;
         line: string;
     }>;
+    metadata?: Record<string, unknown>;
 } | {
     type: "subagent_start";
     subagentId: string;
@@ -1350,6 +1362,8 @@ interface ProviderConfig {
      * Most providers support range [0, 2].
      */
     temperature?: number;
+    /** Optional explicit context window override in tokens for this model. */
+    contextWindow?: number;
     /** Azure-specific */
     resourceName?: string;
     deploymentId?: string;
@@ -1604,6 +1618,7 @@ interface ProjectSettings {
         allow?: string[];
         deny?: string[];
         ask?: string[];
+        allowedMcpTools?: string[];
     };
 }
 /**

@@ -36,6 +36,8 @@ type Props = {
   shouldAnimate: boolean
   shouldShowDot: boolean
   width?: number | string
+  /** Whether tool input details should render expanded details. */
+  expandToolDetails?: boolean
   /** Subagents per SpawnAgents partId (Nexus); only passed when nexusBootstrap is set. */
   subagentsByPartId?: Record<string, SubAgentState[]>
 }
@@ -53,6 +55,7 @@ export function Message({
   shouldAnimate,
   shouldShowDot,
   width,
+  expandToolDetails = false,
   subagentsByPartId,
 }: Props): React.ReactNode {
   // Assistant message
@@ -75,6 +78,7 @@ export function Message({
             shouldAnimate={shouldAnimate}
             shouldShowDot={shouldShowDot}
             width={width}
+            expandToolDetails={expandToolDetails}
             subagentsByPartId={subagentsByPartId}
           />
         ))}
@@ -159,6 +163,7 @@ function AssistantMessage({
   shouldAnimate,
   shouldShowDot,
   width,
+  expandToolDetails = false,
   subagentsByPartId,
 }: {
   param:
@@ -182,6 +187,7 @@ function AssistantMessage({
   shouldAnimate: boolean
   shouldShowDot: boolean
   width?: number | string
+  expandToolDetails?: boolean
   subagentsByPartId?: Record<string, SubAgentState[]>
 }): React.ReactNode {
   switch (param.type) {
@@ -200,6 +206,7 @@ function AssistantMessage({
           unresolvedToolUseIDs={unresolvedToolUseIDs}
           shouldAnimate={shouldAnimate}
           shouldShowDot={shouldShowDot}
+          expandToolDetails={expandToolDetails}
           subagents={subagentsByPartId?.[param.id] ?? []}
         />
       )

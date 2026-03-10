@@ -321,6 +321,8 @@ const TOOL_USE_GUIDE = `## Tool Usage
 
 - **DEFAULT TO PARALLEL** — Unless operations genuinely require sequential order (output of A is required for B), always execute multiple tools simultaneously. This is not an optimization — it is the **expected behavior**. Sequential one-at-a-time calls waste the user's time. Parallel discovery is 3–5× faster. When gathering information, plan what you need and execute all searches in one turn.
 
+- **Use \`Parallel\` when needed** — If the provider supports only one tool call per step, use the built-in \`Parallel\` tool with \`tool_uses\` to batch independent **read-only** calls (e.g. several Read/Grep/Glob calls) in one step. For mutating tools (Write/Edit/Bash), call them directly (not through \`Parallel\`).
+
 - **Context window** — Check the Environment block for "Context: X / Y tokens (Z%)". When usage is high (e.g. >80%), use the \`condense\` tool to summarize the conversation and free tokens before continuing.
 - **Explore structure first** — Use \`List\` (root and key dirs), \`glob\` (find by pattern, e.g. \`**/*.ts\`), \`ListCodeDefinitions\` (file or dir for symbols and line numbers), and \`grep\` (exact patterns, identifiers, imports) to understand the codebase before opening files. Prefer these over reading whole files when you are discovering layout or locating code.
 - **Read only what you need** — After grep, CodebaseSearch, or ListCodeDefinitions, use \`Read\` with \`offset\` and \`limit\` to load only the relevant section (saves context and tokens). Do not read an entire file when a line range is enough.

@@ -102,22 +102,45 @@ export class BaseLLMClient implements LLMClient {
       if (opts.signal?.aborted) break
 
       // AI SDK may emit reasoning-part-finish; types may not include it yet
-      if ((part as { type: string }).type === "reasoning-part-finish") continue
+      const partType = (part as { type: string }).type
+      if (partType === "reasoning-part-finish") continue
 
-      switch (part.type) {
+      // Some OpenAI-compatible gateways include reasoning fields on non-reasoning part types.
+      // Emit these as reasoning_delta so Thought blocks are preserved in UI.
+      const hasNativeReasoningType =
+        partType === "reasoning" ||
+        partType === "reasoning-delta" ||
+        partType === "reasoning_delta"
+      if (!hasNativeReasoningType) {
+        const implicitReasoning = extractReasoningDelta(part as Record<string, unknown>, false)
+        if (implicitReasoning) {
+          yield { type: "reasoning_delta", delta: implicitReasoning }
+        }
+      }
+
+      switch (partType) {
         case "text-delta":
-          yield { type: "text_delta", delta: part.textDelta }
+          yield { type: "text_delta", delta: extractTextDelta(part as Record<string, unknown>) }
           break
 
         case "reasoning":
+        case "reasoning-delta":
+        case "reasoning_delta":
           // Support both textDelta (streaming) and text (chunk) for reasoning/thinking models (OpenRouter, o1, DeepSeek R1, etc.)
-          yield {
-            type: "reasoning_delta",
-            delta:
-              (part as Record<string, string>)["textDelta"] ??
-              (part as Record<string, string>)["text"] ??
-              "",
+          {
+            const delta = extractReasoningDelta(part as Record<string, unknown>, true)
+            if (delta) {
+              yield {
+                type: "reasoning_delta",
+                delta,
+              }
+            }
           }
+          break
+
+        case "reasoning-end":
+        case "reasoning_end":
+          yield { type: "reasoning_end" }
           break
 
         case "tool-call": {
@@ -180,6 +203,60 @@ export class BaseLLMClient implements LLMClient {
   async generateStructured<T>(opts: GenerateOptions<T>): Promise<T> {
     return generateStructuredWithFallback(this, opts)
   }
+}
+
+function extractTextDelta(part: Record<string, unknown>): string {
+  const textDelta = part["textDelta"]
+  if (typeof textDelta === "string") return textDelta
+  const delta = part["delta"]
+  if (typeof delta === "string") return delta
+  const text = part["text"]
+  if (typeof text === "string") return text
+  return ""
+}
+
+function extractReasoningDelta(part: Record<string, unknown>, allowTextFallback: boolean): string {
+  const direct = pickReasoningString(part, allowTextFallback)
+  if (direct) return direct
+
+  const deltaObj = asRecord(part["delta"])
+  if (deltaObj) {
+    const nestedDelta = pickReasoningString(deltaObj, allowTextFallback)
+    if (nestedDelta) return nestedDelta
+  }
+
+  const providerMetadata = asRecord(part["providerMetadata"])
+  if (providerMetadata) {
+    for (const entry of Object.values(providerMetadata)) {
+      const obj = asRecord(entry)
+      if (!obj) continue
+      const nested = pickReasoningString(obj, allowTextFallback)
+      if (nested) return nested
+    }
+  }
+
+  return ""
+}
+
+function pickReasoningString(obj: Record<string, unknown>, allowTextFallback: boolean): string {
+  const keys = [
+    "reasoning",
+    "reasoningText",
+    "reasoning_text",
+    "reasoningContent",
+    "reasoning_content",
+  ]
+  if (allowTextFallback) keys.push("textDelta", "text")
+  for (const key of keys) {
+    const val = obj[key]
+    if (typeof val === "string" && val.length > 0) return val
+  }
+  return ""
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null
+  return value as Record<string, unknown>
 }
 
 function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typeof streamText>[0]["messages"] {

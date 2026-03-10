@@ -20,8 +20,10 @@ const SEARCH_TOOLS = new Set([
   "grep", "codebase_search", "search_files", "list_code_definitions",
   "Grep", "CodebaseSearch", "Glob", "ListCodeDefinitions", // core built-in names
 ])
-/** Only these increase "N files" in Explored label. list_dir/List is in Explored but not counted. */
+/** Only these increase "N files" in Explored label. */
 const FILE_COUNT_TOOLS = new Set(["read_file", "Read"])
+/** Count list tools separately in Explored label. */
+const LIST_COUNT_TOOLS = new Set(["list_dir", "List"])
 
 /** Whether this tool counts as exploration (file read/list or search) for the collapsed "Explored" block. */
 export function isExplorationTool(tool: string): boolean {
@@ -33,7 +35,7 @@ export type ExploredPrefixItem =
   | { type: "reasoning"; text: string; durationMs?: number }
   | { type: "tool"; part: ToolPart; entry: ExploredEntry }
 
-/** Parts: collect ALL reasoning and ALL exploration tools in the message (in order). Block is shown only when there is at least one tool; if only reasoning, return empty so we show Thought(s) as-is. We do not stop at first text — so list_dir etc. later in the message are still inside Explored. */
+/** Parts: collect only the leading contiguous exploration/reasoning prefix. Stop when first non-exploration content appears. */
 export function getExploredPrefixFromParts(parts: MessagePart[]): {
   prefixItems: ExploredPrefixItem[]
   prefixIndices: Set<number>
@@ -43,8 +45,20 @@ export function getExploredPrefixFromParts(parts: MessagePart[]): {
   const prefixItems: ExploredPrefixItem[] = []
   const prefixIndices = new Set<number>()
   let partIndex = 0
+  let hasSeenExplorationTool = false
+
+  const hasVisibleText = (part: MessagePart): boolean => {
+    if (part.type !== "text") return false
+    const textPart = part as { text?: string; user_message?: string }
+    return Boolean(textPart.text?.trim() || textPart.user_message?.trim())
+  }
+
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i]!
+    if (part.type === "text") {
+      if (hasVisibleText(part)) break
+      continue
+    }
     if (part.type === "reasoning") {
       const r = part as { text: string; durationMs?: number }
       prefixItems.push({ type: "reasoning", text: r.text, durationMs: r.durationMs })
@@ -52,21 +66,21 @@ export function getExploredPrefixFromParts(parts: MessagePart[]): {
       partIndex++
       continue
     }
-    if (part.type === "text") continue
     if (part.type === "tool") {
       const toolPart = part as ToolPart
-      if (!isExplorationTool(toolPart.tool)) continue
+      if (!isExplorationTool(toolPart.tool)) break
+      hasSeenExplorationTool = true
       const entry = getToolEntry(toolPart, partIndex++)
       if (entry) prefixItems.push({ type: "tool", part: toolPart, entry })
       prefixIndices.add(i)
       continue
     }
+    break
   }
   const lastPrefixIndex = prefixIndices.size > 0 ? Math.max(...prefixIndices) : -1
   const hasContentAfterPrefix = lastPrefixIndex >= 0 && lastPrefixIndex < parts.length - 1
   if (prefixItems.length === 0) return { prefixItems: [], prefixIndices: new Set(), hasContentAfterPrefix }
-  const hasAtLeastOneTool = prefixItems.some((x) => x.type === "tool")
-  if (!hasAtLeastOneTool) {
+  if (!hasSeenExplorationTool) {
     return { prefixItems: [], prefixIndices: new Set(), hasContentAfterPrefix }
   }
   return { prefixItems, prefixIndices, hasContentAfterPrefix }
@@ -171,13 +185,15 @@ function formatToolName(tool: string): string {
   return core[tool] ?? tool
 }
 
-/** Per-message: compute files/searches count and entries from tool parts only. list_dir/List is in entries but not counted in files (files = read_file only). */
+/** Per-message: compute files/lists/searches count and entries from tool parts only. */
 export function getExploredFromParts(parts: MessagePart[]): {
   filesCount: number
+  listCount: number
   searchesCount: number
   entries: ExploredEntry[]
 } {
   let filesCount = 0
+  let listCount = 0
   let searchesCount = 0
   const entries: ExploredEntry[] = []
   let partIndex = 0
@@ -185,14 +201,15 @@ export function getExploredFromParts(parts: MessagePart[]): {
     if (part.type !== "tool") continue
     const toolPart = part as ToolPart
     if (FILE_COUNT_TOOLS.has(toolPart.tool)) filesCount++
+    if (LIST_COUNT_TOOLS.has(toolPart.tool)) listCount++
     if (SEARCH_TOOLS.has(toolPart.tool)) searchesCount++
     const entry = getToolEntry(toolPart, partIndex++)
     if (entry) entries.push(entry)
   }
-  return { filesCount, searchesCount, entries }
+  return { filesCount, listCount, searchesCount, entries }
 }
 
-/** Inline collapsible "Explored [N files,] [M searches]" — list_dir/List is in the block but not counted; N = read_file only, M = grep/search. If N or M is 0 that part is omitted. */
+/** Inline collapsible "Explored [N files,] [L lists,] [M searches]". If a metric is 0 it is omitted. */
 export function ExploredSummaryInline({
   prefixItems,
   defaultCollapsed,
@@ -206,11 +223,13 @@ export function ExploredSummaryInline({
   useEffect(() => {
     if (defaultCollapsed) setOpen(false)
   }, [defaultCollapsed])
-  // list_dir/List is in Explored but not counted; N files = FILE_COUNT_TOOLS only, M searches = SEARCH_TOOLS
+  // list_dir/List is in Explored and counted as separate "lists" metric.
   const filesCount = prefixItems.filter((x) => x.type === "tool" && FILE_COUNT_TOOLS.has(x.part.tool)).length
+  const listCount = prefixItems.filter((x) => x.type === "tool" && LIST_COUNT_TOOLS.has(x.part.tool)).length
   const searchesCount = prefixItems.filter((x) => x.type === "tool" && SEARCH_TOOLS.has(x.part.tool)).length
   const labelParts: string[] = []
   if (filesCount > 0) labelParts.push(`${filesCount} file${filesCount === 1 ? "" : "s"}`)
+  if (listCount > 0) labelParts.push(`${listCount} list${listCount === 1 ? "" : "s"}`)
   if (searchesCount > 0) labelParts.push(`${searchesCount} search${searchesCount === 1 ? "" : "es"}`)
   const total = prefixItems.length
   if (total === 0) return null
@@ -305,9 +324,10 @@ export function useExploredFromMessages(
   messages: SessionMessage[],
   isRunning: boolean,
   reasoningStartTime: number | null
-): { filesCount: number; searchesCount: number; entries: ExploredEntry[] } {
+): { filesCount: number; listCount: number; searchesCount: number; entries: ExploredEntry[] } {
   return useMemo(() => {
     let filesCount = 0
+    let listCount = 0
     let searchesCount = 0
     const entries: ExploredEntry[] = []
     let partIndex = 0
@@ -327,6 +347,7 @@ export function useExploredFromMessages(
       if (part.type === "tool") {
         const toolPart = part as ToolPart
         if (FILE_COUNT_TOOLS.has(toolPart.tool)) filesCount++
+        if (LIST_COUNT_TOOLS.has(toolPart.tool)) listCount++
         if (SEARCH_TOOLS.has(toolPart.tool)) searchesCount++
         const entry = getToolEntry(toolPart, partIndex++)
         if (entry) entries.push(entry)
@@ -342,7 +363,7 @@ export function useExploredFromMessages(
       })
     }
 
-    return { filesCount, searchesCount, entries }
+    return { filesCount, listCount, searchesCount, entries }
   }, [messages, isRunning, reasoningStartTime])
 }
 
@@ -374,17 +395,18 @@ interface Props {
 
 export function ExploredProgressBlock({ messages, isRunning, reasoningStartTime }: Props) {
   const [open, setOpen] = useState(false)
-  const { filesCount, searchesCount, entries } = useExploredFromMessages(
+  const { filesCount, listCount, searchesCount, entries } = useExploredFromMessages(
     messages,
     isRunning,
     reasoningStartTime
   )
 
-  const total = filesCount + searchesCount
-  // Do not show "Explored" when there are no file reads or searches (list_dir/List is in entries but not counted)
+  const total = filesCount + listCount + searchesCount
+  // Do not show "Explored" when there are no exploration metrics and no entries.
   if (total === 0 && entries.length === 0) return null
   const labelParts: string[] = []
   if (filesCount > 0) labelParts.push(`${filesCount} file${filesCount === 1 ? "" : "s"}`)
+  if (listCount > 0) labelParts.push(`${listCount} list${listCount === 1 ? "" : "s"}`)
   if (searchesCount > 0) labelParts.push(`${searchesCount} search${searchesCount === 1 ? "" : "es"}`)
   const label = labelParts.length > 0 ? labelParts.join(", ") : "Explored"
 

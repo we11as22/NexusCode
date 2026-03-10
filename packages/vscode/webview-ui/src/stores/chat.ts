@@ -50,6 +50,7 @@ export interface NexusConfigState {
     apiKey?: string
     baseUrl?: string
     temperature?: number
+    contextWindow?: number
   }
   embeddings?: {
     provider: "openai" | "openai-compatible" | "ollama" | "local"

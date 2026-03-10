@@ -64,6 +64,10 @@ type Props = {
   onNexusConfigSaved?: () => void | Promise<void>
   /** When set (Nexus), /undo reverts the last message and file changes. */
   onNexusUndo?: () => Promise<void>
+  /** Toggle expanded/collapsed tool input details in chat. */
+  onToggleToolDetails?: () => void
+  /** Current expanded/collapsed state for tool input details. */
+  toolDetailsExpanded?: boolean
 }
 
 function getPastedTextPrompt(text: string): string {
@@ -101,6 +105,8 @@ function PromptInput({
   onNexusToggleAcceptEdits,
   onNexusConfigSaved,
   onNexusUndo,
+  onToggleToolDetails,
+  toolDetailsExpanded = false,
 }: Props): React.ReactNode {
   const [isAutoUpdating, setIsAutoUpdating] = useState(false)
   const [exitMessage, setExitMessage] = useState<{
@@ -300,6 +306,14 @@ function PromptInput({
     if (input === '' && (key.escape || key.backspace || key.delete)) {
       onModeChange('prompt')
     }
+    if (
+      key.ctrl &&
+      (inputChar === 'o' || inputChar === 'O' || inputChar === '\x0f') &&
+      onToggleToolDetails
+    ) {
+      onToggleToolDetails()
+      return
+    }
     if (key.ctrl && (inputChar === 'y' || inputChar === 'Y' || inputChar === '\x19') && onNexusToggleAcceptEdits) {
       onNexusToggleAcceptEdits()
       return
@@ -403,7 +417,10 @@ function PromptInput({
                 >
                   ! for bash mode
                 </Text>
-                <Text dimColor>· / for commands · esc to undo</Text>
+                <Text dimColor>
+                  · / for commands · esc to undo · Ctrl+O tool inputs:{' '}
+                  {toolDetailsExpanded ? 'expanded' : 'collapsed'}
+                </Text>
               </>
             )}
           </Box>

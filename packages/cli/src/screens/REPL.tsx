@@ -12,7 +12,6 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Command } from '../commands.js'
 import { Logo } from '../components/Logo.js'
 import { Message } from '../components/Message.js'
-import { MessageResponse } from '../components/MessageResponse.js'
 import { MessageSelector } from '../components/MessageSelector.js'
 import {
   PermissionRequest,
@@ -244,6 +243,8 @@ export function REPL({
 
   /** When true, auto-accept approvals (write/execute/mcp/doom_loop). Toggle with Ctrl+Y. */
   const [nexusAcceptEditsEnabled, setNexusAcceptEditsEnabled] = useState(true)
+  /** Collapsed/expanded details for tool inputs in chat. Toggle with Ctrl+O. */
+  const [toolDetailsExpanded, setToolDetailsExpanded] = useState(false)
 
   const hasRunningSubagent = useMemo(
     () =>
@@ -645,32 +646,37 @@ export function REPL({
     [normalizedMessages],
   )
 
-  const messagesJSX = useMemo(() =>
-    reorderMessages(normalizedMessages).map(_ => {
-        const toolUseID = getToolUseID(_)
-        const message =
-          _.type === 'progress' ? (
-            _.content.message.content[0]?.type === 'text' &&
-            // Hack: AgentTool interrupts use Progress messages, so don't
-            // need an extra ⎿ because <Message /> already adds one.
-            // TODO: Find a cleaner way to do this.
-            _.content.message.content[0].text === INTERRUPT_MESSAGE ? (
-              <Message
-                message={_.content}
-                messages={_.normalizedMessages}
-                addMargin={false}
-                tools={_.tools}
-                verbose={verbose ?? false}
-                debug={debug}
-                erroredToolUseIDs={new Set()}
-                inProgressToolUseIDs={new Set()}
-                unresolvedToolUseIDs={new Set()}
-                shouldAnimate={false}
-                shouldShowDot={false}
-                subagentsByPartId={subagentsByPartId}
-              />
-            ) : (
-              <MessageResponse>
+  const messagesJSX = useMemo(
+    () =>
+      reorderMessages(normalizedMessages)
+        .map(_ => {
+          // Progress items are only for in-flight tool calls.
+          // Once a matching tool_result arrives, hide progress and keep the final tool_use line.
+          if (_.type === 'progress' && !unresolvedToolUseIDs.has(_.toolUseID)) {
+            return null
+          }
+          const toolUseID = getToolUseID(_)
+          const message =
+            _.type === 'progress' ? (
+              _.content.message.content[0]?.type === 'text' &&
+              // AgentTool interrupts use text progress payloads.
+              _.content.message.content[0].text === INTERRUPT_MESSAGE ? (
+                <Message
+                  message={_.content}
+                  messages={_.normalizedMessages}
+                  addMargin={false}
+                  tools={_.tools}
+                  verbose={verbose ?? false}
+                  debug={debug}
+                  erroredToolUseIDs={new Set()}
+                  inProgressToolUseIDs={new Set()}
+                  unresolvedToolUseIDs={new Set()}
+                  shouldAnimate={false}
+                  shouldShowDot={true}
+                  subagentsByPartId={subagentsByPartId}
+                  expandToolDetails={toolDetailsExpanded}
+                />
+              ) : (
                 <Message
                   message={_.content}
                   messages={_.normalizedMessages}
@@ -686,85 +692,96 @@ export function REPL({
                     ])
                   }
                   shouldAnimate={false}
-                  shouldShowDot={false}
+                  shouldShowDot={true}
                   subagentsByPartId={subagentsByPartId}
+                  expandToolDetails={toolDetailsExpanded}
                 />
-              </MessageResponse>
+              )
+            ) : (
+              <Message
+                message={_}
+                messages={normalizedMessages}
+                addMargin={true}
+                tools={tools}
+                verbose={verbose}
+                debug={debug}
+                erroredToolUseIDs={erroredToolUseIDs}
+                inProgressToolUseIDs={inProgressToolUseIDs}
+                shouldAnimate={
+                  !toolJSX &&
+                  !toolUseConfirm &&
+                  !isMessageSelectorVisible &&
+                  (!toolUseID || inProgressToolUseIDs.has(toolUseID))
+                }
+                shouldShowDot={true}
+                unresolvedToolUseIDs={unresolvedToolUseIDs}
+                subagentsByPartId={subagentsByPartId}
+                expandToolDetails={toolDetailsExpanded}
+              />
             )
-          ) : (
-            <Message
-              message={_}
-              messages={normalizedMessages}
-              addMargin={true}
-              tools={tools}
-              verbose={verbose}
-              debug={debug}
-              erroredToolUseIDs={erroredToolUseIDs}
-              inProgressToolUseIDs={inProgressToolUseIDs}
-              shouldAnimate={
-                !toolJSX &&
-                !toolUseConfirm &&
-                !isMessageSelectorVisible &&
-                (!toolUseID || inProgressToolUseIDs.has(toolUseID))
-              }
-              shouldShowDot={true}
-              unresolvedToolUseIDs={unresolvedToolUseIDs}
-              subagentsByPartId={subagentsByPartId}
-            />
+
+          const type = shouldRenderStatically(
+            _,
+            normalizedMessages,
+            unresolvedToolUseIDs,
           )
+            ? 'static'
+            : 'transient'
 
-        const type = shouldRenderStatically(
-          _,
-          normalizedMessages,
-          unresolvedToolUseIDs,
-        )
-          ? 'static'
-          : 'transient'
+          if (debug) {
+            return {
+              type,
+              jsx: (
+                <Box
+                  borderStyle="single"
+                  borderColor={type === 'static' ? 'green' : 'red'}
+                  key={_.uuid}
+                  width="100%"
+                >
+                  {message}
+                </Box>
+              ),
+            }
+          }
 
-        if (debug) {
           return {
             type,
             jsx: (
-              <Box
-                borderStyle="single"
-                borderColor={type === 'static' ? 'green' : 'red'}
-                key={_.uuid}
-                width="100%"
-              >
+              <Box key={_.uuid} width="100%">
                 {message}
               </Box>
             ),
           }
-        }
-
-        return {
-          type,
-          jsx: (
-            <Box key={_.uuid} width="100%">
-              {message}
-            </Box>
-          ),
-        }
-      }),
-  [
-    normalizedMessages,
-    tools,
-    verbose,
-    debug,
-    erroredToolUseIDs,
-    inProgressToolUseIDs,
-    toolJSX,
-    toolUseConfirm,
-    isMessageSelectorVisible,
-    unresolvedToolUseIDs,
-    mcpClients,
-    isDefaultModel,
-    nexusBootstrap,
-    nexusConfigSnapshot,
-    nexusModeOverride,
-    nexusSessionId,
-    subagentsByPartId,
-  ])
+        })
+        .filter(
+          (
+            item,
+          ): item is {
+            type: 'static' | 'transient'
+            jsx: React.ReactNode
+          } => item !== null,
+        ),
+    [
+      normalizedMessages,
+      tools,
+      verbose,
+      debug,
+      erroredToolUseIDs,
+      inProgressToolUseIDs,
+      toolJSX,
+      toolUseConfirm,
+      isMessageSelectorVisible,
+      unresolvedToolUseIDs,
+      mcpClients,
+      isDefaultModel,
+      nexusBootstrap,
+      nexusConfigSnapshot,
+      nexusModeOverride,
+      nexusSessionId,
+      subagentsByPartId,
+      toolDetailsExpanded,
+    ],
+  )
 
   const staticMessageItems = messagesJSX.filter(_ => _.type === 'static')
   const staticItemsWithHeader = useMemo(
@@ -972,6 +989,10 @@ export function REPL({
                 }
                 onNexusConfigSaved={onNexusConfigSaved}
                 onNexusUndo={nexusBootstrap ? onNexusUndo : undefined}
+                onToggleToolDetails={() =>
+                  setToolDetailsExpanded(prev => !prev)
+                }
+                toolDetailsExpanded={toolDetailsExpanded}
               />
             </>
           )}

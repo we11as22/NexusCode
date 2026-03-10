@@ -272,6 +272,7 @@ export class CliHost implements IHost {
       settings.permissions.allow = allow
       if (!settings.permissions.deny) settings.permissions.deny = []
       if (!settings.permissions.ask) settings.permissions.ask = []
+      await fs.mkdir(dir, { recursive: true })
       await fs.writeFile(settingsLocalPath, JSON.stringify(settings, null, 2), "utf8")
     }
   }

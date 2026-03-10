@@ -286,7 +286,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
   /** Emit context usage. When systemPrompt is provided, include it in usedTokens (Cline/OpenCode-style: UI shows real request size). */
   const emitContextUsage = (systemPromptText?: string) => {
-    const limitTokens = getContextLimit(activeClient.modelId)
+    const limitTokens = getContextLimit(activeClient.modelId, config.model.contextWindow)
     const sessionTokens = session.getTokenEstimate()
     const systemTokens = systemPromptText ? estimateTokens(systemPromptText) : 0
     const usedTokens = sessionTokens + systemTokens
@@ -302,7 +302,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     loopIterations++
 
     // Proactive context management (Cline/OpenCode-style): prune/compact before building prompt when near limit
-    const limitForCompaction = getContextLimit(activeClient.modelId)
+    const limitForCompaction = getContextLimit(activeClient.modelId, config.model.contextWindow)
     if (limitForCompaction > 0 && loopIterations > 1) {
       let sessionTokens = session.getTokenEstimate()
       const threshold = config.summarization?.threshold ?? 0.75
@@ -337,7 +337,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           new Promise<DiagnosticItem[]>((r) => setTimeout(() => r([]), PROBLEMS_TIMEOUT_MS)),
         ])
       : []
-    const limitTokens = getContextLimit(activeClient.modelId)
+    const limitTokens = getContextLimit(activeClient.modelId, config.model.contextWindow)
     const usedTokens = session.getTokenEstimate()
     const contextPercent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
     const promptCtx: PromptContext = {
@@ -461,7 +461,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
       const tasks = pendingReads.map(tc =>
         executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode, mcpToolNames)
-          .catch(err => ({ success: false, output: `Error: ${err.message}` }))
+          .catch(err => ({ success: false, output: `Error: ${err.message}`, metadata: undefined }))
       )
 
       const results = await Promise.all(tasks)
@@ -486,6 +486,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           success: result.success,
           output: result.output,
           error: result.success ? undefined : result.output,
+          metadata: result.metadata,
         })
         if (tc.toolName === "TodoWrite") {
           host.emit({ type: "todo_updated", todo: session.getTodo() })
@@ -707,6 +708,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 output: result.output,
                 error: result.success ? undefined : result.output,
                 compacted: (result as { compacted?: boolean }).compacted,
+                metadata: result.metadata,
                 ...(result.success && (toolName === "Write" || toolName === "Edit")
                   ? {
                       path: extractWriteTargetPath(toolName, toolInput),
@@ -870,6 +872,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             output: result.output,
             error: result.success ? undefined : result.output,
             compacted: (result as { compacted?: boolean }).compacted,
+            metadata: result.metadata,
             ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
               ? {
                   path: extractWriteTargetPath(call.toolName, call.toolInput),
@@ -978,6 +981,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           messageId: newMessageId,
           success: forcedResult.success,
           output: forcedResult.output,
+          metadata: forcedResult.metadata,
         })
         if (forcedResult.success && forcedResult.output?.trim()) {
           setReportToUserMessage(session, newMessageId, forcedResult.output)
@@ -993,7 +997,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     // Check for context overflow proactively
     const tokenCount = session.getTokenEstimate()
-    const contextLimit = getContextLimit(activeClient.modelId)
+    const contextLimit = getContextLimit(activeClient.modelId, config.model.contextWindow)
     if (contextLimit > 0 && tokenCount / contextLimit > config.summarization.threshold) {
       host.emit({ type: "compaction_start" })
       await handleCompaction(session, activeClient, config, host, compaction, signal)
@@ -1318,7 +1322,7 @@ async function handleCompaction(
 
     // Check again
     const tokenCount = session.getTokenEstimate()
-    const contextLimit = getContextLimit(client.modelId)
+    const contextLimit = getContextLimit(client.modelId, config.model.contextWindow)
     if (contextLimit > 0 && tokenCount / contextLimit > config.summarization.threshold) {
       // Full compaction with LLM
       await compaction.compact(session, client, signal)
@@ -1701,7 +1705,10 @@ function extractWriteTargetPath(toolName: string, toolInput: Record<string, unkn
   return undefined
 }
 
-function getContextLimit(modelId: string): number {
+function getContextLimit(modelId: string, configuredLimit?: number): number {
+  if (typeof configuredLimit === "number" && Number.isFinite(configuredLimit) && configuredLimit > 0) {
+    return Math.floor(configuredLimit)
+  }
   const lower = modelId.toLowerCase()
   if (lower.includes("claude-3") || lower.includes("claude-4") || lower.includes("claude-sonnet") || lower.includes("claude-opus")) return 200000
   if (lower.includes("gpt-4o")) return 128000

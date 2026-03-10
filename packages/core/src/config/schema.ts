@@ -12,6 +12,8 @@ const providerSchema = z.object({
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
+  /** Optional explicit context window size override (tokens). */
+  contextWindow: z.number().int().positive().optional(),
   resourceName: z.string().optional(),
   deploymentId: z.string().optional(),
   apiVersion: z.string().optional(),

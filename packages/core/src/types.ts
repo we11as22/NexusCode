@@ -285,7 +285,7 @@ export type AgentEvent =
   | { type: "text_delta"; delta: string; messageId: string; user_message_delta?: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
-  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
+  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; metadata?: Record<string, unknown> }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
@@ -314,6 +314,8 @@ export interface ProviderConfig {
    * Most providers support range [0, 2].
    */
   temperature?: number
+  /** Optional explicit context window override in tokens for this model. */
+  contextWindow?: number
   /** Azure-specific */
   resourceName?: string
   deploymentId?: string

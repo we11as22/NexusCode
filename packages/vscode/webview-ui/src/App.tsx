@@ -674,6 +674,7 @@ interface SettingsDraft {
   modelApiKey: string
   modelBaseUrl: string
   modelTemperature: string
+  modelContextWindow: string
   embProvider: string
   embModel: string
   embApiKey: string
@@ -852,6 +853,11 @@ function SettingsView() {
             />
             <SettingsInput label="Model" value={draft.modelId} onChange={(v) => setDraft({ ...draft, modelId: v })} />
             <SettingsInput label="Temperature (0-2)" value={draft.modelTemperature} onChange={(v) => setDraft({ ...draft, modelTemperature: v })} />
+            <SettingsInput
+              label="Context window (tokens, optional override)"
+              value={draft.modelContextWindow}
+              onChange={(v) => setDraft({ ...draft, modelContextWindow: v })}
+            />
             <SettingsInput type="password" label="API Key" value={draft.modelApiKey} onChange={(v) => setDraft({ ...draft, modelApiKey: v })} />
             <SettingsInput label="Base URL" value={draft.modelBaseUrl} onChange={(v) => setDraft({ ...draft, modelBaseUrl: v })} />
             <div className="nexus-muted text-[10px]">Default context window fallback: 128k tokens.</div>
@@ -1948,6 +1954,7 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     modelApiKey: config.model.apiKey ?? "",
     modelBaseUrl: isOpenRouter && baseUrl ? baseUrl : (config.model.baseUrl ?? ""),
     modelTemperature: toInputNumber(config.model.temperature),
+    modelContextWindow: toInputNumber(config.model.contextWindow),
     embProvider: config.embeddings?.provider ?? "openai",
     embModel: config.embeddings?.model ?? "",
     embApiKey: config.embeddings?.apiKey ?? "",
@@ -1991,6 +1998,7 @@ function getDefaultDraft(): SettingsDraft {
     modelApiKey: "",
     modelBaseUrl: "https://openrouter.ai/api/v1",
     modelTemperature: "0.7",
+    modelContextWindow: "",
     embProvider: "openai",
     embModel: "",
     embApiKey: "",
@@ -2031,6 +2039,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       ? (modelBaseUrl || "https://openrouter.ai/api/v1")
       : (modelBaseUrl || undefined)
   const modelTemperature = parseNumber(draft.modelTemperature)
+  const modelContextWindow = parseIntOrUndefined(draft.modelContextWindow)
   const embDimensions = parseIntOrUndefined(draft.embDimensions)
   const embProviderRaw = draft.embProvider.trim() || "openai"
   const embProvider = embProviderRaw
@@ -2057,6 +2066,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       apiKey: draft.modelApiKey.trim() || undefined,
       baseUrl: normalizedBaseUrl,
       temperature: modelTemperature,
+      contextWindow: modelContextWindow,
     },
     embeddings: draft.embModel.trim()
       ? {

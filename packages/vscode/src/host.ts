@@ -344,28 +344,64 @@ export class VsCodeHost implements IHost {
       new TextEncoder().encode(JSON.stringify({ commands }, null, 2))
     )
 
-    // Also append to .nexus/settings.local.json (like .claude) so the allowlist is visible
+    await this.appendToSettingsAllow(cwd, normalized)
+  }
+
+  async addAllowedPattern(cwd: string, pattern: string): Promise<void> {
+    const normalized = pattern.trim()
+    if (!normalized) return
+    await this.appendToSettingsAllow(cwd, normalized)
+  }
+
+  async addAllowedMcpTool(cwd: string, toolName: string): Promise<void> {
+    const normalized = toolName.trim()
+    if (!normalized) return
+    const dir = path.join(cwd, ".nexus")
+    const settings = await this.readSettingsLocal(cwd)
+    if (!settings.permissions) settings.permissions = {}
+    const list = settings.permissions.allowedMcpTools ?? []
+    if (list.includes(normalized)) return
+    settings.permissions.allowedMcpTools = [...list, normalized]
+    if (!settings.permissions.allow) settings.permissions.allow = []
+    if (!settings.permissions.deny) settings.permissions.deny = []
+    if (!settings.permissions.ask) settings.permissions.ask = []
+    await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir))
+    await vscode.workspace.fs.writeFile(
+      vscode.Uri.file(path.join(dir, "settings.local.json")),
+      new TextEncoder().encode(JSON.stringify(settings, null, 2))
+    )
+  }
+
+  private async readSettingsLocal(cwd: string): Promise<{
+    permissions?: { allow?: string[]; deny?: string[]; ask?: string[]; allowedMcpTools?: string[] }
+  }> {
     const settingsLocalPath = path.join(cwd, ".nexus", "settings.local.json")
-    let settings: { permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } } = {}
     try {
-      const settingsUri = vscode.Uri.file(settingsLocalPath)
-      const data = await vscode.workspace.fs.readFile(settingsUri)
-      settings = JSON.parse(Buffer.from(data).toString("utf8")) as typeof settings
+      const data = await vscode.workspace.fs.readFile(vscode.Uri.file(settingsLocalPath))
+      const parsed = JSON.parse(Buffer.from(data).toString("utf8")) as {
+        permissions?: { allow?: string[]; deny?: string[]; ask?: string[]; allowedMcpTools?: string[] }
+      }
+      if (parsed && typeof parsed === "object") return parsed
+      return {}
     } catch {
-      // File missing or invalid
+      return {}
     }
+  }
+
+  private async appendToSettingsAllow(cwd: string, entry: string): Promise<void> {
+    const dir = path.join(cwd, ".nexus")
+    const settings = await this.readSettingsLocal(cwd)
     if (!settings.permissions) settings.permissions = {}
     const allow = settings.permissions.allow ?? []
-    if (!allow.includes(normalized)) {
-      allow.push(normalized)
-      settings.permissions.allow = allow
-      if (!settings.permissions.deny) settings.permissions.deny = []
-      if (!settings.permissions.ask) settings.permissions.ask = []
-      await vscode.workspace.fs.writeFile(
-        vscode.Uri.file(settingsLocalPath),
-        new TextEncoder().encode(JSON.stringify(settings, null, 2))
-      )
-    }
+    if (allow.includes(entry)) return
+    settings.permissions.allow = [...allow, entry]
+    if (!settings.permissions.deny) settings.permissions.deny = []
+    if (!settings.permissions.ask) settings.permissions.ask = []
+    await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir))
+    await vscode.workspace.fs.writeFile(
+      vscode.Uri.file(path.join(dir, "settings.local.json")),
+      new TextEncoder().encode(JSON.stringify(settings, null, 2))
+    )
   }
 
   async getProblems(): Promise<DiagnosticItem[]> {
@@ -446,10 +482,8 @@ export async function showDiffForPath(cwd: string, filePath: string): Promise<vo
     ? vscode.Uri.joinPath(wf.uri, relPath)
     : vscode.Uri.file(absPath)
 
-  let after: string
   try {
-    const data = await vscode.workspace.fs.readFile(fileUri)
-    after = Buffer.from(data).toString("utf8")
+    await vscode.workspace.fs.readFile(fileUri)
   } catch {
     vscode.window.showErrorMessage(`NexusCode: Could not read file ${filePath}`)
     return
@@ -465,27 +499,18 @@ export async function showDiffForPath(cwd: string, filePath: string): Promise<vo
   }
 
   const fileName = path.basename(filePath)
-
-  // Use untitled URIs so the tab shows a path hint (filename in save dialog).
-  const dir = path.dirname(absPath)
-  const base = path.basename(absPath)
-  const uriAfter = vscode.Uri.parse("untitled:" + absPath)
-  const uriBefore = vscode.Uri.parse("untitled:" + path.join(dir, ".nexuscode-diff-before", base))
-
-  const beforeDoc = await vscode.workspace.openTextDocument(uriBefore)
-  const afterDoc = await vscode.workspace.openTextDocument(uriAfter)
-
-  const we = new vscode.WorkspaceEdit()
-  we.insert(uriBefore, new vscode.Position(0, 0), before)
-  we.insert(uriAfter, new vscode.Position(0, 0), after)
-  await vscode.workspace.applyEdit(we)
+  const lang = getLanguageFromExtension(path.extname(filePath))
+  const beforeDoc = await vscode.workspace.openTextDocument({
+    content: before,
+    language: lang,
+  })
 
   await vscode.commands.executeCommand(
     "vscode.diff",
     beforeDoc.uri,
-    afterDoc.uri,
+    fileUri,
     `${fileName}: NexusCode Changes`,
-    { viewColumn: vscode.ViewColumn.Active, preview: true }
+    { viewColumn: vscode.ViewColumn.Active, preview: false, preserveFocus: false }
   )
 }
 
@@ -501,15 +526,28 @@ export async function showSessionEditDiff(cwd: string, filePath: string, before:
     content: before,
     language: lang,
   })
-  const afterDoc = await vscode.workspace.openTextDocument({
-    content: after,
-    language: lang,
-  })
+  const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
+  const wf = vscode.workspace.workspaceFolders?.[0]
+  const fileUri = wf
+    ? vscode.Uri.joinPath(wf.uri, relPath)
+    : vscode.Uri.file(absPath)
+
+  let afterUri = fileUri
+  try {
+    await vscode.workspace.fs.stat(fileUri)
+  } catch {
+    const afterDoc = await vscode.workspace.openTextDocument({
+      content: after,
+      language: lang,
+    })
+    afterUri = afterDoc.uri
+  }
+
   await vscode.commands.executeCommand(
     "vscode.diff",
     beforeDoc.uri,
-    afterDoc.uri,
+    afterUri,
     `${fileName}: Session changes`,
-    { viewColumn: vscode.ViewColumn.Active, preview: true }
+    { viewColumn: vscode.ViewColumn.Active, preview: false, preserveFocus: false }
   )
 }

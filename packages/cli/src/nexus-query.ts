@@ -44,11 +44,22 @@ function sessionMessageToAssistantContent(msg: SessionMessage): ContentBlockPara
   const parts = content as MessagePart[]
   for (const p of parts) {
     if (p.type === 'text') {
-      const t = (p as TextPart).text
+      const tp = p as TextPart & { user_message?: string }
+      const userMessage = tp.user_message?.trim()
+      if (userMessage) {
+        blocks.push({ type: 'text', text: userMessage, citations: [] })
+      }
+      const t = tp.text
       if (t?.trim()) blocks.push({ type: 'text', text: t, citations: [] })
     } else if (p.type === 'reasoning') {
       const r = (p as { text: string }).text
-      if (r?.trim()) blocks.push({ type: 'text', text: `[Reasoning]\n${r}`, citations: [] })
+      if (r?.trim()) {
+        blocks.push({
+          type: 'thinking',
+          thinking: r,
+          signature: '',
+        } as ContentBlockParam)
+      }
     } else if (p.type === 'tool') {
       const tp = p as ToolPart
       blocks.push({
@@ -230,6 +241,17 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       } else if (event.type === 'tool_end') {
         if (event.tool === 'SpawnAgents') lastSpawnAgentPartId = null
         const toolResultText = event.output ?? (event.error ?? '')
+        const toolResultData = {
+          tool: event.tool,
+          output: toolResultText,
+          path: event.path,
+          diffStats: event.diffStats,
+          diffHunks: event.diffHunks,
+          compacted: event.compacted,
+          writtenContent: event.writtenContent,
+          metadata: event.metadata,
+          success: event.success,
+        }
         const userMsg = createUserMessage([
           {
             type: 'tool_result',
@@ -238,7 +260,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
             is_error: !event.success,
           } as { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean },
         ], {
-          data: toolResultText,
+          data: toolResultData,
           resultForAssistant: toolResultText,
         })
         consumed.push(userMsg)

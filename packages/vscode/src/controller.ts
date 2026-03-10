@@ -152,7 +152,10 @@ export interface WebviewState {
   sessionUnacceptedEdits?: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
 }
 
-function getContextLimit(modelId: string): number {
+function getContextLimit(modelId: string, configuredLimit?: number): number {
+  if (typeof configuredLimit === "number" && Number.isFinite(configuredLimit) && configuredLimit > 0) {
+    return Math.floor(configuredLimit)
+  }
   const lower = modelId.toLowerCase()
   if (lower.includes("claude-3") || lower.includes("claude-4") || lower.includes("claude-sonnet") || lower.includes("claude-opus")) return 200000
   if (lower.includes("gpt-4o")) return 128000
@@ -278,7 +281,7 @@ export class Controller {
       }
     }
     const contextUsedTokens = this.session.getTokenEstimate()
-    const contextLimitTokens = getContextLimit(this.config.model.id)
+    const contextLimitTokens = getContextLimit(this.config.model.id, this.config.model.contextWindow)
     const contextPercent =
       contextLimitTokens > 0
         ? Math.min(100, Math.round((contextUsedTokens / contextLimitTokens) * 100))
@@ -427,9 +430,11 @@ export class Controller {
           if (!this.config.permissions.allowCommandPatterns) this.config.permissions.allowCommandPatterns = []
           if (!this.config.permissions.denyCommandPatterns) this.config.permissions.denyCommandPatterns = []
           if (!this.config.permissions.askCommandPatterns) this.config.permissions.askCommandPatterns = []
+          if (!this.config.permissions.allowedMcpTools) this.config.permissions.allowedMcpTools = []
           if (Array.isArray(perms.allow)) this.config.permissions.allowCommandPatterns = perms.allow
           if (Array.isArray(perms.deny)) this.config.permissions.denyCommandPatterns = perms.deny
           if (Array.isArray(perms.ask)) this.config.permissions.askCommandPatterns = perms.ask
+          if (Array.isArray(perms.allowedMcpTools)) this.config.permissions.allowedMcpTools = perms.allowedMcpTools
         }
       } catch {
         // ignore
@@ -671,7 +676,13 @@ export class Controller {
         const raw = msg.path?.trim() ?? ""
         // Avoid using multi-line or huge strings as path (e.g. accidental content paste).
         if (raw.length > 0 && raw.length < 2048 && !raw.includes("\n")) {
-          await showDiffForPath(cwd, raw)
+          const key = raw.replace(/\\/g, "/")
+          const sessionEdit = this.sessionUnacceptedEdits.find((e) => e.path.replace(/\\/g, "/") === key)
+          if (sessionEdit) {
+            await showSessionEditDiff(cwd, raw, sessionEdit.originalContent, sessionEdit.newContent)
+          } else {
+            await showDiffForPath(cwd, raw)
+          }
         }
         break
       }

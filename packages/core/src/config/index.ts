@@ -447,7 +447,12 @@ export interface ProjectSettings {
     allow?: string[]
     deny?: string[]
     ask?: string[]
+    allowedMcpTools?: string[]
   }
+}
+
+function uniqueNonEmpty(values: string[]): string[] {
+  return [...new Set(values.map(v => v.trim()).filter(Boolean))]
 }
 
 /**
@@ -475,8 +480,12 @@ export function loadProjectSettings(cwd: string): ProjectSettings {
   } catch {
     // ignore
   }
-  const allow = [...(base.permissions?.allow ?? []), ...(local.permissions?.allow ?? [])]
-  const deny = [...(base.permissions?.deny ?? []), ...(local.permissions?.deny ?? [])]
-  const ask = [...(base.permissions?.ask ?? []), ...(local.permissions?.ask ?? [])]
-  return { permissions: { allow, deny, ask } }
+  const allow = uniqueNonEmpty([...(base.permissions?.allow ?? []), ...(local.permissions?.allow ?? [])])
+  const deny = uniqueNonEmpty([...(base.permissions?.deny ?? []), ...(local.permissions?.deny ?? [])])
+  const ask = uniqueNonEmpty([...(base.permissions?.ask ?? []), ...(local.permissions?.ask ?? [])])
+  const allowedMcpTools = uniqueNonEmpty([
+    ...(base.permissions?.allowedMcpTools ?? []),
+    ...(local.permissions?.allowedMcpTools ?? []),
+  ])
+  return { permissions: { allow, deny, ask, allowedMcpTools } }
 }
