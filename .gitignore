@@ -79,3 +79,4 @@ docs/
 
 # Legacy (was in original .gitignore)
 sources/
+.git_disabled/
