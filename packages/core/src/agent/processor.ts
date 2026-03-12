@@ -286,6 +286,10 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
           }
           break
 
+        case "reasoning_end":
+          await emit({ type: "reasoning_end", messageId: newMessageId })
+          break
+
         case "tool_call": {
           let { toolCallId, toolName, toolInput } = event
           if (!toolCallId || !toolName || !toolInput) break

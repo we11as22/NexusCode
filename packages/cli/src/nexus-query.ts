@@ -110,7 +110,7 @@ export interface QueryNexusOptions {
   tuiApprovalRef?: { current: ((r: { approved: boolean; alwaysApprove?: boolean; skipAll?: boolean; whatToDoInstead?: string; addToAllowedCommand?: string }) => void) | null }
   autoApprovePermissions?: Partial<AutoApprovePermissions>
   autoApprove?: boolean
-  /** Override mode for this run (agent/plan/ask/debug). Defaults to nexus.mode. */
+  /** Override mode for this run (agent/plan/ask/debug/review). Defaults to nexus.mode. */
   modeOverride?: string
   /** When set, called for each subagent_* event; partId is the SpawnAgents tool_use id. */
   onSubagentEvent?: (partId: string, event: SubagentEvent) => void
@@ -137,7 +137,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     onRunComplete,
   } = opts
   const { session, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer } = nexus
-  const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug'
+  const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug' | 'review'
 
   let config = await loadConfig(nexus.cwd, { secrets: nexus.secretsStore })
   if (autoApprovePermissions) {

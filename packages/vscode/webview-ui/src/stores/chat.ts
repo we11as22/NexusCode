@@ -2,7 +2,7 @@ import { create } from "zustand"
 import { postMessage } from "../vscode.js"
 import type { ModelsCatalogFromCore, AgentPresetFromCore } from "../types/messages.js"
 
-export type Mode = "agent" | "plan" | "ask" | "debug"
+export type Mode = "agent" | "plan" | "ask" | "debug" | "review"
 export type AppView = "chat" | "sessions" | "settings"
 
 export type IndexStatusKind =
@@ -77,11 +77,13 @@ export interface NexusConfigState {
     autoStart: boolean
   }
   tools: {
+    classifyToolsEnabled?: boolean
     classifyThreshold: number
     parallelReads: boolean
     maxParallelReads: number
     custom: string[]
   }
+  skillClassifyEnabled?: boolean
   skillClassifyThreshold: number
   mcp: {
     servers: Array<{
@@ -105,6 +107,7 @@ export interface NexusConfigState {
     plan?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     ask?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     debug?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
+    review?: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string }
     [key: string]: { autoApprove?: string[]; systemPrompt?: string; customInstructions?: string } | undefined
   }
   permissions?: {
@@ -113,6 +116,12 @@ export interface NexusConfigState {
     autoApproveCommand: boolean
     autoApproveMcp?: boolean
     autoApproveBrowser?: boolean
+    autoApproveReadPatterns?: string[]
+    allowedCommands?: string[]
+    allowCommandPatterns?: string[]
+    denyCommandPatterns?: string[]
+    askCommandPatterns?: string[]
+    allowedMcpTools?: string[]
   }
   /** UI preferences. showReasoningInChat: when true, text_delta shown as muted; when false, only tool text. */
   ui?: { showReasoningInChat?: boolean }
@@ -219,7 +228,7 @@ interface ChatState {
   /** Options for creating a preset (skills, MCP, rules) — loaded when opening create modal. */
   agentPresetOptions: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } | null
   requestAgentPresetOptions: () => void
-  handleAgentPresetOptions: (options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] }) => void
+  handleAgentPresetOptions: (options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } | null) => void
 
   /** Loaded skill definitions (name, path, summary) for Settings → Skills list. */
   skillDefinitions: Array<{ name: string; path: string; summary: string }>
@@ -271,6 +280,7 @@ export type AgentEvent =
   | { type: "assistant_message_started"; messageId: string }
   | { type: "text_delta"; delta: string; messageId: string; user_message_delta?: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
+  | { type: "reasoning_end"; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
@@ -350,7 +360,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   requestAgentPresetOptions: () => {
     postMessage({ type: "getAgentPresetOptions" })
   },
-  handleAgentPresetOptions: (options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] }) => {
+  handleAgentPresetOptions: (options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } | null) => {
     set({ agentPresetOptions: options })
   },
 
@@ -814,6 +824,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ...baseList.slice(index + 1),
           ],
         })
+        break
+      }
+
+      case "reasoning_end": {
+        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const target = baseList[index]
+        const startTime = get().reasoningStartTime
+        if (!target || startTime == null || !Array.isArray(target.content)) {
+          set((s) => ({ ...s, reasoningStartTime: null }))
+          break
+        }
+        const updated = { ...target }
+        const parts = [...(updated.content as MessagePart[])]
+        const lastPart = parts[parts.length - 1]
+        if (lastPart?.type === "reasoning") {
+          parts[parts.length - 1] = { ...lastPart, durationMs: Date.now() - startTime } as ReasoningPart
+          updated.content = parts
+          set({
+            messages: [
+              ...baseList.slice(0, index),
+              updated,
+              ...baseList.slice(index + 1),
+            ],
+            reasoningStartTime: null,
+          })
+          break
+        }
+        set((s) => ({ ...s, reasoningStartTime: null }))
         break
       }
 

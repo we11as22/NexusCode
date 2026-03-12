@@ -1489,14 +1489,10 @@ html, body, #root {
   text-overflow: ellipsis;
 }
 
-/* Kilo-style: flex-based scroll viewport. Use absolute fill so the scroll area always has a definite height (fixes webview stick-to-top). */
+/* Stable scroll viewport for Virtuoso (prevents remount-like jumps on long chats). */
 .message-list-virtuoso-wrap {
-  position: absolute;
-  inset: 0;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  position: relative;
+  flex: 1 1 0%;
   min-height: 0;
   overflow: hidden;
   display: flex;
@@ -1589,7 +1585,7 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  height: 100%;
+  flex: 1 1 0%;
 }
 
 .message-list-item {

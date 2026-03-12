@@ -9,13 +9,14 @@ if (!rootEl) {
   document.body.innerHTML = "<span style='padding:1rem;color:#f48771'>Root element #root not found.</span>"
   throw new Error("Root element #root not found")
 }
+const appRoot = rootEl
 
 function markLoaded(): void {
-  rootEl.classList.add("loaded")
+  appRoot.classList.add("loaded")
 }
 
 try {
-  const root = createRoot(rootEl)
+  const root = createRoot(appRoot)
   root.render(
     <ErrorBoundary>
       <App />
@@ -27,6 +28,6 @@ try {
   })
 } catch (err) {
   const msg = err instanceof Error ? err.message : String(err)
-  rootEl.classList.add("error")
-  rootEl.innerHTML = `<span class="loading-msg" style="color:#f48771;padding:1rem">${msg}</span>`
+  appRoot.classList.add("error")
+  appRoot.innerHTML = `<span class="loading-msg" style="color:#f48771;padding:1rem">${msg}</span>`
 }

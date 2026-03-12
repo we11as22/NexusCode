@@ -46,6 +46,7 @@ const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   plan: 80,
   agent: 200,
   debug: 200,
+  review: 120,
 }
 
 /** When a mandatory end tool (e.g. PlanExit) completes, set its output as user_message on the last text part of the message (so UI and context see it). */
@@ -257,6 +258,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     plan: 24,
     agent: 48,
     debug: 48,
+    review: 36,
   }
   const toolBudgetFromConfig = config.agentLoop?.toolCallBudget
   const iterFromConfig = config.agentLoop?.maxIterations
@@ -265,12 +267,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     plan: toolBudgetFromConfig?.plan ?? BASE_TOOL_CALL_BUDGET_BY_MODE.plan,
     agent: toolBudgetFromConfig?.agent ?? BASE_TOOL_CALL_BUDGET_BY_MODE.agent,
     debug: toolBudgetFromConfig?.debug ?? BASE_TOOL_CALL_BUDGET_BY_MODE.debug,
+    review: toolBudgetFromConfig?.review ?? BASE_TOOL_CALL_BUDGET_BY_MODE.review,
   }
   const effectiveMaxIterations: Record<Mode, number> = {
     ask: iterFromConfig?.ask ?? baseMaxIterationsByMode.ask,
     plan: iterFromConfig?.plan ?? baseMaxIterationsByMode.plan,
     agent: iterFromConfig?.agent ?? baseMaxIterationsByMode.agent,
     debug: iterFromConfig?.debug ?? baseMaxIterationsByMode.debug,
+    review: iterFromConfig?.review ?? baseMaxIterationsByMode.review,
   }
   const maxIterations = effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode]
   const toolCallBudget = Math.max(8, effectiveToolBudget[mode] ?? BASE_TOOL_CALL_BUDGET_BY_MODE[mode])
@@ -542,6 +546,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               flushAssistantContent()
               host.emit({ type: "reasoning_delta", delta: event.delta, messageId: newMessageId })
             }
+            break
+
+          case "reasoning_end":
+            host.emit({ type: "reasoning_end", messageId: newMessageId })
             break
 
           case "tool_call": {

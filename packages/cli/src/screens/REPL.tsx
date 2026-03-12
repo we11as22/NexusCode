@@ -71,7 +71,7 @@ import type { SessionMessage, ToolPart } from '@nexuscode/core'
 import type { SessionDiffEntry } from '../components/NexusSessionDiffBlock.js'
 import { NexusSessionDiffBlock } from '../components/NexusSessionDiffBlock.js'
 
-const NEXUS_MODES = ['agent', 'plan', 'ask', 'debug'] as const
+const NEXUS_MODES = ['agent', 'plan', 'ask', 'debug', 'review'] as const
 function cycleNexusMode(current: string): string {
   const i = NEXUS_MODES.indexOf(current as (typeof NEXUS_MODES)[number])
   return NEXUS_MODES[(i + 1) % NEXUS_MODES.length] ?? 'agent'
@@ -250,7 +250,7 @@ export function REPL({
     Record<string, import('../nexus-subagents.js').SubAgentState[]>
   >({})
 
-  /** Nexus mode for the next run (agent/plan/ask/debug). Shown below input; Shift+Tab to change mode. */
+  /** Nexus mode for the next run (agent/plan/ask/debug/review). Shown below input; Shift+Tab to change mode. */
   const [nexusModeOverride, setNexusModeOverride] = useState<string>(
     () => nexusInitialMode ?? 'agent',
   )

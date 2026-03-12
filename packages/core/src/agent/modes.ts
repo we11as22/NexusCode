@@ -12,6 +12,7 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
   plan:  ["always", "read", "write", "search", "mcp", "skills", "agents", "context", "plan_exit"],
   ask:   ["always", "read", "search", "mcp", "skills", "agents", "context"],
   debug: ["always", "read", "write", "execute", "search", "mcp", "skills", "agents", "context"],
+  review: ["always", "read", "execute", "search", "mcp", "skills", "agents", "context"],
 }
 
 /**
@@ -25,6 +26,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   plan:  ["Bash"],
   ask:   ["Write", "Edit", "Bash", "PlanExit"],
   debug: ["PlanExit"],
+  review: ["Write", "Edit", "PlanExit"],
 }
 
 /**
@@ -90,6 +92,7 @@ export const MANDATORY_END_TOOL: Record<Mode, string> = {
   plan:  "PlanExit",
   ask:   "",
   debug: "",
+  review: "",
 }
 
 /**
@@ -132,6 +135,7 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
     plan:  ["read"],
     ask:   ["read"],
     debug: ["read"],
+    review: ["read"],
   }
   const configured = modeConfig?.autoApprove ?? defaults[mode]
   return new Set(configured)
@@ -145,4 +149,5 @@ export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   plan:  "PLAN mode: (1) Study the task thoroughly — read codebase, search, browser, MCP, skills; write only the plan to .nexus/plans/*.md or .txt. (2) You may use SpawnAgents for parallel research subtasks (sub-agents run in ask mode). (3) Call plan_exit only after at least one plan file exists in .nexus/plans/; user may then approve (execution continues in agent mode), revise, or abandon.",
   ask:   "ASK mode: read-only. Answer questions, explain code, analyze — use read, search, browser, MCP, skills. You may use SpawnAgents for parallel read-only subtasks (sub-agents run in ask mode). Do NOT modify files, run commands, or use plan_exit.",
   debug: "DEBUG mode: diagnose first, then fix. Use read/search/execute/write with strict discipline: list likely root causes, validate with evidence (logs/tests/repro), then apply minimal targeted fixes and re-verify.",
+  review: "REVIEW mode: audit-only review of changes. Use read/search/execute (git diff/log/blame) to produce findings and recommendations. Do NOT modify files or call plan_exit.",
 }

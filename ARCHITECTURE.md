@@ -15,7 +15,7 @@ Both hosts call the same `runAgentLoop()` in core, so behavior is consistent acr
 
 | Feature | Where | Notes |
 |--------|--------|--------|
-| **Mode** (agent / ask / plan / debug) | `--mode` + bootstrap | Passed to `runAgentLoop`; Logo shows `mode=…` when Nexus is active. |
+| **Mode** (agent / ask / plan / debug / review) | `--mode` + bootstrap | Passed to `runAgentLoop`; Logo shows `mode=…` when Nexus is active. |
 | **Model** | `--model` + config / bootstrap | Override in bootstrap; Logo shows `model=…`. |
 | **Vector index** | `--no-index` + config | `indexEnabled` in bootstrap; Logo shows `index=on|off`. |
 | **Profile** | `--profile` + config | Merges profile into model config in bootstrap. |
@@ -43,19 +43,20 @@ The **NexusProvider** owns the webview(s) and delegates all messages to `control
 The agent loop runs until one of:
 
 - **Mandatory end tool** for the current mode is executed (turn ends).
-- **finishReason === "stop"** and no tool calls in the last step (then the loop may force-call the mandatory end tool).
+- **finishReason === "stop"** and no tool calls in the last step (natural end of turn).
 - Abort, fatal error, or tool/iteration budget exceeded.
 
 **Mandatory end tool per mode** (`MANDATORY_END_TOOL` in `packages/core/src/agent/modes.ts`):
 
 | Mode   | Mandatory end tool        | Meaning |
 |--------|---------------------------|--------|
-| agent  | `final_report_to_user`    | Turn ends after the model reports the result to the user. |
+| agent  | *(none)*                  | Turn ends naturally when the model stops without tool calls. |
 | plan   | `plan_exit`               | Turn ends when the plan is ready (plan written to `.nexus/plans/*.md`). |
-| ask    | `final_report_to_user`   | Turn ends after the model reports the answer. |
-| debug  | `final_report_to_user`   | Turn ends after the model reports the diagnosis/fix. |
+| ask    | *(none)*                  | Turn ends naturally when the model stops without tool calls. |
+| debug  | *(none)*                  | Turn ends naturally when the model stops without tool calls. |
+| review | *(none)*                  | Turn ends naturally when the model stops without tool calls. |
 
-When the model stops without calling the mandatory tool, the loop force-calls it (with a summary of the current text) so the user always gets a final message. After the mandatory tool runs, the loop breaks and the turn is complete. There is no separate “completion” tool; **final_report_to_user** is the single way to deliver the final answer and end the turn in agent/ask/debug.
+Only modes with a configured mandatory tool are force-gated by that tool (currently `plan_exit` in plan mode). Other modes end naturally when the model returns a stop with no pending tool calls.
 
 ---
 
@@ -71,10 +72,7 @@ When the number of **MCP servers** exceeds `tools.classifyThreshold` (default 20
 
 ### Inline reasoning fallback for gateway streams
 
-Core streaming supports provider-native `reasoning_delta` and fallback extraction from `text_delta` when gateways embed reasoning into plain text chunks:
-
-- first-line JSON preamble: `{"reasoning":"..."}`
-- inline `<think>...</think>` blocks
+Core streaming supports provider-native `reasoning_delta` and fallback extraction from structured gateway fields (`reasoning`, `reasoning_details`, `thinking`, provider metadata) and `<think>...</think>` blocks in streamed text.
 
 Fallback extraction is disabled once native `reasoning_delta` is observed. This keeps extension/CLI thought blocks populated for providers that do not emit separate reasoning events.
 
@@ -111,7 +109,7 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 - When the **tool-call budget** is exceeded, the loop allows one more iteration with tools disabled so the model can emit a final text-only answer.
 - **`config.agentLoop.toolCallBudget`** and **`config.agentLoop.maxIterations`** override per-mode limits when set.
 - **Models catalog**: CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) and live gateway model list where applicable; unavailable free IDs are filtered from pickers.
-- **End of turn**: In agent/ask/debug the turn ends when **final_report_to_user** is executed; in plan when **plan_exit** is executed. The loop does not run another LLM request after that.
+- **End of turn**: plan mode is force-gated by **PlanExit**; agent/ask/debug/review end naturally when the model stops without tool calls.
 
 ---
 
@@ -122,7 +120,7 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 3. Core (in-process or on server) builds prompt blocks (role, rules, skills, system, mentions, compaction).
 4. The model streams text and tool calls.
 5. Tools run via the host adapter with permission checks (rules, approval dialogs).
-6. When **final_report_to_user** (or **plan_exit** in plan mode) runs, its output is merged into the last text part’s `user_message` and the loop exits after that iteration.
+6. In **plan** mode, **PlanExit** ends the turn after a plan file is written to `.nexus/plans/`. In other modes, turns end naturally when the model stops without tool calls.
 7. Session and tool traces are saved (local or server) and sent back to the UI. With the server, extension and CLI can list/switch sessions; messages are loaded in pages to avoid OOM.
 8. Index updates run in the background and emit status events (in-process only; server mode does not run the indexer in the extension).
 
@@ -157,18 +155,17 @@ NexusCode/
 
 ## Built-in tools (by group)
 
-- **always:** `final_report_to_user`, `ask_followup_question`, `update_todo_list`
-- **read:** `read_file`, `list`, `list_code_definitions`, `read_lints`
-- **write:** `write_to_file`, `replace_in_file`, `create_rule`
-- **execute:** `execute_command`
-- **search:** `grep`, `codebase_search`, `web_fetch`, `web_search`, `glob`
-- **browser:** `browser_action`
-- **skills:** `use_skill`
+- **always:** `AskFollowupQuestion`, `TodoWrite`, `Parallel`
+- **read:** `Read`, `List`, `ListCodeDefinitions`, `ReadLints`
+- **write:** `Write`, `Edit`
+- **execute:** `Bash`
+- **search:** `Grep`, `CodebaseSearch`, `WebFetch`, `WebSearch`, `Glob`
+- **skills:** `Skill`
 - **agents:** `SpawnAgents`
-- **context:** `condense`, `summarize_task`
-- **plan_exit:** `plan_exit` (plan mode only)
+- **context:** `Condense`
+- **plan_exit:** `PlanExit` (plan mode only)
 
-Mode-specific blocks: **plan** blocks `execute_command`; **ask** blocks `write_to_file`, `replace_in_file`, `execute_command`, `create_rule`, `plan_exit`. **agent** and **debug** block `plan_exit`.
+Mode-specific blocks: **plan** blocks `Bash`; **ask** blocks `Write`, `Edit`, `Bash`, `PlanExit`; **review** blocks `Write`, `Edit`, `PlanExit`; **agent/debug** block `PlanExit`.
 
 ---
 

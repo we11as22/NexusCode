@@ -30,8 +30,6 @@ export const progressNoteTool: ToolDef<z.infer<typeof progressNoteSchema>> = {
   name: "progress_note",
   description: `Send a short progress message to the user. The message is shown as **plain text** in the chat (no card). Use it so the user always sees what you are doing.
 
-Use plain text only. Do not output JSON reasoning preambles before calling this tool.
-
 When to use:
 - Before the first tool call each turn: one short note (e.g. "Scanning the codebase for auth logic.").
 - Before each new batch of tools: note what you are about to do (e.g. "Reading the relevant files next.").

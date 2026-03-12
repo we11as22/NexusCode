@@ -26,7 +26,7 @@ function getTextFromMessage(msg: SessionMessage): string {
 }
 
 /**
- * Plan content for follow-up: last assistant text, or from last write_to_file to .nexus/plans, or first .nexus/plans/*.md file.
+ * Plan content for follow-up: last assistant text, or from last Write/Edit to .nexus/plans, or first .nexus/plans/*.md file.
  * Used to inject "Implement the following plan: ..." into a new session or continue message.
  */
 export async function getPlanContentForFollowup(session: ISession, cwd: string): Promise<string> {
@@ -39,7 +39,7 @@ export async function getPlanContentForFollowup(session: ISession, cwd: string):
       const p = parts[i]
       if (p?.type !== "tool") continue
       const tp = p as ToolPart
-      if (tp.tool !== "write_to_file" || tp.status !== "completed") continue
+      if (!["Write", "Edit", "write_to_file", "replace_in_file"].includes(tp.tool) || tp.status !== "completed") continue
       const filePath = (tp.input?.path as string) ?? (tp.input?.file_path as string)
       if (!filePath || typeof filePath !== "string") continue
       const normalized = path.normalize(filePath).replace(/\\/g, "/")

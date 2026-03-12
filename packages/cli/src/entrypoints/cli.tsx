@@ -370,7 +370,7 @@ ${commandList}`,
     .option('--server <url>', 'NexusCode server URL (e.g. http://127.0.0.1:4097); uses NEXUS_SERVER_URL env if set', String)
     .option('--continue', 'Continue most recent session', () => true)
     .option('--profile <name>', 'Named profile from nexus.yaml', String)
-    .option('--mode <mode>', 'Mode: agent | ask | plan | debug', 'agent')
+    .option('--mode <mode>', 'Mode: agent | ask | plan | debug | review', 'agent')
     .action(
       async (
         prompt,
@@ -395,7 +395,14 @@ ${commandList}`,
       ) => {
         await showSetupScreens(dangerouslySkipPermissions, print)
         const effectiveCwd = project ? path.resolve(cwd, project) : cwd
-        const mode = (modeOpt === 'ask' || modeOpt === 'plan' || modeOpt === 'debug' || modeOpt === 'agent') ? modeOpt : 'agent'
+        const mode =
+          modeOpt === 'ask' ||
+          modeOpt === 'plan' ||
+          modeOpt === 'debug' ||
+          modeOpt === 'review' ||
+          modeOpt === 'agent'
+            ? modeOpt
+            : 'agent'
         setCwd(effectiveCwd)
         logEvent('tengu_init', {
           entrypoint: 'nexus',

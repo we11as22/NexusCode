@@ -2,9 +2,9 @@ import type { z } from "zod"
 
 // ─── Modes ───────────────────────────────────────────────────────────────────
 
-export type Mode = "agent" | "plan" | "ask" | "debug"
+export type Mode = "agent" | "plan" | "ask" | "debug" | "review"
 
-export const MODES: Mode[] = ["agent", "plan", "ask", "debug"]
+export const MODES: Mode[] = ["agent", "plan", "ask", "debug", "review"]
 
 // ─── Permissions ─────────────────────────────────────────────────────────────
 
@@ -286,6 +286,7 @@ export type AgentEvent =
   | { type: "assistant_content_complete"; messageId: string }
   | { type: "text_delta"; delta: string; messageId: string; user_message_delta?: string }
   | { type: "reasoning_delta"; delta: string; messageId: string }
+  | { type: "reasoning_end"; messageId: string }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; metadata?: Record<string, unknown> }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
@@ -296,6 +297,8 @@ export type AgentEvent =
   | { type: "compaction_start" }
   | { type: "compaction_end" }
   | { type: "index_update"; status: IndexStatus }
+  | { type: "vector_db_progress"; message?: string }
+  | { type: "vector_db_ready" }
   | { type: "session_saved"; sessionId: string }
   | { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
   | { type: "error"; error: string; fatal?: boolean }
@@ -371,6 +374,7 @@ export interface NexusConfig {
     plan?: ModeConfig
     ask?: ModeConfig
     debug?: ModeConfig
+    review?: ModeConfig
     [key: string]: ModeConfig | undefined
   }
   indexing: {

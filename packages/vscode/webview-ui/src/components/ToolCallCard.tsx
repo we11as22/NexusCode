@@ -573,7 +573,17 @@ function formatToolInputPreview(part: ToolPart): string {
     default:
       return Object.entries(inp)
         .filter(([k]) => k !== "task_progress")
-        .map(([k, v]) => `${k}: ${String(v).slice(0, 40)}`)
+        .map(([k, v]) => {
+          const rendered =
+            typeof v === "string"
+              ? v
+              : Array.isArray(v)
+                ? JSON.stringify(v)
+                : v != null && typeof v === "object"
+                  ? JSON.stringify(v)
+                  : String(v)
+          return `${k}: ${rendered.slice(0, 40)}`
+        })
         .slice(0, 2)
         .join(", ") || ""
   }

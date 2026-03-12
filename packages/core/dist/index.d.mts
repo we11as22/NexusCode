@@ -134,6 +134,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
+        review: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
     }, "strip", z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -199,6 +212,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
+        review: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
     }, z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -252,6 +278,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             customInstructions?: string | undefined;
         }>>;
         debug: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        review: z.ZodOptional<z.ZodObject<{
             autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
             systemPrompt: z.ZodOptional<z.ZodString>;
             customInstructions: z.ZodOptional<z.ZodString>;
@@ -549,32 +588,38 @@ declare const NexusConfigSchema: z.ZodObject<{
             plan: z.ZodOptional<z.ZodNumber>;
             agent: z.ZodOptional<z.ZodNumber>;
             debug: z.ZodOptional<z.ZodNumber>;
+            review: z.ZodOptional<z.ZodNumber>;
         }, "strip", z.ZodTypeAny, {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         }, {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         }>>;
         maxIterations: z.ZodOptional<z.ZodObject<{
             ask: z.ZodOptional<z.ZodNumber>;
             plan: z.ZodOptional<z.ZodNumber>;
             agent: z.ZodOptional<z.ZodNumber>;
             debug: z.ZodOptional<z.ZodNumber>;
+            review: z.ZodOptional<z.ZodNumber>;
         }, "strip", z.ZodTypeAny, {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         }, {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         }>>;
     }, "strip", z.ZodTypeAny, {
         toolCallBudget?: {
@@ -582,12 +627,14 @@ declare const NexusConfigSchema: z.ZodObject<{
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         } | undefined;
         maxIterations?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         } | undefined;
     }, {
         toolCallBudget?: {
@@ -595,12 +642,14 @@ declare const NexusConfigSchema: z.ZodObject<{
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         } | undefined;
         maxIterations?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         } | undefined;
     }>>;
     rules: z.ZodDefault<z.ZodObject<{
@@ -694,6 +743,11 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         } | undefined;
+        review?: {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        } | undefined;
     } & {
         [k: string]: {
             autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
@@ -781,12 +835,14 @@ declare const NexusConfigSchema: z.ZodObject<{
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         } | undefined;
         maxIterations?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         } | undefined;
     };
     profiles: Record<string, {
@@ -909,6 +965,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             systemPrompt?: string | undefined;
             customInstructions?: string | undefined;
         }>>;
+        review: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
+            systemPrompt?: string | undefined;
+            customInstructions?: string | undefined;
+        }>>;
     }, z.ZodOptional<z.ZodObject<{
         autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
         systemPrompt: z.ZodOptional<z.ZodString>;
@@ -1002,12 +1071,14 @@ declare const NexusConfigSchema: z.ZodObject<{
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         } | undefined;
         maxIterations?: {
             agent?: number | undefined;
             plan?: number | undefined;
             ask?: number | undefined;
             debug?: number | undefined;
+            review?: number | undefined;
         } | undefined;
     } | undefined;
     profiles?: Record<string, {
@@ -1025,7 +1096,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     }> | undefined;
 }>;
 
-type Mode = "agent" | "plan" | "ask" | "debug";
+type Mode = "agent" | "plan" | "ask" | "debug" | "review";
 declare const MODES: Mode[];
 type PermissionAction = "read" | "write" | "execute" | "mcp" | "browser" | "search";
 interface PermissionResult {
@@ -1283,6 +1354,9 @@ type AgentEvent = {
     delta: string;
     messageId: string;
 } | {
+    type: "reasoning_end";
+    messageId: string;
+} | {
     type: "tool_start";
     tool: string;
     partId: string;
@@ -1340,6 +1414,11 @@ type AgentEvent = {
 } | {
     type: "index_update";
     status: IndexStatus;
+} | {
+    type: "vector_db_progress";
+    message?: string;
+} | {
+    type: "vector_db_ready";
 } | {
     type: "session_saved";
     sessionId: string;
@@ -1412,6 +1491,7 @@ interface NexusConfig {
         plan?: ModeConfig;
         ask?: ModeConfig;
         debug?: ModeConfig;
+        review?: ModeConfig;
         [key: string]: ModeConfig | undefined;
     };
     indexing: {
@@ -1780,7 +1860,7 @@ declare class Session implements ISession {
  */
 declare function hadPlanExit(session: ISession): boolean;
 /**
- * Plan content for follow-up: last assistant text, or from last write_to_file to .nexus/plans, or first .nexus/plans/*.md file.
+ * Plan content for follow-up: last assistant text, or from last Write/Edit to .nexus/plans, or first .nexus/plans/*.md file.
  * Used to inject "Implement the following plan: ..." into a new session or continue message.
  */
 declare function getPlanContentForFollowup(session: ISession, cwd: string): Promise<string>;

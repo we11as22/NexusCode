@@ -696,6 +696,17 @@ interface SettingsDraft {
   skillClassifyThreshold: string
   parallelReads: boolean
   maxParallelReads: string
+  autoApproveRead: boolean
+  autoApproveWrite: boolean
+  autoApproveCommand: boolean
+  autoApproveMcp: boolean
+  autoApproveBrowser: boolean
+  autoApproveReadPatternsText: string
+  allowedCommandsText: string
+  allowCommandPatternsText: string
+  askCommandPatternsText: string
+  denyCommandPatternsText: string
+  allowedMcpToolsText: string
   mcpServersJson: string
   /** For Rules & Skills panel: path + enabled. skillsText is derived for raw edit. */
   skillsConfig?: Array<{ path: string; enabled: boolean }>
@@ -706,6 +717,7 @@ interface SettingsDraft {
   planInstructions: string
   askInstructions: string
   debugInstructions: string
+  reviewInstructions: string
   profilesJson: string
   /** When true, streamed text_delta is shown in chat as muted reasoning; when false, only tool-written text. */
   showReasoningInChat: boolean
@@ -943,6 +955,68 @@ function SettingsView() {
           value={draft.maxParallelReads}
           onChange={(v) => setDraft({ ...draft, maxParallelReads: v })}
         />
+        <h3 className="nexus-section-title mt-4">Approvals</h3>
+        <SettingsToggle
+          label="Auto-approve Read"
+          checked={draft.autoApproveRead}
+          onChange={(checked) => setDraft({ ...draft, autoApproveRead: checked })}
+        />
+        <SettingsToggle
+          label="Auto-approve Write/Edit"
+          checked={draft.autoApproveWrite}
+          onChange={(checked) => setDraft({ ...draft, autoApproveWrite: checked })}
+        />
+        <SettingsToggle
+          label="Auto-approve Execute command"
+          checked={draft.autoApproveCommand}
+          onChange={(checked) => setDraft({ ...draft, autoApproveCommand: checked })}
+        />
+        <SettingsToggle
+          label="Auto-approve MCP"
+          checked={draft.autoApproveMcp}
+          onChange={(checked) => setDraft({ ...draft, autoApproveMcp: checked })}
+        />
+        <SettingsToggle
+          label="Auto-approve Browser"
+          checked={draft.autoApproveBrowser}
+          onChange={(checked) => setDraft({ ...draft, autoApproveBrowser: checked })}
+        />
+        <SettingsTextarea
+          label="Auto-approve Read path patterns (one per line)"
+          value={draft.autoApproveReadPatternsText}
+          onChange={(v) => setDraft({ ...draft, autoApproveReadPatternsText: v })}
+          rows={3}
+        />
+        <SettingsTextarea
+          label="Allowed command patterns (no approval; one per line)"
+          value={draft.allowCommandPatternsText}
+          onChange={(v) => setDraft({ ...draft, allowCommandPatternsText: v })}
+          rows={3}
+        />
+        <SettingsTextarea
+          label="Ask command patterns (always ask; one per line)"
+          value={draft.askCommandPatternsText}
+          onChange={(v) => setDraft({ ...draft, askCommandPatternsText: v })}
+          rows={2}
+        />
+        <SettingsTextarea
+          label="Deny command patterns (always deny; one per line)"
+          value={draft.denyCommandPatternsText}
+          onChange={(v) => setDraft({ ...draft, denyCommandPatternsText: v })}
+          rows={2}
+        />
+        <SettingsTextarea
+          label="Allowed exact commands (one per line)"
+          value={draft.allowedCommandsText}
+          onChange={(v) => setDraft({ ...draft, allowedCommandsText: v })}
+          rows={2}
+        />
+        <SettingsTextarea
+          label="Allowed MCP tools (one per line)"
+          value={draft.allowedMcpToolsText}
+          onChange={(v) => setDraft({ ...draft, allowedMcpToolsText: v })}
+          rows={2}
+        />
       </section>
       )}
 
@@ -1024,6 +1098,12 @@ function SettingsView() {
               label="Debug custom instructions"
               value={draft.debugInstructions}
               onChange={(v) => setDraft({ ...draft, debugInstructions: v })}
+              rows={3}
+            />
+            <SettingsTextarea
+              label="Review custom instructions"
+              value={draft.reviewInstructions}
+              onChange={(v) => setDraft({ ...draft, reviewInstructions: v })}
               rows={3}
             />
           </>
@@ -1986,6 +2066,17 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     ),
     parallelReads: Boolean(config.tools.parallelReads),
     maxParallelReads: String(config.tools.maxParallelReads ?? 5),
+    autoApproveRead: config.permissions?.autoApproveRead ?? true,
+    autoApproveWrite: config.permissions?.autoApproveWrite ?? false,
+    autoApproveCommand: config.permissions?.autoApproveCommand ?? false,
+    autoApproveMcp: config.permissions?.autoApproveMcp ?? false,
+    autoApproveBrowser: config.permissions?.autoApproveBrowser ?? false,
+    autoApproveReadPatternsText: (config.permissions?.autoApproveReadPatterns ?? []).join("\n"),
+    allowedCommandsText: (config.permissions?.allowedCommands ?? []).join("\n"),
+    allowCommandPatternsText: (config.permissions?.allowCommandPatterns ?? []).join("\n"),
+    askCommandPatternsText: (config.permissions?.askCommandPatterns ?? []).join("\n"),
+    denyCommandPatternsText: (config.permissions?.denyCommandPatterns ?? []).join("\n"),
+    allowedMcpToolsText: (config.permissions?.allowedMcpTools ?? []).join("\n"),
     mcpServersJson: JSON.stringify(config.mcp?.servers ?? [], null, 2),
     skillsConfig: config.skillsConfig ?? (config.skills ?? []).map((p) => ({ path: p, enabled: true })),
     skillsText: (config.skillsConfig ?? (config.skills ?? []).map((p) => ({ path: p, enabled: true }))).map((s) => s.path).join("\n"),
@@ -1995,6 +2086,7 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     planInstructions: config.modes?.plan?.customInstructions ?? "",
     askInstructions: config.modes?.ask?.customInstructions ?? "",
     debugInstructions: config.modes?.debug?.customInstructions ?? "",
+    reviewInstructions: config.modes?.review?.customInstructions ?? "",
     profilesJson: JSON.stringify(config.profiles ?? {}, null, 2),
     showReasoningInChat: config.ui?.showReasoningInChat ?? false,
   }
@@ -2027,6 +2119,17 @@ function getDefaultDraft(): SettingsDraft {
     skillClassifyThreshold: "20",
     parallelReads: true,
     maxParallelReads: "5",
+    autoApproveRead: true,
+    autoApproveWrite: false,
+    autoApproveCommand: false,
+    autoApproveMcp: false,
+    autoApproveBrowser: false,
+    autoApproveReadPatternsText: ".nexus/tool-output/**",
+    allowedCommandsText: "",
+    allowCommandPatternsText: "",
+    askCommandPatternsText: "",
+    denyCommandPatternsText: "",
+    allowedMcpToolsText: "",
     mcpServersJson: "[]",
     skillsText: "",
     rulesFilesText: "",
@@ -2035,6 +2138,7 @@ function getDefaultDraft(): SettingsDraft {
     planInstructions: "",
     askInstructions: "",
     debugInstructions: "",
+    reviewInstructions: "",
     profilesJson: "{}",
     showReasoningInChat: false,
   }
@@ -2108,6 +2212,19 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       maxParallelReads: parsePositiveInt(draft.maxParallelReads, 5),
       custom: [],
     },
+    permissions: {
+      autoApproveRead: draft.autoApproveRead,
+      autoApproveWrite: draft.autoApproveWrite,
+      autoApproveCommand: draft.autoApproveCommand,
+      autoApproveMcp: draft.autoApproveMcp,
+      autoApproveBrowser: draft.autoApproveBrowser,
+      autoApproveReadPatterns: linesToList(draft.autoApproveReadPatternsText),
+      allowedCommands: linesToList(draft.allowedCommandsText),
+      allowCommandPatterns: linesToList(draft.allowCommandPatternsText),
+      askCommandPatterns: linesToList(draft.askCommandPatternsText),
+      denyCommandPatterns: linesToList(draft.denyCommandPatternsText),
+      allowedMcpTools: linesToList(draft.allowedMcpToolsText),
+    },
     skillClassifyEnabled: draft.filterSkills,
     skillClassifyThreshold: draft.filterSkills ? skillThresholdRaw : 9999,
     mcp: {
@@ -2123,6 +2240,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       plan: { customInstructions: draft.planInstructions.trim() || undefined },
       ask: { customInstructions: draft.askInstructions.trim() || undefined },
       debug: { customInstructions: draft.debugInstructions.trim() || undefined },
+      review: { customInstructions: draft.reviewInstructions.trim() || undefined },
     },
     ui: { showReasoningInChat: draft.showReasoningInChat },
     profiles: parsedProfiles,

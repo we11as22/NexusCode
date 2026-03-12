@@ -138,24 +138,11 @@ export class VsCodeHost implements IHost {
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const runInTerminal = vscode.workspace.getConfiguration("nexuscode").get<boolean>("runCommandsInTerminal") ?? true
     if (runInTerminal) {
-      try {
-        return await this.runCommandInTerminal(command, cwd, signal)
-      } catch (e) {
-        // Fallback to execa if terminal run fails (e.g. timeout, no terminal)
-        const { execa } = await import("execa")
-        const result = await execa(command, {
-          shell: true,
-          cwd,
-          reject: false,
-          timeout: 120_000,
-          cancelSignal: signal,
-        })
-        return {
-          stdout: result.stdout ?? "",
-          stderr: result.stderr ?? "",
-          exitCode: result.exitCode ?? 0,
-        }
-      }
+      // Terminal output capture API is not portable across VS Code versions.
+      // We still surface the command in the integrated terminal for visibility.
+      const term = this.getOrCreateNexusTerminal(cwd)
+      term.show(true)
+      term.sendText(`# NexusCode running: ${command}`)
     }
     const { execa } = await import("execa")
     const result = await execa(command, {
@@ -170,62 +157,6 @@ export class VsCodeHost implements IHost {
       stderr: result.stderr ?? "",
       exitCode: result.exitCode ?? 0,
     }
-  }
-
-  /** Run command in VS Code integrated terminal (Cline-style); capture output via end marker. */
-  private async runCommandInTerminal(
-    command: string,
-    cwd: string,
-    signal?: AbortSignal
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const START_MARKER = "__NEXUSCODE_START__"
-    const DONE_MARKER = "__NEXUSCODE_DONE_"
-    const timeoutMs = 120_000
-
-    const term = this.getOrCreateNexusTerminal(cwd)
-    term.show(true)
-
-    return new Promise((resolve, reject) => {
-      let buffer = ""
-      let started = false
-      const cleanup = () => {
-        sub?.dispose()
-        signal?.removeEventListener("abort", onAbort)
-        clearTimeout(timeoutId)
-      }
-      const onAbort = () => {
-        cleanup()
-        reject(new DOMException("Command aborted", "AbortError"))
-      }
-      signal?.addEventListener("abort", onAbort)
-      const timeoutId = setTimeout(() => {
-        cleanup()
-        const match = buffer.match(new RegExp(`${DONE_MARKER}(\\d+)`))
-        const exitCode = match ? parseInt(match[1]!, 10) : 124
-        const out = started
-          ? buffer.replace(new RegExp(`\\n?[^\\n]*${DONE_MARKER}\\d+[^\\n]*`, "g"), "").trim()
-          : buffer.trim()
-        resolve({ stdout: out, stderr: "", exitCode })
-      }, timeoutMs)
-
-      const sub = term.onDidWriteData((data: string) => {
-        buffer += data
-        if (!started && buffer.includes(START_MARKER)) {
-          started = true
-          buffer = buffer.slice(buffer.indexOf(START_MARKER) + START_MARKER.length)
-        }
-        if (!started) return
-        const match = buffer.match(new RegExp(`${DONE_MARKER}(\\d+)`))
-        if (match) {
-          cleanup()
-          const exitCode = parseInt(match[1]!, 10)
-          const out = buffer.replace(new RegExp(`\\n?[^\\n]*${DONE_MARKER}\\d+[^\\n]*`, "g"), "").trim()
-          resolve({ stdout: out, stderr: "", exitCode })
-        }
-      })
-
-      term.sendText(`echo '${START_MARKER}'; ${command}; echo '${DONE_MARKER}'$?`)
-    })
   }
 
   private getOrCreateNexusTerminal(cwd: string): vscode.Terminal {

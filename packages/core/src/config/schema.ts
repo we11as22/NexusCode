@@ -72,6 +72,7 @@ export const NexusConfigSchema = z.object({
     plan: modeConfigSchema.optional(),
     ask: modeConfigSchema.optional(),
     debug: modeConfigSchema.optional(),
+    review: modeConfigSchema.optional(),
   }).catchall(modeConfigSchema.optional()).default({}),
 
   indexing: z.object({
@@ -181,12 +182,14 @@ export const NexusConfigSchema = z.object({
       plan: z.number().int().positive().optional(),
       agent: z.number().int().positive().optional(),
       debug: z.number().int().positive().optional(),
+      review: z.number().int().positive().optional(),
     }).optional(),
     maxIterations: z.object({
       ask: z.number().int().positive().optional(),
       plan: z.number().int().positive().optional(),
       agent: z.number().int().positive().optional(),
       debug: z.number().int().positive().optional(),
+      review: z.number().int().positive().optional(),
     }).optional(),
   }).default({}),
 

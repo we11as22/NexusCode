@@ -101,7 +101,13 @@ sessionRoutes.post("/:id/message", async (c) => {
   if (!sessionMeta) return c.json({ error: "Session not found" }, 404)
   const body = await c.req.json().catch(() => ({})) as { content?: string; mode?: Mode }
   const content = typeof body.content === "string" ? body.content : ""
-  const mode: Mode = body.mode === "plan" || body.mode === "ask" || body.mode === "debug" ? body.mode : "agent"
+  const mode: Mode =
+    body.mode === "plan" ||
+    body.mode === "ask" ||
+    body.mode === "debug" ||
+    body.mode === "review"
+      ? body.mode
+      : "agent"
   if (!content.trim()) return c.json({ error: "content required" }, 400)
 
   const recentMessages = getRecentMessages(id, RECENT_MESSAGES_FOR_RUN)

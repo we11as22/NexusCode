@@ -213,6 +213,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
   const [stickToBottom, setStickToBottom] = useState(true)
   const store = useChatStore()
   const renderedMessages = useMemo(() => mergeConsecutiveAssistantMessages(messages), [messages])
+  const virtuosoComponents = useMemo(() => ({ Scroller: MessageListScroller }), [])
 
   if (initialTopMostItemIndexRef.current == null && renderedMessages.length > 0) {
     initialTopMostItemIndexRef.current = renderedMessages.length - 1
@@ -273,9 +274,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
           )}
           style={{ height: "100%", minHeight: 0, overflowAnchor: "none" }}
           className="message-list-virtuoso-inner"
-          components={{
-            Scroller: MessageListScroller,
-          }}
+          components={virtuosoComponents}
         />
         </div>
       </div>
@@ -582,7 +581,7 @@ function AssistantParts({
       {hasExploredBlock && (
         <ExploredSummaryInline
           prefixItems={prefixItems}
-          defaultCollapsed={true}
+          defaultCollapsed={false}
           onOpenFile={(path, line, endLine) =>
             postMessage({ type: "openFileAtLocation", path, line, endLine })
           }
@@ -685,9 +684,6 @@ function AssistantParts({
               <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
             ) : undefined
           return <ToolCallCard key={i} part={toolPart} approval={approval} />
-        }
-        if (part.type === "reasoning") {
-          return null
         }
         return null
       })}

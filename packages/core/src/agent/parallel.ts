@@ -192,7 +192,7 @@ const taskItemSchema = z
   .object({
     description: z.string().describe("Clear, self-contained task description for this sub-agent."),
     context_summary: z.string().optional().describe("Optional brief context for this task (e.g. background, relevant files)."),
-    mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for this sub-agent (default: agent). 'search'/'explore' → ask."),
+    mode: z.enum(["agent", "plan", "ask", "debug", "review", "search", "explore"]).optional().describe("Mode for this sub-agent (default: agent). 'search'/'explore' → ask."),
   })
   .strict()
 
@@ -201,7 +201,7 @@ const spawnSchema = (maxTasksPerCall: number) =>
     .object({
       description: z.string().optional().describe("Single task: what should the sub-agent do? (Use when launching one sub-agent.)"),
       context_summary: z.string().optional().describe("Optional context for the single task (used only when tasks is not provided)."),
-      mode: z.enum(["agent", "plan", "ask", "debug", "search", "explore"]).optional().describe("Mode for the single sub-agent (default: agent)."),
+      mode: z.enum(["agent", "plan", "ask", "debug", "review", "search", "explore"]).optional().describe("Mode for the single sub-agent (default: agent)."),
       task_progress: z.string().optional(),
       tasks: z
         .array(taskItemSchema)
@@ -228,12 +228,12 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
     description: `Launch one or more parallel sub-agents. Use for independent subtasks that don't depend on each other.
 **Single task:** pass \`description\` (and optional \`context_summary\`, \`mode\`).
 **Multiple tasks:** pass \`tasks\` array with up to ${maxTasksPerCall} items; each has \`description\` and optional \`context_summary\`, \`mode\`. All tasks in one call run in parallel (subject to max concurrent limit).
-**When the main agent is in plan or ask mode**, sub-agents always run with ask (read-only) permissions.
-**When the main agent is in agent/debug mode**, sub-agents can run in agent/plan/ask/debug per \`mode\`.
+**When the main agent is in plan, ask, or review mode**, sub-agents always run with ask (read-only) permissions.
+**When the main agent is in agent/debug mode**, sub-agents can run in agent/plan/ask/debug/review per \`mode\`.
 Each sub-agent must call final_report_to_user when done; results are returned in order.
 Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: schema,
-    // Available in all modes; sub-agent permissions follow parent (plan/ask → ask, agent → agent/plan/ask)
+    // Available in all modes; sub-agent permissions follow parent (plan/ask/review → ask, agent/debug → requested mode)
 
     async execute(
       args: {
@@ -247,7 +247,7 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
     ) {
       const parentMode = ctx.mode ?? "agent"
       const normalizeMode = (m?: Mode | "search" | "explore"): Mode =>
-        parentMode === "plan" || parentMode === "ask"
+        parentMode === "plan" || parentMode === "ask" || parentMode === "review"
           ? "ask"
           : m === "search" || m === "explore"
             ? "ask"

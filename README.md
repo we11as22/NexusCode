@@ -5,7 +5,7 @@
 > AI coding agent combining the best practices from Cline, Continue, KiloCode, OpenCode, Pi, and Roo-Code.
 
 **VS Code extension + CLI** with:
-- Modes: **agent** | **plan** | **debug** | **ask**
+- Modes: **agent** | **plan** | **debug** | **ask** | **review**
 - **AST-based codebase indexing** (classes, functions, methods by language)
 - **Optional semantic vector index** with embeddings + Qdrant auto-start (local binary/docker)
 - **All LLM providers** including any OpenAI-compatible API
@@ -385,6 +385,7 @@ nexus "Refactor the auth module to use JWT"
 nexus plan "Design the database schema for a blog"
 nexus debug "The tests are failing with timeout errors"
 nexus ask "How does the caching layer work?"
+nexus review "Review current git diff for regressions"
 
 # Different model
 nexus --model openai/gpt-4o "Add TypeScript generics to this API"
@@ -436,6 +437,7 @@ Agent presets are stored in `.nexus/agent-configs.json` and can be assembled fro
 | **plan** | Read + create .md plan files | Planning without touching code |
 | **debug** | Full (focused on tracing bugs) | Finding and fixing bugs |
 | **ask** | Read only | Questions and explanations |
+| **review** | Read/search + git command inspection; no file edits | Code review of current changes |
 
 ---
 

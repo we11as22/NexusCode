@@ -284,6 +284,9 @@ function extractReasoningDelta(part: Record<string, unknown>, allowTextFallback:
     if (nestedDelta) return nestedDelta
   }
 
+  const openAICompatible = extractOpenAICompatibleReasoning(part, allowTextFallback)
+  if (openAICompatible) return openAICompatible
+
   const providerMetadata = asRecord(part["providerMetadata"])
   if (providerMetadata) {
     for (const entry of Object.values(providerMetadata)) {
@@ -316,6 +319,9 @@ function pickReasoningString(obj: Record<string, unknown>, allowTextFallback: bo
     "thinking_text",
     "thought",
     "thoughts",
+    "summary",
+    "reasoningSummaryText",
+    "reasoning_summary_text",
   ]
   if (allowTextFallback) keys.push("textDelta", "text")
   for (const key of keys) {
@@ -347,6 +353,11 @@ function stringifyReasoningValue(val: unknown): string {
     (typeof obj["thought"] === "string" && obj["thought"]) ||
     ""
   if (direct) return direct
+  const contentBlocks =
+    extractReasoningFromTypedBlocks(obj["content"]) ||
+    extractReasoningFromTypedBlocks(obj["parts"]) ||
+    extractReasoningFromTypedBlocks(obj["details"])
+  if (contentBlocks) return contentBlocks
   const parts =
     stringifyReasoningValue(obj["reasoning_details"]) ||
     stringifyReasoningValue(obj["reasoningDetails"]) ||
@@ -357,9 +368,56 @@ function stringifyReasoningValue(val: unknown): string {
   return ""
 }
 
+function extractReasoningFromTypedBlocks(value: unknown): string {
+  if (!Array.isArray(value)) return ""
+  const chunks: string[] = []
+  for (const entry of value) {
+    const obj = asRecord(entry)
+    if (!obj) continue
+    const type = typeof obj["type"] === "string" ? obj["type"].toLowerCase() : ""
+    const isReasoningType =
+      type.includes("reasoning") ||
+      type.includes("thinking") ||
+      type.includes("thought") ||
+      type.includes("summary")
+    const isThoughtFlag = obj["thought"] === true
+    if (!isReasoningType && !isThoughtFlag) continue
+    const blockText =
+      (typeof obj["text"] === "string" && obj["text"]) ||
+      (typeof obj["content"] === "string" && obj["content"]) ||
+      (typeof obj["summary"] === "string" && obj["summary"]) ||
+      (typeof obj["reasoning"] === "string" && obj["reasoning"]) ||
+      ""
+    if (blockText) chunks.push(blockText)
+  }
+  return chunks.join("")
+}
+
+function extractOpenAICompatibleReasoning(part: Record<string, unknown>, allowTextFallback: boolean): string {
+  const choices = asRecordArray(part["choices"])
+  for (const choice of choices) {
+    const delta = asRecord(choice["delta"])
+    if (!delta) continue
+    const chunk =
+      stringifyReasoningValue(delta["reasoning"]) ||
+      stringifyReasoningValue(delta["reasoning_text"]) ||
+      stringifyReasoningValue(delta["reasoning_content"]) ||
+      stringifyReasoningValue(delta["reasoning_details"]) ||
+      stringifyReasoningValue(delta["thinking"]) ||
+      (allowTextFallback ? stringifyReasoningValue(delta["content"]) : "")
+    if (chunk) return chunk
+  }
+  return ""
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") return null
   return value as Record<string, unknown>
+}
+
+function asRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is Record<string, unknown> => item != null && typeof item === "object")
 }
 
 function findReasoningStringDeep(

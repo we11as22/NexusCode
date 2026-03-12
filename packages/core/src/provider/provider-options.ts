@@ -49,7 +49,8 @@ export function buildReasoningProviderOptionsCandidates(
 
   const runtime = runtimeProviderName.toLowerCase()
   const configured = model.provider.toLowerCase()
-  const isMiniMaxModel = model.id.toLowerCase().includes("minimax")
+  const modelIdLower = model.id.toLowerCase()
+  const isMiniMaxModel = modelIdLower.includes("minimax")
 
   // Anthropic
   if (runtime === "anthropic" || configured === "anthropic") {
@@ -133,49 +134,75 @@ export function buildReasoningProviderOptionsCandidates(
   const candidates: Array<ProviderOptionsRecord | undefined> = []
   const effortValue = effort === "none" ? "none" : effort
   const thinkingState = effort === "none" ? "disabled" : "enabled"
+  const includeReasoning = effort !== "none"
+  const requiresEnableThinking =
+    isMiniMaxModel ||
+    modelIdLower.includes("qwen") ||
+    modelIdLower.includes("qwq") ||
+    modelIdLower.includes("deepseek-r1") ||
+    modelIdLower.includes("kimi-k2") ||
+    modelIdLower.includes("k2p5")
+  const miniMaxThinking =
+    isMiniMaxModel
+      ? {
+          type: thinkingState,
+          budget_tokens: includeReasoning ? anthropicBudgetFromEffort(effort) : 0,
+        }
+      : undefined
   const applyProviderKeys = (opts: ProviderOptionsRecord): void => {
-    candidates.push({ [runtimeProviderName]: opts, openai: opts })
-    candidates.push({ [runtimeProviderName]: opts })
-    candidates.push({ openai: opts })
+    for (const key of getOpenAIProviderNamespaces(runtimeProviderName)) {
+      candidates.push({ [key]: opts })
+    }
   }
 
-  // AI SDK-style; works for OpenAI/OpenRouter/OpenAI-compatible providers.
+  // 1) AI SDK canonical option (safest / least likely to break).
+  applyProviderKeys({ reasoningEffort: effortValue })
+  // 2) snake_case compatibility (common in gateways).
+  applyProviderKeys({ reasoning_effort: effortValue })
+  // 3) OpenAI Responses nested reasoning.
   applyProviderKeys({
-    reasoningEffort: effortValue,
-    ...(isMiniMaxModel ? { thinking: { type: thinkingState } } : {}),
+    reasoning: effort === "none" ? { enabled: false, effort: "low" } : { effort: effortValue },
   })
 
-  // OpenAI Responses-style nested field.
-  applyProviderKeys({
-    reasoning: effort === "none"
-      ? { effort: "low", enabled: false }
-      : { effort },
-    ...(isMiniMaxModel ? { thinking: { type: thinkingState } } : {}),
-  })
+  // 4) For reasoning-heavy openai-compatible models, explicitly request thinking stream.
+  // Put before extra_body fallback so we keep payload simple first.
+  if (requiresEnableThinking) {
+    applyProviderKeys({
+      reasoningEffort: effortValue,
+      include_reasoning: includeReasoning,
+      enable_thinking: includeReasoning,
+      ...(miniMaxThinking ? { thinking: miniMaxThinking } : {}),
+    })
+    applyProviderKeys({
+      include_reasoning: includeReasoning,
+      enable_thinking: includeReasoning,
+      ...(miniMaxThinking ? { thinking: miniMaxThinking } : {}),
+    })
+  } else {
+    applyProviderKeys({
+      reasoningEffort: effortValue,
+      include_reasoning: includeReasoning,
+    })
+  }
 
-  // snake_case compatibility for gateways/proxies.
-  applyProviderKeys({
-    reasoning_effort: effortValue,
-    ...(isMiniMaxModel ? { thinking: { type: thinkingState } } : {}),
-  })
-
-  // Some gateways only forward custom keys via extra_body.
+  // 5) extra_body fallback for strict proxy layers that only forward custom body.
   applyProviderKeys({
     extra_body: {
       reasoning_effort: effortValue,
+      include_reasoning: includeReasoning,
+      ...(requiresEnableThinking ? { enable_thinking: includeReasoning } : {}),
     },
   })
   applyProviderKeys({
     extra_body: {
-      reasoning: effort === "none"
-        ? { effort: "low", enabled: false }
-        : { effort },
+      reasoning: effort === "none" ? { enabled: false, effort: "low" } : { effort: effortValue },
+      ...(requiresEnableThinking ? { enable_thinking: includeReasoning } : {}),
     },
   })
-  if (isMiniMaxModel) {
+  if (miniMaxThinking) {
     applyProviderKeys({
       extra_body: {
-        thinking: { type: thinkingState },
+        thinking: miniMaxThinking,
       },
     })
   }
@@ -194,6 +221,15 @@ function dedupeCandidates(candidates: Array<ProviderOptionsRecord | undefined>):
     result.push(candidate)
   }
   return result
+}
+
+function getOpenAIProviderNamespaces(runtimeProviderName: string): string[] {
+  const out = new Set<string>()
+  const runtime = runtimeProviderName.trim()
+  if (runtime) out.add(runtime)
+  out.add("openai")
+  out.add("openaiCompatible")
+  return [...out]
 }
 
 function stableStringify(value: unknown): string {

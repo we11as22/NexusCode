@@ -87,12 +87,19 @@ export type ConfigSnapshot = {
     autoApproveCommand: boolean
     autoApproveMcp?: boolean
     autoApproveBrowser?: boolean
+    autoApproveReadPatterns?: string[]
+    allowedCommands?: string[]
+    allowCommandPatterns?: string[]
+    askCommandPatterns?: string[]
+    denyCommandPatterns?: string[]
+    allowedMcpTools?: string[]
   }
   modes: {
     agent?: { customInstructions?: string }
     plan?: { customInstructions?: string }
     ask?: { customInstructions?: string }
     debug?: { customInstructions?: string }
+    review?: { customInstructions?: string }
   }
   profiles: Record<string, unknown>
 }
@@ -133,6 +140,12 @@ export function buildConfigSnapshot(conf: NexusConfig): ConfigSnapshot {
           autoApproveCommand: conf.permissions.autoApproveCommand,
           autoApproveMcp: conf.permissions.autoApproveMcp ?? false,
           autoApproveBrowser: conf.permissions.autoApproveBrowser ?? false,
+          autoApproveReadPatterns: conf.permissions.autoApproveReadPatterns ?? [],
+          allowedCommands: conf.permissions.allowedCommands ?? [],
+          allowCommandPatterns: conf.permissions.allowCommandPatterns ?? [],
+          askCommandPatterns: conf.permissions.askCommandPatterns ?? [],
+          denyCommandPatterns: conf.permissions.denyCommandPatterns ?? [],
+          allowedMcpTools: conf.permissions.allowedMcpTools ?? [],
         }
       : undefined,
     modes: {
@@ -140,6 +153,7 @@ export function buildConfigSnapshot(conf: NexusConfig): ConfigSnapshot {
       plan: { customInstructions: conf.modes?.plan?.customInstructions },
       ask: { customInstructions: conf.modes?.ask?.customInstructions },
       debug: { customInstructions: conf.modes?.debug?.customInstructions },
+      review: { customInstructions: conf.modes?.review?.customInstructions },
     },
     profiles: (conf as unknown as { profiles?: Record<string, unknown> }).profiles ?? {},
   }

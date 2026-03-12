@@ -1,5 +1,6 @@
 import React, { useState } from "react"
 import { useChatStore } from "../stores/chat.js"
+import { postMessage } from "../vscode.js"
 
 /** File icon (document) for context panel */
 function FileIcon({ className }: { className?: string }) {
@@ -30,6 +31,7 @@ export function InputContextPanel() {
   // Pending approval: single file awaiting Allow/Deny
   if (pendingApproval) {
     const { action } = pendingApproval
+    const pendingPath = extractPathFromApprovalDescription(action.description)
     const fileLabel =
       action.type === "write"
         ? (action.description?.split(/[/\\]/).pop() ?? action.description ?? "File")
@@ -69,6 +71,10 @@ export function InputContextPanel() {
                 type="button"
                 className="nexus-input-context-btn nexus-input-context-btn-active"
                 title="Review the change above"
+                onClick={() => {
+                  if (pendingPath) postMessage({ type: "showDiff", path: pendingPath })
+                }}
+                disabled={!pendingPath}
               >
                 Review
               </button>
@@ -208,5 +214,17 @@ export function InputContextPanel() {
     )
   }
 
+  return null
+}
+
+function extractPathFromApprovalDescription(description: string | undefined): string | null {
+  if (!description) return null
+  const trimmed = description.trim()
+  if (!trimmed) return null
+  const prefixed = trimmed.match(/^(?:Write to|Edit|Edit file:|Write file:)\s+(.+)$/i)
+  if (prefixed?.[1]) return prefixed[1].trim()
+  // Fallback: description can include path at the end.
+  const pathLike = trimmed.match(/((?:\.{0,2}\/)?[A-Za-z0-9_.\-\/\\]+\.[A-Za-z0-9]+)$/)
+  if (pathLike?.[1]) return pathLike[1].trim()
   return null
 }

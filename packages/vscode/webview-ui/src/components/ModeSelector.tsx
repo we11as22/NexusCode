@@ -6,6 +6,7 @@ const MODES: Array<{ id: Mode; label: string; icon: string; description: string 
   { id: "plan",  label: "Plan",  icon: "P", description: "Plan without modifying code" },
   { id: "ask",   label: "Ask",   icon: "Q", description: "Q&A without modifications" },
   { id: "debug", label: "Debug", icon: "D", description: "Root-cause debugging mode" },
+  { id: "review", label: "Review", icon: "R", description: "Review changes without editing files" },
 ]
 
 export function ModeSelector() {

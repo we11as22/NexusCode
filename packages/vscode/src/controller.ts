@@ -46,6 +46,7 @@ const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 
 /** Number of messages to load when opening a server session (same as server RECENT_MESSAGES_FOR_RUN for agent context). */
 const INITIAL_SERVER_MESSAGES = 200
+const FILE_WRITE_TOOL_NAMES = new Set(["Write", "Edit", "write_to_file", "replace_in_file"])
 
 function stripModeReminderFromMessages(messages: SessionMessage[]): SessionMessage[] {
   return messages.map((msg) => {
@@ -212,8 +213,8 @@ export class Controller {
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
   /** VS Code Secret Storage for API keys (Roo-Code best practice — keys never in YAML). */
   private readonly secretsStore = {
-    getSecret: (key: string) => this.context.secrets.get(key),
-    setSecret: (key: string, value: string) => this.context.secrets.store(key, value),
+    getSecret: async (key: string) => this.context.secrets.get(key),
+    setSecret: async (key: string, value: string) => this.context.secrets.store(key, value),
   }
   /** Session unaccepted edits: full content for revert/diff; cleared on session change. */
   private sessionUnacceptedEdits: Array<{ path: string; originalContent: string; newContent: string; isNewFile: boolean }> = []
@@ -269,6 +270,64 @@ export class Controller {
     return raw.replace(/\s+/g, " ").trim().slice(0, 80) || "User message"
   }
 
+  private extractUserMessageText(message: SessionMessage): string {
+    if (typeof message.content === "string") {
+      return message.content.replace(/\s+/g, " ").trim()
+    }
+    if (!Array.isArray(message.content)) return ""
+    return message.content
+      .filter((part) => part.type === "text")
+      .map((part) => (part as { text?: string }).text ?? "")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
+
+  private selectRollbackCheckpointEntry(
+    entries: CheckpointEntry[],
+    messages: SessionMessage[],
+    target: SessionMessage,
+    targetIndex: number
+  ): CheckpointEntry | undefined {
+    if (entries.length === 0) return undefined
+    const reversed = [...entries].reverse()
+    const exact = reversed.find((entry) => entry.messageId === target.id)
+    if (exact) return exact
+
+    const nextUserMessage = messages.slice(targetIndex + 1).find((m) => m.role === "user")
+    const windowUpperTs = nextUserMessage?.ts ?? Number.POSITIVE_INFINITY
+    const forwardInWindow = entries.find((entry) => entry.ts >= target.ts && entry.ts < windowUpperTs)
+    if (forwardInWindow) return forwardInWindow
+
+    const fallbackByTime = reversed.find((entry) => entry.ts <= target.ts)
+    if (fallbackByTime) return fallbackByTime
+
+    // Compatibility fallback: map user-message ordinal to checkpoint ordinal when message ids/timestamps drift.
+    const targetUserOrdinal = messages
+      .slice(0, targetIndex + 1)
+      .filter((m) => m.role === "user")
+      .length
+    if (targetUserOrdinal > 0 && entries[targetUserOrdinal - 1]) {
+      return entries[targetUserOrdinal - 1]
+    }
+
+    // Last fallback: match checkpoint description prefix with target user text.
+    const targetText = this.extractUserMessageText(target)
+    if (targetText) {
+      const normalizedTarget = targetText.slice(0, 80).toLowerCase()
+      const byDescription = reversed.find((entry) =>
+        (entry.description ?? "").toLowerCase().includes(normalizedTarget)
+      )
+      if (byDescription) return byDescription
+    }
+
+    return undefined
+  }
+
+  private isFileWriteTool(toolName: string): boolean {
+    return FILE_WRITE_TOOL_NAMES.has(toolName)
+  }
+
   private async ensureCheckpointForCurrentSession(
     sessionId: string,
     cwd: string,
@@ -315,15 +374,7 @@ export class Controller {
     const cwd = this.getCwd()
     const tracker = await this.ensureCheckpointForCurrentSession(this.session.id, cwd, this.config)
     const entries = tracker?.getEntries() ?? []
-    const nextUserMessage = msgs.slice(idx + 1).find((m) => m.role === "user")
-    const exact = [...entries].reverse().find((e) => e.messageId === target.id)
-    // Backward compatibility for old entries without messageId:
-    // prefer the earliest checkpoint at/after target message time and before next user message.
-    const windowUpperTs = nextUserMessage?.ts ?? Number.POSITIVE_INFINITY
-    const forwardInWindow = entries.find((e) => e.ts >= target.ts && e.ts < windowUpperTs)
-    const fallbackByTime = [...entries].reverse().find((e) => e.ts <= target.ts)
-    const fallbackForward = forwardInWindow ?? undefined
-    const checkpointEntry = exact ?? fallbackForward ?? fallbackByTime
+    const checkpointEntry = this.selectRollbackCheckpointEntry(entries, msgs, target, idx)
 
     if (checkpointEntry && tracker) {
       this.abortController?.abort()
@@ -894,10 +945,10 @@ export class Controller {
         if (scope === "global") {
           const dir = path.join(os.homedir(), ".nexus")
           const uri = vscode.Uri.file(dir)
-          try { await vscode.workspace.fs.createDirectory(uri).catch(() => {}) } catch { /* noop */ }
+          try { await Promise.resolve(vscode.workspace.fs.createDirectory(uri)).catch(() => {}) } catch { /* noop */ }
           const configPath = path.join(dir, "nexus.yaml")
           const configUri = vscode.Uri.file(configPath)
-          const doc = await vscode.workspace.openTextDocument(configUri).catch(() => null)
+          const doc = await Promise.resolve(vscode.workspace.openTextDocument(configUri)).catch(() => null)
           if (doc) {
             await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
           }
@@ -906,10 +957,10 @@ export class Controller {
           const cwd = this.getCwd()
           const dir = path.join(cwd, ".nexus")
           const dirUri = vscode.Uri.file(dir)
-          try { await vscode.workspace.fs.createDirectory(dirUri).catch(() => {}) } catch { /* noop */ }
+          try { await Promise.resolve(vscode.workspace.fs.createDirectory(dirUri)).catch(() => {}) } catch { /* noop */ }
           const configPath = path.join(cwd, ".nexus", "nexus.yaml")
           const uri = vscode.Uri.file(configPath)
-          const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
+          const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(() => null)
           if (doc) {
             await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
           } else {
@@ -927,7 +978,7 @@ export class Controller {
         const cwd = this.getCwd()
         const filePath = path.join(cwd, ".cursorignore")
         const uri = vscode.Uri.file(filePath)
-        const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
+        const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(() => null)
         if (doc) {
           await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
         } else {
@@ -943,7 +994,7 @@ export class Controller {
         const cwd = this.getCwd()
         const mcpPath = path.join(cwd, ".nexus", "mcp-servers.json")
         const uri = vscode.Uri.file(mcpPath)
-        const doc = await vscode.workspace.openTextDocument(uri).catch(async () => {
+        const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(async () => {
           const dir = path.join(cwd, ".nexus")
           try {
             await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir))
@@ -980,16 +1031,16 @@ export class Controller {
         const cwd = this.getCwd()
         const absPath = path.isAbsolute(msg.path) ? msg.path : path.resolve(cwd, msg.path)
         const uri = vscode.Uri.file(absPath)
-        const stat = await vscode.workspace.fs.stat(uri).catch(() => null)
+        const stat = await Promise.resolve(vscode.workspace.fs.stat(uri)).catch(() => null)
         if (stat?.type === vscode.FileType.File) {
-          const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
+          const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(() => null)
           if (doc) {
             await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
           }
         } else {
           const skillMd = path.join(absPath, "SKILL.md")
           const skillUri = vscode.Uri.file(skillMd)
-          const doc = await vscode.workspace.openTextDocument(skillUri).catch(() => null)
+          const doc = await Promise.resolve(vscode.workspace.openTextDocument(skillUri)).catch(() => null)
           if (doc) {
             await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
           }
@@ -1025,7 +1076,7 @@ export class Controller {
         const cwd = this.getCwd()
         const filePath = path.join(cwd, ".nexusignore")
         const uri = vscode.Uri.file(filePath)
-        const doc = await vscode.workspace.openTextDocument(uri).catch(() => null)
+        const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(() => null)
         if (doc) {
           await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
         } else {
@@ -1317,7 +1368,11 @@ export class Controller {
       rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["AGENTS.md", "CLAUDE.md"] },
     }
     if (preset.modelProvider && preset.modelId) {
-      updates.model = { ...current.model, provider: preset.modelProvider, id: preset.modelId }
+      const provider =
+        preset.modelProvider === "openrouter"
+          ? "openai-compatible"
+          : (preset.modelProvider as NexusConfig["model"]["provider"])
+      updates.model = { ...current.model, provider, id: preset.modelId }
     }
     await this.handleSaveConfig(updates)
     vscode.window.showInformationMessage(`NexusCode: Applied preset "${trimmed}".`, { modal: false })
@@ -1325,13 +1380,13 @@ export class Controller {
 
   private async handleSaveConfig(patch: Partial<NexusConfig>): Promise<void> {
     if (!this.config || !patch) return
-    const modelPatch = (patch as Record<string, unknown>).model as Record<string, unknown> | undefined
+    const modelPatch = (patch as { model?: Record<string, unknown> }).model
     if (modelPatch && (modelPatch.apiKey === "" || modelPatch.apiKey === undefined)) {
-      const existing = (this.config as Record<string, unknown>).model as Record<string, unknown> | undefined
+      const existing = this.config.model as unknown as Record<string, unknown>
       if (existing?.apiKey) modelPatch.apiKey = existing.apiKey
     }
     if (modelPatch && (modelPatch.baseUrl === "" || modelPatch.baseUrl === undefined)) {
-      const existing = (this.config as Record<string, unknown>).model as Record<string, unknown> | undefined
+      const existing = this.config.model as unknown as Record<string, unknown>
       if (existing?.baseUrl) modelPatch.baseUrl = existing.baseUrl
     }
     const indexBefore = JSON.stringify({
@@ -1340,7 +1395,10 @@ export class Controller {
       embeddings: this.config.embeddings,
     })
     const mcpBefore = JSON.stringify({ mcp: this.config.mcp })
-    deepMergeInto(this.config as Record<string, unknown>, patch as Record<string, unknown>)
+    deepMergeInto(
+      this.config as unknown as Record<string, unknown>,
+      patch as unknown as Partial<Record<string, unknown>>
+    )
     this.defaultModelProfile = { ...this.config.model }
     if (patch.profiles && typeof patch.profiles === "object") {
       writeGlobalProfiles(patch.profiles as Record<string, unknown>)
@@ -1358,20 +1416,24 @@ export class Controller {
       return
     }
     try {
-      await persistSecretsFromConfig(this.config as Record<string, unknown>, this.secretsStore)
+      await persistSecretsFromConfig(
+        this.config as unknown as Record<string, unknown>,
+        this.secretsStore
+      )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       vscode.window.showErrorMessage(`NexusCode: Failed to save API keys — ${message}`)
     }
-    const toWrite = { ...this.config } as Record<string, unknown>
-    if (toWrite.skillsConfig && Array.isArray(toWrite.skillsConfig)) {
-      toWrite.skills = (toWrite.skillsConfig as Array<{ path: string; enabled: boolean }>).map((s) =>
+    const toWrite = { ...this.config } as unknown as Record<string, unknown>
+    if (Array.isArray((toWrite as { skillsConfig?: Array<{ path: string; enabled: boolean }> }).skillsConfig)) {
+      const skillsConfig = (toWrite as { skillsConfig: Array<{ path: string; enabled: boolean }> }).skillsConfig
+      toWrite.skills = skillsConfig.map((s) =>
         s.enabled ? s.path : { path: s.path, enabled: false }
       )
       delete toWrite.skillsConfig
     }
     try {
-      writeConfig(toWrite as NexusConfig, cwd)
+      writeConfig(toWrite as unknown as NexusConfig, cwd)
       vscode.window.showInformationMessage("NexusCode: Settings saved.", { modal: false })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -1434,6 +1496,11 @@ export class Controller {
           ...this.config.permissions,
           rules: [
             ...this.config.permissions.rules,
+            { tool: "Write", pathPattern: ".nexus/skills/**", action: "allow" as const },
+            { tool: "Edit", pathPattern: ".nexus/skills/**", action: "allow" as const },
+            { tool: "Write", pathPattern: ".cursor/skills/**", action: "allow" as const },
+            { tool: "Edit", pathPattern: ".cursor/skills/**", action: "allow" as const },
+            // Backward compatibility for legacy tool aliases.
             { tool: "write_to_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
             { tool: "replace_in_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
             { tool: "write_to_file", pathPattern: ".cursor/skills/**", action: "allow" as const },
@@ -1516,7 +1583,7 @@ export class Controller {
                 if (
                   event.type === "tool_end" &&
                   event.success &&
-                  (event.tool === "write_to_file" || event.tool === "replace_in_file") &&
+                  this.isFileWriteTool(event.tool) &&
                   event.path &&
                   typeof (event as AgentEvent & { writtenContent?: string }).writtenContent === "string"
                 ) {
@@ -1529,10 +1596,12 @@ export class Controller {
                   }
                   toCreate.reverse()
                   for (const p of toCreate) {
-                    await vscode.workspace.fs.createDirectory(vscode.Uri.file(p)).catch(() => {})
+                    await Promise.resolve(vscode.workspace.fs.createDirectory(vscode.Uri.file(p))).catch(() => {})
                   }
                   const uri = vscode.Uri.file(absPath)
-                  await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent)).catch(() => {})
+                  await Promise.resolve(
+                    vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent))
+                  ).catch(() => {})
                 }
                 this.postMessageToWebview({ type: "agentEvent", event })
               } catch {}
@@ -1546,7 +1615,7 @@ export class Controller {
               if (
                 event.type === "tool_end" &&
                 event.success &&
-                (event.tool === "write_to_file" || event.tool === "replace_in_file") &&
+                this.isFileWriteTool(event.tool) &&
                 event.path &&
                 typeof (event as AgentEvent & { writtenContent?: string }).writtenContent === "string"
               ) {
@@ -1559,10 +1628,12 @@ export class Controller {
                 }
                 toCreate.reverse()
                 for (const p of toCreate) {
-                  await vscode.workspace.fs.createDirectory(vscode.Uri.file(p)).catch(() => {})
+                  await Promise.resolve(vscode.workspace.fs.createDirectory(vscode.Uri.file(p))).catch(() => {})
                 }
                 const uri = vscode.Uri.file(absPath)
-                await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent)).catch(() => {})
+                await Promise.resolve(
+                  vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent))
+                ).catch(() => {})
               }
               this.postMessageToWebview({ type: "agentEvent", event })
             } catch {}
@@ -1623,7 +1694,7 @@ export class Controller {
           "path" in event &&
           typeof (event as { path?: string }).path === "string" &&
           ((event as { path?: string }).path as string).length > 0 &&
-          (event.tool === "write_to_file" || event.tool === "replace_in_file")
+          this.isFileWriteTool(event.tool)
         ) {
           const filePath = (event as { path: string }).path
           const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
@@ -2022,6 +2093,21 @@ export class Controller {
 
   private applyVscodeOverrides(config: NexusConfig): void {
     const cfg = vscode.workspace.getConfiguration("nexuscode")
+    const getConfiguredBoolean = (key: string): boolean | undefined => {
+      const inspected = cfg.inspect<boolean>(key)
+      if (!inspected) return undefined
+      const hasExplicitValue =
+        inspected.workspaceFolderValue !== undefined ||
+        inspected.workspaceValue !== undefined ||
+        inspected.globalValue !== undefined
+      if (!hasExplicitValue) return undefined
+      return (
+        inspected.workspaceFolderValue ??
+        inspected.workspaceValue ??
+        inspected.globalValue ??
+        inspected.defaultValue
+      )
+    }
     const provider = cfg.get<string>("provider")
     if (provider != null && provider !== "") {
       if (provider === "openrouter") {
@@ -2049,17 +2135,17 @@ export class Controller {
     if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
       config.model.contextWindow = Math.floor(contextWindow)
     }
-    const enableCheckpoints = cfg.get<boolean>("enableCheckpoints")
+    const enableCheckpoints = getConfiguredBoolean("enableCheckpoints")
     if (typeof enableCheckpoints === "boolean") config.checkpoint.enabled = enableCheckpoints
-    const autoApproveRead = cfg.get<boolean>("autoApproveRead")
+    const autoApproveRead = getConfiguredBoolean("autoApproveRead")
     if (typeof autoApproveRead === "boolean") config.permissions.autoApproveRead = autoApproveRead
-    const autoApproveWrite = cfg.get<boolean>("autoApproveWrite")
+    const autoApproveWrite = getConfiguredBoolean("autoApproveWrite")
     if (typeof autoApproveWrite === "boolean") config.permissions.autoApproveWrite = autoApproveWrite
-    const autoApproveCommand = cfg.get<boolean>("autoApproveCommand")
+    const autoApproveCommand = getConfiguredBoolean("autoApproveCommand")
     if (typeof autoApproveCommand === "boolean") config.permissions.autoApproveCommand = autoApproveCommand
-    const autoApproveMcp = cfg.get<boolean>("autoApproveMcp")
+    const autoApproveMcp = getConfiguredBoolean("autoApproveMcp")
     if (typeof autoApproveMcp === "boolean") config.permissions.autoApproveMcp = autoApproveMcp
-    const autoApproveBrowser = cfg.get<boolean>("autoApproveBrowser")
+    const autoApproveBrowser = getConfiguredBoolean("autoApproveBrowser")
     if (typeof autoApproveBrowser === "boolean") config.permissions.autoApproveBrowser = autoApproveBrowser
   }
 

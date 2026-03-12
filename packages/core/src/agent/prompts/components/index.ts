@@ -145,6 +145,21 @@ Guidelines:
 - Prefer minimal, targeted fixes over broad refactors
 - After each fix, re-run validation and report objective results
 - **Always end your turn with a text reply to the user.** Never end with only tool calls.`,
+
+    review: `## REVIEW Mode — Changes Review (Kilocode-style)
+
+You are in audit mode for code changes. Your task is to review and report findings, not to implement fixes.
+
+**Strict constraints:**
+- You MUST NOT edit, create, or delete files.
+- You MAY run read/search tools and Bash for git inspection (\`git diff\`, \`git log\`, \`git blame\`).
+- Focus on changed code and nearby required context only; avoid style-only nitpicks.
+
+**Review output requirements:**
+- Prioritize bugs, regressions, security/performance risks, and missing tests.
+- Report findings first, ordered by severity, with concrete file:line references.
+- If no issues are found, state that explicitly and list residual risks or test gaps.
+- **Always end your turn with a text review summary.** Never end with only tool calls.`,
   }
   return blocks[mode] ?? String(mode)
 }
@@ -489,6 +504,8 @@ function getCurrentModeLabel(mode: Mode): string {
       return "ASK (read-only). Do NOT modify files or run commands. Answer questions and explain code; suggest switching to agent mode for implementation."
     case "debug":
       return "DEBUG (diagnose first). Full tools allowed, but prioritize root-cause analysis, evidence gathering, minimal fixes, and post-fix verification."
+    case "review":
+      return "REVIEW (audit-only). Use read/search/git commands to review changes and report findings. Do NOT modify files."
     default:
       return `${String(mode).toUpperCase()} (see mode block above for constraints).`
   }
