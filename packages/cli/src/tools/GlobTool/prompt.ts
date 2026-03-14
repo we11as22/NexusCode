@@ -4,5 +4,5 @@ export const DESCRIPTION = `- Fast file pattern matching tool that works with an
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths sorted by modification time
 - Use this tool when you need to find files by name patterns
-- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead
+- For open-ended investigations that need several rounds of searching and reading, you may escalate to the Agent tool, but exact file discovery should stay in Glob
 `

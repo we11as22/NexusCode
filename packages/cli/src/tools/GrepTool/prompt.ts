@@ -7,5 +7,5 @@ export const DESCRIPTION = `
 - Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
 - Returns matching file paths sorted by modification time
 - Use this tool when you need to find files containing specific patterns
-- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead
+- For open-ended investigations that need several rounds of searching and reading, you may escalate to the Agent tool, but exact symbol and text search should stay in Grep
 `

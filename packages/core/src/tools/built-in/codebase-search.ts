@@ -35,7 +35,7 @@ Good: clear question about a specific process with context about when it happens
 ### When NOT to Use
 
 - **Exact text / regex / symbol** → use Grep instead (faster and more precise for known strings).
-- **Reading a known file** → use Read (with start_line/end_line from grep or ListCodeDefinitions results).
+- **Reading a known file** → use Read (with offset/limit guided by Grep or ListCodeDefinitions results).
 - **Single identifier or symbol name** → use Grep or ListCodeDefinitions for exact matching.
 - **Finding a file by name** → use Glob.
 

@@ -105,15 +105,15 @@ const webSearchSchema = z.object({
 
 export const webSearchTool: ToolDef<z.infer<typeof webSearchSchema>> = {
   name: "WebSearch",
-  description: `Search the web (Brave or Serper). Returns titles, URLs, snippets. Use web_fetch to read full pages. Requires BRAVE_API_KEY or SERPER_API_KEY.
+  description: `Search the web (Brave or Serper). Returns titles, URLs, snippets. Use WebFetch to read full pages. Requires BRAVE_API_KEY or SERPER_API_KEY.
 
 When to use:
 - Current docs, versions, or info beyond training data.
 - Verifying APIs, dependencies, or recent changes.
 
 When NOT to use:
-- Codebase questions: use codebase_search or grep.
-- User-provided URL: use web_fetch directly.`,
+- Codebase questions: use CodebaseSearch or Grep.
+- User-provided URL: use WebFetch directly.`,
   parameters: webSearchSchema,
   readOnly: true,
 

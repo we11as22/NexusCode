@@ -77,12 +77,12 @@ The agent loop runs until one of:
 | Mode   | Mandatory end tool        | Meaning |
 |--------|---------------------------|--------|
 | agent  | *(none)*                  | Turn ends naturally when the model stops without tool calls. |
-| plan   | `plan_exit`               | Turn ends when the plan is ready (plan written to `.nexus/plans/*.md`). |
+| plan   | `PlanExit`                | Turn ends when the plan is ready (plan written to `.nexus/plans/*.md`). |
 | ask    | *(none)*                  | Turn ends naturally when the model stops without tool calls. |
 | debug  | *(none)*                  | Turn ends naturally when the model stops without tool calls. |
 | review | *(none)*                  | Turn ends naturally when the model stops without tool calls. |
 
-Only modes with a configured mandatory tool are force-gated by that tool (currently `plan_exit` in plan mode). Other modes end naturally when the model returns a stop with no pending tool calls.
+Only modes with a configured mandatory tool are force-gated by that tool (currently `PlanExit` in plan mode). Other modes end naturally when the model returns a stop with no pending tool calls.
 
 ---
 
@@ -133,6 +133,7 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 ## Invariants
 
 - **Mode permissions** are enforced in core (not only in the UI). Blocked tools are never passed to the model.
+- **Prompt and tool contracts must match runtime exactly.** System prompts, mode descriptions, sub-agent prompts, and tool descriptions must use the real tool names and parameter shapes: `PlanExit`, `SpawnAgent`, `Parallel`, `Read(file_path, offset, limit)`, and the exact-string `Edit` contract.
 - **Built-in tools** are always available per mode; filtering applies only to dynamic (MCP/custom) tools, and by **MCP server** count (not individual tool count) when classification is enabled.
 - **MCP config**: enable/disable is per **server** (all tools of that server). The classifier selects servers, not individual tools.
 - If vector prerequisites are invalid, the agent runs with **FTS-only** search.
@@ -142,6 +143,7 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 - **`config.agentLoop.toolCallBudget`** and **`config.agentLoop.maxIterations`** override per-mode limits when set.
 - **Models catalog**: CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) and live gateway model list where applicable; unavailable free IDs are filtered from pickers.
 - **End of turn**: plan mode is force-gated by **PlanExit**; agent/ask/debug/review end naturally when the model stops without tool calls.
+- **Exploration discipline**: prompts should bias strongly toward search-first discovery (`Grep`/`Glob`/`CodebaseSearch`/`ListCodeDefinitions`) and only then targeted `Read` calls with `offset`/`limit`, avoiding exploratory whole-file reads.
 
 ---
 
@@ -195,7 +197,7 @@ NexusCode/
 - **skills:** `Skill`
 - **agents:** `SpawnAgent`, `SpawnAgentOutput`, `SpawnAgentStop`
 - **context:** `Condense`
-- **plan_exit:** `PlanExit` (plan mode only)
+- **plan_exit tool group:** `PlanExit` (plan mode only)
 
 Mode-specific blocks: **plan** blocks `Bash`; **ask** blocks `Write`, `Edit`, `Bash`, `PlanExit`; **review** blocks `Write`, `Edit`, `PlanExit`; **agent/debug** block `PlanExit`.
 

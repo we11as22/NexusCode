@@ -10,18 +10,18 @@ const schema = z.object({
 
 export const listDefinitionsTool: ToolDef<z.infer<typeof schema>> = {
   name: "ListCodeDefinitions",
-  description: `List top-level code definitions (classes, functions, methods, interfaces, types) for a file or directory. No full bodies — structure only. Use this before read_file to get symbol names and line numbers so you can call read_file with start_line/end_line.
+  description: `List top-level code definitions (classes, functions, methods, interfaces, types) for a file or directory. No full bodies — structure only. Use this before Read to get symbol names and line numbers so you can call Read with offset/limit.
 
 When to use:
-- **Get symbols and line numbers before reading** — Use list_code_definitions on a file or directory first; then use read_file with start_line/end_line to read only the definitions you need. Use on every relevant file or dir when exploring, not only list.
+- **Get symbols and line numbers before reading** — Use ListCodeDefinitions on a file or directory first; then use Read with offset/limit to read only the definitions you need. Use it on every relevant file or dir when exploring, not only once.
 - Understand file or module structure before reading or searching.
-- Find where a symbol is defined (then use read_file or codebase_search for details).
+- Find where a symbol is defined (then use Read or CodebaseSearch for details).
 - Quick overview of many files in a directory.
 
 When NOT to use:
-- Semantic search: use codebase_search.
-- Exact pattern in content: use grep.
-- Reading implementation: use read_file (after list_code_definitions or grep for the range).
+- Semantic search: use CodebaseSearch.
+- Exact pattern in content: use Grep.
+- Reading implementation: use Read (after ListCodeDefinitions or Grep for the range).
 
 Supports: TS/JS, Python, Rust, Go, Java, C/C++. Returns path and line (e.g. "function foo (L42)").`,
   parameters: schema,

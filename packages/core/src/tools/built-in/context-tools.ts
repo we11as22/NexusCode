@@ -76,7 +76,7 @@ export const planExitTool: ToolDef<z.infer<typeof planExitSchema>> = {
   description: `Signal that planning is complete (plan mode only). Call once you have finalized the plan file and are confident it is ready. This ends your planning turn and hands control back to the user.
 
 Call this tool:
-- After you have written a complete plan to a file in \`.nexus/plans/\` (e.g. \`.nexus/plans/plan.md\`). plan_exit is rejected until at least one such file exists.
+- After you have written a complete plan to a file in \`.nexus/plans/\` (e.g. \`.nexus/plans/plan.md\`). \`PlanExit\` is rejected until at least one such file exists.
 - After you have clarified any questions with the user.
 - When you are confident the plan is ready for implementation.
 
@@ -84,7 +84,7 @@ Do NOT call this tool before you have created or finalized the plan file, or if 
   parameters: planExitSchema,
   modes: ["plan"],
 
-  async execute(args, ctx: ToolContext) {
+  async execute(args, _ctx: ToolContext) {
     const summary = args.summary?.trim() ?? "Plan is ready."
     return { success: true, output: `Plan complete.\n\n${summary}` }
   },

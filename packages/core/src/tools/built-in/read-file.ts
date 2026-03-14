@@ -24,24 +24,14 @@ export const readFileTool: ToolDef<z.infer<typeof schema>> = {
 Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
-- The file_path parameter must be an absolute path, not a relative path
+- file_path may be absolute or relative to the project root
 - By default, it reads up to ${DEFAULT_LIMIT} lines starting from the beginning of the file
-- You can optionally specify a line offset and limit (especially handy for long files), but it is recommended to read the whole file by not providing these parameters
+- Prefer specifying offset and limit for long files or when you already know the relevant range. Use whole-file reads only when the file is small or you genuinely need the entire file.
 - Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
 - You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel as a batch — do not drip one-at-a-time.
 - If you read a file that exists but has empty contents you will receive 'File is empty.'
-
-Image Support:
-- This tool can read image files when called with the appropriate path.
-- Supported image formats: jpeg/jpg, png, gif, webp.
-- You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view it. This tool works with all temporary file paths.
-
-PDF Support:
-- This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), provide the pages parameter to read specific page ranges (e.g. pages: "1-5"). Reading a large PDF without pages will fail. Maximum 20 pages per request.
-
-Jupyter Notebooks:
-- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.`,
+- Binary files are not decoded. For binary content this tool returns file metadata and tells you the file cannot be read as text.`,
   parameters: schema,
   readOnly: true,
 

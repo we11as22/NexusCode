@@ -275,10 +275,10 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
         buf.length <= MAX_TOOL_OUTPUT_FILE_BYTES
           ? fullOutput
           : buf.subarray(0, MAX_TOOL_OUTPUT_FILE_BYTES).toString("utf8") +
-            "\n\n[output truncated at 50 MB in file; use grep or read_file with start_line/end_line]\n"
+            "\n\n[output truncated at 50 MB in file; use Grep or Read with offset/limit]\n"
       await fs.promises.writeFile(outPath, capped, "utf8").catch(() => {})
       const relPath = path.relative(ctx.cwd, outPath).replace(/\\/g, "/") || `.nexus/${TOOL_OUTPUT_DIR}/tool_${ts}.out`
-      const hint = `\n\nFull output saved to: ${relPath}\nUse grep to search the full content or read_file with start_line/end_line to view specific sections.`
+      const hint = `\n\nFull output saved to: ${relPath}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
       outputMessage = truncated + hint
     }
 

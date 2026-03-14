@@ -22,12 +22,13 @@ export async function getPrompt(
   const toolNames = tools.map(_ => _.name).join(', ')
   // Use literal names to avoid bundler/circular-dependency issues (Glob/FileReadTool may be undefined at eval time)
   const fileReadName = 'View'
+  const grepName = 'Grep'
   const globName = 'Glob'
-  return `Launch a new agent that has access to the following tools: ${toolNames}. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you. For example:
+  return `Launch a new agent that has access to the following tools: ${toolNames}. Use the Agent tool for broad, multi-step exploration or focused autonomous subtasks, not for simple exact lookups. For example:
 
-- If you are searching for a keyword like "config" or "logger", the Agent tool is appropriate
+- If you are searching for a keyword like "config" or "logger", start with ${grepName}; use the Agent tool only if the search is open-ended or needs multiple rounds of reasoning
 - If you want to read a specific file path, use the ${fileReadName} or ${globName} tool instead of the Agent tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the ${globName} tool instead, to find the match more quickly
+- If you are searching for a specific class definition like "class Foo", use ${grepName} or ${globName} instead; reserve the Agent tool for broader exploration
 
 Usage notes:
 1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
