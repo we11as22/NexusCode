@@ -1,5 +1,6 @@
 import * as vscode from "vscode"
 import * as crypto from "crypto"
+import * as fs from "node:fs"
 import { Controller, type WebviewMessage, type ExtensionMessage } from "./controller.js"
 
 /**
@@ -12,8 +13,15 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   private panel?: vscode.WebviewPanel
   private controller: Controller
   private disposables: vscode.Disposable[] = []
+  private readonly output = vscode.window.createOutputChannel("NexusCode")
+  private readonly readyWebviews = new WeakMap<vscode.Webview, boolean>()
+  private readonly pendingMessages = new WeakMap<vscode.Webview, ExtensionMessage[]>()
+  private latestMessages = new Map<ExtensionMessage["type"], ExtensionMessage>()
 
   constructor(private readonly context: vscode.ExtensionContext) {
+    try {
+      fs.appendFileSync("/tmp/nexuscode-extension.log", `[${new Date().toISOString()}] NexusProvider.constructor\n`)
+    } catch {}
     this.controller = new Controller(context, (msg) => this.postMessage(msg))
   }
 
@@ -22,6 +30,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken
   ): Promise<void> {
+    this.debugLog("resolveWebviewView")
     this.view = webviewView
     this.setupWebview(webviewView.webview)
     void this.controller.ensureInitialized()
@@ -35,6 +44,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 
   async openPanel(): Promise<void> {
+    this.debugLog("openPanel")
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Beside)
       return
@@ -63,20 +73,154 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     this.controller.postStateToWebview()
   }
 
+  private markWebviewReady(webview: vscode.Webview): void {
+    this.readyWebviews.set(webview, true)
+    this.debugLog("webview marked ready")
+  }
+
+  private markWebviewNotReady(webview: vscode.Webview): void {
+    this.readyWebviews.set(webview, false)
+    this.pendingMessages.set(webview, [])
+    this.debugLog("webview marked not ready")
+  }
+
+  private isWebviewReady(webview: vscode.Webview): boolean {
+    return this.readyWebviews.get(webview) === true
+  }
+
+  private cloneMessageForWebview<T extends ExtensionMessage>(msg: T): T {
+    try {
+      return structuredClone(msg)
+    } catch {
+      return JSON.parse(JSON.stringify(msg)) as T
+    }
+  }
+
+  private queueMessageForWebview(webview: vscode.Webview, msg: ExtensionMessage): void {
+    const queued = this.pendingMessages.get(webview) ?? []
+    queued.push(this.cloneMessageForWebview(msg))
+    this.pendingMessages.set(webview, queued)
+    this.debugLog(`queued outbound message: ${msg.type} (queue=${queued.length})`)
+  }
+
+  private async flushPendingMessages(webview: vscode.Webview): Promise<void> {
+    if (!this.isWebviewReady(webview)) return
+    const queued = this.pendingMessages.get(webview)
+    if (!queued || queued.length === 0) return
+    this.debugLog(`flushing queued webview messages: ${queued.length}`)
+    this.pendingMessages.set(webview, [])
+    for (const msg of queued) {
+      try {
+        await webview.postMessage(msg)
+      } catch (error) {
+        console.warn("[NexusCode] Failed to flush queued webview message:", error)
+        this.queueMessageForWebview(webview, msg)
+        return
+      }
+    }
+  }
+
+  private rememberLatestMessage(msg: ExtensionMessage): void {
+    switch (msg.type) {
+      case "stateUpdate":
+      case "sessionList":
+      case "sessionListLoading":
+      case "indexStatus":
+      case "configLoaded":
+      case "skillDefinitions":
+      case "modelsCatalog":
+      case "agentPresets":
+      case "agentPresetOptions":
+      case "mcpServerStatus":
+        this.latestMessages.set(msg.type, this.cloneMessageForWebview(msg))
+        break
+      default:
+        break
+    }
+  }
+
+  private async replayLatestMessages(webview: vscode.Webview): Promise<void> {
+    if (!this.isWebviewReady(webview) || this.latestMessages.size === 0) return
+    const order: ExtensionMessage["type"][] = [
+      "configLoaded",
+      "skillDefinitions",
+      "modelsCatalog",
+      "agentPresets",
+      "agentPresetOptions",
+      "sessionListLoading",
+      "sessionList",
+      "indexStatus",
+      "mcpServerStatus",
+      "stateUpdate",
+    ]
+    for (const type of order) {
+      const msg = this.latestMessages.get(type)
+      if (!msg) continue
+      try {
+        await webview.postMessage(this.cloneMessageForWebview(msg))
+      } catch (error) {
+        console.warn(`[NexusCode] Failed to replay cached webview message (${type}):`, error)
+        return
+      }
+    }
+    this.debugLog(`replayed cached snapshot messages: ${this.latestMessages.size}`)
+  }
+
+  private debugLog(message: string, details?: unknown): void {
+    const line =
+      details === undefined
+        ? `[${new Date().toISOString()}] ${message}`
+        : `[${new Date().toISOString()}] ${message} ${safeStringify(details)}`
+    this.output.appendLine(line)
+    try {
+      fs.appendFileSync("/tmp/nexuscode-extension.log", `${line}\n`)
+    } catch {}
+    if (details === undefined) {
+      console.log(`[NexusCode] ${message}`)
+      return
+    }
+    console.log(`[NexusCode] ${message}`, details)
+  }
+
+  private async postMessageToTarget(webview: vscode.Webview, msg: ExtensionMessage): Promise<void> {
+    this.rememberLatestMessage(msg)
+    if (!this.isWebviewReady(webview)) {
+      this.queueMessageForWebview(webview, msg)
+      return
+    }
+    try {
+      this.debugLog(`posting outbound message: ${msg.type}`, summarizeExtensionMessage(msg))
+      await webview.postMessage(this.cloneMessageForWebview(msg))
+    } catch (error) {
+      console.warn("[NexusCode] Failed to post message to webview:", error)
+    }
+  }
+
   private setupWebview(webview: vscode.Webview): void {
+    this.debugLog("setupWebview")
     const webviewDistPath = vscode.Uri.joinPath(
       this.context.extensionUri, "webview-ui", "dist"
     )
+    this.markWebviewNotReady(webview)
     webview.options = {
       enableScripts: true,
       localResourceRoots: [this.context.extensionUri, webviewDistPath],
     }
 
-    webview.html = this.getHtml(webview)
-
-    webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
-      await this.controller.handleWebviewMessage(msg)
+    webview.onDidReceiveMessage(async (msg: WebviewMessage | Record<string, unknown>) => {
+      const type = typeof msg?.type === "string" ? msg.type : "(unknown)"
+      this.debugLog(`inbound webview message: ${type}`)
+      if (type === "webviewBootstrap" || type === "webviewScriptError" || type === "webviewRuntimeError") {
+        this.debugLog(`webview debug event: ${type}`, msg)
+        return
+      }
+      this.markWebviewReady(webview)
+      await this.flushPendingMessages(webview)
+      await this.replayLatestMessages(webview)
+      await this.controller.handleWebviewMessage(msg as WebviewMessage)
     }, null, this.disposables)
+
+    webview.html = this.getHtml(webview)
 
     queueMicrotask(() => {
       this.controller.postStateToWebview()
@@ -89,11 +233,12 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 
   private postMessage(msg: ExtensionMessage): void {
+    this.rememberLatestMessage(msg)
     const targets: vscode.Webview[] = []
     if (this.view?.webview) targets.push(this.view.webview)
     if (this.panel?.webview && this.panel.webview !== this.view?.webview) targets.push(this.panel.webview)
     for (const webview of targets) {
-      webview.postMessage(msg).then(() => {}, () => {})
+      void this.postMessageToTarget(webview, msg)
     }
   }
 
@@ -143,7 +288,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       `style-src 'unsafe-inline' ${webview.cspSource}`,
       `script-src 'nonce-${nonce}' 'wasm-unsafe-eval' ${webview.cspSource}`,
       `font-src ${webview.cspSource}`,
-      "connect-src http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*",
+      `connect-src ${webview.cspSource} http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*`,
       `img-src ${webview.cspSource} data: https:`,
     ].join("; ")
     const extraStyles = [
@@ -184,16 +329,44 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   </div>
   <script nonce="${nonce}" type="module" src="${scriptUri}" id="main-script"></script>
   <script nonce="${nonce}">
+    var vscode = window.__NEXUS_VSCODE_API__ || (typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null);
+    if (vscode) {
+      window.__NEXUS_VSCODE_API__ = vscode;
+    }
+    function reportToExtension(type, payload) {
+      try {
+        if (vscode && typeof vscode.postMessage === 'function') {
+          vscode.postMessage(Object.assign({ type: type }, payload || {}));
+        }
+      } catch {}
+    }
+    reportToExtension('webviewBootstrap', { phase: 'inline-script-loaded' });
     document.getElementById('main-script').addEventListener('error', function(e) {
       var r = document.getElementById('root');
       r.className = 'error';
       r.innerHTML = '<span class="loading-msg">Failed to load script. Right‑click panel → Inspect → Console for errors.</span>';
+      reportToExtension('webviewScriptError', { message: 'Failed to load main script' });
     });
     window.addEventListener('error', function(ev) {
       var r = document.getElementById('root');
       if (!r || r.classList.contains('loaded')) return;
       r.className = 'error';
       r.innerHTML = '<span class="loading-msg">Error: ' + (ev.message || 'Unknown') + '</span>';
+      reportToExtension('webviewRuntimeError', {
+        message: ev.message || 'Unknown',
+        source: ev.filename || '',
+        line: ev.lineno || 0,
+        column: ev.colno || 0
+      });
+    });
+    window.addEventListener('unhandledrejection', function(ev) {
+      var reason = ev && ev.reason;
+      reportToExtension('webviewRuntimeError', {
+        message: reason && reason.message ? reason.message : String(reason || 'Unhandled rejection'),
+        source: 'unhandledrejection',
+        line: 0,
+        column: 0
+      });
     });
   </script>
 </body>
@@ -211,9 +384,54 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       d.dispose()
     }
     this.disposables = []
+    this.output.dispose()
   }
 }
 
 function getNonce(): string {
   return crypto.randomBytes(16).toString("hex")
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function summarizeExtensionMessage(msg: ExtensionMessage): Record<string, unknown> {
+  if (msg.type === "agentEvent") {
+    const event = msg.event as Record<string, unknown>
+    return {
+      eventType: event.type,
+      messageId: typeof event.messageId === "string" ? event.messageId : undefined,
+      partId: typeof event.partId === "string" ? event.partId : undefined,
+      tool: typeof event.tool === "string" ? event.tool : undefined,
+      error:
+        event.error instanceof Error
+          ? event.error.message
+          : typeof event.error === "string"
+            ? event.error
+            : undefined,
+    }
+  }
+  if (msg.type === "stateUpdate") {
+    const messages = Array.isArray(msg.state.messages) ? msg.state.messages : []
+    const last = messages[messages.length - 1] as { role?: string; id?: string; content?: unknown } | undefined
+    return {
+      sessionId: msg.state.sessionId,
+      isRunning: msg.state.isRunning,
+      messageCount: messages.length,
+      lastRole: last?.role,
+      lastId: last?.id,
+      lastHasContent:
+        typeof last?.content === "string"
+          ? last.content.trim().length > 0
+          : Array.isArray(last?.content)
+            ? last.content.length > 0
+            : false,
+    }
+  }
+  return {}
 }

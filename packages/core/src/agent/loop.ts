@@ -26,15 +26,18 @@ import { getInitialProjectContext } from "./prompts/initial-context.js"
 import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN, MANDATORY_END_TOOL } from "./modes.js"
 import { classifyMcpServers, classifySkills } from "./classifier.js"
 import { normalizeToolInputForParse } from "./tool-execution.js"
-import { listSchemaForGateway } from "../tools/built-in/search-files.js"
+import { getBackgroundBashJobsForPrompt } from "../tools/built-in/execute-command.js"
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
 import { estimateTokens } from "../context/condense.js"
 import * as path from "node:path"
+import * as fs from "node:fs"
 import {
   buildReasoningProviderOptions,
-  buildReasoningProviderOptionsCandidates,
+  getDefaultTemperature,
+  getDefaultTopK,
+  getDefaultTopP,
 } from "../provider/provider-options.js"
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -48,6 +51,8 @@ const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   debug: 200,
   review: 120,
 }
+
+const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
 
 /** When a mandatory end tool (e.g. PlanExit) completes, set its output as user_message on the last text part of the message (so UI and context see it). */
 function setReportToUserMessage(session: ISession, messageId: string, userMessage: string): void {
@@ -85,6 +90,21 @@ function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: stri
   return false
 }
 
+/** Returns true when at least one plan file exists on disk in .nexus/plans (*.md|*.txt). */
+function hasPlanFileOnDisk(cwd: string): boolean {
+  try {
+    const plansDir = path.join(cwd, ".nexus", "plans")
+    const entries = fs.readdirSync(plansDir, { withFileTypes: true })
+    return entries.some(
+      (entry) =>
+        entry.isFile() &&
+        (entry.name.toLowerCase().endsWith(".md") || entry.name.toLowerCase().endsWith(".txt"))
+    )
+  } catch {
+    return false
+  }
+}
+
 /** Returns true if the message already contains a call to the mode's mandatory end tool. */
 function messageHasMandatoryEndTool(session: ISession, messageId: string, mode: Mode): boolean {
   const mandatory = MANDATORY_END_TOOL[mode]
@@ -108,7 +128,7 @@ export interface AgentLoopOptions {
   compaction: SessionCompaction
   signal: AbortSignal
   gitBranch?: string
-  /** When set, commit on final_report_to_user (agent) and optionally double-check (Cline-style). */
+  /** When set, commit on completion of an agent turn and optionally double-check (Cline-style). */
   checkpoint?: { commit(description?: string): Promise<string> }
   /** When true, inject create-skill instructions; host must allow writes to .nexus/skills and .cursor/skills */
   createSkillMode?: boolean
@@ -280,6 +300,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const toolCallBudget = Math.max(8, effectiveToolBudget[mode] ?? BASE_TOOL_CALL_BUDGET_BY_MODE[mode])
   let executedToolCallsTotal = 0
   let forceFinalAnswerNext = false
+  let forceEmptyResponseRecoveryPromptNext = false
+  let consecutiveEmptyFinalResponses = 0
+  const maxEmptyFinalResponseRetries = 2
   let lastAssistantMessageId = ""
   const doubleCheckCompletion = config.checkpoint?.doubleCheckCompletion === true
   const completionState = {
@@ -361,6 +384,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       contextUsedTokens: usedTokens,
       contextLimitTokens: limitTokens > 0 ? limitTokens : undefined,
       contextPercent: limitTokens > 0 ? contextPercent : undefined,
+      backgroundJobsSummary: getBackgroundBashJobsForPrompt(host.cwd),
       createSkillMode: createSkillMode === true,
       supportsStructuredOutput: activeClient.supportsStructuredOutput(),
     }
@@ -383,20 +407,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     emitContextUsage(systemPrompt)
 
     // 4. Build LLM tool definitions
-    // Remote gateways (Minimax, OpenRouter, etc.) often replace "List" with list_dir and validate paths[0].
-    // For those we send a schema with "paths" (array) so the model sends paths: ["."]; we normalize paths → path on receive.
-    const useGatewayListSchema =
-      activeClient.providerName !== "ollama" && activeClient.providerName !== "local"
-    const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedTools).map(t => {
-      if (t.name === "List" && useGatewayListSchema) {
-        return {
-          name: t.name,
-          description: `${t.description}\n\n**Call with \`paths\` (array of one path), e.g. paths: [\".\"] or paths: [\"src\"].**`,
-          parameters: listSchemaForGateway,
-        }
-      }
-      return { name: t.name, description: t.description, parameters: t.parameters }
-    })
+    const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedTools).map(t => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    }))
 
     // 5. Build messages from session
     const messages = buildMessagesFromSession(session)
@@ -407,6 +422,19 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         role: "user",
         content: "Provide the final answer now in plain text only. Do not emit tool-call markup, XML, or JSON function calls.",
       })
+      if (forceEmptyResponseRecoveryPromptNext) {
+        messages.push({
+          role: "user",
+          content: "Your previous response was empty. Return a concise plain-text answer now (no tool calls, no XML/JSON markup).",
+        })
+        forceEmptyResponseRecoveryPromptNext = false
+      }
+    } else if (forceEmptyResponseRecoveryPromptNext) {
+      messages.push({
+        role: "user",
+        content: "Your previous response was empty. Return a concise plain-text answer now (or call tools only if strictly necessary).",
+      })
+      forceEmptyResponseRecoveryPromptNext = false
     } else if (loopIterations > 1 && messages.length > 0 && messages[messages.length - 1]?.role === "tool") {
       // Previous turn had tool calls but no text reply — prompt for a summary
       messages.push({
@@ -424,6 +452,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     let currentText = ""
     let currentReasoning = ""
+    let currentReasoningId: string | undefined
+    let currentReasoningMetadata: Record<string, unknown> | undefined
+    let currentReasoningDurationMs: number | undefined
+    let currentReasoningStartedAt: number | undefined
+    let sawReasoningSignal = false
     const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
     lastToolName = ""
     let sawNativeToolCall = false
@@ -447,13 +480,39 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     const flushAssistantContent = () => {
       const msg = session.messages.find((m) => m.id === newMessageId)
       const existingParts = msg && Array.isArray(msg.content) ? (msg.content as MessagePart[]) : []
-      const toolParts = existingParts.filter((p): p is ToolPart => p.type === "tool")
-      const parts: MessagePart[] = []
-      if (currentReasoning) parts.push({ type: "reasoning", text: currentReasoning } as ReasoningPart)
-      if (currentText) {
-        parts.push({ type: "text", text: currentText } as TextPart)
+      const parts: MessagePart[] = [...existingParts]
+      const reasoningIdx = parts.findIndex((p) => p.type === "reasoning")
+      if (currentReasoning) {
+        const reasoningText = currentReasoning
+        if (reasoningIdx >= 0) {
+          parts[reasoningIdx] = {
+            ...(parts[reasoningIdx] as ReasoningPart),
+            text: reasoningText,
+            ...(currentReasoningId ? { reasoningId: currentReasoningId } : {}),
+            ...(currentReasoningDurationMs != null ? { durationMs: currentReasoningDurationMs } : {}),
+            ...(currentReasoningMetadata ? { providerMetadata: currentReasoningMetadata } : {}),
+          } as ReasoningPart
+        } else {
+          parts.push({
+            type: "reasoning",
+            text: reasoningText,
+            ...(currentReasoningId ? { reasoningId: currentReasoningId } : {}),
+            ...(currentReasoningDurationMs != null ? { durationMs: currentReasoningDurationMs } : {}),
+            ...(currentReasoningMetadata ? { providerMetadata: currentReasoningMetadata } : {}),
+          } as ReasoningPart)
+        }
       }
-      parts.push(...toolParts)
+      if (currentText) {
+        const textIdx = parts.findIndex((p) => p.type === "text")
+        if (textIdx >= 0) {
+          parts[textIdx] = {
+            ...(parts[textIdx] as TextPart),
+            text: currentText,
+          } as TextPart
+        } else {
+          parts.push({ type: "text", text: currentText } as TextPart)
+        }
+      }
       session.updateMessage(newMessageId, { content: parts.length > 0 ? parts : currentText || "" })
     }
 
@@ -502,10 +561,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     try {
       const maxTokens = 8192
       const providerOptions = buildReasoningProviderOptions(config.model, activeClient.providerName)
-      const providerOptionsCandidates = buildReasoningProviderOptionsCandidates(
-        config.model,
-        activeClient.providerName
-      )
       const retryMaxAttempts = config.retry?.enabled === false
         ? 1
         : Math.max(1, config.retry?.maxAttempts ?? 3)
@@ -521,9 +576,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         signal,
         cacheableSystemBlocks: cacheableCount,
         maxTokens,
-        temperature: config.model.temperature,
+        temperature: config.model.temperature ?? getDefaultTemperature(config.model),
+        topP: getDefaultTopP(config.model),
+        topK: getDefaultTopK(config.model),
         providerOptions,
-        providerOptionsCandidates,
         maxRetries: retryMaxAttempts,
         initialRetryDelayMs: config.retry?.initialDelayMs,
         maxRetryDelayMs: config.retry?.maxDelayMs,
@@ -532,6 +588,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         if (signal.aborted) break
 
         switch (event.type) {
+          case "reasoning_start":
+            sawReasoningSignal = true
+            currentReasoningId = event.reasoningId ?? currentReasoningId ?? "reasoning-0"
+            currentReasoningMetadata = event.providerMetadata ?? currentReasoningMetadata
+            currentReasoningStartedAt = currentReasoningStartedAt ?? Date.now()
+            currentReasoningDurationMs = undefined
+            // Keep Thought block visible immediately even before first visible reasoning delta.
+            flushAssistantContent()
+            host.emit({
+              type: "reasoning_start",
+              messageId: newMessageId,
+              reasoningId: currentReasoningId,
+              providerMetadata: event.providerMetadata,
+            })
+            break
+
           case "text_delta":
             if (event.delta) {
               currentText += event.delta
@@ -541,15 +613,40 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             break
 
           case "reasoning_delta":
+            sawReasoningSignal = true
+            currentReasoningId = event.reasoningId ?? currentReasoningId
+            currentReasoningMetadata = event.providerMetadata ?? currentReasoningMetadata
+            currentReasoningStartedAt = currentReasoningStartedAt ?? Date.now()
             if (event.delta) {
               currentReasoning += event.delta
               flushAssistantContent()
-              host.emit({ type: "reasoning_delta", delta: event.delta, messageId: newMessageId })
+            } else {
+              // Keep Thought block in persisted message even when provider sends empty reasoning chunks.
+              flushAssistantContent()
             }
+            host.emit({
+              type: "reasoning_delta",
+              delta: event.delta ?? "",
+              messageId: newMessageId,
+              reasoningId: event.reasoningId,
+              providerMetadata: event.providerMetadata,
+            })
             break
 
           case "reasoning_end":
-            host.emit({ type: "reasoning_end", messageId: newMessageId })
+            if (currentReasoningStartedAt != null) {
+              currentReasoningDurationMs = Math.max(1, Date.now() - currentReasoningStartedAt)
+            }
+            currentReasoningId = event.reasoningId ?? currentReasoningId
+            currentReasoningMetadata = event.providerMetadata ?? currentReasoningMetadata
+            currentReasoningStartedAt = undefined
+            flushAssistantContent()
+            host.emit({
+              type: "reasoning_end",
+              messageId: newMessageId,
+              reasoningId: currentReasoningId ?? event.reasoningId,
+              providerMetadata: event.providerMetadata,
+            })
             break
 
           case "tool_call": {
@@ -654,7 +751,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
               // Plan mode: force writing the plan to .nexus/plans/ before PlanExit
               if (toolName === "PlanExit" && mode === "plan") {
-                if (!messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd)) {
+                const hasPlanFile =
+                  messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd) ||
+                  hasPlanFileOnDisk(toolCtx.cwd)
+                if (!hasPlanFile) {
                   const errMsg =
                     "You must write the plan to a file in .nexus/plans/ (e.g. .nexus/plans/plan.md) before calling PlanExit. Create or update the plan file now, then call PlanExit again."
                   session.updateToolPart(newMessageId, partId, {
@@ -904,6 +1004,35 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       await session.save()
       emitContextUsage()
       continue
+    }
+    // Provider/gateway may close stream without explicit finish event.
+    if (!finishReason && !fatalStreamError) {
+      finishReason = "stop"
+    }
+    const noVisibleAssistantOutputThisIteration =
+      finishReason === "stop" &&
+      !executedToolThisIteration &&
+      currentText.trim().length === 0 &&
+      currentReasoning.trim().length === 0
+    if (noVisibleAssistantOutputThisIteration) {
+      if (consecutiveEmptyFinalResponses < maxEmptyFinalResponseRetries) {
+        consecutiveEmptyFinalResponses++
+        forceEmptyResponseRecoveryPromptNext = true
+        host.emit({
+          type: "error",
+          error: `Model returned an empty response. Retrying (${consecutiveEmptyFinalResponses}/${maxEmptyFinalResponseRetries}) with a stricter prompt.`,
+          fatal: false,
+        })
+        await session.save()
+        emitContextUsage()
+        continue
+      }
+      currentText =
+        "I could not produce a final text response after retries. Please try again or rephrase your request."
+      flushAssistantContent()
+      attemptedCompletionThisIteration = true
+    } else if (currentText.trim().length > 0 || currentReasoning.trim().length > 0) {
+      consecutiveEmptyFinalResponses = 0
     }
 
     // Check if done — mandatory end tool (per mode) ends the turn: plan_exit (plan only). Agent/ask/debug have no mandatory tool.

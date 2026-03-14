@@ -143,7 +143,7 @@ Usage:
   },
 }
 
-// List: single "path" parameter only. No "paths" array — gateways may expose list_dir with paths; we accept only path.
+// List: single "path" parameter only. No "paths" array.
 const listSchema = z
   .object({
     path: z
@@ -153,21 +153,6 @@ const listSchema = z
     recursive: z.boolean().optional().describe("List recursively (default: false for top-level, true for subdirs)"),
     include: z.string().optional().describe("Glob pattern to filter files (e.g. \"*.ts\", \"*.json\")"),
     max_entries: z.number().int().positive().max(5000).optional().describe("Max entries (default: 200)"),
-    task_progress: z.string().optional(),
-  })
-  .strict()
-
-/** Schema sent to gateways (Minimax, OpenRouter, etc.) that replace List with list_dir and validate paths[0]. Model must send paths: [". "] so gateway validation passes; we normalize paths → path on receive. */
-export const listSchemaForGateway = z
-  .object({
-    paths: z
-      .array(z.string())
-      .min(1)
-      .describe("Directory path(s) to list. Use a single path, e.g. [\".\"] for root or [\"src\"] for a folder."),
-    ignore: z.array(z.string()).optional(),
-    recursive: z.boolean().optional(),
-    include: z.string().optional(),
-    max_entries: z.number().int().positive().max(5000).optional(),
     task_progress: z.string().optional(),
   })
   .strict()

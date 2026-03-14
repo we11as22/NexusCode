@@ -35,7 +35,7 @@ export class BaseLLMClient implements LLMClient {
   async *stream(opts: StreamOptions): AsyncIterable<LLMStreamEvent> {
     // Tools are always sent with zod parameters; AI SDK converts to JSON Schema for the provider.
     // When the provider supports structured output, tool-call args conform to that schema.
-    const tools = opts.tools
+    const baseTools = opts.tools
       ? Object.fromEntries(
           opts.tools.map(t => [
             t.name,
@@ -54,34 +54,18 @@ export class BaseLLMClient implements LLMClient {
     const initialDelay = opts.initialRetryDelayMs ?? DEFAULT_INITIAL_DELAY
     const maxDelay = opts.maxRetryDelayMs ?? DEFAULT_MAX_DELAY
     const retryableStatuses = new Set(opts.retryOnStatus ?? DEFAULT_RETRYABLE_STATUS)
-    const providerOptionsCandidates = normalizeProviderOptionsCandidates(
-      opts.providerOptionsCandidates,
-      opts.providerOptions
-    )
-    let providerOptionsIndex = 0
-
     while (true) {
       attempt++
       try {
-        const activeProviderOptions = providerOptionsCandidates[providerOptionsIndex]
         yield* this._streamOnce(
           opts,
           messages,
-          tools,
-          activeProviderOptions
+          baseTools,
+          opts.providerOptions
         )
         return
       } catch (err) {
         if (opts.signal?.aborted) throw err
-        if (
-          providerOptionsCandidates.length > 0 &&
-          providerOptionsIndex < providerOptionsCandidates.length - 1 &&
-          looksLikeUnsupportedProviderOptionsError(err)
-        ) {
-          providerOptionsIndex++
-          attempt--
-          continue
-        }
         const status = getErrorStatus(err)
         const isRetryable =
           (status != null && retryableStatuses.has(status)) || isNetworkError(err)
@@ -115,13 +99,46 @@ export class BaseLLMClient implements LLMClient {
     providerOptions: Record<string, unknown> | undefined
   ): AsyncIterable<LLMStreamEvent> {
     const thinkTagParser = createThinkTagParser()
+    const guaranteeThoughtBlock = providerOptionsRequestsReasoning(providerOptions)
+    let thoughtOpen = false
+    let emittedVisibleText = false
+    let sawFinishEvent = false
+    let streamedTextBuffer = ""
+    let sawAnyTextDelta = false
+    let sawAnyReasoningDelta = false
+    let sawRawTextDelta = false
+    let sawRawTextDone = false
+    const rawTextFallbackChunks: string[] = []
+    const rawReasoningFallbackChunks: string[] = []
+    let currentReasoningId: string | null = null
+    if (guaranteeThoughtBlock) {
+      // Keep Thought UX visible even when provider streams empty/malformed reasoning chunks.
+      currentReasoningId = "reasoning-0"
+      yield { type: "reasoning_start", reasoningId: currentReasoningId }
+      thoughtOpen = true
+    }
+    // Anthropic extended thinking is incompatible with temperature/top_p/top_k.
+    // Drop temperature when Anthropic thinking is enabled to prevent API validation errors.
+    const hasAnthropicThinking =
+      providerOptions != null &&
+      typeof (providerOptions as Record<string, unknown>)["anthropic"] === "object" &&
+      typeof ((providerOptions as Record<string, unknown>)["anthropic"] as Record<string, unknown>)["thinking"] === "object"
+    const hasBedrockThinking =
+      providerOptions != null &&
+      typeof (providerOptions as Record<string, unknown>)["bedrock"] === "object" &&
+      typeof ((providerOptions as Record<string, unknown>)["bedrock"] as Record<string, unknown>)["reasoningConfig"] === "object"
+    const effectiveTemperature =
+      (hasAnthropicThinking || hasBedrockThinking) ? undefined : opts.temperature
+
     const result = streamText({
       model: this.model,
       system: opts.systemPrompt,
       messages,
       tools,
       maxTokens: opts.maxTokens ?? 8192,
-      temperature: opts.temperature,
+      temperature: effectiveTemperature,
+      topP: opts.topP,
+      topK: opts.topK,
       abortSignal: opts.signal,
       maxSteps: 1, // We handle multi-step manually in agentLoop
       ...(providerOptions && Object.keys(providerOptions).length > 0
@@ -139,27 +156,152 @@ export class BaseLLMClient implements LLMClient {
       // Some OpenAI-compatible gateways include reasoning fields on non-reasoning part types.
       // Emit these as reasoning_delta so Thought blocks are preserved in UI.
       const hasNativeReasoningType =
+        partType === "reasoning-start" ||
+        partType === "reasoning_start" ||
         partType === "reasoning" ||
         partType === "reasoning-delta" ||
         partType === "reasoning_delta"
       if (!hasNativeReasoningType) {
         const implicitReasoning = extractReasoningDelta(part as Record<string, unknown>, false)
         if (implicitReasoning) {
-          yield { type: "reasoning_delta", delta: implicitReasoning }
+          if (!thoughtOpen) {
+            currentReasoningId = currentReasoningId ?? extractReasoningId(part as Record<string, unknown>) ?? "reasoning-0"
+            yield {
+              type: "reasoning_start",
+              reasoningId: currentReasoningId,
+              providerMetadata: extractProviderMetadata(part as Record<string, unknown>),
+            }
+          }
+          thoughtOpen = true
+          yield {
+            type: "reasoning_delta",
+            reasoningId: currentReasoningId ?? undefined,
+            delta: implicitReasoning,
+            providerMetadata: extractProviderMetadata(part as Record<string, unknown>),
+          }
         }
       }
 
       switch (partType) {
+        case "text":
         case "text-delta":
           {
             const textDelta = extractTextDelta(part as Record<string, unknown>)
             for (const chunk of thinkTagParser.push(textDelta)) {
               if (chunk.kind === "reasoning") {
-                yield { type: "reasoning_delta", delta: chunk.text }
+                if (!thoughtOpen) {
+                  currentReasoningId = currentReasoningId ?? "reasoning-0"
+                  yield { type: "reasoning_start", reasoningId: currentReasoningId }
+                }
+                thoughtOpen = true
+                yield { type: "reasoning_delta", reasoningId: currentReasoningId ?? undefined, delta: chunk.text }
               } else {
-                yield { type: "text_delta", delta: chunk.text }
+                if (thoughtOpen) {
+                  yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+                  thoughtOpen = false
+                  currentReasoningId = null
+                }
+                if (chunk.text) {
+                  emittedVisibleText = true
+                  sawAnyTextDelta = true
+                  streamedTextBuffer += chunk.text
+                  yield { type: "text_delta", delta: chunk.text }
+                }
               }
             }
+          }
+          break
+
+        case "raw": {
+          // Some providers expose text/reasoning only via raw Responses-style events.
+          const rawPart = part as { rawValue?: unknown; value?: unknown; raw?: unknown }
+          const raw =
+            asRecord(rawPart.rawValue) ?? asRecord(rawPart.value) ?? asRecord(rawPart.raw) ?? null
+          if (raw) {
+            const rawEventType = typeof raw["type"] === "string" ? String(raw["type"]) : ""
+            const rawReasoning = extractReasoningDelta(raw, false)
+            const isReasoningDeltaLike =
+              rawEventType.includes("reasoning") ||
+              rawEventType === "response.content_part.added" ||
+              rawEventType === "response.output_item.added"
+            const isReasoningDoneLike =
+              rawEventType.endsWith(".done") &&
+              (rawEventType.includes("reasoning") ||
+                rawEventType === "response.content_part.done" ||
+                rawEventType === "response.output_item.done")
+            if (rawReasoning && (isReasoningDeltaLike || (isReasoningDoneLike && !sawAnyReasoningDelta))) {
+              if (!thoughtOpen) {
+                currentReasoningId = currentReasoningId ?? extractReasoningId(raw) ?? "reasoning-0"
+                yield {
+                  type: "reasoning_start",
+                  reasoningId: currentReasoningId,
+                  providerMetadata: extractProviderMetadata(raw),
+                }
+                thoughtOpen = true
+              }
+              sawAnyReasoningDelta = true
+              yield {
+                type: "reasoning_delta",
+                reasoningId: currentReasoningId ?? undefined,
+                delta: rawReasoning,
+                providerMetadata: extractProviderMetadata(raw),
+              }
+            } else if (rawReasoning) {
+              rawReasoningFallbackChunks.push(rawReasoning)
+            }
+            const rawText = extractTextDelta(raw)
+            if (rawText) {
+              const isTextDeltaLike =
+                rawEventType.endsWith(".delta") ||
+                rawEventType === "response.content_part.added" ||
+                rawEventType === "response.output_item.added"
+              const isTextDoneLike =
+                rawEventType.endsWith(".done") ||
+                rawEventType === "response.content_part.done" ||
+                rawEventType === "response.output_item.done"
+              if (isTextDeltaLike) {
+                if (thoughtOpen) {
+                  yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+                  thoughtOpen = false
+                  currentReasoningId = null
+                }
+                emittedVisibleText = true
+                sawAnyTextDelta = true
+                sawRawTextDelta = true
+                streamedTextBuffer += rawText
+                yield { type: "text_delta", delta: rawText }
+              } else if (isTextDoneLike) {
+                sawRawTextDone = true
+                if (!sawAnyTextDelta && !sawRawTextDelta) {
+                  if (thoughtOpen) {
+                    yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+                    thoughtOpen = false
+                    currentReasoningId = null
+                  }
+                  emittedVisibleText = true
+                  streamedTextBuffer += rawText
+                  yield { type: "text_delta", delta: rawText }
+                } else if (!sawRawTextDelta) {
+                  rawTextFallbackChunks.push(rawText)
+                }
+              } else {
+                rawTextFallbackChunks.push(rawText)
+              }
+            }
+          }
+          break
+        }
+
+        case "reasoning_start":
+        case "reasoning-start":
+          if (!thoughtOpen) {
+            currentReasoningId = extractReasoningId(part as Record<string, unknown>) ?? currentReasoningId ?? "reasoning-0"
+            yield {
+              type: "reasoning_start",
+              reasoningId: currentReasoningId,
+              providerMetadata: extractProviderMetadata(part as Record<string, unknown>),
+            }
+            thoughtOpen = true
           }
           break
 
@@ -168,22 +310,43 @@ export class BaseLLMClient implements LLMClient {
         case "reasoning_delta":
           // Support both textDelta (streaming) and text (chunk) for reasoning/thinking models (OpenRouter, o1, DeepSeek R1, etc.)
           {
-            const delta = extractReasoningDelta(part as Record<string, unknown>, true)
-            if (delta) {
+            if (!thoughtOpen) {
+              currentReasoningId = extractReasoningId(part as Record<string, unknown>) ?? currentReasoningId ?? "reasoning-0"
               yield {
-                type: "reasoning_delta",
-                delta,
+                type: "reasoning_start",
+                reasoningId: currentReasoningId,
+                providerMetadata: extractProviderMetadata(part as Record<string, unknown>),
               }
             }
+            const delta = extractReasoningDelta(part as Record<string, unknown>, true)
+            sawAnyReasoningDelta = true
+            yield {
+              type: "reasoning_delta",
+              reasoningId: currentReasoningId ?? undefined,
+              delta: delta ?? "",
+              providerMetadata: extractProviderMetadata(part as Record<string, unknown>),
+            }
+            thoughtOpen = true
           }
           break
 
         case "reasoning-end":
         case "reasoning_end":
-          yield { type: "reasoning_end" }
+          yield {
+            type: "reasoning_end",
+            reasoningId: extractReasoningId(part as Record<string, unknown>) ?? currentReasoningId ?? undefined,
+            providerMetadata: extractProviderMetadata(part as Record<string, unknown>),
+          }
+          thoughtOpen = false
+          currentReasoningId = null
           break
 
         case "tool-call": {
+          if (thoughtOpen) {
+            yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+            thoughtOpen = false
+            currentReasoningId = null
+          }
           const toolPart = part as {
             toolName?: string
             args?: Record<string, unknown>
@@ -225,13 +388,67 @@ export class BaseLLMClient implements LLMClient {
         }
 
         case "finish": {
+          sawFinishEvent = true
           const finishPart = part as { finishReason?: LLMStreamEvent["finishReason"] }
           for (const chunk of thinkTagParser.flush()) {
             if (chunk.kind === "reasoning") {
-              yield { type: "reasoning_delta", delta: chunk.text }
+              if (!thoughtOpen) {
+                currentReasoningId = currentReasoningId ?? "reasoning-0"
+                yield { type: "reasoning_start", reasoningId: currentReasoningId }
+                thoughtOpen = true
+              }
+              yield { type: "reasoning_delta", reasoningId: currentReasoningId ?? undefined, delta: chunk.text }
             } else {
+              if (thoughtOpen) {
+                yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+                thoughtOpen = false
+                currentReasoningId = null
+              }
               yield { type: "text_delta", delta: chunk.text }
             }
+          }
+
+          // Fallback for providers that complete without explicit text-delta events.
+          if (!sawAnyReasoningDelta && rawReasoningFallbackChunks.length > 0) {
+            if (!thoughtOpen) {
+              currentReasoningId = currentReasoningId ?? "reasoning-0"
+              yield { type: "reasoning_start", reasoningId: currentReasoningId }
+              thoughtOpen = true
+            }
+            const fallbackReasoning = rawReasoningFallbackChunks.join("")
+            if (fallbackReasoning.trim().length > 0) {
+              yield {
+                type: "reasoning_delta",
+                reasoningId: currentReasoningId ?? undefined,
+                delta: fallbackReasoning,
+              }
+              sawAnyReasoningDelta = true
+            }
+          }
+
+          // Fallback for providers that complete without explicit text-delta events.
+          if (!emittedVisibleText) {
+            const directText = await result.text.catch(() => "")
+            const fallbackText =
+              typeof directText === "string" && directText.trim().length > 0
+                ? directText
+                : rawTextFallbackChunks.join("")
+            if (fallbackText.trim().length > 0) {
+              if (thoughtOpen) {
+                yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+                thoughtOpen = false
+                currentReasoningId = null
+              }
+              emittedVisibleText = true
+              streamedTextBuffer += fallbackText
+              yield { type: "text_delta", delta: fallbackText }
+            }
+          }
+
+          if (thoughtOpen) {
+            yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+            thoughtOpen = false
+            currentReasoningId = null
           }
           const usage = result.usage
           const usageData = await usage.catch(() => null)
@@ -257,6 +474,79 @@ export class BaseLLMClient implements LLMClient {
           break
       }
     }
+
+    if (!sawFinishEvent && !opts.signal?.aborted) {
+      // Some gateways close stream without explicit finish event.
+      for (const chunk of thinkTagParser.flush()) {
+        if (chunk.kind === "reasoning") {
+          if (!thoughtOpen) {
+            currentReasoningId = currentReasoningId ?? "reasoning-0"
+            yield { type: "reasoning_start", reasoningId: currentReasoningId }
+            thoughtOpen = true
+          }
+          yield { type: "reasoning_delta", reasoningId: currentReasoningId ?? undefined, delta: chunk.text }
+        } else if (chunk.text) {
+          if (thoughtOpen) {
+            yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+            thoughtOpen = false
+            currentReasoningId = null
+          }
+          emittedVisibleText = true
+          streamedTextBuffer += chunk.text
+          yield { type: "text_delta", delta: chunk.text }
+        }
+      }
+
+      if (!sawAnyReasoningDelta && rawReasoningFallbackChunks.length > 0) {
+        if (!thoughtOpen) {
+          currentReasoningId = currentReasoningId ?? "reasoning-0"
+          yield { type: "reasoning_start", reasoningId: currentReasoningId }
+          thoughtOpen = true
+        }
+        const fallbackReasoning = rawReasoningFallbackChunks.join("")
+        if (fallbackReasoning.trim().length > 0) {
+          yield {
+            type: "reasoning_delta",
+            reasoningId: currentReasoningId ?? undefined,
+            delta: fallbackReasoning,
+          }
+          sawAnyReasoningDelta = true
+        }
+      }
+
+      if (!emittedVisibleText) {
+        const directText = await result.text.catch(() => "")
+        const fallbackText =
+          typeof directText === "string" && directText.trim().length > 0
+            ? directText
+            : rawTextFallbackChunks.join("")
+        if (fallbackText.trim().length > 0 && fallbackText.trim() !== streamedTextBuffer.trim()) {
+          if (thoughtOpen) {
+            yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+            thoughtOpen = false
+            currentReasoningId = null
+          }
+          emittedVisibleText = true
+          streamedTextBuffer += fallbackText
+          yield { type: "text_delta", delta: fallbackText }
+        }
+      }
+
+      if (thoughtOpen) {
+        yield { type: "reasoning_end", reasoningId: currentReasoningId ?? undefined }
+      }
+
+      const usage = result.usage
+      const usageData = await usage.catch(() => null)
+      yield {
+        type: "finish",
+        finishReason: "stop",
+        usage: {
+          inputTokens: usageData?.promptTokens ?? 0,
+          outputTokens: usageData?.completionTokens ?? 0,
+        },
+      }
+    }
   }
 
   async generateStructured<T>(opts: GenerateOptions<T>): Promise<T> {
@@ -265,6 +555,96 @@ export class BaseLLMClient implements LLMClient {
 }
 
 function extractTextDelta(part: Record<string, unknown>): string {
+  const maybeOutputText = part["output_text"]
+  if (typeof maybeOutputText === "string") return maybeOutputText
+
+  const type = typeof part["type"] === "string" ? String(part["type"]) : ""
+  if (type === "response.output_text.done" || type === "response.text.done") {
+    const doneText =
+      (typeof part["text"] === "string" && part["text"]) ||
+      (typeof part["output_text"] === "string" && part["output_text"]) ||
+      (typeof part["delta"] === "string" && part["delta"]) ||
+      ""
+    if (doneText) return doneText
+  }
+
+  if (type === "response.content_part.added" || type === "response.content_part.done") {
+    const partObj = asRecord(part["part"])
+    if (partObj) {
+      const contentType = typeof partObj["type"] === "string" ? String(partObj["type"]) : ""
+      if (contentType === "text" || contentType === "output_text") {
+        const partText =
+          (typeof partObj["text"] === "string" && partObj["text"]) ||
+          (asRecord(partObj["text"]) && typeof asRecord(partObj["text"])?.["value"] === "string"
+            ? String(asRecord(partObj["text"])?.["value"])
+            : "") ||
+          ""
+        if (partText) return partText
+      }
+    }
+  }
+
+  if (type === "response.output_item.added" || type === "response.output_item.done") {
+    const itemObj = asRecord(part["item"])
+    if (itemObj) {
+      const direct =
+        (typeof itemObj["text"] === "string" && itemObj["text"]) ||
+        (typeof itemObj["output_text"] === "string" && itemObj["output_text"]) ||
+        ""
+      if (direct) return direct
+      const contentArr = itemObj["content"]
+      if (Array.isArray(contentArr)) {
+        for (const entry of contentArr) {
+          const block = asRecord(entry)
+          if (!block) continue
+          const blockType = typeof block["type"] === "string" ? String(block["type"]) : ""
+          if ((blockType === "text" || blockType === "output_text") && typeof block["text"] === "string") {
+            return block["text"] as string
+          }
+        }
+      }
+    }
+  }
+
+  const response = asRecord(part["response"])
+  const responseOutput = response?.["output"]
+  if (Array.isArray(responseOutput)) {
+    for (const outputItem of responseOutput) {
+      const item = asRecord(outputItem)
+      if (!item) continue
+      if ((item["type"] === "text" || item["type"] === "output_text") && Array.isArray(item["content"])) {
+        for (const contentBlock of item["content"] as unknown[]) {
+          const content = asRecord(contentBlock)
+          if (!content) continue
+          if ((content["type"] === "text" || content["type"] === "output_text") && typeof content["text"] === "string") {
+            return content["text"] as string
+          }
+        }
+      }
+    }
+  }
+
+  const deltaObj = asRecord(part["delta"])
+  if (deltaObj) {
+    const deltaContent =
+      (typeof deltaObj["content"] === "string" && deltaObj["content"]) ||
+      (typeof deltaObj["text"] === "string" && deltaObj["text"]) ||
+      (typeof deltaObj["output_text"] === "string" && deltaObj["output_text"]) ||
+      ""
+    if (deltaContent) return deltaContent
+  }
+
+  const choices = asRecordArray(part["choices"])
+  for (const choice of choices) {
+    const choiceDelta = asRecord(choice["delta"])
+    if (!choiceDelta) continue
+    const choiceText =
+      (typeof choiceDelta["content"] === "string" && choiceDelta["content"]) ||
+      (typeof choiceDelta["text"] === "string" && choiceDelta["text"]) ||
+      ""
+    if (choiceText) return choiceText
+  }
+
   const textDelta = part["textDelta"]
   if (typeof textDelta === "string") return textDelta
   const delta = part["delta"]
@@ -353,6 +733,21 @@ function stringifyReasoningValue(val: unknown): string {
     (typeof obj["thought"] === "string" && obj["thought"]) ||
     ""
   if (direct) return direct
+  const typedReasoning =
+    (() => {
+      const type = typeof obj["type"] === "string" ? obj["type"].toLowerCase() : ""
+      if (!type.includes("reasoning") && !type.includes("thinking") && !type.includes("thought") && !type.includes("summary")) {
+        return ""
+      }
+      return (
+        (typeof obj["content"] === "string" && obj["content"]) ||
+        (typeof obj["summary"] === "string" && obj["summary"]) ||
+        (asRecord(obj["text"]) && typeof asRecord(obj["text"])?.["value"] === "string"
+          ? String(asRecord(obj["text"])?.["value"])
+          : "")
+      )
+    })()
+  if (typedReasoning) return typedReasoning
   const contentBlocks =
     extractReasoningFromTypedBlocks(obj["content"]) ||
     extractReasoningFromTypedBlocks(obj["parts"]) ||
@@ -363,6 +758,8 @@ function stringifyReasoningValue(val: unknown): string {
     stringifyReasoningValue(obj["reasoningDetails"]) ||
     stringifyReasoningValue(obj["thoughts"])
   if (parts) return parts
+  const nestedTyped = stringifyReasoningValue(obj["part"]) || stringifyReasoningValue(obj["item"])
+  if (nestedTyped) return nestedTyped
   const nestedDelta = stringifyReasoningValue(obj["delta"])
   if (nestedDelta) return nestedDelta
   return ""
@@ -418,6 +815,38 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function asRecordArray(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is Record<string, unknown> => item != null && typeof item === "object")
+}
+
+function extractReasoningId(part: Record<string, unknown>): string | undefined {
+  const direct =
+    (typeof part["id"] === "string" && part["id"]) ||
+    (typeof part["reasoningId"] === "string" && part["reasoningId"]) ||
+    (typeof part["reasoning_id"] === "string" && part["reasoning_id"]) ||
+    (typeof part["itemId"] === "string" && part["itemId"]) ||
+    (typeof part["item_id"] === "string" && part["item_id"]) ||
+    undefined
+  if (direct) return direct
+  const delta = asRecord(part["delta"])
+  if (delta) {
+    return (
+      (typeof delta["id"] === "string" && delta["id"]) ||
+      (typeof delta["reasoningId"] === "string" && delta["reasoningId"]) ||
+      (typeof delta["reasoning_id"] === "string" && delta["reasoning_id"]) ||
+      undefined
+    )
+  }
+  return undefined
+}
+
+function extractProviderMetadata(part: Record<string, unknown>): Record<string, unknown> | undefined {
+  const metadata = asRecord(part["providerMetadata"])
+  if (metadata) return metadata
+  const delta = asRecord(part["delta"])
+  if (delta) {
+    const nested = asRecord(delta["providerMetadata"])
+    if (nested) return nested
+  }
+  return undefined
 }
 
 function findReasoningStringDeep(
@@ -519,19 +948,6 @@ function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typ
   return result
 }
 
-function normalizeProviderOptionsCandidates(
-  explicitCandidates: StreamOptions["providerOptionsCandidates"] | undefined,
-  singleProviderOptions: StreamOptions["providerOptions"] | undefined
-): Array<Record<string, unknown> | undefined> {
-  if (Array.isArray(explicitCandidates) && explicitCandidates.length > 0) {
-    return explicitCandidates
-  }
-  if (singleProviderOptions && Object.keys(singleProviderOptions).length > 0) {
-    return [singleProviderOptions, undefined]
-  }
-  return [undefined]
-}
-
 type ThinkChunk = { kind: "text" | "reasoning"; text: string }
 
 function createThinkTagParser(): { push: (delta: string) => ThinkChunk[]; flush: () => ThinkChunk[] } {
@@ -614,6 +1030,39 @@ function createThinkTagParser(): { push: (delta: string) => ThinkChunk[]; flush:
   return { push, flush }
 }
 
+function providerOptionsRequestsReasoning(providerOptions: Record<string, unknown> | undefined): boolean {
+  if (!providerOptions) return false
+  const scan = (value: unknown, depth = 0): boolean => {
+    if (depth > 6 || value == null) return false
+    if (typeof value === "boolean") return value
+    if (typeof value === "string") {
+      const lower = value.toLowerCase()
+      if (["none", "off", "false", "disabled"].includes(lower)) return false
+      if (["minimal", "low", "medium", "high", "max", "xhigh", "enabled", "adaptive", "true"].includes(lower)) return true
+      return false
+    }
+    if (Array.isArray(value)) return value.some((item) => scan(item, depth + 1))
+    if (typeof value !== "object") return false
+    const record = value as Record<string, unknown>
+    for (const [key, nested] of Object.entries(record)) {
+      const normalized = key.toLowerCase()
+      if (
+        normalized.includes("reasoningeffort") ||
+        normalized === "reasoning_effort" ||
+        normalized === "reasoning" ||
+        normalized === "thinking" ||
+        normalized === "enable_thinking" ||
+        normalized === "include_reasoning"
+      ) {
+        if (scan(nested, depth + 1)) return true
+      }
+      if (scan(nested, depth + 1)) return true
+    }
+    return false
+  }
+  return scan(providerOptions)
+}
+
 function getErrorStatus(err: unknown): number | null {
   if (err && typeof err === "object") {
     const status = (err as Record<string, unknown>)["statusCode"]
@@ -632,6 +1081,8 @@ function isNetworkError(err: unknown): boolean {
     msg.includes("econnreset") ||
     msg.includes("econnrefused") ||
     msg.includes("etimedout") ||
+    msg.includes("enotfound") ||
+    msg.includes("ehostunreach") ||
     msg.includes("network") ||
     msg.includes("socket") ||
     msg.includes("fetch failed")
@@ -680,24 +1131,6 @@ function getHeaderValue(
     }
   }
   return undefined
-}
-
-function looksLikeUnsupportedProviderOptionsError(err: unknown): boolean {
-  const msg = String(err).toLowerCase()
-  const mentionsReasoning =
-    msg.includes("reasoning_effort") ||
-    msg.includes("reasoningeffort") ||
-    msg.includes("reasoning") ||
-    msg.includes("thinking")
-  const indicatesUnsupported =
-    msg.includes("unsupported") ||
-    msg.includes("unknown") ||
-    msg.includes("unrecognized") ||
-    msg.includes("invalid") ||
-    msg.includes("not allowed") ||
-    msg.includes("not supported") ||
-    msg.includes("unexpected")
-  return mentionsReasoning && indicatesUnsupported
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

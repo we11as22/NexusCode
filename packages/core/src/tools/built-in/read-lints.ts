@@ -38,7 +38,7 @@ export const readLintsTool: ToolDef<z.infer<typeof readLintsSchema>> = {
 
 When to use:
 - After editing files: call read_lints with the paths you changed to see current errors/warnings.
-- Before final_report_to_user (when finishing): optionally check that your changes did not introduce new errors.
+- Before your final response (when finishing): optionally check that your changes did not introduce new errors.
 
 When NOT to use:
 - On files you have not edited and are not about to edit. Do not call read_lints on the whole workspace without paths unless you need a global snapshot (output is capped at ${MAX_DIAGNOSTICS}).

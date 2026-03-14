@@ -3,13 +3,13 @@ import { LanguageModelV1 } from 'ai';
 
 declare const NexusConfigSchema: z.ZodObject<{
     model: z.ZodDefault<z.ZodObject<{
-        provider: z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>;
+        provider: z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity", "minimax"]>;
         id: z.ZodString;
         apiKey: z.ZodOptional<z.ZodString>;
         baseUrl: z.ZodOptional<z.ZodString>;
         temperature: z.ZodOptional<z.ZodNumber>;
-        /** Optional reasoning effort hint for reasoning-capable models. */
-        reasoningEffort: z.ZodOptional<z.ZodString>;
+        /** Reasoning effort hint for reasoning-capable models. "auto" (default) enables thinking only for known reasoning models. */
+        reasoningEffort: z.ZodDefault<z.ZodString>;
         /** Optional explicit context window size override (tokens). */
         contextWindow: z.ZodOptional<z.ZodNumber>;
         resourceName: z.ZodOptional<z.ZodString>;
@@ -17,19 +17,19 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiVersion: z.ZodOptional<z.ZodString>;
         extra: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     }, "strip", z.ZodTypeAny, {
-        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
         id: string;
+        reasoningEffort: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
-        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }, {
-        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -458,7 +458,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     }>>;
     /** UI preferences (e.g. chat pane). */
     ui: z.ZodDefault<z.ZodObject<{
-        /** When true, streamed text_delta is shown in chat as muted/small "reasoning"; when false, only tool-written text (progress_note, final_report_to_user) is shown. */
+        /** When true, streamed text_delta is shown in chat as muted/small "reasoning"; when false, only final assistant text is shown. */
         showReasoningInChat: z.ZodDefault<z.ZodBoolean>;
     }, "strip", z.ZodTypeAny, {
         showReasoningInChat: boolean;
@@ -560,19 +560,19 @@ declare const NexusConfigSchema: z.ZodObject<{
         keepRecentMessages: z.ZodDefault<z.ZodNumber>;
         model: z.ZodDefault<z.ZodString>;
     }, "strip", z.ZodTypeAny, {
-        model: string;
         auto: boolean;
+        model: string;
         threshold: number;
         keepRecentMessages: number;
     }, {
-        model?: string | undefined;
         auto?: boolean | undefined;
+        model?: string | undefined;
         threshold?: number | undefined;
         keepRecentMessages?: number | undefined;
     }>>;
     parallelAgents: z.ZodDefault<z.ZodObject<{
         maxParallel: z.ZodDefault<z.ZodNumber>;
-        /** Max tasks per single SpawnAgents call when using \`tasks\` array (default 12). */
+        /** Deprecated: old SpawnAgents multi-task setting. Parallel sub-agent batching now uses Parallel + SpawnAgent calls. */
         maxTasksPerCall: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
         maxParallel: number;
@@ -660,19 +660,19 @@ declare const NexusConfigSchema: z.ZodObject<{
         files?: string[] | undefined;
     }>>;
     profiles: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
-        provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]>>;
+        provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity", "minimax"]>>;
         id: z.ZodOptional<z.ZodString>;
         apiKey: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         baseUrl: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         temperature: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
-        reasoningEffort: z.ZodOptional<z.ZodOptional<z.ZodString>>;
+        reasoningEffort: z.ZodOptional<z.ZodDefault<z.ZodString>>;
         contextWindow: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
         resourceName: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         deploymentId: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         apiVersion: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         extra: z.ZodOptional<z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
     }, "strip", z.ZodTypeAny, {
-        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -684,7 +684,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }, {
-        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -698,12 +698,12 @@ declare const NexusConfigSchema: z.ZodObject<{
     }>>>;
 }, "strip", z.ZodTypeAny, {
     model: {
-        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
         id: string;
+        reasoningEffort: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
-        reasoningEffort?: string | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -820,8 +820,8 @@ declare const NexusConfigSchema: z.ZodObject<{
     skillClassifyThreshold: number;
     structuredOutput: "never" | "auto" | "always";
     summarization: {
-        model: string;
         auto: boolean;
+        model: string;
         threshold: number;
         keepRecentMessages: number;
     };
@@ -846,7 +846,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         } | undefined;
     };
     profiles: Record<string, {
-        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -874,7 +874,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     } | undefined;
 }, {
     model?: {
-        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
         id: string;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -1056,8 +1056,8 @@ declare const NexusConfigSchema: z.ZodObject<{
     skillClassifyThreshold?: number | undefined;
     structuredOutput?: "never" | "auto" | "always" | undefined;
     summarization?: {
-        model?: string | undefined;
         auto?: boolean | undefined;
+        model?: string | undefined;
         threshold?: number | undefined;
         keepRecentMessages?: number | undefined;
     } | undefined;
@@ -1082,7 +1082,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         } | undefined;
     } | undefined;
     profiles?: Record<string, {
-        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
         id?: string | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -1143,7 +1143,7 @@ interface ToolContext {
     host: IHost;
     session: ISession;
     config: NexusConfig;
-    /** Current loop mode (agent / plan / ask). Used e.g. by SpawnAgents to set sub-agent permissions. */
+    /** Current loop mode (agent / plan / ask). Used e.g. by SpawnAgent to set sub-agent permissions. */
     mode?: Mode;
     indexer?: IIndexer;
     signal: AbortSignal;
@@ -1270,6 +1270,9 @@ interface TextPart {
 interface ReasoningPart {
     type: "reasoning";
     text: string;
+    reasoningId?: string;
+    durationMs?: number;
+    providerMetadata?: Record<string, unknown>;
 }
 /** User message part: image (base64 data URL or raw base64, with mimeType). */
 interface ImagePart {
@@ -1350,12 +1353,21 @@ type AgentEvent = {
     messageId: string;
     user_message_delta?: string;
 } | {
+    type: "reasoning_start";
+    messageId: string;
+    reasoningId: string;
+    providerMetadata?: Record<string, unknown>;
+} | {
     type: "reasoning_delta";
     delta: string;
     messageId: string;
+    reasoningId?: string;
+    providerMetadata?: Record<string, unknown>;
 } | {
     type: "reasoning_end";
     messageId: string;
+    reasoningId?: string;
+    providerMetadata?: Record<string, unknown>;
 } | {
     type: "tool_start";
     tool: string;
@@ -1388,21 +1400,26 @@ type AgentEvent = {
     subagentId: string;
     mode: Mode;
     task: string;
+    parentPartId?: string;
 } | {
     type: "subagent_tool_start";
     subagentId: string;
     tool: string;
+    input?: Record<string, unknown>;
+    parentPartId?: string;
 } | {
     type: "subagent_tool_end";
     subagentId: string;
     tool: string;
     success: boolean;
+    parentPartId?: string;
 } | {
     type: "subagent_done";
     subagentId: string;
     success: boolean;
     outputPreview?: string;
     error?: string;
+    parentPartId?: string;
 } | {
     type: "tool_approval_needed";
     action: ApprovalAction;
@@ -1468,7 +1485,7 @@ interface ProviderConfig {
     /** Extra provider options */
     extra?: Record<string, unknown>;
 }
-type ProviderName = "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+type ProviderName = "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
 interface EmbeddingConfig {
     provider: "openai" | "openai-compatible" | "openrouter" | "ollama" | "google" | "mistral" | "bedrock" | "local";
     model: string;
@@ -1530,7 +1547,7 @@ interface NexusConfig {
         enabled: boolean;
         timeoutMs: number;
         createOnWrite: boolean;
-        /** When true, first final_report_to_user (agent) is rejected; model must re-verify and call again (Cline-style). */
+        /** When true, first completion attempt (agent) is rejected; model must re-verify and complete again (Cline-style). */
         doubleCheckCompletion?: boolean;
     };
     /** UI preferences (e.g. chat pane). */
@@ -1726,8 +1743,10 @@ interface ProjectSettings {
 declare function loadProjectSettings(cwd: string): ProjectSettings;
 
 interface LLMStreamEvent {
-    type: "text_delta" | "reasoning_delta" | "reasoning_end" | "tool_input_start" | "tool_call" | "tool_result" | "finish" | "error";
+    type: "text_delta" | "reasoning_start" | "reasoning_delta" | "reasoning_end" | "tool_input_start" | "tool_call" | "tool_result" | "finish" | "error";
     delta?: string;
+    reasoningId?: string;
+    providerMetadata?: Record<string, unknown>;
     toolCallId?: string;
     toolName?: string;
     toolInput?: Record<string, unknown>;
@@ -1778,14 +1797,14 @@ interface StreamOptions {
     cacheableSystemBlocks?: number;
     maxTokens?: number;
     temperature?: number;
+    topP?: number;
+    topK?: number;
     maxRetries?: number;
     initialRetryDelayMs?: number;
     maxRetryDelayMs?: number;
     retryOnStatus?: number[];
     /** Provider-specific options (e.g. anthropic: { thinking: { type: 'enabled', budgetTokens } }) */
     providerOptions?: Record<string, unknown>;
-    /** Ordered fallback options (strongest -> safest). Stream may retry with next candidate if provider rejects reasoning params. */
-    providerOptionsCandidates?: Array<Record<string, unknown> | undefined>;
 }
 interface GenerateOptions<T> {
     messages: LLMMessage[];
@@ -1885,7 +1904,7 @@ interface AgentLoopOptions {
     compaction: SessionCompaction;
     signal: AbortSignal;
     gitBranch?: string;
-    /** When set, commit on final_report_to_user (agent) and optionally double-check (Cline-style). */
+    /** When set, commit on completion of an agent turn and optionally double-check (Cline-style). */
     checkpoint?: {
         commit(description?: string): Promise<string>;
     };
@@ -1944,6 +1963,8 @@ interface PromptContext {
     gitBranch?: string;
     todoList?: string;
     diagnostics?: DiagnosticItem[];
+    /** Active background bash jobs (bash_id, status, log path). */
+    backgroundJobsSummary?: string;
     /** Short project layout (top-level dirs and key files) at start */
     initialProjectContext?: string;
     /** Context window usage (shown at start of system info so model sees token budget) */
@@ -1981,6 +2002,14 @@ interface SubAgentResult {
     output: string;
     error?: string;
 }
+type SubAgentStatus = "running" | "completed" | "error";
+interface SubAgentSnapshot {
+    subagentId: string;
+    sessionId: string;
+    status: SubAgentStatus;
+    output: string;
+    error?: string;
+}
 /**
  * Manager for parallel sub-agents.
  * Each sub-agent runs its own isolated session and agent loop.
@@ -1992,16 +2021,55 @@ interface SubAgentResult {
  */
 declare class ParallelAgentManager {
     private running;
+    private sessions;
+    private outputById;
+    private statusById;
+    private errorById;
+    private controllers;
+    private history;
+    private static readonly HISTORY_CAP;
     /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns (Cline-style guard). */
     private recentSpawnTasks;
     private static readonly RECENT_SPAWN_CAP;
     private static readonly TASK_KEY_LEN;
-    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string): Promise<SubAgentResult>;
+    private rememberId;
+    private startTask;
+    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string): Promise<SubAgentResult>;
+    spawnInBackground(description: string, mode: Mode, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string): Promise<{
+        subagentId: string;
+    }>;
+    getSnapshot(subagentId: string): SubAgentSnapshot | null;
+    waitFor(subagentId: string): Promise<SubAgentSnapshot | null>;
+    stop(subagentId: string): boolean;
     private runSubAgent;
     /** How many agents are currently running */
     get activeCount(): number;
 }
+declare const spawnOutputSchema: z.ZodObject<{
+    subagent_id: z.ZodString;
+    block: z.ZodOptional<z.ZodBoolean>;
+}, "strict", z.ZodTypeAny, {
+    subagent_id: string;
+    block?: boolean | undefined;
+}, {
+    subagent_id: string;
+    block?: boolean | undefined;
+}>;
+declare const spawnStopSchema: z.ZodObject<{
+    subagent_id: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    subagent_id: string;
+}, {
+    subagent_id: string;
+}>;
 declare function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
+declare function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnOutputSchema>>;
+declare function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnStopSchema>>;
+/**
+ * Backward-compatible alias for old sessions/prompts that still call SpawnAgents.
+ * Runtime behavior is identical to SpawnAgent (single sub-agent per call).
+ */
+declare function createSpawnAgentsAliasTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
 
 /**
  * Tool registry — manages built-in, MCP, and custom tools.
@@ -2330,4 +2398,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getPlanContentForFollowup, getSecretsPayloadFromConfig, hadPlanExit, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getPlanContentForFollowup, getSecretsPayloadFromConfig, hadPlanExit, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles };

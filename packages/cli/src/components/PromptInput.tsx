@@ -57,9 +57,12 @@ type Props = {
   /** When set (Nexus), show current mode below input; cycle mode with Shift+Tab. */
   nexusMode?: string
   onCycleNexusMode?: () => void
-  /** When set (Nexus), show "Accept edits: on|off" and allow Ctrl+Y to toggle. */
-  nexusAcceptEditsEnabled?: boolean
-  onNexusToggleAcceptEdits?: () => void
+  /** Current Nexus model shown in footer status line. */
+  nexusModel?: string
+  /** Current Nexus index state shown in footer status line. */
+  nexusIndexEnabled?: boolean
+  /** Current Nexus session id shown in footer status line. */
+  nexusSessionId?: string
   /** Granular auto-approve state for Nexus actions. */
   nexusAutoApprove?: {
     read: boolean
@@ -76,15 +79,38 @@ type Props = {
   onNexusConfigSaved?: () => void | Promise<void>
   /** When set (Nexus), /undo reverts the last message and file changes. */
   onNexusUndo?: () => Promise<void>
+  /** When set (Nexus), /compact triggers core compaction. */
+  onNexusCompact?: () => Promise<void>
+  /** Handle post-plan followup choices (1/2/3/4/custom). Return true if consumed. */
+  onNexusPlanFollowupSubmit?: (input: string) => Promise<boolean>
   /** Toggle expanded/collapsed tool input details in chat. */
   onToggleToolDetails?: () => void
   /** Current expanded/collapsed state for tool input details. */
   toolDetailsExpanded?: boolean
+  /** Toggle session diff panel (Ctrl+I). */
+  onToggleSessionDiffPanel?: () => void
+  /** Current state of session diff panel visibility. */
+  sessionDiffPanelVisible?: boolean
+  /** Toggle generic tool output visibility (Ctrl+O). */
+  onToggleToolOutputs?: () => void
+  /** Current state of generic tool output visibility. */
+  toolOutputsVisible?: boolean
 }
 
 function getPastedTextPrompt(text: string): string {
-  const newlineCount = (text.match(/\r\n|\r|\n/g) || []).length
-  return `[Pasted text +${newlineCount} lines] `
+  const lines = getPastedLineCount(text)
+  const kind = looksLikeTerminalPaste(text) ? 'bash' : 'text'
+  return `[📋 ${kind} (1-${lines})] `
+}
+
+function getPastedLineCount(text: string): number {
+  if (!text) return 0
+  return text.split(/\r?\n/).length
+}
+
+function looksLikeTerminalPaste(text: string): boolean {
+  const head = text.split(/\r?\n/).slice(0, 6).join('\n')
+  return /(^|\n)\s*(\$|>|#|PS\s|C:\\|\/root\/)/.test(head)
 }
 function PromptInput({
   commands,
@@ -113,14 +139,21 @@ function PromptInput({
   readFileTimestamps,
   nexusMode,
   onCycleNexusMode,
-  nexusAcceptEditsEnabled = true,
-  onNexusToggleAcceptEdits,
+  nexusModel,
+  nexusIndexEnabled,
+  nexusSessionId,
   nexusAutoApprove,
   onToggleNexusAutoApproveAction,
   onNexusConfigSaved,
   onNexusUndo,
+  onNexusCompact,
+  onNexusPlanFollowupSubmit,
   onToggleToolDetails,
   toolDetailsExpanded = false,
+  onToggleSessionDiffPanel,
+  sessionDiffPanelVisible = false,
+  onToggleToolOutputs,
+  toolOutputsVisible = true,
 }: Props): React.ReactNode {
   const [isAutoUpdating, setIsAutoUpdating] = useState(false)
   const [exitMessage, setExitMessage] = useState<{
@@ -210,6 +243,16 @@ function PromptInput({
     if (isLoading) {
       return
     }
+
+    if (onNexusPlanFollowupSubmit) {
+      const consumed = await onNexusPlanFollowupSubmit(input)
+      if (consumed) {
+        onInputChange('')
+        addToHistory(input.trim())
+        resetHistory()
+        return
+      }
+    }
     if (suggestions.length > 0 && !isSubmittingSlashCommand) {
       return
     }
@@ -235,8 +278,15 @@ function PromptInput({
     setIsLoading(true)
 
     const trimmed = finalInput.trim()
-    if (trimmed === '/undo' && onNexusUndo) {
+    if (/^\/undo(\s|$)/i.test(trimmed) && onNexusUndo) {
       await onNexusUndo()
+      onInputChange('')
+      setIsLoading(false)
+      addToHistory(trimmed)
+      return
+    }
+    if (/^\/compact(\s|$)/i.test(trimmed) && onNexusCompact) {
+      await onNexusCompact()
       onInputChange('')
       setIsLoading(false)
       addToHistory(trimmed)
@@ -323,37 +373,26 @@ function PromptInput({
     if (
       key.ctrl &&
       (inputChar === 'o' || inputChar === 'O' || inputChar === '\x0f') &&
-      onToggleToolDetails
+      (onToggleToolDetails || onToggleToolOutputs)
     ) {
-      onToggleToolDetails()
+      onToggleToolDetails?.()
+      onToggleToolOutputs?.()
       return
     }
-    if (key.ctrl && (inputChar === 'y' || inputChar === 'Y' || inputChar === '\x19') && onNexusToggleAcceptEdits) {
-      onNexusToggleAcceptEdits()
+    if (
+      key.ctrl &&
+      (inputChar === 'i' || inputChar === 'I' || inputChar === '\t') &&
+      onToggleSessionDiffPanel
+    ) {
+      onToggleSessionDiffPanel()
       return
     }
-    if (key.ctrl && onToggleNexusAutoApproveAction) {
-      const c = inputChar.toLowerCase()
-      if (c === 'r') {
-        onToggleNexusAutoApproveAction('read')
-        return
-      }
-      if (c === 'w') {
-        onToggleNexusAutoApproveAction('write')
-        return
-      }
-      if (c === 'e') {
-        onToggleNexusAutoApproveAction('execute')
-        return
-      }
-      if (c === 'p') {
-        onToggleNexusAutoApproveAction('mcp')
-        return
-      }
-      if (c === 'b') {
-        onToggleNexusAutoApproveAction('browser')
-        return
-      }
+    if (
+      key.ctrl &&
+      (inputChar === 'k' || inputChar === 'K' || inputChar === '\x0b')
+    ) {
+      onModeChange(mode === 'bash' ? 'prompt' : 'bash')
+      return
     }
     // esc is a little overloaded:
     // - when we're loading a response, it's used to cancel the request
@@ -418,45 +457,40 @@ function PromptInput({
           />
         </Box>
       </Box>
-      {nexusMode != null && (
+      {nexusMode != null && suggestions.length === 0 && (
         <Box paddingX={2} paddingY={0}>
           <Text dimColor>Mode: </Text>
           <Text bold color={getTheme().primary}>{nexusMode}</Text>
           <Text dimColor> · Shift+Tab to change mode</Text>
-          {onNexusToggleAcceptEdits != null && (
-            <>
-              <Text dimColor> · Accept edits: </Text>
-              <Text bold color={nexusAcceptEditsEnabled ? getTheme().primary : undefined} dimColor={!nexusAcceptEditsEnabled}>
-                {nexusAcceptEditsEnabled ? 'on' : 'off'}
-              </Text>
-              <Text dimColor> · Ctrl+Y to toggle</Text>
-            </>
-          )}
+          <Text dimColor> · Bash: </Text>
+          <Text
+            bold
+            color={mode === 'bash' ? getTheme().primary : undefined}
+            dimColor={mode !== 'bash'}
+          >
+            {mode === 'bash' ? 'on' : 'off'}
+          </Text>
+          <Text dimColor> · Ctrl+K to toggle</Text>
         </Box>
       )}
-      {nexusMode != null && nexusAutoApprove != null && onToggleNexusAutoApproveAction != null && (
+      {nexusMode != null && suggestions.length === 0 && (
         <Box paddingX={2} paddingY={0}>
-          <Text dimColor>Auto-approve: </Text>
-          <Text color={nexusAutoApprove.read ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.read}>
-            [{nexusAutoApprove.read ? 'x' : ' '}]Read
-          </Text>
-          <Text dimColor> </Text>
-          <Text color={nexusAutoApprove.write ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.write}>
-            [{nexusAutoApprove.write ? 'x' : ' '}]Write
-          </Text>
-          <Text dimColor> </Text>
-          <Text color={nexusAutoApprove.execute ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.execute}>
-            [{nexusAutoApprove.execute ? 'x' : ' '}]Exec
-          </Text>
-          <Text dimColor> </Text>
-          <Text color={nexusAutoApprove.mcp ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.mcp}>
-            [{nexusAutoApprove.mcp ? 'x' : ' '}]MCP
-          </Text>
-          <Text dimColor> </Text>
-          <Text color={nexusAutoApprove.browser ? getTheme().primary : undefined} dimColor={!nexusAutoApprove.browser}>
-            [{nexusAutoApprove.browser ? 'x' : ' '}]Browser
-          </Text>
-          <Text dimColor> · Ctrl+R/W/E/P/B</Text>
+          <Text dimColor>Nexus:</Text>
+          {nexusModel != null && (
+            <>
+              <Text dimColor> · model=</Text>
+              <Text bold>{nexusModel}</Text>
+            </>
+          )}
+          {nexusIndexEnabled != null && (
+            <Text dimColor> · index={nexusIndexEnabled ? 'on' : 'off'}</Text>
+          )}
+          {nexusSessionId != null && (
+            <>
+              <Text dimColor> · session=</Text>
+              <Text bold>{nexusSessionId}</Text>
+            </>
+          )}
         </Box>
       )}
       {suggestions.length === 0 && (
@@ -480,8 +514,10 @@ function PromptInput({
                   ! for bash mode
                 </Text>
                 <Text dimColor>
-                  · / for commands · esc to undo · Ctrl+O tool inputs:{' '}
-                  {toolDetailsExpanded ? 'expanded' : 'collapsed'}
+                  · / for commands · esc to undo · Ctrl+O tools:{' '}
+                  {toolDetailsExpanded ? 'expanded' : 'collapsed'} · outputs:{' '}
+                  {toolOutputsVisible ? 'visible' : 'hidden'} · Ctrl+I diff:{' '}
+                  {sessionDiffPanelVisible ? 'shown' : 'hidden'}
                 </Text>
               </>
             )}

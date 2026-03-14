@@ -6,7 +6,7 @@
 
 const DEFAULT_MODELS_URL = "https://models.dev/api.json"
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-const NEXUS_GATEWAY_BASE_URL = "https://api.kilo.ai/api/gateway"
+const NEXUS_GATEWAY_BASE_URL = "https://api.kilo.ai/api/openrouter"
 const SOURCE_TIMEOUT_MS = 15_000
 
 export interface CatalogModel {

@@ -22,7 +22,6 @@ import { countTokens } from '../utils/tokens.js'
 import { logEvent } from './statsig.js'
 import { withVCR } from './vcr.js'
 import { zodToJsonSchema } from 'zod-to-json-schema'
-import type { BetaMessageStream } from '@anthropic-ai/sdk/lib/BetaMessageStream.mjs'
 import type {
   Message as APIMessage,
   MessageParam,
@@ -203,8 +202,13 @@ export async function verifyApiKey(apiKey: string): Promise<boolean> {
   }
 }
 
+type StreamLike = AsyncIterable<unknown> & {
+  finalMessage: () => Promise<APIMessage>
+  request_id?: string
+}
+
 async function handleMessageStream(
-  stream: BetaMessageStream,
+  stream: StreamLike,
 ): Promise<StreamResponse> {
   const streamStartTime = Date.now()
   let ttftMs: number | undefined
@@ -508,12 +512,12 @@ async function querySonnetWithPromptCaching(
   let start = Date.now()
   let attemptNumber = 0
   let response
-  let stream: BetaMessageStream | undefined = undefined
+  let stream: StreamLike | undefined = undefined
   try {
     response = await withRetry(async attempt => {
       attemptNumber = attempt
       start = Date.now()
-      const s = anthropic.beta.messages.stream(
+      const s = anthropic.messages.stream(
         {
           model: options.model,
           max_tokens: Math.max(
@@ -553,7 +557,7 @@ async function querySonnetWithPromptCaching(
       attempt: String(attemptNumber),
       provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
       requestId:
-        (stream as BetaMessageStream | undefined)?.request_id ?? undefined,
+        stream?.request_id ?? undefined,
     })
     return getAssistantMessageFromError(error)
   }
@@ -577,7 +581,7 @@ async function querySonnetWithPromptCaching(
     ttftMs: String(response.ttftMs),
     provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
     requestId:
-      (stream as BetaMessageStream | undefined)?.request_id ?? undefined,
+      stream?.request_id ?? undefined,
     stop_reason: response.stop_reason ?? undefined,
   })
 
@@ -691,12 +695,12 @@ async function queryHaikuWithPromptCaching({
   let start = Date.now()
   const startIncludingRetries = Date.now()
   let response: StreamResponse
-  let stream: BetaMessageStream | undefined = undefined
+  let stream: StreamLike | undefined = undefined
   try {
     response = await withRetry(async attempt => {
       attemptNumber = attempt
       start = Date.now()
-      const s = anthropic.beta.messages.stream(
+      const s = anthropic.messages.stream(
         {
           model,
           max_tokens: 512,
@@ -723,7 +727,7 @@ async function queryHaikuWithPromptCaching({
       attempt: String(attemptNumber),
       provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
       requestId:
-        (stream as BetaMessageStream | undefined)?.request_id ?? undefined,
+        stream?.request_id ?? undefined,
     })
     return getAssistantMessageFromError(error)
   }
@@ -770,7 +774,7 @@ async function queryHaikuWithPromptCaching({
     ttftMs: String(response.ttftMs),
     provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
     requestId:
-      (stream as BetaMessageStream | undefined)?.request_id ?? undefined,
+      stream?.request_id ?? undefined,
     stop_reason: response.stop_reason ?? undefined,
   })
 
@@ -808,12 +812,12 @@ async function queryHaikuWithoutPromptCaching({
   let start = Date.now()
   const startIncludingRetries = Date.now()
   let response: StreamResponse
-  let stream: BetaMessageStream | undefined = undefined
+  let stream: StreamLike | undefined = undefined
   try {
     response = await withRetry(async attempt => {
       attemptNumber = attempt
       start = Date.now()
-      const s = anthropic.beta.messages.stream(
+      const s = anthropic.messages.stream(
         {
           model,
           max_tokens: 512,
@@ -843,7 +847,7 @@ async function queryHaikuWithoutPromptCaching({
       attempt: String(attemptNumber),
       provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
       requestId:
-        (stream as BetaMessageStream | undefined)?.request_id ?? undefined,
+        stream?.request_id ?? undefined,
     })
     return getAssistantMessageFromError(error)
   }
@@ -859,7 +863,7 @@ async function queryHaikuWithoutPromptCaching({
     attempt: String(attemptNumber),
     provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
     requestId:
-      (stream as BetaMessageStream | undefined)?.request_id ?? undefined,
+      stream?.request_id ?? undefined,
     stop_reason: response.stop_reason ?? undefined,
   })
 

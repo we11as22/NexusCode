@@ -38,7 +38,7 @@ type Props = {
   width?: number | string
   /** Whether tool input details should render expanded details. */
   expandToolDetails?: boolean
-  /** Subagents per SpawnAgents partId (Nexus); only passed when nexusBootstrap is set. */
+  /** Subagents per SpawnAgent partId (Nexus); only passed when nexusBootstrap is set. */
   subagentsByPartId?: Record<string, SubAgentState[]>
 }
 

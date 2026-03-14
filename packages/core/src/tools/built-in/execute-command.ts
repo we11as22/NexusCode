@@ -56,6 +56,29 @@ async function cleanupOldToolOutputs(toolOutputDir: string): Promise<void> {
 /** Registry of background bash jobs: bash_id -> { pid, logPath } for BashOutput and KillBash. */
 export const backgroundBashJobs = new Map<string, { pid: number; logPath: string }>()
 
+function isProcessRunning(pid: number): boolean {
+  if (pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Compact background job summary for prompt context so the agent can keep tracking long-running commands. */
+export function getBackgroundBashJobsForPrompt(cwd: string): string {
+  if (backgroundBashJobs.size === 0) return ""
+  const rows = Array.from(backgroundBashJobs.entries())
+    .map(([bashId, job]) => {
+      const running = isProcessRunning(job.pid)
+      const relLog = path.isAbsolute(job.logPath) ? path.relative(cwd, job.logPath) : job.logPath
+      return `- ${bashId} | pid=${job.pid} | status=${running ? "running" : "exited"} | log=${relLog}`
+    })
+    .sort((a, b) => a.localeCompare(b))
+  return rows.join("\n")
+}
+
 const schema = z.object({
   command: z.string().describe("The command to execute"),
   timeout: z.number().int().positive().max(600000).optional().describe("Optional timeout in milliseconds (max 600000). If not specified, commands will timeout after 120000ms (2 minutes)."),

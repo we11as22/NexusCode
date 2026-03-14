@@ -36,6 +36,14 @@ The VS Code extension uses a single **Controller** (`packages/vscode/src/control
 
 The **NexusProvider** owns the webview(s) and delegates all messages to `controller.handleWebviewMessage()`. State is pushed via `postStateToWebview()` / `getStateToPostToWebview()`. The agent runs either in-process (`runAgentLoop`) or against the NexusCode server (sessions, pagination).
 
+During streaming, the extension does not rely on `agentEvent` alone. The controller now also pushes incremental `stateUpdate` snapshots while visible assistant/tool/reasoning events arrive. In server mode it maintains a local shadow of the streamed assistant message so the webview keeps rendering even before the final paginated session snapshot is reloaded from the server.
+
+The provider/webview bridge is readiness-gated. `onDidReceiveMessage` is attached before HTML is assigned, the webview marks itself ready via its first inbound message, and extension-to-webview payloads are only posted after that point. Outgoing messages are also cloned before `postMessage()` so non-cloneable values cannot silently break delivery. This avoids the startup race where early state/config snapshots are emitted before the webview has registered its message listeners.
+
+The webview store treats `agentEvent` as the live source of truth during a run and merges later `stateUpdate` snapshots conservatively. If a snapshot arrives without the assistant tail that was already assembled from streamed events, the store preserves the richer local tail instead of dropping the in-flight assistant reply. This prevents the common race where a stale snapshot temporarily rewinds the visible chat back to only the user message.
+
+The webview CSP must allow `${webview.cspSource}` in `connect-src`, not only localhost URLs. The bundled Vite runtime uses `fetch()` for module-preload chunk loading, so blocking the webview resource origin can leave the sidebar blank even though `index.js` exists and the extension host is healthy.
+
 ---
 
 ## Agent loop and mandatory end tools
@@ -72,9 +80,15 @@ When the number of **MCP servers** exceeds `tools.classifyThreshold` (default 20
 
 ### Inline reasoning fallback for gateway streams
 
-Core streaming supports provider-native `reasoning_delta` and fallback extraction from structured gateway fields (`reasoning`, `reasoning_details`, `thinking`, provider metadata) and `<think>...</think>` blocks in streamed text.
+Core streaming supports provider-native `reasoning_delta` and fallback extraction from structured gateway fields (`reasoning`, `reasoning_details`, `thinking`, provider metadata), OpenAI Responses-style raw events (`response.reasoning.*`, `response.output_item.*`, `response.content_part.*`, final `response.completed` payloads), and `<think>...</think>` blocks in streamed text.
 
-Fallback extraction is disabled once native `reasoning_delta` is observed. This keeps extension/CLI thought blocks populated for providers that do not emit separate reasoning events.
+Raw Responses-style text is also emitted as live `text_delta` when the provider does not surface normal text parts. When a provider exposes reasoning only in done/final payloads, core now promotes that reasoning into the same Thought event pipeline instead of dropping it. For OpenAI Responses-compatible providers we also request `reasoning.summary: "auto"` in compatible provider options so summaries arrive in the stream when supported. Fallback extraction is disabled once native `reasoning_delta` is observed. This keeps extension/CLI thought blocks populated for providers that do not emit separate reasoning events.
+
+For OpenAI-compatible gateways, reasoning provider options are tried as an ordered fallback chain. If a gateway answers with an unsupported-parameter style error, or with a generic HTTP 400 `Bad Request` while a reasoning option set is active, the client automatically retries with the next safer provider-options candidate before giving up. This is important for OpenRouter-style model routing where some models accept streamed reasoning but reject one or more optional reasoning fields.
+
+OpenRouter-style endpoints are treated as their own provider path rather than as a generic OpenAI-compatible endpoint. This mirrors the reference implementations more closely: OpenRouter uses its own SDK/provider namespace, and explicit reasoning controls are only sent to model families that are known to accept them reliably through OpenRouter routing. For other OpenRouter models, Nexus falls back to plain streaming without forcing reasoning parameters, which avoids hard 400 failures on models such as many Qwen/DeepSeek/GLM/Kimi variants.
+
+For router/free-tier models where tool support is inconsistent, runtime fallback is also defensive: if an OpenRouter-style request fails with a tool-related 400, or a bare `400 Bad Request` on a `:free` model, the client retries once without tool definitions instead of surfacing an immediate hard failure. This mirrors the capability-gating intent used by the reference projects, even when local model metadata is incomplete.
 
 ### Vector index factory
 
@@ -190,15 +204,23 @@ Mode-specific blocks: **plan** blocks `Bash`; **ask** blocks `Write`, `Edit`, `B
 
 Built-in tool schemas are **strict** (Zod `.strict()` or explicit required/optional). Runtime List execution uses a single **`path`** (string).
 
-Some providers or gateways (e.g. Minimax, Kilo gateway) may expose a list-dir–style tool with a **`paths`** (array) schema or validate model tool-call args against such a schema. If the model returns `{}` or `{ paths: [] }`, the gateway can respond with an error like *"paths[0] must be string, got undefined"* **before** we see the tool_call. To avoid that:
+Some providers or gateways (e.g. Minimax, Kilo gateway) may expose a list-dir–style tool name (`list_dir`, `ListDirectory`) or return malformed `paths[]` payloads. NexusCode no longer advertises a gateway-specific `paths[]` schema for `List`; the public tool contract is always a single strict `path` string. Compatibility is handled only on receive/execute:
 
-1. For non-local gateways, tool definitions can expose a gateway-facing List schema with **`paths`** while runtime execution still normalizes to **`path`**.
-2. We **normalize** as soon as we receive a **tool_call** for List: if the payload has **paths**, we set **path** from **paths[0]** and default to **"."** when missing.
-3. We normalize again before argument parse in execution, so provider quirks cannot leak into built-in tool contracts.
+1. The advertised `List` schema is always `path`-based.
+2. When a provider still returns `paths[]`, we normalize it immediately into `path` as soon as the tool call is received.
+3. We normalize again before Zod parse during execution, so provider quirks cannot leak into built-in tool contracts.
 
-So the **paths[0]** error, when it appears, comes from **provider-side validation**, not from our built-in execution schema. Normalization at receive + at execute ensures our code always works with **path** only.
+So the `paths[0]`-style error is treated as a provider compatibility bug, not as part of the intended NexusCode tool schema.
 
 Additionally, List ignores `.nexus` only for top-level discovery; when user explicitly lists `.nexus` (or its children), it is not filtered out.
+
+Provider request shaping now follows the Roo/Kilo pattern more closely for router-style backends:
+
+- `openrouter.ai` and Kilo-hosted router endpoints go through dedicated OpenRouter-compatible routing instead of the generic OpenAI-compatible path.
+- Kilo free/router defaults use `https://api.kilo.ai/api/openrouter` as the base route. Legacy saved configs using `/api/gateway` are normalized onto `/api/openrouter` at runtime.
+- Streaming no longer retries by cycling through synthetic `providerOptions` variants or by silently stripping tools. Instead, the request is shaped correctly up front with provider-specific defaults.
+- Router/openrouter requests get Kilo-style base options (`usage.include`) plus model-family sampling defaults (`temperature`, `topP`, `topK`) for families such as Qwen, Gemini, MiniMax, and Kimi.
+- Explicit reasoning controls are only attached where the routed provider/model family matches the patterns used by the reference implementations; unsupported OpenRouter families do not receive forced reasoning params.
 
 ---
 

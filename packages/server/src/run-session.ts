@@ -11,6 +11,9 @@ import {
   loadSkills,
   createCompaction,
   createSpawnAgentTool,
+  createSpawnAgentsAliasTool,
+  createSpawnAgentOutputTool,
+  createSpawnAgentStopTool,
   ParallelAgentManager,
   createCodebaseIndexer,
   McpClient,
@@ -105,6 +108,9 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
 
   const parallelManager = new ParallelAgentManager()
   toolRegistry.register(createSpawnAgentTool(parallelManager, config))
+  toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, config))
+  toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
+  toolRegistry.register(createSpawnAgentStopTool(parallelManager))
   const { builtin: tools, dynamic } = toolRegistry.getForMode(mode)
   const allTools = [...tools, ...dynamic]
   // mode and allTools match; runAgentLoop builds system prompt and tool set from this mode

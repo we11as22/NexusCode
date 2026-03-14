@@ -16,6 +16,22 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
   const containerRef = useRef<HTMLDivElement>(null)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [suggestions, setSuggestions] = useState(AT_MENTION_SUGGESTIONS)
+  const [pasteBlocks, setPasteBlocks] = useState<Array<{
+    id: string
+    token: string
+    text: string
+    lines: number
+    terminal: boolean
+  }>>([])
+
+  const getLineCount = (text: string) => text.split(/\r?\n/).length
+  const isLargePaste = (text: string) => getLineCount(text) >= 4
+  const looksLikeTerminalPaste = (text: string) => {
+    const head = text.split(/\r?\n/).slice(0, 6).join("\n")
+    return /(^|\n)\s*(\$|>|#|PS\s|C:\\|\/root\/)/.test(head)
+  }
+  const createPasteToken = (_id: string, lines: number, terminal: boolean) =>
+    `[📋 ${terminal ? "bash" : "text"} (1-${lines})]`
 
   const autosize = () => {
     if (!textareaRef.current || !containerRef.current) return
@@ -50,7 +66,12 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       if (!isRunning && !awaitingApproval && (inputValue.trim() || attachedImages.length > 0)) {
-        sendMessage(inputValue.trim())
+        let expanded = inputValue
+        for (const block of pasteBlocks) {
+          expanded = expanded.split(block.token).join(block.text)
+        }
+        sendMessage(expanded.trim(), { displayText: inputValue.trim() })
+        setPasteBlocks([])
       }
       return
     }
@@ -66,6 +87,7 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value
     setInputValue(value)
+    setPasteBlocks((prev) => prev.filter((b) => value.includes(b.token)))
 
     autosize()
 
@@ -96,6 +118,10 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
       textareaRef.current?.focus()
     }
   }, [isRunning])
+
+  useEffect(() => {
+    if (!inputValue.trim()) setPasteBlocks([])
+  }, [inputValue])
 
   useLayoutEffect(() => {
     autosize()
@@ -151,7 +177,38 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
       }
     }
 
-    if (added > 0) e.preventDefault()
+    if (added > 0) {
+      e.preventDefault()
+      return
+    }
+
+    const text = dt.getData("text/plain")
+    if (!text) return
+
+    // Handle text paste ourselves so multiline terminal pastes keep exact formatting.
+    e.preventDefault()
+    const ta = textareaRef.current
+    if (!ta) {
+      setInputValue((inputValue ?? "") + text)
+      return
+    }
+    const start = ta.selectionStart ?? inputValue.length
+    const end = ta.selectionEnd ?? inputValue.length
+    let inserted = text
+    if (isLargePaste(text)) {
+      const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      const lines = getLineCount(text)
+      const terminal = looksLikeTerminalPaste(text)
+      const token = createPasteToken(id, lines, terminal)
+      inserted = ` ${token} `
+      setPasteBlocks((prev) => [...prev, { id, token, text, lines, terminal }])
+    }
+    const next = inputValue.slice(0, start) + inserted + inputValue.slice(end)
+    setInputValue(next)
+    requestAnimationFrame(() => {
+      ta.selectionStart = ta.selectionEnd = start + inserted.length
+      autosize()
+    })
   }
 
   return (
@@ -172,7 +229,6 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
       )}
 
       <AttachedImagesStripWithPicker registerImagePickerTrigger={registerImagePickerTrigger} />
-
       <div className="prompt-input-container min-h-0 min-w-0 flex flex-col">
         <div className="prompt-input-wrapper">
           <textarea

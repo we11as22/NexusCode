@@ -27,7 +27,7 @@ type Props = {
   shouldShowDot: boolean
   /** Whether tool details (inputs/results) are expanded. */
   expandToolDetails?: boolean
-  /** Subagents for SpawnAgents (single or multiple); shown under the tool line. */
+  /** Subagents for SpawnAgent; shown under the tool line. */
   subagents?: SubAgentState[]
 }
 
@@ -235,7 +235,11 @@ export function AssistantToolUseMessage({
     )
   }
 
-  const userFacingToolName = tool.userFacingName(param.input as never)
+  const normalizedToolName = param.name === 'SpawnAgents' ? 'SpawnAgent' : param.name
+  const userFacingToolName =
+    normalizedToolName === 'SpawnAgent'
+      ? 'SpawnAgent'
+      : tool.userFacingName(param.input as never)
   const inputRecord =
     typeof param.input === 'object' && param.input != null
       ? (param.input as Record<string, unknown>)
@@ -261,13 +265,13 @@ export function AssistantToolUseMessage({
     ? summarizeInput(param.name, inputRecord, renderedInput)
     : ''
   const collapsedLine =
-    param.name === 'Parallel' || param.name === 'parallel'
+    normalizedToolName === 'Parallel' || normalizedToolName === 'parallel'
       ? (collapsedInput || userFacingToolName)
       : [userFacingToolName, collapsedInput].filter(Boolean).join(' ')
   const showExpandHint =
     !expandToolDetails &&
     hasInput &&
-    shouldShowExpandHint(param.name, inputRecord, renderedInput)
+    shouldShowExpandHint(normalizedToolName, inputRecord, renderedInput)
   const mainBlock = (
     <Box
       flexDirection="row"
@@ -311,21 +315,55 @@ export function AssistantToolUseMessage({
       <Cost costUSD={costUSD} durationMs={durationMs} debug={debug} />
     </Box>
   )
-  const showSubagents = param.name === 'SpawnAgents' && subagents.length > 0
+  const showSubagents =
+    (normalizedToolName === 'SpawnAgent' ||
+      normalizedToolName === 'Parallel' ||
+      normalizedToolName === 'parallel') &&
+    subagents.length > 0
   if (!showSubagents) return mainBlock
+  const primary =
+    subagents.find((sa) => sa.status === 'running') ??
+    [...subagents].sort((a, b) => b.startedAt - a.startedAt)[0]
+  if (!primary) return mainBlock
+  const visibleHistory = expandToolDetails
+    ? primary.toolHistory
+    : primary.toolHistory.slice(0, 3)
+  const hiddenUses = Math.max(0, primary.toolHistory.length - visibleHistory.length)
+  const runningCount = subagents.filter((sa) => sa.status === 'running').length
   return (
     <Box flexDirection="column" width="100%">
       {mainBlock}
       <Box flexDirection="column" marginLeft={2} marginTop={1}>
-        {subagents.map((sa) => (
-          <Box key={sa.id} flexDirection="column" marginBottom={1}>
-            <Text color={color}>{truncateTask(sa.task)}</Text>
-            <Text color={getTheme().secondaryText}>{subagentStatusLine(sa)}</Text>
-            {sa.error && sa.status === 'error' ? (
-              <Text color={getTheme().error}>{truncateTask(sa.error, 72)}</Text>
-            ) : null}
-          </Box>
+        <Text color={color}>
+          Explore({truncateTask(primary.task, 72)})
+        </Text>
+        {visibleHistory.length > 0 ? (
+          <Text color={getTheme().secondaryText}>  ⎿ {visibleHistory[0]}</Text>
+        ) : (
+          <Text color={getTheme().secondaryText}>  ⎿ Starting…</Text>
+        )}
+        {visibleHistory.slice(1).map((entry, idx) => (
+          <Text key={`${primary.id}-history-${idx}`} color={getTheme().secondaryText}>
+            {'     '}{entry}
+          </Text>
         ))}
+        {hiddenUses > 0 ? (
+          <Text color={getTheme().secondaryText}>
+            {'     '}+{hiddenUses} more tool uses (ctrl+o to expand)
+          </Text>
+        ) : null}
+        <Text color={getTheme().secondaryText}>{'     '}ctrl+b to run in background</Text>
+        {runningCount > 1 ? (
+          <Text color={getTheme().secondaryText}>
+            {'     '}+{runningCount - 1} more subagent{runningCount - 1 === 1 ? '' : 's'} running
+          </Text>
+        ) : null}
+        {primary.error && primary.status === 'error' ? (
+          <Text color={getTheme().error}>{truncateTask(primary.error, 72)}</Text>
+        ) : null}
+        {primary.status !== 'error' ? (
+          <Text color={getTheme().secondaryText}>{subagentStatusLine(primary)}</Text>
+        ) : null}
       </Box>
     </Box>
   )

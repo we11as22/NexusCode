@@ -1,5 +1,5 @@
 /**
- * Subagent state for SpawnAgents tool display (single and multiple).
+ * Subagent state for SpawnAgent tool display.
  * Updated from AgentEvent subagent_* in nexus-query and rendered under the tool in AssistantToolUseMessage.
  */
 import type { Mode } from '@nexuscode/core'
@@ -10,16 +10,47 @@ export interface SubAgentState {
   task: string
   status: 'running' | 'completed' | 'error'
   currentTool?: string
+  toolHistory: string[]
+  toolUsesCount: number
   startedAt: number
   finishedAt?: number
   error?: string
 }
 
 export type SubagentEvent =
-  | { type: 'subagent_start'; subagentId: string; mode: Mode; task: string }
-  | { type: 'subagent_tool_start'; subagentId: string; tool: string }
-  | { type: 'subagent_tool_end'; subagentId: string; tool: string; success: boolean }
-  | { type: 'subagent_done'; subagentId: string; success: boolean; outputPreview?: string; error?: string }
+  | { type: 'subagent_start'; subagentId: string; mode: Mode; task: string; parentPartId?: string }
+  | { type: 'subagent_tool_start'; subagentId: string; tool: string; input?: Record<string, unknown>; parentPartId?: string }
+  | { type: 'subagent_tool_end'; subagentId: string; tool: string; success: boolean; parentPartId?: string }
+  | { type: 'subagent_done'; subagentId: string; success: boolean; outputPreview?: string; error?: string; parentPartId?: string }
+
+function short(value: unknown, max = 52): string {
+  if (typeof value !== 'string') return ''
+  const one = value.replace(/\s+/g, ' ').trim()
+  return one.length <= max ? one : `${one.slice(0, max - 1)}…`
+}
+
+function toolLabel(tool: string, input?: Record<string, unknown>): string {
+  const path = short(input?.path ?? input?.file_path)
+  const pattern = short(input?.pattern ?? input?.query)
+  const command = short(input?.command, 44)
+  const normalized = tool.trim()
+  if (normalized === 'Read' || normalized === 'read_file') {
+    return path ? `Read(${path})` : 'Read(file)'
+  }
+  if (normalized === 'List' || normalized === 'list_dir') {
+    return path ? `List(${path})` : 'List(.)'
+  }
+  if (normalized === 'Grep' || normalized === 'grep') {
+    return pattern ? `Grep(${pattern})` : 'Grep'
+  }
+  if (normalized === 'Glob' || normalized === 'glob') {
+    return pattern ? `Glob(${pattern})` : 'Glob'
+  }
+  if (normalized === 'Bash' || normalized === 'execute_command') {
+    return command ? `Bash(${command})` : 'Bash'
+  }
+  return normalized
+}
 
 export function reduceSubagentEvent(
   list: SubAgentState[],
@@ -33,14 +64,23 @@ export function reduceSubagentEvent(
         mode: event.mode,
         task: event.task,
         status: 'running',
+        toolHistory: [],
+        toolUsesCount: 0,
         startedAt: Date.now(),
       })
       return next
     }
     case 'subagent_tool_start': {
+      const label = toolLabel(event.tool, event.input)
       return list.map((a) =>
         a.id === event.subagentId
-          ? { ...a, status: 'running' as const, currentTool: event.tool }
+          ? {
+              ...a,
+              status: 'running' as const,
+              currentTool: label,
+              toolUsesCount: a.toolUsesCount + 1,
+              toolHistory: [...a.toolHistory, label].slice(-16),
+            }
           : a,
       )
     }

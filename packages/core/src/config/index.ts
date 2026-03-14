@@ -17,7 +17,7 @@ const CONFIG_FILE_NAMES = [".nexus/nexus.yaml", ".nexus/nexus.yml", ".nexusrc.ya
 const GLOBAL_CONFIG_DIR = path.join(os.homedir(), ".nexus")
 const GLOBAL_CONFIG_PATH = path.join(GLOBAL_CONFIG_DIR, "nexus.yaml")
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-const DEFAULT_FREE_MODELS_BASE_URL = "https://api.kilo.ai/api/gateway"
+const DEFAULT_FREE_MODELS_BASE_URL = "https://api.kilo.ai/api/openrouter"
 
 /**
  * Load config by walking up from cwd.
@@ -203,6 +203,7 @@ const PROVIDER_API_KEY_ENV: Record<string, string[]> = {
   cohere:       ["COHERE_API_KEY"],
   togetherai:   ["TOGETHER_AI_API_KEY", "TOGETHERAI_API_KEY"],
   perplexity:   ["PERPLEXITY_API_KEY"],
+  minimax:      ["MINIMAX_API_KEY"],
 }
 
 // Map of provider name → env var for model ID (e.g. OPENROUTER_MODEL)
@@ -216,6 +217,7 @@ const PROVIDER_MODEL_ENV: Record<string, string[]> = {
   google:       ["GOOGLE_MODEL", "GEMINI_MODEL"],
   xai:          ["XAI_MODEL"],
   cerebras:     ["CEREBRAS_MODEL"],
+  minimax:      ["MINIMAX_MODEL"],
 }
 
 function applyEnvOverrides(config: Record<string, unknown>) {

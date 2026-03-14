@@ -3,7 +3,7 @@ import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
-import { getExploredPrefixFromParts, ExploredSummaryInline } from "./ExploredProgressBlock.js"
+import { getAssistantDisplaySegments, ExploredSummaryInline } from "./ExploredProgressBlock.js"
 import { ThoughtBlock } from "./ThoughtBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
@@ -212,7 +212,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
   const initialTopMostItemIndexRef = useRef<number | undefined>(undefined)
   const [stickToBottom, setStickToBottom] = useState(true)
   const store = useChatStore()
-  const renderedMessages = useMemo(() => mergeConsecutiveAssistantMessages(messages), [messages])
+  const renderedMessages = messages
   const virtuosoComponents = useMemo(() => ({ Scroller: MessageListScroller }), [])
 
   if (initialTopMostItemIndexRef.current == null && renderedMessages.length > 0) {
@@ -292,31 +292,6 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
   )
 }
 
-function mergeConsecutiveAssistantMessages(messages: SessionMessage[]): SessionMessage[] {
-  if (messages.length < 2) return messages
-  const merged: SessionMessage[] = []
-  for (const message of messages) {
-    const prev = merged[merged.length - 1]
-    if (
-      prev?.role === "assistant" &&
-      message.role === "assistant" &&
-      !prev.summary &&
-      !message.summary &&
-      Array.isArray(prev.content) &&
-      Array.isArray(message.content)
-    ) {
-      merged[merged.length - 1] = {
-        ...prev,
-        ts: message.ts,
-        content: [...(prev.content as MessagePart[]), ...(message.content as MessagePart[])],
-      }
-      continue
-    }
-    merged.push(message)
-  }
-  return merged
-}
-
 function MessageBubble({
   message,
   messageIndex,
@@ -344,17 +319,17 @@ function MessageBubble({
   }
 
   if (message.role === "user") {
+    const userText =
+      typeof message.content === "string"
+        ? message.content
+        : (message.content as MessagePart[])
+            .filter(p => p.type === "text")
+            .map(p => (p as { text: string }).text)
+            .join("")
     return (
       <div className="nexus-user-msg-wrap">
         <div className={`nexus-user-msg-bubble${canRollback ? " nexus-user-msg-bubble-has-rollback" : ""}`}>
-          <div className="nexus-user-msg-content">
-            {typeof message.content === "string"
-              ? message.content
-              : (message.content as MessagePart[])
-                  .filter(p => p.type === "text")
-                  .map(p => (p as { text: string }).text)
-                  .join("")}
-          </div>
+          <div className="nexus-user-msg-content">{renderUserTextWithPasteChips(userText)}</div>
           {canRollback && (
             <button
               type="button"
@@ -400,6 +375,64 @@ function MessageBubble({
       )}
     </div>
   )
+}
+
+const MODERN_PASTE_TOKEN = /\[(📋)\s+(bash|text)\s+\((\d+)-(\d+)\)\]/g
+const LEGACY_PASTE_TOKEN = /\[Pasted (terminal|text) \((\d+) lines\) #([a-z0-9_-]+)\]/gi
+
+function renderUserTextWithPasteChips(text: string): React.ReactNode {
+  const chunks: React.ReactNode[] = []
+  let last = 0
+  const matches: Array<{ start: number; end: number; kind: "modern" | "legacy"; label: string }> = []
+
+  let m: RegExpExecArray | null
+  MODERN_PASTE_TOKEN.lastIndex = 0
+  while ((m = MODERN_PASTE_TOKEN.exec(text)) !== null) {
+    const full = m[0] ?? ""
+    const kind = m[2] ?? "text"
+    const from = m[3] ?? "1"
+    const to = m[4] ?? "1"
+    matches.push({
+      start: m.index,
+      end: m.index + full.length,
+      kind: "modern",
+      label: `${kind} (${from}-${to})`,
+    })
+  }
+
+  LEGACY_PASTE_TOKEN.lastIndex = 0
+  while ((m = LEGACY_PASTE_TOKEN.exec(text)) !== null) {
+    const full = m[0] ?? ""
+    const kind = m[1]?.toLowerCase() === "terminal" ? "bash" : "text"
+    const lines = m[2] ?? "1"
+    matches.push({
+      start: m.index,
+      end: m.index + full.length,
+      kind: "legacy",
+      label: `${kind} (1-${lines})`,
+    })
+  }
+
+  matches.sort((a, b) => a.start - b.start)
+  const deduped = matches.filter((cur, idx, arr) => idx === 0 || cur.start >= arr[idx - 1]!.end)
+
+  for (let i = 0; i < deduped.length; i++) {
+    const item = deduped[i]!
+    if (item.start > last) chunks.push(<span key={`txt-${i}`}>{text.slice(last, item.start)}</span>)
+    chunks.push(
+      <span
+        key={`chip-${i}`}
+        className="inline-flex items-center gap-1 rounded-md border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] px-1.5 py-0.5 text-[11px] text-[var(--vscode-descriptionForeground)] align-middle"
+      >
+        <span aria-hidden>📄</span>
+        <span>{item.label}</span>
+      </span>
+    )
+    last = item.end
+  }
+  if (last < text.length) chunks.push(<span key="txt-last">{text.slice(last)}</span>)
+  if (chunks.length === 0) return text
+  return chunks
 }
 
 function AssistantText({ text, streaming, variant = "normal" }: { text: string; streaming?: boolean; variant?: "normal" | "muted" }) {
@@ -508,7 +541,7 @@ function truncateTask(s: string, max = 56): string {
   return one.length <= max ? one : one.slice(0, max - 1) + "…"
 }
 
-/** Subagents inline under the SpawnAgents tool card; one line per subagent (task + dynamic status). */
+/** Subagents inline under the SpawnAgent tool card; one line per subagent (task + dynamic status). */
 function SubagentInlineList({ subagents }: { subagents: SubAgentState[] }) {
   return (
     <div className="mt-1.5 ml-1 space-y-1">
@@ -557,8 +590,7 @@ function AssistantParts({
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
   showReasoningInChat: boolean
 }) {
-  const { prefixItems, prefixIndices } = getExploredPrefixFromParts(parts)
-  const hasExploredBlock = prefixItems.length > 0
+  const segments = getAssistantDisplaySegments(parts)
 
   // Single reply per message: show only one block (canonical part) to avoid multiple identical bubbles.
   const textPartIndices = parts
@@ -577,32 +609,41 @@ function AssistantParts({
 
   return (
     <div className="space-y-3">
-      {/* Explored: reasoning + exploration tools in order. Collapsed by default so user can expand to see Thoughts and tools. */}
-      {hasExploredBlock && (
-        <ExploredSummaryInline
-          prefixItems={prefixItems}
-          defaultCollapsed={false}
-          onOpenFile={(path, line, endLine) =>
-            postMessage({ type: "openFileAtLocation", path, line, endLine })
-          }
-        />
-      )}
-      {parts.map((part, i) => {
-        if (prefixIndices.has(i)) return null
+      {segments.map((segment, segmentIndex) => {
+        if (segment.type === "explored") {
+          const isActiveExplored = !isComplete && isRunning && segmentIndex === segments.length - 1
+          return (
+            <ExploredSummaryInline
+              key={`explored-${segment.startIndex}-${segment.endIndex}`}
+              prefixItems={segment.prefixItems}
+              defaultCollapsed={!isActiveExplored}
+              isRunning={isActiveExplored}
+              onOpenFile={(path, line, endLine) =>
+                postMessage({ type: "openFileAtLocation", path, line, endLine })
+              }
+            />
+          )
+        }
+
+        const { part, index: i } = segment
         if (part.type === "reasoning") {
           const r = part as { text: string; durationMs?: number }
           const isLastPart = i === parts.length - 1
           const showLiveThought = !isComplete && isRunning && isLastPart && reasoningStartTime != null
+          const PLACEHOLDER_TEXT = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
           if (showLiveThought) {
+            const reasoningText = r.text === PLACEHOLDER_TEXT ? "" : r.text
             return (
               <ThoughtBlock
                 key={i}
-                reasoningText={r.text}
+                reasoningText={reasoningText}
                 startTime={reasoningStartTime}
                 isRunning={true}
               />
             )
           }
+          // Skip placeholder reasoning parts that have no real content
+          if (!r.text?.trim() || r.text === PLACEHOLDER_TEXT) return null
           return (
             <ThoughtInlineBlock
               key={i}
@@ -652,20 +693,12 @@ function AssistantParts({
               ) : undefined
             return <BashCommandBlock key={i} part={toolPart} approval={approval} />
           }
-          if (toolPart.tool === "thinking_preamble") {
-            const reasoning = (toolPart.input?.reasoning_and_next_actions as string)?.trim()
-            if (reasoning) {
-              return (
-                <ThoughtInlineBlock
-                  key={i}
-                  text={reasoning}
-                  durationMs={toolPart.timeStart != null && toolPart.timeEnd != null ? toolPart.timeEnd - toolPart.timeStart : undefined}
-                />
-              )
-            }
-            return null
-          }
-          if (toolPart.tool === "SpawnAgents") {
+          if (
+            toolPart.tool === "SpawnAgent" ||
+            toolPart.tool === "SpawnAgents" ||
+            toolPart.tool === "Parallel" ||
+            toolPart.tool === "parallel"
+          ) {
             const approval =
               pendingApproval?.partId === toolPart.id ? (
                 <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
@@ -693,53 +726,23 @@ function AssistantParts({
 
 /** Thought inline: one reasoning part, tool-like (header + optional duration, expandable body). Always shown chronologically. */
 function ThoughtInlineBlock({ text, durationMs }: { text: string; durationMs?: number }) {
-  const [open, setOpen] = useState(true)
-  const durationStr = durationMs != null ? ` (${(durationMs / 1000).toFixed(1)}s)` : ""
+  const [open, setOpen] = useState(false)
+  const seconds = durationMs != null ? Math.max(1, Math.round(durationMs / 1000)) : undefined
+  const label = seconds != null ? `Thought for ${seconds}s` : text.trim().length < 80 ? "Thought briefly" : "Thought"
   return (
-    <div className="my-2 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
+    <div className="my-1">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]"
+        className="w-full flex items-center gap-1.5 px-0 py-0.5 text-left text-xs text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
       >
-        <span className="flex-shrink-0" title="Thought">💭</span>
-        <span className="flex-shrink-0 font-medium">Thought{durationStr}</span>
-        <span className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform" style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
+        <span className="flex-shrink-0 text-[10px] transition-transform" style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
+        <span className="flex-shrink-0">{label}</span>
       </button>
-      {open && text.trim() && (
-        <div className="border-t border-[var(--vscode-panel-border)] px-3 py-2 text-[11px] text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans max-h-[min(50vh,320px)] overflow-y-auto">
-          {text.trim()}
+      {open && (
+        <div className="mt-1 px-2 py-2 text-[11px] text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans max-h-[min(50vh,320px)] overflow-y-auto border border-[var(--vscode-panel-border)] rounded bg-[var(--vscode-editor-background)]">
+          {text.trim() || "Model reasoning is active, but no visible reasoning text was streamed."}
         </div>
-      )}
-    </div>
-  )
-}
-
-/** Thinking preamble:
-  const [showReasoning, setShowReasoning] = useState(false)
-  const hasReasoning = reasoning.trim().length > 0
-  return (
-    <div className="nexus-thinking-preamble-block my-2 font-sans">
-      {userMessage ? (
-        <div className="px-0 py-1 text-sm text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
-          {userMessage}
-        </div>
-      ) : null}
-      {hasReasoning && (
-        <>
-          <button
-            type="button"
-            onClick={() => setShowReasoning(!showReasoning)}
-            className="text-[10px] text-[var(--nexus-accent)] hover:bg-[var(--vscode-list-hoverBackground)] rounded px-0 py-1"
-          >
-            {showReasoning ? "Hide reasoning" : "Show reasoning"}
-          </button>
-          {showReasoning && (
-            <div className="px-0 py-2 text-xs text-[var(--vscode-descriptionForeground)] whitespace-pre-wrap break-words border-t border-[var(--vscode-panel-border)] font-sans mt-1" style={{ fontFamily: "var(--vscode-font-family)" }}>
-              {reasoning}
-            </div>
-          )}
-        </>
       )}
     </div>
   )

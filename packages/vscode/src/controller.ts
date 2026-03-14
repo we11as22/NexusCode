@@ -8,7 +8,7 @@ import * as path from "path"
 import * as fs from "node:fs"
 import { promises as fsPromises } from "node:fs"
 import * as os from "node:os"
-import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus } from "@nexuscode/core"
+import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus, MessagePart, ToolPart } from "@nexuscode/core"
 import type { ApprovalAction, PermissionResult, CheckpointEntry, McpServerConfig } from "@nexuscode/core"
 import {
   loadConfig,
@@ -30,6 +30,9 @@ import {
   createCompaction,
   ParallelAgentManager,
   createSpawnAgentTool,
+  createSpawnAgentsAliasTool,
+  createSpawnAgentOutputTool,
+  createSpawnAgentStopTool,
   runAgentLoop,
   CheckpointTracker,
   CodebaseIndexer,
@@ -43,6 +46,7 @@ import {
 import { VsCodeHost, showSessionEditDiff } from "./host.js"
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
+const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
 
 /** Number of messages to load when opening a server session (same as server RECENT_MESSAGES_FOR_RUN for agent context). */
 const INITIAL_SERVER_MESSAGES = 200
@@ -220,6 +224,8 @@ export class Controller {
   private sessionUnacceptedEdits: Array<{ path: string; originalContent: string; newContent: string; isNewFile: boolean }> = []
   /** Active host for the running local loop; used for pending write/edit previews before approval. */
   private activeRunHost: VsCodeHost | null = null
+  /** Server-stream shadow state: remembers latest SpawnAgent tool so subagent events can attach even before final server snapshot arrives. */
+  private streamLastSpawnAgentPartId: string | null = null
 
   private normalizePathKey(filePath: string, cwd: string): string {
     const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
@@ -326,6 +332,195 @@ export class Controller {
 
   private isFileWriteTool(toolName: string): boolean {
     return FILE_WRITE_TOOL_NAMES.has(toolName)
+  }
+
+  private eventAffectsVisibleState(event: AgentEvent): boolean {
+    switch (event.type) {
+      case "assistant_message_started":
+      case "assistant_content_complete":
+      case "text_delta":
+      case "reasoning_start":
+      case "reasoning_delta":
+      case "reasoning_end":
+      case "tool_start":
+      case "tool_end":
+      case "todo_updated":
+      case "subagent_start":
+      case "subagent_tool_start":
+      case "subagent_tool_end":
+      case "subagent_done":
+      case "done":
+      case "error":
+        return true
+      default:
+        return false
+    }
+  }
+
+  private ensureShadowAssistantMessage(messageId: string): SessionMessage | null {
+    if (!this.session) return null
+    const existing = this.session.messages.find((m) => m.id === messageId && m.role === "assistant")
+    if (existing) return existing
+    const created: SessionMessage = {
+      id: messageId,
+      ts: Date.now(),
+      role: "assistant",
+      content: "",
+    }
+    this.session.messages.push(created)
+    return created
+  }
+
+  private ensureShadowAssistantParts(messageId: string): MessagePart[] {
+    const msg = this.ensureShadowAssistantMessage(messageId)
+    if (!msg) return []
+    if (typeof msg.content === "string") {
+      const parts =
+        msg.content.trim().length > 0
+          ? ([{ type: "text", text: msg.content }] as MessagePart[])
+          : ([] as MessagePart[])
+      msg.content = parts
+      return parts
+    }
+    return msg.content as MessagePart[]
+  }
+
+  private applyAgentEventToSessionShadow(event: AgentEvent): void {
+    if (!this.session) return
+
+    switch (event.type) {
+      case "assistant_message_started": {
+        this.ensureShadowAssistantMessage(event.messageId)
+        return
+      }
+
+      case "text_delta": {
+        const parts = this.ensureShadowAssistantParts(event.messageId)
+        const last = parts[parts.length - 1]
+        if (last?.type === "text") {
+          ;(last as MessagePart & { text: string }).text += event.delta
+        } else {
+          parts.push({ type: "text", text: event.delta })
+        }
+        return
+      }
+
+      case "reasoning_start": {
+        const parts = this.ensureShadowAssistantParts(event.messageId)
+        const reasoningId = event.reasoningId || "reasoning-0"
+        const exists = parts.some(
+          (part) => part.type === "reasoning" && ((part as MessagePart & { reasoningId?: string }).reasoningId ?? "reasoning-0") === reasoningId
+        )
+        if (!exists) {
+          parts.push({
+            type: "reasoning",
+            text: THOUGHT_PLACEHOLDER,
+            reasoningId,
+            providerMetadata: event.providerMetadata,
+          } as MessagePart)
+        }
+        return
+      }
+
+      case "reasoning_delta": {
+        const parts = this.ensureShadowAssistantParts(event.messageId)
+        const reasoningId = event.reasoningId || "reasoning-0"
+        const idx = [...parts].reverse().findIndex(
+          (part) => part.type === "reasoning" && ((part as MessagePart & { reasoningId?: string }).reasoningId ?? "reasoning-0") === reasoningId
+        )
+        if (idx >= 0) {
+          const actualIdx = parts.length - 1 - idx
+          const current = parts[actualIdx] as MessagePart & { text: string; providerMetadata?: Record<string, unknown>; reasoningId?: string }
+          const prevText = current.text === THOUGHT_PLACEHOLDER ? "" : current.text
+          parts[actualIdx] = {
+            ...current,
+            text: `${prevText}${event.delta ?? ""}` || THOUGHT_PLACEHOLDER,
+            reasoningId,
+            providerMetadata: event.providerMetadata ?? current.providerMetadata,
+          } as MessagePart
+        } else {
+          parts.push({
+            type: "reasoning",
+            text: event.delta || THOUGHT_PLACEHOLDER,
+            reasoningId,
+            providerMetadata: event.providerMetadata,
+          } as MessagePart)
+        }
+        return
+      }
+
+      case "reasoning_end": {
+        const parts = this.ensureShadowAssistantParts(event.messageId)
+        const reasoningId = event.reasoningId
+        const idx = [...parts].reverse().findIndex(
+          (part) => part.type === "reasoning" && (reasoningId == null || ((part as MessagePart & { reasoningId?: string }).reasoningId ?? "reasoning-0") === reasoningId)
+        )
+        if (idx >= 0) {
+          const actualIdx = parts.length - 1 - idx
+          const current = parts[actualIdx] as MessagePart & { durationMs?: number; providerMetadata?: Record<string, unknown>; reasoningId?: string }
+          parts[actualIdx] = {
+            ...current,
+            reasoningId: current.reasoningId ?? reasoningId,
+            providerMetadata: event.providerMetadata ?? current.providerMetadata,
+            durationMs: current.durationMs ?? 0,
+          } as MessagePart
+        }
+        return
+      }
+
+      case "tool_start": {
+        const parts = this.ensureShadowAssistantParts(event.messageId)
+        const existingIdx = parts.findIndex((part) => part.type === "tool" && (part as ToolPart).id === event.partId)
+        const nextPart = {
+          type: "tool",
+          id: event.partId,
+          tool: event.tool,
+          status: "running",
+          input: event.input,
+          timeStart: Date.now(),
+        } as ToolPart
+        if (existingIdx >= 0) {
+          parts[existingIdx] = { ...(parts[existingIdx] as ToolPart), ...nextPart }
+        } else {
+          parts.push(nextPart)
+        }
+        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents") {
+          this.streamLastSpawnAgentPartId = event.partId
+        }
+        return
+      }
+
+      case "tool_end": {
+        const msg = this.ensureShadowAssistantMessage(event.messageId)
+        if (!msg) return
+        const parts = this.ensureShadowAssistantParts(event.messageId)
+        const idx = parts.findIndex((part) => part.type === "tool" && (part as ToolPart).id === event.partId)
+        if (idx >= 0) {
+          parts[idx] = {
+            ...(parts[idx] as ToolPart),
+            status: event.success ? "completed" : "error",
+            output: event.output,
+            error: event.error,
+            compacted: event.compacted,
+            path: event.path,
+            diffStats: event.diffStats,
+            ...(Array.isArray(event.diffHunks) ? { diffHunks: event.diffHunks } : {}),
+            timeEnd: Date.now(),
+          } as ToolPart
+        }
+        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents") {
+          this.streamLastSpawnAgentPartId = null
+        }
+        return
+      }
+
+      case "todo_updated":
+        this.session.updateTodo(event.todo ?? "")
+        return
+
+      default:
+        return
+    }
   }
 
   private async ensureCheckpointForCurrentSession(
@@ -1479,14 +1674,39 @@ export class Controller {
       this.postStateToWebview()
       return
     }
-    this.mode = mode ?? this.mode
-    this.lastRunMode = this.mode
+    const trimmedInput = content.trim()
+    if (/^\/compact(\s|$)/i.test(trimmedInput)) {
+      await this.compactHistory()
+      return
+    }
+
+    const reviewCommand = /^\/review(\s|$)/i.test(trimmedInput)
+    const requestedMode = mode ?? this.mode
+    this.mode = requestedMode
+    const runMode: Mode = reviewCommand ? "review" : requestedMode
+    this.lastRunMode = runMode
     this.abortController = new AbortController()
     this.isRunning = true
 
     let actualContent = content
     let createSkillMode = false
     let configForRun = this.config
+    if (reviewCommand) {
+      const reviewArgs = trimmedInput.replace(/^\/review\s*/i, "").trim()
+      actualContent =
+        reviewArgs ||
+        `Run a local code review of uncommitted changes in this repository.
+
+Use git diff against HEAD and inspect changed files.
+Focus on bugs, regressions, security, and missing tests.
+
+Return in this format:
+## Local Review
+### Summary
+### Issues Found
+### Detailed Findings
+### Recommendation`
+    }
     if (content.trim().toLowerCase().startsWith("/create-skill")) {
       createSkillMode = true
       actualContent = content.replace(/^\/create-skill\s*/i, "").trim() || "Describe what you want the skill to do."
@@ -1546,7 +1766,7 @@ export class Controller {
           {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
-            body: JSON.stringify({ content, mode: this.mode }),
+            body: JSON.stringify({ content: actualContent, mode: runMode }),
             signal: this.abortController!.signal,
           }
         )
@@ -1569,6 +1789,13 @@ export class Controller {
         const decoder = new TextDecoder()
         let buffer = ""
         try {
+          const forwardServerEvent = (event: AgentEvent) => {
+            this.applyAgentEventToSessionShadow(event)
+            this.postMessageToWebview({ type: "agentEvent", event })
+            if (this.eventAffectsVisibleState(event)) {
+              this.postStateToWebview()
+            }
+          }
           while (true) {
             const { value, done } = await reader.read()
             if (done) break
@@ -1603,7 +1830,7 @@ export class Controller {
                     vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent))
                   ).catch(() => {})
                 }
-                this.postMessageToWebview({ type: "agentEvent", event })
+                forwardServerEvent(event)
               } catch {}
             }
           }
@@ -1635,7 +1862,7 @@ export class Controller {
                   vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent))
                 ).catch(() => {})
               }
-              this.postMessageToWebview({ type: "agentEvent", event })
+              forwardServerEvent(event)
             } catch {}
           }
         } finally {
@@ -1674,6 +1901,9 @@ export class Controller {
 
     const host = new VsCodeHost(cwd, (event: AgentEvent) => {
       this.postMessageToWebview({ type: "agentEvent", event })
+      if (this.eventAffectsVisibleState(event)) {
+        this.postStateToWebview()
+      }
       if (event.type === "tool_approval_needed") {
         this.postMessageToWebview({
           type: "pendingApproval",
@@ -1685,9 +1915,8 @@ export class Controller {
         this.isRunning = false
         this.postStateToWebview()
       }
-      // Sync full state after tool_end so webview gets latest todo (update_todo_list) and messages
+      // Sync full state after tool_end so webview gets latest todo and messages
       if (event.type === "tool_end") {
-        this.postStateToWebview()
         // Keep editor "memory" in sync with disk: after a successful file write, reload the doc if open so it's not dirty
         if (
           event.success &&
@@ -1753,7 +1982,10 @@ export class Controller {
       }
       const parallelManager = new ParallelAgentManager()
       toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
-      const { builtin: tools, dynamic } = toolRegistry.getForMode(this.mode)
+      toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, configForRun))
+      toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
+      toolRegistry.register(createSpawnAgentStopTool(parallelManager))
+      const { builtin: tools, dynamic } = toolRegistry.getForMode(runMode)
       const allTools = [...tools, ...dynamic]
       const compaction = createCompaction()
       if (configForRun.checkpoint.enabled && !this.checkpoint) {
@@ -1773,7 +2005,7 @@ export class Controller {
         client,
         host,
         config: configForRun,
-        mode: this.mode,
+        mode: runMode,
         tools: allTools,
         skills,
         rulesContent,
@@ -1804,26 +2036,10 @@ export class Controller {
   private async showPlanFollowup(cwd: string): Promise<void> {
     if (!this.session) return
     const planText = await getPlanContentForFollowup(this.session, cwd)
-    const choice = await vscode.window.showQuickPick(
-      [
-        { label: "New session", description: "Implement in a fresh session with a clean context" },
-        { label: "Continue here", description: "Implement the plan in this session" },
-        { label: "Dismiss", description: "Do nothing" },
-      ],
-      { title: "Ready to implement?", placeHolder: "Plan is ready. Implement now?" }
-    )
-    if (!choice || choice.label === "Dismiss") return
-    if (choice.label === "New session") {
-      this.session = Session.create(cwd)
-      this.serverSessionId = undefined
-      this.mode = "agent"
-      this.postStateToWebview()
-      await this.runAgent(`Implement the following plan:\n\n${planText}`, "agent")
-    } else {
-      this.mode = "agent"
-      this.postStateToWebview()
-      await this.runAgent("Implement the plan above.", "agent")
-    }
+    this.postMessageToWebview({
+      type: "stateUpdate",
+      state: { ...this.getStateToPostToWebview(), planFollowupText: planText },
+    })
   }
 
   private getNexusRoot(): string | null {

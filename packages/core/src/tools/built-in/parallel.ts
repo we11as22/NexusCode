@@ -40,6 +40,10 @@ const ALIAS_TO_TOOL: Record<string, string> = {
   websearch: "WebSearch",
   todowrite: "TodoWrite",
   askfollowupquestion: "AskFollowupQuestion",
+  spawnagent: "SpawnAgent",
+  spawnagents: "SpawnAgent",
+  spawnagentoutput: "SpawnAgentOutput",
+  spawnagentstop: "SpawnAgentStop",
 }
 
 function canonicalizeToolName(name: string): string {
@@ -72,12 +76,13 @@ function resolveTool(
 
 export const parallelTool: ToolDef<z.infer<typeof schema>> = {
   name: "Parallel",
-  description: `Run multiple independent read-only tools in a single call. Use this to batch discovery work (e.g. several Read or Grep calls) instead of calling them one by one.
+  description: `Run multiple independent tools in a single call. Use this to batch discovery work (e.g. several Read or Grep calls) and to run multiple SpawnAgent tasks concurrently.
 
 - Pass tool_uses: an array of { recipient_name, parameters } for each tool to run.
 - recipient_name can be canonical (Read), provider-style alias (read_file), or namespaced alias (functions.read_file).
 - Maximum 25 tool calls per batch.
-- Only read-only tools are allowed in Parallel. Write/Edit/Bash and other mutating tools must be called directly.
+- Allowed in Parallel: read-only tools, and SpawnAgent.
+- Write/Edit/Bash and other mutating tools must be called directly (not through Parallel).
 - All tools in the array run in parallel; results are combined and returned in order.
 - Use when operations do not depend on each other's output. When one tool's result is needed to decide the next, call tools sequentially instead.`,
   parameters: schema,
@@ -111,7 +116,8 @@ export const parallelTool: ToolDef<z.infer<typeof schema>> = {
           output: "Nested Parallel calls are not allowed. Put all independent tools in one Parallel.tool_uses array.",
         }
       }
-      if (!tool.readOnly) {
+      const isSpawnAgent = tool.name === "SpawnAgent" || tool.name === "SpawnAgents"
+      if (!tool.readOnly && !isSpawnAgent) {
         return {
           recipient_name: use.recipient_name,
           resolved_name: tool.name,

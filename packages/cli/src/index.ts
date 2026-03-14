@@ -32,7 +32,7 @@ Options:
   --server <url>        NexusCode server URL (NEXUS_SERVER_URL env)
   --continue            Continue most recent session
   --profile <name>      Named profile from nexus.yaml
-  --mode <mode>         Mode: agent | ask | plan | debug | review (default: agent)
+  --mode <mode>         Mode: agent | ask | plan | debug (default: agent)
   -h, --help            Show this help
   -v, --version         Show version
 

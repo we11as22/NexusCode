@@ -8,7 +8,7 @@ import { catalogSelectionToModel } from '@nexuscode/core'
 import type { ModelsCatalog } from '@nexuscode/core'
 import { useFieldInput } from '../hooks/useFieldInput.js'
 
-const NEXUS_GATEWAY = 'https://api.kilo.ai/api/gateway'
+const NEXUS_GATEWAY = 'https://api.kilo.ai/api/openrouter'
 const VISIBLE_ROWS = 12
 
 const PROVIDER_OPTIONS: { id: ProviderConfig['provider']; label: string }[] = [

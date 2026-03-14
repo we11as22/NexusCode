@@ -66,7 +66,7 @@ export interface ToolContext {
   host: IHost
   session: ISession
   config: NexusConfig
-  /** Current loop mode (agent / plan / ask). Used e.g. by SpawnAgents to set sub-agent permissions. */
+  /** Current loop mode (agent / plan / ask). Used e.g. by SpawnAgent to set sub-agent permissions. */
   mode?: Mode
   indexer?: IIndexer
   signal: AbortSignal
@@ -194,6 +194,9 @@ export interface TextPart {
 export interface ReasoningPart {
   type: "reasoning"
   text: string
+  reasoningId?: string
+  durationMs?: number
+  providerMetadata?: Record<string, unknown>
 }
 
 /** User message part: image (base64 data URL or raw base64, with mimeType). */
@@ -285,14 +288,15 @@ export type AgentEvent =
   | { type: "assistant_message_started"; messageId: string }
   | { type: "assistant_content_complete"; messageId: string }
   | { type: "text_delta"; delta: string; messageId: string; user_message_delta?: string }
-  | { type: "reasoning_delta"; delta: string; messageId: string }
-  | { type: "reasoning_end"; messageId: string }
+  | { type: "reasoning_start"; messageId: string; reasoningId: string; providerMetadata?: Record<string, unknown> }
+  | { type: "reasoning_delta"; delta: string; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
+  | { type: "reasoning_end"; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; metadata?: Record<string, unknown> }
-  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
-  | { type: "subagent_tool_start"; subagentId: string; tool: string }
-  | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
-  | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string }
+  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string; parentPartId?: string }
+  | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown>; parentPartId?: string }
+  | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
+  | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string; parentPartId?: string }
   | { type: "tool_approval_needed"; action: ApprovalAction; partId: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
@@ -350,6 +354,7 @@ export type ProviderName =
   | "cohere"
   | "togetherai"
   | "perplexity"
+  | "minimax"
 
 export interface EmbeddingConfig {
   provider: "openai" | "openai-compatible" | "openrouter" | "ollama" | "google" | "mistral" | "bedrock" | "local"
@@ -413,7 +418,7 @@ export interface NexusConfig {
     enabled: boolean
     timeoutMs: number
     createOnWrite: boolean
-    /** When true, first final_report_to_user (agent) is rejected; model must re-verify and call again (Cline-style). */
+    /** When true, first completion attempt (agent) is rejected; model must re-verify and complete again (Cline-style). */
     doubleCheckCompletion?: boolean
   }
   /** UI preferences (e.g. chat pane). */

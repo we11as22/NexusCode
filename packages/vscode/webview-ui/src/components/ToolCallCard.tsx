@@ -55,17 +55,17 @@ const TOOL_ICONS: Record<string, string> = {
   glob: "📋",
   Glob: "📋",
   browser_action: "🖥️",
+  SpawnAgent: "🤖",
   spawn_agents: "🤖",
   SpawnAgents: "🤖",
+  SpawnAgentOutput: "🧵",
+  SpawnAgentStop: "🛑",
   use_skill: "💡",
   Skill: "💡",
-  final_report_to_user: "✅",
   ask_followup_question: "❓",
   AskFollowupQuestion: "❓",
-  progress_note: "📌",
   update_todo_list: "📝",
   TodoWrite: "📝",
-  thinking_preamble: "💭",
   create_rule: "📏",
   batch: "📦",
   Parallel: "🧩",
@@ -85,6 +85,8 @@ function toolDisplayName(tool: string): string {
     read_lints: "ReadLints", ReadLints: "ReadLints",
     glob: "Glob", Glob: "Glob",
     update_todo_list: "TodoWrite", TodoWrite: "TodoWrite",
+    SpawnAgentOutput: "SpawnAgentOutput",
+    SpawnAgentStop: "SpawnAgentStop",
     Parallel: "Parallel", parallel: "Parallel",
     batch: "Batch", Batch: "Batch",
   }
@@ -165,21 +167,10 @@ function isFileEditTool(part: ToolPart): boolean {
   return ["read_file", "Read", "write_to_file", "Write", "replace_in_file", "Edit"].includes(part.tool)
 }
 
-/** Up to 4 lines: first added/removed line, 1 line above, then window of 4 lines down (or until 1 context line inclusive). */
+/** Up to 4 changed lines (+/- only). */
 function getDiffPreviewHunks(hunks: Array<{ type: string; lineNum: number; line: string }>): Array<{ type: string; lineNum: number; line: string }> {
   if (!hunks.length) return []
-  const firstChangeIdx = hunks.findIndex((h) => h.type === "add" || h.type === "remove")
-  if (firstChangeIdx === -1) return hunks.slice(0, 4)
-  const start = Math.max(0, firstChangeIdx - 1)
-  let end = start + 4
-  for (let i = start; i < Math.min(hunks.length, start + 4); i++) {
-    if (i > firstChangeIdx && hunks[i]!.type === "context") {
-      end = i + 1
-      break
-    }
-    end = i + 1
-  }
-  return hunks.slice(start, end)
+  return hunks.filter((h) => h.type === "add" || h.type === "remove").slice(0, 4)
 }
 
 const DIFF_PREVIEW_LINE_HEIGHT = 1.4
@@ -256,7 +247,7 @@ export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approv
       ? buildFallbackDiffHunks(fallback.content, DIFF_PREVIEW_MAX_LINES)
       : []
   const showDiffPreview = previewHunks.length > 0
-  const totalHunks = hasDiffHunks ? part.diffHunks!.length : 0
+  const totalHunks = hasDiffHunks ? part.diffHunks!.filter((h) => h.type === "add" || h.type === "remove").length : 0
   const hiddenLinesCount = totalHunks > previewHunks.length ? totalHunks - previewHunks.length : 0
 
   return (
@@ -331,12 +322,7 @@ export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approv
                       </div>
                     )
                   }
-                  return (
-                    <div key={i} className="px-2 py-0.5 text-[var(--vscode-foreground)] whitespace-pre">
-                      <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
-                      {h.line || " "}
-                    </div>
-                  )
+                  return null
                 })}
               </pre>
               {hiddenLinesCount > 0 && (
@@ -417,12 +403,7 @@ function FileEditBlock({ part }: { part: ToolPart }) {
                     </div>
                   )
                 }
-                return (
-                  <div key={i} className="px-2 py-0.5 text-[var(--vscode-foreground)] whitespace-pre">
-                    <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
-                    {h.line || " "}
-                  </div>
-                )
+                return null
               })}
             </pre>
           </div>
@@ -554,21 +535,10 @@ function formatToolInputPreview(part: ToolPart): string {
       return `${uses.length} parallel ${uses.length === 1 ? "tool" : "tools"}`
     }
     case "spawn_agents":
+    case "SpawnAgent":
     case "SpawnAgents": {
       const desc = inp["description"]
       return desc && typeof desc === "string" ? short(desc.replace(/\s+/g, " "), 48) : "subtask"
-    }
-    case "progress_note":
-    case "final_report_to_user": {
-      const msg = inp["message"]
-      return msg && typeof msg === "string" ? short(String(msg).replace(/\s+/g, " "), 52) : ""
-    }
-    case "thinking_preamble": {
-      const msg = inp["user_message"]
-      const reasoning = inp["reasoning_and_next_actions"]
-      if (msg && typeof msg === "string") return short(String(msg).replace(/\s+/g, " "), 52)
-      if (reasoning && typeof reasoning === "string") return short(String(reasoning).replace(/\s+/g, " "), 52)
-      return "thinking"
     }
     default:
       return Object.entries(inp)
@@ -635,27 +605,7 @@ export function ToolCallCard({ part, approval }: Props) {
           {isFileEditTool(part) && part.output && (
             <FileEditBlock part={part} />
           )}
-          {part.tool === "thinking_preamble" && part.input && (
-            <div className="space-y-2 font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
-              {(part.input.user_message as string)?.trim() && (
-                <div>
-                  <div className="text-[var(--vscode-descriptionForeground)] mb-0.5 text-[10px]">Message</div>
-                  <div className="text-sm text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed bg-[var(--vscode-editor-background)] rounded p-1.5">
-                    {(part.input.user_message as string).trim()}
-                  </div>
-                </div>
-              )}
-              {(part.input.reasoning_and_next_actions as string)?.trim() && (
-                <div>
-                  <div className="text-[var(--vscode-descriptionForeground)] mb-0.5 text-[10px]">Reasoning</div>
-                  <div className="text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed bg-[var(--vscode-editor-background)] rounded p-1.5 max-h-48 overflow-y-auto">
-                    {(part.input.reasoning_and_next_actions as string).trim()}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-          {part.input && Object.keys(part.input).length > 0 && !(isFileEditTool(part) && part.output) && part.tool !== "thinking_preamble" && (
+          {part.input && Object.keys(part.input).length > 0 && !(isFileEditTool(part) && part.output) && (
             <div>
               <div className="text-[var(--vscode-descriptionForeground)] mb-0.5">Input:</div>
               <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-32 overflow-y-auto">

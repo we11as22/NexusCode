@@ -53,6 +53,17 @@ Example flow:
     try {
       content = await fs.promises.readFile(logPath, "utf8")
     } catch (err) {
+      const e = err as NodeJS.ErrnoException
+      if (e?.code === "ENOENT") {
+        // Race: Bash just started background process but log file was not created yet.
+        // Treat as a valid "no output yet" state instead of failing the tool call.
+        const running = isProcessRunning(job.pid)
+        return {
+          success: true,
+          output: `[Process status: ${running ? "running" : "exited"} | PID: ${job.pid}]\n(no output yet)`,
+          metadata: { pid: job.pid, lineCount: 0, status: running ? "running" : "exited" },
+        }
+      }
       return {
         success: false,
         output: `Could not read log for bash_id ${bash_id}: ${(err as Error).message}`,

@@ -115,7 +115,7 @@ export type Props = {
   onChangeCursorOffset: (offset: number) => void
 
   /**
-   * Called when user presses Shift+Tab (cycle Nexus mode: agent/plan/ask/debug/review).
+   * Called when user presses Shift+Tab (cycle Nexus mode: agent/plan/ask/debug).
    */
   readonly onShiftTab?: () => void
 }

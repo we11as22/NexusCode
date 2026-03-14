@@ -21,7 +21,13 @@ export interface SessionMessage {
 
 export type MessagePart = TextPart | ToolPart | ReasoningPart
 export interface TextPart { type: "text"; text: string; user_message?: string }
-export interface ReasoningPart { type: "reasoning"; text: string; durationMs?: number }
+export interface ReasoningPart {
+  type: "reasoning"
+  text: string
+  durationMs?: number
+  reasoningId?: string
+  providerMetadata?: Record<string, unknown>
+}
 export interface ToolPart {
   type: "tool"
   id: string
@@ -39,7 +45,7 @@ export interface ToolPart {
   diffStats?: { added: number; removed: number }
   /** Line-by-line diff for UI (red/green); set from tool_end when available */
   diffHunks?: Array<{ type: string; lineNum: number; line: string }>
-  /** Subagents for SpawnAgents: filled by subagent_start/tool_start/done, shown inline under this tool card */
+  /** Subagents for SpawnAgent: filled by subagent_start/tool_start/done, shown inline under this tool card */
   subagents?: SubAgentState[]
 }
 
@@ -183,12 +189,14 @@ interface ChatState {
   config: NexusConfigState | null
   isCompacting: boolean
   subagents: SubAgentState[]
-  /** partId of the last tool_start(SpawnAgents); used to attach subagent_start to that part */
+  /** partId of the last tool_start(SpawnAgent); used to attach subagent_start to that part */
   lastSpawnAgentPartId: string | null
   selectedProfile: string
   projectDir: string
   /** When the current reasoning block started (for "Thought for Xs" display) */
   reasoningStartTime: number | null
+  /** Active reasoning stream identity, used to match start/delta/end robustly across snapshots. */
+  activeReasoning: { messageId: string; reasoningId: string } | null
   /** NexusCode server URL (nexuscode.serverUrl). When set, extension uses server for sessions and runs. */
   serverUrl: string
   /** MCP server test results: name -> status (ok/error) and optional error message */
@@ -247,7 +255,7 @@ interface ChatState {
   sendQueuedImmediately: (id: string) => void
   setMode: (mode: Mode) => void
   setProfile: (profileName: string) => void
-  sendMessage: (content: string) => void
+  sendMessage: (content: string, options?: { displayText?: string }) => void
   abort: () => void
   compact: () => void
   clearChat: () => void
@@ -278,15 +286,17 @@ interface ChatState {
 
 export type AgentEvent =
   | { type: "assistant_message_started"; messageId: string }
+  | { type: "assistant_content_complete"; messageId: string }
   | { type: "text_delta"; delta: string; messageId: string; user_message_delta?: string }
-  | { type: "reasoning_delta"; delta: string; messageId: string }
-  | { type: "reasoning_end"; messageId: string }
+  | { type: "reasoning_start"; messageId: string; reasoningId: string; providerMetadata?: Record<string, unknown> }
+  | { type: "reasoning_delta"; delta: string; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
+  | { type: "reasoning_end"; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
-  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
-  | { type: "subagent_tool_start"; subagentId: string; tool: string }
-  | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
-  | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string }
+  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string; parentPartId?: string }
+  | { type: "subagent_tool_start"; subagentId: string; tool: string; parentPartId?: string }
+  | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
+  | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string; parentPartId?: string }
   | { type: "tool_approval_needed"; action: ApprovalAction; partId: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
@@ -327,6 +337,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   selectedProfile: "",
   projectDir: "",
   reasoningStartTime: null,
+  activeReasoning: null,
   serverUrl: "",
   mcpStatus: [],
   pendingApproval: null,
@@ -437,10 +448,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     postMessage({ type: "setProfile", profile: profileName })
   },
 
-  sendMessage: (content) => {
-    const { mode, isRunning, attachedImages } = get()
+  sendMessage: (content, options) => {
+    const { mode, isRunning, attachedImages, compact } = get()
     if (isRunning) return
     const text = (typeof content === "string" ? content : "").trim()
+    if (!text) return
+    const displayText = (options?.displayText ?? text).trim()
+    if (isSlashCommand(text, "compact")) {
+      compact()
+      set({ inputValue: "", attachedImages: [] })
+      return
+    }
+    const reviewRequested = isSlashCommand(text, "review")
+    const runMode: Mode = reviewRequested ? "review" : mode
+    const runContent = reviewRequested ? buildReviewPromptFromSlash(text) : text
     set((prev) => ({
       inputValue: "",
       attachedImages: [],
@@ -452,14 +473,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           id: `local_user_${Date.now()}`,
           ts: Date.now(),
           role: "user",
-          content: text,
+          content: displayText || text,
         },
       ],
     }))
     postMessage({
       type: "newMessage",
-      content: text,
-      mode,
+      content: runContent,
+      mode: runMode,
       images: attachedImages.length > 0 ? attachedImages.map((img) => ({ data: img.data, mimeType: img.mimeType })) : undefined,
     })
   },
@@ -538,17 +559,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   handleStateUpdate: (state) => {
     set((prev) => {
       const next = { ...prev, ...state }
-      // Keep streamed assistant content: if incoming messages have an empty last assistant message
-      // but we have a richer one (from streaming), keep ours so the reply does not disappear.
-      if (state.messages != null && Array.isArray(state.messages) && prev.messages.length > 0 && state.messages.length > 0) {
-        const lastIn = state.messages[state.messages.length - 1]
-        const lastPrev = prev.messages[prev.messages.length - 1]
-        if (lastIn?.role === "assistant" && lastPrev?.role === "assistant" && !hasAssistantContent(lastIn.content) && hasAssistantContent(lastPrev.content)) {
-          next.messages = [
-            ...state.messages.slice(0, -1),
-            { ...lastIn, content: lastPrev.content },
-          ]
-        }
+      if (
+        state.messages != null &&
+        Array.isArray(state.messages) &&
+        ((typeof state.sessionId === "string" && state.sessionId === prev.sessionId) || state.sessionId == null)
+      ) {
+        next.messages = mergeStateMessagesForStream(prev.messages, state.messages)
       }
       return next
     })
@@ -639,7 +655,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               const startTime = get().reasoningStartTime
               if (lastPart?.type === "reasoning" && startTime != null) {
                 parts[parts.length - 1] = { ...lastPart, durationMs: Date.now() - startTime } as ReasoningPart
-                set((s) => ({ ...s, reasoningStartTime: null }))
+                set((s) => ({ ...s, reasoningStartTime: null, activeReasoning: null }))
               }
               parts.push({ type: "text", text: cleaned, ...(umDelta != null ? { user_message: umDelta } : {}) })
             }
@@ -656,9 +672,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
       }
 
+      case "assistant_content_complete": {
+        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const target = baseList[index]
+        if (!target || !Array.isArray(target.content)) break
+        const parts = [...(target.content as MessagePart[])]
+        const lastPart = parts[parts.length - 1]
+        const startTime = get().reasoningStartTime
+        if (lastPart?.type !== "reasoning" || startTime == null) break
+        parts[parts.length - 1] = { ...lastPart, durationMs: Date.now() - startTime } as ReasoningPart
+        set({
+          messages: [
+            ...baseList.slice(0, index),
+            { ...target, content: parts },
+            ...baseList.slice(index + 1),
+          ],
+          reasoningStartTime: null,
+          activeReasoning: null,
+        })
+        break
+      }
+
       case "tool_start": {
         const ev = event as { input?: Record<string, unknown>; tool?: string }
-        if (ev.tool === "SpawnAgents") set({ lastSpawnAgentPartId: event.partId })
+        if (ev.tool === "SpawnAgent" || ev.tool === "SpawnAgents") set({ lastSpawnAgentPartId: event.partId })
         const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
@@ -669,7 +706,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const startTime = get().reasoningStartTime
         if (lastPart?.type === "reasoning" && startTime != null) {
           parts[parts.length - 1] = { ...lastPart, durationMs: Date.now() - startTime } as ReasoningPart
-          set((s) => ({ ...s, reasoningStartTime: null }))
+          set((s) => ({ ...s, reasoningStartTime: null, activeReasoning: null }))
         }
         parts.push({
           type: "tool",
@@ -686,7 +723,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "tool_end": {
         const ev = event as { output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
-        if (event.tool === "SpawnAgents") set({ lastSpawnAgentPartId: null })
+        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents") set({ lastSpawnAgentPartId: null })
         set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
         const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg
@@ -721,7 +758,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
 
       case "subagent_start": {
-        const partId = get().lastSpawnAgentPartId
+        const partId = (event as { parentPartId?: string }).parentPartId ?? get().lastSpawnAgentPartId
         if (!partId) break
         const msgs = get().messages
         for (let i = msgs.length - 1; i >= 0; i--) {
@@ -801,20 +838,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "reasoning_delta": {
-        // Built-in agent-loop reflection: provider streams reasoning between tool calls; no tool, stored as type "reasoning" and shown as Thought in Explored block.
+        // Built-in agent-loop reflection: provider streams reasoning between tool calls; no tool, stored as type "reasoning" and shown as Thought block.
         const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
-        set((s) => ({ ...s, reasoningStartTime: s.reasoningStartTime ?? Date.now() }))
+        const reasoningId = typeof event.reasoningId === "string" && event.reasoningId.trim().length > 0 ? event.reasoningId : "reasoning-0"
+        set((s) => ({
+          ...s,
+          reasoningStartTime: s.reasoningStartTime ?? Date.now(),
+          activeReasoning: s.activeReasoning ?? { messageId: event.messageId, reasoningId },
+        }))
+        const delta = typeof event.delta === "string" ? event.delta : ""
         const updated = { ...target }
         const parts = Array.isArray(updated.content)
           ? [...(updated.content as MessagePart[])]
           : (typeof updated.content === "string" && updated.content.length > 0 ? [{ type: "text" as const, text: updated.content }] : [])
-        const lastPart = parts[parts.length - 1]
-        if (lastPart?.type === "reasoning") {
-          parts[parts.length - 1] = { ...lastPart, text: lastPart.text + event.delta } as ReasoningPart
+        const revIdx = [...parts].reverse().findIndex((p) => p.type === "reasoning" && ((p as ReasoningPart).reasoningId ?? "reasoning-0") === reasoningId)
+        const partIndex = revIdx >= 0 ? parts.length - 1 - revIdx : -1
+        if (partIndex >= 0) {
+          const reasoningPart = parts[partIndex] as ReasoningPart
+          const previousText = (reasoningPart.text ?? "").trim() === THOUGHT_PLACEHOLDER ? "" : reasoningPart.text
+          parts[partIndex] = {
+            ...reasoningPart,
+            reasoningId,
+            providerMetadata: event.providerMetadata ?? reasoningPart.providerMetadata,
+            text: `${previousText}${delta}` || THOUGHT_PLACEHOLDER,
+          } as ReasoningPart
         } else {
-          parts.push({ type: "reasoning", text: event.delta })
+          parts.push({
+            type: "reasoning",
+            reasoningId,
+            providerMetadata: event.providerMetadata,
+            text: delta || THOUGHT_PLACEHOLDER,
+          } as ReasoningPart)
         }
         updated.content = parts
         set({
@@ -827,19 +883,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
       }
 
+      case "reasoning_start": {
+        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const target = baseList[index]
+        if (!target) break
+        const reasoningId = typeof event.reasoningId === "string" && event.reasoningId.trim().length > 0 ? event.reasoningId : "reasoning-0"
+        const updated = { ...target }
+        const parts = Array.isArray(updated.content)
+          ? [...(updated.content as MessagePart[])]
+          : (typeof updated.content === "string" && updated.content.length > 0 ? [{ type: "text" as const, text: updated.content }] : [])
+        const revIdx = [...parts].reverse().findIndex((p) => p.type === "reasoning" && ((p as ReasoningPart).reasoningId ?? "reasoning-0") === reasoningId)
+        if (revIdx < 0) {
+          parts.push({
+            type: "reasoning",
+            reasoningId,
+            providerMetadata: event.providerMetadata,
+            text: THOUGHT_PLACEHOLDER,
+          } as ReasoningPart)
+        }
+        updated.content = parts
+        set((s) => ({
+          ...s,
+          messages: [...baseList.slice(0, index), updated, ...baseList.slice(index + 1)],
+          reasoningStartTime: s.reasoningStartTime ?? Date.now(),
+          activeReasoning: { messageId: event.messageId, reasoningId },
+        }))
+        break
+      }
+
       case "reasoning_end": {
         const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
         const target = baseList[index]
         const startTime = get().reasoningStartTime
+        const reasoningId = typeof event.reasoningId === "string" && event.reasoningId.trim().length > 0 ? event.reasoningId : undefined
         if (!target || startTime == null || !Array.isArray(target.content)) {
-          set((s) => ({ ...s, reasoningStartTime: null }))
+          set((s) => ({ ...s, reasoningStartTime: null, activeReasoning: null }))
           break
         }
         const updated = { ...target }
         const parts = [...(updated.content as MessagePart[])]
-        const lastPart = parts[parts.length - 1]
-        if (lastPart?.type === "reasoning") {
-          parts[parts.length - 1] = { ...lastPart, durationMs: Date.now() - startTime } as ReasoningPart
+        const reasoningRevIndex = [...parts].reverse().findIndex((p) =>
+          p.type === "reasoning" && (reasoningId == null || ((p as ReasoningPart).reasoningId ?? "reasoning-0") === reasoningId)
+        )
+        if (reasoningRevIndex >= 0) {
+          const reasoningIndex = parts.length - 1 - reasoningRevIndex
+          const reasoningPart = parts[reasoningIndex] as ReasoningPart
+          parts[reasoningIndex] = {
+            ...reasoningPart,
+            reasoningId: reasoningPart.reasoningId ?? reasoningId,
+            providerMetadata: event.providerMetadata ?? reasoningPart.providerMetadata,
+            durationMs: Date.now() - startTime,
+          } as ReasoningPart
           updated.content = parts
           set({
             messages: [
@@ -848,10 +942,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ...baseList.slice(index + 1),
             ],
             reasoningStartTime: null,
+            activeReasoning: null,
           })
           break
         }
-        set((s) => ({ ...s, reasoningStartTime: null }))
+        set((s) => ({ ...s, reasoningStartTime: null, activeReasoning: null }))
         break
       }
 
@@ -917,9 +1012,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
               const cleanedParts = (last.content as MessagePart[])
                 .filter(
                   (p) =>
-                    p.type !== "text" ||
-                    stripToolCallMarkup((p as TextPart).text).length > 0 ||
-                    ((p as TextPart).user_message?.trim()?.length ?? 0) > 0
+                    (p.type !== "text" ||
+                      stripToolCallMarkup((p as TextPart).text).length > 0 ||
+                      ((p as TextPart).user_message?.trim()?.length ?? 0) > 0) &&
+                    (p.type !== "reasoning" ||
+                      ((p as ReasoningPart).text?.trim().length ?? 0) > 0 &&
+                      (p as ReasoningPart).text !== THOUGHT_PLACEHOLDER)
                 )
                 .map((p) => (p.type === "text" ? { ...p, text: stripToolCallMarkup((p as TextPart).text) } : p))
               msgs[msgs.length - 1] = { ...last, content: cleanedParts }
@@ -928,20 +1026,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           const latestAssistant = msgs[msgs.length - 1]
           const hasAssistantText =
-            latestAssistant?.role === "assistant"
-            && (
-              typeof latestAssistant.content === "string"
-                ? latestAssistant.content.trim().length > 0
-                : (() => {
-                    const parts = latestAssistant.content as MessagePart[]
-                    const hasTextOrUserMessage = parts.some(
-                      (p) =>
-                        p.type === "text" &&
-                        (((p as TextPart).text?.trim().length ?? 0) > 0 || ((p as TextPart).user_message?.trim()?.length ?? 0) > 0)
-                    )
-                    return hasTextOrUserMessage
-                  })()
-            )
+            latestAssistant?.role === "assistant" &&
+            hasRenderableAssistantContent(latestAssistant.content)
 
           // Always provide a text response when needed: add assistant fallback if model produced no final text
           if (!hasAssistantText && state.messages.length > 0) {
@@ -962,6 +1048,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             subagents: [],
             lastSpawnAgentPartId: null,
             reasoningStartTime: null,
+            activeReasoning: null,
           }
         })
         // Send next queued message when agent has finished
@@ -980,6 +1067,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           awaitingApproval: false,
           pendingApproval: null,
           reasoningStartTime: null,
+          activeReasoning: null,
           subagents: [],
           lastSpawnAgentPartId: null,
         }))
@@ -1031,12 +1119,198 @@ function ensureAssistantMessage(messages: SessionMessage[], messageId?: string):
   return { list, index: list.length - 1 }
 }
 
+function mergeAssistantContent(
+  previous: string | MessagePart[],
+  incoming: string | MessagePart[],
+): string | MessagePart[] {
+  if (!hasAssistantContent(incoming) && hasAssistantContent(previous)) {
+    return previous
+  }
+  if (!Array.isArray(previous) || !Array.isArray(incoming)) {
+    return incoming
+  }
+
+  const previousParts = previous as MessagePart[]
+  const incomingParts = incoming as MessagePart[]
+  const previousReasoning = previousParts.filter((p): p is ReasoningPart => p.type === "reasoning")
+  const incomingReasoning = incomingParts.filter((p): p is ReasoningPart => p.type === "reasoning")
+
+  if (previousReasoning.length === 0) return incoming
+  if (incomingReasoning.length === 0) {
+    return [...previousReasoning, ...incomingParts]
+  }
+
+  const prevText = previousReasoning.map((r) => r.text ?? "").join("").trim()
+  const inText = incomingReasoning.map((r) => r.text ?? "").join("").trim()
+  const incomingHasOnlyPlaceholder =
+    inText.length > 0 &&
+    inText === THOUGHT_PLACEHOLDER &&
+    prevText.length > 0 &&
+    prevText !== THOUGHT_PLACEHOLDER
+
+  if (incomingHasOnlyPlaceholder) {
+    const withoutIncomingReasoning = incomingParts.filter((p) => p.type !== "reasoning")
+    const incomingHasVisibleText = withoutIncomingReasoning.some(
+      (p) =>
+        p.type === "text" &&
+        ((((p as TextPart).text ?? "").trim().length > 0 && (p as TextPart).text !== THOUGHT_PLACEHOLDER) ||
+          (((p as TextPart).user_message ?? "").trim().length > 0))
+    )
+    if (incomingHasVisibleText) {
+      return [...previousReasoning, ...withoutIncomingReasoning]
+    }
+    // Keep richer previous text if snapshot only has placeholder reasoning; keep non-text parts from incoming snapshot.
+    const previousVisibleTextParts = previousParts.filter(
+      (p) =>
+        p.type === "text" &&
+        ((((p as TextPart).text ?? "").trim().length > 0 && (p as TextPart).text !== THOUGHT_PLACEHOLDER) ||
+          (((p as TextPart).user_message ?? "").trim().length > 0))
+    )
+    const incomingNonText = withoutIncomingReasoning.filter((p) => p.type !== "text")
+    return [...previousReasoning, ...previousVisibleTextParts, ...incomingNonText]
+  }
+
+  return incoming
+}
+
+function mergeStateMessagesForStream(previous: SessionMessage[], incoming: SessionMessage[]): SessionMessage[] {
+  if (previous.length === 0 || incoming.length === 0) return incoming
+
+  const merged = mergeOptimisticUserMessages(previous, incoming)
+  const lastIncoming = merged[merged.length - 1]
+  const lastPrevious = previous[previous.length - 1]
+
+  if (lastIncoming?.role === "assistant" && lastPrevious?.role === "assistant" && lastIncoming.id === lastPrevious.id) {
+    const mergedContent = mergeAssistantContent(lastPrevious.content, lastIncoming.content)
+    if (mergedContent !== lastIncoming.content) {
+      merged[merged.length - 1] = { ...lastIncoming, content: mergedContent }
+    }
+  } else if (
+    lastIncoming?.role === "assistant" &&
+    lastPrevious?.role === "assistant" &&
+    !hasAssistantContent(lastIncoming.content) &&
+    hasAssistantContent(lastPrevious.content)
+  ) {
+    merged[merged.length - 1] = { ...lastIncoming, content: lastPrevious.content }
+  }
+
+  if (incoming.length < previous.length) {
+    const isIncomingPrefix = incoming.every((message, index) => previous[index]?.id === message.id)
+    if (isIncomingPrefix) {
+      const trailingPrevious = previous.slice(incoming.length)
+      const hasVisibleTail = trailingPrevious.some((message) => {
+        if (message.role === "assistant") return hasAssistantContent(message.content)
+        if (message.role === "user") return message.id.startsWith("local_user_")
+        return true
+      })
+      if (hasVisibleTail) {
+        return [...merged, ...trailingPrevious]
+      }
+    }
+  }
+
+  const optimisticUsersToKeep = previous.filter(
+    (message) =>
+      message.role === "user" &&
+      message.id.startsWith("local_user_") &&
+      !merged.some(
+        (incomingMessage) =>
+          incomingMessage.role === "user" &&
+          messageTextContent(incomingMessage) === messageTextContent(message)
+      )
+  )
+  if (optimisticUsersToKeep.length > 0) {
+    return [...merged, ...optimisticUsersToKeep]
+  }
+
+  return merged
+}
+
+function mergeOptimisticUserMessages(previous: SessionMessage[], incoming: SessionMessage[]): SessionMessage[] {
+  const merged = [...incoming]
+  return merged.map((message) => {
+    if (message.role !== "user") return message
+    const text = messageTextContent(message)
+    const optimistic = previous.find(
+      (candidate) =>
+        candidate.role === "user" &&
+        candidate.id.startsWith("local_user_") &&
+        messageTextContent(candidate) === text
+    )
+    if (!optimistic) return message
+    return {
+      ...message,
+      id: optimistic.id,
+      ts: optimistic.ts,
+      content: optimistic.content,
+    }
+  })
+}
+
+function messageTextContent(message: SessionMessage): string {
+  if (typeof message.content === "string") return message.content.trim()
+  return (
+    (message.content as MessagePart[])
+      .filter((part): part is TextPart => part.type === "text")
+      .map((part) => `${part.text ?? ""}\n${part.user_message ?? ""}`)
+      .join("\n")
+      .trim()
+  )
+}
+
 function hasAssistantContent(content: string | MessagePart[]): boolean {
   if (typeof content === "string") return content.trim().length > 0
   const parts = content as MessagePart[]
   return parts.some(
-    (p) => p.type === "text" && (((p as TextPart).text?.trim().length ?? 0) > 0 || ((p as TextPart).user_message?.trim().length ?? 0) > 0)
+    (p) =>
+      (p.type === "text" && (((p as TextPart).text?.trim().length ?? 0) > 0 || ((p as TextPart).user_message?.trim().length ?? 0) > 0)) ||
+      (p.type === "reasoning" &&
+        ((p as ReasoningPart).text?.trim().length ?? 0) > 0 &&
+        (p as ReasoningPart).text !== THOUGHT_PLACEHOLDER) ||
+      p.type === "tool"
   )
+}
+
+function hasRenderableAssistantContent(content: string | MessagePart[]): boolean {
+  if (typeof content === "string") return content.trim().length > 0
+  const parts = content as MessagePart[]
+  return parts.some((p) => {
+    if (p.type === "text") {
+      return (
+        ((p as TextPart).text?.trim().length ?? 0) > 0 ||
+        ((p as TextPart).user_message?.trim().length ?? 0) > 0
+      )
+    }
+    if (p.type === "reasoning") {
+      return (
+        ((p as ReasoningPart).text?.trim().length ?? 0) > 0 &&
+        (p as ReasoningPart).text !== THOUGHT_PLACEHOLDER
+      )
+    }
+    return false
+  })
+}
+
+const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
+
+function isSlashCommand(text: string, command: string): boolean {
+  return new RegExp(`^/${command}(\\s|$)`, "i").test(text.trim())
+}
+
+function buildReviewPromptFromSlash(raw: string): string {
+  const args = raw.replace(/^\/review\s*/i, "").trim()
+  if (args.length > 0) return args
+  return `Run a local code review of uncommitted changes in this repository.
+
+Use git diff against HEAD and inspect changed files.
+Focus on bugs, regressions, security, and missing tests.
+
+Return in this format:
+## Local Review
+### Summary
+### Issues Found
+### Detailed Findings
+### Recommendation`
 }
 
 function stripToolCallMarkup(value: string): string {

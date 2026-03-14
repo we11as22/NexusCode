@@ -43,7 +43,13 @@ export { runAgentLoop } from "./agent/loop.js"
 export { MODE_TOOL_GROUPS, TOOL_GROUP_MEMBERS, READ_ONLY_TOOLS, getBuiltinToolsForMode } from "./agent/modes.js"
 export { classifyTools, classifySkills } from "./agent/classifier.js"
 export { buildSystemPrompt } from "./agent/prompts/components/index.js"
-export { ParallelAgentManager, createSpawnAgentTool } from "./agent/parallel.js"
+export {
+  ParallelAgentManager,
+  createSpawnAgentTool,
+  createSpawnAgentsAliasTool,
+  createSpawnAgentOutputTool,
+  createSpawnAgentStopTool,
+} from "./agent/parallel.js"
 
 // Tools
 export { ToolRegistry } from "./tools/registry.js"

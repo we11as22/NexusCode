@@ -14,6 +14,7 @@ import { createCerebrasClient } from "./cerebras.js"
 import { createCohereClient } from "./cohere.js"
 import { createTogetherAIClient } from "./togetherai.js"
 import { createPerplexityClient } from "./perplexity.js"
+import { createMiniMaxClient } from "./minimax.js"
 import { createEmbeddingClient, isEmbeddingApiKeyMissing } from "./embeddings.js"
 
 export function createLLMClient(config: ProviderConfig): LLMClient {
@@ -48,6 +49,8 @@ export function createLLMClient(config: ProviderConfig): LLMClient {
       return createTogetherAIClient(config)
     case "perplexity":
       return createPerplexityClient(config)
+    case "minimax":
+      return createMiniMaxClient(config)
     default:
       throw new Error(`Unknown provider: ${(config as ProviderConfig).provider}`)
   }

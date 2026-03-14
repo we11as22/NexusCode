@@ -1,9 +1,10 @@
-import type { LanguageModelV1, LanguageModelV1StreamPart } from "ai"
+import type { LanguageModelV1 } from "ai"
 import type { z } from "zod"
 
 export interface LLMStreamEvent {
   type:
     | "text_delta"
+    | "reasoning_start"
     | "reasoning_delta"
     | "reasoning_end"
     | "tool_input_start"
@@ -13,6 +14,8 @@ export interface LLMStreamEvent {
     | "error"
   // text events
   delta?: string
+  reasoningId?: string
+  providerMetadata?: Record<string, unknown>
   // tool events
   toolCallId?: string
   toolName?: string
@@ -55,14 +58,14 @@ export interface StreamOptions {
   cacheableSystemBlocks?: number
   maxTokens?: number
   temperature?: number
+  topP?: number
+  topK?: number
   maxRetries?: number
   initialRetryDelayMs?: number
   maxRetryDelayMs?: number
   retryOnStatus?: number[]
   /** Provider-specific options (e.g. anthropic: { thinking: { type: 'enabled', budgetTokens } }) */
   providerOptions?: Record<string, unknown>
-  /** Ordered fallback options (strongest -> safest). Stream may retry with next candidate if provider rejects reasoning params. */
-  providerOptionsCandidates?: Array<Record<string, unknown> | undefined>
 }
 
 export interface GenerateOptions<T> {

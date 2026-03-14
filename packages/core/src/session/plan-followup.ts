@@ -14,7 +14,10 @@ export function hadPlanExit(session: ISession): boolean {
   if (typeof content === "string") return false
   const parts = content as MessagePart[]
   return parts.some(
-    (p) => p.type === "tool" && (p as ToolPart).tool === "plan_exit" && (p as ToolPart).status === "completed"
+    (p) =>
+      p.type === "tool" &&
+      ["plan_exit", "PlanExit"].includes((p as ToolPart).tool) &&
+      (p as ToolPart).status === "completed"
   )
 }
 

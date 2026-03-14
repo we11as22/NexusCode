@@ -16,6 +16,16 @@ export interface SubAgentResult {
   error?: string
 }
 
+type SubAgentStatus = "running" | "completed" | "error"
+
+interface SubAgentSnapshot {
+  subagentId: string
+  sessionId: string
+  status: SubAgentStatus
+  output: string
+  error?: string
+}
+
 /**
  * Manager for parallel sub-agents.
  * Each sub-agent runs its own isolated session and agent loop.
@@ -27,10 +37,85 @@ export interface SubAgentResult {
  */
 export class ParallelAgentManager {
   private running = new Map<string, Promise<SubAgentResult>>()
+  private sessions = new Map<string, string>()
+  private outputById = new Map<string, string>()
+  private statusById = new Map<string, SubAgentStatus>()
+  private errorById = new Map<string, string | undefined>()
+  private controllers = new Map<string, AbortController>()
+  private history: string[] = []
+  private static readonly HISTORY_CAP = 100
   /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns (Cline-style guard). */
   private recentSpawnTasks: string[] = []
   private static readonly RECENT_SPAWN_CAP = 3
   private static readonly TASK_KEY_LEN = 80
+
+  private rememberId(subagentId: string): void {
+    this.history.push(subagentId)
+    if (this.history.length > ParallelAgentManager.HISTORY_CAP) {
+      const evict = this.history.shift()
+      if (evict) {
+        this.sessions.delete(evict)
+        this.outputById.delete(evict)
+        this.statusById.delete(evict)
+        this.errorById.delete(evict)
+        this.controllers.delete(evict)
+      }
+    }
+  }
+
+  private startTask(
+    description: string,
+    mode: Mode,
+    config: NexusConfig,
+    cwd: string,
+    signal: AbortSignal,
+    maxParallel: number,
+    emit?: (event: AgentEvent) => void,
+    contextSummary?: string,
+    parentPartId?: string,
+  ): Promise<{ subagentId: string; task: Promise<SubAgentResult> }> {
+    return (async () => {
+      // Wait for a concurrency slot
+      while (this.running.size >= maxParallel) {
+        await Promise.race([...this.running.values()]).catch(() => {})
+        // Flush the microtask queue so .finally() cleanup handlers run
+        // before we re-check .size
+        await Promise.resolve()
+      }
+
+      const subagentId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      this.rememberId(subagentId)
+      this.outputById.set(subagentId, "")
+      this.statusById.set(subagentId, "running")
+      this.errorById.set(subagentId, undefined)
+
+      const localController = new AbortController()
+      this.controllers.set(subagentId, localController)
+      signal.addEventListener("abort", () => localController.abort(), { once: true })
+
+      emit?.({ type: "subagent_start", subagentId, mode, task: description, parentPartId })
+
+      // The task self-removes from the map when it settles (success or error).
+      // This is what makes the while-loop above eventually terminate.
+      const task = this.runSubAgent(
+        subagentId,
+        description,
+        mode,
+        config,
+        cwd,
+        localController.signal,
+        emit,
+        contextSummary,
+        parentPartId,
+      ).finally(() => {
+        this.running.delete(subagentId)
+        this.controllers.delete(subagentId)
+      })
+
+      this.running.set(subagentId, task)
+      return { subagentId, task }
+    })()
+  }
 
   async spawn(
     description: string,
@@ -41,6 +126,7 @@ export class ParallelAgentManager {
     maxParallel: number,
     emit?: (event: AgentEvent) => void,
     contextSummary?: string,
+    parentPartId?: string,
   ): Promise<SubAgentResult> {
     const taskKey = description.trim().slice(0, ParallelAgentManager.TASK_KEY_LEN).toLowerCase()
     const isDuplicate = this.recentSpawnTasks.some(
@@ -52,7 +138,7 @@ export class ParallelAgentManager {
         sessionId: "",
         success: true,
         output:
-          "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call SpawnAgents again for the same task.",
+          "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call SpawnAgent again for the same task.",
       }
     }
     this.recentSpawnTasks.push(taskKey)
@@ -60,26 +146,95 @@ export class ParallelAgentManager {
       this.recentSpawnTasks.shift()
     }
 
-    // Wait for a concurrency slot
-    while (this.running.size >= maxParallel) {
-      await Promise.race([...this.running.values()]).catch(() => {})
-      // Flush the microtask queue so .finally() cleanup handlers run
-      // before we re-check .size
-      await Promise.resolve()
+    const { task } = await this.startTask(
+      description,
+      mode,
+      config,
+      cwd,
+      signal,
+      maxParallel,
+      emit,
+      contextSummary,
+      parentPartId,
+    )
+    return task
+  }
+
+  async spawnInBackground(
+    description: string,
+    mode: Mode,
+    config: NexusConfig,
+    cwd: string,
+    signal: AbortSignal,
+    maxParallel: number,
+    emit?: (event: AgentEvent) => void,
+    contextSummary?: string,
+    parentPartId?: string,
+  ): Promise<{ subagentId: string }> {
+    const taskKey = description.trim().slice(0, ParallelAgentManager.TASK_KEY_LEN).toLowerCase()
+    const isDuplicate = this.recentSpawnTasks.some(
+      (t) => t === taskKey || taskKey.startsWith(t) || t.startsWith(taskKey)
+    )
+    if (isDuplicate) {
+      const subagentId = `skip_${Date.now()}`
+      this.rememberId(subagentId)
+      this.sessions.set(subagentId, "")
+      this.outputById.set(
+        subagentId,
+        "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call SpawnAgent again for the same task.",
+      )
+      this.statusById.set(subagentId, "completed")
+      this.errorById.set(subagentId, undefined)
+      return { subagentId }
+    }
+    this.recentSpawnTasks.push(taskKey)
+    if (this.recentSpawnTasks.length > ParallelAgentManager.RECENT_SPAWN_CAP) {
+      this.recentSpawnTasks.shift()
     }
 
-    const subagentId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-    emit?.({ type: "subagent_start", subagentId, mode, task: description })
+    const { subagentId } = await this.startTask(
+      description,
+      mode,
+      config,
+      cwd,
+      signal,
+      maxParallel,
+      emit,
+      contextSummary,
+      parentPartId,
+    )
+    return { subagentId }
+  }
 
-    // The task self-removes from the map when it settles (success or error).
-    // This is what makes the while-loop above eventually terminate.
-    const task = this.runSubAgent(subagentId, description, mode, config, cwd, signal, emit, contextSummary).finally(() => {
-      this.running.delete(subagentId)
-    })
+  getSnapshot(subagentId: string): SubAgentSnapshot | null {
+    const sessionId = this.sessions.get(subagentId) ?? ""
+    const status = this.statusById.get(subagentId)
+    const output = this.outputById.get(subagentId) ?? ""
+    const error = this.errorById.get(subagentId)
+    if (!status && !this.running.has(subagentId) && !sessionId && !output) return null
+    const normalizedStatus: SubAgentStatus = status ?? (this.running.has(subagentId) ? "running" : "completed")
+    return {
+      subagentId,
+      sessionId,
+      status: normalizedStatus,
+      output,
+      ...(error ? { error } : {}),
+    }
+  }
 
-    this.running.set(subagentId, task)
+  async waitFor(subagentId: string): Promise<SubAgentSnapshot | null> {
+    const running = this.running.get(subagentId)
+    if (running) {
+      await running.catch(() => {})
+    }
+    return this.getSnapshot(subagentId)
+  }
 
-    return task
+  stop(subagentId: string): boolean {
+    const ctrl = this.controllers.get(subagentId)
+    if (!ctrl) return false
+    ctrl.abort()
+    return true
   }
 
   private async runSubAgent(
@@ -91,8 +246,10 @@ export class ParallelAgentManager {
     signal: AbortSignal,
     emit?: (event: AgentEvent) => void,
     contextSummary?: string,
+    parentPartId?: string,
   ): Promise<SubAgentResult> {
     const session = Session.create(cwd)
+    this.sessions.set(subagentId, session.id)
     const userContent = contextSummary?.trim()
       ? `${contextSummary}\n\n---\n\nTask: ${description}`
       : description
@@ -108,6 +265,7 @@ export class ParallelAgentManager {
     const compaction = createCompaction()
 
     let output = ""
+    const manager = this
 
     const mockHost = {
       cwd,
@@ -133,12 +291,19 @@ export class ParallelAgentManager {
       emit(event: AgentEvent) {
         if (event.type === "text_delta" && event.delta) {
           output += event.delta
+          manager.outputById.set(subagentId, output)
         }
         if (event.type === "tool_start") {
-          emit?.({ type: "subagent_tool_start", subagentId, tool: event.tool })
+          emit?.({
+            type: "subagent_tool_start",
+            subagentId,
+            tool: event.tool,
+            input: event.input,
+            parentPartId,
+          })
         }
         if (event.type === "tool_end") {
-          emit?.({ type: "subagent_tool_end", subagentId, tool: event.tool, success: event.success })
+          emit?.({ type: "subagent_tool_end", subagentId, tool: event.tool, success: event.success, parentPartId })
         }
       },
     }
@@ -161,7 +326,11 @@ export class ParallelAgentManager {
         subagentId,
         success: true,
         outputPreview: output.slice(0, 300),
+        parentPartId,
       })
+      this.outputById.set(subagentId, output)
+      this.statusById.set(subagentId, "completed")
+      this.errorById.set(subagentId, undefined)
       return { subagentId, sessionId: session.id, success: true, output }
     } catch (err) {
       const error = (err as Error).message
@@ -171,7 +340,11 @@ export class ParallelAgentManager {
         success: false,
         outputPreview: output.slice(0, 300),
         error,
+        parentPartId,
       })
+      this.outputById.set(subagentId, output || "")
+      this.statusById.set(subagentId, "error")
+      this.errorById.set(subagentId, error)
       return {
         subagentId,
         sessionId: session.id,
@@ -188,60 +361,51 @@ export class ParallelAgentManager {
   }
 }
 
-const taskItemSchema = z
+const spawnSchema = z
   .object({
-    description: z.string().describe("Clear, self-contained task description for this sub-agent."),
+    description: z.string().min(1).describe("Task description for this single sub-agent."),
     context_summary: z.string().optional().describe("Optional brief context for this task (e.g. background, relevant files)."),
     mode: z.enum(["agent", "plan", "ask", "debug", "review", "search", "explore"]).optional().describe("Mode for this sub-agent (default: agent). 'search'/'explore' → ask."),
+    run_in_background: z.boolean().optional().describe("Set true to start sub-agent in background and continue immediately. Use SpawnAgentOutput to poll status/output."),
+    task_progress: z.string().optional(),
   })
   .strict()
 
-const spawnSchema = (maxTasksPerCall: number) =>
-  z
-    .object({
-      description: z.string().optional().describe("Single task: what should the sub-agent do? (Use when launching one sub-agent.)"),
-      context_summary: z.string().optional().describe("Optional context for the single task (used only when tasks is not provided)."),
-      mode: z.enum(["agent", "plan", "ask", "debug", "review", "search", "explore"]).optional().describe("Mode for the single sub-agent (default: agent)."),
-      task_progress: z.string().optional(),
-      tasks: z
-        .array(taskItemSchema)
-        .max(maxTasksPerCall)
-        .optional()
-        .describe(
-          `Optional list of tasks to run in parallel (up to ${maxTasksPerCall} per call). When provided, all run concurrently; omit or use single \`description\` for one task.`
-        ),
-    })
-    .strict()
-    .refine(
-      (data) =>
-        (data.tasks != null && data.tasks.length > 0) ||
-        (typeof data.description === "string" && data.description.trim().length > 0),
-      { message: "Provide either description (single task) or non-empty tasks array." }
-    )
+const spawnOutputSchema = z
+  .object({
+    subagent_id: z.string().min(1).describe("ID returned by SpawnAgent when run_in_background is true."),
+    block: z.boolean().optional().describe("When true, wait until the sub-agent finishes; when false, return current status immediately (default: true)."),
+  })
+  .strict()
+
+const spawnStopSchema = z
+  .object({
+    subagent_id: z.string().min(1).describe("Background sub-agent ID to stop."),
+  })
+  .strict()
 
 export function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef {
-  const maxTasksPerCall = config.parallelAgents?.maxTasksPerCall ?? 12
-  const schema = spawnSchema(maxTasksPerCall)
+  const schema = spawnSchema
 
   return {
-    name: "SpawnAgents",
-    description: `Launch one or more parallel sub-agents. Use for independent subtasks that don't depend on each other.
-**Single task:** pass \`description\` (and optional \`context_summary\`, \`mode\`).
-**Multiple tasks:** pass \`tasks\` array with up to ${maxTasksPerCall} items; each has \`description\` and optional \`context_summary\`, \`mode\`. All tasks in one call run in parallel (subject to max concurrent limit).
+    name: "SpawnAgent",
+    description: `Launch exactly one sub-agent for a focused task.
+For running many sub-agents concurrently, use the Parallel tool with multiple SpawnAgent calls in one batch.
 **When the main agent is in plan, ask, or review mode**, sub-agents always run with ask (read-only) permissions.
 **When the main agent is in agent/debug mode**, sub-agents can run in agent/plan/ask/debug/review per \`mode\`.
-Each sub-agent must call final_report_to_user when done; results are returned in order.
+Set \`run_in_background: true\` for non-blocking execution and poll with \`SpawnAgentOutput\`.
+Each sub-agent must end with a clear text summary.
 Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
     parameters: schema,
     // Available in all modes; sub-agent permissions follow parent (plan/ask/review → ask, agent/debug → requested mode)
 
     async execute(
       args: {
-        description?: string
+        description: string
         context_summary?: string
         mode?: Mode | "search" | "explore"
+        run_in_background?: boolean
         task_progress?: string
-        tasks?: Array<{ description: string; context_summary?: string; mode?: Mode | "search" | "explore" }>
       },
       ctx: ToolContext,
     ) {
@@ -266,32 +430,26 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
           maxParallel,
           emit,
           contextSummary,
+          ctx.partId,
         )
 
-      if (args.tasks != null && args.tasks.length > 0) {
-        const results = await Promise.all(
-          args.tasks.map((t) => runOne(t.description, t.context_summary, t.mode)),
+      if (args.run_in_background) {
+        const started = await manager.spawnInBackground(
+          args.description,
+          normalizeMode(args.mode),
+          ctx.config,
+          ctx.cwd,
+          ctx.signal,
+          maxParallel,
+          emit,
+          args.context_summary,
+          ctx.partId,
         )
-        const outputs: string[] = []
-        let allSuccess = true
-        for (let i = 0; i < results.length; i++) {
-          const r = results[i]
-          const label = args.tasks[i].description.slice(0, 50) + (args.tasks[i].description.length > 50 ? "…" : "")
-          if (r.error) {
-            allSuccess = false
-            outputs.push(`[${i + 1}] ${label}\nSub-agent ${r.subagentId} failed: ${r.error}\nPartial: ${r.output.slice(0, 400)}`)
-          } else {
-            outputs.push(`[${i + 1}] ${label}\nSub-agent ${r.subagentId} completed:\n${r.output}`)
-          }
-        }
         return {
-          success: allSuccess,
-          output: outputs.join("\n\n---\n\n"),
+          success: true,
+          output: `Sub-agent ${started.subagentId} started in background. Use SpawnAgentOutput with subagent_id=${started.subagentId} to monitor.`,
+          metadata: { subagent_id: started.subagentId, status: "running", background: true },
         }
-      }
-
-      if (typeof args.description !== "string" || !args.description.trim()) {
-        return { success: false, output: "Provide description or non-empty tasks array." }
       }
 
       const result = await runOne(args.description, args.context_summary, args.mode)
@@ -303,5 +461,69 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
       }
       return { success: true, output: `Sub-agent ${result.subagentId} completed:\n\n${result.output}` }
     },
+  }
+}
+
+export function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnOutputSchema>> {
+  return {
+    name: "SpawnAgentOutput",
+    description: `Get output/status from a background SpawnAgent task.
+- Pass subagent_id returned by SpawnAgent(run_in_background: true).
+- block=true waits for completion; block=false returns current status immediately.
+- Returns status (running/completed/error), partial or final output, and error if any.`,
+    parameters: spawnOutputSchema,
+    readOnly: true,
+    async execute({ subagent_id, block }, _ctx: ToolContext) {
+      const shouldBlock = block ?? true
+      const snapshot = shouldBlock ? await manager.waitFor(subagent_id) : manager.getSnapshot(subagent_id)
+      if (!snapshot) {
+        return {
+          success: false,
+          output: `Unknown sub-agent id: ${subagent_id}.`,
+        }
+      }
+      const statusLine = `[Sub-agent status: ${snapshot.status}]`
+      const body = snapshot.output?.trim() ? snapshot.output : "(no output yet)"
+      const errLine = snapshot.error ? `\nError: ${snapshot.error}` : ""
+      return {
+        success: snapshot.status !== "error",
+        output: `${statusLine}\n${body}${errLine}`,
+        metadata: {
+          subagent_id: snapshot.subagentId,
+          status: snapshot.status,
+          session_id: snapshot.sessionId,
+          ...(snapshot.error ? { error: snapshot.error } : {}),
+        },
+      }
+    },
+  }
+}
+
+export function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnStopSchema>> {
+  return {
+    name: "SpawnAgentStop",
+    description: "Stop a running background sub-agent started via SpawnAgent(run_in_background: true).",
+    parameters: spawnStopSchema,
+    async execute({ subagent_id }, _ctx: ToolContext) {
+      const stopped = manager.stop(subagent_id)
+      if (!stopped) {
+        return { success: false, output: `No active background sub-agent with id ${subagent_id}.` }
+      }
+      return { success: true, output: `Stop signal sent to ${subagent_id}.` }
+    },
+  }
+}
+
+/**
+ * Backward-compatible alias for old sessions/prompts that still call SpawnAgents.
+ * Runtime behavior is identical to SpawnAgent (single sub-agent per call).
+ */
+export function createSpawnAgentsAliasTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef {
+  const base = createSpawnAgentTool(manager, config)
+  return {
+    ...base,
+    name: "SpawnAgents",
+    description:
+      `${base.description}\n\n[Deprecated alias] Use SpawnAgent instead.`,
   }
 }

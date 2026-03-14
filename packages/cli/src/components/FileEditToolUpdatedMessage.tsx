@@ -2,11 +2,9 @@ import { Hunk } from 'diff'
 import { Box, Text } from 'ink'
 import * as React from 'react'
 import { intersperse } from '../utils/array.js'
-import { StructuredDiff } from './StructuredDiff.js'
 import { getTheme } from '../utils/theme.js'
 import { getCwd } from '../utils/state.js'
 import { relative } from 'path'
-import { useTerminalSize } from '../hooks/useTerminalSize.js'
 
 type Props = {
   filePath: string
@@ -19,7 +17,6 @@ export function FileEditToolUpdatedMessage({
   structuredPatch,
   verbose,
 }: Props): React.ReactNode {
-  const { columns } = useTerminalSize()
   const numAdditions = structuredPatch.reduce(
     (count, hunk) => count + hunk.lines.filter(_ => _.startsWith('+')).length,
     0,
@@ -52,7 +49,20 @@ export function FileEditToolUpdatedMessage({
       {intersperse(
         structuredPatch.map(_ => (
           <Box flexDirection="column" paddingLeft={5} key={_.newStart}>
-            <StructuredDiff patch={_} dim={false} width={columns - 12} />
+            {_.lines
+              .filter(line => line.startsWith('+') || line.startsWith('-'))
+              .map((line, idx) => (
+                <Text
+                  key={`${_.newStart}-${idx}`}
+                  color={
+                    line.startsWith('+')
+                      ? getTheme().diff.added
+                      : getTheme().diff.removed
+                  }
+                >
+                  {line}
+                </Text>
+              ))}
           </Box>
         )),
         i => (

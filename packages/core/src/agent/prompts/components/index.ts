@@ -17,6 +17,8 @@ export interface PromptContext {
   gitBranch?: string
   todoList?: string
   diagnostics?: DiagnosticItem[]
+  /** Active background bash jobs (bash_id, status, log path). */
+  backgroundJobsSummary?: string
   /** Short project layout (top-level dirs and key files) at start */
   initialProjectContext?: string
   /** Context window usage (shown at start of system info so model sees token budget) */
@@ -94,8 +96,8 @@ You have complete access: read/write files, run shell commands, search the codeb
 - Read all relevant context before making changes; prefer \`Edit\` over \`Write\` for existing files.
 - **Verify** — After changes, run tests/build; fix failures before marking the task complete.
 - **Flow** — On a new goal, run a brief read-only discovery (multiple grep/CodebaseSearch in parallel, then targeted Read). Before each logical group of tool calls, write one short plain-text progress sentence and then execute the tools. Use parallel tool calls for independent operations.
-- **Sub-agents** — Use \`Agent\` (SpawnAgents) early for focused sub-tasks (e.g. "analyze X", "implement Y"). For parallel subtasks, pass a \`tasks\` array in one call. Do not call \`Agent\` repeatedly for the same or very similar task.
-- **Decomposition & parallelization** — When a task is complex or spans multiple areas: (1) Decompose into subtasks and identify which are independent vs dependent. (2) Independent subtasks (different files/areas) → run in parallel via SpawnAgents with a \`tasks\` array in one call. (3) Dependent subtasks → different waves; wait for one wave to complete before starting the next. (4) If two agents might touch the same file → run them sequentially (different waves). (5) You can do implementation yourself or delegate to sub-agents; use sub-agents when it saves context or when subtasks are clearly separable.
+- **Sub-agents** — Use \`SpawnAgent\` early for focused sub-tasks (e.g. "analyze X", "implement Y"). For parallel subtasks, use \`Parallel\` with multiple \`SpawnAgent\` calls in one batch. Use \`run_in_background: true\` when the sub-agent can run independently, then poll with \`SpawnAgentOutput\` and stop with \`SpawnAgentStop\` if needed. Do not call sub-agents repeatedly for the same or very similar task.
+- **Decomposition & parallelization** — When a task is complex or spans multiple areas: (1) Decompose into subtasks and identify which are independent vs dependent. (2) Independent subtasks (different files/areas) → run in parallel via \`Parallel\` + multiple \`SpawnAgent\` entries in one call. (3) Dependent subtasks → different waves; wait for one wave to complete before starting the next. (4) If two agents might touch the same file → run them sequentially (different waves). (5) You can do implementation yourself or delegate to sub-agents; use sub-agents when it saves context or when subtasks are clearly separable.
 - **Always end your turn with a text reply to the user.** After using tools, summarize what you did. Never end with only tool calls.`,
 
     plan: `## PLAN Mode — Research & Planning (Kilo-style)
@@ -114,7 +116,7 @@ The user will choose one of:
 - **Abandon** — they leave plan mode; no execution.
 
 - Use parallel reads and discovery (grep, CodebaseSearch, ListCodeDefinitions) to explore efficiently.
-- You may use \`Agent\` for parallel research subtasks (sub-agents run in ask mode). Do not use it for implementation.
+- You may use \`SpawnAgent\` for research subtasks (sub-agents run in ask mode). For parallel sub-agents, use \`Parallel\` with multiple \`SpawnAgent\` calls. Use \`run_in_background: true\` only for independent research and track it via \`SpawnAgentOutput\`. Do not use sub-agents for implementation in ask mode.
 - **Always end your turn with a text reply to the user** (or ExitPlanMode). After using tools, summarize what you found. Never end with only tool calls.`,
 
     ask: `## ASK Mode — Read-only Q&A and Explanations
@@ -124,7 +126,7 @@ You are a knowledgeable technical assistant focused on answering questions and e
 **Strict constraints:**
 - You MUST NOT edit, create, or delete any files. Do not use Write or Edit.
 - You MUST NOT run shell commands (Bash is disabled). Do not suggest commands for the user to run unless they explicitly ask.
-- You may use Agent for parallel read-only subtasks (sub-agents run in ask mode); for implementation work, tell the user to switch to agent mode.
+- You may use SpawnAgent for read-only subtasks (sub-agents run in ask mode); for parallel sub-agents, use Parallel with multiple SpawnAgent calls. Use \`run_in_background: true\` only for independent subtasks and poll with \`SpawnAgentOutput\`. For implementation work, tell the user to switch to agent mode.
 
 **What you should do:**
 - Answer questions thoroughly with clear explanations and relevant examples. Use search-first: run grep/CodebaseSearch (and ListCodeDefinitions) to locate relevant code; then Read only the ranges you need. Do not read whole files to explore.
@@ -328,7 +330,8 @@ const TOOL_USE_GUIDE = `## Tool Usage
 
 - **DEFAULT TO PARALLEL** — Unless operations genuinely require sequential order (output of A is required for B), always execute multiple tools simultaneously. This is not an optimization — it is the **expected behavior**. Sequential one-at-a-time calls waste the user's time. Parallel discovery is 3–5× faster. When gathering information, plan what you need and execute all searches in one turn.
 
-- **Use \`Parallel\` when needed** — If the provider supports only one tool call per step, use the built-in \`Parallel\` tool with \`tool_uses\` to batch independent **read-only** calls (e.g. several Read/Grep/Glob calls) in one step. For mutating tools (Write/Edit/Bash), call them directly (not through \`Parallel\`).
+- **Use \`Parallel\` when needed** — If the provider supports only one tool call per step, use the built-in \`Parallel\` tool with \`tool_uses\` to batch independent calls in one step. Primary use: read-only discovery (Read/Grep/Glob/etc). Special case: you may run multiple \`SpawnAgent\` calls in one Parallel batch for concurrent sub-agents. For mutating tools (Write/Edit/Bash), call them directly (not through \`Parallel\`).
+- **Background sub-agents** — For independent long subtasks, call \`SpawnAgent(..., run_in_background: true)\`. It returns \`subagent_id\`. Monitor with \`SpawnAgentOutput({ subagent_id, block: false })\`; wait for completion with \`block: true\`; stop with \`SpawnAgentStop\` if required.
 
 - **Context window** — Check the Environment block for "Context: X / Y tokens (Z%)". When usage is high (e.g. >80%), use the \`condense\` tool to summarize the conversation and free tokens before continuing.
 - **Explore structure first** — Use \`List\` (root and key dirs), \`glob\` (find by pattern, e.g. \`**/*.ts\`), \`ListCodeDefinitions\` (file or dir for symbols and line numbers), and \`grep\` (exact patterns, identifiers, imports) to understand the codebase before opening files. Prefer these over reading whole files when you are discovering layout or locating code.
@@ -402,7 +405,7 @@ const GIT_HYGIENE = `## Git & Workspace
 
 const TASK_PROGRESS_GUIDE = `## Task Progress
 
-Use \`TodoWrite\` to track progress on complex tasks. Use \`merge: true\` to update existing todos by id; use \`merge: false\` to replace the list. Each item has \`id\`, \`content\`, and \`status\` (pending | in_progress | completed | cancelled).
+Use \`TodoWrite\` aggressively on any non-trivial work. Start early, update often, and keep exactly one active \`in_progress\` item. Use \`merge: true\` to update existing todos by id; use \`merge: false\` to replace the list. Each item has \`id\`, \`content\`, and \`status\` (pending | in_progress | completed | cancelled).
 
 ### When to Use
 
@@ -428,6 +431,9 @@ Skip for:
 - **Only one \`in_progress\` at a time** — Complete the current item before starting the next.
 - **Mark complete immediately** — As soon as a task is done, mark it \`completed\`. Do not batch.
 - **Create only when none exists** — If context has no "Current Todo List", create one with \`merge: false\`.
+- **Track background work explicitly** — If you start \`Bash(..., run_in_background: true)\`, immediately add/update a todo item that includes the \`bash_id\` and expected completion condition (e.g. "wait for tests to exit cleanly"). Do not end the task while background jobs that matter are still unchecked.
+- **Do not forget sub-agents** — After each \`SpawnAgent\` (or Parallel batch with SpawnAgent), consume and summarize each sub-agent result before moving on. For background runs, poll each \`subagent_id\` via \`SpawnAgentOutput\` until it finishes (or stop with \`SpawnAgentStop\`). If results are incomplete or conflicting, run follow-up sub-agents/tasks and resolve before finalizing.
+- **Before final response** — Verify there are no pending critical background checks: poll each active \`bash_id\` with \`BashOutput\` (and \`KillBash\` if needed) or explicitly state why it is safe to leave it running.
 - **Batch with other tool calls** — Prefer creating the first todo as \`in_progress\` and starting work in the same turn.
 - **Call silently** — Do not announce "I'm updating the todo list". Just do it.`
 
@@ -544,6 +550,13 @@ export function buildSystemInfoBlock(ctx: PromptContext): string {
     }
   }
   lines.push(`</env>`)
+
+  if (ctx.backgroundJobsSummary?.trim()) {
+    lines.push(``)
+    lines.push(`## Active Background Bash Jobs`)
+    lines.push(`Track these jobs explicitly. Poll with BashOutput until done or stop with KillBash when appropriate:`)
+    lines.push(ctx.backgroundJobsSummary)
+  }
 
   if (ctx.initialProjectContext?.trim()) {
     lines.push(``)

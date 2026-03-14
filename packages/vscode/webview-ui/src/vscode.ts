@@ -6,14 +6,25 @@ declare function acquireVsCodeApi(): {
   setState(state: unknown): void
 }
 
+declare global {
+  interface Window {
+    __NEXUS_VSCODE_API__?: ReturnType<typeof acquireVsCodeApi>
+  }
+}
+
 let vscodeApi: ReturnType<typeof acquireVsCodeApi> | null = null
 
 const pendingConfirms = new Map<string, (ok: boolean) => void>()
 
 export function getVsCode() {
   if (!vscodeApi) {
-    if (typeof acquireVsCodeApi !== "undefined") {
+    if (typeof window !== "undefined" && window.__NEXUS_VSCODE_API__) {
+      vscodeApi = window.__NEXUS_VSCODE_API__
+    } else if (typeof acquireVsCodeApi !== "undefined") {
       vscodeApi = acquireVsCodeApi()
+      if (typeof window !== "undefined") {
+        window.__NEXUS_VSCODE_API__ = vscodeApi
+      }
     } else {
       // Dev mode mock
       vscodeApi = {

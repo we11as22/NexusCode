@@ -11,19 +11,9 @@ export const MIN_LOGO_WIDTH = 46
 export function Logo({
   mcpClients,
   isDefaultModel = false,
-  nexusMode,
-  nexusModel,
-  nexusIndexEnabled,
-  nexusSessionId,
 }: {
   mcpClients: WrappedClient[]
   isDefaultModel?: boolean
-  /** When set, show Nexus mode/model/index in the header */
-  nexusMode?: string
-  nexusModel?: string
-  nexusIndexEnabled?: boolean
-  /** When set (Nexus), show session id in the header for resume command */
-  nexusSessionId?: string
 }): React.ReactNode {
   const width = Math.max(MIN_LOGO_WIDTH, getCwd().length + 12)
   const theme = getTheme()
@@ -60,24 +50,10 @@ export function Logo({
           <Box paddingLeft={2} flexDirection="column" gap={1}>
             <Text color={theme.secondaryText} italic>
               /help for help
-              {nexusMode != null && <> · Use /undo to revert the last message and file changes</>}
+              {process.env.USER_TYPE === 'ant' && <> · Use /undo to revert the last message and file changes</>}
               {process.env.USER_TYPE === 'ant' && <> · NexusCode</>}
             </Text>
             <Text color={theme.secondaryText}>cwd: {getCwd()}</Text>
-            {nexusMode != null && (
-              <Text color={theme.secondaryText}>
-                Nexus: mode=<Text bold>{nexusMode}</Text>
-                {nexusModel != null && (
-                  <> · model=<Text bold>{nexusModel}</Text></>
-                )}
-                {nexusIndexEnabled != null && (
-                  <> · index={nexusIndexEnabled ? 'on' : 'off'}</>
-                )}
-                {nexusSessionId != null && (
-                  <> · session=<Text bold>{nexusSessionId}</Text></>
-                )}
-              </Text>
-            )}
           </Box>
           {hasOverrides && (
             <Box

@@ -112,7 +112,7 @@ export interface QueryNexusOptions {
   autoApprove?: boolean
   /** Override mode for this run (agent/plan/ask/debug/review). Defaults to nexus.mode. */
   modeOverride?: string
-  /** When set, called for each subagent_* event; partId is the SpawnAgents tool_use id. */
+  /** When set, called for each subagent_* event; partId is the SpawnAgent tool_use id. */
   onSubagentEvent?: (partId: string, event: SubagentEvent) => void
   /** When set, called when a run completes with the host (for revert last turn /undo). */
   onRunComplete?: (host: import('./host.js').CliHost) => void
@@ -180,7 +180,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   const eventQueue: AgentEvent[] = []
   let resolveNext: (() => void) | null = null
   let runError: Error | null = null
-  /** partId of the last tool_start(SpawnAgents); subagent_* events attach to this part. */
+  /** partId of the last tool_start(SpawnAgent); subagent_* events attach to this part. */
   let lastSpawnAgentPartId: string | null = null
 
   const allApprovalsEnabled =
@@ -258,7 +258,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           yield am
         }
       } else if (event.type === 'tool_start') {
-        if (event.tool === 'SpawnAgents') lastSpawnAgentPartId = event.partId
+        if (event.tool === 'SpawnAgent' || event.tool === 'SpawnAgents') lastSpawnAgentPartId = event.partId
         // Match reference: ProgressMessage content must have content[0] = tool_use so REPL shows ToolUseLoader
         const toolUseBlock: ContentBlockParam = {
           type: 'tool_use',
@@ -292,7 +292,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         consumed.push(pm)
         yield pm
       } else if (event.type === 'tool_end') {
-        if (event.tool === 'SpawnAgents') lastSpawnAgentPartId = null
+        if (event.tool === 'SpawnAgent' || event.tool === 'SpawnAgents') lastSpawnAgentPartId = null
         const toolResultText = event.output ?? (event.error ?? '')
         const toolResultData = {
           tool: event.tool,
@@ -329,13 +329,15 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         return true
       } else if (
         onSubagentEvent &&
-        lastSpawnAgentPartId &&
         (event.type === 'subagent_start' ||
           event.type === 'subagent_tool_start' ||
           event.type === 'subagent_tool_end' ||
           event.type === 'subagent_done')
       ) {
-        onSubagentEvent(lastSpawnAgentPartId, event as SubagentEvent)
+        const parentPartId = (event as { parentPartId?: string }).parentPartId ?? lastSpawnAgentPartId
+        if (parentPartId) {
+          onSubagentEvent(parentPartId, event as SubagentEvent)
+        }
       }
     }
     return false

@@ -3,7 +3,7 @@ import { z } from "zod"
 const PROVIDER_NAMES = [
   "anthropic", "openai", "google", "ollama", "openai-compatible",
   "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras",
-  "cohere", "togetherai", "perplexity",
+  "cohere", "togetherai", "perplexity", "minimax",
 ] as const
 
 const providerSchema = z.object({
@@ -12,8 +12,8 @@ const providerSchema = z.object({
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
-  /** Optional reasoning effort hint for reasoning-capable models. */
-  reasoningEffort: z.string().optional(),
+  /** Reasoning effort hint for reasoning-capable models. "auto" (default) enables thinking only for known reasoning models. */
+  reasoningEffort: z.string().default("auto"),
   /** Optional explicit context window size override (tokens). */
   contextWindow: z.number().int().positive().optional(),
   resourceName: z.string().optional(),
@@ -54,7 +54,7 @@ export const NexusConfigSchema = z.object({
   model: providerSchema.default({
     provider: "openai-compatible",
     id: "minimax/minimax-m2.5:free",
-    baseUrl: "https://api.kilo.ai/api/gateway",
+    baseUrl: "https://api.kilo.ai/api/openrouter",
   }),
 
   embeddings: embeddingSchema.optional(),
@@ -132,7 +132,7 @@ export const NexusConfigSchema = z.object({
 
   /** UI preferences (e.g. chat pane). */
   ui: z.object({
-    /** When true, streamed text_delta is shown in chat as muted/small "reasoning"; when false, only tool-written text (progress_note, final_report_to_user) is shown. */
+    /** When true, streamed text_delta is shown in chat as muted/small "reasoning"; when false, only final assistant text is shown. */
     showReasoningInChat: z.boolean().default(false),
   }).default({}),
 
@@ -171,7 +171,7 @@ export const NexusConfigSchema = z.object({
 
   parallelAgents: z.object({
     maxParallel: z.number().int().positive().default(4),
-    /** Max tasks per single SpawnAgents call when using \`tasks\` array (default 12). */
+    /** Deprecated: old SpawnAgents multi-task setting. Parallel sub-agent batching now uses Parallel + SpawnAgent calls. */
     maxTasksPerCall: z.number().int().positive().default(12),
   }).default({}),
 

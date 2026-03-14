@@ -25,10 +25,13 @@ import {
 import type { ApprovalAction } from "../types.js"
 import {
   buildReasoningProviderOptions,
-  buildReasoningProviderOptionsCandidates,
+  getDefaultTemperature,
+  getDefaultTopK,
+  getDefaultTopP,
 } from "../provider/provider-options.js"
 
 const MAX_CONSECUTIVE_INVALID = 3
+const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
 
 function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: string): boolean {
   const msg = session.messages.find((m) => m.id === messageId)
@@ -55,6 +58,8 @@ export interface ProcessStreamStepOptions {
   cacheableSystemBlocks?: number
   maxTokens: number
   temperature?: number
+  topP?: number
+  topK?: number
   signal: AbortSignal
   session: ISession
   host: IHost
@@ -107,6 +112,8 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
     cacheableSystemBlocks,
     maxTokens,
     temperature,
+    topP,
+    topK,
     signal,
     session,
     host,
@@ -127,6 +134,11 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
 
   let currentText = ""
   let currentReasoning = ""
+  let currentReasoningId: string | undefined
+  let currentReasoningMetadata: Record<string, unknown> | undefined
+  let currentReasoningDurationMs: number | undefined
+  let currentReasoningStartedAt: number | undefined
+  let sawReasoningSignal = false
   const pendingReads: Array<{ toolCallId: string; toolName: string; toolInput: Record<string, unknown> }> = []
   let lastToolName = ""
   let sawNativeToolCall = false
@@ -144,13 +156,39 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
   const flushAssistantContent = () => {
     const msg = session.messages.find((m) => m.id === newMessageId)
     const existingParts = msg && Array.isArray(msg.content) ? (msg.content as MessagePart[]) : []
-    const toolParts = existingParts.filter((p): p is ToolPart => p.type === "tool")
-    const parts: MessagePart[] = []
-    if (currentReasoning) parts.push({ type: "reasoning", text: currentReasoning } as ReasoningPart)
-    if (currentText) {
-      parts.push({ type: "text", text: currentText } as TextPart)
+    const parts: MessagePart[] = [...existingParts]
+    const reasoningIdx = parts.findIndex((p) => p.type === "reasoning")
+    if (currentReasoning || sawReasoningSignal) {
+      const reasoningText = currentReasoning || THOUGHT_PLACEHOLDER
+      if (reasoningIdx >= 0) {
+        parts[reasoningIdx] = {
+          ...(parts[reasoningIdx] as ReasoningPart),
+          text: reasoningText,
+          ...(currentReasoningId ? { reasoningId: currentReasoningId } : {}),
+          ...(currentReasoningDurationMs != null ? { durationMs: currentReasoningDurationMs } : {}),
+          ...(currentReasoningMetadata ? { providerMetadata: currentReasoningMetadata } : {}),
+        } as ReasoningPart
+      } else {
+        parts.push({
+          type: "reasoning",
+          text: reasoningText,
+          ...(currentReasoningId ? { reasoningId: currentReasoningId } : {}),
+          ...(currentReasoningDurationMs != null ? { durationMs: currentReasoningDurationMs } : {}),
+          ...(currentReasoningMetadata ? { providerMetadata: currentReasoningMetadata } : {}),
+        } as ReasoningPart)
+      }
     }
-    parts.push(...toolParts)
+    if (currentText) {
+      const textIdx = parts.findIndex((p) => p.type === "text")
+      if (textIdx >= 0) {
+        parts[textIdx] = {
+          ...(parts[textIdx] as TextPart),
+          text: currentText,
+        } as TextPart
+      } else {
+        parts.push({ type: "text", text: currentText } as TextPart)
+      }
+    }
     session.updateMessage(newMessageId, { content: parts.length > 0 ? parts : currentText || "" })
   }
 
@@ -245,10 +283,6 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
 
   try {
     const providerOptions = buildReasoningProviderOptions(config.model, client.providerName)
-    const providerOptionsCandidates = buildReasoningProviderOptionsCandidates(
-      config.model,
-      client.providerName
-    )
     const retryMaxAttempts = config.retry?.enabled === false
       ? 1
       : Math.max(1, config.retry?.maxAttempts ?? 3)
@@ -259,9 +293,10 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
       signal,
       cacheableSystemBlocks,
       maxTokens,
-      temperature,
+      temperature: temperature ?? config.model.temperature ?? getDefaultTemperature(config.model),
+      topP: topP ?? getDefaultTopP(config.model),
+      topK: topK ?? getDefaultTopK(config.model),
       providerOptions,
-      providerOptionsCandidates,
       maxRetries: retryMaxAttempts,
       initialRetryDelayMs: config.retry?.initialDelayMs,
       maxRetryDelayMs: config.retry?.maxDelayMs,
@@ -270,6 +305,21 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
       if (signal.aborted) break
 
       switch (event.type) {
+        case "reasoning_start":
+          sawReasoningSignal = true
+          currentReasoningId = event.reasoningId ?? currentReasoningId ?? "reasoning-0"
+          currentReasoningMetadata = event.providerMetadata ?? currentReasoningMetadata
+          currentReasoningStartedAt = currentReasoningStartedAt ?? Date.now()
+          currentReasoningDurationMs = undefined
+          flushAssistantContent()
+          await emit({
+            type: "reasoning_start",
+            messageId: newMessageId,
+            reasoningId: currentReasoningId,
+            providerMetadata: event.providerMetadata,
+          })
+          break
+
         case "text_delta":
           if (event.delta) {
             currentText += event.delta
@@ -279,15 +329,39 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
           break
 
         case "reasoning_delta":
+          sawReasoningSignal = true
+          currentReasoningId = event.reasoningId ?? currentReasoningId
+          currentReasoningMetadata = event.providerMetadata ?? currentReasoningMetadata
+          currentReasoningStartedAt = currentReasoningStartedAt ?? Date.now()
           if (event.delta) {
             currentReasoning += event.delta
             flushAssistantContent()
-            await emit({ type: "reasoning_delta", delta: event.delta, messageId: newMessageId })
+          } else {
+            flushAssistantContent()
           }
+          await emit({
+            type: "reasoning_delta",
+            delta: event.delta ?? "",
+            messageId: newMessageId,
+            reasoningId: event.reasoningId,
+            providerMetadata: event.providerMetadata,
+          })
           break
 
         case "reasoning_end":
-          await emit({ type: "reasoning_end", messageId: newMessageId })
+          if (currentReasoningStartedAt != null) {
+            currentReasoningDurationMs = Math.max(1, Date.now() - currentReasoningStartedAt)
+          }
+          currentReasoningId = event.reasoningId ?? currentReasoningId
+          currentReasoningMetadata = event.providerMetadata ?? currentReasoningMetadata
+          currentReasoningStartedAt = undefined
+          flushAssistantContent()
+          await emit({
+            type: "reasoning_end",
+            messageId: newMessageId,
+            reasoningId: currentReasoningId ?? event.reasoningId,
+            providerMetadata: event.providerMetadata,
+          })
           break
 
         case "tool_call": {
@@ -510,6 +584,8 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
   }
 
   let result: "continue" | "compact" | "stop" = "continue"
+  // Provider/gateway may close stream without explicit finish event.
+  const normalizedFinishReason = finishReason ?? (fatalStreamError ? undefined : "stop")
   if (fatalStreamError || budgetExceededThisIteration) {
     result = "stop"
   } else if (needsCompaction) {
@@ -518,7 +594,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
 
   return {
     result,
-    finishReason,
+    finishReason: normalizedFinishReason,
     sawNativeToolCall,
     currentText,
     currentReasoning,

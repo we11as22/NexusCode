@@ -11,9 +11,9 @@ const PRUNE_PROTECT = 30_000
 const PRUNE_PROTECTED_TOOLS = new Set([
   "use_skill",
   "codebase_search",
-  "final_report_to_user",
-  "plan_exit",
-  "ask_followup_question",
+  "PlanExit",
+  "AskFollowupQuestion",
+  "TodoWrite",
 ])
 
 const COMPACTION_BUFFER = 20_000
@@ -196,13 +196,6 @@ function buildLLMMessages(messages: SessionMessage[]) {
         if (p.type === "tool") {
           const tp = p as ToolPart
           if (tp.compacted) return `[${tp.tool}: output pruned]`
-          if (tp.tool === "thinking_preamble") {
-            const reasoning = (tp.input?.reasoning_and_next_actions as string)?.trim()
-            const msg = (tp.input?.user_message as string)?.trim()
-            if (reasoning) return `[thinking_preamble: ${reasoning.slice(0, 200)}]`
-            if (msg) return `[thinking_preamble (user): ${msg.slice(0, 100)}]`
-            return `[${tp.tool}: ${(tp.output ?? "").slice(0, 100)}]`
-          }
           return `[${tp.tool}: ${(tp.output ?? "").slice(0, 300)}]`
         }
         return ""

@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from "react"
+import React, { useEffect, useMemo, useRef, useState } from "react"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 
@@ -158,17 +158,50 @@ export type ExploredPrefixItem =
   | { type: "reasoning"; text: string; durationMs?: number }
   | { type: "tool"; part: ToolPart; entry: ExploredEntry }
 
-/** Parts: collect only the leading contiguous exploration/reasoning prefix. Stop when first non-exploration content appears. */
-export function getExploredPrefixFromParts(parts: MessagePart[]): {
-  prefixItems: ExploredPrefixItem[]
-  prefixIndices: Set<number>
-  /** True if there is at least one part after the last prefix index — then collapse by default when complete or when text has user_message. */
-  hasContentAfterPrefix: boolean
-} {
-  const prefixItems: ExploredPrefixItem[] = []
-  const prefixIndices = new Set<number>()
+export type AssistantDisplaySegment =
+  | { type: "part"; index: number; part: MessagePart }
+  | { type: "explored"; startIndex: number; endIndex: number; prefixItems: ExploredPrefixItem[] }
+
+/** Split assistant parts into chronological display segments; each explored segment is one contiguous exploration sequence. */
+export function getAssistantDisplaySegments(parts: MessagePart[]): AssistantDisplaySegment[] {
+  const segments: AssistantDisplaySegment[] = []
+  let sequenceStartIndex: number | null = null
+  let sequenceEndIndex: number | null = null
+  let sequenceItems: ExploredPrefixItem[] = []
+  let sequenceHasExplorationTool = false
   let partIndex = 0
-  let hasSeenExplorationTool = false
+
+  const flushSequence = () => {
+    if (sequenceItems.length === 0 || sequenceStartIndex == null || sequenceEndIndex == null) {
+      sequenceStartIndex = null
+      sequenceEndIndex = null
+      sequenceItems = []
+      sequenceHasExplorationTool = false
+      return
+    }
+    if (sequenceHasExplorationTool) {
+      segments.push({
+        type: "explored",
+        startIndex: sequenceStartIndex,
+        endIndex: sequenceEndIndex,
+        prefixItems: sequenceItems,
+      })
+    } else {
+      for (let i = sequenceStartIndex; i <= sequenceEndIndex; i++) {
+        const part = parts[i]
+        if (part) segments.push({ type: "part", index: i, part })
+      }
+    }
+    sequenceStartIndex = null
+    sequenceEndIndex = null
+    sequenceItems = []
+    sequenceHasExplorationTool = false
+  }
+
+  const beginSequenceIfNeeded = (index: number) => {
+    if (sequenceStartIndex == null) sequenceStartIndex = index
+    sequenceEndIndex = index
+  }
 
   const hasVisibleText = (part: MessagePart): boolean => {
     if (part.type !== "text") return false
@@ -178,38 +211,44 @@ export function getExploredPrefixFromParts(parts: MessagePart[]): {
 
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i]!
-    if (part.type === "text") {
-      if (hasVisibleText(part)) break
-      continue
-    }
     if (part.type === "reasoning") {
+      beginSequenceIfNeeded(i)
       const r = part as { text: string; durationMs?: number }
-      prefixItems.push({ type: "reasoning", text: r.text, durationMs: r.durationMs })
-      prefixIndices.add(i)
-      partIndex++
+      sequenceItems.push({ type: "reasoning", text: r.text, durationMs: r.durationMs })
       continue
     }
+
     if (part.type === "tool") {
       const toolPart = part as ToolPart
       const expanded = expandExplorationToolParts(toolPart)
-      if (expanded.length === 0) break
-      hasSeenExplorationTool = true
-      for (const expandedPart of expanded) {
-        const entry = getToolEntry(expandedPart, partIndex++)
-        if (entry) prefixItems.push({ type: "tool", part: expandedPart, entry })
+      if (expanded.length > 0) {
+        beginSequenceIfNeeded(i)
+        sequenceHasExplorationTool = true
+        for (const expandedPart of expanded) {
+          const entry = getToolEntry(expandedPart, partIndex++)
+          if (entry) sequenceItems.push({ type: "tool", part: expandedPart, entry })
+        }
+        continue
       }
-      prefixIndices.add(i)
+      flushSequence()
+      segments.push({ type: "part", index: i, part })
       continue
     }
-    break
+
+    if (part.type === "text") {
+      if (hasVisibleText(part)) {
+        flushSequence()
+        segments.push({ type: "part", index: i, part })
+      }
+      continue
+    }
+
+    flushSequence()
+    segments.push({ type: "part", index: i, part })
   }
-  const lastPrefixIndex = prefixIndices.size > 0 ? Math.max(...prefixIndices) : -1
-  const hasContentAfterPrefix = lastPrefixIndex >= 0 && lastPrefixIndex < parts.length - 1
-  if (prefixItems.length === 0) return { prefixItems: [], prefixIndices: new Set(), hasContentAfterPrefix }
-  if (!hasSeenExplorationTool) {
-    return { prefixItems: [], prefixIndices: new Set(), hasContentAfterPrefix }
-  }
-  return { prefixItems, prefixIndices, hasContentAfterPrefix }
+
+  flushSequence()
+  return segments
 }
 
 function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
@@ -351,15 +390,21 @@ export function getExploredFromParts(parts: MessagePart[]): {
 export function ExploredSummaryInline({
   prefixItems,
   defaultCollapsed,
+  isRunning,
   onOpenFile,
 }: {
   prefixItems: ExploredPrefixItem[]
   defaultCollapsed: boolean
+  isRunning: boolean
   onOpenFile?: (path: string, line?: number, endLine?: number) => void
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(!defaultCollapsed)
+  const previousCollapsedRef = useRef(defaultCollapsed)
   useEffect(() => {
-    if (defaultCollapsed) setOpen(false)
+    if (previousCollapsedRef.current !== defaultCollapsed) {
+      setOpen(!defaultCollapsed)
+      previousCollapsedRef.current = defaultCollapsed
+    }
   }, [defaultCollapsed])
   // list_dir/List is in Explored and counted as separate "lists" metric.
   const filesCount = prefixItems.filter((x) => x.type === "tool").reduce((acc, x) => acc + countExplorationMetrics(x.part.tool).files, 0)
@@ -371,7 +416,8 @@ export function ExploredSummaryInline({
   if (searchesCount > 0) labelParts.push(`${searchesCount} search${searchesCount === 1 ? "" : "es"}`)
   const total = prefixItems.length
   if (total === 0) return null
-  const headerLabel = labelParts.length > 0 ? `Explored ${labelParts.join(", ")}` : "Explored"
+  const statusLabel = isRunning ? "Exploring" : "Explored"
+  const headerLabel = labelParts.length > 0 ? `${statusLabel} ${labelParts.join(", ")}` : statusLabel
 
   return (
     <div
@@ -434,7 +480,7 @@ function ExploredThoughtRow({ text, durationMs }: { text: string; durationMs?: n
   const [expanded, setExpanded] = useState(false)
   const label =
     durationMs != null
-      ? `Thought for ${(durationMs / 1000).toFixed(0)}s`
+      ? `Thought for ${Math.max(1, Math.round(durationMs / 1000))}s`
       : text.trim().length < 80
         ? "Thought briefly"
         : "Thought"
@@ -449,9 +495,9 @@ function ExploredThoughtRow({ text, durationMs }: { text: string; durationMs?: n
         <span className="nexus-explored-thought-chevron" style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
         <span>{label}</span>
       </button>
-      {expanded && text.trim() && (
+      {expanded && (
         <div className="nexus-explored-thought-expanded">
-          {text.trim()}
+          {text.trim() || "Model reasoning is active, but no visible reasoning text was streamed."}
         </div>
       )}
     </div>

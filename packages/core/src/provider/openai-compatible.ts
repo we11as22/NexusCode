@@ -1,6 +1,12 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
+import { createOpenRouter } from "@openrouter/ai-sdk-provider"
 import type { ProviderConfig } from "../types.js"
 import { BaseLLMClient } from "./base.js"
+
+const DEFAULT_OPENROUTER_HEADERS = {
+  "HTTP-Referer": "https://nexuscode.dev",
+  "X-Title": "NexusCode",
+}
 
 /**
  * Generic OpenAI-compatible provider.
@@ -25,13 +31,18 @@ export function createOpenAICompatibleClient(config: ProviderConfig) {
     )
   }
   // Detect provider name from baseUrl for better structured output support
-  const providerName = detectProviderFromUrl(config.baseUrl)
-  const provider = createOpenAICompatible({
-    name: providerName,
-    apiKey,
-    baseURL: config.baseUrl,
-  })
-  const model = provider.chatModel(config.id)
+  const normalizedBaseUrl = normalizeGatewayBaseUrl(config.baseUrl)
+  const providerName = detectProviderFromUrl(normalizedBaseUrl)
+  const model = isKiloGatewayUrl(normalizedBaseUrl)
+    ? createKiloGatewayModel(normalizedBaseUrl, apiKey, config.id)
+    : isOpenRouterUrl(config.baseUrl)
+      ? createOpenRouterModel(normalizedBaseUrl, apiKey, config.id)
+      : createOpenAICompatible({
+        name: providerName,
+        apiKey,
+        baseURL: normalizedBaseUrl,
+        headers: needsOpenRouterHeaders(normalizedBaseUrl) ? DEFAULT_OPENROUTER_HEADERS : undefined,
+      }).chatModel(config.id)
 
   return new BaseLLMClient(model as any, providerName, config.id)
 }
@@ -52,6 +63,7 @@ export function createOllamaClient(config: ProviderConfig) {
 function detectProviderFromUrl(baseUrl: string): string {
   const url = baseUrl.toLowerCase()
   if (url.includes("api.kilo.ai")) return "kilo"
+  if (url.includes("openrouter.ai")) return "openrouter"
   if (url.includes("groq")) return "groq"
   if (url.includes("together")) return "together"
   if (url.includes("mistral")) return "mistral"
@@ -69,6 +81,67 @@ function isApiKeyOptionalBaseUrl(baseUrl: string): boolean {
   return (
     url.includes("localhost") ||
     url.includes("127.0.0.1") ||
-    url.includes("api.kilo.ai/api/gateway")
+    url.includes("api.kilo.ai/api/")
   )
+}
+
+function isKiloGatewayUrl(baseUrl: string): boolean {
+  const url = baseUrl.toLowerCase()
+  return url.includes("api.kilo.ai/api/openrouter") || url.includes("api.kilo.ai/api/organizations/")
+}
+
+function isOpenRouterUrl(baseUrl: string): boolean {
+  return baseUrl.toLowerCase().includes("openrouter.ai")
+}
+
+function toKiloOpenRouterBase(baseUrl: string): string {
+  const trimmed = baseUrl.trim()
+  const lower = trimmed.toLowerCase()
+  if (lower.includes("/api/gateway")) {
+    const withoutGateway = trimmed.replace(/\/api\/gateway\/?$/i, "/api/openrouter")
+    return withoutGateway.endsWith("/") ? withoutGateway : `${withoutGateway}/`
+  }
+  if (lower.includes("/openrouter")) return trimmed.endsWith("/") ? trimmed : `${trimmed}/`
+  if (lower.includes("/api/organizations/")) return trimmed.endsWith("/") ? trimmed : `${trimmed}/`
+  if (trimmed.endsWith("/api")) return `${trimmed}/openrouter/`
+  return trimmed.endsWith("/") ? `${trimmed}api/openrouter/` : `${trimmed}/api/openrouter/`
+}
+
+function normalizeGatewayBaseUrl(baseUrl: string): string {
+  return isKiloGatewayUrl(baseUrl) || baseUrl.toLowerCase().includes("api.kilo.ai/api/gateway")
+    ? toKiloOpenRouterBase(baseUrl)
+    : baseUrl
+}
+
+function needsOpenRouterHeaders(baseUrl: string): boolean {
+  const url = baseUrl.toLowerCase()
+  return url.includes("openrouter.ai") || url.includes("api.kilo.ai/api/")
+}
+
+function createKiloGatewayModel(baseUrl: string, apiKey: string, modelId: string) {
+  const provider = createOpenRouter({
+    baseURL: toKiloOpenRouterBase(baseUrl),
+    apiKey,
+    headers: DEFAULT_OPENROUTER_HEADERS,
+  }) as unknown as {
+    languageModel?: (id: string) => unknown
+    chatModel?: (id: string) => unknown
+  }
+  if (typeof provider.languageModel === "function") return provider.languageModel(modelId)
+  if (typeof provider.chatModel === "function") return provider.chatModel(modelId)
+  throw new Error("Failed to initialize Kilo Gateway model provider")
+}
+
+function createOpenRouterModel(baseUrl: string, apiKey: string, modelId: string) {
+  const provider = createOpenRouter({
+    baseURL: baseUrl,
+    apiKey,
+    headers: DEFAULT_OPENROUTER_HEADERS,
+  }) as unknown as {
+    languageModel?: (id: string) => unknown
+    chatModel?: (id: string) => unknown
+  }
+  if (typeof provider.languageModel === "function") return provider.languageModel(modelId)
+  if (typeof provider.chatModel === "function") return provider.chatModel(modelId)
+  throw new Error("Failed to initialize OpenRouter model provider")
 }

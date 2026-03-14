@@ -19,6 +19,9 @@ import {
   createCompaction,
   ParallelAgentManager,
   createSpawnAgentTool,
+  createSpawnAgentsAliasTool,
+  createSpawnAgentOutputTool,
+  createSpawnAgentStopTool,
   listSessions,
   deleteSession as coreDeleteSession,
   readCheckpointEntries,
@@ -38,7 +41,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const NEXUS_ROOT = path.resolve(__dirname, '..', '..', '..')
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
-const NEXUS_GATEWAY_BASE_URL = 'https://api.kilo.ai/api/gateway'
+const NEXUS_GATEWAY_BASE_URL = 'https://api.kilo.ai/api/openrouter'
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
@@ -284,6 +287,9 @@ export async function bootstrapNexus(opts: {
 
   const parallelManager = new ParallelAgentManager()
   toolRegistry.register(createSpawnAgentTool(parallelManager, config))
+  toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, config))
+  toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
+  toolRegistry.register(createSpawnAgentStopTool(parallelManager))
 
   const rulesContent = await loadRules(cwd, config.rules.files).catch(() => '')
   const skills = await loadSkills(config.skills, cwd).catch(() => [])

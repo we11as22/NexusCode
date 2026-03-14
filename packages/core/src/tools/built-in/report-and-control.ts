@@ -1,49 +1,6 @@
 import { z } from "zod"
 import type { ToolDef, ToolContext } from "../../types.js"
 
-/** Tool that explicitly sends a text result to the user. Must be called at the end of each reply so the user sees a clear summary. */
-const reportToUserSchema = z.object({
-  message: z.string().describe("Result text for the user: what was done, key findings, and what they need to know. This is shown in the chat and included in context for the next turn."),
-})
-
-export const reportToUserTool: ToolDef<z.infer<typeof reportToUserSchema>> = {
-  name: "final_report_to_user",
-  description: `Send the result of your work to the user as plain text. You MUST call this at the end of every reply (after using tools) so the user sees a clear summary.
-
-When to use:
-- After any batch of tool use (exploration, edits, runs): call once with a concise summary for the user.
-- When the task is done: call final_report_to_user with your final summary — this ends the turn.
-
-The message is shown in the chat and saved for context/compaction. Keep it clear and concise.`,
-  parameters: reportToUserSchema,
-
-  async execute({ message }, ctx: ToolContext) {
-    return { success: true, output: message }
-  },
-}
-
-const progressNoteSchema = z.object({
-  message: z.string().describe("Brief progress note for the user: what just happened, what you are about to do, or any blocker. Shown in the chat; keep it short and conversational."),
-})
-
-export const progressNoteTool: ToolDef<z.infer<typeof progressNoteSchema>> = {
-  name: "progress_note",
-  description: `Send a short progress message to the user. The message is shown as **plain text** in the chat (no card). Use it so the user always sees what you are doing.
-
-When to use:
-- Before the first tool call each turn: one short note (e.g. "Scanning the codebase for auth logic.").
-- Before each new batch of tools: note what you are about to do (e.g. "Reading the relevant files next.").
-- Before ending your turn: a brief note before you call final_report_to_user with the summary.
-
-Critical: If you say you are about to do something, do it in the same turn (call the tool right after this note). Do not use headings like "Update:"; write in a continuous conversational style. Use backticks for file/dir names.`,
-  parameters: progressNoteSchema,
-  readOnly: true,
-
-  async execute({ message }, ctx: ToolContext) {
-    return { success: true, output: message }
-  },
-}
-
 const askSchema = z.object({
   question: z.string().describe("The question to ask the user"),
   options: z.array(z.string()).optional().describe("Optional list of suggested answers"),

@@ -8,7 +8,6 @@ import { InputContextPanel } from "./components/InputContextPanel.js"
 import { QueuedMessagesPanel } from "./components/QueuedMessagesPanel.js"
 import { ModeDropdown } from "./components/ModeDropdown.js"
 import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
-import { AutoApproveDropdown } from "./components/AutoApproveDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import { CheckpointStrip } from "./components/CheckpointStrip.js"
 import type { ExtensionMessage } from "./types/messages.js"
@@ -29,6 +28,15 @@ const EMB_PROVIDER_OPTIONS = [
   "mistral",
   "bedrock",
   "local",
+]
+const REASONING_EFFORT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "", label: "(auto)" },
+  { value: "none", label: "none" },
+  { value: "minimal", label: "minimal" },
+  { value: "low", label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "high", label: "high" },
+  { value: "max", label: "max" },
 ]
 
 export function App() {
@@ -188,29 +196,6 @@ function ChatView() {
               hasOlderMessages={store.hasOlderMessages}
               loadingOlderMessages={store.loadingOlderMessages}
             />
-            {(() => {
-              const msgs = store.messages
-              const last = msgs[msgs.length - 1]
-              const isLlmError =
-                last?.role === "system"
-                && typeof last.content === "string"
-                && last.content.startsWith("Error:")
-              if (!isLlmError || msgs.length < 2) return null
-              const lastUser = [...msgs].reverse().find((m) => m.role === "user")
-              const lastUserContent = lastUser && typeof lastUser.content === "string" ? lastUser.content : (lastUser?.content as Array<{ type: string; text?: string }>)?.find((p) => p.type === "text")?.text ?? ""
-              if (!lastUserContent.trim()) return null
-              return (
-                <div className="nexus-retry-bar">
-                  <button
-                    type="button"
-                    onClick={() => store.sendMessage(lastUserContent)}
-                    className="nexus-retry-btn"
-                  >
-                    Retry (LLM error)
-                  </button>
-                </div>
-              )
-            })()}
           </div>
         </div>
 
@@ -232,10 +217,39 @@ function ChatView() {
         <div className="chat-input">
           <QueuedMessagesPanel />
           <InputContextPanel />
+          <RetryMessageBar />
           <ChatBottomBar />
         </div>
       </div>
     </>
+  )
+}
+
+function RetryMessageBar() {
+  const store = useChatStore()
+  const msgs = store.messages
+  const last = msgs[msgs.length - 1]
+  const isLlmError =
+    last?.role === "system" &&
+    typeof last.content === "string" &&
+    last.content.startsWith("Error:")
+  if (!isLlmError || msgs.length < 2) return null
+  const lastUser = [...msgs].reverse().find((m) => m.role === "user")
+  const lastUserContent =
+    lastUser && typeof lastUser.content === "string"
+      ? lastUser.content
+      : (lastUser?.content as Array<{ type: string; text?: string }>)?.find((p) => p.type === "text")?.text ?? ""
+  if (!lastUserContent.trim()) return null
+  return (
+    <div className="nexus-retry-bar">
+      <button
+        type="button"
+        onClick={() => store.sendMessage(lastUserContent)}
+        className="nexus-retry-btn"
+      >
+        Retry (LLM error)
+      </button>
+    </div>
   )
 }
 
@@ -257,7 +271,6 @@ function ChatBottomBar() {
           <div className="chat-bottom-bar-left">
             <ModeDropdown />
             <AgentPresetDropdown />
-            <AutoApproveDropdown />
           </div>
           <div className="chat-bottom-bar-input-wrap">
           {store.isRunning && (
@@ -518,30 +531,78 @@ function PlanActionsBar({
   planFollowupText: string | null
   onChoice: (choice: "new_session" | "continue" | "dismiss", planText?: string) => void
 }) {
+  const [expanded, setExpanded] = useState(false)
+  const [selected, setSelected] = useState<"continue" | "dismiss">("continue")
+  const fullText = (planFollowupText ?? "").trim()
+  const lines = fullText.split(/\r?\n/)
+  const needsClamp = lines.length > 48 || fullText.length > 3600
+  const renderedText = !needsClamp || expanded ? fullText : `${lines.slice(0, 48).join("\n")}\n\n…`
+
   return (
-    <div className="flex-shrink-0 px-3 py-2 border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-badge-background)] flex flex-wrap items-center gap-2">
-      <span className="text-xs font-medium text-[var(--vscode-foreground)]">Ready to implement?</span>
-      <button
-        type="button"
-        className="nexus-secondary-btn text-xs"
-        onClick={() => onChoice("new_session", planFollowupText ?? undefined)}
-      >
-        New session
-      </button>
-      <button
-        type="button"
-        className="nexus-secondary-btn text-xs"
-        onClick={() => onChoice("continue", planFollowupText ?? undefined)}
-      >
-        Continue here
-      </button>
-      <button
-        type="button"
-        className="nexus-secondary-btn text-xs text-[var(--vscode-descriptionForeground)]"
-        onClick={() => onChoice("dismiss")}
-      >
-        Dismiss
-      </button>
+    <div className="nexus-plan-followup-wrap">
+      <div className="nexus-plan-followup-card">
+        <div className="nexus-plan-followup-header">
+          <span className="nexus-plan-followup-title">Plan</span>
+          <div className="nexus-plan-followup-actions">
+            {needsClamp ? (
+              <button
+                type="button"
+                className="nexus-plan-mini-btn"
+                onClick={() => setExpanded((v) => !v)}
+              >
+                {expanded ? "Collapse" : "Expand"}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="nexus-plan-mini-btn"
+              onClick={() => onChoice("new_session", planFollowupText ?? undefined)}
+            >
+              Open in new session
+            </button>
+          </div>
+        </div>
+        <pre className="nexus-plan-followup-text">{renderedText || "Plan saved to .nexus/plans/."}</pre>
+      </div>
+
+      <div className="nexus-plan-followup-question">Implement this plan?</div>
+      <div className="nexus-plan-followup-options">
+        <button
+          type="button"
+          className={`nexus-plan-option ${selected === "continue" ? "nexus-plan-option-active" : ""}`}
+          onClick={() => setSelected("continue")}
+        >
+          1. Yes, implement this plan
+        </button>
+        <button
+          type="button"
+          className={`nexus-plan-option ${selected === "dismiss" ? "nexus-plan-option-active" : ""}`}
+          onClick={() => setSelected("dismiss")}
+        >
+          2. No, and tell Codex what to do differently
+        </button>
+      </div>
+      <div className="nexus-plan-followup-submit-row">
+        <button
+          type="button"
+          className="nexus-secondary-btn text-xs"
+          onClick={() => onChoice("dismiss")}
+        >
+          Dismiss
+        </button>
+        <button
+          type="button"
+          className="nexus-primary-btn text-xs"
+          onClick={() =>
+            onChoice(
+              selected === "continue" ? "continue" : "dismiss",
+              selected === "continue" ? (planFollowupText ?? undefined) : undefined
+            )
+          }
+        >
+          Submit
+        </button>
+      </div>
     </div>
   )
 }
@@ -868,10 +929,11 @@ function SettingsView() {
             />
             <SettingsInput label="Model" value={draft.modelId} onChange={(v) => setDraft({ ...draft, modelId: v })} />
             <SettingsInput label="Temperature (0-2)" value={draft.modelTemperature} onChange={(v) => setDraft({ ...draft, modelTemperature: v })} />
-            <SettingsInput
-              label="Reasoning effort (optional: none|minimal|low|medium|high|max)"
+            <SettingsSelect
+              label="Reasoning effort"
               value={draft.modelReasoningEffort}
               onChange={(v) => setDraft({ ...draft, modelReasoningEffort: v })}
+              options={REASONING_EFFORT_OPTIONS}
             />
             <SettingsInput
               label="Context window (tokens, optional override)"
@@ -2333,15 +2395,17 @@ function SettingsSelect({
   label: string
   value: string
   onChange: (value: string) => void
-  options: string[]
+  options: Array<string | { value: string; label: string }>
 }) {
   return (
     <label className="nexus-field">
       <span className="nexus-field-label">{label}</span>
       <select value={value} onChange={(e) => onChange(e.target.value)} className="nexus-input">
-        {options.map((opt) => (
-          <option key={opt} value={opt}>{opt}</option>
-        ))}
+        {options.map((opt) => {
+          const value = typeof opt === "string" ? opt : opt.value
+          const label = typeof opt === "string" ? opt : opt.label
+          return <option key={value || "__empty__"} value={value}>{label}</option>
+        })}
       </select>
     </label>
   )
