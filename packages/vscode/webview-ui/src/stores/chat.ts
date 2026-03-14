@@ -140,9 +140,100 @@ export interface SubAgentState {
   task: string
   status: "running" | "completed" | "error"
   currentTool?: string
+  toolHistory: string[]
+  toolUsesCount: number
   startedAt: number
   finishedAt?: number
   error?: string
+}
+
+function shortenSubagentValue(value: unknown, max = 52): string {
+  if (typeof value !== "string") return ""
+  const one = value.replace(/\s+/g, " ").trim()
+  return one.length <= max ? one : `${one.slice(0, max - 1)}…`
+}
+
+function getSubagentToolLabel(tool: string, input?: Record<string, unknown>): string {
+  const path = shortenSubagentValue(input?.path ?? input?.file_path)
+  const pattern = shortenSubagentValue(input?.pattern ?? input?.query)
+  const command = shortenSubagentValue(input?.command, 44)
+  const normalized = tool.trim()
+  if (normalized === "Read" || normalized === "read_file") return path ? `Read(${path})` : "Read(file)"
+  if (normalized === "List" || normalized === "list_dir") return path ? `List(${path})` : "List(.)"
+  if (normalized === "Grep" || normalized === "grep") return pattern ? `Grep(${pattern})` : "Grep"
+  if (normalized === "Glob" || normalized === "glob") return pattern ? `Glob(${pattern})` : "Glob"
+  if (normalized === "Bash" || normalized === "execute_command") return command ? `Bash(${command})` : "Bash"
+  return normalized
+}
+
+function reduceSubagentState(list: SubAgentState[], event:
+  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
+  | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown> }
+  | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
+  | { type: "subagent_done"; subagentId: string; success: boolean; error?: string }): SubAgentState[] {
+  switch (event.type) {
+    case "subagent_start": {
+      const next = list.filter((item) => item.id !== event.subagentId)
+      next.push({
+        id: event.subagentId,
+        mode: event.mode,
+        task: event.task,
+        status: "running",
+        currentTool: undefined,
+        toolHistory: [],
+        toolUsesCount: 0,
+        startedAt: Date.now(),
+      })
+      return next
+    }
+    case "subagent_tool_start": {
+      const label = getSubagentToolLabel(event.tool, event.input)
+      return list.map((item) =>
+        item.id === event.subagentId
+          ? {
+              ...item,
+              status: "running" as const,
+              currentTool: label,
+              toolUsesCount: item.toolUsesCount + 1,
+              toolHistory: [...item.toolHistory, label].slice(-16),
+            }
+          : item
+      )
+    }
+    case "subagent_tool_end":
+      return list.map((item) =>
+        item.id === event.subagentId
+          ? {
+              ...item,
+              status: (event.success ? "running" : "error") as "running" | "error",
+              currentTool: event.success ? undefined : event.tool,
+            }
+          : item
+      )
+    case "subagent_done":
+      return list.map((item) =>
+        item.id === event.subagentId
+          ? {
+              ...item,
+              status: (event.success ? "completed" : "error") as "completed" | "error",
+              currentTool: undefined,
+              finishedAt: Date.now(),
+              error: event.error,
+            }
+          : item
+      )
+  }
+}
+
+function findToolPartIndexForSubagent(parts: MessagePart[], subagentId: string, parentPartId?: string | null): number {
+  const byExistingSubagent = parts.findIndex(
+    (part) => part.type === "tool" && (part as ToolPart).subagents?.some((subagent) => subagent.id === subagentId)
+  )
+  if (byExistingSubagent >= 0) return byExistingSubagent
+  if (parentPartId && parentPartId.trim().length > 0) {
+    return parts.findIndex((part) => part.type === "tool" && (part as ToolPart).id === parentPartId)
+  }
+  return -1
 }
 
 type ApprovalAction = {
@@ -186,6 +277,8 @@ interface ChatState {
   sessions: SessionPreview[]
   /** True while session list is being fetched (e.g. from server). */
   sessionsLoading: boolean
+  /** Optimistic deletions: hide sessions until a fresh list confirms removal or the tombstone expires. */
+  pendingDeletedSessionIds: Record<string, number>
   config: NexusConfigState | null
   isCompacting: boolean
   subagents: SubAgentState[]
@@ -294,7 +387,7 @@ export type AgentEvent =
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string; parentPartId?: string }
-  | { type: "subagent_tool_start"; subagentId: string; tool: string; parentPartId?: string }
+  | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown>; parentPartId?: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
   | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string; parentPartId?: string }
   | { type: "tool_approval_needed"; action: ApprovalAction; partId: string }
@@ -330,6 +423,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   queuedMessages: [],
   sessions: [],
   sessionsLoading: false,
+  pendingDeletedSessionIds: {},
   config: null,
   isCompacting: false,
   subagents: [],
@@ -517,6 +611,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     postMessage({ type: "deleteSession", sessionId })
     set((prev) => ({
       sessions: prev.sessions.filter((s) => s.id !== sessionId),
+      pendingDeletedSessionIds: {
+        ...prev.pendingDeletedSessionIds,
+        [sessionId]: Date.now(),
+      },
     }))
   },
 
@@ -587,7 +685,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   handleSessionList: (sessions) => {
-    set({ sessions })
+    set((prev) => {
+      const now = Date.now()
+      const nextPending: Record<string, number> = {}
+      const visibleSessions = sessions.filter((session) => {
+        const deletedAt = prev.pendingDeletedSessionIds[session.id]
+        if (deletedAt == null) return true
+        if (now - deletedAt < 1500) {
+          nextPending[session.id] = deletedAt
+          return false
+        }
+        return true
+      })
+      return {
+        sessions: visibleSessions,
+        pendingDeletedSessionIds: nextPending,
+      }
+    })
   },
   handleSessionListLoading: (loading) => {
     set({ sessionsLoading: loading })
@@ -768,7 +882,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const idx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).id === partId)
           if (idx === -1) continue
           const part = parts[idx] as ToolPart
-          const nextSubagents = [...(part.subagents ?? []), { id: event.subagentId, mode: event.mode, task: event.task, status: "running" as const, startedAt: Date.now() }]
+          const nextSubagents = reduceSubagentState(part.subagents ?? [], {
+            type: "subagent_start",
+            subagentId: event.subagentId,
+            mode: event.mode,
+            task: event.task,
+          })
           const nextParts = [...parts]
           nextParts[idx] = { ...part, subagents: nextSubagents }
           set({ messages: [...msgs.slice(0, i), { ...msg, content: nextParts }, ...msgs.slice(i + 1)] })
@@ -779,14 +898,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "subagent_tool_start": {
         const msgs = get().messages
+        const fallbackPartId = (event as { parentPartId?: string }).parentPartId ?? get().lastSpawnAgentPartId
         for (let i = msgs.length - 1; i >= 0; i--) {
           const msg = msgs[i]
           if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
           const parts = msg.content as MessagePart[]
-          const partIdx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).subagents?.some((s) => s.id === event.subagentId))
+          const partIdx = findToolPartIndexForSubagent(parts, event.subagentId, fallbackPartId)
           if (partIdx === -1) continue
           const part = parts[partIdx] as ToolPart
-          const subagents = (part.subagents ?? []).map((a) => (a.id === event.subagentId ? { ...a, status: "running" as const, currentTool: event.tool } : a))
+          let subagents = part.subagents ?? []
+          if (!subagents.some((item) => item.id === event.subagentId) && typeof part.input?.description === "string") {
+            subagents = reduceSubagentState(subagents, {
+              type: "subagent_start",
+              subagentId: event.subagentId,
+              mode: "ask",
+              task: part.input.description.trim(),
+            })
+          }
+          subagents = reduceSubagentState(subagents, {
+            type: "subagent_tool_start",
+            subagentId: event.subagentId,
+            tool: event.tool,
+            input: (event as { input?: Record<string, unknown> }).input,
+          })
           const nextParts = [...parts]
           nextParts[partIdx] = { ...part, subagents }
           set({ messages: [...msgs.slice(0, i), { ...msg, content: nextParts }, ...msgs.slice(i + 1)] })
@@ -797,16 +931,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "subagent_tool_end": {
         const msgs = get().messages
+        const fallbackPartId = (event as { parentPartId?: string }).parentPartId ?? get().lastSpawnAgentPartId
         for (let i = msgs.length - 1; i >= 0; i--) {
           const msg = msgs[i]
           if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
           const parts = msg.content as MessagePart[]
-          const partIdx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).subagents?.some((s) => s.id === event.subagentId))
+          const partIdx = findToolPartIndexForSubagent(parts, event.subagentId, fallbackPartId)
           if (partIdx === -1) continue
           const part = parts[partIdx] as ToolPart
-          const subagents = (part.subagents ?? []).map((a) =>
-            a.id === event.subagentId ? { ...a, status: (event.success ? "running" : "error") as "running" | "error", currentTool: event.success ? undefined : event.tool } : a
-          )
+          let subagents = part.subagents ?? []
+          if (!subagents.some((item) => item.id === event.subagentId) && typeof part.input?.description === "string") {
+            subagents = reduceSubagentState(subagents, {
+              type: "subagent_start",
+              subagentId: event.subagentId,
+              mode: "ask",
+              task: part.input.description.trim(),
+            })
+          }
+          subagents = reduceSubagentState(subagents, {
+            type: "subagent_tool_end",
+            subagentId: event.subagentId,
+            tool: event.tool,
+            success: event.success,
+          })
           const nextParts = [...parts]
           nextParts[partIdx] = { ...part, subagents }
           set({ messages: [...msgs.slice(0, i), { ...msg, content: nextParts }, ...msgs.slice(i + 1)] })
@@ -817,18 +964,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "subagent_done": {
         const msgs = get().messages
+        const fallbackPartId = (event as { parentPartId?: string }).parentPartId ?? get().lastSpawnAgentPartId
         for (let i = msgs.length - 1; i >= 0; i--) {
           const msg = msgs[i]
           if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
           const parts = msg.content as MessagePart[]
-          const partIdx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).subagents?.some((s) => s.id === event.subagentId))
+          const partIdx = findToolPartIndexForSubagent(parts, event.subagentId, fallbackPartId)
           if (partIdx === -1) continue
           const part = parts[partIdx] as ToolPart
-          const subagents = (part.subagents ?? []).map((a) =>
-            a.id === event.subagentId
-              ? { ...a, status: (event.success ? "completed" : "error") as "completed" | "error", currentTool: undefined, finishedAt: Date.now(), error: event.error }
-              : a
-          )
+          let subagents = part.subagents ?? []
+          if (!subagents.some((item) => item.id === event.subagentId) && typeof part.input?.description === "string") {
+            subagents = reduceSubagentState(subagents, {
+              type: "subagent_start",
+              subagentId: event.subagentId,
+              mode: "ask",
+              task: part.input.description.trim(),
+            })
+          }
+          subagents = reduceSubagentState(subagents, {
+            type: "subagent_done",
+            subagentId: event.subagentId,
+            success: event.success,
+            error: event.error,
+          })
           const nextParts = [...parts]
           nextParts[partIdx] = { ...part, subagents }
           set({ messages: [...msgs.slice(0, i), { ...msg, content: nextParts }, ...msgs.slice(i + 1)] })
@@ -1137,7 +1295,7 @@ function mergeAssistantContent(
 
   if (previousReasoning.length === 0) return incoming
   if (incomingReasoning.length === 0) {
-    return [...previousReasoning, ...incomingParts]
+    return dedupeAssistantParts([...previousReasoning, ...incomingParts])
   }
 
   const prevText = previousReasoning.map((r) => r.text ?? "").join("").trim()
@@ -1157,7 +1315,7 @@ function mergeAssistantContent(
           (((p as TextPart).user_message ?? "").trim().length > 0))
     )
     if (incomingHasVisibleText) {
-      return [...previousReasoning, ...withoutIncomingReasoning]
+      return dedupeAssistantParts([...previousReasoning, ...withoutIncomingReasoning])
     }
     // Keep richer previous text if snapshot only has placeholder reasoning; keep non-text parts from incoming snapshot.
     const previousVisibleTextParts = previousParts.filter(
@@ -1167,10 +1325,10 @@ function mergeAssistantContent(
           (((p as TextPart).user_message ?? "").trim().length > 0))
     )
     const incomingNonText = withoutIncomingReasoning.filter((p) => p.type !== "text")
-    return [...previousReasoning, ...previousVisibleTextParts, ...incomingNonText]
+    return dedupeAssistantParts([...previousReasoning, ...previousVisibleTextParts, ...incomingNonText])
   }
 
-  return incoming
+  return dedupeAssistantParts(incoming)
 }
 
 function mergeStateMessagesForStream(previous: SessionMessage[], incoming: SessionMessage[]): SessionMessage[] {
@@ -1220,10 +1378,10 @@ function mergeStateMessagesForStream(previous: SessionMessage[], incoming: Sessi
       )
   )
   if (optimisticUsersToKeep.length > 0) {
-    return [...merged, ...optimisticUsersToKeep]
+    return collapseAdjacentDuplicateMessages([...merged, ...optimisticUsersToKeep])
   }
 
-  return merged
+  return collapseAdjacentDuplicateMessages(merged)
 }
 
 function mergeOptimisticUserMessages(previous: SessionMessage[], incoming: SessionMessage[]): SessionMessage[] {
@@ -1268,6 +1426,115 @@ function hasAssistantContent(content: string | MessagePart[]): boolean {
         ((p as ReasoningPart).text?.trim().length ?? 0) > 0 &&
         (p as ReasoningPart).text !== THOUGHT_PLACEHOLDER) ||
       p.type === "tool"
+  )
+}
+
+function collapseAdjacentDuplicateMessages(messages: SessionMessage[]): SessionMessage[] {
+  const collapsed: SessionMessage[] = []
+  for (const message of messages) {
+    const previous = collapsed[collapsed.length - 1]
+    if (
+      previous &&
+      previous.role === "assistant" &&
+      message.role === "assistant" &&
+      assistantMessageSignature(previous) === assistantMessageSignature(message)
+    ) {
+      collapsed[collapsed.length - 1] = {
+        ...message,
+        id: message.id,
+        ts: Math.max(previous.ts, message.ts),
+      }
+      continue
+    }
+    collapsed.push(message)
+  }
+  return collapsed
+}
+
+function dedupeAssistantParts(parts: MessagePart[]): MessagePart[] {
+  const deduped: MessagePart[] = []
+  for (const part of parts) {
+    const previous = deduped[deduped.length - 1]
+    if (previous && assistantPartSignature(previous) === assistantPartSignature(part)) {
+      deduped[deduped.length - 1] = part
+      continue
+    }
+    deduped.push(part)
+  }
+  return deduped
+}
+
+function assistantPartSignature(part: MessagePart): string {
+  if (part.type === "text") {
+    const textPart = part as TextPart
+    return JSON.stringify({
+      type: "text",
+      text: textPart.text ?? "",
+      user_message: textPart.user_message ?? "",
+    })
+  }
+  if (part.type === "reasoning") {
+    const reasoning = part as ReasoningPart
+    return JSON.stringify({
+      type: "reasoning",
+      text: reasoning.text ?? "",
+      reasoningId: reasoning.reasoningId ?? "",
+    })
+  }
+  const tool = part as ToolPart
+  return JSON.stringify({
+    type: "tool",
+    id: tool.id,
+    tool: tool.tool,
+    status: tool.status,
+    path: tool.path ?? "",
+    input: tool.input ?? null,
+    output: tool.output ?? "",
+    error: tool.error ?? "",
+    diffStats: tool.diffStats ?? null,
+  })
+}
+
+function assistantMessageSignature(message: SessionMessage): string {
+  if (typeof message.content === "string") return `assistant:string:${message.content.trim()}`
+  return JSON.stringify(
+    (message.content as MessagePart[]).map((part) => {
+      if (part.type === "text") {
+        const textPart = part as TextPart
+        return {
+          type: "text",
+          text: textPart.text ?? "",
+          user_message: textPart.user_message ?? "",
+        }
+      }
+      if (part.type === "reasoning") {
+        const reasoning = part as ReasoningPart
+        return {
+          type: "reasoning",
+          text: reasoning.text ?? "",
+          durationMs: reasoning.durationMs ?? 0,
+          reasoningId: reasoning.reasoningId ?? "",
+        }
+      }
+      const tool = part as ToolPart
+      return {
+        type: "tool",
+        id: tool.id,
+        tool: tool.tool,
+        status: tool.status,
+        input: tool.input ?? null,
+        output: tool.output ?? "",
+        error: tool.error ?? "",
+        subagents:
+          tool.subagents?.map((subagent) => ({
+            id: subagent.id,
+            task: subagent.task,
+            status: subagent.status,
+            currentTool: subagent.currentTool ?? "",
+            toolUsesCount: subagent.toolUsesCount,
+          })) ?? [],
+      }
+    })
   )
 }
 

@@ -10,17 +10,31 @@ export interface TodoItem {
 export function parseTodo(todo: string): TodoItem[] {
   const raw = todo.trim()
   if (!raw) return []
-  // Structured format: JSON array of { done, text }
+  // Structured format: JSON array of either legacy { done, text } or TodoWrite { id, content, status }
   if (raw.startsWith("[")) {
     try {
-      const arr = JSON.parse(raw) as Array<{ done?: boolean; text?: string }>
+      const arr = JSON.parse(raw) as Array<{
+        done?: boolean
+        text?: string
+        id?: string | number
+        content?: string
+        status?: string
+      }>
       if (!Array.isArray(arr)) return []
       return arr.map((item, i) => ({
         id: i,
-        done: Boolean(item.done),
-        label: typeof item.text === "string" ? item.text : String(item.text ?? ""),
-        inProgress: false,
-      }))
+        done:
+          typeof item.status === "string"
+            ? item.status === "completed" || item.status === "cancelled"
+            : Boolean(item.done),
+        label:
+          typeof item.content === "string"
+            ? item.content
+            : typeof item.text === "string"
+              ? item.text
+              : "",
+        inProgress: typeof item.status === "string" ? item.status === "in_progress" : false,
+      })).filter((item) => item.label.trim().length > 0)
     } catch {
       // fall through to markdown
     }
@@ -45,11 +59,17 @@ export function useTodoWithProgress(todo: string, isRunning: boolean): { items: 
   const items = React.useMemo(() => parseTodo(todo), [todo])
   const completedCount = items.filter((i) => i.done).length
   const total = items.length
+  const explicitInProgressIndex = items.findIndex((i) => i.inProgress)
   const firstPendingIndex = items.findIndex((i) => !i.done)
-  const inProgressIndex = isRunning && firstPendingIndex >= 0 ? firstPendingIndex : -1
+  const inProgressIndex =
+    explicitInProgressIndex >= 0
+      ? explicitInProgressIndex
+      : isRunning && firstPendingIndex >= 0
+        ? firstPendingIndex
+        : -1
   const withProgress = items.map((item, idx) => ({
     ...item,
-    inProgress: idx === inProgressIndex,
+    inProgress: idx === inProgressIndex && !item.done,
   }))
   const currentIndex = inProgressIndex >= 0 ? inProgressIndex + 1 : completedCount
   return { items: withProgress, currentIndex, total }

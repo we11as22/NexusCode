@@ -260,47 +260,37 @@ export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approv
         onKeyDown={(e) => e.key === "Enter" && setExpanded((prev) => !prev)}
       >
         <span className="nexus-file-edit-badge flex-shrink-0">{lang}</span>
-        <button
-          type="button"
-          className="nexus-file-edit-path flex-1 min-w-0 text-left truncate font-medium text-[var(--vscode-foreground)] hover:underline"
-          onClick={(e) => {
-            e.stopPropagation()
-            if (path) postMessage({ type: "showDiff", path })
-          }}
-        >
-          {fileName}
-        </button>
-        {part.diffStats != null ? (
-          <span className="nexus-file-edit-stats flex-shrink-0 flex items-center gap-1">
-            {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
-            {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
-          </span>
-        ) : statLabel ? (
-          <span className="nexus-file-edit-stats flex-shrink-0">
-            {statLabel.startsWith("+") && !statLabel.includes("-") ? (
-              <span className="text-green-500">{statLabel}</span>
-            ) : (
-              statLabel
-            )}
-          </span>
-        ) : null}
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <button
+            type="button"
+            className="nexus-file-edit-path min-w-0 max-w-full text-left truncate font-medium text-[var(--vscode-foreground)] hover:underline"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (path) postMessage({ type: "showDiff", path })
+            }}
+          >
+            {fileName}
+          </button>
+          {part.diffStats != null ? (
+            <span className="nexus-file-edit-stats flex-shrink-0 flex items-center gap-1">
+              {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
+              {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
+            </span>
+          ) : statLabel ? (
+            <span className="nexus-file-edit-stats flex-shrink-0">
+              {statLabel.startsWith("+") && !statLabel.includes("-") ? (
+                <span className="text-green-500">{statLabel}</span>
+              ) : (
+                statLabel
+              )}
+            </span>
+          ) : null}
+        </div>
       </div>
       {expanded && (
         <div className="nexus-file-edit-content">
           {showDiffPreview ? (
             <div className="nexus-diff-view rounded overflow-hidden border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
-              <div className="nexus-diff-view-header px-2 py-1 text-[10px] font-mono border-b border-[var(--vscode-panel-border)] flex items-center gap-2">
-                {fileName}
-                {part.diffStats != null && (
-                  <>
-                    {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
-                    {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
-                  </>
-                )}
-                {fallback && part.diffStats == null && output.includes("replaced") && (
-                  <span className="text-[var(--vscode-descriptionForeground)]">edited</span>
-                )}
-              </div>
               <pre
                 className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono overflow-y-auto nexus-diff-preview-pre"
                 style={{ lineHeight: DIFF_PREVIEW_LINE_HEIGHT, maxHeight: `${diffPreviewMaxHeightRem}rem` }}
@@ -361,7 +351,7 @@ function FileEditBlock({ part }: { part: ToolPart }) {
 
   return (
     <div className="nexus-file-edit-block">
-      <div className="nexus-file-edit-header">
+      <div className="nexus-file-edit-header flex items-center gap-2">
         <span className="nexus-file-edit-badge">{lang}</span>
         <span className="nexus-file-edit-path">{fileName}</span>
         {part.diffStats != null ? (
@@ -376,15 +366,6 @@ function FileEditBlock({ part }: { part: ToolPart }) {
       <div className="nexus-file-edit-content">
         {hasDiffHunks ? (
           <div className="nexus-diff-view rounded overflow-hidden border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
-            <div className="nexus-diff-view-header px-2 py-1 text-[10px] font-mono border-b border-[var(--vscode-panel-border)] flex items-center gap-2">
-              {fileName}
-              {part.diffStats != null && (
-                <>
-                  {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
-                  {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
-                </>
-              )}
-            </div>
             <pre className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono overflow-y-auto">
               {getDiffPreviewHunks(part.diffHunks!).map((h, i) => {
                 if (h.type === "add") {

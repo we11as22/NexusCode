@@ -158,6 +158,36 @@ export type ExploredPrefixItem =
   | { type: "reasoning"; text: string; durationMs?: number }
   | { type: "tool"; part: ToolPart; entry: ExploredEntry }
 
+export function getExplorationItemsFromToolPart(part: ToolPart): ExploredPrefixItem[] {
+  const expanded = expandExplorationToolParts(part)
+  const items: ExploredPrefixItem[] = []
+  for (let index = 0; index < expanded.length; index++) {
+    const expandedPart = expanded[index]!
+    const entry = getToolEntry(expandedPart, index)
+    if (!entry) continue
+    items.push({ type: "tool", part: expandedPart, entry })
+  }
+  return items
+}
+
+export function countExplorationMetricsFromItems(prefixItems: ExploredPrefixItem[]): {
+  filesCount: number
+  listCount: number
+  searchesCount: number
+} {
+  return prefixItems.reduce(
+    (acc, item) => {
+      if (item.type !== "tool") return acc
+      const metrics = countExplorationMetrics(item.part.tool)
+      acc.filesCount += metrics.files
+      acc.listCount += metrics.lists
+      acc.searchesCount += metrics.searches
+      return acc
+    },
+    { filesCount: 0, listCount: 0, searchesCount: 0 }
+  )
+}
+
 export type AssistantDisplaySegment =
   | { type: "part"; index: number; part: MessagePart }
   | { type: "explored"; startIndex: number; endIndex: number; prefixItems: ExploredPrefixItem[] }
@@ -389,27 +419,22 @@ export function getExploredFromParts(parts: MessagePart[]): {
 /** Inline collapsible "Explored [N files,] [L lists,] [M searches]". If a metric is 0 it is omitted. */
 export function ExploredSummaryInline({
   prefixItems,
-  defaultCollapsed,
   isRunning,
   onOpenFile,
 }: {
   prefixItems: ExploredPrefixItem[]
-  defaultCollapsed: boolean
   isRunning: boolean
   onOpenFile?: (path: string, line?: number, endLine?: number) => void
 }) {
-  const [open, setOpen] = useState(!defaultCollapsed)
-  const previousCollapsedRef = useRef(defaultCollapsed)
+  const [open, setOpen] = useState(false)
+  const previousRunningRef = useRef(isRunning)
   useEffect(() => {
-    if (previousCollapsedRef.current !== defaultCollapsed) {
-      setOpen(!defaultCollapsed)
-      previousCollapsedRef.current = defaultCollapsed
+    if (previousRunningRef.current && !isRunning) {
+      setOpen(false)
     }
-  }, [defaultCollapsed])
-  // list_dir/List is in Explored and counted as separate "lists" metric.
-  const filesCount = prefixItems.filter((x) => x.type === "tool").reduce((acc, x) => acc + countExplorationMetrics(x.part.tool).files, 0)
-  const listCount = prefixItems.filter((x) => x.type === "tool").reduce((acc, x) => acc + countExplorationMetrics(x.part.tool).lists, 0)
-  const searchesCount = prefixItems.filter((x) => x.type === "tool").reduce((acc, x) => acc + countExplorationMetrics(x.part.tool).searches, 0)
+    previousRunningRef.current = isRunning
+  }, [isRunning])
+  const { filesCount, listCount, searchesCount } = countExplorationMetricsFromItems(prefixItems)
   const labelParts: string[] = []
   if (filesCount > 0) labelParts.push(`${filesCount} file${filesCount === 1 ? "" : "s"}`)
   if (listCount > 0) labelParts.push(`${listCount} list${listCount === 1 ? "" : "s"}`)
@@ -418,6 +443,37 @@ export function ExploredSummaryInline({
   if (total === 0) return null
   const statusLabel = isRunning ? "Exploring" : "Explored"
   const headerLabel = labelParts.length > 0 ? `${statusLabel} ${labelParts.join(", ")}` : statusLabel
+  const previewItems = isRunning && !open ? prefixItems.slice(-4) : []
+
+  const renderItem = (item: ExploredPrefixItem, idx: number, compact: boolean) => {
+    if (item.type === "reasoning") {
+      return (
+        <ExploredThoughtRow
+          key={`thought-${idx}`}
+          text={item.text}
+          durationMs={item.durationMs}
+          compact={compact}
+        />
+      )
+    }
+    const e = item.entry
+    return (
+      <div key={e.id} className={`nexus-explored-entry${compact ? " nexus-explored-entry-compact" : ""}`}>
+        {e.path != null && (e.line != null || e.endLine != null) && onOpenFile ? (
+          <button
+            type="button"
+            onClick={() => onOpenFile(e.path!, e.line, e.endLine)}
+            className="nexus-explored-entry-btn"
+            title={e.path}
+          >
+            {e.label}
+          </button>
+        ) : (
+          <span className="nexus-explored-entry-text">{e.label}</span>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div
@@ -439,36 +495,14 @@ export function ExploredSummaryInline({
           ▼
         </span>
       </button>
+      {!open && previewItems.length > 0 && (
+        <div className="nexus-explored-preview-window">
+          {previewItems.map((item, idx) => renderItem(item, idx, true))}
+        </div>
+      )}
       {open && (
         <div className="nexus-explored-content">
-          {prefixItems.map((item, idx) => {
-            if (item.type === "reasoning") {
-              return (
-                <ExploredThoughtRow
-                  key={`thought-${idx}`}
-                  text={item.text}
-                  durationMs={item.durationMs}
-                />
-              )
-            }
-            const e = item.entry
-            return (
-              <div key={e.id} className="nexus-explored-entry">
-                {e.path != null && (e.line != null || e.endLine != null) && onOpenFile ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenFile(e.path!, e.line, e.endLine)}
-                    className="nexus-explored-entry-btn"
-                    title={e.path}
-                  >
-                    {e.label}
-                  </button>
-                ) : (
-                  <span className="nexus-explored-entry-text">{e.label}</span>
-                )}
-              </div>
-            )
-          })}
+          {prefixItems.map((item, idx) => renderItem(item, idx, false))}
         </div>
       )}
     </div>
@@ -476,7 +510,7 @@ export function ExploredSummaryInline({
 }
 
 /** One thought row inside Explored block — one line "Thought for Xs" / "Thought briefly", expandable on click for full text. */
-function ExploredThoughtRow({ text, durationMs }: { text: string; durationMs?: number }) {
+function ExploredThoughtRow({ text, durationMs, compact = false }: { text: string; durationMs?: number; compact?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const label =
     durationMs != null
@@ -486,16 +520,23 @@ function ExploredThoughtRow({ text, durationMs }: { text: string; durationMs?: n
         : "Thought"
 
   return (
-    <div className="nexus-explored-entry">
+    <div className={`nexus-explored-entry${compact ? " nexus-explored-entry-compact" : ""}`}>
       <button
         type="button"
-        onClick={() => setExpanded((e) => !e)}
+        onClick={() => {
+          if (!compact) setExpanded((e) => !e)
+        }}
         className="nexus-explored-entry-btn w-full text-left"
       >
-        <span className="nexus-explored-thought-chevron" style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
+        <span
+          className="nexus-explored-thought-chevron"
+          style={{ transform: compact ? "rotate(-90deg)" : expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
+        >
+          ▼
+        </span>
         <span>{label}</span>
       </button>
-      {expanded && (
+      {expanded && !compact && (
         <div className="nexus-explored-thought-expanded">
           {text.trim() || "Model reasoning is active, but no visible reasoning text was streamed."}
         </div>

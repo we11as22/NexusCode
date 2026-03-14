@@ -2,6 +2,38 @@ import * as vscode from "vscode"
 import * as path from "path"
 import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticItem, CheckpointEntry, ChangedFile } from "@nexuscode/core"
 
+const NEXUS_PREVIEW_SCHEME = "nexuscode-preview"
+const previewDocuments = new Map<string, string>()
+let previewProviderRegistration: vscode.Disposable | undefined
+
+function ensurePreviewProviderRegistered(): void {
+  if (previewProviderRegistration) return
+  previewProviderRegistration = vscode.workspace.registerTextDocumentContentProvider(NEXUS_PREVIEW_SCHEME, {
+    provideTextDocumentContent(uri: vscode.Uri): string {
+      return previewDocuments.get(uri.toString()) ?? ""
+    },
+  })
+}
+
+async function openReadonlyPreviewDocument(content: string, filePath: string, label: string): Promise<vscode.TextDocument> {
+  ensurePreviewProviderRegistered()
+  const lang = getLanguageFromExtension(path.extname(filePath))
+  const fileName = path.basename(filePath) || "preview"
+  const uri = vscode.Uri.parse(
+    `${NEXUS_PREVIEW_SCHEME}:/${encodeURIComponent(fileName)}?label=${encodeURIComponent(label)}&id=${Date.now()}-${Math.random().toString(36).slice(2)}`
+  )
+  previewDocuments.set(uri.toString(), content)
+  const doc = await vscode.workspace.openTextDocument(uri)
+  try {
+    if (lang && doc.languageId !== lang) {
+      await vscode.languages.setTextDocumentLanguage(doc, lang)
+    }
+  } catch {
+    // keep default/plaintext
+  }
+  return doc
+}
+
 /**
  * VS Code host adapter — bridges the core agent with VS Code APIs.
  * When useWebviewApproval is true, showApprovalDialog defers to webview (no native dialog).
@@ -111,14 +143,8 @@ export class VsCodeHost implements IHost {
   async showDiff(filePath: string, before: string, after: string): Promise<boolean> {
     // Create diff view in VS Code
     const fileName = path.basename(filePath)
-    const beforeDoc = await vscode.workspace.openTextDocument({
-      content: before,
-      language: getLanguageFromExtension(path.extname(filePath)),
-    })
-    const afterDoc = await vscode.workspace.openTextDocument({
-      content: after,
-      language: getLanguageFromExtension(path.extname(filePath)),
-    })
+    const beforeDoc = await openReadonlyPreviewDocument(before, filePath, `${fileName}:before`)
+    const afterDoc = await openReadonlyPreviewDocument(after, filePath, `${fileName}:after`)
 
     await vscode.commands.executeCommand(
       "vscode.diff",
@@ -436,11 +462,7 @@ export async function showDiffForPath(cwd: string, filePath: string): Promise<vo
   }
 
   const fileName = path.basename(filePath)
-  const lang = getLanguageFromExtension(path.extname(filePath))
-  const beforeDoc = await vscode.workspace.openTextDocument({
-    content: before,
-    language: lang,
-  })
+  const beforeDoc = await openReadonlyPreviewDocument(before, filePath, `${fileName}:before`)
 
   await vscode.commands.executeCommand(
     "vscode.diff",
@@ -465,10 +487,7 @@ export async function showSessionEditDiff(
   const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
   const fileName = path.basename(filePath)
   const lang = getLanguageFromExtension(path.extname(filePath))
-  const beforeDoc = await vscode.workspace.openTextDocument({
-    content: before,
-    language: lang,
-  })
+  const beforeDoc = await openReadonlyPreviewDocument(before, filePath, `${fileName}:before`)
   const fileUri = resolveWorkspaceFileUri(cwd, absPath)
   const useWorkspaceAfterFile = options?.useWorkspaceAfterFile !== false
   let afterUri: vscode.Uri
@@ -477,17 +496,11 @@ export async function showSessionEditDiff(
     try {
       await vscode.workspace.fs.stat(fileUri)
     } catch {
-      const afterDoc = await vscode.workspace.openTextDocument({
-        content: after,
-        language: lang,
-      })
+      const afterDoc = await openReadonlyPreviewDocument(after, filePath, `${fileName}:after`)
       afterUri = afterDoc.uri
     }
   } else {
-    const afterDoc = await vscode.workspace.openTextDocument({
-      content: after,
-      language: lang,
-    })
+    const afterDoc = await openReadonlyPreviewDocument(after, filePath, `${fileName}:after`)
     afterUri = afterDoc.uri
   }
 
@@ -496,6 +509,23 @@ export async function showSessionEditDiff(
     beforeDoc.uri,
     afterUri,
     `${fileName}: Session changes`,
+    { viewColumn: vscode.ViewColumn.Active, preview: false, preserveFocus: false }
+  )
+}
+
+export async function openReadonlyTextDiff(
+  filePath: string,
+  before: string,
+  after: string,
+  title: string,
+): Promise<void> {
+  const beforeDoc = await openReadonlyPreviewDocument(before, filePath, `${title}:before`)
+  const afterDoc = await openReadonlyPreviewDocument(after, filePath, `${title}:after`)
+  await vscode.commands.executeCommand(
+    "vscode.diff",
+    beforeDoc.uri,
+    afterDoc.uri,
+    title,
     { viewColumn: vscode.ViewColumn.Active, preview: false, preserveFocus: false }
   )
 }

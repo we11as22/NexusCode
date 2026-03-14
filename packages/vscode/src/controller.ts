@@ -30,7 +30,6 @@ import {
   createCompaction,
   ParallelAgentManager,
   createSpawnAgentTool,
-  createSpawnAgentsAliasTool,
   createSpawnAgentOutputTool,
   createSpawnAgentStopTool,
   runAgentLoop,
@@ -43,7 +42,7 @@ import {
   hadPlanExit,
   getPlanContentForFollowup,
 } from "@nexuscode/core"
-import { VsCodeHost, showSessionEditDiff } from "./host.js"
+import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
@@ -51,6 +50,111 @@ const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not
 /** Number of messages to load when opening a server session (same as server RECENT_MESSAGES_FOR_RUN for agent context). */
 const INITIAL_SERVER_MESSAGES = 200
 const FILE_WRITE_TOOL_NAMES = new Set(["Write", "Edit", "write_to_file", "replace_in_file"])
+
+type ShadowSubAgentState = {
+  id: string
+  mode: Mode
+  task: string
+  status: "running" | "completed" | "error"
+  currentTool?: string
+  toolHistory: string[]
+  toolUsesCount: number
+  startedAt: number
+  finishedAt?: number
+  error?: string
+}
+
+function shortenSubagentValue(value: unknown, max = 52): string {
+  if (typeof value !== "string") return ""
+  const one = value.replace(/\s+/g, " ").trim()
+  return one.length <= max ? one : `${one.slice(0, max - 1)}…`
+}
+
+function getSubagentToolLabel(tool: string, input?: Record<string, unknown>): string {
+  const path = shortenSubagentValue(input?.path ?? input?.file_path)
+  const pattern = shortenSubagentValue(input?.pattern ?? input?.query)
+  const command = shortenSubagentValue(input?.command, 44)
+  const normalized = tool.trim()
+  if (normalized === "Read" || normalized === "read_file") return path ? `Read(${path})` : "Read(file)"
+  if (normalized === "List" || normalized === "list_dir") return path ? `List(${path})` : "List(.)"
+  if (normalized === "Grep" || normalized === "grep") return pattern ? `Grep(${pattern})` : "Grep"
+  if (normalized === "Glob" || normalized === "glob") return pattern ? `Glob(${pattern})` : "Glob"
+  if (normalized === "Bash" || normalized === "execute_command") return command ? `Bash(${command})` : "Bash"
+  return normalized
+}
+
+function reduceSubagentState(
+  list: ShadowSubAgentState[],
+  event:
+    | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
+    | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown> }
+    | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
+    | { type: "subagent_done"; subagentId: string; success: boolean; error?: string }
+): ShadowSubAgentState[] {
+  switch (event.type) {
+    case "subagent_start": {
+      const next = list.filter((item) => item.id !== event.subagentId)
+      next.push({
+        id: event.subagentId,
+        mode: event.mode,
+        task: event.task,
+        status: "running",
+        currentTool: undefined,
+        toolHistory: [],
+        toolUsesCount: 0,
+        startedAt: Date.now(),
+      })
+      return next
+    }
+    case "subagent_tool_start": {
+      const label = getSubagentToolLabel(event.tool, event.input)
+      return list.map((item) =>
+        item.id === event.subagentId
+          ? {
+              ...item,
+              status: "running" as const,
+              currentTool: label,
+              toolUsesCount: item.toolUsesCount + 1,
+              toolHistory: [...item.toolHistory, label].slice(-16),
+            }
+          : item
+      )
+    }
+    case "subagent_tool_end":
+      return list.map((item) =>
+        item.id === event.subagentId
+          ? {
+              ...item,
+              status: (event.success ? "running" : "error") as "running" | "error",
+              currentTool: event.success ? undefined : event.tool,
+            }
+          : item
+      )
+    case "subagent_done":
+      return list.map((item) =>
+        item.id === event.subagentId
+          ? {
+              ...item,
+              status: (event.success ? "completed" : "error") as "completed" | "error",
+              currentTool: undefined,
+              finishedAt: Date.now(),
+              error: event.error,
+            }
+          : item
+      )
+  }
+}
+
+function findToolPartIndexForSubagent(parts: MessagePart[], subagentId: string, parentPartId?: string | null): number {
+  const byExistingSubagent = parts.findIndex(
+    (part) => part.type === "tool" && (part as ToolPart & { subagents?: ShadowSubAgentState[] }).subagents?.some((subagent) => subagent.id === subagentId)
+  )
+  if (byExistingSubagent >= 0) return byExistingSubagent
+  if (parentPartId && parentPartId.trim().length > 0) {
+    return parts.findIndex((part) => part.type === "tool" && (part as ToolPart).id === parentPartId)
+  }
+  return -1
+}
 
 function stripModeReminderFromMessages(messages: SessionMessage[]): SessionMessage[] {
   return messages.map((msg) => {
@@ -517,6 +621,80 @@ export class Controller {
       case "todo_updated":
         this.session.updateTodo(event.todo ?? "")
         return
+
+      case "subagent_start":
+      case "subagent_tool_start":
+      case "subagent_tool_end":
+      case "subagent_done": {
+        const explicitParentPartId =
+          "parentPartId" in event && typeof event.parentPartId === "string" && event.parentPartId.trim().length > 0
+            ? event.parentPartId
+            : undefined
+        const partId = explicitParentPartId ?? this.streamLastSpawnAgentPartId ?? null
+        if (!partId) return
+        const assistantMessages = [...this.session.messages].reverse()
+        for (const msg of assistantMessages) {
+          if (msg.role !== "assistant") continue
+          const parts = Array.isArray(msg.content)
+            ? (msg.content as MessagePart[])
+            : typeof msg.content === "string" && msg.content.trim().length > 0
+              ? ([{ type: "text", text: msg.content }] as MessagePart[])
+              : ([] as MessagePart[])
+          const partIndex =
+            event.type === "subagent_start"
+              ? parts.findIndex((part) => part.type === "tool" && (part as ToolPart).id === partId)
+              : findToolPartIndexForSubagent(parts, event.subagentId, partId)
+          if (partIndex < 0) continue
+          const toolPart = parts[partIndex] as ToolPart & { subagents?: ShadowSubAgentState[] }
+          let currentSubagents = Array.isArray(toolPart.subagents) ? toolPart.subagents : []
+          if (
+            event.type !== "subagent_start" &&
+            !currentSubagents.some((item) => item.id === event.subagentId) &&
+            typeof toolPart.input?.description === "string"
+          ) {
+            currentSubagents = reduceSubagentState(currentSubagents, {
+              type: "subagent_start",
+              subagentId: event.subagentId,
+              mode: "ask",
+              task: toolPart.input.description.trim(),
+            })
+          }
+          let nextSubagents = currentSubagents
+          if (event.type === "subagent_start") {
+            nextSubagents = reduceSubagentState(currentSubagents, {
+              type: "subagent_start",
+              subagentId: event.subagentId,
+              mode: event.mode,
+              task: event.task,
+            })
+          } else if (event.type === "subagent_tool_start") {
+            nextSubagents = reduceSubagentState(currentSubagents, {
+              type: "subagent_tool_start",
+              subagentId: event.subagentId,
+              tool: event.tool,
+              input: event.input,
+            })
+          } else if (event.type === "subagent_tool_end") {
+            nextSubagents = reduceSubagentState(currentSubagents, {
+              type: "subagent_tool_end",
+              subagentId: event.subagentId,
+              tool: event.tool,
+              success: event.success,
+            })
+          } else {
+            nextSubagents = reduceSubagentState(currentSubagents, {
+              type: "subagent_done",
+              subagentId: event.subagentId,
+              success: event.success,
+              error: event.error,
+            })
+          }
+          parts[partIndex] = { ...toolPart, subagents: nextSubagents } as ToolPart
+          msg.content = parts
+          return
+        }
+        return
+      }
 
       default:
         return
@@ -1421,9 +1599,12 @@ export class Controller {
       }
       if (files.length === 1) {
         const f = files[0]!
-        const beforeDoc = await vscode.workspace.openTextDocument({ content: f.before, language: "plaintext" })
-        const afterDoc = await vscode.workspace.openTextDocument({ content: f.after, language: "plaintext" })
-        await vscode.commands.executeCommand("vscode.diff", beforeDoc.uri, afterDoc.uri, `${path.basename(f.path)}: Checkpoint diff`, { viewColumn: vscode.ViewColumn.Active })
+        await openReadonlyTextDiff(
+          f.path,
+          f.before,
+          f.after,
+          `${path.basename(f.path)}: Checkpoint diff`
+        )
         return
       }
       const chosen = await vscode.window.showQuickPick(
@@ -1431,9 +1612,12 @@ export class Controller {
         { title: "Select file to view diff", placeHolder: `${files.length} files changed` }
       )
       if (chosen) {
-        const beforeDoc = await vscode.workspace.openTextDocument({ content: chosen.file.before, language: "plaintext" })
-        const afterDoc = await vscode.workspace.openTextDocument({ content: chosen.file.after, language: "plaintext" })
-        await vscode.commands.executeCommand("vscode.diff", beforeDoc.uri, afterDoc.uri, `${path.basename(chosen.file.path)}: Checkpoint diff`, { viewColumn: vscode.ViewColumn.Active })
+        await openReadonlyTextDiff(
+          chosen.file.path,
+          chosen.file.before,
+          chosen.file.after,
+          `${path.basename(chosen.file.path)}: Checkpoint diff`
+        )
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -1982,7 +2166,6 @@ Return in this format:
       }
       const parallelManager = new ParallelAgentManager()
       toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
-      toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, configForRun))
       toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
       toolRegistry.register(createSpawnAgentStopTool(parallelManager))
       const { builtin: tools, dynamic } = toolRegistry.getForMode(runMode)

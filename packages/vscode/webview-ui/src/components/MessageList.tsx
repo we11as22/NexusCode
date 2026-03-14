@@ -3,7 +3,7 @@ import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
-import { getAssistantDisplaySegments, ExploredSummaryInline, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
+import { ExploredSummaryInline, getExplorationItemsFromToolPart, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
 import { ThoughtBlock } from "./ThoughtBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
@@ -12,6 +12,16 @@ import { useChatStore } from "../stores/chat.js"
 
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file", "Edit", "Write"])
 const BASH_OUTPUT_TAIL_LINES = 80
+const TODO_TOOL_NAMES = new Set(["TodoWrite", "update_todo_list"])
+const SPAWN_AGENT_TOOL_NAMES = new Set(["SpawnAgent", "SpawnAgents"])
+const HIDDEN_SUBAGENT_ORCHESTRATION_TOOLS = new Set(["SpawnAgentOutput", "SpawnAgentStop"])
+
+function isDeniedFileEdit(part: ToolPart): boolean {
+  if (!FILE_EDIT_TOOLS.has(part.tool)) return false
+  if (part.status !== "error") return false
+  const output = (part.output ?? "").trim()
+  return /^User denied (write|edit) /i.test(output)
+}
 
 const MessageListScroller = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   (props, ref) => (
@@ -249,14 +259,56 @@ function getCanonicalReplyIndex(parts: MessagePart[]): number {
   return textPartIndices[textPartIndices.length - 1]!
 }
 
+function hasVisibleTextPart(part: MessagePart): boolean {
+  if (part.type !== "text") return false
+  const textPart = part as { text?: string; user_message?: string }
+  return Boolean(textPart.text?.trim() || textPart.user_message?.trim())
+}
+
+function isReasoningPartRenderable(part: MessagePart): boolean {
+  if (part.type !== "reasoning") return false
+  const reasoning = part as { text?: string }
+  const PLACEHOLDER_TEXT = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
+  return Boolean(reasoning.text?.trim()) && reasoning.text !== PLACEHOLDER_TEXT
+}
+
 function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): ChatRenderItem[] {
-  const flatItems: ChatRenderItem[] = []
+  const renderItems: ChatRenderItem[] = []
+  let pendingReasoning: Array<Extract<ChatRenderItem, { type: "assistant_part" }>> = []
+  let activeExploration:
+    | {
+        key: string
+        prefixItems: ExploredPrefixItem[]
+      }
+    | null = null
+
+  const flushPendingReasoning = () => {
+    if (pendingReasoning.length === 0) return
+    renderItems.push(...pendingReasoning)
+    pendingReasoning = []
+  }
+
+  const flushExploration = (running: boolean) => {
+    if (!activeExploration || activeExploration.prefixItems.length === 0) {
+      activeExploration = null
+      return
+    }
+    renderItems.push({
+      type: "explored",
+      key: activeExploration.key,
+      prefixItems: [...activeExploration.prefixItems],
+      isRunning: running,
+    })
+    activeExploration = null
+  }
 
   messages.forEach((message, messageIndex) => {
     const isComplete = !isRunning || messageIndex < messages.length - 1
 
     if (message.role !== "assistant" || typeof message.content === "string" || !Array.isArray(message.content)) {
-      flatItems.push({
+      flushExploration(false)
+      flushPendingReasoning()
+      renderItems.push({
         type: "message",
         key: message.id,
         message,
@@ -267,48 +319,90 @@ function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): C
     }
 
     const parts = message.content as MessagePart[]
-    const segments = getAssistantDisplaySegments(parts)
     const canonicalReplyIndex = getCanonicalReplyIndex(parts)
 
-    segments.forEach((segment, segmentIndex) => {
-      if (segment.type === "explored") {
-        flatItems.push({
-          type: "explored",
-          key: `${message.id}-explored-${segment.startIndex}-${segment.endIndex}`,
-          prefixItems: segment.prefixItems,
-          isRunning: !isComplete && segmentIndex === segments.length - 1,
-        })
-        return
-      }
-
-      flatItems.push({
+    parts.forEach((part, partIndex) => {
+      const baseItem: Extract<ChatRenderItem, { type: "assistant_part" }> = {
         type: "assistant_part",
-        key: `${message.id}-part-${segment.index}`,
+        key: `${message.id}-part-${partIndex}`,
         message,
         messageIndex,
         isComplete,
         parts,
-        part: segment.part,
-        partIndex: segment.index,
+        part,
+        partIndex,
         canonicalReplyIndex,
-        isLastPart: segment.index === parts.length - 1,
-      })
+        isLastPart: partIndex === parts.length - 1,
+      }
+
+      if (part.type === "reasoning") {
+        if (activeExploration) {
+          if (isReasoningPartRenderable(part)) {
+            const reasoning = part as { text: string; durationMs?: number }
+            activeExploration.prefixItems.push({
+              type: "reasoning",
+              text: reasoning.text,
+              durationMs: reasoning.durationMs,
+            })
+          }
+          return
+        }
+        pendingReasoning.push(baseItem)
+        return
+      }
+
+      if (part.type === "tool") {
+        if (TODO_TOOL_NAMES.has((part as ToolPart).tool)) return
+        const explorationItems = getExplorationItemsFromToolPart(part as ToolPart)
+        if (explorationItems.length > 0) {
+          if (!activeExploration) {
+            activeExploration = {
+              key: pendingReasoning[0]?.key ?? `${message.id}-explored-${partIndex}`,
+              prefixItems: pendingReasoning
+                .filter((item) => item.part.type === "reasoning" && isReasoningPartRenderable(item.part))
+                .map((item) => {
+                  const reasoning = item.part as { text: string; durationMs?: number }
+                  return {
+                    type: "reasoning" as const,
+                    text: reasoning.text,
+                    durationMs: reasoning.durationMs,
+                  }
+                }),
+            }
+            pendingReasoning = []
+          }
+          activeExploration.prefixItems.push(...explorationItems)
+          return
+        }
+
+        flushExploration(false)
+        flushPendingReasoning()
+        renderItems.push(baseItem)
+        return
+      }
+
+      if (part.type === "text") {
+        if (hasVisibleTextPart(part)) {
+          flushExploration(false)
+          flushPendingReasoning()
+          renderItems.push(baseItem)
+        }
+        return
+      }
+
+      flushExploration(false)
+      flushPendingReasoning()
+      renderItems.push(baseItem)
     })
   })
 
-  const mergedItems: ChatRenderItem[] = []
-  for (const item of flatItems) {
-    const previous = mergedItems[mergedItems.length - 1]
-    if (item.type === "explored" && previous?.type === "explored") {
-      previous.prefixItems = [...previous.prefixItems, ...item.prefixItems]
-      previous.isRunning = previous.isRunning || item.isRunning
-      previous.key = `${previous.key}__${item.key}`
-      continue
-    }
-    mergedItems.push(item)
+  if (activeExploration) {
+    flushExploration(isRunning)
+  } else {
+    flushPendingReasoning()
   }
 
-  return mergedItems
+  return renderItems
 }
 
 export function MessageList({ messages, isRunning = false, hasOlderMessages = false, loadingOlderMessages = false }: Props) {
@@ -413,7 +507,6 @@ function RenderItemRow({
       <div className="w-full min-w-0">
         <ExploredSummaryInline
           prefixItems={item.prefixItems}
-          defaultCollapsed={!item.isRunning}
           isRunning={item.isRunning}
           onOpenFile={(path, line, endLine) =>
             postMessage({ type: "openFileAtLocation", path, line, endLine })
@@ -748,34 +841,10 @@ function AssistantText({ text, streaming, variant = "normal" }: { text: string; 
   )
 }
 
-const SUBAGENT_TOOL_LABELS: Record<string, string> = {
-  read_file: "Reading file",
-  Read: "Reading file",
-  list_dir: "Listing directory",
-  List: "Listing directory",
-  list_code_definitions: "Listing definitions",
-  ListCodeDefinitions: "Listing definitions",
-  search_files: "Searching files",
-  codebase_search: "Searching codebase",
-  CodebaseSearch: "Searching codebase",
-  grep: "Searching files",
-  Grep: "Searching files",
-  write_to_file: "Edit file",
-  replace_in_file: "Edit file",
-  Write: "Edit file",
-  Edit: "Edit file",
-  execute_command: "Bash",
-  Bash: "Bash",
-  web_fetch: "Fetching URL",
-  web_search: "Web search",
-  use_skill: "Using skill",
-  batch: "Batch operation",
-}
-
 function subagentStatusLine(a: SubAgentState): string {
   if (a.status === "completed") return "Completed"
   if (a.status === "error") return a.error ? `Failed: ${a.error.slice(0, 60)}` : "Failed"
-  if (a.currentTool) return SUBAGENT_TOOL_LABELS[a.currentTool] ?? `Running ${a.currentTool}`
+  if (a.currentTool) return a.currentTool
   return "Starting…"
 }
 
@@ -784,32 +853,165 @@ function truncateTask(s: string, max = 56): string {
   return one.length <= max ? one : one.slice(0, max - 1) + "…"
 }
 
-/** Subagents inline under the SpawnAgent tool card; one line per subagent (task + dynamic status). */
-function SubagentInlineList({ subagents }: { subagents: SubAgentState[] }) {
+type SubagentDisplayItem = {
+  key: string
+  task: string
+  status: "running" | "completed" | "error" | "pending"
+  detail: string
+  error?: string
+}
+
+function isSpawnAgentRecipientName(raw: string): boolean {
+  const normalized = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, "")
+  return normalized === "spawnagent" || normalized === "spawnagents"
+}
+
+function getParallelSpawnAgentDescriptions(input?: Record<string, unknown>): string[] {
+  const uses = input?.tool_uses
+  if (!Array.isArray(uses)) return []
+  return uses
+    .map((item) => {
+      if (item == null || typeof item !== "object") return null
+      const use = item as { recipient_name?: unknown; parameters?: unknown }
+      if (typeof use.recipient_name !== "string" || !isSpawnAgentRecipientName(use.recipient_name)) return null
+      if (use.parameters == null || typeof use.parameters !== "object") return null
+      const description = (use.parameters as Record<string, unknown>).description
+      return typeof description === "string" && description.trim().length > 0 ? description.trim() : null
+    })
+    .filter((value): value is string => value != null)
+}
+
+function isPureSubagentParallelTool(part: ToolPart): boolean {
+  if (part.tool !== "Parallel" && part.tool !== "parallel") return false
+  const uses = part.input?.tool_uses
+  if (!Array.isArray(uses) || uses.length === 0) return false
+  return uses.every((item) => {
+    if (item == null || typeof item !== "object") return false
+    const recipientName = (item as { recipient_name?: unknown }).recipient_name
+    return typeof recipientName === "string" && isSpawnAgentRecipientName(recipientName)
+  })
+}
+
+function getSubagentDisplayItems(part: ToolPart): SubagentDisplayItem[] {
+  const liveSubagents = part.subagents ?? []
+  const declaredTasks =
+    SPAWN_AGENT_TOOL_NAMES.has(part.tool)
+      ? (() => {
+          const task = typeof part.input?.description === "string" ? part.input.description.trim() : ""
+          return task ? [task] : []
+        })()
+      : isPureSubagentParallelTool(part)
+        ? getParallelSpawnAgentDescriptions(part.input)
+        : []
+
+  const items: SubagentDisplayItem[] = []
+  const usedLiveIds = new Set<string>()
+
+  declaredTasks.forEach((task, index) => {
+    const live = liveSubagents.find((subagent) => subagent.task.trim() === task.trim() && !usedLiveIds.has(subagent.id))
+    if (live) {
+      usedLiveIds.add(live.id)
+      items.push({
+        key: live.id,
+        task: live.task,
+        status: live.status,
+        detail: subagentStatusLine(live),
+        error: live.error,
+      })
+      return
+    }
+    const isSingleSpawnAgent = SPAWN_AGENT_TOOL_NAMES.has(part.tool) && declaredTasks.length === 1
+    items.push({
+      key: `${part.id}-pending-${index}`,
+      task,
+      status:
+        isSingleSpawnAgent && part.status === "completed"
+          ? "completed"
+          : isSingleSpawnAgent && part.status === "error"
+            ? "error"
+            : "pending",
+      detail:
+        isSingleSpawnAgent && part.status === "completed"
+          ? "Completed"
+          : isSingleSpawnAgent && part.status === "error"
+            ? (part.error?.trim() || "Failed")
+            : "Starting…",
+      error: isSingleSpawnAgent && part.status === "error" ? part.error : undefined,
+    })
+  })
+
+  liveSubagents.forEach((subagent) => {
+    if (usedLiveIds.has(subagent.id)) return
+    items.push({
+      key: subagent.id,
+      task: subagent.task,
+      status: subagent.status,
+      detail: subagentStatusLine(subagent),
+      error: subagent.error,
+    })
+  })
+
+  return items
+}
+
+function StatusCircleIcon({ status }: { status: SubagentDisplayItem["status"] }) {
+  if (status === "completed") {
+    return (
+      <svg className="nexus-subtask-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M8 12.5l2.5 2.5L16.5 9" />
+      </svg>
+    )
+  }
+  if (status === "error") {
+    return (
+      <svg className="nexus-subtask-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M9 9l6 6M15 9l-6 6" />
+      </svg>
+    )
+  }
   return (
-    <div className="mt-1.5 ml-1 space-y-1">
-      {subagents.map((a) => (
+    <svg className="nexus-subtask-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1">
+      <circle cx="12" cy="12" r="8.5" />
+    </svg>
+  )
+}
+
+/** Subagent task cards — standalone UI, without visible Parallel/SpawnAgent tool wrapper. */
+function SubagentInlineList({ items }: { items: SubagentDisplayItem[] }) {
+  if (items.length === 0) return null
+  return (
+    <div className="nexus-subtask-stack">
+      {items.map((item) => (
         <div
-          key={a.id}
-          className={`rounded border px-2 py-1.5 text-xs ${
-            a.status === "completed"
-              ? "border-green-500/30 bg-green-500/10"
-              : a.status === "error"
-                ? "border-red-500/30 bg-red-500/10"
-                : "border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/20"
+          key={item.key}
+          className={`nexus-subtask-card ${
+            item.status === "completed"
+              ? "nexus-subtask-card-done"
+              : item.status === "error"
+                ? "nexus-subtask-card-error"
+                : item.status === "running"
+                  ? "nexus-subtask-card-running"
+                  : "nexus-subtask-card-pending"
           }`}
         >
-          <div className="font-medium text-[var(--vscode-foreground)] truncate" title={a.task}>
-            {truncateTask(a.task)}
+          <div className="nexus-subtask-status">
+            <StatusCircleIcon status={item.status} />
           </div>
-          <div className="text-[11px] text-[var(--vscode-descriptionForeground)] mt-0.5">
-            {subagentStatusLine(a)}
-          </div>
-          {a.error && a.status === "error" && (
-            <div className="text-[10px] text-red-400 mt-1 truncate" title={a.error}>
-              {a.error}
+          <div className="nexus-subtask-body">
+            <div className="nexus-subtask-title" title={item.task}>
+              {truncateTask(item.task, 72)}
             </div>
-          )}
+            <div className="nexus-subtask-subtitle">
+              {item.detail}
+            </div>
+            {item.error && item.status === "error" && (
+              <div className="nexus-subtask-error" title={item.error}>
+                {item.error}
+              </div>
+            )}
+          </div>
         </div>
       ))}
     </div>
@@ -897,6 +1099,12 @@ function AssistantPartRow({
 
   if (part.type === "tool") {
     const toolPart = part as ToolPart
+    if (TODO_TOOL_NAMES.has(toolPart.tool)) return null
+    if (HIDDEN_SUBAGENT_ORCHESTRATION_TOOLS.has(toolPart.tool)) return null
+    if (isDeniedFileEdit(toolPart)) return null
+    if (SPAWN_AGENT_TOOL_NAMES.has(toolPart.tool) || isPureSubagentParallelTool(toolPart)) {
+      return <SubagentInlineList items={getSubagentDisplayItems(toolPart)} />
+    }
     if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file" || toolPart.tool === "Edit" || toolPart.tool === "Write") {
       const approval =
         pendingApproval?.partId === toolPart.id ? (
@@ -912,8 +1120,6 @@ function AssistantPartRow({
       return <BashCommandBlock part={toolPart} approval={approval} />
     }
     if (
-      toolPart.tool === "SpawnAgent" ||
-      toolPart.tool === "SpawnAgents" ||
       toolPart.tool === "Parallel" ||
       toolPart.tool === "parallel"
     ) {
@@ -924,8 +1130,8 @@ function AssistantPartRow({
       return (
         <>
           <ToolCallCard part={toolPart} approval={approval} />
-          {toolPart.subagents && toolPart.subagents.length > 0 ? (
-            <SubagentInlineList subagents={toolPart.subagents} />
+          {getSubagentDisplayItems(toolPart).length > 0 ? (
+            <SubagentInlineList items={getSubagentDisplayItems(toolPart)} />
           ) : null}
         </>
       )

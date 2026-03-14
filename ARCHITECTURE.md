@@ -42,7 +42,23 @@ The provider/webview bridge is readiness-gated. `onDidReceiveMessage` is attache
 
 The webview store treats `agentEvent` as the live source of truth during a run and merges later `stateUpdate` snapshots conservatively. If a snapshot arrives without the assistant tail that was already assembled from streamed events, the store preserves the richer local tail instead of dropping the in-flight assistant reply. This prevents the common race where a stale snapshot temporarily rewinds the visible chat back to only the user message.
 
-Assistant rendering is timeline-first, not message-prefix-first. `thought` timers are bound to the active `(messageId, reasoningId)` pair, so a new reasoning block cannot reset an older Thought label in place. `explored` is only a compression layer for contiguous code-exploration sequences (reasoning + read/list/search tools) and is merged across adjacent assistant messages when no visible non-exploration content interrupts the sequence. This keeps counters and collapsed history aligned with the real chronological stream.
+The sessions sidebar uses the same anti-stale rule for optimistic deletes. When the user deletes a session, the row is hidden immediately and marked with a short-lived tombstone in the store. Any stale `sessionList` that still contains that session is filtered out until a fresh list confirms the deletion or the tombstone expires, so the row cannot flicker back into view during refresh.
+
+File-edit preview/approval uses a two-stage flow in the extension: `tool_start` creates the visible file-edit block first, then `tool_approval_needed` raises the approval UI if write auto-approval is off. If the user denies the edit or responds with an alternative instruction, that pending file-edit block must disappear from the chat instead of remaining as an error artifact. Only approved edits may survive into the post-run "N Files" review panel.
+
+Assistant rendering is timeline-first, not message-prefix-first. `thought` timers are bound to the active `(messageId, reasoningId)` pair, so a new reasoning block cannot reset an older Thought label in place. `explored` is only a compression layer for contiguous code-exploration sequences (reasoning + read/list/search tools) and is merged across adjacent assistant messages when no visible non-exploration content interrupts the sequence. While a sequence is still active it is rendered as `exploring`: collapsed by default, with a live preview window of the last four events, while the full accumulated sequence remains available on expand. When a visible text reply or a non-exploration tool arrives, that sequence is finalized into `explored` without losing its accumulated history or changing its local counters.
+
+Todo state is delivered over its own `todo_updated` stream and rendered in dedicated todo panels. `TodoWrite` / `update_todo_list` must not appear as ordinary tool rows in either the webview or the CLI bridge, and they must not interrupt chronological chat grouping such as `exploring/explored`.
+
+Subagent orchestration also has a split between execution and presentation. Multiple subagents must be launched through the `Parallel` tool with `SpawnAgent` entries, but the user-facing UI must not expose that orchestration layer directly. The webview and CLI should render subagent task cards/progress from `subagent_*` events and task descriptions, while hiding pure subagent `Parallel` wrappers and the deprecated `SpawnAgents` alias from normal chat/tool output. The declared tasks from a pure subagent `Parallel` input are the stable UI skeleton: if only one subagent has emitted live events so far, the other declared tasks must still remain visible as pending cards instead of disappearing until their first event arrives.
+
+The extension controller must mirror `subagent_*` events into its server-stream shadow session before posting `stateUpdate`. Otherwise a live `agentEvent` can briefly show subagent progress and the next snapshot can erase it. `subagent_tool_start` input payloads are also part of the UI contract because the card subtitle derives from them (`Read(path)`, `List(path)`, `Grep(pattern)`, etc.), not just from the bare tool name.
+
+Polling/control tools such as `SpawnAgentOutput` and `SpawnAgentStop` are orchestration-only and must not render as ordinary chat tool rows in either the webview or CLI. Their effect should be reflected indirectly through the subagent cards and the parent assistant summary, otherwise the chat timeline becomes noisy and duplicates the already-visible subagent state.
+
+Live state merges also need adjacent duplicate protection. When a streamed assistant tail is later reintroduced by a snapshot with the same visible reasoning/tool/subagent content, the webview should collapse those adjacent duplicates instead of showing the same thought + subagent block twice in a row.
+
+All diff previews opened from the extension must use read-only virtual documents, not dirty untitled editors created with `openTextDocument({ content })`. This applies to pending file approvals, accepted-but-unreviewed session edits, and checkpoint diffs. The user must be able to close those diff tabs without any save prompt, while still seeing proper red/green line diffs and opening the real workspace file by its actual path when needed.
 
 The webview CSP must allow `${webview.cspSource}` in `connect-src`, not only localhost URLs. The bundled Vite runtime uses `fetch()` for module-preload chunk loading, so blocking the webview resource origin can leave the sidebar blank even though `index.js` exists and the extension host is healthy.
 
@@ -177,7 +193,7 @@ NexusCode/
 - **execute:** `Bash`
 - **search:** `Grep`, `CodebaseSearch`, `WebFetch`, `WebSearch`, `Glob`
 - **skills:** `Skill`
-- **agents:** `SpawnAgents`
+- **agents:** `SpawnAgent`, `SpawnAgentOutput`, `SpawnAgentStop`
 - **context:** `Condense`
 - **plan_exit:** `PlanExit` (plan mode only)
 

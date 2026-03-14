@@ -19,7 +19,6 @@ import {
   createCompaction,
   ParallelAgentManager,
   createSpawnAgentTool,
-  createSpawnAgentsAliasTool,
   createSpawnAgentOutputTool,
   createSpawnAgentStopTool,
   listSessions,
@@ -287,7 +286,6 @@ export async function bootstrapNexus(opts: {
 
   const parallelManager = new ParallelAgentManager()
   toolRegistry.register(createSpawnAgentTool(parallelManager, config))
-  toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, config))
   toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
   toolRegistry.register(createSpawnAgentStopTool(parallelManager))
 

@@ -34,6 +34,34 @@ export type NexusBannerMessage = { type: 'nexus_banner'; text: string }
 /** Todo list update from agent (TodoWrite tool). Rendered above input, below progress. */
 export type NexusTodoMessage = { type: 'nexus_todo'; todo: string }
 
+const TODO_TOOL_NAMES = new Set(['TodoWrite', 'update_todo_list'])
+const SPAWN_AGENT_TOOL_NAMES = new Set(['SpawnAgent', 'SpawnAgents'])
+
+function isSpawnAgentRecipientName(raw: string): boolean {
+  const normalized = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+  return normalized === 'spawnagent' || normalized === 'spawnagents'
+}
+
+function isPureSubagentParallelInput(input: unknown): boolean {
+  if (input == null || typeof input !== 'object') return false
+  const toolUses = (input as { tool_uses?: unknown }).tool_uses
+  if (!Array.isArray(toolUses) || toolUses.length === 0) return false
+  return toolUses.every((item) => {
+    if (item == null || typeof item !== 'object') return false
+    const recipientName = (item as { recipient_name?: unknown }).recipient_name
+    return typeof recipientName === 'string' && isSpawnAgentRecipientName(recipientName)
+  })
+}
+
+function shouldHideSubagentToolDisplay(toolName: string, input?: unknown): boolean {
+  return (
+    SPAWN_AGENT_TOOL_NAMES.has(toolName) ||
+    toolName === 'SpawnAgentOutput' ||
+    toolName === 'SpawnAgentStop' ||
+    ((toolName === 'Parallel' || toolName === 'parallel') && isPureSubagentParallelInput(input))
+  )
+}
+
 export type AutoApprovePermissions = {
   read: boolean
   write: boolean
@@ -70,6 +98,8 @@ function sessionMessageToAssistantContent(msg: SessionMessage): ContentBlockPara
       }
     } else if (p.type === 'tool') {
       const tp = p as ToolPart
+      if (TODO_TOOL_NAMES.has(tp.tool)) continue
+      if (shouldHideSubagentToolDisplay(tp.tool, tp.input)) continue
       blocks.push({
         type: 'tool_use',
         id: tp.id,
@@ -258,7 +288,9 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           yield am
         }
       } else if (event.type === 'tool_start') {
+        if (TODO_TOOL_NAMES.has(event.tool)) continue
         if (event.tool === 'SpawnAgent' || event.tool === 'SpawnAgents') lastSpawnAgentPartId = event.partId
+        if (shouldHideSubagentToolDisplay(event.tool, event.input)) continue
         // Match reference: ProgressMessage content must have content[0] = tool_use so REPL shows ToolUseLoader
         const toolUseBlock: ContentBlockParam = {
           type: 'tool_use',
@@ -292,7 +324,9 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         consumed.push(pm)
         yield pm
       } else if (event.type === 'tool_end') {
+        if (TODO_TOOL_NAMES.has(event.tool)) continue
         if (event.tool === 'SpawnAgent' || event.tool === 'SpawnAgents') lastSpawnAgentPartId = null
+        if (shouldHideSubagentToolDisplay(event.tool)) continue
         const toolResultText = event.output ?? (event.error ?? '')
         const toolResultData = {
           tool: event.tool,
