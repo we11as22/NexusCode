@@ -2361,8 +2361,10 @@ declare class CheckpointTracker {
     private readonly cwdHash;
     private initialized;
     private entries;
+    private operationQueue;
     constructor(taskId: string, workspaceRoot: string);
     private getGit;
+    private enqueue;
     /**
      * Initialize the shadow git repository with worktree = workspaceRoot.
      * Returns false if validation fails, git unavailable, or timeout.

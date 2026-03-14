@@ -42,6 +42,8 @@ The provider/webview bridge is readiness-gated. `onDidReceiveMessage` is attache
 
 The webview store treats `agentEvent` as the live source of truth during a run and merges later `stateUpdate` snapshots conservatively. If a snapshot arrives without the assistant tail that was already assembled from streamed events, the store preserves the richer local tail instead of dropping the in-flight assistant reply. This prevents the common race where a stale snapshot temporarily rewinds the visible chat back to only the user message.
 
+Assistant rendering is timeline-first, not message-prefix-first. `thought` timers are bound to the active `(messageId, reasoningId)` pair, so a new reasoning block cannot reset an older Thought label in place. `explored` is only a compression layer for contiguous code-exploration sequences (reasoning + read/list/search tools) and is merged across adjacent assistant messages when no visible non-exploration content interrupts the sequence. This keeps counters and collapsed history aligned with the real chronological stream.
+
 The webview CSP must allow `${webview.cspSource}` in `connect-src`, not only localhost URLs. The bundled Vite runtime uses `fetch()` for module-preload chunk loading, so blocking the webview resource origin can leave the sidebar blank even though `index.js` exists and the extension host is healthy.
 
 ---

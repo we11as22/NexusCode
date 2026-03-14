@@ -23,6 +23,7 @@ export class CheckpointTracker {
   private readonly cwdHash: string
   private initialized = false
   private entries: CheckpointEntry[] = []
+  private operationQueue: Promise<unknown> = Promise.resolve()
 
   constructor(
     private readonly taskId: string,
@@ -35,6 +36,15 @@ export class CheckpointTracker {
   private getGit(): SimpleGit {
     if (!this.git) throw new Error("CheckpointTracker not initialized")
     return this.git
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.operationQueue.then(operation, operation)
+    this.operationQueue = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
   }
 
   /**
@@ -149,7 +159,7 @@ export class CheckpointTracker {
   }
 
   async commit(description?: string): Promise<string> {
-    return this.commitInternal(description, "")
+    return this.enqueue(() => this.commitInternal(description, ""))
   }
 
   /**
@@ -157,7 +167,7 @@ export class CheckpointTracker {
    * Used by rollback-to-message flow in extension/CLI.
    */
   async commitForMessage(messageId: string, description?: string): Promise<string> {
-    return this.commitInternal(description, messageId)
+    return this.enqueue(() => this.commitInternal(description, messageId))
   }
 
   private async commitInternal(description?: string, messageId: string = ""): Promise<string> {
@@ -184,52 +194,56 @@ export class CheckpointTracker {
    * Runs git clean -fd then git reset --hard in the shadow repo; worktree = workspace so files are restored in place.
    */
   async resetHead(hash: string): Promise<void> {
-    if (!this.initialized) throw new Error("Checkpoint not initialized")
-    const cleanHash = hash.startsWith("HEAD ") ? hash.slice(5) : hash.trim()
-    await this.getGit().clean("f", ["-d"])
-    await this.getGit().raw(["reset", "--hard", cleanHash])
+    await this.enqueue(async () => {
+      if (!this.initialized) throw new Error("Checkpoint not initialized")
+      const cleanHash = hash.startsWith("HEAD ") ? hash.slice(5) : hash.trim()
+      await this.getGit().clean("f", ["-d"])
+      await this.getGit().raw(["reset", "--hard", cleanHash])
+    })
   }
 
   async getDiff(fromHash: string, toHash?: string): Promise<ChangedFile[]> {
-    if (!this.initialized) return []
-    const cleanFrom = fromHash.startsWith("HEAD ") ? fromHash.slice(5) : fromHash.trim()
-    await this.addCheckpointFiles()
-    const diffRange = toHash
-      ? `${cleanFrom}..${toHash.startsWith("HEAD ") ? toHash.slice(5) : toHash.trim()}`
-      : cleanFrom
-    try {
-      const diff = await this.getGit().diff(["--name-status", diffRange])
-      const files: ChangedFile[] = []
-      for (const line of diff.split("\n").filter(Boolean)) {
-        const [status, ...parts] = line.split("\t")
-        const filePath = parts[0]
-        if (!filePath || !status) continue
-        let before = ""
-        let after = ""
-        try {
-          before = await this.getGit().show([`${cleanFrom}:${filePath}`]).catch(() => "")
-        } catch {}
-        if (toHash) {
-          const cleanTo = toHash.startsWith("HEAD ") ? toHash.slice(5) : toHash.trim()
+    return this.enqueue(async () => {
+      if (!this.initialized) return []
+      const cleanFrom = fromHash.startsWith("HEAD ") ? fromHash.slice(5) : fromHash.trim()
+      await this.addCheckpointFiles()
+      const diffRange = toHash
+        ? `${cleanFrom}..${toHash.startsWith("HEAD ") ? toHash.slice(5) : toHash.trim()}`
+        : cleanFrom
+      try {
+        const diff = await this.getGit().diff(["--name-status", diffRange])
+        const files: ChangedFile[] = []
+        for (const line of diff.split("\n").filter(Boolean)) {
+          const [status, ...parts] = line.split("\t")
+          const filePath = parts[0]
+          if (!filePath || !status) continue
+          let before = ""
+          let after = ""
           try {
-            after = await this.getGit().show([`${cleanTo}:${filePath}`]).catch(() => "")
+            before = await this.getGit().show([`${cleanFrom}:${filePath}`]).catch(() => "")
           } catch {}
-        } else {
-          try {
-            after = await fs.readFile(path.join(this.workspaceRoot, filePath), "utf8")
-          } catch {}
+          if (toHash) {
+            const cleanTo = toHash.startsWith("HEAD ") ? toHash.slice(5) : toHash.trim()
+            try {
+              after = await this.getGit().show([`${cleanTo}:${filePath}`]).catch(() => "")
+            } catch {}
+          } else {
+            try {
+              after = await fs.readFile(path.join(this.workspaceRoot, filePath), "utf8")
+            } catch {}
+          }
+          files.push({
+            path: filePath,
+            before,
+            after,
+            status: status === "A" ? "added" : status === "D" ? "deleted" : "modified",
+          })
         }
-        files.push({
-          path: filePath,
-          before,
-          after,
-          status: status === "A" ? "added" : status === "D" ? "deleted" : "modified",
-        })
+        return files
+      } catch {
+        return []
       }
-      return files
-    } catch {
-      return []
-    }
+    })
   }
 
   getEntries(): CheckpointEntry[] {

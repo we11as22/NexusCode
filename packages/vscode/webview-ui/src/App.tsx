@@ -9,7 +9,6 @@ import { QueuedMessagesPanel } from "./components/QueuedMessagesPanel.js"
 import { ModeDropdown } from "./components/ModeDropdown.js"
 import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
-import { CheckpointStrip } from "./components/CheckpointStrip.js"
 import type { ExtensionMessage } from "./types/messages.js"
 import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
 
@@ -172,8 +171,6 @@ function ChatView() {
           <span>Action awaiting your approval — use notification or chat buttons: Allow once / Always allow / Deny / Allow all (session) / Say what to do instead.</span>
         </div>
       )}
-
-      <CheckpointStrip />
 
       <div className="chat-view">
         <SessionTabBar />

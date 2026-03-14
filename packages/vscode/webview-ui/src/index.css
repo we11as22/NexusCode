@@ -1626,10 +1626,14 @@ html, body, #root {
   transform: translateY(-50%);
 }
 
+.nexus-message-checkpoint-wrap {
+  z-index: 4;
+}
+
 .nexus-rollback-btn:hover {
   color: var(--vscode-foreground);
   background: var(--vscode-list-hoverBackground);
-  transform: translateY(-50%) scale(1.03);
+  transform: scale(1.03);
 }
 
 .nexus-rollback-arrow {
@@ -2314,6 +2318,8 @@ input[type="text"]:focus-visible {
 .nexus-checkpoint-tooltip-option { margin-bottom: 12px; }
 .nexus-checkpoint-tooltip-option:last-child { margin-bottom: 0; }
 .nexus-checkpoint-tooltip-option p { margin: 8px 0 0 0; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 14px; }
+.nexus-message-checkpoint-tooltip { left: auto; right: 0; top: calc(100% + 10px); min-width: 240px; max-width: min(calc(100vw - 32px), 260px); }
+.nexus-message-checkpoint-tooltip::after { left: auto; right: 12px; }
 
 .nexus-checkpoint-restore-btn {
   flex-shrink: 0;

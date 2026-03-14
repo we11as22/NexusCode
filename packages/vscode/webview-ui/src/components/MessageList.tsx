@@ -3,7 +3,7 @@ import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
-import { getAssistantDisplaySegments, ExploredSummaryInline } from "./ExploredProgressBlock.js"
+import { getAssistantDisplaySegments, ExploredSummaryInline, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
 import { ThoughtBlock } from "./ThoughtBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
@@ -207,12 +207,116 @@ interface Props {
   loadingOlderMessages?: boolean
 }
 
+type ChatRenderItem =
+  | {
+      type: "message"
+      key: string
+      message: SessionMessage
+      messageIndex: number
+      isComplete: boolean
+    }
+  | {
+      type: "assistant_part"
+      key: string
+      message: SessionMessage
+      messageIndex: number
+      isComplete: boolean
+      parts: MessagePart[]
+      part: MessagePart
+      partIndex: number
+      canonicalReplyIndex: number
+      isLastPart: boolean
+    }
+  | {
+      type: "explored"
+      key: string
+      prefixItems: ExploredPrefixItem[]
+      isRunning: boolean
+    }
+
+function getCanonicalReplyIndex(parts: MessagePart[]): number {
+  const textPartIndices = parts
+    .map((part, index) => (part.type === "text" ? index : -1))
+    .filter((index) => index >= 0)
+
+  if (textPartIndices.length === 0) return -1
+
+  const withUserMessage = textPartIndices.filter(
+    (index) => (parts[index] as { user_message?: string }).user_message?.trim()
+  )
+
+  if (withUserMessage.length > 0) return withUserMessage[withUserMessage.length - 1]!
+  return textPartIndices[textPartIndices.length - 1]!
+}
+
+function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): ChatRenderItem[] {
+  const flatItems: ChatRenderItem[] = []
+
+  messages.forEach((message, messageIndex) => {
+    const isComplete = !isRunning || messageIndex < messages.length - 1
+
+    if (message.role !== "assistant" || typeof message.content === "string" || !Array.isArray(message.content)) {
+      flatItems.push({
+        type: "message",
+        key: message.id,
+        message,
+        messageIndex,
+        isComplete,
+      })
+      return
+    }
+
+    const parts = message.content as MessagePart[]
+    const segments = getAssistantDisplaySegments(parts)
+    const canonicalReplyIndex = getCanonicalReplyIndex(parts)
+
+    segments.forEach((segment, segmentIndex) => {
+      if (segment.type === "explored") {
+        flatItems.push({
+          type: "explored",
+          key: `${message.id}-explored-${segment.startIndex}-${segment.endIndex}`,
+          prefixItems: segment.prefixItems,
+          isRunning: !isComplete && segmentIndex === segments.length - 1,
+        })
+        return
+      }
+
+      flatItems.push({
+        type: "assistant_part",
+        key: `${message.id}-part-${segment.index}`,
+        message,
+        messageIndex,
+        isComplete,
+        parts,
+        part: segment.part,
+        partIndex: segment.index,
+        canonicalReplyIndex,
+        isLastPart: segment.index === parts.length - 1,
+      })
+    })
+  })
+
+  const mergedItems: ChatRenderItem[] = []
+  for (const item of flatItems) {
+    const previous = mergedItems[mergedItems.length - 1]
+    if (item.type === "explored" && previous?.type === "explored") {
+      previous.prefixItems = [...previous.prefixItems, ...item.prefixItems]
+      previous.isRunning = previous.isRunning || item.isRunning
+      previous.key = `${previous.key}__${item.key}`
+      continue
+    }
+    mergedItems.push(item)
+  }
+
+  return mergedItems
+}
+
 export function MessageList({ messages, isRunning = false, hasOlderMessages = false, loadingOlderMessages = false }: Props) {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const initialTopMostItemIndexRef = useRef<number | undefined>(undefined)
   const [stickToBottom, setStickToBottom] = useState(true)
   const store = useChatStore()
-  const renderedMessages = messages
+  const renderedMessages = useMemo(() => buildChatRenderItems(messages, isRunning), [messages, isRunning])
   const virtuosoComponents = useMemo(() => ({ Scroller: MessageListScroller }), [])
 
   if (initialTopMostItemIndexRef.current == null && renderedMessages.length > 0) {
@@ -260,13 +364,11 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
           followOutput={stickToBottom ? "auto" : false}
           atBottomStateChange={setStickToBottom}
           atBottomThreshold={10}
-          computeItemKey={(_, msg) => (msg as SessionMessage).id}
-          itemContent={(idx, msg) => (
+          computeItemKey={(_, item) => (item as ChatRenderItem).key}
+          itemContent={(idx, item) => (
             <div className="message-list-item">
-              <MessageBubble
-                message={msg}
-                messageIndex={idx}
-                isComplete={!isRunning || idx < renderedMessages.length - 1}
+              <RenderItemRow
+                item={item as ChatRenderItem}
                 pendingApproval={store.pendingApproval}
                 onResolveApproval={store.resolveApproval}
               />
@@ -292,20 +394,62 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
   )
 }
 
-function MessageBubble({
-  message,
-  messageIndex,
-  isComplete,
+function RenderItemRow({
+  item,
   pendingApproval,
   onResolveApproval,
 }: {
-  message: SessionMessage
-  messageIndex: number
-  isComplete: boolean
+  item: ChatRenderItem
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
 }) {
+  const showReasoningInChat = useChatStore((s) => s.config?.ui?.showReasoningInChat ?? false)
+  const reasoningStartTime = useChatStore((s) => s.reasoningStartTime)
+  const activeReasoning = useChatStore((s) => s.activeReasoning)
+  const isRunning = useChatStore((s) => s.isRunning)
+
+  if (item.type === "explored") {
+    return (
+      <div className="w-full min-w-0">
+        <ExploredSummaryInline
+          prefixItems={item.prefixItems}
+          defaultCollapsed={!item.isRunning}
+          isRunning={item.isRunning}
+          onOpenFile={(path, line, endLine) =>
+            postMessage({ type: "openFileAtLocation", path, line, endLine })
+          }
+        />
+      </div>
+    )
+  }
+
+  if (item.type === "assistant_part") {
+    return (
+      <div className="w-full min-w-0">
+        <AssistantPartRow
+          part={item.part}
+          partIndex={item.partIndex}
+          parts={item.parts}
+          messageId={item.message.id}
+          isComplete={item.isComplete}
+          isRunning={isRunning}
+          reasoningStartTime={reasoningStartTime}
+          activeReasoning={activeReasoning}
+          canonicalReplyIndex={item.canonicalReplyIndex}
+          isLastPart={item.isLastPart}
+          pendingApproval={pendingApproval}
+          onResolveApproval={onResolveApproval}
+          showReasoningInChat={showReasoningInChat}
+        />
+      </div>
+    )
+  }
+
+  const { message, messageIndex, isComplete } = item
   const canRollback = messageIndex > 0 && message.role === "user"
+  const checkpointEntries = useChatStore((s) => s.checkpointEntries)
+  const restoreCheckpoint = useChatStore((s) => s.restoreCheckpoint)
+  const showCheckpointDiff = useChatStore((s) => s.showCheckpointDiff)
 
   if (message.summary) {
     return (
@@ -319,6 +463,7 @@ function MessageBubble({
   }
 
   if (message.role === "user") {
+    const checkpointEntry = checkpointEntries.find((entry) => entry.messageId === message.id)
     const userText =
       typeof message.content === "string"
         ? message.content
@@ -331,15 +476,14 @@ function MessageBubble({
         <div className={`nexus-user-msg-bubble${canRollback ? " nexus-user-msg-bubble-has-rollback" : ""}`}>
           <div className="nexus-user-msg-content">{renderUserTextWithPasteChips(userText)}</div>
           {canRollback && (
-            <button
-              type="button"
-              onClick={() => postMessage({ type: "rollbackToBeforeMessage", messageId: message.id })}
-              className="nexus-rollback-btn nexus-rollback-btn-corner"
-              title="Откатить чат и изменения до состояния до этого сообщения"
-              aria-label="Rollback"
-            >
-              <span className="nexus-rollback-arrow">↶</span>
-            </button>
+            <MessageCheckpointMenu
+              messageId={message.id}
+              checkpointHash={checkpointEntry?.hash}
+              onCompare={() => checkpointEntry && showCheckpointDiff(checkpointEntry.hash)}
+              onRestoreFilesOnly={() => checkpointEntry && restoreCheckpoint(checkpointEntry.hash, "workspace")}
+              onRestoreTaskOnly={() => checkpointEntry && restoreCheckpoint(checkpointEntry.hash, "task")}
+              onRestoreFilesAndTask={() => checkpointEntry && restoreCheckpoint(checkpointEntry.hash, "taskAndWorkspace")}
+            />
           )}
         </div>
       </div>
@@ -355,23 +499,122 @@ function MessageBubble({
   }
 
   // Assistant — on chat background, no frame (only user messages are in a bubble)
-  const showReasoningInChat = useChatStore((s) => s.config?.ui?.showReasoningInChat ?? false)
-  const reasoningStartTime = useChatStore((s) => s.reasoningStartTime)
-  const isRunning = useChatStore((s) => s.isRunning)
   return (
     <div className="w-full min-w-0">
       {typeof message.content === "string" ? (
         <AssistantText text={message.content} streaming={!isComplete} />
       ) : (
-        <AssistantParts
-          parts={message.content as MessagePart[]}
-          isComplete={isComplete}
-          isRunning={isRunning}
-          reasoningStartTime={reasoningStartTime}
-          pendingApproval={pendingApproval}
-          onResolveApproval={onResolveApproval}
-          showReasoningInChat={showReasoningInChat}
-        />
+        <AssistantText text="" streaming={false} />
+      )}
+    </div>
+  )
+}
+
+function MessageCheckpointMenu({
+  messageId,
+  checkpointHash,
+  onCompare,
+  onRestoreFilesOnly,
+  onRestoreTaskOnly,
+  onRestoreFilesAndTask,
+}: {
+  messageId: string
+  checkpointHash?: string
+  onCompare: () => void
+  onRestoreFilesOnly: () => void
+  onRestoreTaskOnly: () => void
+  onRestoreFilesAndTask: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener("click", close, true)
+    return () => document.removeEventListener("click", close, true)
+  }, [open])
+
+  return (
+    <div className="nexus-rollback-btn-corner nexus-message-checkpoint-wrap" ref={menuRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="nexus-rollback-btn"
+        title="Rollback / restore options"
+        aria-label="Rollback"
+        aria-expanded={open}
+      >
+        <span className="nexus-rollback-arrow">↶</span>
+      </button>
+      {open && (
+        <div className="nexus-checkpoint-tooltip nexus-message-checkpoint-tooltip">
+          <div className="nexus-checkpoint-tooltip-primary">
+            <button
+              type="button"
+              className="nexus-checkpoint-tooltip-btn primary"
+              onClick={() => {
+                if (checkpointHash) onRestoreFilesAndTask()
+                else postMessage({ type: "rollbackToBeforeMessage", messageId })
+                setOpen(false)
+              }}
+            >
+              <span className="codicon codicon-debug-restart" aria-hidden />
+              Restore Files & Task
+            </button>
+            <p>Revert files and clear messages after this point</p>
+          </div>
+          {checkpointHash && (
+            <div className="nexus-checkpoint-tooltip-more">
+              <div className="nexus-checkpoint-tooltip-option">
+                <button
+                  type="button"
+                  className="nexus-checkpoint-tooltip-btn secondary"
+                  onClick={() => {
+                    onCompare()
+                    setOpen(false)
+                  }}
+                >
+                  <span className="codicon codicon-diff" aria-hidden />
+                  Compare
+                </button>
+                <p>Compare current workspace against this checkpoint</p>
+              </div>
+              <div className="nexus-checkpoint-tooltip-option">
+                <button
+                  type="button"
+                  className="nexus-checkpoint-tooltip-btn secondary"
+                  onClick={() => {
+                    onRestoreFilesOnly()
+                    setOpen(false)
+                  }}
+                >
+                  <span className="codicon codicon-file-symlink-directory" aria-hidden />
+                  Restore Files Only
+                </button>
+                <p>Revert files to this checkpoint</p>
+              </div>
+              <div className="nexus-checkpoint-tooltip-option">
+                <button
+                  type="button"
+                  className="nexus-checkpoint-tooltip-btn secondary"
+                  onClick={() => {
+                    onRestoreTaskOnly()
+                    setOpen(false)
+                  }}
+                >
+                  <span className="codicon codicon-comment-discussion" aria-hidden />
+                  Restore Task Only
+                </button>
+                <p>Clear messages after this point</p>
+              </div>
+            </div>
+          )}
+        </div>
       )}
     </div>
   )
@@ -573,155 +816,128 @@ function SubagentInlineList({ subagents }: { subagents: SubAgentState[] }) {
   )
 }
 
-function AssistantParts({
+function AssistantPartRow({
+  part,
+  partIndex,
   parts,
+  messageId,
   isComplete,
   isRunning,
   reasoningStartTime,
+  activeReasoning,
+  canonicalReplyIndex,
+  isLastPart,
   pendingApproval,
   onResolveApproval,
   showReasoningInChat,
 }: {
+  part: MessagePart
+  partIndex: number
   parts: MessagePart[]
+  messageId: string
   isComplete: boolean
   isRunning: boolean
   reasoningStartTime: number | null
+  activeReasoning: { messageId: string; reasoningId: string } | null
+  canonicalReplyIndex: number
+  isLastPart: boolean
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
   showReasoningInChat: boolean
 }) {
-  const segments = getAssistantDisplaySegments(parts)
+  if (part.type === "reasoning") {
+    const r = part as { text: string; durationMs?: number; reasoningId?: string }
+    const PLACEHOLDER_TEXT = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
+    const reasoningId = r.reasoningId ?? "reasoning-0"
+    const isActiveThought =
+      !isComplete &&
+      isRunning &&
+      isLastPart &&
+      reasoningStartTime != null &&
+      activeReasoning?.messageId === messageId &&
+      activeReasoning.reasoningId === reasoningId
 
-  // Single reply per message: show only one block (canonical part) to avoid multiple identical bubbles.
-  const textPartIndices = parts
-    .map((p, i) => (p.type === "text" ? i : -1))
-    .filter((i) => i >= 0)
-  const canonicalReplyIndex =
-    textPartIndices.length === 0
-      ? -1
-      : (() => {
-          const withUserMessage = textPartIndices.filter(
-            (i) => (parts[i] as { user_message?: string }).user_message?.trim()
-          )
-          if (withUserMessage.length > 0) return withUserMessage[withUserMessage.length - 1]!
-          return textPartIndices[textPartIndices.length - 1]!
-        })()
+    if (isActiveThought) {
+      const reasoningText = r.text === PLACEHOLDER_TEXT ? "" : r.text
+      return (
+        <ThoughtBlock
+          key={`${messageId}-${reasoningId}`}
+          reasoningText={reasoningText}
+          startTime={reasoningStartTime}
+          isRunning={true}
+        />
+      )
+    }
 
-  return (
-    <div className="space-y-3">
-      {segments.map((segment, segmentIndex) => {
-        if (segment.type === "explored") {
-          const isActiveExplored = !isComplete && isRunning && segmentIndex === segments.length - 1
-          return (
-            <ExploredSummaryInline
-              key={`explored-${segment.startIndex}-${segment.endIndex}`}
-              prefixItems={segment.prefixItems}
-              defaultCollapsed={!isActiveExplored}
-              isRunning={isActiveExplored}
-              onOpenFile={(path, line, endLine) =>
-                postMessage({ type: "openFileAtLocation", path, line, endLine })
-              }
-            />
-          )
-        }
+    if (!r.text?.trim() || r.text === PLACEHOLDER_TEXT) return null
+    return <ThoughtInlineBlock text={r.text} durationMs={r.durationMs} />
+  }
 
-        const { part, index: i } = segment
-        if (part.type === "reasoning") {
-          const r = part as { text: string; durationMs?: number }
-          const isLastPart = i === parts.length - 1
-          const showLiveThought = !isComplete && isRunning && isLastPart && reasoningStartTime != null
-          const PLACEHOLDER_TEXT = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
-          if (showLiveThought) {
-            const reasoningText = r.text === PLACEHOLDER_TEXT ? "" : r.text
-            return (
-              <ThoughtBlock
-                key={i}
-                reasoningText={reasoningText}
-                startTime={reasoningStartTime}
-                isRunning={true}
-              />
-            )
-          }
-          // Skip placeholder reasoning parts that have no real content
-          if (!r.text?.trim() || r.text === PLACEHOLDER_TEXT) return null
-          return (
-            <ThoughtInlineBlock
-              key={i}
-              text={r.text}
-              durationMs={r.durationMs}
-            />
-          )
-        }
-        if (part.type === "text") {
-          const textPart = part as { text: string; user_message?: string }
-          const text = textPart.text
-          const userMessage = textPart.user_message?.trim()
-          const isLastPart = i === parts.length - 1
-          const showStreaming = !isComplete && isLastPart
-          if (i !== canonicalReplyIndex) return null
-          // Main reply: prefer tool-written summary (user_message); otherwise show streamed/model text so it never disappears.
-          const hasToolReply = !!userMessage
-          const displayText = text?.trim() ?? ""
-          if (hasToolReply) {
-            return (
-              <div key={i} className="space-y-0">
-                <AssistantText text={userMessage!} streaming={false} />
-              </div>
-            )
-          }
-          // Show model's text as main reply (always, so streamed content stays visible after done/stateUpdate).
-          if (!showStreaming && !displayText) return null
-          return (
-            <div key={i} className="space-y-0">
-              <AssistantText text={displayText} streaming={showStreaming} variant={showReasoningInChat ? "muted" : "normal"} />
-            </div>
-          )
-        }
-        if (part.type === "tool") {
-          const toolPart = part as ToolPart
-          if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file" || toolPart.tool === "Edit" || toolPart.tool === "Write") {
-            const approval =
-              pendingApproval?.partId === toolPart.id ? (
-                <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
-              ) : undefined
-            return <InlineFileEditBlock key={i} part={toolPart} approval={approval} />
-          }
-          if (toolPart.tool === "execute_command" || toolPart.tool === "Bash") {
-            const approval =
-              pendingApproval?.partId === toolPart.id ? (
-                <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
-              ) : undefined
-            return <BashCommandBlock key={i} part={toolPart} approval={approval} />
-          }
-          if (
-            toolPart.tool === "SpawnAgent" ||
-            toolPart.tool === "SpawnAgents" ||
-            toolPart.tool === "Parallel" ||
-            toolPart.tool === "parallel"
-          ) {
-            const approval =
-              pendingApproval?.partId === toolPart.id ? (
-                <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
-              ) : undefined
-            return (
-              <React.Fragment key={i}>
-                <ToolCallCard part={toolPart} approval={approval} />
-                {toolPart.subagents && toolPart.subagents.length > 0 ? (
-                  <SubagentInlineList subagents={toolPart.subagents} />
-                ) : null}
-              </React.Fragment>
-            )
-          }
-          const approval =
-            pendingApproval?.partId === toolPart.id ? (
-              <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
-            ) : undefined
-          return <ToolCallCard key={i} part={toolPart} approval={approval} />
-        }
-        return null
-      })}
-    </div>
-  )
+  if (part.type === "text") {
+    const textPart = part as { text: string; user_message?: string }
+    const text = textPart.text
+    const userMessage = textPart.user_message?.trim()
+    const showStreaming = !isComplete && isLastPart
+    if (partIndex !== canonicalReplyIndex) return null
+    if (userMessage) {
+      return (
+        <div className="space-y-0">
+          <AssistantText text={userMessage} streaming={false} />
+        </div>
+      )
+    }
+    const displayText = text?.trim() ?? ""
+    if (!showStreaming && !displayText) return null
+    return (
+      <div className="space-y-0">
+        <AssistantText text={displayText} streaming={showStreaming} variant={showReasoningInChat ? "muted" : "normal"} />
+      </div>
+    )
+  }
+
+  if (part.type === "tool") {
+    const toolPart = part as ToolPart
+    if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file" || toolPart.tool === "Edit" || toolPart.tool === "Write") {
+      const approval =
+        pendingApproval?.partId === toolPart.id ? (
+          <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+        ) : undefined
+      return <InlineFileEditBlock part={toolPart} approval={approval} />
+    }
+    if (toolPart.tool === "execute_command" || toolPart.tool === "Bash") {
+      const approval =
+        pendingApproval?.partId === toolPart.id ? (
+          <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+        ) : undefined
+      return <BashCommandBlock part={toolPart} approval={approval} />
+    }
+    if (
+      toolPart.tool === "SpawnAgent" ||
+      toolPart.tool === "SpawnAgents" ||
+      toolPart.tool === "Parallel" ||
+      toolPart.tool === "parallel"
+    ) {
+      const approval =
+        pendingApproval?.partId === toolPart.id ? (
+          <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+        ) : undefined
+      return (
+        <>
+          <ToolCallCard part={toolPart} approval={approval} />
+          {toolPart.subagents && toolPart.subagents.length > 0 ? (
+            <SubagentInlineList subagents={toolPart.subagents} />
+          ) : null}
+        </>
+      )
+    }
+    const approval =
+      pendingApproval?.partId === toolPart.id ? (
+        <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+      ) : undefined
+    return <ToolCallCard part={toolPart} approval={approval} />
+  }
+
+  return null
 }
 
 /** Thought inline: one reasoning part, tool-like (header + optional duration, expandable body). Always shown chronologically. */
