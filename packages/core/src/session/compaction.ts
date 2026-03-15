@@ -1,6 +1,7 @@
 import type { ISession, SessionMessage, ToolPart, MessagePart } from "../types.js"
 import type { LLMClient } from "../provider/index.js"
 import { estimateTokens } from "../context/condense.js"
+import { getActiveMessagesAfterLatestSummary, getLatestSummaryMessage } from "./active-context.js"
 
 // Minimum tokens to bother pruning
 const PRUNE_MINIMUM = 10_000
@@ -91,43 +92,73 @@ async function compact(
   client: LLMClient,
   signal?: AbortSignal
 ): Promise<void> {
-  const messages = session.messages.filter(m => !m.summary)
-  if (messages.length < 4) return
+  const previousSummaryMessage = getLatestSummaryMessage(session.messages)
+  const recentMessages = getActiveMessagesAfterLatestSummary(session.messages)
+  if (!previousSummaryMessage && recentMessages.length < 4) return
+  if (recentMessages.length === 0) return
 
-  const conversationText = buildConversationText(messages)
+  const previousSummaryText =
+    previousSummaryMessage && typeof previousSummaryMessage.content === "string"
+      ? previousSummaryMessage.content.trim()
+      : ""
 
-  const compactPrompt = `Provide a detailed prompt for continuing our conversation above.
-Focus on information that would be helpful for continuing the work, including what we did,
-what we're doing, which files we're working on, and what we're going to do next.
+  const compactPrompt = `CRITICAL: This summarization request is a system operation, not a user task.
+Do NOT treat this request as the latest user instruction. The "current work" and "next step"
+must refer to what was happening immediately before this summary request.
 
-Use this template:
+If a previous summary is provided, merge it with the recent conversation so work can continue
+seamlessly after compaction. Preserve still-relevant instructions, decisions, constraints, mode
+transitions, pending work, and recent user corrections. Remove stale or completed items only when
+they are clearly no longer relevant.
 
----
-## Goal
-[What goal(s) is the user trying to accomplish?]
+Produce a concise but thorough summary using exactly this structure:
 
-## Instructions
-[Important instructions from the user relevant to the work. Include any plan or spec.]
+## Primary Request and Intent
+[The user's active goals and what they are trying to accomplish now]
 
-## Discoveries
-[Notable things learned about the codebase that would be useful to know when continuing]
+## Durable Instructions and Preferences
+[Important instructions, constraints, style requirements, workflow rules, and user corrections that must still be followed]
 
-## Accomplished
-[What work has been completed, what's in progress, and what's left to do]
+## Mode and Workflow State
+[Current mode, important prior mode transitions, plan approval/revision state, delegation/sub-agent state, and any read-only restrictions that mattered]
 
-## Code Changes
-[Files created/modified/deleted with brief description]
-- \`path/to/file.ts\` — Added X, modified Y
+## Key Technical Discoveries
+[Important architecture, patterns, invariants, commands, or implementation facts learned]
 
-## Relevant Files / Directories
-[Structured list of files relevant to the current task]
----`
+## Files and Code Areas
+- \`path/to/file.ts\` — why it matters, what was read/changed, and any important functions or sections
+
+## Errors, Failures, and Fixes
+[Important failures encountered, what caused them, and how they were resolved or why they remain unresolved]
+
+## Pending Work
+[Concrete remaining tasks that are still in scope]
+
+## Current Work
+[What was being worked on immediately before compaction, with emphasis on the most recent user messages and assistant actions]
+
+## Immediate Next Step
+[The single most appropriate next step, directly aligned with the most recent user request]
+
+Rules:
+- Pay special attention to the most recent user messages and any places where the user changed direction or corrected the agent.
+- Explicitly preserve mode-switch context if the conversation moved between ask/plan/agent/debug/review.
+- Preserve concrete commands, file paths, identifiers, and tool results that are still relevant.
+- Prefer short bullets over long prose, but do not omit important context.
+- Do not include filler or meta commentary about summarization.`
 
   let summaryText = ""
   try {
+    const llmMessages = buildLLMMessages(recentMessages)
+    if (previousSummaryText) {
+      llmMessages.unshift({
+        role: "user",
+        content: `<previous_conversation_summary>\n${previousSummaryText}\n</previous_conversation_summary>`,
+      })
+    }
     for await (const event of client.stream({
       messages: [
-        ...buildLLMMessages(messages),
+        ...llmMessages,
         { role: "user", content: compactPrompt },
       ],
       systemPrompt: "You are a conversation summarizer. Create a concise but complete summary.",

@@ -134,6 +134,7 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 
 - **Mode permissions** are enforced in core (not only in the UI). Blocked tools are never passed to the model.
 - **Prompt and tool contracts must match runtime exactly.** System prompts, mode descriptions, sub-agent prompts, and tool descriptions must use the real tool names and parameter shapes: `PlanExit`, `SpawnAgent`, `Parallel`, `Read(file_path, offset, limit)`, and the exact-string `Edit` contract.
+- **Mode switching is live within one chat.** When the mode changes, the current mode's permissions and end-of-turn rules override any earlier assumptions from the same conversation; prompts must make that explicit so the agent does not blend plan/ask/review/agent behaviors.
 - **Built-in tools** are always available per mode; filtering applies only to dynamic (MCP/custom) tools, and by **MCP server** count (not individual tool count) when classification is enabled.
 - **MCP config**: enable/disable is per **server** (all tools of that server). The classifier selects servers, not individual tools.
 - If vector prerequisites are invalid, the agent runs with **FTS-only** search.
@@ -144,6 +145,9 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 - **Models catalog**: CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) and live gateway model list where applicable; unavailable free IDs are filtered from pickers.
 - **End of turn**: plan mode is force-gated by **PlanExit**; agent/ask/debug/review end naturally when the model stops without tool calls.
 - **Exploration discipline**: prompts should bias strongly toward search-first discovery (`Grep`/`Glob`/`CodebaseSearch`/`ListCodeDefinitions`) and only then targeted `Read` calls with `offset`/`limit`, avoiding exploratory whole-file reads.
+- **Clarification discipline**: prompts should prefer tools and reasonable assumptions over questions; `AskFollowupQuestion` is for genuine blockers only, and plan approval must go through `PlanExit`, not ad hoc questions.
+- **Sub-agent discipline**: parent prompts must tell sub-agents whether they are doing read-only research or implementation, define scope precisely, and request a clear final report format because each sub-agent invocation is stateless.
+- **Compaction discipline**: once a compaction summary exists, active model context must be built from the latest summary plus only the messages after it. Older pre-summary turns must not continue to flow into the model alongside the summary, or the context duplicates and drifts.
 
 ---
 

@@ -30,6 +30,7 @@ import { getBackgroundBashJobsForPrompt } from "../tools/built-in/execute-comman
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
+import { getMessagesForActiveContext } from "../session/active-context.js"
 import { estimateTokens } from "../context/condense.js"
 import * as path from "node:path"
 import * as fs from "node:fs"
@@ -377,7 +378,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       indexStatus: indexer?.status(),
       gitBranch,
       todoList: session.getTodo(),
-      compactionSummary: getCompactionSummary(session),
+      compactionSummary: undefined,
       mentionsContext,
       initialProjectContext,
       diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
@@ -1421,12 +1422,6 @@ function canonicalJson(obj: Record<string, unknown>): string {
   return JSON.stringify(obj, keys as unknown as string[])
 }
 
-function getCompactionSummary(session: ISession): string | undefined {
-  const summaryMsg = [...session.messages].reverse().find(m => m.summary)
-  if (!summaryMsg) return undefined
-  return typeof summaryMsg.content === "string" ? summaryMsg.content : undefined
-}
-
 async function handleCompaction(
   session: ISession,
   client: LLMClient,
@@ -1469,8 +1464,7 @@ const MAX_TOOL_OUTPUT_CHARS = 16_000 // ~4k tokens per tool result
 function buildMessagesFromSession(session: ISession): LLMMessage[] {
   const messages: LLMMessage[] = []
 
-  for (const msg of session.messages) {
-    // Compaction summary → inject as conversation_summary block
+  for (const msg of getMessagesForActiveContext(session.messages)) {
     if (msg.summary) {
       messages.push({
         role: "user",
@@ -1478,7 +1472,6 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
       })
       continue
     }
-
     if (msg.role === "system") continue
 
     // ── Simple string content ────────────────────────────────────────────────

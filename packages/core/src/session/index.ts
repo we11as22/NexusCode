@@ -2,6 +2,7 @@ import * as crypto from "node:crypto"
 import type { ISession, SessionMessage, ToolPart, MessagePart } from "../types.js"
 import { saveSession, loadSession, generateSessionId, type StoredSession } from "./storage.js"
 import { estimateTokens } from "../context/condense.js"
+import { getMessagesForActiveContext } from "./active-context.js"
 
 const SESSION_TITLE_MAX_LEN = 80
 
@@ -89,11 +90,7 @@ export class Session implements ISession {
 
   getTokenEstimate(): number {
     let total = 0
-    for (const msg of this._messages) {
-      if (msg.summary) {
-        total += estimateTokens(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content))
-        continue
-      }
+    for (const msg of getMessagesForActiveContext(this._messages)) {
       if (typeof msg.content === "string") {
         total += estimateTokens(msg.content)
       } else {
