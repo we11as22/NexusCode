@@ -4,10 +4,12 @@ import figures from 'figures'
 import { getTheme } from '../utils/theme.js'
 import type { NexusConfig } from '@nexuscode/core'
 
+type CloseResult = { cancelled?: boolean; saved?: boolean }
+
 type Props = {
   initialConfig: NexusConfig
   onSave: (patch: Partial<NexusConfig>) => Promise<void>
-  onClose: () => void
+  onClose: (result?: CloseResult) => void
 }
 
 /** Single vector index: indexing.enabled and indexing.vector are toggled together. */
@@ -26,7 +28,7 @@ export function NexusIndexPanel({
 
   useInput((input, key) => {
     if (key.escape) {
-      onClose()
+      onClose({ cancelled: true })
       return
     }
     if (key.return || input === ' ') {
@@ -41,7 +43,10 @@ export function NexusIndexPanel({
           vector: next,
         },
       })
-        .then(() => setSaving(false))
+        .then(() => {
+          setSaving(false)
+          onClose({ saved: true })
+        })
         .catch((e) => {
           setError(String(e))
           setSaving(false)

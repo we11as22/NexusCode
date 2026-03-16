@@ -21,6 +21,7 @@ import type { SubAgentState } from '../nexus-subagents.js'
 import { AssistantThinkingMessage } from './messages/AssistantThinkingMessage.js'
 import { AssistantRedactedThinkingMessage } from './messages/AssistantRedactedThinkingMessage.js'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
+import { getGlobalConfig } from '../utils/config.js'
 
 type Props = {
   message: UserMessage | AssistantMessage
@@ -224,9 +225,13 @@ function AssistantMessage({
         />
       )
     case 'redacted_thinking':
-      return <AssistantRedactedThinkingMessage addMargin={addMargin} />
+      return (getGlobalConfig().showReasoning ?? false)
+        ? <AssistantRedactedThinkingMessage addMargin={addMargin} />
+        : null
     case 'thinking':
-      return <AssistantThinkingMessage addMargin={addMargin} param={param} />
+      return (getGlobalConfig().showReasoning ?? false)
+        ? <AssistantThinkingMessage addMargin={addMargin} param={param} />
+        : null
     default:
       logError(`Unable to render message type: ${param.type}`)
       return null

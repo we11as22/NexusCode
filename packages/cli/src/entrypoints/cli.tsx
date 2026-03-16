@@ -86,6 +86,9 @@ import { createNexusModelCommand } from '../commands/nexusModel.js'
 import { createNexusIndexCommand } from '../commands/nexusIndex.js'
 import { createNexusVectorCommand } from '../commands/nexusVector.js'
 import { createNexusEmbeddingsCommand } from '../commands/nexusEmbeddings.js'
+import { createNexusSkillsCommand } from '../commands/nexusSkills.js'
+import { createNexusMcpCommand } from '../commands/nexusMcp.js'
+import { createNexusSessionsCommand } from '../commands/nexusSessions.js'
 import { queryNexus } from '../nexus-query.js'
 
 export function completeOnboarding(): void {
@@ -499,6 +502,9 @@ ${commandList}`,
             createNexusIndexCommand(nexus),
             createNexusVectorCommand(nexus),
             createNexusEmbeddingsCommand(nexus),
+            createNexusSkillsCommand(nexus),
+            createNexusMcpCommand(nexus),
+            createNexusSessionsCommand(nexus, () => {}),
           ]
 
           function NexusREPLWithConfigRefresh({

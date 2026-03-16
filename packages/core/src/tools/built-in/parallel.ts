@@ -5,11 +5,13 @@ import type { ToolDef, ToolContext } from "../../types.js"
 const MAX_BATCH_TOOLS = 25
 
 const schema = z.object({
-  tool_uses: z.array(z.object({
-    recipient_name: z.string().describe("Tool name to call. Supports canonical names (Read, Grep), provider-style aliases (read_file, grep_search, execute_command), and namespace prefixes (functions.read_file)."),
-    parameters: z.record(z.unknown()).describe("Arguments to pass to the tool"),
-  })).min(1).max(MAX_BATCH_TOOLS).describe("The tools to execute in parallel. Max 25 calls per batch."),
-})
+  tool_uses: z.array(
+    z.object({
+      recipient_name: z.string().describe("Tool name to call. Supports canonical names (Read, Grep), provider-style aliases (read_file, grep_search, execute_command), and namespace prefixes (functions.read_file)."),
+      parameters: z.record(z.unknown()).describe("Arguments to pass to the tool"),
+    }).passthrough()  // Allow extra fields from LLMs without failing validation
+  ).min(1).max(MAX_BATCH_TOOLS).describe("The tools to execute in parallel. Max 25 calls per batch."),
+}).passthrough()  // Allow extra top-level fields (e.g. recipient_name) without failing
 
 type ParallelToolUse = z.infer<typeof schema>["tool_uses"][number]
 
@@ -76,17 +78,45 @@ function resolveTool(
 
 export const parallelTool: ToolDef<z.infer<typeof schema>> = {
   name: "Parallel",
-  description: `Run multiple independent tools in a single call. Use this to batch discovery work (e.g. several Read or Grep calls) and to run multiple SpawnAgent tasks concurrently.
+  description: `Run multiple independent tools in a single call. Use to batch read-only discovery (e.g. several Read, Grep, CodebaseSearch, Glob, ListCodeDefinitions) and to run multiple SpawnAgent tasks concurrently.
 
-- Pass tool_uses: an array of { recipient_name, parameters } for each tool to run.
-- recipient_name can be canonical (Read), provider-style alias (read_file), or namespaced alias (functions.read_file).
+- tool_uses: ARRAY of { recipient_name, parameters } — not a string. Each object is one tool call.
+- recipient_name: tool name — canonical (Read, Grep), alias (read_file), or namespaced (functions.read_file).
+- parameters: object with the tool's arguments (same as calling the tool directly).
 - Maximum 25 tool calls per batch.
 - Allowed in Parallel: read-only tools, and SpawnAgent.
 - Write/Edit/Bash and other mutating tools must be called directly (not through Parallel).
-- All tools in the array run in parallel; results are combined and returned in order.
-- Use when operations do not depend on each other's output. When one tool's result is needed to decide the next, call tools sequentially instead.`,
+- All tools run in parallel; results are combined and returned in order.
+- For multiple SpawnAgent calls, prefer SpawnAgentsParallel (simpler, no wrapping needed).
+
+CORRECT format:
+  Parallel({tool_uses: [
+    {recipient_name: "Read", parameters: {file_path: "src/foo.ts"}},
+    {recipient_name: "Grep", parameters: {pattern: "class Foo", path: "src/"}}
+  ]})
+
+For concurrent sub-agents (simpler):
+  SpawnAgentsParallel({agents: [
+    {description: "Explore API routes"},
+    {description: "Explore data store"}
+  ]})`,
   parameters: schema,
   readOnly: true,
+
+  formatValidationError(err: z.ZodError): string {
+    const issues = err.issues.map(i => `  - ${i.path.join(".") || "root"}: ${i.message}`).join("\n")
+    return `Invalid arguments for Parallel tool:\n${issues}\n\n` +
+      `tool_uses MUST be a JSON array, not a string. Correct format:\n` +
+      `  Parallel({tool_uses: [\n` +
+      `    {recipient_name: "Read", parameters: {file_path: "path/to/file.ts"}},\n` +
+      `    {recipient_name: "Grep", parameters: {pattern: "myFunc", path: "src/"}}\n` +
+      `  ]})\n\n` +
+      `For concurrent sub-agents use SpawnAgentsParallel instead:\n` +
+      `  SpawnAgentsParallel({agents: [\n` +
+      `    {description: "Task 1 description"},\n` +
+      `    {description: "Task 2 description"}\n` +
+      `  ]})`
+  },
 
   async execute({ tool_uses }, ctx: ToolContext) {
     const tools = ctx.resolvedTools ?? []
@@ -128,17 +158,24 @@ export const parallelTool: ToolDef<z.infer<typeof schema>> = {
 
       let parsed: unknown
       try {
-        const input = typeof use.parameters === "object" && use.parameters != null
-          ? { ...use.parameters }
-          : {}
+        // parameters may be a JSON string if LLM stringified it
+        let rawParams = use.parameters
+        if (typeof rawParams === "string") {
+          try { rawParams = JSON.parse(rawParams as string) } catch { /* leave as-is */ }
+        }
+        const input = typeof rawParams === "object" && rawParams != null ? { ...rawParams } : {}
         const normalized = normalizeToolInputForParse(tool.name, input as Record<string, unknown>)
         parsed = tool.parameters.parse(normalized)
       } catch (err) {
+        // Use the tool's own formatValidationError if available (kilocode pattern)
+        const friendlyMsg = (err instanceof z.ZodError && tool.formatValidationError)
+          ? tool.formatValidationError(err)
+          : `Invalid arguments for ${tool.name}: ${err}`
         return {
           recipient_name: use.recipient_name,
           resolved_name: tool.name,
           success: false,
-          output: `Invalid arguments: ${err}`,
+          output: friendlyMsg,
         }
       }
       try {

@@ -1,4 +1,5 @@
 import * as path from "node:path"
+import { z } from "zod"
 import type {
   IHost,
   ISession,
@@ -68,6 +69,23 @@ function normalizeOptionalStringArray(val: unknown): string[] | undefined {
 }
 
 /**
+ * Try to parse a JSON string that may use JS object literal syntax (unquoted keys).
+ * Falls back to standard JSON.parse first, then tries a best-effort key-quoting regex.
+ */
+function tryParseLooseJson(s: string): unknown {
+  try { return JSON.parse(s) } catch { /* fall through */ }
+  try {
+    // Quote unquoted identifier keys: {key: → {"key":
+    // Also fix trailing commas and single-quoted strings.
+    const fixed = s
+      .replace(/,(\s*[}\]])/g, "$1")          // trailing commas
+      .replace(/([{[,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:/g, '$1"$2":')  // quote bare keys
+    return JSON.parse(fixed)
+  } catch { /* fall through */ }
+  return null
+}
+
+/**
  * Normalize tool input before Zod parse so gateway/API quirks (paths vs path, [undefined] in arrays) don't cause validation errors.
  * Applied to all built-in tools that have optional string arrays or path/paths.
  */
@@ -117,6 +135,23 @@ export function normalizeToolInputForParse(
   if (name === "Grep") {
     const ignore = normalizeOptionalStringArray(raw.ignore)
     return { ...raw, ignore: ignore ?? undefined }
+  }
+  // Parallel: tool_uses may arrive as a JSON string from some LLM providers.
+  // Also: recipient_name may appear at the top level instead of inside each element.
+  if (name === "Parallel") {
+    let tool_uses = raw.tool_uses
+    const topLevelRecipient = typeof raw.recipient_name === "string" ? raw.recipient_name : undefined
+    if (typeof tool_uses === "string") {
+      tool_uses = tryParseLooseJson(tool_uses) ?? tool_uses
+    }
+    if (Array.isArray(tool_uses) && topLevelRecipient) {
+      tool_uses = tool_uses.map((item: unknown) => {
+        if (typeof item !== "object" || item === null) return item
+        const obj = item as Record<string, unknown>
+        return obj.recipient_name ? obj : { recipient_name: topLevelRecipient, ...obj }
+      })
+    }
+    return { ...raw, tool_uses }
   }
   return raw
 }
@@ -472,6 +507,11 @@ export async function executeToolCall(
     inputToParse = normalizeToolInputForParse(resolvedToolName, inputToParse) as Record<string, unknown>
     validatedArgs = tool.parameters.parse(inputToParse)
   } catch (err) {
+    // Use tool's formatValidationError if available (kilocode pattern):
+    // returns a helpful message with the correct format so the LLM can self-correct.
+    if (err instanceof z.ZodError && tool.formatValidationError) {
+      return { success: false, output: tool.formatValidationError(err) }
+    }
     return { success: false, output: `Invalid arguments for ${resolvedToolName}: ${err}` }
   }
 

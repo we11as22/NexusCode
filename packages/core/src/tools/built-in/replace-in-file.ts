@@ -25,12 +25,12 @@ export const editTool: ToolDef<z.infer<typeof schema>> = {
   description: `Performs exact string replacements in files.
 
 Usage:
-- You must use your Read tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if old_string is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use replace_all to change every instance of old_string.
-- Use replace_all for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.`,
+- You MUST use Read at least once in the conversation before editing. This tool will error if you attempt an edit without having read the file.
+- When editing text that came from Read output: preserve the exact indentation (tabs/spaces) as it appears in the file. The Read tool returns lines in the format \`LINE_NUMBER|CONTENT\` — the \`LINE_NUMBER|\` prefix is metadata only. Match only the actual file content (everything after that prefix) in old_string and new_string. Never include the line number prefix in old_string or new_string.
+- ALWAYS prefer editing existing files. NEVER create new files unless explicitly required.
+- Only use emojis if the user explicitly requests them.
+- The edit will FAIL if old_string is not unique in the file. Either provide a larger string with more surrounding context to make it unique, or use replace_all to change every occurrence.
+- Use replace_all for replacing and renaming strings across the entire file (e.g. renaming a variable).`,
   parameters: schema,
   requiresApproval: true,
 

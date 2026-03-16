@@ -18,15 +18,15 @@ const searchSchema = z.object({
   path: z.string().optional().describe("File or directory to search in (rg PATH). Defaults to current working directory."),
   glob: z.string().optional().describe("Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg --glob"),
   output_mode: z.enum(["content", "files_with_matches", "count"]).optional().describe("Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\"."),
-  "-B": z.number().int().min(0).optional().describe("Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise."),
-  "-A": z.number().int().min(0).optional().describe("Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise."),
-  "-C": z.number().int().min(0).optional().describe("Alias for context. Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."),
-  context: z.number().int().min(0).optional().describe("Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."),
+  "-B": z.coerce.number().int().min(0).optional().describe("Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise."),
+  "-A": z.coerce.number().int().min(0).optional().describe("Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise."),
+  "-C": z.coerce.number().int().min(0).optional().describe("Alias for context. Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."),
+  context: z.coerce.number().int().min(0).optional().describe("Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."),
   "-n": z.boolean().optional().describe("Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise. Defaults to true."),
   "-i": z.boolean().optional().describe("Case insensitive search (rg -i)"),
   type: z.string().optional().describe("File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than glob for standard file types."),
-  head_limit: z.number().int().positive().max(2000).optional().describe("Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). When unspecified, shows all results from ripgrep."),
-  offset: z.number().int().min(0).optional().describe("Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0."),
+  head_limit: z.coerce.number().int().positive().max(2000).optional().describe("Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). When unspecified, shows all results from ripgrep."),
+  offset: z.coerce.number().int().min(0).optional().describe("Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0."),
   multiline: z.boolean().optional().describe("Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."),
 })
 
@@ -44,8 +44,9 @@ Usage:
 - For open-ended investigations requiring multiple rounds, run several Grep/CodebaseSearch calls in parallel or use SpawnAgent for broader research when that will clearly save context
 - Pattern syntax: Uses ripgrep (not grep) — literal braces need escaping (use \`interface\\\\{\\\\}\` to find \`interface{}\` in Go code)
 - Multiline matching: By default patterns match within single lines only. For cross-line patterns like \`struct \\\\{[\\\\s\\\\S]*?field\`, use \`multiline: true\`
-- Results are capped for responsiveness; truncated results show "at least" counts.
-- Content output follows ripgrep format: \`-\` for context lines, \`:\` for match lines.
+- Avoid overly broad glob patterns (e.g. \`--glob *\`) as they can bypass .gitignore and be slow. Use \`type\` or \`glob\` only when you are certain of the file type needed
+- Results are capped for responsiveness; truncated results show "at least" counts. Use head_limit to bound output (e.g. equivalent to "| head -N")
+- Content output follows ripgrep format: \`-\` for context lines, \`:\` for match lines, grouped by file
 - Unsaved or out-of-workspace active editors are also searched and show "(unsaved)" or "(out of workspace)". Use absolute paths to read/edit these.`,
   parameters: searchSchema,
   readOnly: true,
@@ -152,7 +153,7 @@ const listSchema = z
     ignore: z.array(z.string()).optional().describe("List of glob patterns to ignore (e.g. \"*.log\", \"**/node_modules/**\")"),
     recursive: z.boolean().optional().describe("List recursively (default: false for top-level, true for subdirs)"),
     include: z.string().optional().describe("Glob pattern to filter files (e.g. \"*.ts\", \"*.json\")"),
-    max_entries: z.number().int().positive().max(5000).optional().describe("Max entries (default: 200)"),
+    max_entries: z.coerce.number().int().positive().max(5000).optional().describe("Max entries (default: 200)"),
     task_progress: z.string().optional(),
   })
   .strict()
@@ -168,6 +169,8 @@ export const listTool: ToolDef<z.infer<typeof listSchema>> = {
 - **Project layout discovery** — Use at the start of a task on root and key dirs (e.g. \`.\`, \`src\`, \`packages\`) to understand structure. Use once or twice; do not list every nested folder.
 - **Verify directory exists** — Before running commands that create files/dirs (e.g. \`mkdir foo/bar\`), use List to check the parent directory exists and is the correct location.
 - **Find file names or check presence** — Config files, scripts, modules. Use \`include\` to filter by extension.
+
+**Note:** The result does not display dot-files and dot-directories by default (e.g. \`.env\`, \`.gitignore\` may be hidden depending on ignore rules).
 
 ### When NOT to Use
 

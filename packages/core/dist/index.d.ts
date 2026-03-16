@@ -1123,6 +1123,12 @@ interface ToolDef<TArgs = Record<string, unknown>> {
     modes?: Mode[];
     /** If true, always show approval dialog */
     requiresApproval?: boolean;
+    /**
+     * Optional: produce a human-readable validation error from a ZodError.
+     * Return value is sent back to the LLM as the tool result so it can self-correct.
+     * Pattern from kilocode — include the correct format example in the message.
+     */
+    formatValidationError?: (error: z.ZodError) => string;
     execute(args: TArgs, ctx: ToolContext): Promise<ToolResult>;
 }
 interface ToolResult {
@@ -1737,10 +1743,23 @@ interface ProjectSettings {
     };
 }
 /**
- * Load .nexus/settings.json and .nexus/settings.local.json (local overrides), merge and return.
+ * Load global ~/.nexus/settings.json and ~/.nexus/settings.local.json.
  * Same structure as .claude: permissions.allow, permissions.deny, permissions.ask.
  */
+declare function loadGlobalSettings(): ProjectSettings;
+/**
+ * Load .nexus/settings.json and .nexus/settings.local.json (local overrides), merge with global settings.
+ * Layer order: global base → global local → project base → project local (later overrides earlier).
+ */
 declare function loadProjectSettings(cwd: string): ProjectSettings;
+/**
+ * Write project settings to .nexus/settings.json.
+ */
+declare function writeProjectSettings(cwd: string, settings: ProjectSettings): void;
+/**
+ * Write global settings to ~/.nexus/settings.json.
+ */
+declare function writeGlobalSettings(settings: ProjectSettings): void;
 
 interface LLMStreamEvent {
     type: "text_delta" | "reasoning_start" | "reasoning_delta" | "reasoning_end" | "tool_input_start" | "tool_call" | "tool_result" | "finish" | "error";
@@ -1851,7 +1870,9 @@ declare class Session implements ISession {
     private _messages;
     private _todo;
     private cwd;
-    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string);
+    /** Ephemeral sessions are never persisted to disk (used for sub-agents). */
+    private _ephemeral;
+    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean);
     get messages(): SessionMessage[];
     addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage;
     updateMessage(id: string, updates: Partial<SessionMessage>): void;
@@ -1870,6 +1891,8 @@ declare class Session implements ISession {
     save(): Promise<void>;
     load(): Promise<void>;
     static create(cwd: string): Session;
+    /** Create a session that is never saved to disk (for sub-agents). */
+    static createEphemeral(cwd: string): Session;
     static resume(sessionId: string, cwd: string): Promise<Session | null>;
 }
 
@@ -2065,6 +2088,11 @@ declare const spawnStopSchema: z.ZodObject<{
 declare function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
 declare function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnOutputSchema>>;
 declare function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnStopSchema>>;
+/**
+ * SpawnAgentsParallel — simple alternative to Parallel+SpawnAgent for concurrent sub-agent launch.
+ * Flat schema: no recipient_name/parameters wrapping needed.
+ */
+declare function createSpawnAgentsParallelTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
 /**
  * Backward-compatible alias for old sessions/prompts that still call SpawnAgents.
  * Runtime behavior is identical to SpawnAgent (single sub-agent per call).
@@ -2400,4 +2428,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getPlanContentForFollowup, getSecretsPayloadFromConfig, hadPlanExit, listSessions, loadConfig, loadProjectSettings, loadRules, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getPlanContentForFollowup, getSecretsPayloadFromConfig, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

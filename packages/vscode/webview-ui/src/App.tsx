@@ -133,13 +133,8 @@ export function App() {
 
 function ChatView() {
   const store = useChatStore()
-  const contextColor =
-    store.contextPercent >= 90
-      ? "text-red-400"
-      : store.contextPercent >= 75
-        ? "text-yellow-300"
-        : "text-emerald-300"
 
+  // Must be called before any conditional return (Rules of Hooks)
   const todoHeader = useMemo(() => {
     const user = [...store.messages].reverse().find((m) => m.role === "user")
     const content = user?.content
@@ -150,6 +145,22 @@ function ChatView() {
     }
     return ""
   }, [store.messages])
+
+  // Prevent flash: don't render content until initial stateUpdate has been received
+  if (!store.isInitialized) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <span className="text-[11px] text-[var(--vscode-descriptionForeground)] opacity-50">Loading…</span>
+      </div>
+    )
+  }
+
+  const contextColor =
+    store.contextPercent >= 90
+      ? "text-red-400"
+      : store.contextPercent >= 75
+        ? "text-yellow-300"
+        : "text-emerald-300"
 
   return (
     <>

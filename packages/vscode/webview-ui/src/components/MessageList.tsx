@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
 import { ExploredSummaryInline, getExplorationItemsFromToolPart, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
 import { ThoughtBlock } from "./ThoughtBlock.js"
+import { MermaidBlock } from "./MermaidBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 import type { SubAgentState } from "../stores/chat.js"
@@ -35,7 +36,17 @@ const MessageListScroller = React.forwardRef<HTMLDivElement, React.HTMLAttribute
 )
 MessageListScroller.displayName = "MessageListScroller"
 
-/** Approval request inline (Cline/Roo-style: Allow once, Always allow, Deny, Add to allowed for folder, Allow all session, Say what to do instead). */
+/**
+ * Compact approval request inline.
+ *
+ * Layout:
+ *   ─────────────────────────────────────
+ *   ⚠  Run: echo 'test'          +3 -1
+ *   [✓ Allow] [∞ Always] [⌀ Session] [✗]  [↩]
+ *   ─────────────────────────────────────
+ *
+ * [↩] opens "Say what to do instead" textarea.
+ */
 function ApprovalInline({
   action,
   onResolve,
@@ -43,117 +54,70 @@ function ApprovalInline({
   action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } }
   onResolve: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean, whatToDoInstead?: string) => void
 }) {
-  const [showWhatToDoInstead, setShowWhatToDoInstead] = useState(false)
-  const [whatToDoText, setWhatToDoText] = useState("")
+  const [showRedirect, setShowRedirect] = useState(false)
+  const [redirectText, setRedirectText] = useState("")
 
   const label =
     action.type === "execute"
       ? (action.content ? `Run: ${action.content}` : action.description)
       : action.type === "write"
-        ? `Edit file: ${action.description}`
+        ? `Edit: ${action.description}`
         : action.description
 
-  const submitWhatToDoInstead = () => {
-    const trimmed = whatToDoText.trim()
-    if (trimmed) {
-      onResolve(false, undefined, undefined, undefined, trimmed)
-      setShowWhatToDoInstead(false)
-      setWhatToDoText("")
-    }
+  const submitRedirect = () => {
+    const trimmed = redirectText.trim()
+    if (!trimmed) return
+    onResolve(false, undefined, undefined, undefined, trimmed)
+    setShowRedirect(false)
+    setRedirectText("")
   }
 
-  if (showWhatToDoInstead) {
+  const BTN = "flex-shrink-0 px-2 py-0.5 rounded text-[11px] font-medium border transition-colors"
+  const BTN_ALLOW = `${BTN} border-green-600/40 text-green-400 hover:bg-green-600/15`
+  const BTN_DENY = `${BTN} border-red-500/40 text-red-400 hover:bg-red-500/15`
+  const BTN_NEUTRAL = `${BTN} border-[var(--vscode-panel-border)] text-[var(--vscode-descriptionForeground)] hover:bg-[var(--vscode-list-hoverBackground)] hover:text-[var(--vscode-foreground)]`
+
+  if (showRedirect) {
     return (
-      <div className="nexus-approval-inline border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 px-3 py-2 flex flex-col gap-2">
-        <span className="text-xs text-[var(--vscode-foreground)]">What should the agent do instead?</span>
+      <div className="border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/20 px-3 py-2 flex flex-col gap-1.5">
+        <span className="text-[11px] text-[var(--vscode-descriptionForeground)]">What should the agent do instead?</span>
         <textarea
-          value={whatToDoText}
-          onChange={(e) => setWhatToDoText(e.target.value)}
+          value={redirectText}
+          onChange={(e) => setRedirectText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submitRedirect() }}
           placeholder="e.g. Use npm instead of pnpm"
-          className="nexus-input w-full text-sm min-h-[60px] resize-y"
+          className="nexus-input w-full text-xs min-h-[48px] resize-none"
           rows={2}
           autoFocus
         />
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className="nexus-approval-inline-btn nexus-approval-inline-btn-allow"
-            onClick={submitWhatToDoInstead}
-            disabled={!whatToDoText.trim()}
-          >
-            Send
-          </button>
-          <button
-            type="button"
-            className="nexus-approval-inline-btn nexus-approval-inline-btn-deny"
-            onClick={() => { setShowWhatToDoInstead(false); setWhatToDoText("") }}
-          >
-            Cancel
-          </button>
+        <div className="flex items-center gap-1.5">
+          <button type="button" className={BTN_ALLOW} onClick={submitRedirect} disabled={!redirectText.trim()}>Send</button>
+          <button type="button" className={BTN_NEUTRAL} onClick={() => { setShowRedirect(false); setRedirectText("") }}>Cancel</button>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="nexus-approval-inline border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 px-3 py-2 flex flex-wrap items-center gap-2">
-      <span className="nexus-approval-inline-icon text-[var(--vscode-editorWarning-foreground)]" title="Permission required">
-        ⚠
-      </span>
-      <span className="nexus-approval-inline-text text-xs text-[var(--vscode-foreground)] truncate flex-1 min-w-0">
-        {label}
-      </span>
-      {action.diffStats != null && (action.diffStats.added > 0 || action.diffStats.removed > 0) && (
-        <span className="nexus-approval-inline-stats flex items-center gap-1 flex-shrink-0 text-[10px]">
-          {action.diffStats.added > 0 && <span className="text-green-500">+{action.diffStats.added}</span>}
-          {action.diffStats.removed > 0 && <span className="text-red-400">-{action.diffStats.removed}</span>}
-        </span>
-      )}
-      <div className="nexus-approval-inline-buttons flex items-center gap-1.5 flex-shrink-0 flex-wrap">
-        <button
-          type="button"
-          className="nexus-approval-inline-btn nexus-approval-inline-btn-allow"
-          onClick={() => onResolve(true)}
-        >
-          Allow once
-        </button>
-        {action.type === "execute" && (
-          <button
-            type="button"
-            className="nexus-approval-inline-btn nexus-approval-inline-btn-allow"
-            onClick={() => onResolve(true, false, action.content)}
-          >
-            Add to allowed for this folder
-          </button>
+    <div className="border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/20 px-3 py-2 space-y-1.5">
+      {/* Label row */}
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="flex-shrink-0 text-[var(--vscode-editorWarning-foreground)] text-[11px]">⚠</span>
+        <span className="text-[11px] text-[var(--vscode-foreground)] truncate flex-1 min-w-0" title={label}>{label}</span>
+        {action.diffStats != null && (action.diffStats.added > 0 || action.diffStats.removed > 0) && (
+          <span className="flex-shrink-0 flex items-center gap-1 text-[10px]">
+            {action.diffStats.added > 0 && <span className="text-green-500">+{action.diffStats.added}</span>}
+            {action.diffStats.removed > 0 && <span className="text-red-400">-{action.diffStats.removed}</span>}
+          </span>
         )}
-        <button
-          type="button"
-          className="nexus-approval-inline-btn nexus-approval-inline-btn-always"
-          onClick={() => onResolve(true, true)}
-        >
-          Always allow
-        </button>
-        <button
-          type="button"
-          className="nexus-approval-inline-btn nexus-approval-inline-btn-session"
-          onClick={() => onResolve(true, false, undefined, true)}
-        >
-          Allow all (session)
-        </button>
-        <button
-          type="button"
-          className="nexus-approval-inline-btn text-[var(--vscode-descriptionForeground)]"
-          onClick={() => setShowWhatToDoInstead(true)}
-        >
-          Say what to do instead
-        </button>
-        <button
-          type="button"
-          className="nexus-approval-inline-btn nexus-approval-inline-btn-deny"
-          onClick={() => onResolve(false)}
-        >
-          Deny
-        </button>
+      </div>
+      {/* Action buttons row */}
+      <div className="flex items-center gap-1 flex-wrap">
+        <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true)} title="Allow once">✓ Allow</button>
+        <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true, true)} title="Always allow this tool">∞ Always</button>
+        <button type="button" className={BTN_NEUTRAL} onClick={() => onResolve(true, false, undefined, true)} title="Allow all for this session">⌀ Session</button>
+        <button type="button" className={BTN_DENY} onClick={() => onResolve(false)} title="Deny">✗</button>
+        <button type="button" className={BTN_NEUTRAL} onClick={() => setShowRedirect(true)} title="Say what to do instead">↩</button>
       </div>
     </div>
   )
@@ -161,7 +125,12 @@ function ApprovalInline({
 
 /** Bash (execute_command) block: command in header, expandable output (tail when long). */
 function BashCommandBlock({ part, approval }: { part: ToolPart; approval?: React.ReactNode }) {
-  const [expanded, setExpanded] = useState(true)
+  // null = follow auto logic; true/false = user override
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
+  // Auto-expand when command completes; stay collapsed while pending/running (so approval doesn't look like edit field)
+  const isDone = part.status === "completed" || part.status === "error"
+  const expanded = userExpanded !== null ? userExpanded : isDone
+  const setExpanded = (v: boolean) => setUserExpanded(v)
   const command = (part.input?.command as string)?.trim() ?? ""
   const output = (part.output ?? "").trim()
   const lines = output ? output.split("\n") : []
@@ -771,6 +740,57 @@ function renderUserTextWithPasteChips(text: string): React.ReactNode {
   return chunks
 }
 
+/** Recursively extract plain text from React children (used to get mermaid/code source). */
+function extractReactText(node: React.ReactNode): string {
+  if (typeof node === "string") return node
+  if (typeof node === "number") return String(node)
+  if (!node) return ""
+  if (Array.isArray(node)) return node.map(extractReactText).join("")
+  if (React.isValidElement(node)) return extractReactText((node.props as { children?: React.ReactNode }).children)
+  return ""
+}
+
+/** Code block wrapper with overflow scroll and copy button (top-right, visible on hover). */
+function CodeBlock({ children }: { children?: React.ReactNode }) {
+  const [copied, setCopied] = useState(false)
+
+  const extractText = (node: React.ReactNode): string => {
+    if (typeof node === "string") return node
+    if (typeof node === "number") return String(node)
+    if (!node) return ""
+    if (Array.isArray(node)) return node.map(extractText).join("")
+    if (React.isValidElement(node)) return extractText((node.props as { children?: React.ReactNode }).children)
+    return ""
+  }
+
+  const text = extractText(children).trimEnd()
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch { /* ignore */ }
+  }
+
+  return (
+    <div className="relative group/code my-2 max-w-full overflow-x-auto overflow-y-hidden min-w-0 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+      <pre className="m-0 p-3 text-xs font-mono bg-transparent overflow-visible whitespace-pre">
+        {children}
+      </pre>
+      <button
+        type="button"
+        onClick={handleCopy}
+        title={copied ? "Copied!" : "Copy code"}
+        aria-label={copied ? "Copied!" : "Copy code"}
+        className="absolute top-1.5 right-1.5 opacity-0 group-hover/code:opacity-100 focus:opacity-100 transition-opacity px-1.5 py-0.5 rounded text-[11px] font-mono leading-none select-none text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]"
+      >
+        {copied ? "✓" : "⎘"}
+      </button>
+    </div>
+  )
+}
+
 function AssistantText({ text, streaming, variant = "normal" }: { text: string; streaming?: boolean; variant?: "normal" | "muted" }) {
   const isMuted = variant === "muted"
   return (
@@ -788,14 +808,23 @@ function AssistantText({ text, streaming, variant = "normal" }: { text: string; 
                 </code>
               )
             }
+            // Block code — no overflow here; CodeBlock wrapper handles it
             return (
-              <code className="block bg-[var(--vscode-editor-background)] rounded-lg p-3 text-xs font-mono overflow-x-auto text-[var(--vscode-editor-foreground,#d4d4d4)] border border-[var(--vscode-panel-border)]" {...props}>
+              <code className="text-[var(--vscode-editor-foreground,#d4d4d4)]" {...props}>
                 {children}
               </code>
             )
           },
           pre({ children }) {
-            return <pre className="my-2">{children}</pre>
+            // Detect mermaid code blocks: <pre><code class="language-mermaid">...</code></pre>
+            if (React.isValidElement(children)) {
+              const child = children as React.ReactElement<{ className?: string; children?: React.ReactNode }>
+              if (child.props?.className?.includes("language-mermaid")) {
+                const mermaidCode = extractReactText(child.props.children).trim()
+                if (mermaidCode) return <MermaidBlock code={mermaidCode} />
+              }
+            }
+            return <CodeBlock>{children}</CodeBlock>
           },
           p({ children }) {
             return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>
@@ -842,9 +871,11 @@ function AssistantText({ text, streaming, variant = "normal" }: { text: string; 
 }
 
 function subagentStatusLine(a: SubAgentState): string {
-  if (a.status === "completed") return "Completed"
-  if (a.status === "error") return a.error ? `Failed: ${a.error.slice(0, 60)}` : "Failed"
-  if (a.currentTool) return a.currentTool
+  if (a.status === "completed") return "Done"
+  if (a.status === "error") return a.error ? `Error: ${a.error.slice(0, 72)}` : "Failed"
+  if (a.currentTool) return `Using ${a.currentTool}`
+  const lastTool = a.toolHistory?.[a.toolHistory.length - 1]
+  if (lastTool) return `${lastTool} · thinking…`
   return "Starting…"
 }
 
@@ -858,12 +889,25 @@ type SubagentDisplayItem = {
   task: string
   status: "running" | "completed" | "error" | "pending"
   detail: string
+  toolHistory?: string[]
   error?: string
 }
 
 function isSpawnAgentRecipientName(raw: string): boolean {
   const normalized = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, "")
   return normalized === "spawnagent" || normalized === "spawnagents"
+}
+
+function getSpawnAgentsParallelDescriptions(input?: Record<string, unknown>): string[] {
+  const agents = input?.agents
+  if (!Array.isArray(agents)) return []
+  return agents
+    .map((item) => {
+      if (item == null || typeof item !== "object") return null
+      const description = (item as Record<string, unknown>).description
+      return typeof description === "string" && description.trim().length > 0 ? description.trim() : null
+    })
+    .filter((value): value is string => value != null)
 }
 
 function getParallelSpawnAgentDescriptions(input?: Record<string, unknown>): string[] {
@@ -894,15 +938,18 @@ function isPureSubagentParallelTool(part: ToolPart): boolean {
 
 function getSubagentDisplayItems(part: ToolPart): SubagentDisplayItem[] {
   const liveSubagents = part.subagents ?? []
+  const isParallelBatch = part.tool === "SpawnAgentsParallel"
   const declaredTasks =
     SPAWN_AGENT_TOOL_NAMES.has(part.tool)
       ? (() => {
           const task = typeof part.input?.description === "string" ? part.input.description.trim() : ""
           return task ? [task] : []
         })()
-      : isPureSubagentParallelTool(part)
-        ? getParallelSpawnAgentDescriptions(part.input)
-        : []
+      : isParallelBatch
+        ? getSpawnAgentsParallelDescriptions(part.input)
+        : isPureSubagentParallelTool(part)
+          ? getParallelSpawnAgentDescriptions(part.input)
+          : []
 
   const items: SubagentDisplayItem[] = []
   const usedLiveIds = new Set<string>()
@@ -916,6 +963,7 @@ function getSubagentDisplayItems(part: ToolPart): SubagentDisplayItem[] {
         task: live.task,
         status: live.status,
         detail: subagentStatusLine(live),
+        toolHistory: live.toolHistory,
         error: live.error,
       })
       return
@@ -929,14 +977,20 @@ function getSubagentDisplayItems(part: ToolPart): SubagentDisplayItem[] {
           ? "completed"
           : isSingleSpawnAgent && part.status === "error"
             ? "error"
-            : "pending",
+            : isParallelBatch && part.status === "completed"
+              ? "completed"
+              : isParallelBatch && part.status === "error"
+                ? "error"
+                : "pending",
       detail:
         isSingleSpawnAgent && part.status === "completed"
-          ? "Completed"
+          ? "Done"
           : isSingleSpawnAgent && part.status === "error"
             ? (part.error?.trim() || "Failed")
-            : "Starting…",
-      error: isSingleSpawnAgent && part.status === "error" ? part.error : undefined,
+            : isParallelBatch && part.status === "completed"
+              ? "Done"
+              : "Starting…",
+      error: (isSingleSpawnAgent || isParallelBatch) && part.status === "error" ? part.error : undefined,
     })
   })
 
@@ -947,6 +1001,7 @@ function getSubagentDisplayItems(part: ToolPart): SubagentDisplayItem[] {
       task: subagent.task,
       status: subagent.status,
       detail: subagentStatusLine(subagent),
+      toolHistory: subagent.toolHistory,
       error: subagent.error,
     })
   })
@@ -983,38 +1038,60 @@ function SubagentInlineList({ items }: { items: SubagentDisplayItem[] }) {
   if (items.length === 0) return null
   return (
     <div className="nexus-subtask-stack">
-      {items.map((item) => (
-        <div
-          key={item.key}
-          className={`nexus-subtask-card ${
-            item.status === "completed"
-              ? "nexus-subtask-card-done"
-              : item.status === "error"
-                ? "nexus-subtask-card-error"
-                : item.status === "running"
-                  ? "nexus-subtask-card-running"
-                  : "nexus-subtask-card-pending"
-          }`}
-        >
-          <div className="nexus-subtask-status">
-            <StatusCircleIcon status={item.status} />
-          </div>
-          <div className="nexus-subtask-body">
-            <div className="nexus-subtask-title" title={item.task}>
-              {truncateTask(item.task, 72)}
+      {items.map((item) => {
+        const isRunning = item.status === "running"
+        const recentTools = item.toolHistory?.slice(-3) ?? []
+        return (
+          <div
+            key={item.key}
+            className={`nexus-subtask-card ${
+              item.status === "completed"
+                ? "nexus-subtask-card-done"
+                : item.status === "error"
+                  ? "nexus-subtask-card-error"
+                  : isRunning
+                    ? "nexus-subtask-card-running"
+                    : "nexus-subtask-card-pending"
+            }`}
+          >
+            <div className="nexus-subtask-status">
+              {isRunning ? <SpinnerSubtask /> : <StatusCircleIcon status={item.status} />}
             </div>
-            <div className="nexus-subtask-subtitle">
-              {item.detail}
-            </div>
-            {item.error && item.status === "error" && (
-              <div className="nexus-subtask-error" title={item.error}>
-                {item.error}
+            <div className="nexus-subtask-body">
+              <div className="nexus-subtask-title" title={item.task}>
+                {truncateTask(item.task, 72)}
               </div>
-            )}
+              <div className="nexus-subtask-subtitle">
+                {item.detail}
+              </div>
+              {isRunning && recentTools.length > 1 && (
+                <div
+                  className="mt-1 text-[10px] leading-snug opacity-50 truncate"
+                  style={{ color: "var(--vscode-descriptionForeground)" }}
+                  title={recentTools.join(" → ")}
+                >
+                  {recentTools.slice(0, -1).join(" → ")}
+                </div>
+              )}
+              {item.error && item.status === "error" && (
+                <div className="nexus-subtask-error" title={item.error}>
+                  {item.error}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
+  )
+}
+
+function SpinnerSubtask() {
+  return (
+    <svg className="animate-spin nexus-subtask-status-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+      <circle className="opacity-20" cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" />
+      <path className="opacity-80" fill="currentColor" d="M12 3a9 9 0 019 9h-2.5A6.5 6.5 0 0012 5.5V3z" />
+    </svg>
   )
 }
 
@@ -1121,17 +1198,29 @@ function AssistantPartRow({
     }
     if (
       toolPart.tool === "Parallel" ||
-      toolPart.tool === "parallel"
+      toolPart.tool === "parallel" ||
+      toolPart.tool === "SpawnAgentsParallel"
     ) {
+      const displayItems = getSubagentDisplayItems(toolPart)
       const approval =
         pendingApproval?.partId === toolPart.id ? (
           <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
         ) : undefined
+      // SpawnAgentsParallel: hide the tool wrapper entirely, only show cards
+      if (toolPart.tool === "SpawnAgentsParallel") {
+        return (
+          <>
+            {displayItems.length > 0
+              ? <SubagentInlineList items={displayItems} />
+              : <ToolCallCard part={toolPart} approval={approval} />}
+          </>
+        )
+      }
       return (
         <>
           <ToolCallCard part={toolPart} approval={approval} />
-          {getSubagentDisplayItems(toolPart).length > 0 ? (
-            <SubagentInlineList items={getSubagentDisplayItems(toolPart)} />
+          {displayItems.length > 0 ? (
+            <SubagentInlineList items={displayItems} />
           ) : null}
         </>
       )

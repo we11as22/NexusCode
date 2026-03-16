@@ -13,16 +13,18 @@ const schema = z.object({
 
 export const webFetchTool: ToolDef<z.infer<typeof schema>> = {
   name: "WebFetch",
-  description: `Fetch content from a URL. HTML is converted to markdown; JSON/text returned as-is. Read-only.
+  description: `Fetch content from a URL via HTTP. HTML is converted to markdown; JSON/text returned as-is. Read-only.
 
 When to use:
-- Documentation, API specs, project URLs the user provided.
-- Checking external references or dependencies.
+- Documentation, API specs, or URLs the user provided.
+- Extracting text from public pages, reading static content, or checking external references.
 
 When NOT to use:
-- Do not guess or fabricate URLs; use only user-provided or discovered URLs.
-- Large binaries or non-text: tool caps at 100KB and is text-oriented.
-Requires a valid, fully-formed URL. Timeout ~30s.`,
+- Do not guess or fabricate URLs; use only user-provided or tool-discovered URLs.
+- Authenticated or private URLs (e.g. Google Docs, Confluence, Jira) — WebFetch will fail; use a specialized authenticated tool if available.
+- Large binaries or non-text content; tool is text-oriented and caps response size.
+
+Usage: URL must be fully-formed and valid. Timeout ~30s. When the response indicates a redirect to a different host, make a new WebFetch request with the redirect URL provided in the response. If an MCP-provided web fetch tool is available (e.g. mcp_web_fetch), prefer it when it may have fewer restrictions.`,
   parameters: schema,
   readOnly: true,
 
@@ -105,15 +107,18 @@ const webSearchSchema = z.object({
 
 export const webSearchTool: ToolDef<z.infer<typeof webSearchSchema>> = {
   name: "WebSearch",
-  description: `Search the web (Brave or Serper). Returns titles, URLs, snippets. Use WebFetch to read full pages. Requires BRAVE_API_KEY or SERPER_API_KEY.
+  description: `Search the web for real-time information (Brave or Serper). Returns titles, URLs, and snippets. Use WebFetch to read full pages. Requires BRAVE_API_KEY or SERPER_API_KEY.
 
 When to use:
-- Current docs, versions, or info beyond training data.
+- Current docs, versions, or information beyond training data.
 - Verifying APIs, dependencies, or recent changes.
+- Questions about current events, technology updates, or topics that require recent information.
 
 When NOT to use:
 - Codebase questions: use CodebaseSearch or Grep.
-- User-provided URL: use WebFetch directly.`,
+- When the user already gave a URL: use WebFetch directly.
+
+Usage: Be specific in the query; include version numbers or dates for technical queries. Account for "Today's date" in the Environment block — e.g. when searching for "latest docs", use the current year in the query. After using search results in your answer, include a "Sources:" section with markdown links to the relevant URLs (e.g. [Title](URL)).`,
   parameters: webSearchSchema,
   readOnly: true,
 

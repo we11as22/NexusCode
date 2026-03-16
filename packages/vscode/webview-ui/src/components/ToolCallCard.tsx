@@ -1,6 +1,6 @@
 import React, { useState } from "react"
 import { postMessage } from "../vscode.js"
-import type { ToolPart } from "../stores/chat.js"
+import type { ToolPart, SubAgentState } from "../stores/chat.js"
 
 /** Extract path:line pairs from search/codebase output for "Open in editor" links */
 function extractPathLinePairs(output: string): Array<{ path: string; line: number }> {
@@ -540,6 +540,41 @@ function formatToolInputPreview(part: ToolPart): string {
   }
 }
 
+function SubAgentDisplay({ subagents }: { subagents?: SubAgentState[] }) {
+  if (!subagents?.length) return null
+  return (
+    <div className="mt-1 pl-2 border-l-2 border-[var(--vscode-panel-border)] space-y-0.5">
+      {subagents.map((sa) => {
+        const isRunning = sa.status === "running"
+        const isCompleted = sa.status === "completed"
+        const dot = isRunning ? "●" : isCompleted ? "✓" : "✗"
+        const dotColor = isRunning ? "text-blue-400" : isCompleted ? "text-green-500" : "text-red-500"
+        const taskShort = sa.task.replace(/\s+/g, " ").trim().slice(0, 44) + (sa.task.length > 44 ? "…" : "")
+        const toolHistory = sa.toolHistory?.slice(-3) ?? []
+        return (
+          <div key={sa.id} className="text-[10px]">
+            <div className="flex items-center gap-1.5">
+              <span className={`flex-shrink-0 ${dotColor}`}>{dot}</span>
+              <span className="text-[var(--vscode-foreground)] truncate">{taskShort}</span>
+              {isRunning && sa.currentTool && (
+                <span className="text-[var(--vscode-descriptionForeground)] truncate flex-shrink-0">→ {sa.currentTool}</span>
+              )}
+            </div>
+            {isRunning && toolHistory.length > 0 && (
+              <div className="ml-4 text-[var(--vscode-descriptionForeground)] truncate">
+                {toolHistory.join(" → ")}
+              </div>
+            )}
+            {sa.status === "error" && sa.error && (
+              <div className="ml-4 text-red-400 truncate">{sa.error.slice(0, 60)}</div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export function ToolCallCard({ part, approval }: Props) {
   const [expanded, setExpanded] = useState(false)
   const icon = TOOL_ICONS[part.tool] ?? "🔧"
@@ -581,6 +616,9 @@ export function ToolCallCard({ part, approval }: Props) {
         </span>
       </button>
 
+      {part.subagents && part.subagents.length > 0 && (
+        <SubAgentDisplay subagents={part.subagents} />
+      )}
       {expanded && (
         <div className="px-2 pb-2 space-y-1">
           {isFileEditTool(part) && part.output && (

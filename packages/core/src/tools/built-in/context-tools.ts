@@ -73,14 +73,16 @@ const planExitSchema = z.object({
 
 export const planExitTool: ToolDef<z.infer<typeof planExitSchema>> = {
   name: "PlanExit",
-  description: `Signal that planning is complete (plan mode only). Call once you have finalized the plan file and are confident it is ready. This ends your planning turn and hands control back to the user.
+  description: `Signal that planning is complete (plan mode only). Call once you have finalized the plan file and are ready for user approval. This ends your planning turn and hands control to the user.
 
 Call this tool:
-- After you have written a complete plan to a file in \`.nexus/plans/\` (e.g. \`.nexus/plans/plan.md\`). \`PlanExit\` is rejected until at least one such file exists.
-- After you have clarified any questions with the user.
-- When you are confident the plan is ready for implementation.
+- After you have written a complete plan to a file in \`.nexus/plans/\` (e.g. \`.nexus/plans/plan.md\`). PlanExit is rejected until at least one such file exists.
+- When you are confident the plan is ready for implementation (and any blocking questions have been resolved via AskFollowupQuestion).
 
-Do NOT call this tool before you have created or finalized the plan file, or if you still have unanswered questions.`,
+When NOT to use:
+- For research-only tasks (searching, reading, understanding the codebase) — do NOT use PlanExit. Use it only when the task requires planning the implementation steps of code changes.
+- Do NOT use AskFollowupQuestion to ask "Is my plan ready?" or "Should I proceed?" — that is what PlanExit does. Use PlanExit to request approval of your plan.
+- Do NOT call before you have created or finalized the plan file, or if you still have unresolved blocking questions.`,
   parameters: planExitSchema,
   modes: ["plan"],
 

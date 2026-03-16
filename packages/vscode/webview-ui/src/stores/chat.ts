@@ -335,6 +335,9 @@ interface ChatState {
   skillDefinitions: Array<{ name: string; path: string; summary: string }>
   handleSkillDefinitions: (definitions: Array<{ name: string; path: string; summary: string }>) => void
 
+  /** True after first stateUpdate received — prevents flash during initial load. */
+  isInitialized: boolean
+
   // Actions
   setView: (view: AppView) => void
   setInputValue: (v: string) => void
@@ -436,6 +439,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   mcpStatus: [],
   pendingApproval: null,
 
+  isInitialized: false,
   modelsCatalog: null,
   modelsCatalogLoading: false,
   checkpointEntries: [],
@@ -656,7 +660,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   handleStateUpdate: (state) => {
     set((prev) => {
-      const next = { ...prev, ...state }
+      const next = { ...prev, ...state, isInitialized: true }
       if (
         state.messages != null &&
         Array.isArray(state.messages) &&
@@ -809,7 +813,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "tool_start": {
         const ev = event as { input?: Record<string, unknown>; tool?: string }
-        if (ev.tool === "SpawnAgent" || ev.tool === "SpawnAgents") set({ lastSpawnAgentPartId: event.partId })
+        if (ev.tool === "SpawnAgent" || ev.tool === "SpawnAgents" || ev.tool === "SpawnAgentsParallel") {
+          set({ lastSpawnAgentPartId: event.partId })
+        } else if (ev.tool === "Parallel" || ev.tool === "parallel") {
+          // Track Parallel as spawn parent when all tool_uses are SpawnAgent calls
+          const toolUses = (ev.input?.tool_uses as Array<{ recipient_name?: string }> | undefined) ?? []
+          const allSpawn = toolUses.length > 0 && toolUses.every((u) => {
+            const name = (u.recipient_name ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "")
+            return name === "spawnagent" || name === "spawnagents"
+          })
+          if (allSpawn) set({ lastSpawnAgentPartId: event.partId })
+        }
         const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
@@ -837,7 +851,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "tool_end": {
         const ev = event as { output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
-        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents") set({ lastSpawnAgentPartId: null })
+        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") set({ lastSpawnAgentPartId: null })
         set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
         const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg

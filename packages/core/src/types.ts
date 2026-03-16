@@ -43,6 +43,12 @@ export interface ToolDef<TArgs = Record<string, unknown>> {
   modes?: Mode[]
   /** If true, always show approval dialog */
   requiresApproval?: boolean
+  /**
+   * Optional: produce a human-readable validation error from a ZodError.
+   * Return value is sent back to the LLM as the tool result so it can self-correct.
+   * Pattern from kilocode — include the correct format example in the message.
+   */
+  formatValidationError?: (error: z.ZodError) => string
   execute(args: TArgs, ctx: ToolContext): Promise<ToolResult>
 }
 

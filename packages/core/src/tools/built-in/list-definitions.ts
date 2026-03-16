@@ -10,20 +10,20 @@ const schema = z.object({
 
 export const listDefinitionsTool: ToolDef<z.infer<typeof schema>> = {
   name: "ListCodeDefinitions",
-  description: `List top-level code definitions (classes, functions, methods, interfaces, types) for a file or directory. No full bodies — structure only. Use this before Read to get symbol names and line numbers so you can call Read with offset/limit.
+  description: `List top-level code definitions (classes, functions, methods, interfaces, types, enums) for a file or directory. Returns structure only — no full bodies. Use before Read to get symbol names and line numbers, then call Read with offset/limit for only the ranges you need.
 
 When to use:
-- **Get symbols and line numbers before reading** — Use ListCodeDefinitions on a file or directory first; then use Read with offset/limit to read only the definitions you need. Use it on every relevant file or dir when exploring, not only once.
+- **Before reading:** Run ListCodeDefinitions on a file or directory to get symbols and approximate line ranges; then use Read(path, offset, limit) for the specific sections. Use it on every relevant file or dir when exploring, not only once.
 - Understand file or module structure before reading or searching.
-- Find where a symbol is defined (then use Read or CodebaseSearch for details).
+- Find where a symbol is defined (then use Read or Grep for the full implementation).
 - Quick overview of many files in a directory.
 
 When NOT to use:
-- Semantic search: use CodebaseSearch.
-- Exact pattern in content: use Grep.
-- Reading implementation: use Read (after ListCodeDefinitions or Grep for the range).
+- Semantic search ("how does X work?"): use CodebaseSearch.
+- Exact pattern or identifier in content: use Grep.
+- Reading full implementation: use Read after you have path and line range from ListCodeDefinitions or Grep.
 
-Supports: TS/JS, Python, Rust, Go, Java, C/C++. Returns path and line (e.g. "function foo (L42)").`,
+Supports: TS/JS, Python, Rust, Go, Java, C/C++. Returns path and line (e.g. "function foo (L42)", "class Bar (L10)"). Chunk signatures from CodebaseSearch may show only signatures — use ListCodeDefinitions or Read to get full code for those ranges.`,
   parameters: schema,
   readOnly: true,
 

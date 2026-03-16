@@ -51,7 +51,7 @@ type LocalCommand = {
 type LocalJSXCommand = {
   type: 'local-jsx'
   call(
-    onDone: (result?: string) => void,
+    onDone: (result?: string | { cancelled?: boolean; saved?: boolean }) => void,
     context: ToolUseContext & {
       setForkConvoWithMessagesOnTheNextRender: (
         forkConvoWithMessages: Message[],

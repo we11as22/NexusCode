@@ -107,6 +107,10 @@ export type GlobalConfig = {
   verbose: boolean
   /** Show successful tool outputs in chat. */
   showToolOutputs?: boolean
+  /** Show tool input details (expanded view) in chat. */
+  showToolDetails?: boolean
+  /** Show model reasoning/thinking blocks in chat. */
+  showReasoning?: boolean
   customApiKeyResponses?: {
     approved?: string[]
     rejected?: string[]
@@ -124,7 +128,9 @@ export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
   theme: 'dark' as ThemeNames,
   preferredNotifChannel: 'iterm2',
   verbose: false,
-  showToolOutputs: true,
+  showToolOutputs: false,
+  showToolDetails: false,
+  showReasoning: false,
   customApiKeyResponses: {
     approved: [],
     rejected: [],
@@ -139,6 +145,8 @@ export const GLOBAL_CONFIG_KEYS = [
   'lastReleaseNotesSeen',
   'verbose',
   'showToolOutputs',
+  'showToolDetails',
+  'showReasoning',
   'customApiKeyResponses',
   'primaryApiKey',
   'preferredNotifChannel',

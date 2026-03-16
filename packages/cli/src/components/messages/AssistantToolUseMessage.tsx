@@ -235,7 +235,8 @@ export function AssistantToolUseMessage({
     )
   }
 
-  const normalizedToolName = param.name === 'SpawnAgents' ? 'SpawnAgent' : param.name
+  const normalizedToolName =
+    param.name === 'SpawnAgents' || param.name === 'SpawnAgentsParallel' ? 'SpawnAgent' : param.name
   const userFacingToolName =
     normalizedToolName === 'SpawnAgent'
       ? 'SpawnAgent'

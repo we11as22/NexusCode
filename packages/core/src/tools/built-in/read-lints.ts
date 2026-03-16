@@ -34,18 +34,18 @@ export const readLintsTool: ToolDef<z.infer<typeof readLintsSchema>> = {
   name: "ReadLints",
   description: `Read linter/compiler diagnostics (errors, warnings) from the workspace.
 
-**NEVER call this tool on a file unless you have edited it or are about to edit it.** Avoid calling read_lints with a very wide scope; results can include pre-existing issues. Prefer passing specific paths you changed.
+**NEVER call this tool on a file unless you have edited it or are about to edit it.** Results can include pre-existing issues; avoid calling with a very wide scope. Prefer passing the specific paths you changed.
 
 When to use:
-- After editing files: call read_lints with the paths you changed to see current errors/warnings.
-- Before your final response (when finishing): optionally check that your changes did not introduce new errors.
+- After editing files: call with the paths you changed to see current errors/warnings.
+- Before your final response: optionally check that your changes did not introduce new errors.
 
 When NOT to use:
-- On files you have not edited and are not about to edit. Do not call read_lints on the whole workspace without paths unless you need a global snapshot (output is capped at ${MAX_DIAGNOSTICS}).
-- In CLI/server mode diagnostics are not available (only in the VS Code extension); the tool will return an explanatory message — use Bash to run the linter (e.g. eslint, tsc) if needed.
+- On files you have not edited and are not about to edit.
+- On the whole workspace without paths unless you need a global snapshot (output is capped at ${MAX_DIAGNOSTICS}).
+- In CLI/server mode diagnostics may be unavailable (VS Code extension only); the tool will explain — use Bash to run the linter (e.g. eslint, tsc, ruff) if needed.
 
-Parameters:
-- paths: optional array of file or directory paths (relative to project root). If provided, returns diagnostics only for those paths. If omitted, returns up to ${MAX_DIAGNOSTICS} diagnostics from the whole workspace.`,
+Parameters: paths — optional array of file or directory paths (relative to project root or absolute). If provided, returns diagnostics only for those paths. If omitted, returns up to ${MAX_DIAGNOSTICS} diagnostics from the whole workspace.`,
   parameters: readLintsSchema,
   readOnly: true,
 

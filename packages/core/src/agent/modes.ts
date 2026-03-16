@@ -53,7 +53,7 @@ export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   search:  ["Grep", "CodebaseSearch", "WebFetch", "WebSearch", "Glob"],
   mcp:     [],
   skills:  ["Skill"],
-  agents:  ["SpawnAgent"],
+  agents:  ["SpawnAgent", "SpawnAgentsParallel"],
   context: ["Condense"],
   plan_exit: ["PlanExit"],
 }

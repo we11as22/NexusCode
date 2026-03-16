@@ -248,7 +248,7 @@ export class ParallelAgentManager {
     contextSummary?: string,
     parentPartId?: string,
   ): Promise<SubAgentResult> {
-    const session = Session.create(cwd)
+    const session = Session.createEphemeral(cwd)
     this.sessions.set(subagentId, session.id)
     const userContent = contextSummary?.trim()
       ? `${contextSummary}\n\n---\n\nTask: ${description}`
@@ -390,7 +390,12 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
   return {
     name: "SpawnAgent",
     description: `Launch exactly one sub-agent for a focused task.
-For running many sub-agents concurrently, use the Parallel tool with multiple SpawnAgent calls in one batch.
+
+⚡ PARALLEL EXECUTION: To run multiple sub-agents CONCURRENTLY use SpawnAgentsParallel (simpler) or Parallel+SpawnAgent:
+  SpawnAgentsParallel({agents: [{description: "task1"}, {description: "task2"}]})
+Calling SpawnAgent multiple times in a row is SEQUENTIAL (slow). Use SpawnAgentsParallel for concurrent execution.
+NEVER call SpawnAgent multiple times in a row when parallel execution is desired.
+
 **When the main agent is in plan, ask, or review mode**, sub-agents always run with ask (read-only) permissions.
 **When the main agent is in agent/debug mode**, sub-agents can run in agent/plan/ask/debug/review per \`mode\`.
 Set \`run_in_background: true\` for non-blocking execution and poll with \`SpawnAgentOutput\`.
@@ -469,8 +474,9 @@ export function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolD
     name: "SpawnAgentOutput",
     description: `Get output/status from a background SpawnAgent task.
 - Pass subagent_id returned by SpawnAgent(run_in_background: true).
-- block=true waits for completion; block=false returns current status immediately.
-- Returns status (running/completed/error), partial or final output, and error if any.`,
+- block=true (DEFAULT): blocks until the agent finishes, then returns the final output. Use this in the common case — one call is all you need.
+- block=false: returns current status immediately (running/completed/error). Only use this when you have other independent work to do first; then call again with block=true when ready. NEVER call block=false in a loop with no other work between calls — that is a wasted polling loop.
+- Returns status, output (partial if still running, final if done), and error if any.`,
     parameters: spawnOutputSchema,
     readOnly: true,
     async execute({ subagent_id, block }, _ctx: ToolContext) {
@@ -510,6 +516,93 @@ export function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef
         return { success: false, output: `No active background sub-agent with id ${subagent_id}.` }
       }
       return { success: true, output: `Stop signal sent to ${subagent_id}.` }
+    },
+  }
+}
+
+const spawnParallelSchema = z.object({
+  agents: z
+    .array(
+      z.object({
+        description: z.string().min(1).describe("Task description for this sub-agent."),
+        mode: z
+          .enum(["agent", "plan", "ask", "debug", "review", "search", "explore"])
+          .optional()
+          .describe("Mode for this sub-agent (default: agent). 'search'/'explore' → ask."),
+        context_summary: z
+          .string()
+          .optional()
+          .describe("Optional brief context for this agent."),
+      })
+    )
+    .min(2)
+    .describe("List of sub-agents to run concurrently. Min 2."),
+})
+
+/**
+ * SpawnAgentsParallel — simple alternative to Parallel+SpawnAgent for concurrent sub-agent launch.
+ * Flat schema: no recipient_name/parameters wrapping needed.
+ */
+export function createSpawnAgentsParallelTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef {
+  return {
+    name: "SpawnAgentsParallel",
+    description: `Launch multiple sub-agents CONCURRENTLY in a single call. Simpler alternative to Parallel(SpawnAgent).
+
+Use this whenever you need 2+ sub-agents running at the same time.
+Each agent in the \`agents\` array starts immediately and runs in parallel.
+Results are returned only after ALL agents finish.
+
+Example:
+  SpawnAgentsParallel({agents: [
+    {description: "Explore API routes and middleware"},
+    {description: "Explore data store and types"}
+  ]})
+
+Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
+    parameters: spawnParallelSchema,
+
+    async execute(
+      args: z.infer<typeof spawnParallelSchema>,
+      ctx: ToolContext,
+    ) {
+      const parentMode = ctx.mode ?? "agent"
+      const normalizeMode = (m?: Mode | "search" | "explore"): Mode =>
+        parentMode === "plan" || parentMode === "ask" || parentMode === "review"
+          ? "ask"
+          : m === "search" || m === "explore"
+            ? "ask"
+            : ((m ?? "agent") as Mode)
+
+      const maxParallel = ctx.config.parallelAgents.maxParallel
+      const emit = (event: AgentEvent) => ctx.host.emit(event)
+
+      const results = await Promise.all(
+        args.agents.map((agent) =>
+          manager.spawn(
+            agent.description,
+            normalizeMode(agent.mode),
+            ctx.config,
+            ctx.cwd,
+            ctx.signal,
+            maxParallel,
+            emit,
+            agent.context_summary,
+            ctx.partId,
+          )
+        )
+      )
+
+      const parts = results.map((r, i) => {
+        const label = `Agent ${i + 1}: ${args.agents[i]!.description.slice(0, 60)}`
+        if (r.error) return `## ${label}\n[failed] ${r.error}\nPartial output: ${r.output}`
+        return `## ${label}\n${r.output}`
+      })
+
+      const allOk = results.every((r) => !r.error)
+      return {
+        success: allOk,
+        output: `Ran ${results.length} sub-agents in parallel.\n\n${parts.join("\n\n")}`,
+      }
     },
   }
 }

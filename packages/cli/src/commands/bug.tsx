@@ -8,7 +8,7 @@ const bug = {
   name: 'bug',
   description: `Submit feedback about ${PRODUCT_NAME}`,
   isEnabled: true,
-  isHidden: false,
+  isHidden: true,
   async call(onDone) {
     return <Bug onDone={onDone} />
   },

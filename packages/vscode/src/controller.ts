@@ -32,6 +32,7 @@ import {
   createSpawnAgentTool,
   createSpawnAgentOutputTool,
   createSpawnAgentStopTool,
+  createSpawnAgentsParallelTool,
   runAgentLoop,
   CheckpointTracker,
   CodebaseIndexer,
@@ -213,6 +214,7 @@ export type WebviewMessage =
   | { type: "keepAllSessionEdits" }
   | { type: "revertSessionEditFile"; path: string }
   | { type: "acceptSessionEditFile"; path: string }
+  | { type: "slashCommand"; command: string }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
@@ -1313,7 +1315,6 @@ export class Controller {
         break
       }
       case "openNexusConfigFolder": {
-        const os = await import("os")
         const scope = msg.scope === "project" ? "project" : "global"
         if (scope === "global") {
           const dir = path.join(os.homedir(), ".nexus")
@@ -1527,6 +1528,143 @@ export class Controller {
             `Implement the following plan:\n\n${planText}`,
             "agent"
           )
+        }
+        break
+      }
+      case "slashCommand": {
+        const command = typeof msg.command === "string" ? msg.command.trim() : ""
+        if (!command) break
+        const cwd = this.getCwd()
+        switch (command) {
+          case "compact":
+            await this.compactHistory()
+            break
+          case "diff": {
+            // Show session file changes as a diff summary
+            const edits = this.getSessionUnacceptedEditsForState()
+            if (edits.length === 0) {
+              vscode.window.showInformationMessage("NexusCode: No file changes in this session.")
+            } else {
+              const summary = edits.map(e => {
+                const stats = `+${e.diffStats.added}/-${e.diffStats.removed}`
+                return `${e.path} (${stats})`
+              }).join("\n")
+              vscode.window.showInformationMessage(`Session changes:\n${summary}`, { modal: true })
+            }
+            break
+          }
+          case "mode":
+          case "llm":
+          case "embeddings":
+          case "presets":
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings" })
+            break
+          case "sessions":
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "sessions" })
+            break
+          case "index":
+            this.sendIndexStatus()
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings" })
+            break
+          case "skills": {
+            // Show quick pick: project or global
+            const choice = await vscode.window.showQuickPick(
+              ["Project (.nexus/skills/)", "Global (~/.nexus/skills/)"],
+              { placeHolder: "Open skills in..." }
+            )
+            if (choice?.startsWith("Project")) {
+              const skillsDir = path.join(cwd, ".nexus", "skills")
+              try {
+                await vscode.workspace.fs.createDirectory(vscode.Uri.file(skillsDir))
+              } catch {}
+              await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(skillsDir))
+            } else if (choice?.startsWith("Global")) {
+              const globalSkillsDir = path.join(os.homedir(), ".nexus", "skills")
+              try {
+                await vscode.workspace.fs.createDirectory(vscode.Uri.file(globalSkillsDir))
+              } catch {}
+              await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(globalSkillsDir))
+            }
+            break
+          }
+          case "mcp": {
+            const choice = await vscode.window.showQuickPick(
+              ["Project (.nexus/mcp-servers.json)", "Global (~/.nexus/mcp-servers.json)"],
+              { placeHolder: "Open MCP config in..." }
+            )
+            if (choice?.startsWith("Project")) {
+              const mcpPath = path.join(cwd, ".nexus", "mcp-servers.json")
+              const uri = vscode.Uri.file(mcpPath)
+              const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(async () => {
+                await vscode.workspace.fs.writeFile(uri, Buffer.from("[]", "utf8"))
+                return vscode.workspace.openTextDocument(uri)
+              })
+              await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active })
+            } else if (choice?.startsWith("Global")) {
+              const globalMcpPath = path.join(os.homedir(), ".nexus", "mcp-servers.json")
+              const uri = vscode.Uri.file(globalMcpPath)
+              const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(async () => {
+                await vscode.workspace.fs.writeFile(uri, Buffer.from("[]", "utf8"))
+                return vscode.workspace.openTextDocument(uri)
+              })
+              await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active })
+            }
+            break
+          }
+          case "create-skill": {
+            const skillName = await vscode.window.showInputBox({ prompt: "Skill name (e.g. my-skill)" })
+            if (!skillName?.trim()) break
+            const scope = await vscode.window.showQuickPick(
+              ["Project (.nexus/skills/)", "Global (~/.nexus/skills/)"],
+              { placeHolder: "Create skill in..." }
+            )
+            const baseDir = scope?.startsWith("Global")
+              ? path.join(os.homedir(), ".nexus", "skills")
+              : path.join(cwd, ".nexus", "skills")
+            const skillDir = path.join(baseDir, skillName.trim())
+            const skillFile = path.join(skillDir, "SKILL.md")
+            try {
+              await vscode.workspace.fs.createDirectory(vscode.Uri.file(skillDir))
+              const template = `# ${skillName.trim()}\n\nDescribe what this skill does and when to use it.\n\n## Instructions\n\n- Step 1\n- Step 2\n`
+              await vscode.workspace.fs.writeFile(vscode.Uri.file(skillFile), Buffer.from(template, "utf8"))
+              const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(skillFile))
+              await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active })
+            } catch (err) {
+              vscode.window.showErrorMessage(`NexusCode: Failed to create skill — ${err}`)
+            }
+            break
+          }
+          case "create-rule": {
+            const ruleName = await vscode.window.showInputBox({ prompt: "Rule file name (e.g. my-rule.md)" })
+            if (!ruleName?.trim()) break
+            const scope = await vscode.window.showQuickPick(
+              ["Project (.nexus/rules/)", "Global (~/.nexus/rules/)"],
+              { placeHolder: "Create rule in..." }
+            )
+            const baseDir = scope?.startsWith("Global")
+              ? path.join(os.homedir(), ".nexus", "rules")
+              : path.join(cwd, ".nexus", "rules")
+            const ruleFile = path.join(baseDir, ruleName.trim().endsWith(".md") ? ruleName.trim() : `${ruleName.trim()}.md`)
+            try {
+              await vscode.workspace.fs.createDirectory(vscode.Uri.file(baseDir))
+              const template = `# Rule: ${ruleName.trim()}\n\nDefine your project rules here.\n`
+              await vscode.workspace.fs.writeFile(vscode.Uri.file(ruleFile), Buffer.from(template, "utf8"))
+              const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(ruleFile))
+              await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active })
+            } catch (err) {
+              vscode.window.showErrorMessage(`NexusCode: Failed to create rule — ${err}`)
+            }
+            break
+          }
+          case "clear":
+            this.session = Session.create(cwd)
+            this.lastRunMode = null
+            this.sessionUnacceptedEdits = []
+            this.postStateToWebview()
+            break
+          default:
+            // Unknown slash command — switch to settings view as fallback
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings" })
         }
         break
       }
@@ -2168,6 +2306,7 @@ Return in this format:
       toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
       toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
       toolRegistry.register(createSpawnAgentStopTool(parallelManager))
+      toolRegistry.register(createSpawnAgentsParallelTool(parallelManager, configForRun))
       const { builtin: tools, dynamic } = toolRegistry.getForMode(runMode)
       const allTools = [...tools, ...dynamic]
       const compaction = createCompaction()

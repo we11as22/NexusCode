@@ -192,35 +192,10 @@ export function NexusModelPanel({
     }
 
     if (screen === 'custom') {
-      const fieldCount = 6
-      if (ownFieldIndex > 0 && key.upArrow) {
-        setOwnFieldIndex((i) => Math.max(0, i - 1))
-        return
-      }
-      if (ownFieldIndex < fieldCount - 1 && key.downArrow) {
-        setOwnFieldIndex((i) => Math.min(fieldCount - 1, i + 1))
-        return
-      }
-      if (key.tab) {
-        setOwnFieldIndex((i) => (i + 1) % fieldCount)
-        return
-      }
-      if (key.backtab) {
-        setOwnFieldIndex((i) => (i - 1 + fieldCount) % fieldCount)
-        return
-      }
-      if (ownFieldIndex === 0) {
-        if (key.upArrow) {
-          const idx = PROVIDER_OPTIONS.findIndex((p) => p.id === ownProvider)
-          setOwnProvider(PROVIDER_OPTIONS[(idx - 1 + PROVIDER_OPTIONS.length) % PROVIDER_OPTIONS.length].id)
-          return
-        }
-        if (key.downArrow) {
-          const idx = PROVIDER_OPTIONS.findIndex((p) => p.id === ownProvider)
-          setOwnProvider(PROVIDER_OPTIONS[(idx + 1) % PROVIDER_OPTIONS.length].id)
-          return
-        }
-      }
+      // fieldCount = 7: 0=Provider, 1=BaseURL, 2=APIKey, 3=ModelID, 4=Temp, 5=ReasoningEffort, 6=Save
+      const fieldCount = 7
+
+      // On text fields (1-5): let field handle input first, THEN check navigation
       if (ownFieldIndex >= 1 && ownFieldIndex <= 5) {
         const handlers = [
           baseUrlField.handleInput,
@@ -229,19 +204,54 @@ export function NexusModelPanel({
           temperatureField.handleInput,
           reasoningEffortField.handleInput,
         ]
-        if (handlers[ownFieldIndex - 1](input ?? '', key)) return
+        if (handlers[ownFieldIndex - 1]!(input ?? '', key)) return
+      }
+
+      if (key.tab) {
+        setOwnFieldIndex((i) => (i + 1) % fieldCount)
+        return
+      }
+      if (key.backtab) {
+        setOwnFieldIndex((i) => (i - 1 + fieldCount) % fieldCount)
+        return
+      }
+      if (key.upArrow) {
+        if (ownFieldIndex === 0) {
+          const idx = PROVIDER_OPTIONS.findIndex((p) => p.id === ownProvider)
+          setOwnProvider(PROVIDER_OPTIONS[(idx - 1 + PROVIDER_OPTIONS.length) % PROVIDER_OPTIONS.length]!.id)
+        } else {
+          setOwnFieldIndex((i) => Math.max(0, i - 1))
+        }
+        return
+      }
+      if (key.downArrow) {
+        if (ownFieldIndex === 0) {
+          const idx = PROVIDER_OPTIONS.findIndex((p) => p.id === ownProvider)
+          setOwnProvider(PROVIDER_OPTIONS[(idx + 1) % PROVIDER_OPTIONS.length]!.id)
+        } else {
+          setOwnFieldIndex((i) => Math.min(fieldCount - 1, i + 1))
+        }
+        return
       }
       if (isEnter(key, input ?? '')) {
+        if (ownFieldIndex < fieldCount - 1) {
+          // Enter on a field moves to next field
+          setOwnFieldIndex((i) => Math.min(fieldCount - 1, i + 1))
+          return
+        }
+        // Enter on Save button
         const provider = ownProvider
         const baseUrl = ownBaseUrl.trim() || (provider === 'openai-compatible' ? NEXUS_GATEWAY : undefined)
         const id = ownModelId.trim()
         if (!id) {
           setError('Model ID is required')
+          setOwnFieldIndex(3)
           return
         }
         const temp = ownTemperature.trim() ? parseFloat(ownTemperature) : undefined
-        if (ownTemperature.trim() && (Number.isNaN(temp) || temp < 0 || temp > 2)) {
+        if (ownTemperature.trim() && (Number.isNaN(temp) || temp! < 0 || temp! > 2)) {
           setError('Temperature must be 0–2')
+          setOwnFieldIndex(4)
           return
         }
         setSaving(true)
@@ -268,39 +278,44 @@ export function NexusModelPanel({
 
   // --- Custom model form (step 2b)
   if (screen === 'custom') {
-    const fieldCount = 6
     const fieldDisplays = [
       PROVIDER_OPTIONS.find((p) => p.id === ownProvider)?.label ?? ownProvider,
-      ownFieldIndex === 1 ? baseUrlField.renderedValue : (ownBaseUrl || '(optional for some)'),
+      ownFieldIndex === 1 ? baseUrlField.renderedValue : (ownBaseUrl || '(optional)'),
       ownFieldIndex === 2 ? apiKeyField.renderedValue : (ownApiKey ? '•'.repeat(ownApiKey.length) : '(optional)'),
-      ownFieldIndex === 3 ? modelIdField.renderedValue : (ownModelId || ''),
-      ownFieldIndex === 4 ? temperatureField.renderedValue : (ownTemperature || ''),
+      ownFieldIndex === 3 ? modelIdField.renderedValue : (ownModelId || '(required)'),
+      ownFieldIndex === 4 ? temperatureField.renderedValue : (ownTemperature || '(auto)'),
       ownFieldIndex === 5 ? reasoningEffortField.renderedValue : (ownReasoningEffort || '(auto)'),
     ]
     const fieldNames = ['Provider', 'Base URL', 'API key', 'Model ID', 'Temperature (0–2)', 'Reasoning effort']
     return (
-      <Box flexDirection="column" borderStyle="round" borderColor={theme.secondaryBorder} paddingX={1} marginTop={1} height={16}>
+      <Box flexDirection="column" borderStyle="round" borderColor={theme.secondaryBorder} paddingX={1} marginTop={1}>
         <Box marginBottom={1}>
           <Text bold>Custom model</Text>
           <Text dimColor> · Esc back</Text>
         </Box>
-        <Box flexDirection="column" height={7}>
+        <Box flexDirection="column">
           {fieldNames.map((name, i) => (
-            <Box key={name} height={1}>
+            <Box key={name}>
               <Text color={i === ownFieldIndex ? theme.primary : undefined}>
                 {i === ownFieldIndex ? figures.pointer : ' '} {name}:{' '}
               </Text>
               <Text>{fieldDisplays[i] ?? '—'}</Text>
             </Box>
           ))}
+          <Box marginTop={1}>
+            <Text color={ownFieldIndex === 6 ? theme.primary : undefined}>
+              {ownFieldIndex === 6 ? figures.pointer : ' '}{' '}
+              <Text bold>{saving ? 'Saving…' : 'Save'}</Text>
+            </Text>
+          </Box>
         </Box>
         {error && (
-          <Box>
+          <Box marginTop={1}>
             <Text color={theme.error}>{error}</Text>
           </Box>
         )}
         <Box marginTop={1}>
-          <Text dimColor>↑/↓ or Tab field · type value · Enter save · Esc back</Text>
+          <Text dimColor>↑/↓ Tab navigate · type in field · Enter next/save · Esc back</Text>
         </Box>
       </Box>
     )

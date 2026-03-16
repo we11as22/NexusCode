@@ -11,8 +11,8 @@ const MAX_READ_SIZE = 20 * 1024 * 1024 // 20 MB
 
 const schema = z.object({
   file_path: z.string().min(1).describe("The absolute path to the file to read. You can use either a relative path in the workspace or an absolute path. If an absolute path is provided, it will be preserved as is."),
-  offset: z.number().int().positive().optional().describe("The line number to start reading from. Only provide if the file is too large to read at once."),
-  limit: z.number().int().positive().max(MAX_LINES).optional().describe(`The number of lines to read. Only provide if the file is too large to read at once. Defaults to ${DEFAULT_LIMIT} when reading from the start.`),
+  offset: z.coerce.number().int().positive().optional().describe("The line number to start reading from. Only provide if the file is too large to read at once."),
+  limit: z.coerce.number().int().positive().max(MAX_LINES).optional().describe(`The number of lines to read. Only provide if the file is too large to read at once. Defaults to ${DEFAULT_LIMIT} when reading from the start.`),
 }).refine(
   (data) => data.offset == null || data.limit == null || data.limit > 0,
   { message: "limit must be positive", path: ["limit"] }
@@ -26,12 +26,14 @@ Assume this tool is able to read all files on the machine. If the User provides 
 Usage:
 - file_path may be absolute or relative to the project root
 - By default, it reads up to ${DEFAULT_LIMIT} lines starting from the beginning of the file
-- Prefer specifying offset and limit for long files or when you already know the relevant range. Use whole-file reads only when the file is small or you genuinely need the entire file.
+- Prefer specifying offset and limit for long files or when you already know the relevant range (e.g. from Grep, CodebaseSearch, or ListCodeDefinitions). Use whole-file reads only when the file is small or you genuinely need the entire file
+- When full chunk contents were already provided by a previous tool (CodebaseSearch, Grep with context), do not call Read again for the same path and line range — use the content you already have. Call Read only to expand ranges when you got only signatures or snippets
+- Each time you call Read, assess whether the contents are sufficient to proceed. If not, call again with a different offset/limit or run more searches; do not re-read the same range
 - Any lines longer than 2000 characters will be truncated
-- Results are returned using cat -n format, with line numbers starting at 1
-- You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel as a batch — do not drip one-at-a-time.
+- Results are returned with line numbers in the format \`LINE_NUMBER|LINE_CONTENT\`. Treat the \`LINE_NUMBER|\` prefix as metadata — never include it in old_string/new_string when editing
+- You can call multiple tools in a single response. Prefer reading multiple potentially useful files in parallel; do not drip one-at-a-time
 - If you read a file that exists but has empty contents you will receive 'File is empty.'
-- Binary files are not decoded. For binary content this tool returns file metadata and tells you the file cannot be read as text.`,
+- Binary files are not decoded. For binary content this tool returns file metadata and states that the file cannot be read as text.`,
   parameters: schema,
   readOnly: true,
 

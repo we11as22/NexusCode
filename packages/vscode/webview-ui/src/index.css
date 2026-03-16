@@ -1237,6 +1237,9 @@ html, body, #root {
   flex-direction: column;
   gap: 8px;
   margin: 8px 0 6px 0;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .nexus-subtask-card {
@@ -1248,6 +1251,8 @@ html, body, #root {
   border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 88%, #ffffff 12%);
   background: color-mix(in srgb, var(--vscode-editor-background) 96%, #ffffff 4%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  overflow: hidden;
+  max-width: 100%;
 }
 
 .nexus-subtask-card-pending {
@@ -1426,6 +1431,29 @@ html, body, #root {
   background: var(--vscode-editor-background);
   max-height: min(50vh, 320px);
   overflow-y: auto;
+}
+
+/* Wave/shimmer animation for the "Exploring" word while running */
+@keyframes nexus-exploring-wave {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
+
+.nexus-exploring-wave-text {
+  background: linear-gradient(
+    90deg,
+    var(--vscode-foreground) 0%,
+    var(--vscode-foreground) 25%,
+    rgba(255, 255, 255, 0.95) 50%,
+    var(--vscode-foreground) 75%,
+    var(--vscode-foreground) 100%
+  );
+  background-size: 300% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: nexus-exploring-wave 2s linear infinite;
 }
 
 /* Plan followup panel (chat-native, no modal quick-pick). */
@@ -1801,6 +1829,8 @@ html, body, #root {
   padding: 12px;
   padding-right: 16px; /* space for scrollbar so it doesn't overlap tool cards and content */
   background: var(--nexus-chat-bg);
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 /* Virtuoso root must fill the wrap and form a flex column so the Scroller gets a definite height (Kilo-style) */
@@ -1813,6 +1843,9 @@ html, body, #root {
 
 .message-list-item {
   padding-bottom: 16px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .message-list-item:last-child {

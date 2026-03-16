@@ -117,10 +117,32 @@ export function Config({ onClose }: Props): React.ReactNode {
     {
       id: 'showToolOutputs',
       label: 'Tool outputs',
-      value: globalConfig.showToolOutputs ?? true,
+      value: globalConfig.showToolOutputs ?? false,
       type: 'boolean',
       onChange(showToolOutputs: boolean) {
         const config = { ...getGlobalConfig(), showToolOutputs }
+        saveGlobalConfig(config)
+        setGlobalConfig(config)
+      },
+    },
+    {
+      id: 'showToolDetails',
+      label: 'Tool inputs',
+      value: globalConfig.showToolDetails ?? false,
+      type: 'boolean',
+      onChange(showToolDetails: boolean) {
+        const config = { ...getGlobalConfig(), showToolDetails }
+        saveGlobalConfig(config)
+        setGlobalConfig(config)
+      },
+    },
+    {
+      id: 'showReasoning',
+      label: 'Model reasoning',
+      value: globalConfig.showReasoning ?? false,
+      type: 'boolean',
+      onChange(showReasoning: boolean) {
+        const config = { ...getGlobalConfig(), showReasoning }
         saveGlobalConfig(config)
         setGlobalConfig(config)
       },
@@ -238,10 +260,12 @@ export function Config({ onClose }: Props): React.ReactNode {
 
     if (key.upArrow) {
       setSelectedIndex(prev => Math.max(0, prev - 1))
+      return
     }
 
     if (key.downArrow) {
       setSelectedIndex(prev => Math.min(settings.length - 1, prev + 1))
+      return
     }
   })
 
@@ -255,8 +279,8 @@ export function Config({ onClose }: Props): React.ReactNode {
         marginTop={1}
       >
         <Box flexDirection="column" minHeight={2} marginBottom={1}>
-          <Text bold>Settings</Text>
-          <Text dimColor>Configure {PRODUCT_NAME} preferences</Text>
+          <Text bold>Displaying</Text>
+          <Text dimColor>Configure {PRODUCT_NAME} display preferences</Text>
         </Box>
 
         {settings.map((setting, i) => {

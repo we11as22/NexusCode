@@ -22,21 +22,19 @@ function isProcessRunning(pid: number): boolean {
 
 export const bashOutputTool: ToolDef<z.infer<typeof schema>> = {
   name: "BashOutput",
-  description: `Read output from a background bash shell started with run_in_background: true.
+  description: `Retrieve output from a running or completed background bash shell started with Bash(..., run_in_background: true).
 
-The response includes a status line: [Process status: running | exited]. Use it to decide whether to poll again or proceed (exited = command finished; log contains full output).
-
-Usage:
-- Call with the bash_id returned by Bash when run_in_background is true.
-- Returns a status line (running/exited), then all stdout/stderr logged so far (from .nexus/<bash_id>.log).
-- Use the optional filter parameter (regex) to show only matching lines — e.g. errors or progress.
-- Poll periodically: call BashOutput again to see new output; when status is "exited", the log is final.
-- To stop a running process, use KillBash(shell_id) with the same id.
+- Takes bash_id (returned by Bash when run_in_background is true).
+- Returns a status line: [Process status: running | exited] and the log content so far (stdout/stderr from .nexus/<bash_id>.log). Each call returns the full log up to that point; when status is "exited", the log is final.
+- Use the optional filter parameter (regex) to show only lines matching the pattern (e.g. "error|Error|ERROR" or "progress|%"). Non-matching lines are not included in the result when filter is set.
+- Use this tool to monitor long-running commands (builds, tests, servers). Call periodically; when status is "exited", the command has finished.
+- To stop a running process, use KillBash(shell_id) with the same id (shell_id and bash_id are the same value).
+- Shell IDs for active jobs are listed in the Environment block under "Active Background Bash Jobs" when present.
 
 Example flow:
 1. Bash({ command: "npm run build", run_in_background: true }) → returns bash_id "run_1234567890"
 2. BashOutput({ bash_id: "run_1234567890" }) → [Process status: running] + output so far
-3. BashOutput({ bash_id: "run_1234567890" }) → [Process status: exited] + full log (or use filter: "error|Error|ERROR" to find errors)`,
+3. BashOutput({ bash_id: "run_1234567890" }) → [Process status: exited] + full log; or use filter: "error|Error|ERROR" to see only error lines`,
   parameters: schema,
   readOnly: true,
 

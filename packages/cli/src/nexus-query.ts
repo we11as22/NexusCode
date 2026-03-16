@@ -35,7 +35,7 @@ export type NexusBannerMessage = { type: 'nexus_banner'; text: string }
 export type NexusTodoMessage = { type: 'nexus_todo'; todo: string }
 
 const TODO_TOOL_NAMES = new Set(['TodoWrite', 'update_todo_list'])
-const SPAWN_AGENT_TOOL_NAMES = new Set(['SpawnAgent', 'SpawnAgents'])
+const SPAWN_AGENT_TOOL_NAMES = new Set(['SpawnAgent', 'SpawnAgents', 'SpawnAgentsParallel'])
 
 function isSpawnAgentRecipientName(raw: string): boolean {
   const normalized = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -289,7 +289,11 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         }
       } else if (event.type === 'tool_start') {
         if (TODO_TOOL_NAMES.has(event.tool)) continue
-        if (event.tool === 'SpawnAgent' || event.tool === 'SpawnAgents') lastSpawnAgentPartId = event.partId
+        if (SPAWN_AGENT_TOOL_NAMES.has(event.tool)) {
+          lastSpawnAgentPartId = event.partId
+        } else if ((event.tool === 'Parallel' || event.tool === 'parallel') && isPureSubagentParallelInput(event.input)) {
+          lastSpawnAgentPartId = event.partId
+        }
         if (shouldHideSubagentToolDisplay(event.tool, event.input)) continue
         // Match reference: ProgressMessage content must have content[0] = tool_use so REPL shows ToolUseLoader
         const toolUseBlock: ContentBlockParam = {
@@ -325,7 +329,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         yield pm
       } else if (event.type === 'tool_end') {
         if (TODO_TOOL_NAMES.has(event.tool)) continue
-        if (event.tool === 'SpawnAgent' || event.tool === 'SpawnAgents') lastSpawnAgentPartId = null
+        if (SPAWN_AGENT_TOOL_NAMES.has(event.tool)) lastSpawnAgentPartId = null
         if (shouldHideSubagentToolDisplay(event.tool)) continue
         const toolResultText = event.output ?? (event.error ?? '')
         const toolResultData = {

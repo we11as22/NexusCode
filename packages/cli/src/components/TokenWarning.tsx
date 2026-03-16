@@ -6,7 +6,7 @@ type Props = {
   tokenUsage: number
 }
 
-const MAX_TOKENS = 190_000 // leave wiggle room for /compact
+export const MAX_TOKENS = 190_000 // leave wiggle room for /compact
 export const WARNING_THRESHOLD = MAX_TOKENS * 0.6 // 60%
 const ERROR_THRESHOLD = MAX_TOKENS * 0.8 // 80%
 

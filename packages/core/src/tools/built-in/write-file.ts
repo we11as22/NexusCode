@@ -20,7 +20,7 @@ const schema = z.object({
 
 export const writeFileTool: ToolDef<z.infer<typeof schema>> = {
   name: "Write",
-  description: `Create a new file or overwrite an existing file entirely. Use only when Edit is not suitable.
+  description: `Create a new file or overwrite an existing file entirely.
 
 When to use:
 - New files, boilerplate, or full rewrites.
@@ -29,9 +29,11 @@ When to use:
 When NOT to use:
 - Small or targeted edits: use Edit (faster, less error-prone).
 - Appending or patching: use Edit with search/replace.
-- **Existing files:** If the file already exists, read it first with Read so you have the exact content; then either use Edit for targeted changes or Write with complete final content. Do not create documentation files (*.md, README) unless the user explicitly requests them.
+- **Existing files:** If the file already exists, you MUST use Read first to read its contents. This tool will fail if you attempt to write to an existing file without having read it first. Then use either Edit for targeted changes or Write with the complete final content.
+- NEVER proactively create documentation files (*.md, README). Only create them if the user explicitly requests.
+- Only use emojis in file content if the user explicitly asks.
 
-WARNING: Replaces entire file content. Provide complete final content. Creates parent directories if needed.`,
+WARNING: Write replaces the entire file. Provide complete final content. Creates parent directories if needed.`,
   parameters: schema,
   requiresApproval: true,
 

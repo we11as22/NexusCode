@@ -162,14 +162,6 @@ export class VsCodeHost implements IHost {
     cwd: string,
     signal?: AbortSignal
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const runInTerminal = vscode.workspace.getConfiguration("nexuscode").get<boolean>("runCommandsInTerminal") ?? true
-    if (runInTerminal) {
-      // Terminal output capture API is not portable across VS Code versions.
-      // We still surface the command in the integrated terminal for visibility.
-      const term = this.getOrCreateNexusTerminal(cwd)
-      term.show(true)
-      term.sendText(`# NexusCode running: ${command}`)
-    }
     const { execa } = await import("execa")
     const result = await execa(command, {
       shell: true,

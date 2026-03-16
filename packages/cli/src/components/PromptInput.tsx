@@ -5,7 +5,7 @@ import * as React from 'react'
 import { type Message } from '../query.js'
 import { processUserInput } from '../utils/messages.js'
 import { useArrowKeyHistory } from '../hooks/useArrowKeyHistory.js'
-import { useSlashCommandTypeahead } from '../hooks/useSlashCommandTypeahead.js'
+import { useSlashCommandTypeahead, type CommandSuggestion } from '../hooks/useSlashCommandTypeahead.js'
 import { addToHistory } from '../history.js'
 import TextInput from './TextInput.js'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
@@ -15,7 +15,7 @@ import { AutoUpdater } from './AutoUpdater.js'
 import { AutoUpdaterResult } from '../utils/autoUpdater.js'
 import type { Command } from '../commands.js'
 import type { SetToolJSXFn, Tool } from '../Tool.js'
-import { TokenWarning, WARNING_THRESHOLD } from './TokenWarning.js'
+import { TokenWarning, WARNING_THRESHOLD, MAX_TOKENS } from './TokenWarning.js'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import { getTheme } from '../utils/theme.js'
 import { getSlowAndCapableModel } from '../utils/model.js'
@@ -95,6 +95,10 @@ type Props = {
   onToggleToolOutputs?: () => void
   /** Current state of generic tool output visibility. */
   toolOutputsVisible?: boolean
+  /** Directly set the Nexus agent mode (used by /mode command). */
+  onSetNexusMode?: (mode: string) => void
+  /** Open a file in the user's $EDITOR (used by /skills, /mcp, /create-skill, /create-rule). */
+  onOpenInEditor?: (filePath: string) => Promise<void>
 }
 
 function getPastedTextPrompt(text: string): string {
@@ -154,6 +158,8 @@ function PromptInput({
   sessionDiffPanelVisible = false,
   onToggleToolOutputs,
   toolOutputsVisible = true,
+  onSetNexusMode,
+  onOpenInEditor,
 }: Props): React.ReactNode {
   const [isAutoUpdating, setIsAutoUpdating] = useState(false)
   const [exitMessage, setExitMessage] = useState<{
@@ -174,6 +180,12 @@ function PromptInput({
     setCursorOffset(off)
   }, [])
   const [pastedText, setPastedText] = useState<string | null>(null)
+  /** Pending create-skill/rule scope selection: { description, isSkill } */
+  const [pendingCreate, setPendingCreate] = useState<{
+    description: string
+    isSkill: boolean
+    scopeIndex: number
+  } | null>(null)
 
   useEffect(() => {
     getExampleCommands().then(commands => {
@@ -197,6 +209,7 @@ function PromptInput({
     onInputChange,
     onSubmit,
     setCursorOffset,
+    isNexus: nexusMode != null,
   })
 
   const onChange = useCallback(
@@ -293,6 +306,71 @@ function PromptInput({
       return
     }
 
+    // Handle Nexus virtual commands
+    const virtualCmdMatch = trimmed.match(/^\/([a-z][a-z0-9-]*)(?:\s+(.*))?$/i)
+    if (virtualCmdMatch) {
+      const vcName = virtualCmdMatch[1]!.toLowerCase()
+      const vcArg = (virtualCmdMatch[2] ?? '').trim()
+      const VALID_MODES = ['agent', 'plan', 'ask', 'debug', 'review']
+
+      switch (vcName) {
+        case 'mode': {
+          if (vcArg && VALID_MODES.includes(vcArg.toLowerCase())) {
+            onSetNexusMode?.(vcArg.toLowerCase())
+          } else {
+            onCycleNexusMode?.()
+          }
+          onInputChange('')
+          setIsLoading(false)
+          addToHistory(trimmed)
+          resetHistory()
+          return
+        }
+        case 'diff': {
+          onToggleSessionDiffPanel?.()
+          onInputChange('')
+          setIsLoading(false)
+          addToHistory(trimmed)
+          resetHistory()
+          return
+        }
+        // skills/mcp/sessions/index/embeddings/model → redirect to real CLI commands
+        case 'skills':
+          finalInput = '/skills'
+          break
+        case 'mcp':
+          finalInput = '/mcp'
+          break
+        case 'sessions':
+          finalInput = '/sessions'
+          break
+        case 'create-skill': {
+          if (!vcArg) {
+            onInputChange('/create-skill ')
+            setIsLoading(false)
+            return
+          }
+          // Show scope selection panel
+          setPendingCreate({ description: vcArg, isSkill: true, scopeIndex: 0 })
+          onInputChange('')
+          setIsLoading(false)
+          return
+        }
+        case 'create-rule': {
+          if (!vcArg) {
+            onInputChange('/create-rule ')
+            setIsLoading(false)
+            return
+          }
+          // Show scope selection panel
+          setPendingCreate({ description: vcArg, isSkill: false, scopeIndex: 0 })
+          onInputChange('')
+          setIsLoading(false)
+          return
+        }
+      }
+    }
+
     const abortController = new AbortController()
     setAbortController(abortController)
     const model = await getSlowAndCapableModel()
@@ -366,6 +444,77 @@ function PromptInput({
     setPastedText(text)
   }
 
+  // Handle pending create-skill/rule scope selection
+  useInput((inputChar, key) => {
+    if (!pendingCreate) return
+    if (key.escape || inputChar === 'c' || inputChar === 'C') {
+      setPendingCreate(null)
+      return
+    }
+    if (key.upArrow) {
+      setPendingCreate(prev => prev ? { ...prev, scopeIndex: Math.max(0, prev.scopeIndex - 1) } : null)
+      return
+    }
+    if (key.downArrow) {
+      setPendingCreate(prev => prev ? { ...prev, scopeIndex: Math.min(2, prev.scopeIndex + 1) } : null)
+      return
+    }
+    if (key.return) {
+      const { description, isSkill, scopeIndex } = pendingCreate
+      if (scopeIndex === 2) {
+        // Cancel
+        setPendingCreate(null)
+        return
+      }
+      const scope = scopeIndex === 0 ? 'global' : 'local'
+      const globalPath = scope === 'global'
+        ? '~/.nexus/' + (isSkill ? 'skills/' : 'rules/')
+        : '.nexus/' + (isSkill ? 'skills/' : 'rules/')
+      const pathNote = scope === 'global'
+        ? 'in the global directory ~/.nexus/' + (isSkill ? 'skills/' : 'rules/')
+        : 'in the local directory .nexus/' + (isSkill ? 'skills/' : 'rules/')
+      const agentPrompt = isSkill
+        ? `Please create a new Nexus skill ${pathNote}. Skill description: "${description}".
+
+Create a SKILL.md file with a descriptive name. The SKILL.md should follow this format:
+---
+name: <skill-name>
+description: <brief description>
+when_to_use: <trigger conditions>
+---
+# <Skill Name>
+<detailed instructions for Claude to follow when this skill is active>
+
+Create the skill ${pathNote}. Confirm the created file path.`
+        : `Please create a new Nexus rule file ${pathNote}. Rule description: "${description}".
+
+Create a .md rule file with a descriptive name. The rule file should define clear, actionable instructions. Create the file ${pathNote}. Confirm the created file path.`
+      setPendingCreate(null)
+      onInputChange('')
+      // Submit the agent prompt
+      setIsLoading(true)
+      const abortController = new AbortController()
+      setAbortController(abortController)
+      getSlowAndCapableModel().then(async (model: string) => {
+        const msgs = await processUserInput(agentPrompt, 'prompt', setToolJSX, {
+          options: { commands, forkNumber, messageLogName, tools, verbose, slowAndCapableModel: model, maxThinkingTokens: 0 },
+          messageId: undefined,
+          abortController,
+          readFileTimestamps,
+          setForkConvoWithMessagesOnTheNextRender,
+          onNexusConfigSaved,
+        }, null)
+        if (msgs.length) {
+          addToHistory(agentPrompt)
+          resetHistory()
+          onQuery(msgs, abortController)
+        } else {
+          setIsLoading(false)
+        }
+      })
+    }
+  })
+
   useInput((inputChar, key) => {
     if (input === '' && (key.escape || key.backspace || key.delete)) {
       onModeChange('prompt')
@@ -406,6 +555,8 @@ function PromptInput({
   const textInputColumns = useTerminalSize().columns - 6
   const tokenUsage = useMemo(() => countTokens(messages), [messages])
   const theme = getTheme()
+
+  const createScopeOptions = ['Create global (~/.nexus/)', 'Create local (.nexus/)', 'Cancel']
 
   return (
     <Box flexDirection="column">
@@ -457,8 +608,26 @@ function PromptInput({
           />
         </Box>
       </Box>
+      {pendingCreate && (
+        <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.secondaryBorder} paddingX={1}>
+          <Box flexDirection="column" marginBottom={1}>
+            <Text bold>{pendingCreate.isSkill ? 'Create Skill' : 'Create Rule'}</Text>
+            <Text dimColor>{pendingCreate.description}</Text>
+          </Box>
+          {createScopeOptions.map((label, i) => (
+            <Box key={label} height={1}>
+              <Text color={pendingCreate.scopeIndex === i ? theme.primary : undefined}>
+                {pendingCreate.scopeIndex === i ? '▶' : ' '} {label}
+              </Text>
+            </Box>
+          ))}
+          <Box marginTop={1}>
+            <Text dimColor>↑/↓ navigate · Enter confirm · Esc cancel</Text>
+          </Box>
+        </Box>
+      )}
       {nexusMode != null && suggestions.length === 0 && (
-        <Box paddingX={2} paddingY={0}>
+        <Box paddingX={2} paddingY={0} width={columns} overflow="hidden">
           <Text dimColor>Mode: </Text>
           <Text bold color={getTheme().primary}>{nexusMode}</Text>
           <Text dimColor> · Shift+Tab to change mode</Text>
@@ -474,7 +643,7 @@ function PromptInput({
         </Box>
       )}
       {nexusMode != null && suggestions.length === 0 && (
-        <Box paddingX={2} paddingY={0}>
+        <Box paddingX={2} paddingY={0} width={columns} overflow="hidden">
           <Text dimColor>Nexus:</Text>
           {nexusModel != null && (
             <>
@@ -499,6 +668,8 @@ function PromptInput({
           justifyContent="space-between"
           paddingX={2}
           paddingY={0}
+          width={columns}
+          overflow="hidden"
         >
           <Box justifyContent="flex-start" gap={1}>
             {exitMessage.show ? (
@@ -545,6 +716,9 @@ function PromptInput({
                   }% cached)`}
                 </Text>
               )}
+              {tokenUsage < WARNING_THRESHOLD && (
+                <Text dimColor>ctx: {Math.min(100, Math.round((tokenUsage / MAX_TOKENS) * 100))}%</Text>
+              )}
               <TokenWarning tokenUsage={tokenUsage} />
               <AutoUpdater
                 debug={debug}
@@ -565,56 +739,61 @@ function PromptInput({
           paddingY={0}
         >
           <Box flexDirection="column">
-            {suggestions.map((suggestion, index) => {
-              const command = commands.find(
-                cmd => cmd.userFacingName() === suggestion.replace('/', ''),
-              )
-              return (
-                <Box
-                  key={suggestion}
-                  flexDirection={columns < 80 ? 'column' : 'row'}
-                >
-                  <Box width={columns < 80 ? undefined : commandWidth}>
-                    <Text
-                      color={
-                        index === selectedSuggestion
-                          ? theme.suggestion
-                          : undefined
-                      }
-                      dimColor={index !== selectedSuggestion}
-                    >
-                      /{suggestion}
-                      {command?.aliases && command.aliases.length > 0 && (
-                        <Text dimColor> ({command.aliases.join(', ')})</Text>
-                      )}
-                    </Text>
-                  </Box>
-                  {command && (
-                    <Box
-                      width={columns - (columns < 80 ? 4 : commandWidth + 4)}
-                      paddingLeft={columns < 80 ? 4 : 0}
-                    >
+            {(() => {
+              const rendered: React.ReactNode[] = []
+              let lastSection: string | null = null
+              suggestions.forEach((suggestion: CommandSuggestion, index: number) => {
+                if (suggestion.section !== lastSection) {
+                  lastSection = suggestion.section
+                  rendered.push(
+                    <Box key={`section-${suggestion.section}`} paddingTop={rendered.length > 0 ? 0 : 0}>
+                      <Text dimColor bold> {suggestion.section}</Text>
+                    </Box>
+                  )
+                }
+                const isSelected = index === selectedSuggestion
+                // Find the underlying command if it's not virtual
+                const command = !suggestion.isVirtual
+                  ? commands.find(cmd => cmd.userFacingName() === suggestion.name)
+                  : undefined
+                const argHint = command?.type === 'prompt' && command.argNames?.length
+                  ? ` (${command.argNames.join(', ')})`
+                  : ''
+                rendered.push(
+                  <Box
+                    key={suggestion.name}
+                    flexDirection={columns < 80 ? 'column' : 'row'}
+                  >
+                    <Box width={columns < 80 ? undefined : commandWidth + 2}>
                       <Text
-                        color={
-                          index === selectedSuggestion
-                            ? theme.suggestion
-                            : undefined
-                        }
-                        dimColor={index !== selectedSuggestion}
-                        wrap="wrap"
+                        color={isSelected ? theme.suggestion : undefined}
+                        dimColor={!isSelected}
                       >
-                        <Text dimColor={index !== selectedSuggestion}>
-                          {command.description}
-                          {command.type === 'prompt' && command.argNames?.length
-                            ? ` (arguments: ${command.argNames.join(', ')})`
-                            : null}
-                        </Text>
+                        {'  '}/{suggestion.name}
+                        {suggestion.aliases && suggestion.aliases.length > 0 && (
+                          <Text dimColor> ({suggestion.aliases.join(', ')})</Text>
+                        )}
                       </Text>
                     </Box>
-                  )}
-                </Box>
-              )
-            })}
+                    {suggestion.description && (
+                      <Box
+                        width={columns - (columns < 80 ? 4 : commandWidth + 6)}
+                        paddingLeft={columns < 80 ? 4 : 0}
+                      >
+                        <Text
+                          color={isSelected ? theme.suggestion : undefined}
+                          dimColor={!isSelected}
+                          wrap="wrap"
+                        >
+                          {suggestion.description}{argHint}
+                        </Text>
+                      </Box>
+                    )}
+                  </Box>
+                )
+              })
+              return rendered
+            })()}
           </Box>
           <SentryErrorBoundary>
             <Box justifyContent="flex-end" gap={1}>

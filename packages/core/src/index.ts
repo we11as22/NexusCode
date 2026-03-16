@@ -6,6 +6,9 @@ export {
   getGlobalConfigDir,
   ensureGlobalConfigDir,
   loadProjectSettings,
+  loadGlobalSettings,
+  writeProjectSettings,
+  writeGlobalSettings,
   applySecretsToConfig,
   stripSecretsFromConfig,
   stripProfileSecrets,
@@ -49,6 +52,7 @@ export {
   createSpawnAgentsAliasTool,
   createSpawnAgentOutputTool,
   createSpawnAgentStopTool,
+  createSpawnAgentsParallelTool,
 } from "./agent/parallel.js"
 
 // Tools

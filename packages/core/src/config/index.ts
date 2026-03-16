@@ -457,37 +457,73 @@ function uniqueNonEmpty(values: string[]): string[] {
   return [...new Set(values.map(v => v.trim()).filter(Boolean))]
 }
 
+function readSettingsFile(filePath: string): ProjectSettings {
+  try {
+    if (!fs.existsSync(filePath)) return {}
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf8"))
+    if (raw && typeof raw === "object") return raw as ProjectSettings
+  } catch {
+    // ignore
+  }
+  return {}
+}
+
+function mergeSettings(...layers: ProjectSettings[]): ProjectSettings {
+  const allow: string[] = []
+  const deny: string[] = []
+  const ask: string[] = []
+  const allowedMcpTools: string[] = []
+  for (const layer of layers) {
+    allow.push(...(layer.permissions?.allow ?? []))
+    deny.push(...(layer.permissions?.deny ?? []))
+    ask.push(...(layer.permissions?.ask ?? []))
+    allowedMcpTools.push(...(layer.permissions?.allowedMcpTools ?? []))
+  }
+  return {
+    permissions: {
+      allow: uniqueNonEmpty(allow),
+      deny: uniqueNonEmpty(deny),
+      ask: uniqueNonEmpty(ask),
+      allowedMcpTools: uniqueNonEmpty(allowedMcpTools),
+    },
+  }
+}
+
 /**
- * Load .nexus/settings.json and .nexus/settings.local.json (local overrides), merge and return.
+ * Load global ~/.nexus/settings.json and ~/.nexus/settings.local.json.
  * Same structure as .claude: permissions.allow, permissions.deny, permissions.ask.
  */
+export function loadGlobalSettings(): ProjectSettings {
+  const globalBase = readSettingsFile(path.join(GLOBAL_CONFIG_DIR, "settings.json"))
+  const globalLocal = readSettingsFile(path.join(GLOBAL_CONFIG_DIR, "settings.local.json"))
+  return mergeSettings(globalBase, globalLocal)
+}
+
+/**
+ * Load .nexus/settings.json and .nexus/settings.local.json (local overrides), merge with global settings.
+ * Layer order: global base → global local → project base → project local (later overrides earlier).
+ */
 export function loadProjectSettings(cwd: string): ProjectSettings {
-  const basePath = path.join(cwd, ".nexus", "settings.json")
-  const localPath = path.join(cwd, ".nexus", "settings.local.json")
-  let base: ProjectSettings = {}
-  let local: ProjectSettings = {}
-  try {
-    if (fs.existsSync(basePath)) {
-      const raw = JSON.parse(fs.readFileSync(basePath, "utf8"))
-      if (raw && typeof raw === "object") base = raw
-    }
-  } catch {
-    // ignore
-  }
-  try {
-    if (fs.existsSync(localPath)) {
-      const raw = JSON.parse(fs.readFileSync(localPath, "utf8"))
-      if (raw && typeof raw === "object") local = raw
-    }
-  } catch {
-    // ignore
-  }
-  const allow = uniqueNonEmpty([...(base.permissions?.allow ?? []), ...(local.permissions?.allow ?? [])])
-  const deny = uniqueNonEmpty([...(base.permissions?.deny ?? []), ...(local.permissions?.deny ?? [])])
-  const ask = uniqueNonEmpty([...(base.permissions?.ask ?? []), ...(local.permissions?.ask ?? [])])
-  const allowedMcpTools = uniqueNonEmpty([
-    ...(base.permissions?.allowedMcpTools ?? []),
-    ...(local.permissions?.allowedMcpTools ?? []),
-  ])
-  return { permissions: { allow, deny, ask, allowedMcpTools } }
+  const globalBase = readSettingsFile(path.join(GLOBAL_CONFIG_DIR, "settings.json"))
+  const globalLocal = readSettingsFile(path.join(GLOBAL_CONFIG_DIR, "settings.local.json"))
+  const projectBase = readSettingsFile(path.join(cwd, ".nexus", "settings.json"))
+  const projectLocal = readSettingsFile(path.join(cwd, ".nexus", "settings.local.json"))
+  return mergeSettings(globalBase, globalLocal, projectBase, projectLocal)
+}
+
+/**
+ * Write project settings to .nexus/settings.json.
+ */
+export function writeProjectSettings(cwd: string, settings: ProjectSettings): void {
+  const dir = path.join(cwd, ".nexus")
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify(settings, null, 2), "utf8")
+}
+
+/**
+ * Write global settings to ~/.nexus/settings.json.
+ */
+export function writeGlobalSettings(settings: ProjectSettings): void {
+  ensureGlobalConfigDir()
+  fs.writeFileSync(path.join(GLOBAL_CONFIG_DIR, "settings.json"), JSON.stringify(settings, null, 2), "utf8")
 }

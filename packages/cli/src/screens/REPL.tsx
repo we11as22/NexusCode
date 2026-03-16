@@ -1,3 +1,6 @@
+import * as path from 'node:path'
+import * as fs from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { Box, Newline, Static, Text } from 'ink'
 import ProjectOnboarding, {
@@ -6,6 +9,7 @@ import ProjectOnboarding, {
 import { CostThresholdDialog } from '../components/CostThresholdDialog.js'
 import { NexusApprovalPanel } from '../components/NexusApprovalPanel.js'
 import { NexusSubagentBlock } from '../components/NexusSubagentBlock.js'
+import { NexusExploringBlock } from '../components/NexusExploringBlock.js'
 import { NexusTodoBlock } from '../components/NexusTodoBlock.js'
 import * as React from 'react'
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
@@ -46,6 +50,8 @@ import { getGlobalConfig, saveGlobalConfig } from '../utils/config.js'
 import { logEvent } from '../services/statsig.js'
 import { getNextAvailableLogForkNumber } from '../utils/log.js'
 import {
+  createAssistantMessage,
+  createAssistantAPIErrorMessage,
   extractTagFromMessage,
   getErroredToolUseMessages,
   getInProgressToolUseIDs,
@@ -268,9 +274,13 @@ export function REPL({
     setNexusAutoApprove(buildInitialAutoApproveState(nexusConfigSnapshot))
   }, [nexusConfigSnapshot])
   /** Collapsed/expanded details for tool inputs in chat. Toggle with Ctrl+O. */
-  const [toolDetailsExpanded, setToolDetailsExpanded] = useState<boolean>(true)
+  const [toolDetailsExpanded, setToolDetailsExpanded] = useState<boolean>(
+    () => getGlobalConfig().showToolDetails ?? false,
+  )
   /** Show generic tool result outputs in chat. Toggle with Ctrl+O. */
-  const [toolOutputsVisible, setToolOutputsVisible] = useState<boolean>(true)
+  const [toolOutputsVisible, setToolOutputsVisible] = useState<boolean>(
+    () => getGlobalConfig().showToolOutputs ?? false,
+  )
   /** Session diff panel visibility (default hidden). Toggle with Ctrl+I. */
   const [sessionDiffExpanded, setSessionDiffExpanded] = useState(false)
   /** Plan mode follow-up panel (Ready to code?). */
@@ -367,12 +377,24 @@ export function REPL({
     }
   }, [nexusBootstrap])
 
+  const onSetNexusMode = useCallback((mode: string) => {
+    setNexusModeOverride(mode)
+  }, [])
+
+  const onOpenInEditor = useCallback(async (filePath: string) => {
+    const editor = process.env['VISUAL'] ?? process.env['EDITOR'] ?? 'nano'
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true })
+      spawnSync(editor, [filePath], { stdio: 'inherit' })
+    } catch { /* ignore editor errors */ }
+  }, [])
+
   const toggleToolPresentation = useCallback(() => {
     setToolDetailsExpanded(prev => {
       const next = !prev
       setToolOutputsVisible(next)
       const cfg = getGlobalConfig()
-      saveGlobalConfig({ ...cfg, showToolOutputs: next })
+      saveGlobalConfig({ ...cfg, showToolOutputs: next, showToolDetails: next })
       return next
     })
   }, [])
@@ -831,6 +853,32 @@ export function REPL({
     }
   }, [nexusSessionId])
 
+  // Clear stale subagents when a new query starts (isLoading: false → true)
+  const prevIsLoadingRef = useRef(false)
+  useEffect(() => {
+    if (isLoading && !prevIsLoadingRef.current) {
+      setSubagentsByPartId({})
+    }
+    prevIsLoadingRef.current = isLoading
+  }, [isLoading])
+
+  // Re-render on terminal resize to prevent input field duplication
+  useEffect(() => {
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    const handleResize = () => {
+      if (timeout) clearTimeout(timeout)
+      timeout = setTimeout(async () => {
+        await clearTerminal()
+        setForkNumber(n => n + 1)
+      }, 50)
+    }
+    process.stdout.on('resize', handleResize)
+    return () => {
+      process.stdout.off('resize', handleResize)
+      if (timeout) clearTimeout(timeout)
+    }
+  }, [])
+
   const normalizedMessages = useMemo(
     () => normalizeMessages(messages).filter(isNotEmptyMessage),
     [messages],
@@ -1028,28 +1076,6 @@ export function REPL({
   // only show the dialog once not loading
   const showingCostDialog = !isLoading && showCostDialog
 
-  // When approval is requested (Nexus), show todo list above the approval panel instead of chat
-  if (toolJSX) {
-    return (
-      <>
-        <Box flexDirection="column" width="100%">
-          {nexusBootstrap ? (
-            <NexusSubagentBlock
-              subagentsByPartId={subagentsByPartId}
-              isLoading={isLoading}
-              expandToolDetails={toolDetailsExpanded}
-            />
-          ) : null}
-          {nexusBootstrap && nexusTodo.trim() ? (
-            <NexusTodoBlock todo={nexusTodo} />
-          ) : null}
-          {toolJSX.jsx}
-        </Box>
-        <Newline />
-      </>
-    )
-  }
-
   return (
     <>
       {chatMessagesSection}
@@ -1059,7 +1085,22 @@ export function REPL({
         flexDirection="column"
         width="100%"
       >
-        {!toolUseConfirm && !binaryFeedbackContext && isLoading && (
+        {toolJSX ? (
+          <Box flexDirection="column" width="100%">
+            {nexusBootstrap ? (
+              <NexusSubagentBlock
+                subagentsByPartId={subagentsByPartId}
+                isLoading={isLoading}
+                expandToolDetails={toolDetailsExpanded}
+              />
+            ) : null}
+            {nexusBootstrap && nexusTodo.trim() ? (
+              <NexusTodoBlock todo={nexusTodo} />
+            ) : null}
+            {toolJSX.jsx}
+          </Box>
+        ) : null}
+        {!toolJSX && !toolUseConfirm && !binaryFeedbackContext && isLoading && (
           !(nexusBootstrap && hasRunningSubagent) ? <Spinner /> : null
         )}
         {!toolJSX && binaryFeedbackContext && !isMessageSelectorVisible && (
@@ -1154,6 +1195,14 @@ export function REPL({
                   expandToolDetails={toolDetailsExpanded}
                 />
               ) : null}
+              {nexusBootstrap ? (
+                <NexusExploringBlock
+                  normalizedMessages={normalizedMessages}
+                  inProgressToolUseIDs={inProgressToolUseIDs}
+                  expandToolDetails={toolDetailsExpanded}
+                  isLoading={isLoading}
+                />
+              ) : null}
               {nexusBootstrap && nexusTodo.trim() ? (
                 <NexusTodoBlock todo={nexusTodo} />
               ) : null}
@@ -1238,6 +1287,8 @@ export function REPL({
                     : undefined
                 }
                 sessionDiffPanelVisible={sessionDiffExpanded}
+                onSetNexusMode={nexusBootstrap ? onSetNexusMode : undefined}
+                onOpenInEditor={nexusBootstrap ? onOpenInEditor : undefined}
               />
             </>
           )}

@@ -9,12 +9,12 @@ const schema = z.object({
 
 export const killBashTool: ToolDef<z.infer<typeof schema>> = {
   name: "KillBash",
-  description: `Terminate a background bash process started with run_in_background: true.
+  description: `Kill a running background bash shell by its ID.
 
-- Takes shell_id (same value as bash_id returned by Bash with run_in_background: true).
+- Takes shell_id (same value as bash_id returned by Bash when run_in_background: true).
 - Sends SIGTERM to the process and removes it from the background job registry.
-- Returns success if the process was found and killed, or an error if it already exited.
-- Use this when you need to stop a long-running server, watcher, or runaway build.`,
+- Returns success or failure. Use when you need to terminate a long-running command (server, watcher, build, etc.).
+- Background shell IDs can be found in the Environment block under "Active Background Bash Jobs", or from the bash_id returned when you started the command with run_in_background: true.`,
   parameters: schema,
 
   async execute({ shell_id }, _ctx: ToolContext) {

@@ -3,11 +3,11 @@ import * as path from "node:path"
 import type { ToolDef, ToolContext } from "../../types.js"
 
 const schema = z.object({
-  query: z.string().describe("A complete question about what you want to understand. Ask as if talking to a colleague: 'How does X work?', 'What happens when Y?', 'Where is Z handled?'"),
+  query: z.string().describe("A complete question about what you want to understand. Ask as if talking to a colleague: 'How does X work?', 'What happens when Y?', 'Where is Z handled?' Unless there is a clear reason not to, reuse the user's exact query or phrasing — their wording often helps semantic match."),
   target_directories: z.array(z.string()).optional().describe("Prefix directory paths to limit search scope (single directory only, no glob patterns). Omit or empty to search the whole repo."),
-  explanation: z.string().optional().describe("One sentence explanation as to why this tool is being used, and how it contributes to the goal."),
+  explanation: z.string().optional().describe("One sentence explanation as to why this tool is being used and how it contributes to the goal."),
   kind: z.enum(["class", "function", "method", "interface", "type", "enum", "const", "any"]).optional().describe("Filter by symbol type"),
-  limit: z.number().int().positive().max(50).optional().describe("Max results (default: 10)"),
+  limit: z.coerce.number().int().positive().max(50).optional().describe("Max results (default: 10)"),
 })
 
 export const codebaseSearchTool: ToolDef<z.infer<typeof schema>> = {
@@ -52,9 +52,11 @@ Bad: combines two separate queries — split into parallel searches like "What i
 ### Query Strategy
 
 - Write a complete question as if asking a colleague: "How does X work?", "What happens when Y?", "Where is Z handled?"
+- Unless there is a clear reason not to, reuse the user's exact query or phrasing — their wording often helps semantic search.
 - Run multiple searches in parallel with different phrasings; first-pass results often miss key details.
 - Start with \`target_directories: []\` (whole repo) if unsure; then rerun scoped to a directory when results point there.
-- Break multi-part questions into focused sub-queries and run them in parallel.
+- Break multi-part questions into focused sub-queries and run them in parallel (e.g. "Where is X?" and "How does Y work?" in two parallel calls).
+- When results show only signatures or snippets for some items, use Read with the path and offset/limit (or Grep) to get full code for those ranges; do not re-read chunks whose full content was already returned.
 
 ### Target Directories
 

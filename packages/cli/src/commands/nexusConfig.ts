@@ -11,7 +11,7 @@ export function createNexusConfigCommand(nexus: NexusBootstrapResult): Command {
     name: 'nexus-config',
     description: 'Show Nexus config (model, mode, index) and where to set LLM, sessions, embeddings, MCP, skills',
     isEnabled: true,
-    isHidden: false,
+    isHidden: true,
     userFacingName() {
       return 'nexus-config'
     },

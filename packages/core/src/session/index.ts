@@ -29,12 +29,15 @@ export class Session implements ISession {
   private _messages: SessionMessage[] = []
   private _todo: string = ""
   private cwd: string
+  /** Ephemeral sessions are never persisted to disk (used for sub-agents). */
+  private _ephemeral: boolean
 
-  constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string) {
+  constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral = false) {
     this.id = id
     this.cwd = cwd
     this._messages = messages ?? []
     this._todo = typeof initialTodo === "string" ? initialTodo : ""
+    this._ephemeral = ephemeral
   }
 
   get messages(): SessionMessage[] {
@@ -145,6 +148,7 @@ export class Session implements ISession {
   }
 
   async save(): Promise<void> {
+    if (this._ephemeral) return  // sub-agent sessions are never persisted
     const title = deriveSessionTitle(this._messages)
     const stored: StoredSession = {
       id: this.id,
@@ -167,6 +171,11 @@ export class Session implements ISession {
 
   static create(cwd: string): Session {
     return new Session(generateSessionId(), cwd)
+  }
+
+  /** Create a session that is never saved to disk (for sub-agents). */
+  static createEphemeral(cwd: string): Session {
+    return new Session(generateSessionId(), cwd, undefined, undefined, true)
   }
 
   static async resume(sessionId: string, cwd: string): Promise<Session | null> {

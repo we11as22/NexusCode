@@ -12,18 +12,19 @@ export const askFollowupTool: ToolDef<z.infer<typeof askSchema>> = {
   description: `Ask the user a clarifying question when you cannot proceed without their input.
 
 When to use:
-- Genuinely blocked (e.g. choice between options, missing config, ambiguous requirement).
-- After doing all non-blocked work; ask one focused question.
+- Genuinely blocked: choice between options, missing config, ambiguous requirement that tools cannot resolve.
+- After doing all non-blocked work; ask one focused question at a time.
 
 When NOT to use:
-- Info you can get via tools (read config, search codebase).
-- Obvious or multiple questions; prefer making a reasonable choice and stating it.
-- Permission prompts ("Should I run tests?"); just run them if relevant.
+- Information you can get via tools (read config, search codebase, grep).
+- Permission or approval prompts ("Should I run tests?", "Is my plan ready?"). For tests, just run them if relevant. For plan approval, use PlanExit (in plan mode), not AskFollowupQuestion.
+- Multiple or vague questions; prefer making a reasonable choice and stating it.
 
 Prefer making a reasonable choice and stating the assumption over asking. Examples of when NOT to ask:
 - "Should I run tests?" → just run them
 - "Which file format?" → pick the one already used in the project
-- "Is it okay if I create X file?" → just create it`,
+- "Is it okay if I create X file?" → just create it
+- "Does the plan look good?" (in plan mode) → use PlanExit instead`,
   parameters: askSchema,
 
   async execute({ question, options }, ctx: ToolContext) {
@@ -57,25 +58,24 @@ const todoSchema = z.object({
 
 export const todoWriteTool: ToolDef<z.infer<typeof todoSchema>> = {
   name: "TodoWrite",
-  description: `Use this tool to create and manage a structured task list for the current conversation. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
+  description: `Create and manage a structured task list for the current conversation. Use proactively to track progress and give the user visibility.
 
 When to use:
 - Complex multi-step tasks (3+ distinct steps)
 - Non-trivial tasks requiring careful planning
-- User explicitly requests todo list
-- User provides multiple tasks (numbered/comma-separated)
-- After receiving new instructions — capture requirements as todos (use merge=false to add new ones)
+- User explicitly requests a todo list
+- User provides multiple tasks (numbered or comma-separated)
+- After receiving new instructions — capture requirements as todos (merge=false)
 - After completing tasks — mark complete with merge=true and add follow-ups
-- When starting new tasks — mark as in_progress (ideally only one at a time)
+- When starting a new task — mark it in_progress (only one in_progress at a time)
 
 When NOT to use:
 - Single, straightforward tasks
-- Trivial tasks with no organizational benefit
-- Tasks completable in < 3 trivial steps
-- Purely conversational/informational requests
-- NEVER include operational steps in todos (e.g. "run lint", "run tests", "search codebase"). Todos are deliverable milestones (e.g. "Add dark mode toggle", "Fix login validation").
+- Trivial tasks with no organizational benefit (< 3 steps)
+- Purely conversational or informational requests
+- NEVER include operational/housekeeping steps in todos: do NOT add items for "run lint", "run tests", "search codebase", "read file X". Todo items must be deliverable milestones (e.g. "Add dark mode toggle", "Fix login validation", "Implement API endpoint").
 
-Task states: pending | in_progress | completed | cancelled. Use merge=true to update existing todos by id; use merge=false to replace the entire list. Prefer creating the first todo as in_progress and batch todo updates with other tool calls.`,
+Task states: pending | in_progress | completed | cancelled. Use merge=true to update existing todos by id; use merge=false to replace the entire list. Mark tasks completed IMMEDIATELY after finishing; do not batch completions. Prefer creating the first todo as in_progress and starting work in the same turn. Do not announce "I'm updating the todo list" — just call the tool.`,
   parameters: todoSchema,
 
   async execute({ merge, todos }, ctx: ToolContext) {

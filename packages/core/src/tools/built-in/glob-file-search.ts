@@ -13,13 +13,14 @@ const globSchema = z.object({
 
 export const globFileSearchTool: ToolDef<z.infer<typeof globSchema>> = {
   name: "Glob",
-  description: `- Fast file pattern matching tool that works with any codebase size
-- Supports glob patterns like "**/*.js" or "src/**/*.ts"
-- Returns matching file paths sorted by modification time
-- Use Glob when you know the file name pattern (e.g. \`**/*.ts\`, \`**/package.json\`).
-- When NOT to use: finding files by content → use Grep; finding by meaning → CodebaseSearch; listing directory structure → List.
-- When you are doing an open-ended investigation that may require multiple rounds of discovery, keep the search-first flow: run multiple Grep/CodebaseSearch/Glob calls in parallel, or delegate broad research to SpawnAgent when that will clearly save context.
-- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.`,
+  description: `Fast file pattern matching that works with any codebase size.
+
+- Supports glob patterns like "**/*.js", "src/**/*.ts", "**/test/**/test_*.ts". Patterns not starting with "**/" are searched recursively from the target directory.
+- Returns matching file paths sorted by modification time (newest first). Capped at 500 results.
+- Use this tool when you need to find files by name or path pattern. Prefer Glob over List when you know the pattern (e.g. all .ts files, all package.json).
+- When NOT to use: finding by content → Grep; finding by meaning → CodebaseSearch; listing directory structure → List.
+- For open-ended discovery that may require multiple rounds, run multiple Glob/Grep/CodebaseSearch calls in parallel in one turn, or use SpawnAgent for broad research when that will clearly save context.
+- You can call multiple tools in a single response. Prefer batching multiple Glob (or Glob + Grep) calls in parallel when they are independent.`,
   parameters: globSchema,
   readOnly: true,
 

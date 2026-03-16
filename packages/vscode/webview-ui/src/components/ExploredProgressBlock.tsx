@@ -442,7 +442,8 @@ export function ExploredSummaryInline({
   const total = prefixItems.length
   if (total === 0) return null
   const statusLabel = isRunning ? "Exploring" : "Explored"
-  const headerLabel = labelParts.length > 0 ? `${statusLabel} ${labelParts.join(", ")}` : statusLabel
+  const metricsLabel = labelParts.length > 0 ? ` ${labelParts.join(", ")}` : ""
+  const headerLabel = `${statusLabel}${metricsLabel}`
   const previewItems = isRunning && !open ? prefixItems.slice(-4) : []
 
   const renderItem = (item: ExploredPrefixItem, idx: number, compact: boolean) => {
@@ -486,7 +487,14 @@ export function ExploredSummaryInline({
         className="nexus-explored-header w-full flex items-center gap-2 text-left cursor-pointer select-none"
       >
         <span className="flex-1 min-w-0 truncate text-[var(--vscode-foreground)] text-xs">
-          {headerLabel}
+          {isRunning ? (
+            <>
+              <span className="nexus-exploring-wave-text">Exploring</span>
+              {metricsLabel}
+            </>
+          ) : (
+            headerLabel
+          )}
         </span>
         <span
           className="nexus-explored-chevron flex-shrink-0 text-[var(--vscode-descriptionForeground)] text-[10px] transition-transform"

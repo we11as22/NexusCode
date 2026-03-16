@@ -96,24 +96,25 @@ IMPORTANT: This tool is for terminal operations like git, npm, docker, builds, t
 Before executing the command, follow these steps:
 
 1. Directory Verification:
-   - If the command will create new directories or files, first use List or Glob to verify the parent directory exists and is the correct location.
-   - For example, before running "mkdir foo/bar", first use List to check that "foo" exists and is the intended parent directory.
+   - If the command will create new directories or files, first use List (or Glob) to verify the parent directory exists and is the correct location.
+   - Example: before running "mkdir foo/bar", use List with path "foo" (or "." and check for foo) to confirm "foo" exists and is the intended parent.
 
 2. Command Execution:
-   - Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt").
+   - Always quote file paths that contain spaces with double quotes (e.g. cd "path with spaces/file.txt", python "/path/with spaces/script.py").
    - After ensuring proper quoting, execute the command. Capture the output.
 
 Usage notes:
   - The command argument is required.
   - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Default timeout is 120000ms (2 minutes).
-  - Write a clear, concise description of what this command does. For simple commands keep it brief (5-10 words). For complex piped commands or obscure flags, add enough context to clarify what it does. Never use words like "complex" or "risk" in the description.
+  - Write a clear, concise description of what this command does in active voice. For simple commands keep it brief (5-10 words). For complex piped commands or obscure flags, add enough context so a reader understands at a glance. Never use words like "complex" or "risk" in the description.
     - ls → "List files in current directory"
     - git status → "Show working tree status"
     - npm install → "Install package dependencies"
+    - mkdir foo → "Create directory 'foo'"
     - find . -name "*.tmp" -exec rm {} \\; → "Find and delete all .tmp files recursively"
-  - If output exceeds 50KB, it will be truncated (head+tail shown); full output is saved to .nexus/tool-output/ for further inspection.
-  - **Blocking vs background:** Use blocking (default) for short commands where you need the result immediately (e.g. git status, npm run lint, short scripts). Use run_in_background: true for long-running commands (builds, servers, tests, migrations). With background: Bash returns immediately with bash_id; output is written to .nexus/<bash_id>.log in real time. Use BashOutput(bash_id) to read progress — the response includes [Process status: running | exited]. Poll until exited or use KillBash(shell_id) to stop. Do NOT use '&' in the command itself.
-  - Avoid using Bash with find, grep, cat, head, tail, sed, awk, or echo unless explicitly instructed. Instead use dedicated tools:
+  - If output exceeds 50KB, it will be truncated (head+tail shown); full output is saved to .nexus/tool-output/ for further inspection. Use Grep or Read with offset/limit on that file if needed.
+  - **Blocking vs background:** Use blocking (default) for short commands where you need the result immediately (e.g. git status, npm run lint, short scripts). Use run_in_background: true for long-running commands (builds, servers, tests, migrations). With background: Bash returns immediately with bash_id; output is written to .nexus/<bash_id>.log in real time. Use BashOutput(bash_id) to read progress — the response includes [Process status: running | exited]. Poll until exited or use KillBash(shell_id) to stop. Do NOT use '&' at the end of the command when using run_in_background. Never use run_in_background for 'sleep' — it returns immediately and is useless.
+  - **CRITICAL — Use dedicated tools instead of shell commands:** You MUST avoid using Bash for file search, content search, reading, editing, or writing. Use the dedicated tools instead. Do NOT run find, grep, cat, head, tail, sed, awk, or echo in Bash for those purposes. Use:
     - File search: Glob (NOT find or ls)
     - Content search: Grep (NOT grep or rg)
     - Read files: Read (NOT cat/head/tail)
@@ -121,8 +122,8 @@ Usage notes:
     - Write files: Write (NOT echo >/cat <<EOF)
     - Communication: output text directly (NOT echo/printf)
   - **Non-interactive commands** — For any command that would prompt for user input (confirmations, passwords, selections), assume the user is NOT available. Pass non-interactive flags: \`--yes\` / \`-y\` for package managers, \`--force\` / \`-f\` when appropriate, \`--non-interactive\` for CLIs that support it. Never run a command that will block waiting for input.
-  - When issuing multiple commands: if they are independent, make multiple Bash calls in a single response (parallel). If they depend on each other, use '&&' to chain them. Use ';' only when you don't care if earlier commands fail. DO NOT use newlines to separate commands (newlines are ok in quoted strings).
-  - Use absolute paths and avoid cd. If you must run in a subdirectory, prefix with the absolute path:
+  - When issuing multiple commands: if they are independent, make multiple Bash calls in a single response (parallel). If they depend on each other, use '&&' to chain them (e.g. git add . && git commit -m "..." && git status). Use ';' only when you don't care if earlier commands fail. DO NOT use newlines to separate commands (newlines are ok inside quoted strings).
+  - Maintain current working directory: prefer absolute paths and avoid unnecessary \`cd\`. Use \`cd\` only when the command genuinely depends on that working directory. Good: \`pytest /foo/bar/tests\`. Bad: \`cd /foo/bar && pytest tests\`.
     <good-example>
     pytest /foo/bar/tests
     </good-example>

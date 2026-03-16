@@ -1,6 +1,23 @@
 /**
- * Subagent progress block shown above the todo list when a SpawnAgent subagent is running.
- * Matches reference: ● Mode(task), ⎿ tool uses, thinking line.
+ * Subagent progress block. Layout:
+ *
+ * 1 agent:
+ *   ● Explore(task)
+ *     ⎿ Read(file.ts)
+ *            Grep(pattern)
+ *          +N more tool uses (ctrl+o to expand)
+ *          ctrl+b to run in background
+ *
+ * N agents:
+ *   Running N subagents…
+ *     ● Explore(task1)
+ *       ⎿ Read(file.ts)
+ *              Grep(pattern)
+ *            +N more tool uses (ctrl+o to expand)
+ *            ctrl+b to run in background
+ *     ● Explore(task2)
+ *       ⎿ List(src/)
+ *            ctrl+b to run in background
  */
 import { Box, Text } from 'ink'
 import React, { useMemo } from 'react'
@@ -18,65 +35,178 @@ function modeLabel(mode: string): string {
   return mode.charAt(0).toUpperCase() + mode.slice(1).toLowerCase()
 }
 
+/**
+ * Shared tool-history section. Used by both AgentBlock and NexusExploringBlock.
+ * Renders at the "current" indent level (caller wraps with extra paddingLeft as needed).
+ *
+ *   ⎿ Read(file.ts)          ← "  ⎿ " = 2sp + ⎿ + sp
+ *          Grep(pattern)     ← "       " = 7sp (aligns with tool text after ⎿)
+ *        +N more…            ← "     " = 5sp
+ *        ctrl+b…             ← "     " = 5sp
+ */
+export function ToolHistorySection({
+  history,
+  expandToolDetails,
+  agentId,
+  theme,
+}: {
+  history: string[]
+  expandToolDetails: boolean
+  agentId: string
+  theme: ReturnType<typeof getTheme>
+}): React.ReactNode {
+  const maxShown = expandToolDetails ? history.length : 3
+  const visible = history.slice(-maxShown)
+  const hidden = Math.max(0, history.length - maxShown)
+
+  // "  ⎿ " = 2sp + ⎿ + sp = 4 chars → tool name at col 4.
+  // All continuation lines must start at col 4 to align vertically.
+  return (
+    <Box flexDirection="column">
+      {visible.length > 0 ? (
+        <>
+          <Box>
+            <Text color={theme.primary}>  ⎿ </Text>
+            <Text>{visible[0]}</Text>
+          </Box>
+          {visible.slice(1).map((line, idx) => (
+            <Box key={`${agentId}-h-${idx}`}>
+              <Text dimColor>    {line}</Text>
+            </Box>
+          ))}
+        </>
+      ) : (
+        <Box>
+          <Text dimColor>  ⎿ Starting…</Text>
+        </Box>
+      )}
+      {hidden > 0 && (
+        <Box>
+          <Text dimColor>    +{hidden} more tool uses (ctrl+o to expand)</Text>
+        </Box>
+      )}
+      <Box>
+        <Text dimColor>    ctrl+b to run in background</Text>
+      </Box>
+    </Box>
+  )
+}
+
+/** One agent block: header + tool history. */
+function AgentBlock({
+  sa,
+  expandToolDetails,
+  theme,
+}: {
+  sa: SubAgentState
+  expandToolDetails: boolean
+  theme: ReturnType<typeof getTheme>
+}): React.ReactNode {
+  const isCompleted = sa.status === 'completed' || sa.status === 'error'
+  const isErr = sa.status === 'error'
+
+  return (
+    <Box flexDirection="column">
+      <Box>
+        <Text color={isCompleted ? (isErr ? theme.error : (theme.success ?? 'green')) : theme.primary}>
+          {isCompleted ? (isErr ? '✗ ' : '✓ ') : '● '}
+        </Text>
+        <Text bold>{modeLabel(sa.mode)}({truncateTask(sa.task, 64)})</Text>
+      </Box>
+
+      {isCompleted ? (
+        <Box>
+          <Text dimColor>  ⎿ {isErr ? (sa.error ?? 'Failed') : 'Done'}</Text>
+        </Box>
+      ) : (
+        <ToolHistorySection
+          history={sa.toolHistory}
+          expandToolDetails={expandToolDetails}
+          agentId={sa.id}
+          theme={theme}
+        />
+      )}
+    </Box>
+  )
+}
+
 export function NexusSubagentBlock({
   subagentsByPartId,
   isLoading,
   expandToolDetails = false,
 }: Props): React.ReactNode {
   const theme = getTheme()
+
   const allSubagents = useMemo(() => {
-    return Object.values(subagentsByPartId).flat().sort((a, b) => b.startedAt - a.startedAt)
+    return Object.values(subagentsByPartId).flat().sort((a, b) => a.startedAt - b.startedAt)
   }, [subagentsByPartId])
 
   const running = allSubagents.filter((sa) => sa.status === 'running')
-  const primary = running[0]
-  const otherRunningCount = Math.max(0, running.length - 1)
+  const completed = allSubagents.filter((sa) => sa.status === 'completed' || sa.status === 'error')
 
-  if (!primary) return null
+  // Always show: running agents if any, otherwise all completed agents
+  const toDisplay: SubAgentState[] = running.length > 0 ? running : completed
 
-  const history = primary.toolHistory
-  const visibleHistory = expandToolDetails ? history : history.slice(0, 3)
-  const hiddenToolUses = Math.max(0, history.length - visibleHistory.length)
+  if (toDisplay.length === 0) return null
+
+  const allDone = running.length === 0 && completed.length > 0
+  const isMulti = toDisplay.length > 1
+
+  // Multi-completed: tree view  "● N agents finished" with ├─/└─ rows
+  if (allDone && isMulti) {
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Box>
+          <Text color={theme.success ?? 'green'}>● </Text>
+          <Text bold>{completed.length} agents finished</Text>
+          <Text dimColor> (ctrl+o to expand)</Text>
+        </Box>
+        {completed.map((sa, idx) => {
+          const isLast = idx === completed.length - 1
+          const prefix = isLast ? '└─' : '├─'
+          const contPrefix = isLast ? '   ' : '│  '
+          const isErr = sa.status === 'error'
+          const toolCount = sa.toolHistory.length
+          return (
+            <React.Fragment key={sa.id}>
+              <Box>
+                <Text dimColor>  {prefix} </Text>
+                <Text>{modeLabel(sa.mode)}({truncateTask(sa.task, 48)})</Text>
+                {toolCount > 0 && <Text dimColor> · {toolCount} tool use{toolCount !== 1 ? 's' : ''}</Text>}
+              </Box>
+              <Box>
+                <Text dimColor>  {contPrefix} </Text>
+                <Text color={theme.primary}>⎿ </Text>
+                <Text dimColor>{isErr ? (sa.error ?? 'Failed') : 'Done'}</Text>
+              </Box>
+            </React.Fragment>
+          )
+        })}
+      </Box>
+    )
+  }
 
   return (
-    <Box flexDirection="column" marginTop={0} paddingX={1}>
-      <Box>
-        <Text color={theme.primary}>● </Text>
-        <Text bold>{modeLabel(primary.mode)}({truncateTask(primary.task, 72)})</Text>
-      </Box>
-      {visibleHistory.length > 0 ? (
-        <Box flexDirection="column">
-          <Box>
-            <Text color={theme.primary}>  ⎿ </Text>
-            <Text>{visibleHistory[0]}</Text>
-          </Box>
-          {visibleHistory.slice(1).map((line, idx) => (
-            <Box key={`${primary.id}-tool-${idx}`}>
-              <Text dimColor>     {line}</Text>
-            </Box>
-          ))}
-        </Box>
-      ) : (
+    <Box flexDirection="column" paddingX={1}>
+      {/* Multi-agent running header */}
+      {isMulti && (
         <Box>
-          <Text dimColor>  ⎿ Starting…</Text>
+          <Text color={theme.primary}>✽ </Text>
+          <Text bold>Running {running.length} subagents…</Text>
         </Box>
       )}
-      {hiddenToolUses > 0 ? (
-        <Box>
-          <Text dimColor>     +{hiddenToolUses} more tool uses (ctrl+o to expand)</Text>
+
+      {/* Each agent — indented by 2 when multi, flat when single */}
+      {toDisplay.map((sa) => (
+        <Box key={sa.id} paddingLeft={isMulti ? 2 : 0} flexDirection="column">
+          <AgentBlock sa={sa} expandToolDetails={expandToolDetails} theme={theme} />
         </Box>
-      ) : null}
-      <Box>
-        <Text dimColor>     ctrl+b to run in background</Text>
-      </Box>
-      {otherRunningCount > 0 ? (
+      ))}
+
+      {/* Single agent running spinner */}
+      {!isMulti && (isLoading || running.length > 0) && (
         <Box>
-          <Text dimColor>     +{otherRunningCount} more subagent{otherRunningCount === 1 ? '' : 's'} running</Text>
-        </Box>
-      ) : null}
-      {(isLoading || running.length > 0) && (
-        <Box>
-          <Text color={theme.secondaryText}>✽ Running subagents…</Text>
+          <Text color={theme.secondaryText}>✽ Running subagent…</Text>
         </Box>
       )}
     </Box>

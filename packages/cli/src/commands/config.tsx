@@ -4,15 +4,16 @@ import * as React from 'react'
 
 const config = {
   type: 'local-jsx',
-  name: 'config',
-  description: 'Open config panel (global: API key, theme; Nexus: use /nexus-config and .nexus/nexus.yaml)',
+  name: 'displaying',
+  description: 'Display settings (verbose, theme, tool outputs, notifications)',
   isEnabled: true,
   isHidden: false,
+  aliases: ['config'],
   async call(onDone) {
     return <Config onClose={onDone} />
   },
   userFacingName() {
-    return 'config'
+    return 'displaying'
   },
 } satisfies Command
 
