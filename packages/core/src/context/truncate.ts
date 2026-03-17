@@ -1,20 +1,21 @@
 /**
  * Kilocode/OpenCode-style truncation of tool output.
  * When output exceeds MAX_LINES or MAX_BYTES, it is truncated; full output is saved to
- * .nexus/tool-output/ and the model gets a shortened version + hint to use Read/Grep.
+ * the global data dir (~/.nexus/data/tool-output/) and the model gets a shortened version + hint to use Read/Grep.
  */
 import * as fs from "node:fs"
 import * as path from "node:path"
+import * as os from "node:os"
+import { getToolOutputDir } from "../data-dir.js"
 
 export const MAX_LINES = 2000
 export const MAX_BYTES = 50 * 1024 // 50 KB
-const TOOL_OUTPUT_DIR = "tool-output"
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 /** Cap size of saved file to protect disk (OpenCode-style). */
 const MAX_FILE_BYTES = 50 * 1024 * 1024 // 50 MB
 
 export interface TruncateOptions {
-  /** Working directory; output is saved under cwd/.nexus/tool-output/ */
+  /** Working directory (used only for relative path display when possible). Output is saved to global data dir. */
   cwd: string
   maxLines?: number
   maxBytes?: number
@@ -39,7 +40,7 @@ const DEFAULT_HINT =
   "Full output saved to the file above. Use Read with offset/limit to view specific sections or Grep to search the full content. Do NOT paste the entire file — use tools to inspect it."
 
 /**
- * If text exceeds maxLines or maxBytes, truncate it, write full output to .nexus/tool-output/<id>.out,
+ * If text exceeds maxLines or maxBytes, truncate it, write full output to global data dir (tool-output/<id>.out),
  * and return shortened content + path hint. Otherwise return content unchanged.
  */
 export async function truncateOutput(
@@ -57,7 +58,7 @@ export async function truncateOutput(
     return { content: text, truncated: false }
   }
 
-  const outDir = path.join(options.cwd, ".nexus", TOOL_OUTPUT_DIR)
+  const outDir = getToolOutputDir()
   try {
     fs.mkdirSync(outDir, { recursive: true })
   } catch {
@@ -80,14 +81,16 @@ export async function truncateOutput(
         "\n\n[output truncated at 50 MB in file]\n"
   await fs.promises.writeFile(filePath, fileContent, "utf8").catch(() => {})
 
-  const relPath = path.relative(options.cwd, filePath).replace(/\\/g, "/") || `.nexus/${TOOL_OUTPUT_DIR}/${id}.out`
+  const displayPath = filePath.startsWith(os.homedir())
+    ? path.join("~", ".nexus", "data", "tool-output", `${id}.out`).replace(/\\/g, "/")
+    : filePath.replace(/\\/g, "/")
   const truncated = truncateInMemory(text, lines, totalBytes, maxLines, maxBytes, direction)
-  const hint = `\n\nFull output saved to: ${relPath}\n${DEFAULT_HINT}`
+  const hint = `\n\nFull output saved to: ${displayPath}\n${DEFAULT_HINT}`
 
   return {
     content: truncated + hint,
     truncated: true,
-    outputPath: relPath,
+    outputPath: displayPath,
   }
 }
 

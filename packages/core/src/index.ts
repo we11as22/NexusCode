@@ -1,3 +1,6 @@
+// Global data dir (Kilo-style: terminal outputs outside project)
+export { getNexusDataDir, getToolOutputDir, getRunLogsDir } from "./data-dir.js"
+
 // Config
 export {
   loadConfig,
@@ -40,6 +43,10 @@ export type { LLMClient, EmbeddingClient } from "./provider/types.js"
 export { Session, generateSessionId, listSessions, deleteSession, deriveSessionTitle } from "./session/index.js"
 export { hadPlanExit, getPlanContentForFollowup } from "./session/plan-followup.js"
 export { createCompaction } from "./session/compaction.js"
+
+// Server client (extension + CLI when serverUrl is set)
+export { NexusServerClient, DEFAULT_HEARTBEAT_TIMEOUT_MS } from "./server-client.js"
+export type { NexusServerClientOptions } from "./server-client.js"
 
 // Agent
 export { runAgentLoop } from "./agent/loop.js"

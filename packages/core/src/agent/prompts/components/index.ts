@@ -388,7 +388,7 @@ Reserve Bash for real shell operations: builds, tests, git, installs, package ma
 
 ### Background commands: monitor progress and stop
 
-1. **Start:** \`Bash({ command: "...", run_in_background: true })\` → returns \`bash_id\` (e.g. \`run_1234567890\`) and log path. Output is streamed to \`.nexus/<bash_id>.log\`.
+1. **Start:** \`Bash({ command: "...", run_in_background: true })\` → returns \`bash_id\` (e.g. \`run_1234567890\`) and log path. Output is streamed to the global data dir (\`~/.nexus/data/run/<bash_id>.log\`).
 2. **Monitor:** \`BashOutput({ bash_id: "run_1234567890" })\` → returns a status line \`[Process status: running | exited]\` plus the log content so far. Call again to poll; when status is \`exited\`, the log is complete. Use optional \`filter\` (regex) to show only matching lines (e.g. errors or progress).
 3. **Stop if needed:** \`KillBash({ shell_id: "run_1234567890" })\` → sends SIGTERM to the process. Use when you need to abort a long-running command.
 4. **Continue work:** You can run other tools (Read, Edit, Grep, or another Bash) while a background command runs; then call BashOutput again to check progress or final result.

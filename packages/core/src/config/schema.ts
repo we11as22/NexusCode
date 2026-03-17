@@ -96,7 +96,11 @@ export const NexusConfigSchema = z.object({
     autoApproveCommand: z.boolean().default(false),
     autoApproveMcp: z.boolean().default(false),
     autoApproveBrowser: z.boolean().default(false),
-    autoApproveReadPatterns: z.array(z.string()).default([".nexus/tool-output/**"]),
+    autoApproveReadPatterns: z.array(z.string()).default([
+    ".nexus/tool-output/**",
+    "**/.nexus/data/tool-output/**",
+    "**/.nexus/data/run/**",
+  ]),
     /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
     allowedCommands: z.array(z.string()).default([]),
     /** Command patterns from .nexus/settings.json + settings.local.json */

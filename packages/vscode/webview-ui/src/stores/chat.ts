@@ -292,6 +292,10 @@ interface ChatState {
   activeReasoning: { messageId: string; reasoningId: string } | null
   /** NexusCode server URL (nexuscode.serverUrl). When set, extension uses server for sessions and runs. */
   serverUrl: string
+  /** When using server: connection state for UI (connecting/streaming/error). */
+  connectionState: "idle" | "connecting" | "streaming" | "error"
+  /** When connectionState === "error": message to show; user can retry by sending again. */
+  serverConnectionError: string | null
   /** MCP server test results: name -> status (ok/error) and optional error message */
   mcpStatus: Array<{ name: string; status: "ok" | "error"; error?: string }>
   /** When set, show in-webview approval bar (Allow / Deny) instead of only VS Code notification */
@@ -338,8 +342,14 @@ interface ChatState {
   /** True after first stateUpdate received — prevents flash during initial load. */
   isInitialized: boolean
 
+  /** When opening Settings from a slash command, open this tab (cleared after applied). */
+  initialSettingsTab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets" | null
+  /** When opening Settings → Integrations, open this sub-tab (cleared after applied). */
+  initialSettingsIntegTab: "rules-skills" | "mcp" | "rules-instructions" | null
+  clearInitialSettingsTab: () => void
+
   // Actions
-  setView: (view: AppView) => void
+  setView: (view: AppView, options?: { settingsTab?: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"; settingsIntegTab?: "rules-skills" | "mcp" | "rules-instructions" }) => void
   setInputValue: (v: string) => void
   appendToInput: (v: string) => void
   addAttachedImage: (data: string, mimeType: string) => void
@@ -436,10 +446,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   reasoningStartTime: null,
   activeReasoning: null,
   serverUrl: "",
+  connectionState: "idle",
+  serverConnectionError: null,
   mcpStatus: [],
   pendingApproval: null,
 
   isInitialized: false,
+  initialSettingsTab: null,
+  initialSettingsIntegTab: null,
   modelsCatalog: null,
   modelsCatalogLoading: false,
   checkpointEntries: [],
@@ -478,9 +492,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ skillDefinitions: definitions })
   },
 
-  setView: (view) => {
-    set({ view })
-    if (view === "sessions") postMessage({ type: "getState" })
+  clearInitialSettingsTab: () => set({ initialSettingsTab: null, initialSettingsIntegTab: null }),
+  setView: (view, options) => {
+    set((prev) => {
+      const next: Partial<ChatState> = { view }
+      if (view === "sessions") postMessage({ type: "getState" })
+      if (view === "settings" && options?.settingsTab) next.initialSettingsTab = options.settingsTab
+      if (view === "settings" && options?.settingsIntegTab) next.initialSettingsIntegTab = options.settingsIntegTab
+      return next
+    })
   },
   setInputValue: (v) => set({ inputValue: v }),
 

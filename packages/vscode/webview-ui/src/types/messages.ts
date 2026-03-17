@@ -22,6 +22,9 @@ export interface AgentPresetFromCore {
   modelId?: string
 }
 
+/** Server connection state for UI indicator and retry. */
+export type ServerConnectionState = "idle" | "connecting" | "streaming" | "error"
+
 export interface WebviewState {
   messages: SessionMessage[]
   mode: Mode
@@ -38,6 +41,10 @@ export interface WebviewState {
   contextPercent: number
   /** NexusCode server URL (from nexuscode.serverUrl). When set, extension uses server for sessions and runs. */
   serverUrl?: string
+  /** When using server: connection state for UI (connecting/streaming/error). */
+  connectionState?: ServerConnectionState
+  /** When connectionState === "error": message to show; user can retry by sending again. */
+  serverConnectionError?: string
   /** When true, server session has more messages above; show "Load older". */
   hasOlderMessages?: boolean
   /** True while older messages are being fetched. */
@@ -54,7 +61,7 @@ export type ExtensionMessage =
   | { type: "indexStatus"; status: IndexStatusKind }
   | { type: "configLoaded"; config: NexusConfigState }
   | { type: "addToChatContent"; content: string }
-  | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings" }
+  | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings"; settingsTab?: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"; settingsIntegTab?: "rules-skills" | "mcp" | "rules-instructions" }
   | { type: "mcpServerStatus"; results: Array<{ name: string; status: "ok" | "error"; error?: string }> }
   | { type: "pendingApproval"; partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } }
   | { type: "confirmResult"; id: string; ok: boolean }

@@ -11,6 +11,7 @@ app.use("*", cors({
 }))
 
 app.get("/", (c) => c.json({ name: "NexusCode Server", version: "0.1.0" }))
+app.get("/health", (c) => c.json({ ok: true, ts: Date.now() }))
 app.route("/session", sessionRoutes)
 
 export function createApp() {

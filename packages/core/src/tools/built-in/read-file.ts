@@ -1,7 +1,17 @@
 import { z } from "zod"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
+import * as os from "node:os"
 import type { ToolDef, ToolContext } from "../../types.js"
+
+/** Expand leading ~ to homedir so Read can access global data (e.g. ~/.nexus/data/run/*.log, tool-output/*.out). */
+function resolveFilePath(filePath: string, cwd: string): string {
+  const t = filePath.trim()
+  if (t === "~" || t.startsWith("~/") || t.startsWith("~\\")) {
+    return path.join(os.homedir(), t.slice(1))
+  }
+  return path.resolve(cwd, filePath)
+}
 
 const MAX_FILE_SIZE = 200 * 1024 // 200 KB — over this without offset/limit we return head+tail
 const DEFAULT_LIMIT = 2000
@@ -39,7 +49,7 @@ Usage:
 
   async execute({ file_path, offset, limit }, ctx: ToolContext) {
     const filePath = file_path
-    const absPath = path.resolve(ctx.cwd, filePath)
+    const absPath = resolveFilePath(filePath, ctx.cwd)
 
     let stat: Awaited<ReturnType<typeof fs.stat>>
     try {

@@ -620,14 +620,14 @@ export function ToolCallCard({ part, approval }: Props) {
         <SubAgentDisplay subagents={part.subagents} />
       )}
       {expanded && (
-        <div className="px-2 pb-2 space-y-1">
+        <div className="px-3 pb-2 space-y-1">
           {isFileEditTool(part) && part.output && (
             <FileEditBlock part={part} />
           )}
           {part.input && Object.keys(part.input).length > 0 && !(isFileEditTool(part) && part.output) && (
             <div>
               <div className="text-[var(--vscode-descriptionForeground)] mb-0.5">Input:</div>
-              <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-32 overflow-y-auto">
+              <pre className="nexus-output-pre bg-[var(--vscode-editor-background)] rounded overflow-x-auto text-[10px] whitespace-pre-wrap max-h-32 overflow-y-auto">
                 {JSON.stringify(
                   Object.fromEntries(Object.entries(part.input).filter(([k]) => k !== "task_progress")),
                   null, 2
@@ -686,7 +686,7 @@ function OpenAtLineLinks({ output }: { output: string }) {
 function ToolOutputBlock({ output, compacted }: { output: string; compacted?: boolean }) {
   if (compacted) {
     return (
-      <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 text-[10px] text-[var(--vscode-descriptionForeground)]">
+      <pre className="nexus-output-pre bg-[var(--vscode-editor-background)] rounded text-[10px] text-[var(--vscode-descriptionForeground)]">
         [output pruned for context efficiency]
       </pre>
     )
@@ -699,7 +699,7 @@ function ToolOutputBlock({ output, compacted }: { output: string; compacted?: bo
         <div className="text-[10px] text-[var(--vscode-descriptionForeground)] font-mono">
           {path} (lines {lines}, total {total})
         </div>
-        <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-64 overflow-y-auto font-mono">
+        <pre className="nexus-output-pre bg-[var(--vscode-editor-background)] rounded overflow-x-auto text-[10px] whitespace-pre-wrap max-h-64 overflow-y-auto font-mono">
           {content.trim()}
         </pre>
       </div>
@@ -709,7 +709,7 @@ function ToolOutputBlock({ output, compacted }: { output: string; compacted?: bo
   const looksLikeDiff = lines.filter((l) => l.startsWith("+") || l.startsWith("-")).length >= 3
   if (looksLikeDiff) {
     return (
-      <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-64 overflow-y-auto font-mono diff-output">
+      <pre className="nexus-output-pre bg-[var(--vscode-editor-background)] rounded overflow-x-auto text-[10px] whitespace-pre-wrap max-h-64 overflow-y-auto font-mono diff-output">
         {lines.map((line, i) => {
           if (line.startsWith("+") && !line.startsWith("+++")) {
             return <div key={i} className="text-green-500 bg-green-500/10">{line}</div>
@@ -725,7 +725,7 @@ function ToolOutputBlock({ output, compacted }: { output: string; compacted?: bo
   const maxShow = 8000
   const truncated = output.length > maxShow
   return (
-    <pre className="bg-[var(--vscode-editor-background)] rounded p-1.5 overflow-x-auto text-[10px] whitespace-pre-wrap max-h-64 overflow-y-auto">
+    <pre className="nexus-output-pre bg-[var(--vscode-editor-background)] rounded overflow-x-auto text-[10px] whitespace-pre-wrap max-h-64 overflow-y-auto">
       {truncated ? output.slice(0, maxShow) : output}
       {truncated ? "\n... (truncated)" : ""}
     </pre>

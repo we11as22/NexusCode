@@ -2,8 +2,10 @@ import { z } from "zod"
 import { spawn } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import * as os from "node:os"
 import stripAnsi from "strip-ansi"
 import type { ToolDef, ToolContext } from "../../types.js"
+import { getRunLogsDir, getToolOutputDir } from "../../data-dir.js"
 
 const MAX_OUTPUT_BYTES = 50 * 1024 // 50 KB
 /** Max size of saved full output file (OpenCode-style disk protection). */
@@ -13,21 +15,28 @@ const PROGRESS_LINE_PATTERN = /[\r\x1b\[2K]/ // CR or ANSI clear line
 /** Matches lines that look like progress bar updates (one per line). */
 const PROGRESS_LIKE_LINE = /%\s*$|progress|downloading|building|extracting|\[\s*[\d.]*%?\s*\]|\d+\.?\d*\s*%/i
 
-/** Delete .nexus/run_*.log files older than this (same idea as OpenCode Truncate cleanup). */
+/** Delete run_*.log files older than this (Kilo-style retention). */
 const RUN_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 
-const TOOL_OUTPUT_DIR = "tool-output"
+/** Short path for display (e.g. ~/.nexus/data/run/run_123.log). */
+function shortDataPath(absolutePath: string): string {
+  const home = os.homedir()
+  if (absolutePath.startsWith(home + path.sep) || absolutePath === home) {
+    return path.join("~", ".nexus", path.relative(path.join(home, ".nexus"), absolutePath)).replace(/\\/g, "/")
+  }
+  return absolutePath.replace(/\\/g, "/")
+}
 
-async function cleanupOldRunLogs(nexusDir: string): Promise<void> {
+async function cleanupOldRunLogs(runDir: string): Promise<void> {
   const cutoff = Date.now() - RUN_LOG_RETENTION_MS
   try {
-    const entries = await fs.promises.readdir(nexusDir, { withFileTypes: true })
+    const entries = await fs.promises.readdir(runDir, { withFileTypes: true })
     for (const e of entries) {
       if (!e.isFile() || !e.name.startsWith("run_") || !e.name.endsWith(".log")) continue
       const m = e.name.match(/^run_(\d+)\.log$/)
       const ts = m ? parseInt(m[1]!, 10) : NaN
       if (!Number.isFinite(ts) || ts < cutoff) {
-        await fs.promises.unlink(path.join(nexusDir, e.name)).catch(() => {})
+        await fs.promises.unlink(path.join(runDir, e.name)).catch(() => {})
       }
     }
   } catch {
@@ -35,7 +44,7 @@ async function cleanupOldRunLogs(nexusDir: string): Promise<void> {
   }
 }
 
-/** Delete .nexus/tool-output/tool_*.out files older than retention (OpenCode-style). */
+/** Delete tool_*.out files older than retention (Kilo-style). */
 async function cleanupOldToolOutputs(toolOutputDir: string): Promise<void> {
   const cutoff = Date.now() - RUN_LOG_RETENTION_MS
   try {
@@ -67,13 +76,13 @@ function isProcessRunning(pid: number): boolean {
 }
 
 /** Compact background job summary for prompt context so the agent can keep tracking long-running commands. */
-export function getBackgroundBashJobsForPrompt(cwd: string): string {
+export function getBackgroundBashJobsForPrompt(_cwd: string): string {
   if (backgroundBashJobs.size === 0) return ""
   const rows = Array.from(backgroundBashJobs.entries())
     .map(([bashId, job]) => {
       const running = isProcessRunning(job.pid)
-      const relLog = path.isAbsolute(job.logPath) ? path.relative(cwd, job.logPath) : job.logPath
-      return `- ${bashId} | pid=${job.pid} | status=${running ? "running" : "exited"} | log=${relLog}`
+      const logDisplay = path.isAbsolute(job.logPath) ? shortDataPath(job.logPath) : job.logPath
+      return `- ${bashId} | pid=${job.pid} | status=${running ? "running" : "exited"} | log=${logDisplay}`
     })
     .sort((a, b) => a.localeCompare(b))
   return rows.join("\n")
@@ -112,8 +121,8 @@ Usage notes:
     - npm install → "Install package dependencies"
     - mkdir foo → "Create directory 'foo'"
     - find . -name "*.tmp" -exec rm {} \\; → "Find and delete all .tmp files recursively"
-  - If output exceeds 50KB, it will be truncated (head+tail shown); full output is saved to .nexus/tool-output/ for further inspection. Use Grep or Read with offset/limit on that file if needed.
-  - **Blocking vs background:** Use blocking (default) for short commands where you need the result immediately (e.g. git status, npm run lint, short scripts). Use run_in_background: true for long-running commands (builds, servers, tests, migrations). With background: Bash returns immediately with bash_id; output is written to .nexus/<bash_id>.log in real time. Use BashOutput(bash_id) to read progress — the response includes [Process status: running | exited]. Poll until exited or use KillBash(shell_id) to stop. Do NOT use '&' at the end of the command when using run_in_background. Never use run_in_background for 'sleep' — it returns immediately and is useless.
+  - If output exceeds 50KB, it will be truncated (head+tail shown); full output is saved to the global data dir (~/.nexus/data/tool-output/) for further inspection. Use Grep or Read with offset/limit on that file if needed.
+  - **Blocking vs background:** Use blocking (default) for short commands where you need the result immediately (e.g. git status, npm run lint, short scripts). Use run_in_background: true for long-running commands (builds, servers, tests, migrations). With background: Bash returns immediately with bash_id; output is written to the global data dir (~/.nexus/data/run/<bash_id>.log) in real time. Use BashOutput(bash_id) to read progress — the response includes [Process status: running | exited]. Poll until exited or use KillBash(shell_id) to stop. Do NOT use '&' at the end of the command when using run_in_background. Never use run_in_background for 'sleep' — it returns immediately and is useless.
   - **CRITICAL — Use dedicated tools instead of shell commands:** You MUST avoid using Bash for file search, content search, reading, editing, or writing. Use the dedicated tools instead. Do NOT run find, grep, cat, head, tail, sed, awk, or echo in Bash for those purposes. Use:
     - File search: Glob (NOT find or ls)
     - Content search: Grep (NOT grep or rg)
@@ -195,11 +204,11 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
     const workingDir = ctx.cwd
 
     if (background) {
-      const nexusDir = path.join(ctx.cwd, ".nexus")
-      try { fs.mkdirSync(nexusDir, { recursive: true }) } catch { /* ignore */ }
-      await cleanupOldRunLogs(nexusDir)
+      const runDir = getRunLogsDir()
+      try { fs.mkdirSync(runDir, { recursive: true }) } catch { /* ignore */ }
+      await cleanupOldRunLogs(runDir)
       const bashId = `run_${Date.now()}`
-      const logPath = path.join(nexusDir, `${bashId}.log`)
+      const logPath = path.join(runDir, `${bashId}.log`)
       const logStream = fs.createWriteStream(logPath, { flags: "a" })
 
       const child = spawn(command, [], {
@@ -214,11 +223,11 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
       const pid = child.pid ?? 0
       backgroundBashJobs.set(bashId, { pid, logPath })
 
-      const relLog = path.relative(ctx.cwd, logPath) || logPath
+      const logDisplay = shortDataPath(logPath)
       return {
         success: true,
-        output: `[background] bash_id: ${bashId}\nPID: ${pid}\nLog: ${relLog}\n\nOutput is written to the log file in real time. Use BashOutput(bash_id: "${bashId}") to read progress; the response includes [Process status: running | exited]. Use KillBash(shell_id: "${bashId}") to stop the process.`,
-        metadata: { bash_id: bashId, pid, logPath: relLog },
+        output: `[background] bash_id: ${bashId}\nPID: ${pid}\nLog: ${logDisplay}\n\nOutput is written to the log file in real time. Use BashOutput(bash_id: "${bashId}") to read progress; the response includes [Process status: running | exited]. Use KillBash(shell_id: "${bashId}") to stop the process.`,
+        metadata: { bash_id: bashId, pid, logPath },
       }
     }
 
@@ -264,13 +273,12 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
         `[... ${truncatedCount} lines truncated ...]`,
         ...tailLines,
       ].join("\n")
-      const nexusDir = path.join(ctx.cwd, ".nexus")
-      const toolOutputDir = path.join(nexusDir, TOOL_OUTPUT_DIR)
+      const toolOutputDir = getToolOutputDir()
       try { fs.mkdirSync(toolOutputDir, { recursive: true }) } catch { /* ignore */ }
       await cleanupOldToolOutputs(toolOutputDir)
       const ts = Date.now()
       const outPath = path.join(toolOutputDir, `tool_${ts}.out`)
-      // Cap file size by bytes to protect disk (OpenCode-style)
+      // Cap file size by bytes to protect disk (Kilo/OpenCode-style)
       const buf = Buffer.from(fullOutput, "utf8")
       const capped =
         buf.length <= MAX_TOOL_OUTPUT_FILE_BYTES
@@ -278,8 +286,8 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
           : buf.subarray(0, MAX_TOOL_OUTPUT_FILE_BYTES).toString("utf8") +
             "\n\n[output truncated at 50 MB in file; use Grep or Read with offset/limit]\n"
       await fs.promises.writeFile(outPath, capped, "utf8").catch(() => {})
-      const relPath = path.relative(ctx.cwd, outPath).replace(/\\/g, "/") || `.nexus/${TOOL_OUTPUT_DIR}/tool_${ts}.out`
-      const hint = `\n\nFull output saved to: ${relPath}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
+      const outPathDisplay = shortDataPath(outPath)
+      const hint = `\n\nFull output saved to: ${outPathDisplay}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
       outputMessage = truncated + hint
     }
 

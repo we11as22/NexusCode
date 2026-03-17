@@ -142,49 +142,11 @@ export function NexusSubagentBlock({
   }, [subagentsByPartId])
 
   const running = allSubagents.filter((sa) => sa.status === 'running')
-  const completed = allSubagents.filter((sa) => sa.status === 'completed' || sa.status === 'error')
 
-  // Always show: running agents if any, otherwise all completed agents
-  const toDisplay: SubAgentState[] = running.length > 0 ? running : completed
+  // Only show live running agents; completed agents appear inline in the chat history
+  if (running.length === 0) return null
 
-  if (toDisplay.length === 0) return null
-
-  const allDone = running.length === 0 && completed.length > 0
-  const isMulti = toDisplay.length > 1
-
-  // Multi-completed: tree view  "● N agents finished" with ├─/└─ rows
-  if (allDone && isMulti) {
-    return (
-      <Box flexDirection="column" paddingX={1}>
-        <Box>
-          <Text color={theme.success ?? 'green'}>● </Text>
-          <Text bold>{completed.length} agents finished</Text>
-          <Text dimColor> (ctrl+o to expand)</Text>
-        </Box>
-        {completed.map((sa, idx) => {
-          const isLast = idx === completed.length - 1
-          const prefix = isLast ? '└─' : '├─'
-          const contPrefix = isLast ? '   ' : '│  '
-          const isErr = sa.status === 'error'
-          const toolCount = sa.toolHistory.length
-          return (
-            <React.Fragment key={sa.id}>
-              <Box>
-                <Text dimColor>  {prefix} </Text>
-                <Text>{modeLabel(sa.mode)}({truncateTask(sa.task, 48)})</Text>
-                {toolCount > 0 && <Text dimColor> · {toolCount} tool use{toolCount !== 1 ? 's' : ''}</Text>}
-              </Box>
-              <Box>
-                <Text dimColor>  {contPrefix} </Text>
-                <Text color={theme.primary}>⎿ </Text>
-                <Text dimColor>{isErr ? (sa.error ?? 'Failed') : 'Done'}</Text>
-              </Box>
-            </React.Fragment>
-          )
-        })}
-      </Box>
-    )
-  }
+  const isMulti = running.length > 1
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -197,14 +159,14 @@ export function NexusSubagentBlock({
       )}
 
       {/* Each agent — indented by 2 when multi, flat when single */}
-      {toDisplay.map((sa) => (
+      {running.map((sa) => (
         <Box key={sa.id} paddingLeft={isMulti ? 2 : 0} flexDirection="column">
           <AgentBlock sa={sa} expandToolDetails={expandToolDetails} theme={theme} />
         </Box>
       ))}
 
       {/* Single agent running spinner */}
-      {!isMulti && (isLoading || running.length > 0) && (
+      {!isMulti && (
         <Box>
           <Text color={theme.secondaryText}>✽ Running subagent…</Text>
         </Box>

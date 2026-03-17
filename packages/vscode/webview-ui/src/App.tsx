@@ -91,7 +91,10 @@ export function App() {
           break
         case "action":
           if (msg.action === "switchView" && msg.view) {
-            store.setView(msg.view)
+            store.setView(msg.view, {
+              ...(msg.settingsTab && { settingsTab: msg.settingsTab }),
+              ...(msg.settingsIntegTab && { settingsIntegTab: msg.settingsIntegTab }),
+            })
           }
           break
       }
@@ -122,10 +125,30 @@ export function App() {
         </div>
       )}
 
+      {store.connectionState !== "idle" && store.serverUrl && (
+        <div
+          className={`flex-shrink-0 px-3 py-1.5 border-b text-[11px] ${
+            store.connectionState === "error"
+              ? "border-[var(--vscode-errorForeground)] bg-[var(--vscode-inputValidation-errorBackground)] text-[var(--vscode-errorForeground)]"
+              : "border-[var(--vscode-panel-border)] bg-[var(--vscode-badge-background)] text-[var(--vscode-descriptionForeground)]"
+          }`}
+        >
+          {store.connectionState === "connecting" && "Connecting to server…"}
+          {store.connectionState === "streaming" && "Streaming…"}
+          {store.connectionState === "error" && (store.serverConnectionError ?? "Connection error. Send again to retry.")}
+        </div>
+      )}
+
       <div className="nexus-main flex-1 min-h-0 overflow-hidden flex flex-col">
       {store.view === "chat" && <ChatView />}
       {store.view === "sessions" && <SessionsView />}
-      {store.view === "settings" && <SettingsView />}
+      {store.view === "settings" && (
+        <SettingsView
+          initialTab={store.initialSettingsTab}
+          initialIntegTab={store.initialSettingsIntegTab}
+          onInitialTabApplied={store.clearInitialSettingsTab}
+        />
+      )}
       </div>
     </div>
   )
@@ -792,12 +815,23 @@ interface SettingsDraft {
   showReasoningInChat: boolean
 }
 
-function SettingsView() {
+type SettingsTabId = "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"
+type SettingsIntegTabId = "rules-skills" | "mcp" | "rules-instructions"
+
+function SettingsView({
+  initialTab,
+  initialIntegTab,
+  onInitialTabApplied,
+}: {
+  initialTab: SettingsTabId | null
+  initialIntegTab: SettingsIntegTabId | null
+  onInitialTabApplied: () => void
+}) {
   const { config, provider, model, saveConfig, serverUrl, modelsCatalog, modelsCatalogLoading, requestModelsCatalog, agentPresets, requestAgentPresets, agentPresetOptions, requestAgentPresetOptions, handleAgentPresetOptions } = useChatStore()
   const [draft, setDraft] = useState<SettingsDraft>(() => getDefaultDraft())
   const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
-  const [tab, setTab] = useState<"llm" | "embeddings" | "index" | "tools" | "integrations" | "presets">("llm")
-  const [integTab, setIntegTab] = useState<"rules-skills" | "mcp" | "rules-instructions">("rules-skills")
+  const [tab, setTab] = useState<SettingsTabId>("llm")
+  const [integTab, setIntegTab] = useState<SettingsIntegTabId>("rules-skills")
   const [rulesFilter, setRulesFilter] = useState<"all" | "user" | "projects">("all")
   const [includeThirdParty, setIncludeThirdParty] = useState(true)
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
@@ -808,6 +842,14 @@ function SettingsView() {
   const [presetCreateSkills, setPresetCreateSkills] = useState<Set<string>>(new Set())
   const [presetCreateMcp, setPresetCreateMcp] = useState<Set<string>>(new Set())
   const [presetCreateRules, setPresetCreateRules] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (initialTab) {
+      setTab(initialTab)
+      if (initialIntegTab) setIntegTab(initialIntegTab)
+      onInitialTabApplied()
+    }
+  }, [initialTab, initialIntegTab, onInitialTabApplied])
 
   useEffect(() => {
     setServerUrlLocal(serverUrl)

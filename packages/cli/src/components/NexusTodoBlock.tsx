@@ -4,7 +4,6 @@
  */
 import { Box, Text } from 'ink'
 import React, { useMemo } from 'react'
-import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import { getTheme } from '../utils/theme.js'
 
 type TodoItem = {
@@ -28,13 +27,10 @@ function parseTodoList(todo: string): TodoItem[] {
   }
 }
 
-const SEPARATOR_CHAR = '─'
-
 type Props = { todo: string }
 
 export function NexusTodoBlock({ todo }: Props): React.ReactNode {
   const theme = getTheme()
-  const { columns } = useTerminalSize()
   const items = useMemo(() => parseTodoList(todo), [todo])
   if (items.length === 0) return null
 
@@ -47,7 +43,6 @@ export function NexusTodoBlock({ todo }: Props): React.ReactNode {
   ).length
   const openCount = items.length - doneCount - inProgressCount
   const summary = `${items.length} tasks (${doneCount} done, ${inProgressCount} in progress, ${openCount} open)`
-  const separator = SEPARATOR_CHAR.repeat(Math.max(0, columns - 2))
 
   return (
     <Box flexDirection="column" marginTop={0} paddingX={1}>
@@ -77,7 +72,6 @@ export function NexusTodoBlock({ todo }: Props): React.ReactNode {
           </Box>
         )
       })}
-      <Box marginTop={0}><Text dimColor>{separator}</Text></Box>
       <Box marginTop={0}>
         <Text dimColor> esc to interrupt · ctrl+t to hide tasks</Text>
       </Box>

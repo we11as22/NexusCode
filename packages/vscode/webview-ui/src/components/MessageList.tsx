@@ -165,11 +165,11 @@ function BashCommandBlock({ part, approval }: { part: ToolPart; approval?: React
               … last {BASH_OUTPUT_TAIL_LINES} lines (of {lines.length})
             </div>
           )}
-          <pre className="text-[11px] font-mono whitespace-pre-wrap break-words overflow-x-auto max-h-64 overflow-y-auto bg-[var(--vscode-textCodeBlock-background)] rounded p-2">
+          <pre className="nexus-output-pre text-[11px] font-mono whitespace-pre-wrap break-words overflow-x-auto max-h-64 overflow-y-auto bg-[var(--vscode-textCodeBlock-background)] rounded">
             {displayOutput || " "}
           </pre>
           {part.error && (
-            <div className="mt-1 text-red-400 text-[11px] bg-red-500/10 rounded p-2">{part.error}</div>
+            <div className="mt-1 text-red-400 text-[11px] bg-red-500/10 rounded p-2 px-3">{part.error}</div>
           )}
         </div>
       )}
@@ -1062,7 +1062,9 @@ function SubagentInlineList({ items }: { items: SubagentDisplayItem[] }) {
                 {truncateTask(item.task, 72)}
               </div>
               <div className="nexus-subtask-subtitle">
-                {item.detail}
+                {isRunning
+                  ? <span className="nexus-subtask-subtitle-shimmer">{item.detail}</span>
+                  : item.detail}
               </div>
               {isRunning && recentTools.length > 1 && (
                 <div

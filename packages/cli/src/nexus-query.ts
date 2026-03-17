@@ -8,12 +8,14 @@ import {
   runAgentLoop,
   createLLMClient,
   loadConfig,
+  Session,
   type AgentEvent,
   type ToolDef,
 } from '@nexuscode/core'
 import type { NexusBootstrapResult } from './nexus-bootstrap.js'
 import type { SubagentEvent } from './nexus-subagents.js'
 import { CliHost } from './host.js'
+import { NexusServerClient } from './server-client.js'
 import {
   createAssistantMessage,
   createAssistantAPIErrorMessage,
@@ -166,8 +168,11 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     onSubagentEvent,
     onRunComplete,
   } = opts
-  const { session, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer } = nexus
+  const { session: bootstrapSession, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer, serverUrl } = nexus
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug' | 'review'
+
+  let session = bootstrapSession
+  session.addMessage({ role: 'user', content: userPrompt })
 
   let config = await loadConfig(nexus.cwd, { secrets: nexus.secretsStore })
   if (autoApprovePermissions) {
@@ -233,27 +238,54 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   /** Start of this run: previous turn’s edits become revertable for /undo. */
   host.startNewTurn()
 
-  session.addMessage({ role: 'user', content: userPrompt })
-
   const client = createLLMClient(config.model)
   const { builtin, dynamic } = toolRegistry.getForMode(mode)
   const tools: ToolDef[] = [...builtin, ...dynamic]
 
-  const runPromise = runAgentLoop({
-    session,
-    client,
-    host,
-    config,
-    mode,
-    tools,
-    skills,
-    rulesContent,
-    indexer: indexer ?? undefined,
-    compaction,
-    signal,
-  }).catch((err) => {
-    runError = err instanceof Error ? err : new Error(String(err))
-  })
+  let runPromise: Promise<void>
+  if (serverUrl) {
+    const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: nexus.cwd })
+    const created = await serverClient.createSession()
+    session = new Session(created.id, nexus.cwd, [])
+    runPromise = (async () => {
+      try {
+        for await (const event of serverClient.streamMessage(created.id, userPrompt, mode, signal)) {
+          if (event.type === 'assistant_content_complete') {
+            try {
+              const msgs = await serverClient.getMessages(created.id, { limit: 100 })
+              session = new Session(created.id, nexus.cwd, msgs)
+            } catch {
+              // keep current session
+            }
+          }
+          eventQueue.push(event)
+          if (resolveNext) {
+            const r = resolveNext
+            resolveNext = null
+            r()
+          }
+        }
+      } catch (err) {
+        runError = err instanceof Error ? err : new Error(String(err))
+      }
+    })()
+  } else {
+    runPromise = runAgentLoop({
+      session,
+      client,
+      host,
+      config,
+      mode,
+      tools,
+      skills,
+      rulesContent,
+      indexer: indexer ?? undefined,
+      compaction,
+      signal,
+    }).catch((err) => {
+      runError = err instanceof Error ? err : new Error(String(err))
+    })
+  }
 
   const consumed: MessageType[] = []
 

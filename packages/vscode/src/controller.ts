@@ -42,6 +42,8 @@ import {
   getModelsCatalog,
   hadPlanExit,
   getPlanContentForFollowup,
+  NexusServerClient,
+  DEFAULT_HEARTBEAT_TIMEOUT_MS,
 } from "@nexuscode/core"
 import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
 
@@ -51,7 +53,6 @@ const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not
 /** Number of messages to load when opening a server session (same as server RECENT_MESSAGES_FOR_RUN for agent context). */
 const INITIAL_SERVER_MESSAGES = 200
 const FILE_WRITE_TOOL_NAMES = new Set(["Write", "Edit", "write_to_file", "replace_in_file"])
-
 type ShadowSubAgentState = {
   id: string
   mode: Mode
@@ -225,13 +226,15 @@ export type ExtensionMessage =
   | { type: "configLoaded"; config: NexusConfig }
   | { type: "skillDefinitions"; definitions: Array<{ name: string; path: string; summary: string }> }
   | { type: "addToChatContent"; content: string }
-  | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings" }
+  | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings"; settingsTab?: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"; settingsIntegTab?: "rules-skills" | "mcp" | "rules-instructions" }
   | { type: "mcpServerStatus"; results: Array<{ name: string; status: "ok" | "error"; error?: string }> }
   | { type: "pendingApproval"; partId: string; action: ApprovalAction }
   | { type: "confirmResult"; id: string; ok: boolean }
   | { type: "modelsCatalog"; catalog: import("@nexuscode/core").ModelsCatalog }
   | { type: "agentPresets"; presets: Array<{ name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string }> }
   | { type: "agentPresetOptions"; options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } }
+
+export type ServerConnectionState = "idle" | "connecting" | "streaming" | "error"
 
 export interface WebviewState {
   messages: SessionMessage[]
@@ -248,6 +251,10 @@ export interface WebviewState {
   contextLimitTokens: number
   contextPercent: number
   serverUrl?: string
+  /** When using server: connection state for UI indicator and retry. */
+  connectionState?: ServerConnectionState
+  /** When connectionState === "error": message to show and trigger retry. */
+  serverConnectionError?: string
   modelsCatalog?: import("@nexuscode/core").ModelsCatalog | null
   checkpointEnabled?: boolean
   checkpointEntries?: CheckpointEntry[]
@@ -312,6 +319,9 @@ export class Controller {
   /** For server sessions: offset of the oldest loaded message (0 = all loaded). Used for "Load older" pagination. */
   private serverSessionOldestLoadedOffset: number | undefined = undefined
   private loadingOlderMessages = false
+  /** When using server: connection state and error for UI. */
+  private serverConnectionState: ServerConnectionState = "idle"
+  private serverConnectionError: string | undefined = undefined
   private initialized = false
   private initPromise?: Promise<void>
   /** Started in ensureInitialized (not awaited there); runAgent awaits it so MCP is ready before first run. */
@@ -590,7 +600,7 @@ export class Controller {
         } else {
           parts.push(nextPart)
         }
-        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents") {
+        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") {
           this.streamLastSpawnAgentPartId = event.partId
         }
         return
@@ -614,7 +624,7 @@ export class Controller {
             timeEnd: Date.now(),
           } as ToolPart
         }
-        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents") {
+        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") {
           this.streamLastSpawnAgentPartId = null
         }
         return
@@ -838,6 +848,8 @@ export class Controller {
         contextLimitTokens: 128000,
         contextPercent: 0,
         serverUrl: this.getServerUrl(),
+        connectionState: this.serverConnectionState,
+        serverConnectionError: this.serverConnectionError,
         modelsCatalog: this.modelsCatalogCache ?? null,
         sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
       }
@@ -864,6 +876,8 @@ export class Controller {
       contextLimitTokens,
       contextPercent,
       serverUrl: this.getServerUrl(),
+      connectionState: this.serverConnectionState,
+      serverConnectionError: this.serverConnectionError,
       modelsCatalog: this.modelsCatalogCache ?? null,
       checkpointEnabled: this.config?.checkpoint?.enabled === true || this.checkpoint != null,
       checkpointEntries: this.checkpoint?.getEntries() ?? [],
@@ -905,6 +919,12 @@ export class Controller {
         })
       })
     }
+  }
+
+  private setServerConnectionState(state: ServerConnectionState, error?: string): void {
+    this.serverConnectionState = state
+    this.serverConnectionError = error
+    this.postStateToWebview()
   }
 
   /** Load skills from config paths and standard dirs (~/.nexus/skills, .nexus/skills) and send to webview for Skills list UI. */
@@ -1555,62 +1575,27 @@ export class Controller {
           }
           case "mode":
           case "llm":
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings", settingsTab: "llm" })
+            break
           case "embeddings":
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings", settingsTab: "embeddings" })
+            break
           case "presets":
-            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings" })
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings", settingsTab: "presets" })
             break
           case "sessions":
             this.postMessageToWebview({ type: "action", action: "switchView", view: "sessions" })
             break
           case "index":
             this.sendIndexStatus()
-            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings" })
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings", settingsTab: "index" })
             break
-          case "skills": {
-            // Show quick pick: project or global
-            const choice = await vscode.window.showQuickPick(
-              ["Project (.nexus/skills/)", "Global (~/.nexus/skills/)"],
-              { placeHolder: "Open skills in..." }
-            )
-            if (choice?.startsWith("Project")) {
-              const skillsDir = path.join(cwd, ".nexus", "skills")
-              try {
-                await vscode.workspace.fs.createDirectory(vscode.Uri.file(skillsDir))
-              } catch {}
-              await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(skillsDir))
-            } else if (choice?.startsWith("Global")) {
-              const globalSkillsDir = path.join(os.homedir(), ".nexus", "skills")
-              try {
-                await vscode.workspace.fs.createDirectory(vscode.Uri.file(globalSkillsDir))
-              } catch {}
-              await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(globalSkillsDir))
-            }
+          case "skills":
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings", settingsTab: "integrations", settingsIntegTab: "rules-skills" })
             break
-          }
-          case "mcp": {
-            const choice = await vscode.window.showQuickPick(
-              ["Project (.nexus/mcp-servers.json)", "Global (~/.nexus/mcp-servers.json)"],
-              { placeHolder: "Open MCP config in..." }
-            )
-            if (choice?.startsWith("Project")) {
-              const mcpPath = path.join(cwd, ".nexus", "mcp-servers.json")
-              const uri = vscode.Uri.file(mcpPath)
-              const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(async () => {
-                await vscode.workspace.fs.writeFile(uri, Buffer.from("[]", "utf8"))
-                return vscode.workspace.openTextDocument(uri)
-              })
-              await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active })
-            } else if (choice?.startsWith("Global")) {
-              const globalMcpPath = path.join(os.homedir(), ".nexus", "mcp-servers.json")
-              const uri = vscode.Uri.file(globalMcpPath)
-              const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(async () => {
-                await vscode.workspace.fs.writeFile(uri, Buffer.from("[]", "utf8"))
-                return vscode.workspace.openTextDocument(uri)
-              })
-              await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active })
-            }
+          case "mcp":
+            this.postMessageToWebview({ type: "action", action: "switchView", view: "settings", settingsTab: "integrations", settingsIntegTab: "mcp" })
             break
-          }
           case "create-skill": {
             const skillName = await vscode.window.showInputBox({ prompt: "Skill name (e.g. my-skill)" })
             if (!skillName?.trim()) break
@@ -2070,158 +2055,111 @@ Return in this format:
     })
 
     if (serverUrl) {
+      this.setServerConnectionState("connecting")
+      let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
+      const clearHeartbeat = () => {
+        if (heartbeatTimer != null) {
+          clearTimeout(heartbeatTimer)
+          heartbeatTimer = null
+        }
+      }
+      const resetHeartbeat = () => {
+        clearHeartbeat()
+        if (this.abortController?.signal.aborted) return
+        heartbeatTimer = setTimeout(() => {
+          heartbeatTimer = null
+          this.setServerConnectionState("error", "Connection lost (no response from server). You can retry by sending again.")
+          this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: "Connection lost: heartbeat timeout" } })
+          this.abortController?.abort()
+        }, DEFAULT_HEARTBEAT_TIMEOUT_MS)
+      }
       try {
+        const client = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
         let sid = this.serverSessionId
         if (!sid) {
-          const createRes = await fetch(`${serverUrl.replace(/\/$/, "")}/session`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
-            body: "{}",
-          })
-          if (!createRes.ok) throw new Error(`Server create session: ${createRes.status}`)
-          const created = (await createRes.json()) as { id: string }
+          const created = await client.createSession()
           sid = created.id
           this.serverSessionId = sid
         }
-        const res = await fetch(
-          `${serverUrl.replace(/\/$/, "")}/session/${sid}/message?directory=${encodeURIComponent(cwd)}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
-            body: JSON.stringify({ content: actualContent, mode: runMode }),
-            signal: this.abortController!.signal,
+        this.setServerConnectionState("streaming")
+        const forwardServerEvent = (event: AgentEvent) => {
+          this.applyAgentEventToSessionShadow(event)
+          this.postMessageToWebview({ type: "agentEvent", event })
+          if (this.eventAffectsVisibleState(event)) {
+            this.postStateToWebview()
           }
-        )
-        if (!res.ok) {
-          this.postMessageToWebview({
-            type: "agentEvent",
-            event: { type: "error", error: `Server: ${res.status} ${await res.text()}` },
-          })
-          this.isRunning = false
-          this.postStateToWebview()
-          return
-        }
-        const reader = res.body?.getReader()
-        if (!reader) {
-          this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: "No response body" } })
-          this.isRunning = false
-          this.postStateToWebview()
-          return
-        }
-        const decoder = new TextDecoder()
-        let buffer = ""
-        try {
-          const forwardServerEvent = (event: AgentEvent) => {
-            this.applyAgentEventToSessionShadow(event)
-            this.postMessageToWebview({ type: "agentEvent", event })
-            if (this.eventAffectsVisibleState(event)) {
-              this.postStateToWebview()
-            }
-          }
-          while (true) {
-            const { value, done } = await reader.read()
-            if (done) break
-            buffer += decoder.decode(value, { stream: true })
-            const lines = buffer.split("\n")
-            buffer = lines.pop() ?? ""
-            for (const line of lines) {
-              const t = line.trim()
-              if (!t) continue
-              try {
-                const event = JSON.parse(t) as AgentEvent
-                if (
-                  event.type === "tool_end" &&
-                  event.success &&
-                  this.isFileWriteTool(event.tool) &&
-                  event.path &&
-                  typeof (event as AgentEvent & { writtenContent?: string }).writtenContent === "string"
-                ) {
-                  const absPath = path.isAbsolute(event.path) ? event.path : path.join(cwd, event.path)
-                  let dir = path.dirname(absPath)
-                  const toCreate: string[] = []
-                  while (dir !== cwd && dir.length > cwd.length) {
-                    toCreate.push(dir)
-                    dir = path.dirname(dir)
-                  }
-                  toCreate.reverse()
-                  for (const p of toCreate) {
-                    await Promise.resolve(vscode.workspace.fs.createDirectory(vscode.Uri.file(p))).catch(() => {})
-                  }
-                  const uri = vscode.Uri.file(absPath)
-                  await Promise.resolve(
-                    vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent))
-                  ).catch(() => {})
-                }
-                forwardServerEvent(event)
-              } catch {}
-            }
-          }
-          for (const line of buffer.split("\n")) {
-            const t = line.trim()
-            if (!t) continue
-            try {
-              const event = JSON.parse(t) as AgentEvent
-              if (
-                event.type === "tool_end" &&
-                event.success &&
-                this.isFileWriteTool(event.tool) &&
-                event.path &&
-                typeof (event as AgentEvent & { writtenContent?: string }).writtenContent === "string"
-              ) {
-                const absPath = path.isAbsolute(event.path) ? event.path : path.join(cwd, event.path)
-                let dir = path.dirname(absPath)
-                const toCreate: string[] = []
-                while (dir !== cwd && dir.length > cwd.length) {
-                  toCreate.push(dir)
-                  dir = path.dirname(dir)
-                }
-                toCreate.reverse()
-                for (const p of toCreate) {
-                  await Promise.resolve(vscode.workspace.fs.createDirectory(vscode.Uri.file(p))).catch(() => {})
-                }
-                const uri = vscode.Uri.file(absPath)
-                await Promise.resolve(
-                  vscode.workspace.fs.writeFile(uri, new TextEncoder().encode((event as AgentEvent & { writtenContent: string }).writtenContent))
-                ).catch(() => {})
+          if (event.type === "tool_end" && event.success && this.isFileWriteTool(event.tool) && event.path) {
+            const writtenContent = (event as AgentEvent & { writtenContent?: string }).writtenContent
+            if (typeof writtenContent === "string") {
+              const absPath = path.isAbsolute(event.path) ? event.path : path.join(cwd, event.path)
+              let dir = path.dirname(absPath)
+              const toCreate: string[] = []
+              while (dir !== cwd && dir.length > cwd.length) {
+                toCreate.push(dir)
+                dir = path.dirname(dir)
               }
-              forwardServerEvent(event)
-            } catch {}
-          }
-        } finally {
-          reader.releaseLock()
-        }
-        try {
-          const metaRes = await fetch(
-            `${serverUrl.replace(/\/$/, "")}/session/${sid}?directory=${encodeURIComponent(cwd)}`,
-            { headers: { "x-nexus-directory": cwd } }
-          )
-          if (metaRes.ok) {
-            const meta = (await metaRes.json()) as { messageCount: number }
-            const offset = Math.max(0, meta.messageCount - INITIAL_SERVER_MESSAGES)
-            const msgRes = await fetch(
-              `${serverUrl.replace(/\/$/, "")}/session/${sid}/message?directory=${encodeURIComponent(cwd)}&limit=${INITIAL_SERVER_MESSAGES}&offset=${offset}`,
-              { headers: { "x-nexus-directory": cwd } }
-            )
-            if (msgRes.ok) {
-              const messages = (await msgRes.json()) as SessionMessage[]
-              this.session = new Session(sid!, cwd, messages)
-              this.serverSessionOldestLoadedOffset = offset
+              toCreate.reverse()
+              for (const p of toCreate) {
+                void vscode.workspace.fs.createDirectory(vscode.Uri.file(p)).catch(() => {})
+              }
+              void vscode.workspace.fs.writeFile(vscode.Uri.file(absPath), new TextEncoder().encode(writtenContent)).catch(() => {})
             }
           }
-        } catch {}
+          if (event.type === "error") {
+            this.isRunning = false
+            this.setServerConnectionState("error", event.error)
+            this.postStateToWebview()
+          }
+        }
+        for await (const event of client.streamMessage(sid, actualContent, runMode, this.abortController!.signal)) {
+          if (this.abortController?.signal.aborted) break
+          resetHeartbeat()
+          forwardServerEvent(event)
+        }
+        try {
+          const meta = await client.getSession(sid)
+          const offset = Math.max(0, meta.messageCount - INITIAL_SERVER_MESSAGES)
+          const messages = await client.getMessages(sid, { limit: INITIAL_SERVER_MESSAGES, offset })
+          this.session = new Session(sid, cwd, messages)
+          this.serverSessionOldestLoadedOffset = offset
+        } catch {
+          // keep current session shadow
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (!msg.includes("abort")) {
+          this.setServerConnectionState("error", msg)
           this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: msg } })
         }
       } finally {
+        clearHeartbeat()
         this.isRunning = false
+        this.serverConnectionState = "idle"
+        this.serverConnectionError = undefined
         this.postStateToWebview()
       }
       return
     }
 
     const host = new VsCodeHost(cwd, (event: AgentEvent) => {
+      // Track spawn agent partId for subagent event routing (local mode doesn't go through applyAgentEventToSessionShadow for non-subagent events)
+      if (event.type === "tool_start") {
+        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") {
+          this.streamLastSpawnAgentPartId = event.partId
+        }
+      } else if (event.type === "tool_end") {
+        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") {
+          this.streamLastSpawnAgentPartId = null
+        }
+      } else if (
+        event.type === "subagent_start" ||
+        event.type === "subagent_tool_start" ||
+        event.type === "subagent_tool_end" ||
+        event.type === "subagent_done"
+      ) {
+        // Apply subagent events to session shadow so stateUpdates carry current subagent progress
+        this.applyAgentEventToSessionShadow(event)
+      }
       this.postMessageToWebview({ type: "agentEvent", event })
       if (this.eventAffectsVisibleState(event)) {
         this.postStateToWebview()

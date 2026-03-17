@@ -167,7 +167,7 @@ export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
         tabIndex={0}
         onClick={() => setOpen((o) => !o)}
         onKeyDown={(e) => e.key === "Enter" && setOpen((o) => !o)}
-        className={`flex items-center gap-2 px-3 py-2 cursor-pointer select-none text-xs hover:bg-[var(--vscode-list-hoverBackground)] ${
+        className={`flex items-center gap-2 px-4 py-2 cursor-pointer select-none text-xs hover:bg-[var(--vscode-list-hoverBackground)] ${
           mostImportant?.inProgress && !open ? "text-[var(--vscode-charts-yellow)]" : "text-[var(--vscode-foreground)]"
         }`}
       >
@@ -185,7 +185,7 @@ export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
         </span>
       </div>
       {open && (
-        <ul ref={listRef} className="list-none max-h-[300px] overflow-y-auto mt-0 py-2 px-3 border-t border-[var(--vscode-panel-border)] space-y-1.5">
+        <ul ref={listRef} className="list-none max-h-[300px] overflow-y-auto mt-0 py-2 px-4 border-t border-[var(--vscode-panel-border)] space-y-1.5">
           {items.map((item, idx) => (
             <div
               key={item.id}

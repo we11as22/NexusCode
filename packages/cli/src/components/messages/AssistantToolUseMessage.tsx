@@ -9,8 +9,12 @@ import { BLACK_CIRCLE } from '../../constants/figures.js'
 import { ThinkTool } from '../../tools/ThinkTool/ThinkTool.js'
 import { getGenericToolForCoreName } from '../../tools/GenericCoreTool.js'
 import type { SubAgentState } from '../../nexus-subagents.js'
-import { subagentStatusLine, truncateTask } from '../../nexus-subagents.js'
+import { truncateTask } from '../../nexus-subagents.js'
 import { AssistantThinkingMessage } from './AssistantThinkingMessage.js'
+
+function modeLabel(mode: string): string {
+  return mode.charAt(0).toUpperCase() + mode.slice(1).toLowerCase()
+}
 
 type Props = {
   param: ToolUseBlockParam
@@ -322,49 +326,90 @@ export function AssistantToolUseMessage({
       normalizedToolName === 'parallel') &&
     subagents.length > 0
   if (!showSubagents) return mainBlock
+
+  const running = subagents.filter((sa) => sa.status === 'running')
+  const completed = subagents.filter((sa) => sa.status === 'completed' || sa.status === 'error')
+  const allDone = running.length === 0 && completed.length > 0
+
+  // All done: tree view with ├─/└─
+  if (allDone && completed.length > 1) {
+    return (
+      <Box flexDirection="column" width="100%">
+        {mainBlock}
+        <Box flexDirection="column" marginLeft={2} marginTop={1}>
+          <Box>
+            <Text color={getTheme().success ?? 'green'}>● </Text>
+            <Text bold>{completed.length} agents finished</Text>
+          </Box>
+          {completed.map((sa, idx) => {
+            const isLast = idx === completed.length - 1
+            const prefix = isLast ? '└─' : '├─'
+            const contPrefix = isLast ? '   ' : '│  '
+            const isErr = sa.status === 'error'
+            const toolCount = sa.toolHistory.length
+            return (
+              <React.Fragment key={sa.id}>
+                <Box>
+                  <Text dimColor>  {prefix} </Text>
+                  <Text>{modeLabel(sa.mode)}({truncateTask(sa.task, 48)})</Text>
+                  {toolCount > 0 && <Text dimColor> · {toolCount} tool use{toolCount !== 1 ? 's' : ''}</Text>}
+                </Box>
+                <Box>
+                  <Text dimColor>  {contPrefix} </Text>
+                  <Text color={getTheme().primary}>⎿ </Text>
+                  <Text dimColor>{isErr ? (sa.error ?? 'Failed') : 'Done'}</Text>
+                </Box>
+              </React.Fragment>
+            )
+          })}
+        </Box>
+      </Box>
+    )
+  }
+
+  // Single done or running: show primary agent details
   const primary =
-    subagents.find((sa) => sa.status === 'running') ??
+    running[0] ??
     [...subagents].sort((a, b) => b.startedAt - a.startedAt)[0]
   if (!primary) return mainBlock
   const visibleHistory = expandToolDetails
     ? primary.toolHistory
     : primary.toolHistory.slice(0, 3)
   const hiddenUses = Math.max(0, primary.toolHistory.length - visibleHistory.length)
-  const runningCount = subagents.filter((sa) => sa.status === 'running').length
   return (
     <Box flexDirection="column" width="100%">
       {mainBlock}
       <Box flexDirection="column" marginLeft={2} marginTop={1}>
         <Text color={color}>
-          Explore({truncateTask(primary.task, 72)})
+          {modeLabel(primary.mode)}({truncateTask(primary.task, 72)})
         </Text>
-        {visibleHistory.length > 0 ? (
-          <Text color={getTheme().secondaryText}>  ⎿ {visibleHistory[0]}</Text>
+        {primary.status === 'completed' || primary.status === 'error' ? (
+          <Text dimColor>  ⎿ {primary.status === 'error' ? (primary.error ?? 'Failed') : 'Done'}</Text>
         ) : (
-          <Text color={getTheme().secondaryText}>  ⎿ Starting…</Text>
+          <>
+            {visibleHistory.length > 0 ? (
+              <Text color={getTheme().secondaryText}>  ⎿ {visibleHistory[0]}</Text>
+            ) : (
+              <Text color={getTheme().secondaryText}>  ⎿ Starting…</Text>
+            )}
+            {visibleHistory.slice(1).map((entry, idx) => (
+              <Text key={`${primary.id}-history-${idx}`} color={getTheme().secondaryText}>
+                {'     '}{entry}
+              </Text>
+            ))}
+            {hiddenUses > 0 ? (
+              <Text color={getTheme().secondaryText}>
+                {'     '}+{hiddenUses} more tool uses (ctrl+o to expand)
+              </Text>
+            ) : null}
+            <Text color={getTheme().secondaryText}>{'     '}ctrl+b to run in background</Text>
+            {running.length > 1 ? (
+              <Text color={getTheme().secondaryText}>
+                {'     '}+{running.length - 1} more subagent{running.length - 1 === 1 ? '' : 's'} running
+              </Text>
+            ) : null}
+          </>
         )}
-        {visibleHistory.slice(1).map((entry, idx) => (
-          <Text key={`${primary.id}-history-${idx}`} color={getTheme().secondaryText}>
-            {'     '}{entry}
-          </Text>
-        ))}
-        {hiddenUses > 0 ? (
-          <Text color={getTheme().secondaryText}>
-            {'     '}+{hiddenUses} more tool uses (ctrl+o to expand)
-          </Text>
-        ) : null}
-        <Text color={getTheme().secondaryText}>{'     '}ctrl+b to run in background</Text>
-        {runningCount > 1 ? (
-          <Text color={getTheme().secondaryText}>
-            {'     '}+{runningCount - 1} more subagent{runningCount - 1 === 1 ? '' : 's'} running
-          </Text>
-        ) : null}
-        {primary.error && primary.status === 'error' ? (
-          <Text color={getTheme().error}>{truncateTask(primary.error, 72)}</Text>
-        ) : null}
-        {primary.status !== 'error' ? (
-          <Text color={getTheme().secondaryText}>{subagentStatusLine(primary)}</Text>
-        ) : null}
       </Box>
     </Box>
   )

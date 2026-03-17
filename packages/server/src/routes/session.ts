@@ -120,12 +120,31 @@ sessionRoutes.post("/:id/message", async (c) => {
   c.header("Content-Type", "application/x-ndjson")
   c.header("Transfer-Encoding", "chunked")
   c.header("X-Accel-Buffering", "no")
+  c.header("Cache-Control", "no-store")
+
+  const HEARTBEAT_INTERVAL_MS = 10_000
 
   return stream(c, async (stream) => {
     const write = (event: AgentEvent) => {
       stream.write(JSON.stringify(event) + "\n")
     }
+    const writeHeartbeat = () => {
+      stream.write(JSON.stringify({ type: "heartbeat", ts: Date.now() }) + "\n")
+    }
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+    const clearHeartbeat = () => {
+      if (heartbeatTimer != null) {
+        clearInterval(heartbeatTimer)
+        heartbeatTimer = null
+      }
+    }
+    abortController.signal.addEventListener(
+      "abort",
+      () => clearHeartbeat(),
+      { once: true }
+    )
     try {
+      heartbeatTimer = setInterval(writeHeartbeat, HEARTBEAT_INTERVAL_MS)
       await runSession({
         session,
         cwd,
@@ -146,6 +165,7 @@ sessionRoutes.post("/:id/message", async (c) => {
       const msg = err instanceof Error ? err.message : String(err)
       if (!msg.includes("abort")) write({ type: "error", error: msg })
     } finally {
+      clearHeartbeat()
       stream.close()
     }
   })

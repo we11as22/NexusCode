@@ -25,7 +25,7 @@ export const bashOutputTool: ToolDef<z.infer<typeof schema>> = {
   description: `Retrieve output from a running or completed background bash shell started with Bash(..., run_in_background: true).
 
 - Takes bash_id (returned by Bash when run_in_background is true).
-- Returns a status line: [Process status: running | exited] and the log content so far (stdout/stderr from .nexus/<bash_id>.log). Each call returns the full log up to that point; when status is "exited", the log is final.
+- Returns a status line: [Process status: running | exited] and the log content so far (stdout/stderr from the log file in the global data dir, e.g. ~/.nexus/data/run/<bash_id>.log). Each call returns the full log up to that point; when status is "exited", the log is final.
 - Use the optional filter parameter (regex) to show only lines matching the pattern (e.g. "error|Error|ERROR" or "progress|%"). Non-matching lines are not included in the result when filter is set.
 - Use this tool to monitor long-running commands (builds, tests, servers). Call periodically; when status is "exited", the command has finished.
 - To stop a running process, use KillBash(shell_id) with the same id (shell_id and bash_id are the same value).

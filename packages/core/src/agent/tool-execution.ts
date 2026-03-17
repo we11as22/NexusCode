@@ -536,7 +536,7 @@ export async function executeToolCall(
       }
     }
 
-    // Kilocode-style: truncate large tool output, save full content to .nexus/tool-output/, return shortened + hint
+    // Kilocode-style: truncate large tool output, save full content to global data dir (~/.nexus/data/tool-output/), return shortened + hint
     if (
       result.success &&
       typeof result.output === "string" &&

@@ -26,6 +26,23 @@ Both hosts call the same `runAgentLoop()` in core, so behavior is consistent acr
 
 Optional **`packages/server`** stores sessions and messages in SQLite; extension and CLI can connect to it for shared sessions and pagination (no OOM on long chats).
 
+**Terminal output (Kilo-style):** Bash run logs and large tool output are written to the **global data dir** (`~/.nexus/data` or `$NEXUS_DATA_HOME`), not in the project. So `run_*.log` and `tool-output/*.out` never appear in the project tree, in git status, or in the extension/CLI "N Files" / session-edits list (those lists only include paths from Write/Edit tool results). The agent can read these files via `Read("~/.nexus/data/run/run_<id>.log")` or `Read("~/.nexus/data/tool-output/...")`; the Read tool expands `~` to the home directory, and `autoApproveReadPatterns` includes `**/.nexus/data/run/**` and `**/.nexus/data/tool-output/**` so no approval is required.
+
+#### Connection modes and server stream contract
+
+| Mode | Who runs the agent | Where sessions live | How client connects |
+|------|--------------------|----------------------|----------------------|
+| **Extension in-process** | `runAgentLoop()` in extension process, `VsCodeHost` | Local JSONL (`.nexus/`) | N/A |
+| **Extension + server** | Server process (`runSession` → `runAgentLoop` with `ServerHost`) | Server SQLite | Extension uses `nexuscode.serverUrl`; `NexusServerClient` (core) for create/list/get messages and **stream** |
+| **CLI in-process** | `runAgentLoop()` in CLI process, `CliHost` | Local JSONL | N/A |
+| **CLI + server** | Server process | Server SQLite | CLI `--server <url>` (or `NEXUS_SERVER_URL`); `queryNexus` uses `NexusServerClient.streamMessage()` and pushes events into the same queue as in-process; REPL consumes identically |
+
+Server stream (POST `/session/:id/message`) returns **NDJSON** (`Content-Type: application/x-ndjson`, chunked): one JSON object per line. Each object is an `AgentEvent` or a **heartbeat** line `{"type":"heartbeat","ts":<ms>}` sent every 10s so proxies and clients can detect dead connections. Clients skip heartbeat lines; if no event (including heartbeat) is received for `DEFAULT_HEARTBEAT_TIMEOUT_MS` (20s), the client treats the stream as dead and surfaces an error (extension: connection state "error" + retry by sending again). Malformed lines yield an `AgentEvent` `{ type: "error", error: "Invalid stream line: ..." }`. Abort is via client closing the request (`AbortController.signal`); the server forwards `c.req.raw.signal` to `runSession` so the run stops when the client disconnects.
+
+**Health:** GET `/health` returns `{ ok: true, ts }` for liveness checks.
+
+**Extension → webview:** In server mode the controller sends each `agentEvent` immediately via `postMessage` (no batching), matching kilo-vscode: postMessage already acts as an implicit async buffer, so coalescing is unnecessary and would add latency. Connection state (`connecting` / `streaming` / `error`) and optional `serverConnectionError` are in `stateUpdate` so the UI can show an indicator and "Send again to retry" on error.
+
 ### Extension: Controller pattern
 
 The VS Code extension uses a single **Controller** (`packages/vscode/src/controller.ts`) that owns:
