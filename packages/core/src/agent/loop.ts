@@ -304,6 +304,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   let forceEmptyResponseRecoveryPromptNext = false
   let consecutiveEmptyFinalResponses = 0
   const maxEmptyFinalResponseRetries = 2
+  let contextOverflowRetries = 0
+  const MAX_CONTEXT_OVERFLOW_RETRIES = 3
   let lastAssistantMessageId = ""
   const doubleCheckCompletion = config.checkpoint?.doubleCheckCompletion === true
   const completionState = {
@@ -312,10 +314,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     checkpoint: opts.checkpoint,
   }
   /** Emit context usage. When systemPrompt is provided, include it in usedTokens (Cline/OpenCode-style: UI shows real request size). */
+  let lastBuiltSystemPrompt = ""
   const emitContextUsage = (systemPromptText?: string) => {
+    const text = systemPromptText ?? lastBuiltSystemPrompt
     const limitTokens = getContextLimit(activeClient.modelId, config.model.contextWindow)
     const sessionTokens = session.getTokenEstimate()
-    const systemTokens = systemPromptText ? estimateTokens(systemPromptText) : 0
+    const systemTokens = text ? estimateTokens(text) : 0
     const usedTokens = sessionTokens + systemTokens
     const percent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
     host.emit({ type: "context_usage", usedTokens, limitTokens, percent })
@@ -401,8 +405,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         "3. Include: what was accomplished, any remaining tasks, and what should be done next.\n" +
         "Any attempt to use tools is a critical violation. Respond with text ONLY."
       )
+    } else if (loopIterations >= Math.floor(maxIterations * 0.8)) {
+      blocks.push(
+        `NOTICE — APPROACHING STEP LIMIT\n\n` +
+        `You have used ${loopIterations} of ${maxIterations} allowed steps in ${mode} mode. ` +
+        `Begin wrapping up. Prioritize completing the most important remaining work and delivering ` +
+        `a clear summary response. Avoid starting new sub-tasks or broad explorations.`
+      )
     }
     const systemPrompt = blocks.join("\n\n---\n\n")
+    lastBuiltSystemPrompt = systemPrompt
 
     // Emit context usage including system prompt so UI shows real request size (Cline/OpenCode-style)
     emitContextUsage(systemPrompt)
@@ -416,6 +428,21 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     // 5. Build messages from session
     const messages = buildMessagesFromSession(session)
+
+    // On the very first iteration of a new agent invocation that has prior history, inject a brief
+    // context annotation (Codex-style: environment context as a message event, not just system prompt).
+    // This is ephemeral — not stored in session — so it doesn't affect compaction or token estimates.
+    if (loopIterations === 1) {
+      const priorTurns = session.messages.filter(m => m.role === "user" || m.role === "assistant")
+      if (priorTurns.length > 1) {
+        const today = new Date().toISOString().split("T")[0]
+        messages.push({
+          role: "user",
+          content: `[Context: New agent turn — mode: ${mode}, cwd: ${host.cwd}, date: ${today}]`,
+        })
+      }
+    }
+
     // No separate "reflection" or "thinking" step between tool runs: we do not call the LLM again
     // just to reflect between tools. One iteration = one stream(); reasoning comes only from the model's own stream (reasoning_delta) if supported.
     if (isFinalIteration) {
@@ -436,12 +463,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         content: "Your previous response was empty. Return a concise plain-text answer now (or call tools only if strictly necessary).",
       })
       forceEmptyResponseRecoveryPromptNext = false
-    } else if (loopIterations > 1 && messages.length > 0 && messages[messages.length - 1]?.role === "tool") {
-      // Previous turn had tool calls but no text reply — prompt for a summary
-      messages.push({
-        role: "user",
-        content: "Based on the tool results above, provide a concise text response to the user (summarize what you found or did).",
-      })
     }
     // 6. Start streaming
     const newMessageId = session.addMessage({
@@ -885,6 +906,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
       // Check for context overflow error
       if (isContextOverflowError(errMsg)) {
+        contextOverflowRetries++
+        if (contextOverflowRetries > MAX_CONTEXT_OVERFLOW_RETRIES) {
+          host.emit({ type: "error", error: "Context overflow could not be resolved after compaction. Stopping.", fatal: true })
+          break
+        }
         await handleCompaction(session, activeClient, config, host, compaction, signal)
         continue
       }
@@ -1124,6 +1150,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       host.emit({ type: "compaction_end" })
     }
 
+    contextOverflowRetries = 0
     await session.save()
     emitContextUsage()
   }
@@ -1524,11 +1551,25 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
     const toolCallParts = toolParts.filter(tp => tp.input != null)
     const completedToolParts = toolParts.filter(tp => tp.status === "completed" || tp.status === "error")
 
+    // Codex-style: include reasoning summary so model preserves chain-of-thought across turns.
+    // IMPORTANT: must NOT use type="thinking" — Anthropic requires original cryptographic signatures
+    // for thinking blocks; fabricated thinking blocks cause 400 errors. Plain type="text" is safe
+    // across all providers (Anthropic, OpenAI, Google, etc.).
+    const REASONING_CONTEXT_CAP = 1500
+    const reasoningParts = parts.filter((p): p is ReasoningPart => p.type === "reasoning")
+    const rawReasoning = reasoningParts.map(p => p.text ?? "").join("").trim()
+    const cappedReasoning = rawReasoning.length > REASONING_CONTEXT_CAP
+      ? rawReasoning.slice(0, REASONING_CONTEXT_CAP) + "…"
+      : rawReasoning
+
     if (toolCallParts.length > 0) {
-      // Assistant message with tool calls — do NOT include reasoning in context for next turn; only user_message + text + tools.
+      // Build combined text: reasoning prefix + assistant text
+      const combinedText = cappedReasoning
+        ? (textContent ? `[Reasoning: ${cappedReasoning}]\n${textContent}` : `[Reasoning: ${cappedReasoning}]`)
+        : textContent
       const assistantContent: Array<Record<string, unknown>> = []
-      if (textContent) {
-        assistantContent.push({ type: "text", text: textContent })
+      if (combinedText) {
+        assistantContent.push({ type: "text", text: combinedText })
       }
       for (const tp of toolCallParts) {
         assistantContent.push({
@@ -1562,10 +1603,14 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
         })
         messages.push({ role: "tool" as SessionRole, content: toolResultContent as LLMMessage["content"] })
       }
-    } else if (textContent) {
-      // Pure text response (no tool calls) — only text goes to context, not reasoning.
-      const content: LLMMessage["content"] = textContent
-      messages.push({ role: "assistant", content })
+    } else {
+      // Pure text response (no tool calls): include reasoning prefix + text
+      const combinedText = cappedReasoning
+        ? (textContent ? `[Reasoning: ${cappedReasoning}]\n${textContent}` : `[Reasoning: ${cappedReasoning}]`)
+        : textContent
+      if (combinedText) {
+        messages.push({ role: "assistant", content: combinedText })
+      }
     }
   }
 

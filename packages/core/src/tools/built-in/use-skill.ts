@@ -7,6 +7,11 @@ const schema = z.object({
   task_progress: z.string().optional(),
 })
 
+/** Normalize a skill name for loose matching: lowercase + collapse separators */
+function normalizeName(n: string): string {
+  return n.trim().toLowerCase().replace(/[-_\s]+/g, "-")
+}
+
 export const useSkillTool: ToolDef<z.infer<typeof schema>> = {
   name: "Skill",
   description: `Load a skill's content (markdown) for specialized knowledge. Skills live in .nexus/skills/ or ~/.nexus/skills/ (same resolution as classifier).
@@ -25,10 +30,23 @@ When NOT to use:
     const skillPaths = ctx.config.skills ?? []
     const loaded = await loadSkills(skillPaths, ctx.cwd).catch(() => [])
 
-    const nameLower = skill.trim().toLowerCase()
-    const found = loaded.find(
-      (s) => s.name.toLowerCase() === nameLower
-    )
+    const inputNorm = normalizeName(skill)
+
+    // 1. Exact case-insensitive match
+    let found = loaded.find(s => s.name.toLowerCase() === skill.trim().toLowerCase())
+
+    // 2. Normalized match (hyphens/underscores/spaces treated the same)
+    if (!found) {
+      found = loaded.find(s => normalizeName(s.name) === inputNorm)
+    }
+
+    // 3. Partial match: input contains skill name or vice versa
+    if (!found) {
+      found = loaded.find(s => {
+        const sn = normalizeName(s.name)
+        return sn.includes(inputNorm) || inputNorm.includes(sn)
+      })
+    }
 
     if (!found) {
       const available = loaded.length > 0

@@ -1246,6 +1246,8 @@ html, body, #root {
   width: 100%;
   min-width: 0;
   overflow: hidden;
+  padding: 0 1px; /* prevent right border-radius from being clipped by overflow:hidden parent */
+  box-sizing: border-box;
 }
 
 .nexus-subtask-card {
@@ -1463,27 +1465,40 @@ html, body, #root {
   overflow-y: auto;
 }
 
-/* Wave/shimmer animation for the "Exploring" word while running */
-@keyframes nexus-exploring-wave {
-  0%   { background-position: 200% center; }
-  100% { background-position: -200% center; }
-}
-
+/* Exploring wave: reuses nexus-shimmer keyframe (left→right) for consistency with tool detail shimmer */
 .nexus-exploring-wave-text {
   background: linear-gradient(
     90deg,
     var(--vscode-foreground) 0%,
-    var(--vscode-foreground) 25%,
-    rgba(255, 255, 255, 0.95) 50%,
-    var(--vscode-foreground) 75%,
+    var(--vscode-foreground) 30%,
+    rgba(255, 255, 255, 0.96) 50%,
+    var(--vscode-foreground) 70%,
     var(--vscode-foreground) 100%
   );
-  background-size: 300% auto;
+  background-size: 600px auto;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
   color: transparent;
-  animation: nexus-exploring-wave 2s linear infinite;
+  animation: nexus-shimmer 2.2s linear infinite;
+}
+
+/* Thinking wave: same shimmer style on "Thinking…" label in ThoughtBlock while streaming */
+.nexus-thinking-wave-text {
+  background: linear-gradient(
+    90deg,
+    var(--vscode-descriptionForeground) 0%,
+    var(--vscode-descriptionForeground) 30%,
+    rgba(255, 255, 255, 0.96) 50%,
+    var(--vscode-descriptionForeground) 70%,
+    var(--vscode-descriptionForeground) 100%
+  );
+  background-size: 600px auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: nexus-shimmer 2.2s linear infinite;
 }
 
 /* Plan followup panel (chat-native, no modal quick-pick). */

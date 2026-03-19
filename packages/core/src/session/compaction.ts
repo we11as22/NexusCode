@@ -171,15 +171,18 @@ Rules:
       if (event.type === "error") throw event.error
     }
   } catch (err) {
-    console.warn("[nexus] Compaction LLM call failed:", err)
+    console.warn("[nexus] Compaction LLM call failed, falling back to prune:", err)
+    // Fallback: best-effort prune to free tokens even without a summary
+    prune(session)
     return
   }
 
   if (!summaryText.trim()) return
 
-  // Add summary message
+  // Add summary message as user role — it will be presented to the LLM as a user message
+  // wrapping the conversation history, which is the correct semantic intent.
   session.addMessage({
-    role: "assistant",
+    role: "user",
     content: summaryText,
     summary: true,
   })
@@ -217,7 +220,10 @@ function buildLLMMessages(messages: SessionMessage[]) {
     } else {
       const parts = m.content as MessagePart[]
       text = parts.map(p => {
-        if (p.type === "reasoning") return "" // do not include reasoning in compaction summary
+        if (p.type === "reasoning") {
+          const rp = p as import("../types.js").ReasoningPart
+          return rp.text?.trim() ? `[Thinking: ${rp.text.slice(0, 500)}]` : ""
+        }
         if (p.type === "image") return "" // images not included in compaction summary
         if (p.type === "text") {
           const t = p as { text: string; user_message?: string }

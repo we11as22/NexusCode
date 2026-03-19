@@ -2293,7 +2293,7 @@ declare function estimateTokens(text: string): number;
  * Load skills from configured paths and standard locations.
  *
  * Config paths can be:
- *  - A directory path like ".nexus/skills/my-skill" → loads SKILL.md or any .md inside
+ *  - A directory path like ".nexus/skills/my-skill" → loads SKILL.md + subdirectory context
  *  - A glob pattern like ".nexus/skills/**\/*.md"
  *  - A direct file path like ".nexus/skills/my-skill/SKILL.md"
  *

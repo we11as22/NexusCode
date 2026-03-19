@@ -1040,7 +1040,6 @@ function SubagentInlineList({ items }: { items: SubagentDisplayItem[] }) {
     <div className="nexus-subtask-stack">
       {items.map((item) => {
         const isRunning = item.status === "running"
-        const recentTools = item.toolHistory?.slice(-3) ?? []
         return (
           <div
             key={item.key}
@@ -1066,15 +1065,6 @@ function SubagentInlineList({ items }: { items: SubagentDisplayItem[] }) {
                   ? <span className="nexus-subtask-subtitle-shimmer">{item.detail}</span>
                   : item.detail}
               </div>
-              {isRunning && recentTools.length > 1 && (
-                <div
-                  className="mt-1 text-[10px] leading-snug opacity-50 truncate"
-                  style={{ color: "var(--vscode-descriptionForeground)" }}
-                  title={recentTools.join(" → ")}
-                >
-                  {recentTools.slice(0, -1).join(" → ")}
-                </div>
-              )}
               {item.error && item.status === "error" && (
                 <div className="nexus-subtask-error" title={item.error}>
                   {item.error}

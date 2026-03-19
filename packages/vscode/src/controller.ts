@@ -450,14 +450,21 @@ export class Controller {
     return FILE_WRITE_TOOL_NAMES.has(toolName)
   }
 
+  /**
+   * Whether this event should trigger a full state sync to the webview.
+   * We do NOT trigger for text_delta / reasoning_* — the webview already applies these via
+   * handleAgentEvent, and sending full state on every chunk causes heavy serialization + postMessage
+   * and makes VS Code lag during agent runs.
+   */
   private eventAffectsVisibleState(event: AgentEvent): boolean {
     switch (event.type) {
-      case "assistant_message_started":
-      case "assistant_content_complete":
       case "text_delta":
       case "reasoning_start":
       case "reasoning_delta":
       case "reasoning_end":
+        return false
+      case "assistant_message_started":
+      case "assistant_content_complete":
       case "tool_start":
       case "tool_end":
       case "todo_updated":
