@@ -179,10 +179,11 @@ function processOutput(output: NotebookCellOutput) {
       }
     case 'execute_result':
     case 'display_data':
+      const data = output.data as Record<string, string | string[] | undefined> | undefined
       return {
         output_type: output.output_type,
-        text: processOutputText(output.data?.['text/plain']),
-        image: output.data && extractImage(output.data),
+        text: processOutputText(data?.['text/plain']),
+        image: data && extractImage(data as Record<string, unknown>),
       }
     case 'error':
       return {

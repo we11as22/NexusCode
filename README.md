@@ -18,7 +18,7 @@
 - **Shadow git checkpoints** with task/workspace restore
 - **Two-level context compaction** (prune output → LLM summary with OpenCode-style structure)
 - **MCP support** with OAuth and tool classification
-- **Optional NexusCode Server**: DB-backed sessions and dialogs; extension and CLI can connect to the server, switch sessions, and avoid OOM on long chats (pagination)
+- **Optional NexusCode Server**: HTTP agent + the **same JSONL session store** as the CLI/extension (canonical project root); connect for shared runs, session list parity, and paginated history (no OOM on long chats)
 - Beautiful Cline/agent-style UI: thought progress ("Thought for Xs"), loading states, todo checklist, diff-style tool output
 - CLI TUI refactored to KiloCode-style Home + Prompt shell: centered logo/prompt/tips, Kilo-like slash command palette, and `Vector index` + `/agent-config` in menu
 

@@ -90,6 +90,7 @@ import { createNexusSkillsCommand } from '../commands/nexusSkills.js'
 import { createNexusMcpCommand } from '../commands/nexusMcp.js'
 import { createNexusSessionsCommand } from '../commands/nexusSessions.js'
 import { queryNexus } from '../nexus-query.js'
+import { Session } from '@nexuscode/core'
 
 export function completeOnboarding(): void {
   const config = getGlobalConfig()
@@ -495,36 +496,82 @@ ${commandList}`,
             profileOverride: profile ?? undefined,
           })
 
-          const commandsToUse = [
-            ...commands,
-            createNexusConfigCommand(nexus),
-            createNexusModelCommand(nexus),
-            createNexusIndexCommand(nexus),
-            createNexusVectorCommand(nexus),
-            createNexusEmbeddingsCommand(nexus),
-            createNexusSkillsCommand(nexus),
-            createNexusMcpCommand(nexus),
-            createNexusSessionsCommand(nexus, () => {}),
-          ]
-
           function NexusREPLWithConfigRefresh({
             nexus: n,
+            baseCommands,
+            effectiveCwd,
             ...replProps
           }: {
             nexus: Awaited<ReturnType<typeof bootstrapNexus>>
-          } & Omit<React.ComponentProps<typeof REPL>, 'nexusConfigSnapshot' | 'onNexusConfigSaved'>) {
+            baseCommands: Command[]
+            effectiveCwd: string
+          } & Omit<
+            React.ComponentProps<typeof REPL>,
+            | 'nexusConfigSnapshot'
+            | 'onNexusConfigSaved'
+            | 'nexusBootstrap'
+            | 'commands'
+            | 'nexusSessionId'
+            | 'nexusGetCheckpointList'
+            | 'nexusOnRestoreCheckpoint'
+            | 'nexusOnSwitchSession'
+          >) {
             const [configSnapshot, setConfigSnapshot] = React.useState(n.configSnapshot)
+            const [activeSessionId, setActiveSessionId] = React.useState(n.session.id)
             const refreshConfig = React.useCallback(async () => {
               const { loadConfig } = await import('@nexuscode/core')
               const config = await loadConfig(n.cwd, { secrets: n.secretsStore })
               setConfigSnapshot(buildConfigSnapshot(config))
             }, [n.cwd, n.secretsStore])
+
+            const handleSwitchSession = React.useCallback(
+              async (sessionId: string) => {
+                if (sessionId === n.session.id) return
+                const resumed = await Session.resume(sessionId, n.cwd)
+                if (!resumed) {
+                  process.stderr.write(`[nexus] Session not found: ${sessionId}\n`)
+                  return
+                }
+                n.session = resumed
+                setActiveSessionId(resumed.id)
+              },
+              [n],
+            )
+
+            const commandsToUse = React.useMemo(
+              () => [
+                ...baseCommands,
+                createNexusConfigCommand(n),
+                createNexusModelCommand(n),
+                createNexusIndexCommand(n),
+                createNexusVectorCommand(n),
+                createNexusEmbeddingsCommand(n),
+                createNexusSkillsCommand(n),
+                createNexusMcpCommand(n),
+                createNexusSessionsCommand(n, id => {
+                  void handleSwitchSession(id)
+                }),
+              ],
+              [baseCommands, n, handleSwitchSession],
+            )
+
             return (
               <REPL
                 {...replProps}
+                commands={commandsToUse}
                 nexusConfigSnapshot={configSnapshot}
                 onNexusConfigSaved={refreshConfig}
                 nexusBootstrap={n}
+                nexusSessionId={activeSessionId}
+                nexusGetCheckpointList={() =>
+                  readCheckpointEntries(effectiveCwd, activeSessionId)
+                }
+                nexusOnRestoreCheckpoint={(id, type) =>
+                  runTaskRestore(effectiveCwd, activeSessionId, id, type)
+                }
+                nexusGetSessionList={() => listSessions(effectiveCwd)}
+                nexusOnSwitchSession={handleSwitchSession}
+                nexusOnDeleteSession={async () => {}}
               />
             )
           }
@@ -532,7 +579,8 @@ ${commandList}`,
           render(
             <NexusREPLWithConfigRefresh
               nexus={nexus}
-              commands={commandsToUse}
+              baseCommands={commands}
+              effectiveCwd={effectiveCwd}
               debug={debug}
               initialPrompt={inputPrompt}
               messageLogName={dateToFilename(new Date())}
@@ -544,12 +592,6 @@ ${commandList}`,
               isDefaultModel={isDefaultModel}
               nexusInitialMode={nexus.mode}
               nexusNoIndex={!nexus.indexer}
-              nexusSessionId={nexus.session.id}
-              nexusGetCheckpointList={() => readCheckpointEntries(effectiveCwd, nexus.session.id)}
-              nexusOnRestoreCheckpoint={(id, type) => runTaskRestore(effectiveCwd, nexus.session.id, id, type)}
-              nexusGetSessionList={() => listSessions(effectiveCwd)}
-              nexusOnSwitchSession={async () => {}}
-              nexusOnDeleteSession={async () => {}}
               nexusSaveConfig={async () => {
                 const { writeConfig } = await import('@nexuscode/core')
                 writeConfig(nexus.config, effectiveCwd)

@@ -3,6 +3,7 @@ import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
+import { NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX } from "../constants/questionnaire.js"
 import { ExploredSummaryInline, getExplorationItemsFromToolPart, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
 import { ThoughtBlock } from "./ThoughtBlock.js"
 import { MermaidBlock } from "./MermaidBlock.js"
@@ -147,7 +148,7 @@ function BashCommandBlock({ part, approval }: { part: ToolPart; approval?: React
     <div className="my-2 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
       <button
         type="button"
-        onClick={() => setExpanded((e) => !e)}
+        onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]"
       >
         <span className="flex-shrink-0" title="bash">⌨️</span>
@@ -533,6 +534,33 @@ function RenderItemRow({
             .filter(p => p.type === "text")
             .map(p => (p as { text: string }).text)
             .join("")
+    if (userText.startsWith(NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX)) {
+      const body = userText.slice(NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX.length).trim()
+      const lines = body ? body.split("\n").filter(Boolean) : []
+      return (
+        <div className="nexus-qnr-user-wrap">
+          <div className={`nexus-qnr-user-row${canRollback ? " nexus-qnr-user-row--rollback" : ""}`}>
+            <div className="nexus-qnr-user-lines">
+              {lines.map((line, i) => (
+                <div key={i} className="nexus-qnr-user-line" title={line}>
+                  {line}
+                </div>
+              ))}
+            </div>
+            {canRollback && (
+              <MessageCheckpointMenu
+                messageId={message.id}
+                checkpointHash={checkpointEntry?.hash}
+                onCompare={() => checkpointEntry && showCheckpointDiff(checkpointEntry.hash)}
+                onRestoreFilesOnly={() => checkpointEntry && restoreCheckpoint(checkpointEntry.hash, "workspace")}
+                onRestoreTaskOnly={() => checkpointEntry && restoreCheckpoint(checkpointEntry.hash, "task")}
+                onRestoreFilesAndTask={() => checkpointEntry && restoreCheckpoint(checkpointEntry.hash, "taskAndWorkspace")}
+              />
+            )}
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="nexus-user-msg-wrap">
         <div className={`nexus-user-msg-bubble${canRollback ? " nexus-user-msg-bubble-has-rollback" : ""}`}>
@@ -791,10 +819,18 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
   )
 }
 
-function AssistantText({ text, streaming, variant = "normal" }: { text: string; streaming?: boolean; variant?: "normal" | "muted" }) {
+const AssistantText = React.memo(function AssistantText({ text, streaming, variant = "normal" }: { text: string; streaming?: boolean; variant?: "normal" | "muted" }) {
   const isMuted = variant === "muted"
+  if (streaming) {
+    return (
+      <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words whitespace-pre-wrap ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
+        {text}
+        <span className={`nexus-streaming-cursor inline-block w-0.5 h-4 ml-0.5 align-middle animate-pulse ${isMuted ? "bg-[var(--vscode-descriptionForeground)]" : "bg-[var(--vscode-foreground)]"}`} aria-hidden />
+      </div>
+    )
+  }
   return (
-    <div className={`text-sm min-w-0 break-words ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
+    <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
       <ReactMarkdown
         className="prose-nexus"
         remarkPlugins={[remarkGfm]}
@@ -863,12 +899,9 @@ function AssistantText({ text, streaming, variant = "normal" }: { text: string; 
       >
         {text}
       </ReactMarkdown>
-      {streaming && (
-        <span className={`nexus-streaming-cursor inline-block w-0.5 h-4 ml-0.5 align-middle animate-pulse ${isMuted ? "bg-[var(--vscode-descriptionForeground)]" : "bg-[var(--vscode-foreground)]"}`} aria-hidden />
-      )}
     </div>
   )
-}
+})
 
 function subagentStatusLine(a: SubAgentState): string {
   if (a.status === "completed") return "Done"
@@ -1037,6 +1070,7 @@ function StatusCircleIcon({ status }: { status: SubagentDisplayItem["status"] })
 function SubagentInlineList({ items }: { items: SubagentDisplayItem[] }) {
   if (items.length === 0) return null
   return (
+    <div className="nexus-subagent-inline-outer w-full min-w-0 max-w-full box-border">
     <div className="nexus-subtask-stack">
       {items.map((item) => {
         const isRunning = item.status === "running"
@@ -1074,6 +1108,7 @@ function SubagentInlineList({ items }: { items: SubagentDisplayItem[] }) {
           </div>
         )
       })}
+    </div>
     </div>
   )
 }
@@ -1232,19 +1267,29 @@ function ThoughtInlineBlock({ text, durationMs }: { text: string; durationMs?: n
   const [open, setOpen] = useState(false)
   const seconds = durationMs != null ? Math.max(1, Math.round(durationMs / 1000)) : undefined
   const label = seconds != null ? `Thought for ${seconds}s` : text.trim().length < 80 ? "Thought briefly" : "Thought"
+
+  useEffect(() => {
+    const raf = window.requestAnimationFrame(() => {
+      window.dispatchEvent(new Event("resize"))
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [open])
+
   return (
-    <div className="my-1">
+    <div className="nexus-thought-inline-block">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-1.5 px-0 py-0.5 text-left text-xs text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
+        className="w-full flex items-center gap-1.5 px-0 py-1 text-left text-xs text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
       >
         <span className="flex-shrink-0 text-[10px] transition-transform" style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
         <span className="flex-shrink-0">{label}</span>
       </button>
       {open && (
-        <div className="mt-1 px-2 py-2 text-[11px] text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans max-h-[min(50vh,320px)] overflow-y-auto border border-[var(--vscode-panel-border)] rounded bg-[var(--vscode-editor-background)]">
-          {text.trim() || "Model reasoning is active, but no visible reasoning text was streamed."}
+        <div className="px-2 pb-1">
+          <div className="px-2 py-2 text-[11px] text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans max-h-[min(50vh,320px)] overflow-y-auto border border-[var(--vscode-panel-border)] rounded bg-[var(--vscode-editor-background)]">
+            {text.trim() || "Model reasoning is active, but no visible reasoning text was streamed."}
+          </div>
         </div>
       )}
     </div>
@@ -1258,7 +1303,7 @@ function ReasoningPartBlock({ text }: { text: string }) {
   const displayText = collapsed && isLong ? text.slice(0, 600) + "\n…" : text
 
   return (
-    <div className="nexus-reasoning-block my-2 font-sans">
+    <div className="nexus-reasoning-block font-sans">
       <div className="px-0 py-1 text-xs text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans" style={{ fontFamily: "var(--vscode-font-family)" }}>
         {displayText}
       </div>

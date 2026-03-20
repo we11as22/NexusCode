@@ -51,6 +51,13 @@ export interface WebviewState {
   loadingOlderMessages?: boolean
   /** Session unaccepted edits: path + diffStats for "N Files" panel. */
   sessionUnacceptedEdits?: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
+  pendingQuestionRequest?: {
+    requestId: string
+    title?: string
+    submitLabel?: string
+    customOptionLabel?: string
+    questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }>
+  } | null
 }
 
 export type ExtensionMessage =

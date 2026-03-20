@@ -1,4 +1,4 @@
-import React, { useState } from "react"
+import React, { useMemo, useState } from "react"
 import { useChatStore } from "../stores/chat.js"
 import { postMessage } from "../vscode.js"
 
@@ -23,9 +23,17 @@ export function InputContextPanel() {
   const { pendingApproval, resolveApproval, mode, sessionUnacceptedEdits, openSessionEditDiff, undoSessionEdits, keepAllSessionEdits, revertSessionEditFile, acceptSessionEditFile } = store
   const [expanded, setExpanded] = useState(true)
 
+  const sessionEditsForPanel = useMemo(
+    () =>
+      (sessionUnacceptedEdits ?? []).filter(
+        (e) => !e.path.replace(/\\/g, "/").includes(".nexus/plans"),
+      ),
+    [sessionUnacceptedEdits],
+  )
+
   const showSessionEditsPanel =
     CODE_WRITING_MODES.includes(mode as (typeof CODE_WRITING_MODES)[number]) &&
-    (sessionUnacceptedEdits?.length ?? 0) > 0 &&
+    sessionEditsForPanel.length > 0 &&
     !pendingApproval
 
   // Pending approval: single file awaiting Allow/Deny
@@ -118,8 +126,8 @@ export function InputContextPanel() {
   }
 
   // Session unaccepted edits: N files, Undo All / Keep All / Review
-  if (showSessionEditsPanel && sessionUnacceptedEdits && sessionUnacceptedEdits.length > 0) {
-    const n = sessionUnacceptedEdits.length
+  if (showSessionEditsPanel && sessionEditsForPanel.length > 0) {
+    const n = sessionEditsForPanel.length
     const fileLabel = n === 1 ? "1 File" : `${n} Files`
 
     return (
@@ -164,7 +172,7 @@ export function InputContextPanel() {
           </div>
           {expanded && (
             <div className="nexus-input-context-file-list">
-              {sessionUnacceptedEdits.map((edit) => {
+              {sessionEditsForPanel.map((edit) => {
                 const name = edit.path.split(/[/\\]/).pop() ?? edit.path
                 const hasDiff = edit.diffStats.added > 0 || edit.diffStats.removed > 0
                 return (

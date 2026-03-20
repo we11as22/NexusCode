@@ -3,7 +3,7 @@
  * Converts AgentEvent → UserMessage | AssistantMessage | ProgressMessage so the REPL can render.
  */
 import { randomUUID } from 'node:crypto'
-import type { SessionMessage, MessagePart, TextPart, ToolPart } from '@nexuscode/core'
+import type { SessionMessage, MessagePart, TextPart, ToolPart, UserQuestionRequest } from '@nexuscode/core'
 import {
   runAgentLoop,
   createLLMClient,
@@ -27,7 +27,7 @@ import type {
   AssistantMessage,
 } from './query.js'
 import type { Tool } from './Tool.js'
-import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
+import type { Message as APIAssistantMessage } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { ApprovalAction } from '@nexuscode/core'
 
 export type NexusApprovalMessage = { type: 'nexus_approval'; action: ApprovalAction; partId: string }
@@ -35,6 +35,19 @@ export type NexusApprovalMessage = { type: 'nexus_approval'; action: ApprovalAct
 export type NexusBannerMessage = { type: 'nexus_banner'; text: string }
 /** Todo list update from agent (TodoWrite tool). Rendered above input, below progress. */
 export type NexusTodoMessage = { type: 'nexus_todo'; todo: string }
+export type NexusQuestionMessage = { type: 'nexus_question'; request: UserQuestionRequest }
+export type NexusContextMessage = {
+  type: 'nexus_context'
+  usedTokens: number
+  limitTokens: number
+  percent: number
+}
+
+type ContentBlockParam = APIAssistantMessage['content'][number]
+type UsageWithCache = APIAssistantMessage['usage'] & {
+  cache_creation_input_tokens?: number
+  cache_read_input_tokens?: number
+}
 
 const TODO_TOOL_NAMES = new Set(['TodoWrite', 'update_todo_list'])
 const SPAWN_AGENT_TOOL_NAMES = new Set(['SpawnAgent', 'SpawnAgents', 'SpawnAgentsParallel'])
@@ -76,7 +89,7 @@ function sessionMessageToAssistantContent(msg: SessionMessage): ContentBlockPara
   const content = msg.content
   const blocks: ContentBlockParam[] = []
   if (typeof content === 'string') {
-    if (content.trim()) blocks.push({ type: 'text', text: content, citations: [] })
+    if (content.trim()) blocks.push({ type: 'text', text: content })
     return blocks
   }
   const parts = content as MessagePart[]
@@ -85,10 +98,10 @@ function sessionMessageToAssistantContent(msg: SessionMessage): ContentBlockPara
       const tp = p as TextPart & { user_message?: string }
       const userMessage = tp.user_message?.trim()
       if (userMessage) {
-        blocks.push({ type: 'text', text: userMessage, citations: [] })
+        blocks.push({ type: 'text', text: userMessage })
       }
       const t = tp.text
-      if (t?.trim()) blocks.push({ type: 'text', text: t, citations: [] })
+      if (t?.trim()) blocks.push({ type: 'text', text: t })
     } else if (p.type === 'reasoning') {
       const r = (p as { text: string }).text
       if (r?.trim()) {
@@ -110,7 +123,7 @@ function sessionMessageToAssistantContent(msg: SessionMessage): ContentBlockPara
       })
     }
   }
-  if (blocks.length === 0) blocks.push({ type: 'text', text: '', citations: [] })
+  if (blocks.length === 0) blocks.push({ type: 'text', text: '' })
   return blocks
 }
 
@@ -128,7 +141,7 @@ function buildAssistantMessageFromSession(msg: SessionMessage): AssistantMessage
       stop_reason: 'end_turn',
       stop_sequence: '',
       type: 'message',
-      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } as UsageWithCache,
       content,
     },
   }
@@ -155,7 +168,7 @@ export interface QueryNexusOptions {
  * Yields NexusApprovalMessage when tool_approval_needed so REPL can show the approval panel and resolve tuiApprovalRef.
  * Loads config from disk at start so that model/LLM settings saved in the CLI are applied.
  */
-export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage, void> {
+export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage, void> {
   const {
     nexus,
     userPrompt,
@@ -172,7 +185,10 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug' | 'review'
 
   let session = bootstrapSession
-  session.addMessage({ role: 'user', content: userPrompt })
+  // Local loop mutates this Session; server persists via HTTP and adds the user turn in runSession.
+  if (!serverUrl) {
+    session.addMessage({ role: 'user', content: userPrompt })
+  }
 
   let config = await loadConfig(nexus.cwd, { secrets: nexus.secretsStore })
   if (autoApprovePermissions) {
@@ -215,6 +231,12 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   const eventQueue: AgentEvent[] = []
   let resolveNext: (() => void) | null = null
   let runError: Error | null = null
+  function wakeWaitingConsumer(): void {
+    const fn = resolveNext
+    if (!fn) return
+    resolveNext = null
+    fn()
+  }
   /** partId of the last tool_start(SpawnAgent); subagent_* events attach to this part. */
   let lastSpawnAgentPartId: string | null = null
 
@@ -228,11 +250,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
 
   const host = new CliHost(nexus.cwd, (event: AgentEvent) => {
     eventQueue.push(event)
-    if (resolveNext) {
-      const fn = resolveNext
-      resolveNext = null
-      fn()
-    }
+    wakeWaitingConsumer()
   }, autoApprove || allApprovalsEnabled, tuiApprovalRef)
 
   /** Start of this run: previous turn’s edits become revertable for /undo. */
@@ -245,25 +263,26 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   let runPromise: Promise<void>
   if (serverUrl) {
     const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: nexus.cwd })
-    const created = await serverClient.createSession()
-    session = new Session(created.id, nexus.cwd, [])
+    const sid = bootstrapSession.id
     runPromise = (async () => {
       try {
-        for await (const event of serverClient.streamMessage(created.id, userPrompt, mode, signal)) {
+        for await (const event of serverClient.streamMessage(sid, userPrompt, mode, signal)) {
           if (event.type === 'assistant_content_complete') {
             try {
-              const msgs = await serverClient.getMessages(created.id, { limit: 100 })
-              session = new Session(created.id, nexus.cwd, msgs)
+              const msgs = await serverClient.getMessages(sid, { limit: 500 })
+              session = new Session(sid, nexus.cwd, msgs)
             } catch {
               // keep current session
             }
           }
           eventQueue.push(event)
-          if (resolveNext) {
-            const r = resolveNext
-            resolveNext = null
-            r()
-          }
+          wakeWaitingConsumer()
+        }
+        try {
+          const msgs = await serverClient.getMessages(sid, { limit: 2000 })
+          session = new Session(sid, nexus.cwd, msgs)
+        } catch {
+          /* keep session from last assistant_content_complete */
         }
       } catch (err) {
         runError = err instanceof Error ? err : new Error(String(err))
@@ -289,7 +308,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
 
   const consumed: MessageType[] = []
 
-  function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage, boolean, unknown> {
+  function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage, boolean, unknown> {
     while (eventQueue.length > 0) {
       const event = eventQueue.shift()!
       if (event.type === 'todo_updated') {
@@ -310,6 +329,19 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       }
       if (event.type === 'tool_approval_needed') {
         yield { type: 'nexus_approval', action: event.action, partId: event.partId }
+        continue
+      }
+      if (event.type === 'question_request') {
+        yield { type: 'nexus_question', request: event.request }
+        continue
+      }
+      if (event.type === 'context_usage') {
+        yield {
+          type: 'nexus_context',
+          usedTokens: event.usedTokens,
+          limitTokens: event.limitTokens,
+          percent: event.percent,
+        }
         continue
       }
       if (event.type === 'assistant_content_complete') {
@@ -346,7 +378,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
             stop_reason: 'end_turn',
             stop_sequence: '',
             type: 'message',
-            usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+            usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } as UsageWithCache,
             content: [toolUseBlock],
           },
         }
@@ -443,4 +475,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   }
 
   await runPromise
+  if (serverUrl) {
+    nexus.session = session
+  }
 }

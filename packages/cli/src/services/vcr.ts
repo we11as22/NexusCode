@@ -117,8 +117,7 @@ function mapAssistantMessage(
               return {
                 ..._,
                 text: f(_.text) as string,
-                citations: _.citations || [],
-              } // Ensure citations
+              }
             case 'tool_use':
               return {
                 ..._,

@@ -38,7 +38,7 @@ type LocalCommand = {
       options: {
         commands: Command[]
         tools: Tool[]
-        slowAndCapableModel: string
+        slowAndCapableModel?: string
       }
       abortController: AbortController
       setForkConvoWithMessagesOnTheNextRender: (

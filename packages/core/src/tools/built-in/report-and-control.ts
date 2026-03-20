@@ -1,11 +1,55 @@
 import { z } from "zod"
-import type { ToolDef, ToolContext } from "../../types.js"
+import type { ToolDef, ToolContext, UserQuestionRequest, UserQuestionItem } from "../../types.js"
+import { buildUserQuestionOptions, normalizeCustomOptionLabel } from "../user-question-utils.js"
+
+const askQuestionItemSchema = z.object({
+  id: z.string().optional().describe("Optional stable id for this question"),
+  question: z.string().describe("The question to ask the user"),
+  /** If empty or one item, core pads with generic brief/detailed choices. */
+  options: z.array(z.string()).optional().describe("Suggested answer options (2+ recommended; host pads if fewer)"),
+  allow_custom: z.boolean().optional().describe("Deprecated — ignored. The UI always adds exactly one “Other/custom” row; do not put Other/custom in options."),
+})
 
 const askSchema = z.object({
-  question: z.string().describe("The question to ask the user"),
-  options: z.array(z.string()).optional().describe("Optional list of suggested answers"),
+  question: z.string().optional().describe("Single legacy question to ask the user"),
+  options: z.array(z.string()).optional().describe("Optional suggested answers (2+ recommended; if omitted, generic choices are added)"),
+  questions: z.array(askQuestionItemSchema).optional().describe("Structured multi-question form shown to the user at once"),
+  title: z.string().optional().describe("Optional title for the grouped question panel"),
+  submit_label: z.string().optional().describe("Optional label for the final submit button"),
+  custom_option_label: z.string().optional().describe("Label for the host-added custom row (default Other). Do not duplicate this string inside options."),
   task_progress: z.string().optional(),
+}).refine((value) => {
+  if (Array.isArray(value.questions) && value.questions.length > 0) return true
+  return typeof value.question === "string" && value.question.trim().length > 0
+}, {
+  message: "Provide either question or questions.",
 })
+
+function normalizeQuestionRequest(input: z.infer<typeof askSchema>): UserQuestionRequest {
+  const customOptionLabel = normalizeCustomOptionLabel(input.custom_option_label)
+  const questions: UserQuestionItem[] =
+    Array.isArray(input.questions) && input.questions.length > 0
+      ? input.questions.map((item, index) => ({
+          id: item.id?.trim() || `question_${index + 1}`,
+          question: item.question.trim(),
+          options: buildUserQuestionOptions(item.options ?? [], customOptionLabel, index),
+          allowCustom: true,
+        }))
+      : [{
+          id: "question_1",
+          question: input.question!.trim(),
+          options: buildUserQuestionOptions(input.options ?? [], customOptionLabel, 0),
+          allowCustom: true,
+        }]
+
+  return {
+    requestId: `question_request_${Date.now()}`,
+    title: input.title?.trim() || "Asking questions",
+    submitLabel: input.submit_label?.trim() || "Continue",
+    customOptionLabel,
+    questions,
+  }
+}
 
 export const askFollowupTool: ToolDef<z.infer<typeof askSchema>> = {
   name: "AskFollowupQuestion",
@@ -18,31 +62,34 @@ When to use:
 When NOT to use:
 - Information you can get via tools (read config, search codebase, grep).
 - Permission or approval prompts ("Should I run tests?", "Is my plan ready?"). For tests, just run them if relevant. For plan approval, use PlanExit (in plan mode), not AskFollowupQuestion.
-- Multiple or vague questions; prefer making a reasonable choice and stating it.
+- Multiple or vague questions unless they form one tight structured questionnaire.
 
 Prefer making a reasonable choice and stating the assumption over asking. Examples of when NOT to ask:
 - "Should I run tests?" → just run them
 - "Which file format?" → pick the one already used in the project
 - "Is it okay if I create X file?" → just create it
-- "Does the plan look good?" (in plan mode) → use PlanExit instead`,
+- "Does the plan look good?" (in plan mode) → use PlanExit instead
+
+Structured questionnaire mode:
+- Use \`questions\` to ask multiple tightly related questions in one panel.
+- Each question should include real answer options when possible (do NOT include Other/custom; the UI adds exactly one automatically). If you omit options or send fewer than two, the host adds generic choices (brief vs detailed) so the questionnaire can render.
+- For batching multiple AskFollowupQuestion calls, prefer \`Parallel\` with only AskFollowupQuestion entries; the host will merge them into one questionnaire.`,
   parameters: askSchema,
 
-  async execute({ question, options }, ctx: ToolContext) {
-    const optionsStr = options && options.length > 0
-      ? `\n\nOptions:\n${options.map(o => `- ${o}`).join("\n")}`
-      : ""
-    const formatted = `${question}${optionsStr}`
-
-    // Show approval dialog to get user response
-    const result = await ctx.host.showApprovalDialog({
-      type: "read",
-      tool: "AskFollowupQuestion",
-      description: formatted,
+  async execute(args, ctx: ToolContext) {
+    const request = normalizeQuestionRequest(args)
+    ctx.host.emit({
+      type: "question_request",
+      request,
+      partId: ctx.partId,
     })
-
     return {
       success: true,
-      output: result.approved ? "User acknowledged the question." : "User declined to answer.",
+      output: "User input is required before the task can continue.",
+      metadata: {
+        questionRequest: true,
+        request,
+      },
     }
   },
 }

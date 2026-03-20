@@ -25,7 +25,11 @@ import { buildSystemPrompt, type PromptContext } from "./prompts/components/inde
 import { getInitialProjectContext } from "./prompts/initial-context.js"
 import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN, MANDATORY_END_TOOL } from "./modes.js"
 import { classifyMcpServers, classifySkills } from "./classifier.js"
-import { normalizeToolInputForParse } from "./tool-execution.js"
+import {
+  formatToolValidationError,
+  normalizeToolInputForParse,
+  formatToolAttemptForLanguageModel,
+} from "./tool-execution.js"
 import { getBackgroundBashJobsForPrompt } from "../tools/built-in/execute-command.js"
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
@@ -114,6 +118,28 @@ function messageHasMandatoryEndTool(session: ISession, messageId: string, mode: 
   if (!msg || !Array.isArray(msg.content)) return false
   const parts = msg.content as MessagePart[]
   return parts.some((p) => p.type === "tool" && (p as ToolPart).tool === mandatory)
+}
+
+/** User message from plan-followup "revise" (extension/CLI); must match controller copy. */
+function lastUserMessageRequestsPlanRevision(session: ISession): boolean {
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const m = session.messages[i]!
+    if (m.role !== "user") continue
+    const text =
+      typeof m.content === "string"
+        ? m.content
+        : Array.isArray(m.content)
+          ? (m.content as MessagePart[])
+              .filter((p): p is TextPart => p.type === "text")
+              .map((p) => p.text)
+              .join("\n")
+          : ""
+    return (
+      text.includes("Revise the current implementation plan based on this feedback.") &&
+      text.includes("User feedback / requested changes:")
+    )
+  }
+  return false
 }
 
 export interface AgentLoopOptions {
@@ -267,12 +293,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const autoApproveActions = getAutoApproveActions(mode, config.modes?.[mode])
   const mentionsContext = await resolveMentionsContext(session, host)
   const initialProjectContext = await getInitialProjectContext(host.cwd)
-  /**
-   * Keep tracking across outer iterations; otherwise one invalid tool call per turn
-   * can bypass the threshold forever.
-   */
-  let consecutiveInvalidToolCalls = 0
-  const MAX_CONSECUTIVE_INVALID = 3
   let loopIterations = 0
   const baseMaxIterationsByMode: Record<Mode, number> = {
     ask: 24,
@@ -597,6 +617,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         systemPrompt,
         signal,
         cacheableSystemBlocks: cacheableCount,
+        promptCacheKey: session.id,
         maxTokens,
         temperature: config.model.temperature ?? getDefaultTemperature(config.model),
         topP: getDefaultTopP(config.model),
@@ -701,20 +722,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
             sawNativeToolCall = true
 
-            // Track invalid tool calls — if model keeps calling non-existent tools, stop it
-            const isKnownTool = resolvedTools.some(t => t.name === toolName)
-            if (!isKnownTool) {
-              consecutiveInvalidToolCalls++
-              if (consecutiveInvalidToolCalls >= MAX_CONSECUTIVE_INVALID) {
-                throw new Error(
-                  `Model called ${consecutiveInvalidToolCalls} non-existent tools in a row ("${toolName}" etc). ` +
-                  `This likely indicates model confusion. Stopping to prevent infinite loop.`
-                )
-              }
-            } else {
-              consecutiveInvalidToolCalls = 0
-            }
-
             if (executedToolCallsTotal + pendingReads.length >= toolCallBudget) {
               markToolBudgetExceeded()
               break
@@ -736,28 +743,50 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             // Inform host of available tools list so UI/user knows context
             // TodoWrite updates session in its execute(); no task_progress here.
 
-            // DOOM LOOP DETECTION — halt if same tool called 3x with identical args
+            // DOOM LOOP DETECTION — surface as a failed tool result so the model can recover (no hard abort).
             if (await detectDoomLoop(session, toolName, toolInput)) {
               host.emit({ type: "doom_loop_detected", tool: toolName })
-              // In non-interactive mode always abort to prevent infinite loops
               const threshold = toolName === "Bash" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
-              if (typeof process !== "undefined" && process.stdin && !process.stdin.isTTY) {
-                throw new Error(`Doom loop: tool "${toolName}" called ${threshold} times with same arguments. Aborting.`)
+              const tty = typeof process !== "undefined" && process.stdin && process.stdin.isTTY
+              let proceed = false
+              if (tty) {
+                const doomAction: ApprovalAction = {
+                  type: "doom_loop",
+                  tool: toolName,
+                  description: `Potential infinite loop: "${toolName}" called ${threshold} times with same args. Continue anyway? [y]es [n]o (abort).`,
+                }
+                host.emit({ type: "tool_approval_needed", action: doomAction, partId })
+                const doomApproval = await Promise.race([
+                  host.showApprovalDialog(doomAction),
+                  new Promise<PermissionResult>((resolve) =>
+                    setTimeout(() => resolve({ approved: false }), 60_000)
+                  ),
+                ]).catch((): PermissionResult => ({ approved: false }))
+                proceed = doomApproval.approved
               }
-              const doomAction: ApprovalAction = {
-                type: "doom_loop",
-                tool: toolName,
-                description: `Potential infinite loop: "${toolName}" called ${threshold} times with same args. Continue anyway? [y]es [n]o (abort).`,
-              }
-              host.emit({ type: "tool_approval_needed", action: doomAction, partId })
-              const doomApproval = await Promise.race([
-                host.showApprovalDialog(doomAction),
-                new Promise<PermissionResult>((_, reject) =>
-                  setTimeout(() => reject(new Error("Doom loop approval timed out (no response). Aborting.")), 60_000)
-                ),
-              ])
-              if (!doomApproval.approved) {
-                throw new Error(`User aborted doom loop for "${toolName}"`)
+              if (!proceed) {
+                const errMsg =
+                  toolName === "Bash"
+                    ? `Same Bash command was run ${threshold} times with identical arguments. Stop repeating it: read prior output and errors, fix the command or approach, then continue differently.`
+                    : `Same tool "${toolName}" was called ${threshold} times with identical arguments. Stop the loop: check prior tool results, correct inputs, or choose another action.`
+                session.updateToolPart(newMessageId, partId, {
+                  status: "error",
+                  output: errMsg,
+                  timeEnd: Date.now(),
+                })
+                host.emit({
+                  type: "tool_end",
+                  tool: toolName,
+                  partId,
+                  messageId: newMessageId,
+                  success: false,
+                  output: errMsg,
+                  error: errMsg,
+                })
+                lastToolName = toolName
+                executedToolThisIteration = true
+                executedToolCallsTotal++
+                break
               }
             }
 
@@ -853,8 +882,15 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               lastToolName = toolName
               executedToolThisIteration = true
               executedToolCallsTotal++
+              if ((result.metadata as { questionRequest?: boolean } | undefined)?.questionRequest) {
+                attemptedCompletionThisIteration = true
+                await flushPendingReads()
+                break streamLoop
+              }
               if (toolName === MANDATORY_END_TOOL[mode]) {
                 attemptedCompletionThisIteration = true
+                await flushPendingReads()
+                break streamLoop
               }
             }
             break
@@ -946,7 +982,30 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
           if (await detectDoomLoop(session, call.toolName, call.toolInput)) {
             host.emit({ type: "doom_loop_detected", tool: call.toolName })
-            throw new Error(`Doom loop: tool "${call.toolName}" repeatedly called via textual tool-call markup.`)
+            const threshold =
+              call.toolName === "Bash" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
+            const errMsg =
+              call.toolName === "Bash"
+                ? `Same Bash command was run ${threshold} times with identical arguments (textual tool call). Stop repeating: read prior errors and change the command.`
+                : `Same tool "${call.toolName}" was called ${threshold} times with identical arguments (textual tool call). Stop the loop and fix inputs.`
+            session.updateToolPart(newMessageId, partId, {
+              status: "error",
+              output: errMsg,
+              timeEnd: Date.now(),
+            })
+            host.emit({
+              type: "tool_end",
+              tool: call.toolName,
+              partId,
+              messageId: newMessageId,
+              success: false,
+              output: errMsg,
+              error: errMsg,
+            })
+            lastToolName = call.toolName
+            executedToolThisIteration = true
+            executedToolCallsTotal++
+            continue
           }
 
           const result = await executeToolCall(
@@ -1014,6 +1073,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           lastToolName = call.toolName
           executedToolThisIteration = true
           executedToolCallsTotal++
+          if ((result.metadata as { questionRequest?: boolean } | undefined)?.questionRequest) {
+            attemptedCompletionThisIteration = true
+            break
+          }
           if (call.toolName === MANDATORY_END_TOOL[mode]) {
             attemptedCompletionThisIteration = true
           }
@@ -1072,6 +1135,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     if (finishReason === "stop" && !executedToolThisIteration) {
       let mandatoryTool = MANDATORY_END_TOOL[mode]
       if (!mandatoryTool) break
+      // Revision pass: user asked to change the plan — never inject PlanExit on a text-only stop; run another outer iteration so the model can edit .nexus/plans first.
+      if (mode === "plan" && mandatoryTool === "PlanExit" && lastUserMessageRequestsPlanRevision(session)) {
+        flushAssistantContent()
+        await session.save()
+        emitContextUsage()
+        continue
+      }
       const alreadyCalled = messageHasMandatoryEndTool(session, newMessageId, mode)
       if (mandatoryTool && !alreadyCalled && resolvedTools.some((t) => t.name === mandatoryTool)) {
         // Plan mode: if no plan file was written, still force plan_exit so user gets a message
@@ -1380,7 +1450,7 @@ async function executeToolCall(
   try {
     validatedArgs = tool.parameters.parse(inputToParse)
   } catch (err) {
-    return { success: false, output: `Invalid arguments for ${toolName}: ${err}` }
+    return { success: false, output: formatToolValidationError(resolvedToolName, err, inputToParse) }
   }
 
   // Execute
@@ -1592,6 +1662,9 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
             result = raw.length <= MAX_TOOL_OUTPUT_CHARS
               ? raw
               : raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + "\n\n[... output truncated for context ...]"
+          }
+          if (tp.status === "error") {
+            result = formatToolAttemptForLanguageModel(tp.tool, tp.input, result)
           }
           return {
             type: "tool-result",

@@ -8,6 +8,8 @@ import ProjectOnboarding, {
 } from '../ProjectOnboarding.js'
 import { CostThresholdDialog } from '../components/CostThresholdDialog.js'
 import { NexusApprovalPanel } from '../components/NexusApprovalPanel.js'
+import { NexusPlanFollowupPanel } from '../components/NexusPlanFollowupPanel.js'
+import { NexusQuestionPanel } from '../components/NexusQuestionPanel.js'
 import { NexusSubagentBlock } from '../components/NexusSubagentBlock.js'
 import { NexusExploringBlock } from '../components/NexusExploringBlock.js'
 import { NexusTodoBlock } from '../components/NexusTodoBlock.js'
@@ -41,7 +43,7 @@ import {
   query,
 } from '../query.js'
 import { queryNexus } from '../nexus-query.js'
-import type { NexusApprovalMessage, NexusBannerMessage, NexusTodoMessage } from '../nexus-query.js'
+import type { NexusApprovalMessage, NexusBannerMessage, NexusTodoMessage, NexusQuestionMessage, NexusContextMessage } from '../nexus-query.js'
 import type { AutoApprovePermissions } from '../nexus-query.js'
 import type { WrappedClient } from '../services/mcpClient.js'
 import type { Tool } from '../Tool.js'
@@ -77,14 +79,89 @@ import { reduceSubagentEvent } from '../nexus-subagents.js'
 import type { RestoreType } from '../task-restore.js'
 import type { SessionMessage, ToolPart } from '@nexuscode/core'
 import { createLLMClient, loadConfig } from '@nexuscode/core'
-import { Session, hadPlanExit, getPlanContentForFollowup } from '@nexuscode/core'
+import { Session, hadPlanExit, getPlanContentForFollowup, formatQuestionnaireAnswersForAgent } from '@nexuscode/core'
 import type { SessionDiffEntry } from '../components/NexusSessionDiffBlock.js'
 import { NexusSessionDiffBlock } from '../components/NexusSessionDiffBlock.js'
+import {
+  canonToolName,
+  isExploreToolName,
+  parallelInputIsPureExplore,
+} from '../utils/exploreTools.js'
+import { nexusContextWindowLimit } from '../utils/nexusContextWindow.js'
 
 const NEXUS_MODES = ['agent', 'plan', 'ask', 'debug'] as const
 function cycleNexusMode(current: string): string {
   const i = NEXUS_MODES.indexOf(current as (typeof NEXUS_MODES)[number])
   return NEXUS_MODES[(i + 1) % NEXUS_MODES.length] ?? 'agent'
+}
+
+function collectCurrentTurnExploreToolUseIDs(messages: NormalizedMessage[]): Set<string> {
+  let turnStartIdx = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]!
+    if (msg.type !== 'user') continue
+    const content = (msg as any).message?.content
+    if (Array.isArray(content) && content.some((b: any) => b?.type === 'text')) {
+      turnStartIdx = i + 1
+      break
+    }
+  }
+
+  const ids = new Set<string>()
+  for (let i = turnStartIdx; i < messages.length; i++) {
+    const msg = messages[i]!
+    if (msg.type !== 'assistant') continue
+    const blocks = msg.message.content
+    if (!Array.isArray(blocks)) continue
+    for (const block of blocks) {
+      if (block?.type !== 'tool_use') continue
+      const nm = canonToolName(block.name)
+      if (nm === 'parallel') {
+        const input =
+          typeof block.input === 'object' && block.input != null
+            ? (block.input as Record<string, unknown>)
+            : {}
+        if (parallelInputIsPureExplore(input)) {
+          ids.add(block.id)
+        }
+        continue
+      }
+      if (!isExploreToolName(block.name)) continue
+      ids.add(block.id)
+    }
+  }
+  return ids
+}
+
+function isExploreNormalizedMessage(
+  message: NormalizedMessage,
+  exploreToolUseIDs: Set<string>,
+): boolean {
+  if (message.type === 'assistant') {
+    const blocks = message.message.content
+    if (!Array.isArray(blocks)) return false
+    return blocks.some(
+      b => b?.type === 'tool_use' && exploreToolUseIDs.has(b.id),
+    )
+  }
+  if (message.type === 'progress') {
+    return exploreToolUseIDs.has(message.toolUseID)
+  }
+  if (message.type === 'user') {
+    const content = message.message.content
+    if (!Array.isArray(content)) return false
+    return content.some(
+      b =>
+        b?.type === 'tool_result' &&
+        exploreToolUseIDs.has((b as { tool_use_id: string }).tool_use_id),
+    )
+  }
+  return false
+}
+
+type MessageRenderItem = {
+  type: 'static' | 'transient'
+  jsx: React.ReactNode
 }
 
 function buildInitialAutoApproveState(
@@ -254,6 +331,18 @@ export function REPL({
   const [nexusBannerText, setNexusBannerText] = useState('')
   /** Todo list from agent (TodoWrite). Rendered above input, below progress. */
   const [nexusTodo, setNexusTodo] = useState('')
+  const [nexusQuestionRequest, setNexusQuestionRequest] = useState<{
+    requestId: string
+    title?: string
+    submitLabel?: string
+    customOptionLabel?: string
+    questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }>
+  } | null>(null)
+  const [nexusContextUsage, setNexusContextUsage] = useState<{
+    usedTokens: number
+    limitTokens: number
+    percent: number
+  } | null>(null)
 
   /** Subagents per SpawnAgent tool partId. Updated via onSubagentEvent from queryNexus. */
   const [subagentsByPartId, setSubagentsByPartId] = useState<
@@ -287,6 +376,7 @@ export function REPL({
   const [nexusPlanFollowup, setNexusPlanFollowup] = useState<{
     planText: string
   } | null>(null)
+  const forcedNexusModeForNextRunRef = useRef<string | null>(null)
 
   const hasRunningSubagent = useMemo(
     () =>
@@ -400,13 +490,14 @@ export function REPL({
   }, [])
 
   const runNexusFollowupPrompt = useCallback(
-    async (prompt: string, resetSession: boolean) => {
+    async (prompt: string, resetSession: boolean, modeOverride: string) => {
       if (!nexusBootstrap) return
       if (resetSession) {
         nexusBootstrap.session = Session.create(nexusBootstrap.cwd)
         setMessages([])
       }
-      setNexusModeOverride('agent')
+      forcedNexusModeForNextRunRef.current = modeOverride
+      setNexusModeOverride(modeOverride)
       const abortController = new AbortController()
       setAbortController(abortController)
       setIsLoading(true)
@@ -424,6 +515,13 @@ export function REPL({
     [nexusBootstrap, onQuery],
   )
 
+  const runNexusQuestionPrompt = useCallback(async (answers: Array<{ questionId: string; optionId?: string; optionLabel?: string; customText?: string }>) => {
+    if (!nexusQuestionRequest) return
+    const prompt = formatQuestionnaireAnswersForAgent(nexusQuestionRequest, answers)
+    setNexusQuestionRequest(null)
+    await runNexusFollowupPrompt(prompt, false, nexusModeOverride)
+  }, [nexusQuestionRequest, nexusModeOverride, runNexusFollowupPrompt])
+
   const handleNexusPlanFollowupInput = useCallback(
     async (input: string): Promise<boolean> => {
       if (!nexusPlanFollowup) return false
@@ -432,47 +530,19 @@ export function REPL({
       const planText = nexusPlanFollowup.planText
       const implementationPrompt = `Implement the following plan:\n\n${planText}`
       if (trimmed === '1') {
-        setNexusAutoApprove({
-          read: true,
-          write: true,
-          execute: true,
-          mcp: true,
-          browser: true,
-        })
         setNexusPlanFollowup(null)
-        await runNexusFollowupPrompt(implementationPrompt, true)
+        await runNexusFollowupPrompt(implementationPrompt, false, 'agent')
         return true
       }
       if (trimmed === '2') {
-        setNexusAutoApprove({
-          read: true,
-          write: true,
-          execute: true,
-          mcp: true,
-          browser: true,
-        })
-        setNexusPlanFollowup(null)
-        await runNexusFollowupPrompt(implementationPrompt, false)
         return true
       }
-      if (trimmed === '3') {
-        setNexusPlanFollowup(null)
-        await runNexusFollowupPrompt(implementationPrompt, false)
-        return true
-      }
-      if (trimmed === '4') {
-        return true
-      }
-      const customInstruction =
-        /^4[\s:,-]+/i.test(trimmed)
-          ? trimmed.replace(/^4[\s:,-]+/i, '').trim()
-          : trimmed
+      const customInstruction = trimmed
       setNexusPlanFollowup(null)
       await runNexusFollowupPrompt(
-        customInstruction
-          ? `Implement the plan above with these changes:\n${customInstruction}`
-          : 'Implement the plan above.',
+        `Revise the current implementation plan based on this feedback.\n\nCurrent plan:\n${planText}\n\nUser feedback / requested changes:\n${customInstruction}\n\nDo not implement the code. Update the plan file in .nexus/plans/ and call PlanExit again when the revised plan is ready.`,
         false,
+        'plan',
       )
       return true
     },
@@ -483,6 +553,11 @@ export function REPL({
     (message: MessageType): string => {
       if (extractTagFromMessage(message, 'command-name') === 'review') {
         return 'review'
+      }
+      const forced = forcedNexusModeForNextRunRef.current
+      if (forced) {
+        forcedNexusModeForNextRunRef.current = null
+        return forced
       }
       return nexusModeOverride
     },
@@ -655,6 +730,19 @@ export function REPL({
             setNexusTodo((message as NexusTodoMessage).todo)
             continue
           }
+          if (message && 'type' in message && message.type === 'nexus_question') {
+            setNexusQuestionRequest((message as NexusQuestionMessage).request)
+            continue
+          }
+          if (message && 'type' in message && message.type === 'nexus_context') {
+            const ctx = message as NexusContextMessage
+            setNexusContextUsage({
+              usedTokens: ctx.usedTokens,
+              limitTokens: ctx.limitTokens,
+              percent: ctx.percent,
+            })
+            continue
+          }
           setMessages(oldMessages => [...oldMessages, message as MessageType])
         }
         if (modeOverrideForRun === 'plan' && hadPlanExit(nexusBootstrap.session)) {
@@ -778,6 +866,19 @@ export function REPL({
           setNexusTodo((message as NexusTodoMessage).todo)
           continue
         }
+        if (message && 'type' in message && message.type === 'nexus_question') {
+          setNexusQuestionRequest((message as NexusQuestionMessage).request)
+          continue
+        }
+        if (message && 'type' in message && message.type === 'nexus_context') {
+          const ctx = message as NexusContextMessage
+          setNexusContextUsage({
+            usedTokens: ctx.usedTokens,
+            limitTokens: ctx.limitTokens,
+            percent: ctx.percent,
+          })
+          continue
+        }
         setMessages(oldMessages => [...oldMessages, message as MessageType])
       }
       if (modeOverrideForRun === 'plan' && hadPlanExit(nexusBootstrap.session)) {
@@ -853,6 +954,49 @@ export function REPL({
     }
   }, [nexusSessionId])
 
+  /** After `/sessions` switch: sync in-memory Session, footer id, chat, and context estimate. */
+  const prevNexusSessionIdRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    if (!nexusBootstrap || nexusSessionId == null) return
+    if (prevNexusSessionIdRef.current === undefined) {
+      prevNexusSessionIdRef.current = nexusSessionId
+      return
+    }
+    if (prevNexusSessionIdRef.current === nexusSessionId) return
+    prevNexusSessionIdRef.current = nexusSessionId
+
+    const model = nexusBootstrap.config.model as {
+      id: string
+      contextWindow?: number
+    }
+    const limitTokens = nexusContextWindowLimit(model.id, model.contextWindow)
+    const usedTokens = nexusBootstrap.session.getTokenEstimate()
+    const percent =
+      limitTokens > 0
+        ? Math.min(100, Math.round((usedTokens / limitTokens) * 100))
+        : 0
+
+    setNexusBannerText('')
+    setNexusApprovalAction(null)
+    setNexusQuestionRequest(null)
+    setSubagentsByPartId({})
+    setNexusPlanFollowup(null)
+    setNexusTodo(nexusBootstrap.session.getTodo())
+    setNexusContextUsage({ usedTokens, limitTokens, percent })
+    setForkNumber(n => n + 1)
+    const sid =
+      nexusSessionId.length > 24
+        ? `${nexusSessionId.slice(0, 10)}…${nexusSessionId.slice(-6)}`
+        : nexusSessionId
+    setMessages([
+      createAssistantMessage(
+        `Switched session · ${sid}\n` +
+          `Chat view cleared for this session. Context reflects loaded history (send a message to refresh after edits).\n` +
+          `CLI resume: nexus --session ${nexusSessionId}`,
+      ),
+    ])
+  }, [nexusSessionId, nexusBootstrap])
+
   // Clear stale subagents when a new query starts (isLoading: false → true)
   const prevIsLoadingRef = useRef(false)
   useEffect(() => {
@@ -904,10 +1048,22 @@ export function REPL({
     [normalizedMessages],
   )
 
-  const messagesJSX = useMemo(
+  const currentTurnExploreToolUseIDs = useMemo(
+    () => collectCurrentTurnExploreToolUseIDs(normalizedMessages),
+    [normalizedMessages],
+  )
+
+  const messagesJSX = useMemo<MessageRenderItem[]>(
     () =>
       reorderMessages(normalizedMessages)
         .map(_ => {
+          if (
+            nexusBootstrap &&
+            currentTurnExploreToolUseIDs.size > 0 &&
+            isExploreNormalizedMessage(_, currentTurnExploreToolUseIDs)
+          ) {
+            return null
+          }
           // Progress items are only for in-flight tool calls.
           // Once a matching tool_result arrives, hide progress and keep the final tool_use line.
           if (_.type === 'progress' && !unresolvedToolUseIDs.has(_.toolUseID)) {
@@ -1011,14 +1167,7 @@ export function REPL({
             ),
           }
         })
-        .filter(
-          (
-            item,
-          ): item is {
-            type: 'static' | 'transient'
-            jsx: React.ReactNode
-          } => item !== null,
-        ),
+        .filter((item): item is MessageRenderItem => item !== null),
     [
       normalizedMessages,
       tools,
@@ -1034,6 +1183,7 @@ export function REPL({
       isDefaultModel,
       nexusBootstrap,
       nexusConfigSnapshot,
+      currentTurnExploreToolUseIDs,
       nexusModeOverride,
       nexusSessionId,
       subagentsByPartId,
@@ -1041,7 +1191,8 @@ export function REPL({
     ],
   )
 
-  const staticMessageItems = messagesJSX.filter(_ => _.type === 'static')
+  const staticMessageItems = messagesJSX.filter((item) => item.type === 'static')
+  const transientMessageItems = messagesJSX.filter((item) => item.type === 'transient')
   const staticItemsWithHeader = useMemo(
     () => [{ id: 'header' as const }, ...staticMessageItems],
     [staticMessageItems],
@@ -1067,10 +1218,10 @@ export function REPL({
             )
           }
         </Static>
-        {messagesJSX.filter(_ => _.type === 'transient').map(_ => _.jsx)}
+        {transientMessageItems.map((item) => item.jsx)}
       </>
     ),
-    [forkNumber, staticItemsWithHeader, messagesJSX, mcpClients, isDefaultModel],
+    [forkNumber, staticItemsWithHeader, transientMessageItems, mcpClients, isDefaultModel],
   )
 
   // only show the dialog once not loading
@@ -1210,26 +1361,46 @@ export function REPL({
                 <NexusSessionDiffBlock entries={sessionDiffEntries} />
               ) : null}
               {nexusBootstrap && nexusPlanFollowup ? (
-                <Box flexDirection="column" marginTop={1} paddingX={1}>
-                  <Text bold>Ready to code?</Text>
-                  <Text dimColor>Here is the plan:</Text>
-                  <Box marginTop={1} borderStyle="single" borderColor={getTheme().secondaryBorder} paddingX={1}>
-                    <Text>{nexusPlanFollowup.planText}</Text>
-                  </Box>
-                  <Box marginTop={1} flexDirection="column">
-                    <Text>1. Yes, clear context and auto-accept edits</Text>
-                    <Text>2. Yes, auto-accept edits</Text>
-                    <Text>3. Yes, manually approve edits</Text>
-                    <Text>4. Type custom changes (or just type your instruction)</Text>
-                  </Box>
-                </Box>
+                <NexusPlanFollowupPanel
+                  planText={nexusPlanFollowup.planText}
+                  onImplement={async () => {
+                    const planText = nexusPlanFollowup.planText
+                    setNexusPlanFollowup(null)
+                    await runNexusFollowupPrompt(
+                      `Implement the following plan:\n\n${planText}`,
+                      false,
+                      'agent',
+                    )
+                  }}
+                  onRevise={async (instruction) => {
+                    const planText = nexusPlanFollowup.planText
+                    setNexusPlanFollowup(null)
+                    await runNexusFollowupPrompt(
+                      `Revise the current implementation plan based on this feedback.\n\nCurrent plan:\n${planText}\n\nUser feedback / requested changes:\n${instruction}\n\nDo not implement the code. Update the plan file in .nexus/plans/ and call PlanExit again when the revised plan is ready.`,
+                      false,
+                      'plan',
+                    )
+                  }}
+                  onDismiss={() => {
+                    setNexusPlanFollowup(null)
+                    setNexusModeOverride('agent')
+                  }}
+                />
               ) : null}
+              {nexusBootstrap && nexusQuestionRequest ? (
+                <NexusQuestionPanel
+                  request={nexusQuestionRequest}
+                  onDismiss={() => setNexusQuestionRequest(null)}
+                  onSubmit={runNexusQuestionPrompt}
+                />
+              ) : null}
+              {!nexusPlanFollowup && !nexusQuestionRequest ? (
               <PromptInput
                 commands={commands}
                 forkNumber={forkNumber}
                 messageLogName={messageLogName}
                 tools={tools}
-                isDisabled={apiKeyStatus === 'invalid'}
+                isDisabled={apiKeyStatus === 'invalid' || nexusPlanFollowup != null || nexusQuestionRequest != null || nexusApprovalAction != null}
                 isLoading={isLoading}
                 onQuery={onQuery}
                 debug={debug}
@@ -1260,6 +1431,7 @@ export function REPL({
                   (nexusBootstrap ? nexusBootstrap.indexEnabled : undefined)
                 }
                 nexusSessionId={nexusSessionId}
+                nexusContextUsage={nexusContextUsage}
                 onCycleNexusMode={
                   nexusBootstrap
                     ? () => setNexusModeOverride(prev => cycleNexusMode(prev))
@@ -1290,6 +1462,7 @@ export function REPL({
                 onSetNexusMode={nexusBootstrap ? onSetNexusMode : undefined}
                 onOpenInEditor={nexusBootstrap ? onOpenInEditor : undefined}
               />
+              ) : null}
             </>
           )}
       </Box>
@@ -1345,6 +1518,17 @@ function shouldRenderStatically(
   switch (message.type) {
     case 'user':
     case 'assistant': {
+      // Tool rows depend on Ctrl+O (expandToolDetails). Static freezes them so
+      // collapse/expand stops updating after the turn completes.
+      if (message.type === 'assistant') {
+        const blocks = message.message.content
+        if (
+          Array.isArray(blocks) &&
+          blocks.some(b => b?.type === 'tool_use')
+        ) {
+          return false
+        }
+      }
       const toolUseID = getToolUseID(message)
       if (!toolUseID) {
         return true

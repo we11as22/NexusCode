@@ -3,8 +3,39 @@ import * as path from "node:path"
 import * as diff from "diff"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { buildDiffHunks } from "./diff-hunks.js"
+import { isNexusPlansPath } from "../plan-paths.js"
 
 const MAX_DIFF_PREVIEW_LINES = 80
+
+/** Normalize to LF for comparison; avoids Edit failing when the model uses \\n but the file is CRLF. */
+function normalizeLineEndings(text: string): string {
+  return text.replaceAll("\r\n", "\n")
+}
+
+function detectLineEnding(text: string): "\n" | "\r\n" {
+  return text.includes("\r\n") ? "\r\n" : "\n"
+}
+
+/** Convert internal \\n segments to the file's native line endings (Kilo/OpenCode-style). */
+function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
+  if (ending === "\n") return text
+  return text.replaceAll("\n", "\r\n")
+}
+
+/**
+ * Map model-supplied strings to the file's line endings so literal search/replace matches on disk.
+ */
+function prepareEditStrings(
+  fileContent: string,
+  oldString: string,
+  newString: string,
+): { oldPrepared: string; newPrepared: string } {
+  const ending = detectLineEnding(fileContent)
+  return {
+    oldPrepared: convertToLineEnding(normalizeLineEndings(oldString), ending),
+    newPrepared: convertToLineEnding(normalizeLineEndings(newString), ending),
+  }
+}
 
 function createDiffPreview(oldContent: string, newContent: string, label: string): string {
   const patch = diff.createTwoFilesPatch(label, label, oldContent, newContent, "", "", { context: 2 })
@@ -43,21 +74,36 @@ Usage:
       return { success: false, output: `File not found: ${filePath}` }
     }
 
+    const { oldPrepared, newPrepared } = prepareEditStrings(
+      originalContent,
+      old_string,
+      new_string,
+    )
+    if (oldPrepared === newPrepared) {
+      return {
+        success: false,
+        output: `'old_string' and 'new_string' are identical after normalizing line endings; nothing to change in ${filePath}.`,
+      }
+    }
+
     let content: string
     if (replace_all) {
-      content = originalContent.split(old_string).join(new_string)
+      content = originalContent.split(oldPrepared).join(newPrepared)
       if (content === originalContent) {
         return { success: false, output: `No occurrences of old_string found in ${filePath}.` }
       }
     } else {
-      const idx = originalContent.indexOf(old_string)
+      const idx = originalContent.indexOf(oldPrepared)
       if (idx === -1) {
         return {
           success: false,
-          output: `old_string not found in ${filePath}.\nHint: Read the file first to verify the exact content.`,
+          output: `old_string not found in ${filePath}.\nHint: Read the file first to verify the exact content (whitespace, quotes, and line endings must match; try Read again if the file changed).`,
         }
       }
-      content = originalContent.slice(0, idx) + new_string + originalContent.slice(idx + old_string.length)
+      content =
+        originalContent.slice(0, idx) +
+        newPrepared +
+        originalContent.slice(idx + oldPrepared.length)
     }
 
     const changesForStats = diff.diffLines(originalContent, content)
@@ -77,7 +123,10 @@ Usage:
     const modeAutoApprove = new Set(
       (ctx.mode ? ctx.config.modes?.[ctx.mode]?.autoApprove : undefined) ?? []
     )
-    const skipApproval = ctx.config.permissions.autoApproveWrite || modeAutoApprove.has("write")
+    const skipApproval =
+      ctx.config.permissions.autoApproveWrite ||
+      modeAutoApprove.has("write") ||
+      isNexusPlansPath(filePath)
 
     if (useFileEditFlow) {
       const diffPreview = createDiffPreview(originalContent, content, filePath)

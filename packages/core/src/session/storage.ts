@@ -9,10 +9,25 @@ import type { SessionMessage, ToolPart, MessagePart } from "../types.js"
  * Session storage using JSONL format (like Pi).
  * Each line is a JSON entry with { id, parentId, role, content, ts, metadata }.
  * Sessions are stored per project in ~/.nexus/sessions/{project-hash}/
+ *
+ * All callers should use the same logical project root: CLI, VS Code, and server
+ * resolve paths here so one bucket is used per workspace (symlinks, trailing
+ * slashes, and Windows drive casing are normalized when possible).
  */
+export function canonicalProjectRoot(cwd: string): string {
+  const trimmed = (cwd ?? "").trim()
+  const base = trimmed.length > 0 ? trimmed : process.cwd()
+  const resolved = path.resolve(base)
+  try {
+    return fs.realpathSync.native(resolved)
+  } catch {
+    return resolved
+  }
+}
 
 export function getSessionsDir(cwd: string): string {
-  const hash = crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 12)
+  const root = canonicalProjectRoot(cwd)
+  const hash = crypto.createHash("sha1").update(root).digest("hex").slice(0, 12)
   return path.join(os.homedir(), ".nexus", "sessions", hash)
 }
 
@@ -26,15 +41,25 @@ export interface StoredSession {
   messages: SessionMessage[]
 }
 
+export interface StoredSessionMeta {
+  id: string
+  cwd: string
+  ts: number
+  title?: string
+  todo?: string
+  messageCount: number
+}
+
 export async function saveSession(session: StoredSession): Promise<void> {
-  const dir = getSessionsDir(session.cwd)
+  const cwd = canonicalProjectRoot(session.cwd)
+  const dir = getSessionsDir(cwd)
   await fsp.mkdir(dir, { recursive: true })
 
   const filePath = path.join(dir, `${session.id}.jsonl`)
   const lines = session.messages.map(m => JSON.stringify(m)).join("\n")
   const meta = JSON.stringify({
     id: session.id,
-    cwd: session.cwd,
+    cwd,
     ts: session.ts,
     title: session.title,
     todo: session.todo ?? "",
@@ -44,7 +69,8 @@ export async function saveSession(session: StoredSession): Promise<void> {
 }
 
 export async function loadSession(sessionId: string, cwd: string): Promise<StoredSession | null> {
-  const dir = getSessionsDir(cwd)
+  const root = canonicalProjectRoot(cwd)
+  const dir = getSessionsDir(root)
   const filePath = path.join(dir, `${sessionId}.jsonl`)
 
   if (!fs.existsSync(filePath)) return null
@@ -59,10 +85,64 @@ export async function loadSession(sessionId: string, cwd: string): Promise<Store
 
   return {
     id: meta.id,
-    cwd,
+    cwd: root,
     ts: meta.ts,
     title: meta.title,
     todo: typeof meta.todo === "string" ? meta.todo : "",
+    messages,
+  }
+}
+
+export async function getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null> {
+  const root = canonicalProjectRoot(cwd)
+  const dir = getSessionsDir(root)
+  const filePath = path.join(dir, `${sessionId}.jsonl`)
+  if (!fs.existsSync(filePath)) return null
+
+  const content = await fsp.readFile(filePath, "utf8")
+  const lines = content.split("\n").filter(Boolean)
+  if (lines.length === 0) return null
+
+  const meta = JSON.parse(lines[0]!) as { id: string; cwd: string; ts: number; title?: string; todo?: string }
+  return {
+    id: meta.id,
+    cwd: root,
+    ts: meta.ts,
+    title: meta.title,
+    todo: typeof meta.todo === "string" ? meta.todo : "",
+    messageCount: Math.max(0, lines.length - 1),
+  }
+}
+
+export async function loadSessionMessages(
+  sessionId: string,
+  cwd: string,
+  limit: number,
+  offset: number
+): Promise<{ meta: StoredSessionMeta; messages: SessionMessage[] } | null> {
+  const root = canonicalProjectRoot(cwd)
+  const dir = getSessionsDir(root)
+  const filePath = path.join(dir, `${sessionId}.jsonl`)
+  if (!fs.existsSync(filePath)) return null
+
+  const content = await fsp.readFile(filePath, "utf8")
+  const lines = content.split("\n").filter(Boolean)
+  if (lines.length === 0) return null
+
+  const meta = JSON.parse(lines[0]!) as { id: string; cwd: string; ts: number; title?: string; todo?: string }
+  const messageLines = lines.slice(1)
+  const start = Math.max(0, offset)
+  const end = limit > 0 ? Math.min(messageLines.length, start + limit) : messageLines.length
+  const messages = messageLines.slice(start, end).map((line) => JSON.parse(line) as SessionMessage)
+  return {
+    meta: {
+      id: meta.id,
+      cwd: root,
+      ts: meta.ts,
+      title: meta.title,
+      todo: typeof meta.todo === "string" ? meta.todo : "",
+      messageCount: messageLines.length,
+    },
     messages,
   }
 }
@@ -89,7 +169,7 @@ export async function listSessions(cwd: string): Promise<Array<{ id: string; ts:
 }
 
 export async function deleteSession(sessionId: string, cwd: string): Promise<boolean> {
-  const dir = getSessionsDir(cwd)
+  const dir = getSessionsDir(canonicalProjectRoot(cwd))
   const filePath = path.join(dir, `${sessionId}.jsonl`)
   try {
     await fsp.unlink(filePath)

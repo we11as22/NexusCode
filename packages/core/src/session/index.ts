@@ -1,6 +1,14 @@
 import * as crypto from "node:crypto"
 import type { ISession, SessionMessage, ToolPart, MessagePart } from "../types.js"
-import { saveSession, loadSession, generateSessionId, type StoredSession } from "./storage.js"
+import {
+  saveSession,
+  loadSession,
+  loadSessionMessages,
+  getSessionMeta,
+  generateSessionId,
+  canonicalProjectRoot,
+  type StoredSession,
+} from "./storage.js"
 import { estimateTokens } from "../context/condense.js"
 import { getMessagesForActiveContext } from "./active-context.js"
 
@@ -31,10 +39,12 @@ export class Session implements ISession {
   private cwd: string
   /** Ephemeral sessions are never persisted to disk (used for sub-agents). */
   private _ephemeral: boolean
+  /** Cached token estimate for the active context; invalidated on every session mutation. */
+  private _tokenEstimateCache: number | null = null
 
   constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral = false) {
     this.id = id
-    this.cwd = cwd
+    this.cwd = canonicalProjectRoot(cwd)
     this._messages = messages ?? []
     this._todo = typeof initialTodo === "string" ? initialTodo : ""
     this._ephemeral = ephemeral
@@ -44,6 +54,10 @@ export class Session implements ISession {
     return this._messages
   }
 
+  invalidateTokenEstimate(): void {
+    this._tokenEstimateCache = null
+  }
+
   addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage {
     const full: SessionMessage = {
       ...msg,
@@ -51,6 +65,7 @@ export class Session implements ISession {
       ts: Date.now(),
     }
     this._messages.push(full)
+    this.invalidateTokenEstimate()
     return full
   }
 
@@ -58,6 +73,7 @@ export class Session implements ISession {
     const idx = this._messages.findIndex(m => m.id === id)
     if (idx === -1) return
     this._messages[idx] = { ...this._messages[idx]!, ...updates }
+    this.invalidateTokenEstimate()
   }
 
   addToolPart(messageId: string, part: ToolPart): void {
@@ -70,6 +86,7 @@ export class Session implements ISession {
     } else {
       ;(msg.content as MessagePart[]).push(part)
     }
+    this.invalidateTokenEstimate()
   }
 
   updateToolPart(messageId: string, partId: string, updates: Partial<ToolPart>): void {
@@ -81,6 +98,7 @@ export class Session implements ISession {
     if (idx === -1) return
 
     parts[idx] = { ...(parts[idx] as ToolPart), ...updates } as ToolPart
+    this.invalidateTokenEstimate()
   }
 
   updateTodo(markdown: string): void {
@@ -92,6 +110,7 @@ export class Session implements ISession {
   }
 
   getTokenEstimate(): number {
+    if (this._tokenEstimateCache != null) return this._tokenEstimateCache
     let total = 0
     for (const msg of getMessagesForActiveContext(this._messages)) {
       if (typeof msg.content === "string") {
@@ -112,6 +131,7 @@ export class Session implements ISession {
         }
       }
     }
+    this._tokenEstimateCache = total
     return total
   }
 
@@ -126,6 +146,7 @@ export class Session implements ISession {
     const keep = this._messages.filter(m => m.ts <= timestamp)
     if (keep.length < this._messages.length) {
       this._messages = keep
+      this.invalidateTokenEstimate()
     }
   }
 
@@ -134,6 +155,7 @@ export class Session implements ISession {
     const keep = this._messages.filter(m => m.ts < timestamp)
     if (keep.length < this._messages.length) {
       this._messages = keep
+      this.invalidateTokenEstimate()
     }
   }
 
@@ -141,10 +163,14 @@ export class Session implements ISession {
   rewindBeforeMessageId(messageId: string): void {
     const idx = this._messages.findIndex((m) => m.id === messageId)
     if (idx <= 0) {
-      if (idx === 0) this._messages = []
+      if (idx === 0) {
+        this._messages = []
+        this.invalidateTokenEstimate()
+      }
       return
     }
     this._messages = this._messages.slice(0, idx)
+    this.invalidateTokenEstimate()
   }
 
   async save(): Promise<void> {
@@ -166,6 +192,7 @@ export class Session implements ISession {
     if (stored) {
       this._messages = stored.messages
       this._todo = typeof stored.todo === "string" ? stored.todo : ""
+      this.invalidateTokenEstimate()
     }
   }
 
@@ -184,6 +211,25 @@ export class Session implements ISession {
     const todo = typeof stored.todo === "string" ? stored.todo : ""
     return new Session(sessionId, cwd, stored.messages, todo)
   }
+
+  static async resumeWindow(sessionId: string, cwd: string, limit: number, offset: number): Promise<Session | null> {
+    const loaded = await loadSessionMessages(sessionId, cwd, limit, offset)
+    if (!loaded) return null
+    return new Session(sessionId, cwd, loaded.messages, loaded.meta.todo ?? "")
+  }
+
+  static async getMeta(sessionId: string, cwd: string) {
+    return getSessionMeta(sessionId, cwd)
+  }
 }
 
-export { generateSessionId, listSessions, deleteSession } from "./storage.js"
+export {
+  generateSessionId,
+  listSessions,
+  deleteSession,
+  getSessionMeta,
+  loadSessionMessages,
+  canonicalProjectRoot,
+  saveSession,
+  loadSession,
+} from "./storage.js"

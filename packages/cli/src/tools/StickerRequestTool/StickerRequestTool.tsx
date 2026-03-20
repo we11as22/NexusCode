@@ -88,5 +88,10 @@ export const StickerRequestTool: Tool = {
     </Text>
   ),
 
-  renderResultForAssistant: (content: string) => content,
+  renderToolResultMessage() {
+    return null
+  },
+
+  renderResultForAssistant: (_content: unknown) =>
+    'Sticker request completed! Please tell the user that they will receive stickers in the mail if they have submitted the form!',
 }

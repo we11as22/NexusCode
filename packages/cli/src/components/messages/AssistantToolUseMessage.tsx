@@ -269,10 +269,13 @@ export function AssistantToolUseMessage({
   const collapsedInput = hasInput
     ? summarizeInput(param.name, inputRecord, renderedInput)
     : ''
-  const collapsedLine =
+  let collapsedLine =
     normalizedToolName === 'Parallel' || normalizedToolName === 'parallel'
       ? (collapsedInput || userFacingToolName)
       : [userFacingToolName, collapsedInput].filter(Boolean).join(' ')
+  if (erroredToolUseIDs.has(param.id)) {
+    collapsedLine = `Attempt ${collapsedLine}`
+  }
   const showExpandHint =
     !expandToolDetails &&
     hasInput &&
@@ -302,7 +305,9 @@ export function AssistantToolUseMessage({
               />
             ))}
           <Text color={color} bold={!isQueued}>
-            {expandToolDetails ? userFacingToolName : collapsedLine}
+            {expandToolDetails
+              ? `${erroredToolUseIDs.has(param.id) ? 'Attempt ' : ''}${userFacingToolName}`
+              : collapsedLine}
             {showExpandHint ? ' (ctrl+o to expand)' : ''}
           </Text>
         </Box>

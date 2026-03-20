@@ -32,7 +32,7 @@ export function SelectOption({
   smallPointer,
   children,
 }: SelectOptionProps) {
-  const { styles } = useComponentTheme<Theme>('Select')
+  const { styles } = useComponentTheme('Select') as { styles: Theme }
 
   return (
     <Box {...styles.option({ isFocused })}>

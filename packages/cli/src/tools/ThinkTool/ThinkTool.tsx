@@ -43,6 +43,10 @@ export const ThinkTool = {
     return input.thought
   },
 
+  renderToolResultMessage() {
+    return null
+  },
+
   renderToolUseRejectedMessage() {
     return (
       <MessageResponse>

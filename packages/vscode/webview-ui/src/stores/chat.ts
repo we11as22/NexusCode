@@ -2,6 +2,9 @@ import { create } from "zustand"
 import { postMessage } from "../vscode.js"
 import type { ModelsCatalogFromCore, AgentPresetFromCore } from "../types/messages.js"
 
+/** Detects a new plan snapshot so the full follow-up panel re-opens. */
+let planFollowupTextFingerprint: string | null = null
+
 export type Mode = "agent" | "plan" | "ask" | "debug" | "review"
 export type AppView = "chat" | "sessions" | "settings"
 
@@ -310,6 +313,20 @@ interface ChatState {
   planCompleted: boolean
   /** Plan text for "New session" option. */
   planFollowupText: string | null
+  /** When true, show a one-line plan strip instead of the full follow-up UI (e.g. while plan is being revised). */
+  planPanelCollapsed: boolean
+  pendingQuestionRequest: {
+    requestId: string
+    title?: string
+    submitLabel?: string
+    customOptionLabel?: string
+    questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }>
+  } | null
+  /**
+   * Request id the user just dismissed/submitted locally; ignore same id in following stateUpdate
+   * so a debounced extension state post cannot flash the questionnaire again.
+   */
+  suppressedQuestionRequestId: string | null
 
   /** Server session: there are older messages above the loaded window; show "Load older". */
   hasOlderMessages: boolean
@@ -386,6 +403,10 @@ interface ChatState {
   handleMcpServerStatus: (results: Array<{ name: string; status: "ok" | "error"; error?: string }>) => void
   handlePendingApproval: (partId: string, action: { type: string; tool: string; description: string; content?: string }) => void
   resolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean, whatToDoInstead?: string) => void
+  clearPendingQuestionRequest: () => void
+  /** Collapse the plan follow-up block (user submitted dismiss/revise/implement or minimized). */
+  collapsePlanPanel: () => void
+  expandPlanPanel: () => void
   handleSessionList: (sessions: SessionPreview[]) => void
   handleSessionListLoading: (loading: boolean) => void
 }
@@ -404,6 +425,7 @@ export type AgentEvent =
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
   | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string; parentPartId?: string }
   | { type: "tool_approval_needed"; action: ApprovalAction; partId: string }
+  | { type: "question_request"; request: { requestId: string; title?: string; submitLabel?: string; customOptionLabel?: string; questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }> }; partId?: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
   | { type: "index_update"; status: IndexStatusKind }
@@ -460,6 +482,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   checkpointEnabled: false,
   planCompleted: false,
   planFollowupText: null,
+  planPanelCollapsed: false,
+  pendingQuestionRequest: null,
+  suppressedQuestionRequestId: null,
   hasOlderMessages: false,
   loadingOlderMessages: false,
   sessionUnacceptedEdits: [],
@@ -613,8 +638,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   clearChat: () => {
+    planFollowupTextFingerprint = null
     postMessage({ type: "clearChat" })
-    set({ messages: [], todo: "", view: "chat", subagents: [], lastSpawnAgentPartId: null, planCompleted: false, planFollowupText: null, hasOlderMessages: false, loadingOlderMessages: false })
+    set({ messages: [], todo: "", view: "chat", subagents: [], lastSpawnAgentPartId: null, planCompleted: false, planFollowupText: null, planPanelCollapsed: false, hasOlderMessages: false, loadingOlderMessages: false })
   },
 
   forkSession: (messageId) => {
@@ -680,13 +706,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   handleStateUpdate: (state) => {
     set((prev) => {
-      const next = { ...prev, ...state, isInitialized: true }
+      let suppressedQuestionRequestId = prev.suppressedQuestionRequestId
+      const incomingPending = state.pendingQuestionRequest
+
+      if (incomingPending !== undefined) {
+        if (incomingPending === null) {
+          suppressedQuestionRequestId = null
+        } else if (suppressedQuestionRequestId != null && incomingPending.requestId !== suppressedQuestionRequestId) {
+          suppressedQuestionRequestId = null
+        }
+      }
+
+      const next = { ...prev, ...state, isInitialized: true, suppressedQuestionRequestId }
+      if (state.pendingQuestionRequest !== undefined) {
+        const inc = state.pendingQuestionRequest
+        const hideStale =
+          inc != null &&
+          suppressedQuestionRequestId != null &&
+          inc.requestId === suppressedQuestionRequestId
+        next.pendingQuestionRequest = hideStale ? null : inc
+      }
       if (
         state.messages != null &&
         Array.isArray(state.messages) &&
-        ((typeof state.sessionId === "string" && state.sessionId === prev.sessionId) || state.sessionId == null)
+        (
+          (typeof state.sessionId === "string" && state.sessionId === prev.sessionId) ||
+          (typeof state.sessionId === "string" && !prev.sessionId) ||
+          state.sessionId == null
+        )
       ) {
         next.messages = mergeStateMessagesForStream(prev.messages, state.messages)
+      }
+      const effectivePlanDone = state.planCompleted !== undefined ? state.planCompleted : prev.planCompleted
+      const effectivePlanText =
+        state.planFollowupText !== undefined ? state.planFollowupText : prev.planFollowupText
+      if (effectivePlanDone && typeof effectivePlanText === "string" && effectivePlanText.length > 0) {
+        const fp = `${effectivePlanText.length}\0${effectivePlanText.slice(0, 220)}\0${effectivePlanText.slice(-160)}`
+        if (fp !== planFollowupTextFingerprint) {
+          planFollowupTextFingerprint = fp
+          // New plan snapshots should open in compact-preview mode first so action buttons stay visible.
+          next.planPanelCollapsed = true
+        }
+      }
+      if (state.planCompleted === false) {
+        planFollowupTextFingerprint = null
+        next.planPanelCollapsed = true
       }
       return next
     })
@@ -754,6 +818,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ pendingApproval: null, awaitingApproval: false })
     }
   },
+  clearPendingQuestionRequest: () =>
+    set((s) => ({
+      pendingQuestionRequest: null,
+      suppressedQuestionRequestId: s.pendingQuestionRequest?.requestId ?? s.suppressedQuestionRequestId,
+    })),
+  collapsePlanPanel: () => set({ planPanelCollapsed: true }),
+  expandPlanPanel: () => set({ planPanelCollapsed: false }),
 
   handleAgentEvent: (event) => {
     const { messages } = get()
@@ -1164,6 +1235,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
         })
         break
 
+      case "question_request":
+        set({
+          pendingQuestionRequest: (event as {
+            request: {
+              requestId: string
+              title?: string
+              submitLabel?: string
+              customOptionLabel?: string
+              questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }>
+            }
+          }).request,
+          suppressedQuestionRequestId: null,
+        })
+        break
+
       case "index_update": {
         const status = event.status as IndexStatusKind
         set({
@@ -1366,7 +1452,13 @@ function mergeAssistantContent(
 }
 
 function mergeStateMessagesForStream(previous: SessionMessage[], incoming: SessionMessage[]): SessionMessage[] {
-  if (previous.length === 0 || incoming.length === 0) return incoming
+  // Server may briefly send [] while optimistic local_user_* rows exist — keep previous to avoid flash.
+  if (incoming.length === 0) {
+    return previous
+  }
+  if (previous.length === 0) {
+    return incoming
+  }
 
   const merged = mergeOptimisticUserMessages(previous, incoming)
   const lastIncoming = merged[merged.length - 1]

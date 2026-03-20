@@ -21,7 +21,7 @@ import {
   ToolResultBlockParam,
   ToolUseBlockParam,
   Message as APIMessage,
-  ContentBlockParam,
+  MessageParam,
   ContentBlock,
 } from '@anthropic-ai/sdk/resources/index.mjs'
 import { setCwd } from './state.js'
@@ -71,7 +71,7 @@ function baseCreateAssistantMessage(
         output_tokens: 0,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
-      },
+      } as UsageWithCache,
       content,
     },
     ...extra,
@@ -83,7 +83,6 @@ export function createAssistantMessage(content: string): AssistantMessage {
     {
       type: 'text' as const,
       text: content === '' ? NO_CONTENT_MESSAGE : content,
-      citations: [],
     },
   ])
 }
@@ -96,7 +95,6 @@ export function createAssistantAPIErrorMessage(
       {
         type: 'text' as const,
         text: content === '' ? NO_CONTENT_MESSAGE : content,
-        citations: [],
       },
     ],
     { isApiErrorMessage: true },
@@ -106,6 +104,12 @@ export function createAssistantAPIErrorMessage(
 export type FullToolUseResult = {
   data: unknown // Matches tool's `Output` type
   resultForAssistant: ToolResultBlockParam['content']
+}
+
+type ContentBlockParam = Exclude<MessageParam['content'], string>[number]
+type UsageWithCache = APIMessage['usage'] & {
+  cache_creation_input_tokens?: number
+  cache_read_input_tokens?: number
 }
 
 export function createUserMessage(
@@ -207,9 +211,7 @@ export async function processUserInput(
       shouldHidePromptInput: false,
     })
     try {
-      const validationResult = await BashTool.validateInput({
-        command: input,
-      })
+      const validationResult = await BashTool.validateInput({ command: input })
       if (!validationResult.result) {
         return [userMessage, createAssistantMessage(validationResult.message)]
       }
@@ -347,7 +349,7 @@ async function getMessagesForSlashCommand(
                 createUserMessage(`<command-name>${command.userFacingName()}</command-name>
           <command-message>${command.userFacingName()}</command-message>
           <command-args>${args}</command-args>`),
-                r
+                typeof r === 'string'
                   ? createAssistantMessage(r)
                   : createAssistantMessage(NO_RESPONSE_REQUESTED),
               ])
@@ -587,17 +589,23 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
               message.message.content.length,
             durationMs: (message as AssistantMessage).durationMs,
           } as NormalizedMessage
-        case 'user':
-          // It seems like the line below was a no-op before, but I'm not sure.
-          // To check, we could throw an error if any of the following are true:
-          // - message `role` does isn't `user` -- this possibility is allowed by MCP tools,
-          //   though isn't supposed to happen in practice (we should fix this)
-          // - message `content` is not an array -- this one is more concerning because it's
-          //   not allowed by the `NormalizedUserMessage` type, but if it's happening that was
-          //   probably a bug before.
-          // Maybe I'm missing something? -(ab)
-          // return createUserMessage([_]) as NormalizedMessage
-          return message as NormalizedUserMessage
+        case 'user': {
+          // Mirror assistant splitting: one UI row per block so tool results sit next to the
+          // correct tool_use (fixes errors showing under the previous tool row).
+          const block = _
+          const base = message as UserMessage
+          return {
+            type: 'user',
+            uuid: randomUUID(),
+            message: {
+              ...base.message,
+              content: [block] as NormalizedUserMessage['message']['content'],
+            },
+            ...(base.toolUseResult && block.type === 'tool_result'
+              ? { toolUseResult: base.toolUseResult }
+              : {}),
+          } as NormalizedMessage
+        }
       }
     })
   })
@@ -641,9 +649,13 @@ export function reorderMessages(
         ms[ms.indexOf(existingProgressMessage)] = message
         continue
       }
-      // otherwise, insert it after its tool use
-      const toolUseMessage = toolUseMessages.find(
-        _ => _.message.content[0]?.id === message.toolUseID,
+      // otherwise, insert it after its tool use (match any content block — not only [0])
+      const toolUseMessage = toolUseMessages.find((m) =>
+        Array.isArray(m.message.content) &&
+        m.message.content.some(
+          (b): b is ToolUseBlockParam =>
+            b?.type === 'tool_use' && b.id === message.toolUseID,
+        ),
       )
       if (toolUseMessage) {
         ms.splice(ms.indexOf(toolUseMessage) + 1, 0, message)
@@ -651,16 +663,16 @@ export function reorderMessages(
       }
     }
 
-    // if it's a tool result, insert it after its tool use and progress messages
-    if (
-      message.type === 'user' &&
-      Array.isArray(message.message.content) &&
-      message.message.content[0]?.type === 'tool_result'
-    ) {
-      const toolUseID = (message.message.content[0] as ToolResultBlockParam)
-        ?.tool_use_id
+    // Tool results: place after the matching progress row, else after the assistant tool_use.
+    const toolResultBlock =
+      message.type === 'user' && Array.isArray(message.message.content)
+        ? message.message.content.find(
+            (b): b is ToolResultBlockParam => b?.type === 'tool_result',
+          )
+        : undefined
+    if (toolResultBlock) {
+      const toolUseID = toolResultBlock.tool_use_id
 
-      // First check for progress messages
       const lastProgressMessage = ms.find(
         _ => _.type === 'progress' && _.toolUseID === toolUseID,
       )
@@ -669,60 +681,68 @@ export function reorderMessages(
         continue
       }
 
-      // If no progress messages, check for tool use messages
-      const toolUseMessage = toolUseMessages.find(
-        _ => _.message.content[0]?.id === toolUseID,
+      const toolUseMessage = toolUseMessages.find((m) =>
+        Array.isArray(m.message.content) &&
+        m.message.content.some(
+          (b): b is ToolUseBlockParam =>
+            b?.type === 'tool_use' && b.id === toolUseID,
+        ),
       )
       if (toolUseMessage) {
         ms.splice(ms.indexOf(toolUseMessage) + 1, 0, message)
         continue
       }
+      ms.push(message)
+      continue
     }
 
-    // otherwise, just add it to the list
-    else {
-      ms.push(message)
-    }
+    ms.push(message)
   }
 
   return ms
 }
 
+function buildToolUseResultErrorMap(
+  normalizedMessages: NormalizedMessage[],
+): Record<string, boolean> {
+  return Object.fromEntries(
+    normalizedMessages.flatMap(_ => {
+      if (_.type !== 'user' || !Array.isArray(_.message.content)) {
+        return [] as [string, boolean][]
+      }
+      return _.message.content
+        .filter((b): b is ToolResultBlockParam => b?.type === 'tool_result')
+        .map(b => [b.tool_use_id, b.is_error ?? false] as [string, boolean])
+    }),
+  )
+}
+
 const getToolResultIDs = memoize(
   (normalizedMessages: NormalizedMessage[]): { [toolUseID: string]: boolean } =>
-    Object.fromEntries(
-      normalizedMessages.flatMap(_ =>
-        _.type === 'user' && _.message.content[0]?.type === 'tool_result'
-          ? [
-              [
-                _.message.content[0]!.tool_use_id,
-                _.message.content[0]!.is_error ?? false,
-              ],
-            ]
-          : ([] as [string, boolean][]),
-      ),
-    ),
+    buildToolUseResultErrorMap(normalizedMessages),
 )
+
+/** tool_use_id → tool result was error (for CLI "Attempt …" in Exploring block). */
+export function getToolUseResultErrorMap(
+  normalizedMessages: NormalizedMessage[],
+): Record<string, boolean> {
+  return buildToolUseResultErrorMap(normalizedMessages)
+}
 
 export function getUnresolvedToolUseIDs(
   normalizedMessages: NormalizedMessage[],
 ): Set<string> {
   const toolResults = getToolResultIDs(normalizedMessages)
-  return new Set(
-    normalizedMessages
-      .filter(
-        (
-          _,
-        ): _ is AssistantMessage & {
-          message: { content: [ToolUseBlockParam] }
-        } =>
-          _.type === 'assistant' &&
-          Array.isArray(_.message.content) &&
-          _.message.content[0]?.type === 'tool_use' &&
-          !(_.message.content[0]?.id in toolResults),
-      )
-      .map(_ => _.message.content[0].id),
-  )
+  const ids = new Set<string>()
+  for (const m of normalizedMessages) {
+    if (m.type !== 'assistant' || !Array.isArray(m.message.content)) continue
+    for (const b of m.message.content) {
+      if (b.type === 'tool_use' && !(b.id in toolResults)) {
+        ids.add(b.id)
+      }
+    }
+  }
+  return ids
 }
 
 /**
@@ -739,45 +759,34 @@ export function getInProgressToolUseIDs(
   const toolUseIDsThatHaveProgressMessages = new Set(
     normalizedMessages.filter(_ => _.type === 'progress').map(_ => _.toolUseID),
   )
-  return new Set(
-    (
-      normalizedMessages.filter(_ => {
-        if (_.type !== 'assistant') {
-          return false
-        }
-        if (_.message.content[0]?.type !== 'tool_use') {
-          return false
-        }
-        const toolUseID = _.message.content[0].id
-        if (toolUseID === unresolvedToolUseIDs.values().next().value) {
-          return true
-        }
-
-        if (
-          toolUseIDsThatHaveProgressMessages.has(toolUseID) &&
-          unresolvedToolUseIDs.has(toolUseID)
-        ) {
-          return true
-        }
-
-        return false
-      }) as AssistantMessage[]
-    ).map(_ => (_.message.content[0]! as ToolUseBlockParam).id),
-  )
+  const out = new Set<string>()
+  for (const id of unresolvedToolUseIDs) {
+    if (toolUseIDsThatHaveProgressMessages.has(id)) {
+      out.add(id)
+    }
+  }
+  // Progress row may lag behind tool_start; still show loaders for any unresolved tools
+  if (out.size === 0 && unresolvedToolUseIDs.size > 0) {
+    for (const id of unresolvedToolUseIDs) {
+      out.add(id)
+    }
+  }
+  return out
 }
 
 export function getErroredToolUseMessages(
   normalizedMessages: NormalizedMessage[],
 ): AssistantMessage[] {
   const toolResults = getToolResultIDs(normalizedMessages)
-  return normalizedMessages.filter(
-    _ =>
-      _.type === 'assistant' &&
-      Array.isArray(_.message.content) &&
-      _.message.content[0]?.type === 'tool_use' &&
-      _.message.content[0]?.id in toolResults &&
-      toolResults[_.message.content[0]?.id],
-  ) as AssistantMessage[]
+  return normalizedMessages.filter((m): m is AssistantMessage => {
+    if (m.type !== 'assistant' || !Array.isArray(m.message.content)) return false
+    return m.message.content.some(
+      b =>
+        b.type === 'tool_use' &&
+        b.id in toolResults &&
+        toolResults[b.id],
+    )
+  })
 }
 
 export function normalizeMessagesForAPI(
@@ -841,7 +850,7 @@ export function normalizeContentFromAPI(
   )
 
   if (filteredContent.length === 0) {
-    return [{ type: 'text', text: NO_CONTENT_MESSAGE, citations: [] }]
+    return [{ type: 'text', text: NO_CONTENT_MESSAGE }]
   }
 
   return filteredContent
@@ -867,16 +876,21 @@ export function stripSystemMessages(content: string): string {
 
 export function getToolUseID(message: NormalizedMessage): string | null {
   switch (message.type) {
-    case 'assistant':
-      if (message.message.content[0]?.type !== 'tool_use') {
-        return null
-      }
-      return message.message.content[0].id
-    case 'user':
-      if (message.message.content[0]?.type !== 'tool_result') {
-        return null
-      }
-      return message.message.content[0].tool_use_id
+    case 'assistant': {
+      if (!Array.isArray(message.message.content)) return null
+      const tu = message.message.content.find(
+        (b): b is ToolUseBlockParam => b?.type === 'tool_use',
+      )
+      return tu?.id ?? null
+    }
+    case 'user': {
+      const content = message.message.content
+      if (!Array.isArray(content)) return null
+      const tr = content.find(
+        (b): b is ToolResultBlockParam => b?.type === 'tool_result',
+      )
+      return tr?.tool_use_id ?? null
+    }
     case 'progress':
       return message.toolUseID
   }

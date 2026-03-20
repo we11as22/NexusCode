@@ -22,7 +22,7 @@ import {
   DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND,
   type CompletionState,
 } from "./tool-execution.js"
-import type { ApprovalAction } from "../types.js"
+import type { ApprovalAction, PermissionResult } from "../types.js"
 import {
   buildReasoningProviderOptions,
   getDefaultTemperature,
@@ -30,7 +30,6 @@ import {
   getDefaultTopP,
 } from "../provider/provider-options.js"
 
-const MAX_CONSECUTIVE_INVALID = 3
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
 
 function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: string): boolean {
@@ -56,6 +55,7 @@ export interface ProcessStreamStepOptions {
   tools: LLMToolDef[]
   systemPrompt: string
   cacheableSystemBlocks?: number
+  promptCacheKey?: string
   maxTokens: number
   temperature?: number
   topP?: number
@@ -74,8 +74,6 @@ export interface ProcessStreamStepOptions {
   toolCallBudget: number
   /** Mutable ref: total tool calls executed so far (this session). */
   executedToolCallsTotalRef: { current: number }
-  /** Mutable ref: consecutive invalid tool names (for doom detection). */
-  consecutiveInvalidToolCallsRef: { current: number }
   /** Call when tool budget exceeded; sets forceFinalAnswerNext and emits. */
   onToolBudgetExceeded: () => void
   /** Call after token usage may have changed. */
@@ -110,6 +108,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
     tools: llmTools,
     systemPrompt,
     cacheableSystemBlocks,
+    promptCacheKey,
     maxTokens,
     temperature,
     topP,
@@ -127,7 +126,6 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
     newMessageId,
     toolCallBudget,
     executedToolCallsTotalRef,
-    consecutiveInvalidToolCallsRef,
     onToolBudgetExceeded,
     emitContextUsage,
   } = opts
@@ -231,6 +229,9 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
         partId,
         messageId: newMessageId,
         success: result.success,
+        output: result.output,
+        error: result.success ? undefined : result.output,
+        metadata: "metadata" in result ? result.metadata : undefined,
       })
       if (tc.toolName === "TodoWrite") {
         await emit({ type: "todo_updated", todo: session.getTodo() })
@@ -292,6 +293,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
       systemPrompt,
       signal,
       cacheableSystemBlocks,
+      promptCacheKey,
       maxTokens,
       temperature: temperature ?? config.model.temperature ?? getDefaultTemperature(config.model),
       topP: topP ?? getDefaultTopP(config.model),
@@ -397,18 +399,6 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
             }
           }
 
-          const isKnownTool = resolvedTools.some(t => t.name === toolName)
-          if (!isKnownTool) {
-            consecutiveInvalidToolCallsRef.current++
-            if (consecutiveInvalidToolCallsRef.current >= MAX_CONSECUTIVE_INVALID) {
-              throw new Error(
-                `Model called ${MAX_CONSECUTIVE_INVALID} non-existent tools in a row ("${toolName}" etc). Stopping to prevent infinite loop.`
-              )
-            }
-          } else {
-            consecutiveInvalidToolCallsRef.current = 0
-          }
-
           if (executedToolCallsTotalRef.current + pendingReads.length >= toolCallBudget) {
             onToolBudgetExceeded()
             budgetExceededThisIteration = true
@@ -430,23 +420,46 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
           if (await detectDoomLoop(session, toolName, normalizedToolInput)) {
             await emit({ type: "doom_loop_detected", tool: toolName })
             const threshold = toolName === "Bash" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
-            if (typeof process !== "undefined" && process.stdin && !process.stdin.isTTY) {
-              throw new Error(`Doom loop: tool "${toolName}" called ${threshold} times with same arguments. Aborting.`)
+            const tty = typeof process !== "undefined" && process.stdin && process.stdin.isTTY
+            let proceed = false
+            if (tty) {
+              const doomAction: ApprovalAction = {
+                type: "doom_loop",
+                tool: toolName,
+                description: `Potential infinite loop: "${toolName}" called ${threshold} times with same args. Continue anyway? [y]es [n]o (abort).`,
+              }
+              await emit({ type: "tool_approval_needed", action: doomAction, partId })
+              const doomApproval = await Promise.race([
+                host.showApprovalDialog(doomAction),
+                new Promise<PermissionResult>((resolve) =>
+                  setTimeout(() => resolve({ approved: false }), 60_000)
+                ),
+              ]).catch((): PermissionResult => ({ approved: false }))
+              proceed = doomApproval.approved
             }
-            const doomAction: ApprovalAction = {
-              type: "doom_loop",
-              tool: toolName,
-              description: `Potential infinite loop: "${toolName}" called ${threshold} times with same args. Continue anyway? [y]es [n]o (abort).`,
-            }
-            await emit({ type: "tool_approval_needed", action: doomAction, partId })
-            const doomApproval = await Promise.race([
-              host.showApprovalDialog(doomAction),
-              new Promise<{ approved: boolean }>((_, reject) =>
-                setTimeout(() => reject(new Error("Doom loop approval timed out (no response). Aborting.")), 60_000)
-              ),
-            ])
-            if (!doomApproval.approved) {
-              throw new Error(`User aborted doom loop for "${toolName}"`)
+            if (!proceed) {
+              const errMsg =
+                toolName === "Bash"
+                  ? `Same Bash command was run ${threshold} times with identical arguments. Stop repeating it: read prior output and errors, fix the command or approach, then continue differently.`
+                  : `Same tool "${toolName}" was called ${threshold} times with identical arguments. Stop the loop: check prior tool results, correct inputs, or choose another action.`
+              session.updateToolPart(newMessageId, partId, {
+                status: "error",
+                output: errMsg,
+                timeEnd: Date.now(),
+              })
+              await emit({
+                type: "tool_end",
+                tool: toolName,
+                partId,
+                messageId: newMessageId,
+                success: false,
+                output: errMsg,
+                error: errMsg,
+              })
+              lastToolName = toolName
+              executedToolThisIteration = true
+              executedToolCallsTotalRef.current++
+              break
             }
           }
 
@@ -523,6 +536,11 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
             lastToolName = toolName
             executedToolThisIteration = true
             executedToolCallsTotalRef.current++
+            if ((result.metadata as { questionRequest?: boolean } | undefined)?.questionRequest) {
+              attemptedCompletionThisIteration = true
+              await flushPendingReads()
+              break streamLoop
+            }
             if (toolName === MANDATORY_END_TOOL[mode]) {
               attemptedCompletionThisIteration = true
             }

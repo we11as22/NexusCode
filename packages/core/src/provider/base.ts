@@ -47,7 +47,7 @@ export class BaseLLMClient implements LLMClient {
         )
       : undefined
 
-    const messages = buildAISDKMessages(opts.messages)
+    const messages = buildAISDKMessages(opts.messages, this.providerName)
 
     let attempt = 0
     const maxAttempts = opts.maxRetries ?? DEFAULT_MAX_RETRIES
@@ -98,8 +98,13 @@ export class BaseLLMClient implements LLMClient {
     tools: Record<string, { description: string; parameters: z.ZodType<unknown> }> | undefined,
     providerOptions: Record<string, unknown> | undefined
   ): AsyncIterable<LLMStreamEvent> {
+    const effectiveProviderOptions = withPromptCachingProviderOptions(
+      providerOptions,
+      this.providerName,
+      opts.promptCacheKey
+    )
     const thinkTagParser = createThinkTagParser()
-    const guaranteeThoughtBlock = providerOptionsRequestsReasoning(providerOptions)
+    const guaranteeThoughtBlock = providerOptionsRequestsReasoning(effectiveProviderOptions)
     let thoughtOpen = false
     let emittedVisibleText = false
     let sawFinishEvent = false
@@ -120,13 +125,13 @@ export class BaseLLMClient implements LLMClient {
     // Anthropic extended thinking is incompatible with temperature/top_p/top_k.
     // Drop temperature when Anthropic thinking is enabled to prevent API validation errors.
     const hasAnthropicThinking =
-      providerOptions != null &&
-      typeof (providerOptions as Record<string, unknown>)["anthropic"] === "object" &&
-      typeof ((providerOptions as Record<string, unknown>)["anthropic"] as Record<string, unknown>)["thinking"] === "object"
+      effectiveProviderOptions != null &&
+      typeof (effectiveProviderOptions as Record<string, unknown>)["anthropic"] === "object" &&
+      typeof ((effectiveProviderOptions as Record<string, unknown>)["anthropic"] as Record<string, unknown>)["thinking"] === "object"
     const hasBedrockThinking =
-      providerOptions != null &&
-      typeof (providerOptions as Record<string, unknown>)["bedrock"] === "object" &&
-      typeof ((providerOptions as Record<string, unknown>)["bedrock"] as Record<string, unknown>)["reasoningConfig"] === "object"
+      effectiveProviderOptions != null &&
+      typeof (effectiveProviderOptions as Record<string, unknown>)["bedrock"] === "object" &&
+      typeof ((effectiveProviderOptions as Record<string, unknown>)["bedrock"] as Record<string, unknown>)["reasoningConfig"] === "object"
     const effectiveTemperature =
       (hasAnthropicThinking || hasBedrockThinking) ? undefined : opts.temperature
 
@@ -141,8 +146,8 @@ export class BaseLLMClient implements LLMClient {
       topK: opts.topK,
       abortSignal: opts.signal,
       maxSteps: 1, // We handle multi-step manually in agentLoop
-      ...(providerOptions && Object.keys(providerOptions).length > 0
-        ? { providerOptions: providerOptions as any }
+      ...(effectiveProviderOptions && Object.keys(effectiveProviderOptions).length > 0
+        ? { providerOptions: effectiveProviderOptions as any }
         : {}),
     })
 
@@ -880,7 +885,10 @@ function findReasoningStringDeep(
   return ""
 }
 
-function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typeof streamText>[0]["messages"] {
+function buildAISDKMessages(
+  messages: StreamOptions["messages"],
+  providerName: string
+): Parameters<typeof streamText>[0]["messages"] {
   const result: Parameters<typeof streamText>[0]["messages"] = []
 
   for (const msg of messages) {
@@ -945,7 +953,111 @@ function buildAISDKMessages(messages: StreamOptions["messages"]): Parameters<typ
     }
   }
 
+  if (supportsPromptCacheHints(providerName)) {
+    addPromptCacheBreakpoints(result)
+  }
+
   return result
+}
+
+function supportsPromptCacheHints(providerName: string): boolean {
+  const p = providerName.toLowerCase()
+  return (
+    p === "anthropic" ||
+    p === "openrouter" ||
+    p === "openai-compatible" ||
+    p === "bedrock" ||
+    p === "minimax"
+  )
+}
+
+function addPromptCacheBreakpoints(messages: Parameters<typeof streamText>[0]["messages"]): void {
+  if (!messages) return
+  const users = messages.filter((m) => m.role === "user")
+  const targets = users.slice(-2)
+  for (const msg of targets) {
+    if (typeof msg.content === "string") {
+      const text = msg.content.trim().length > 0 ? msg.content : "..."
+      msg.content = [{ type: "text", text, cache_control: { type: "ephemeral" } } as any]
+      continue
+    }
+    if (!Array.isArray(msg.content)) continue
+    let lastTextIdx = -1
+    for (let i = msg.content.length - 1; i >= 0; i--) {
+      const part = msg.content[i] as { type?: string } | undefined
+      if (part?.type === "text") {
+        lastTextIdx = i
+        break
+      }
+    }
+    if (lastTextIdx === -1) {
+      msg.content.push({ type: "text", text: "...", cache_control: { type: "ephemeral" } } as any)
+      continue
+    }
+    const block = msg.content[lastTextIdx] as unknown as Record<string, unknown>
+    block["cache_control"] = { type: "ephemeral" }
+  }
+}
+
+function withPromptCachingProviderOptions(
+  providerOptions: Record<string, unknown> | undefined,
+  providerName: string,
+  promptCacheKey: string | undefined
+): Record<string, unknown> | undefined {
+  const base = providerOptions ? { ...providerOptions } : {}
+  const cacheHints: Record<string, unknown> = {}
+
+  const lower = providerName.toLowerCase()
+  if (lower === "anthropic") {
+    cacheHints["anthropic"] = { cacheControl: { type: "ephemeral" } }
+  }
+  if (lower === "openrouter") {
+    cacheHints["openrouter"] = {
+      cacheControl: { type: "ephemeral" },
+      ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
+    }
+  }
+  if (lower === "openai-compatible") {
+    cacheHints["openaiCompatible"] = { cache_control: { type: "ephemeral" } }
+  }
+  if (lower === "bedrock") {
+    cacheHints["bedrock"] = { cachePoint: { type: "default" } }
+  }
+  if (lower === "minimax") {
+    cacheHints["anthropic"] = { cacheControl: { type: "ephemeral" } }
+  }
+  if (promptCacheKey) {
+    cacheHints["gateway"] = { caching: "auto" }
+  }
+
+  if (Object.keys(cacheHints).length === 0) return providerOptions
+  return deepMergeObjects(base, cacheHints)
+}
+
+function deepMergeObjects(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...left }
+  for (const [key, val] of Object.entries(right)) {
+    const existing = out[key]
+    if (
+      val &&
+      typeof val === "object" &&
+      !Array.isArray(val) &&
+      existing &&
+      typeof existing === "object" &&
+      !Array.isArray(existing)
+    ) {
+      out[key] = deepMergeObjects(
+        existing as Record<string, unknown>,
+        val as Record<string, unknown>
+      )
+    } else {
+      out[key] = val
+    }
+  }
+  return out
 }
 
 type ThinkChunk = { kind: "text" | "reasoning"; text: string }

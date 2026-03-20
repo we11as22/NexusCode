@@ -17,6 +17,14 @@ import React, { useMemo, useEffect, useState } from 'react'
 import { getTheme } from '../utils/theme.js'
 import { ToolHistorySection } from './NexusSubagentBlock.js'
 import type { NormalizedMessage } from '../utils/messages.js'
+import { getToolUseResultErrorMap } from '../utils/messages.js'
+import {
+  canonToolName,
+  exploreLabelFromRecipientAndParams,
+  getParallelToolUsesFromInput,
+  isExploreToolName,
+  parallelInputIsPureExplore,
+} from '../utils/exploreTools.js'
 
 type Props = {
   normalizedMessages: NormalizedMessage[]
@@ -25,42 +33,12 @@ type Props = {
   isLoading: boolean
 }
 
-const EXPLORE_CANONICAL = new Set([
-  'read', 'readfile',
-  'grep', 'grepsearch',
-  'glob', 'filesearch', 'globfilesearch',
-  'list', 'listdir', 'listdirectory',
-  'codebasesearch',
-])
-
-function canon(name: string): string {
-  return name.toLowerCase().replace(/[^a-z]/g, '')
-}
-
-function isExploreTool(name: string): boolean {
-  return EXPLORE_CANONICAL.has(canon(name))
-}
-
-function short(v: unknown, max = 50): string {
-  if (typeof v !== 'string') return ''
-  const s = v.replace(/\s+/g, ' ').trim()
-  return s.length <= max ? s : s.slice(0, max - 1) + '…'
-}
-
 function makeLabel(name: string, input: Record<string, unknown>): string {
-  const c = canon(name)
-  let type = name
-  if (c === 'read' || c === 'readfile') type = 'Read'
-  else if (c === 'grep' || c === 'grepsearch') type = 'Grep'
-  else if (c === 'glob' || c === 'filesearch' || c === 'globfilesearch') type = 'Glob'
-  else if (c === 'list' || c === 'listdir' || c === 'listdirectory') type = 'List'
-  else if (c === 'codebasesearch') type = 'Search'
-  const arg = short(input.file_path ?? input.path ?? input.pattern ?? input.query ?? input.glob)
-  return arg ? `${type}(${arg})` : type
+  return exploreLabelFromRecipientAndParams(name, input)
 }
 
 function toolCat(name: string): 'read' | 'search' | 'list' {
-  const c = canon(name)
+  const c = canonToolName(name)
   if (c === 'read' || c === 'readfile') return 'read'
   if (c === 'list' || c === 'listdir' || c === 'listdirectory') return 'list'
   return 'search'
@@ -75,10 +53,10 @@ function buildCtrs(labels: string[], names: string[]): string {
     else lists++
   })
   const parts: string[] = []
-  if (reads > 0) parts.push(`reads:${reads}`)
-  if (searches > 0) parts.push(`searches:${searches}`)
-  if (lists > 0) parts.push(`lists:${lists}`)
-  return parts.join(' · ')
+  if (reads > 0) parts.push(`${reads} file${reads === 1 ? '' : 's'}`)
+  if (searches > 0) parts.push(`${searches} ${searches === 1 ? 'search' : 'searches'}`)
+  if (lists > 0) parts.push(`${lists} list${lists === 1 ? '' : 's'}`)
+  return parts.join(', ')
 }
 
 interface ExploreEntry {
@@ -92,7 +70,7 @@ export function NexusExploringBlock({
   normalizedMessages,
   inProgressToolUseIDs,
   expandToolDetails = false,
-  isLoading,
+  isLoading: _isLoading,
 }: Props): React.ReactNode {
   const theme = getTheme()
   const [showExplored, setShowExplored] = useState(false)
@@ -105,6 +83,7 @@ export function NexusExploringBlock({
   // So we scan progress messages from the current turn start first, then fall back
   // to the original assistant-message logic for non-Nexus mode.
   const allEntries = useMemo((): ExploreEntry[] => {
+    const toolErr = getToolUseResultErrorMap(normalizedMessages)
     // Find the start of the current turn: last user message with text content
     let turnStartIdx = 0
     for (let i = normalizedMessages.length - 1; i >= 0; i--) {
@@ -128,14 +107,44 @@ export function NexusExploringBlock({
       if (!Array.isArray(blocks)) continue
       for (const block of blocks) {
         if (block?.type !== 'tool_use') continue
-        if (!isExploreTool(block.name)) continue
+        const input =
+          typeof block.input === 'object' && block.input != null
+            ? (block.input as Record<string, unknown>)
+            : {}
+        if (canonToolName(block.name) === 'parallel') {
+          if (!parallelInputIsPureExplore(input)) continue
+          const uses = getParallelToolUsesFromInput(input)
+          const parallelDone = !inProgressToolUseIDs.has(block.id)
+          const parallelFailed = toolErr[block.id] === true
+          uses.forEach((u, idx) => {
+            if (typeof u.recipient_name !== 'string') return
+            const sid = `${block.id}#${idx}`
+            if (seenIds.has(sid)) return
+            seenIds.add(sid)
+            const params =
+              typeof u.parameters === 'object' && u.parameters != null
+                ? (u.parameters as Record<string, unknown>)
+                : {}
+            const base = exploreLabelFromRecipientAndParams(
+              u.recipient_name,
+              params,
+            )
+            progressEntries.push({
+              id: sid,
+              label: parallelFailed ? `Attempt ${base}` : base,
+              toolName: u.recipient_name,
+              done: parallelDone,
+            })
+          })
+          continue
+        }
+        if (!isExploreToolName(block.name)) continue
         if (seenIds.has(block.id)) continue
         seenIds.add(block.id)
-        const input = typeof block.input === 'object' && block.input != null
-          ? (block.input as Record<string, unknown>) : {}
+        const baseLabel = makeLabel(block.name, input)
         progressEntries.push({
           id: block.id,
-          label: makeLabel(block.name, input),
+          label: toolErr[block.id] === true ? `Attempt ${baseLabel}` : baseLabel,
           toolName: block.name,
           done: !inProgressToolUseIDs.has(block.id),
         })
@@ -152,12 +161,41 @@ export function NexusExploringBlock({
       let addedAny = false
       for (const block of blocks) {
         if (block.type !== 'tool_use') continue
-        if (!isExploreTool(block.name)) continue
-        const input = typeof block.input === 'object' && block.input != null
-          ? (block.input as Record<string, unknown>) : {}
+        const input =
+          typeof block.input === 'object' && block.input != null
+            ? (block.input as Record<string, unknown>)
+            : {}
+        if (canonToolName(block.name) === 'parallel') {
+          if (!parallelInputIsPureExplore(input)) continue
+          const uses = getParallelToolUsesFromInput(input)
+          const parallelDone = !inProgressToolUseIDs.has(block.id)
+          const parallelFailed = toolErr[block.id] === true
+          for (let ui = uses.length - 1; ui >= 0; ui--) {
+            const u = uses[ui]!
+            if (typeof u.recipient_name !== 'string') continue
+            const params =
+              typeof u.parameters === 'object' && u.parameters != null
+                ? (u.parameters as Record<string, unknown>)
+                : {}
+            const base = exploreLabelFromRecipientAndParams(
+              u.recipient_name,
+              params,
+            )
+            entries.unshift({
+              id: `${block.id}#${ui}`,
+              label: parallelFailed ? `Attempt ${base}` : base,
+              toolName: u.recipient_name,
+              done: parallelDone,
+            })
+            addedAny = true
+          }
+          continue
+        }
+        if (!isExploreToolName(block.name)) continue
+        const fbBase = makeLabel(block.name, input)
         entries.unshift({
           id: block.id,
-          label: makeLabel(block.name, input),
+          label: toolErr[block.id] === true ? `Attempt ${fbBase}` : fbBase,
           toolName: block.name,
           done: !inProgressToolUseIDs.has(block.id),
         })
@@ -168,7 +206,8 @@ export function NexusExploringBlock({
     return entries
   }, [normalizedMessages, inProgressToolUseIDs])
 
-  const hasInProgress = isLoading && allEntries.some(e => !e.done)
+  // Do not gate on isLoading: it can flip false between tool rounds while tools are still unresolved.
+  const hasInProgress = allEntries.length > 0 && allEntries.some(e => !e.done)
 
   useEffect(() => {
     const was = prevHadInProgress.current
@@ -184,7 +223,7 @@ export function NexusExploringBlock({
     return (
       <Box paddingX={1}>
         <Text color={theme.success ?? 'green'}>✓ Explored</Text>
-        {exploredCtrs ? <Text dimColor> · {exploredCtrs}</Text> : null}
+        {exploredCtrs ? <Text dimColor> {exploredCtrs}.</Text> : null}
       </Box>
     )
   }
@@ -200,7 +239,7 @@ export function NexusExploringBlock({
       <Box>
         <Text color={theme.primary}>◎ </Text>
         <Text bold>Exploring</Text>
-        {ctrs ? <Text dimColor>  {ctrs}</Text> : null}
+        {ctrs ? <Text dimColor> {ctrs}...</Text> : null}
       </Box>
       {/* Tool history — same section as subagent, same indentation */}
       <ToolHistorySection

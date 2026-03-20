@@ -281,6 +281,14 @@ export function getAssistantDisplaySegments(parts: MessagePart[]): AssistantDisp
   return segments
 }
 
+/** Prefix failed tool rows inside Exploring/Explored so they stay in the block but read as a recoverable attempt. */
+function explorationEntryLabel(part: ToolPart, baseLabel: string): string {
+  if (part.status === "error" && part.timeEnd != null) {
+    return `Attempt ${baseLabel}`
+  }
+  return baseLabel
+}
+
 function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
   const id = `${part.id}-${index}`
   const durationSec =
@@ -302,7 +310,7 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
       return {
         id,
         kind: "read",
-        label: `Read ${pathStr}${lineStr}${dur}`,
+        label: explorationEntryLabel(part, `Read ${pathStr}${lineStr}${dur}`),
         path,
         line: start,
         endLine: end,
@@ -315,7 +323,7 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
       return {
         id,
         kind: "list",
-        label: `Listed ${path}${dur}`,
+        label: explorationEntryLabel(part, `Listed ${path}${dur}`),
         path: path !== "." ? path : undefined,
         durationSec,
       }
@@ -333,7 +341,7 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
       return {
         id,
         kind: "grep",
-        label: `Grepped ${shortPattern}${scope}${dur}`,
+        label: explorationEntryLabel(part, `Grepped ${shortPattern}${scope}${dur}`),
         path: typeof pathScope === "string" ? pathScope : undefined,
         durationSec,
       }
@@ -342,22 +350,42 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
     case "CodebaseSearch": {
       const query = (part.input?.query as string) ?? "…"
       const short = query.length > 50 ? query.slice(0, 47) + "…" : query
-      return { id, kind: "search", label: `Codebase search: ${short}${dur}`, durationSec }
+      return {
+        id,
+        kind: "search",
+        label: explorationEntryLabel(part, `Codebase search: ${short}${dur}`),
+        durationSec,
+      }
     }
     case "search_files": {
       const q = (part.input?.query as string) ?? "…"
-      return { id, kind: "search", label: `Search files: ${q}${dur}`, durationSec }
+      return {
+        id,
+        kind: "search",
+        label: explorationEntryLabel(part, `Search files: ${q}${dur}`),
+        durationSec,
+      }
     }
     case "list_code_definitions":
     case "ListCodeDefinitions": {
       const scope = (part.input?.pathScope ?? part.input?.path) as string ?? "codebase"
-      return { id, kind: "search", label: `List definitions in ${scope}${dur}`, durationSec }
+      return {
+        id,
+        kind: "search",
+        label: explorationEntryLabel(part, `List definitions in ${scope}${dur}`),
+        durationSec,
+      }
     }
     case "glob":
     case "Glob": {
       const pattern = (part.input?.pattern ?? part.input?.glob_pattern) as string ?? "…"
       const short = pattern.length > 40 ? pattern.slice(0, 37) + "…" : pattern
-      return { id, kind: "search", label: `Glob: ${short}${dur}`, durationSec }
+      return {
+        id,
+        kind: "search",
+        label: explorationEntryLabel(part, `Glob: ${short}${dur}`),
+        durationSec,
+      }
     }
     case "execute_command":
     case "Bash":
@@ -370,7 +398,7 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
       return {
         id,
         kind: "search",
-        label: `${formatToolName(part.tool)}${dur}`,
+        label: explorationEntryLabel(part, `${formatToolName(part.tool)}${dur}`),
         durationSec,
       }
   }

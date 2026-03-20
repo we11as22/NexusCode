@@ -36,7 +36,8 @@ export type Out = {
 
 export const BashTool = {
   name: 'Bash',
-  async description({ command }) {
+  async description(input) {
+    const command = input?.command ?? ''
     try {
       const result = await queryHaiku({
         systemPrompt: [
@@ -139,7 +140,7 @@ export const BashTool = {
   },
 
   renderToolResultMessage(content, { verbose }) {
-    return <BashToolResultMessage content={content} verbose={verbose} />
+    return <BashToolResultMessage content={content} verbose={Boolean(verbose)} />
   },
   renderResultForAssistant({ interrupted, stdout, stderr }) {
     let errorMessage = stderr.trim()

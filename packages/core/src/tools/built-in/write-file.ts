@@ -3,6 +3,7 @@ import * as path from "node:path"
 import * as diff from "diff"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { buildDiffHunks } from "./diff-hunks.js"
+import { isNexusPlansPath } from "../plan-paths.js"
 
 const MAX_DIFF_PREVIEW_LINES = 80
 
@@ -79,7 +80,10 @@ WARNING: Write replaces the entire file. Provide complete final content. Creates
     const modeAutoApprove = new Set(
       (ctx.mode ? ctx.config.modes?.[ctx.mode]?.autoApprove : undefined) ?? []
     )
-    const skipApproval = ctx.config.permissions.autoApproveWrite || modeAutoApprove.has("write")
+    const skipApproval =
+      ctx.config.permissions.autoApproveWrite ||
+      modeAutoApprove.has("write") ||
+      isNexusPlansPath(filePath)
 
     if (useFileEditFlow) {
       const diffPreview = createDiffPreview(originalContentStr, content, filePath)

@@ -25,6 +25,36 @@ export function extractWriteTargetPath(toolName: string, toolInput: Record<strin
   return undefined
 }
 
+const MAX_TOOL_ARGS_SNIPPET_FOR_LLM = 4000
+
+function stringifyToolInputForPrompt(input: Record<string, unknown> | undefined): string {
+  if (!input || typeof input !== "object") return "(none)"
+  try {
+    const stripped = Object.fromEntries(Object.entries(input).filter(([k]) => k !== "task_progress"))
+    let s = JSON.stringify(stripped, null, 2)
+    if (s.length > MAX_TOOL_ARGS_SNIPPET_FOR_LLM) {
+      s = s.slice(0, MAX_TOOL_ARGS_SNIPPET_FOR_LLM) + "\n… [arguments truncated]"
+    }
+    return s
+  } catch {
+    return String(input)
+  }
+}
+
+/**
+ * Rich tool outcome for the next LLM turn: tool name, arguments, and error/outcome.
+ * Session/UI still store the shorter `output` on ToolPart; this is applied in buildMessagesFromSession only.
+ */
+export function formatToolAttemptForLanguageModel(
+  toolName: string,
+  input: Record<string, unknown> | undefined,
+  outcome: string
+): string {
+  const argsBlock = stringifyToolInputForPrompt(input)
+  const body = (outcome ?? "").trim() || "(no message)"
+  return `[Tool attempt: ${toolName}]\nArguments:\n${argsBlock}\n\nOutcome:\n${body}`
+}
+
 export async function detectDoomLoop(
   session: ISession,
   toolName: string,
@@ -68,6 +98,53 @@ function normalizeOptionalStringArray(val: unknown): string[] | undefined {
   return filtered.length === 0 ? undefined : filtered
 }
 
+/** First non-empty string among known option/label keys (LLMs often send { label, value } instead of string[]). */
+function pickFirstStringField(obj: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = obj[k]
+    if (typeof v === "string" && v.trim().length > 0) return v.trim()
+  }
+  return undefined
+}
+
+/**
+ * Coerce model-supplied "options" shapes into a list of display strings.
+ * Handles string[], mixed arrays, and { label | text | value | ... } rows.
+ */
+export function coerceQuestionOptionStrings(val: unknown): string[] {
+  if (val === undefined || val === null) return []
+  if (typeof val === "string") return val.trim() ? [val.trim()] : []
+  if (typeof val === "number" || typeof val === "boolean") return [String(val)]
+  if (!Array.isArray(val)) return []
+  const out: string[] = []
+  for (const el of val) {
+    if (typeof el === "string") {
+      if (el.trim()) out.push(el.trim())
+      continue
+    }
+    if (typeof el === "number" || typeof el === "boolean") {
+      out.push(String(el))
+      continue
+    }
+    if (el != null && typeof el === "object") {
+      const row = el as Record<string, unknown>
+      const s = pickFirstStringField(row, [
+        "label",
+        "text",
+        "value",
+        "title",
+        "name",
+        "option",
+        "answer",
+        "description",
+        "content",
+      ])
+      if (s) out.push(s)
+    }
+  }
+  return out
+}
+
 /**
  * Try to parse a JSON string that may use JS object literal syntax (unquoted keys).
  * Falls back to standard JSON.parse first, then tries a best-effort key-quoting regex.
@@ -83,6 +160,61 @@ function tryParseLooseJson(s: string): unknown {
     return JSON.parse(fixed)
   } catch { /* fall through */ }
   return null
+}
+
+/**
+ * LLMs often send AskFollowupQuestion with `choices` instead of `options`, object-shaped option rows,
+ * or `text`/`prompt` instead of `question`. Without coercion we end up with empty option lists and the
+ * UI only shows generic padded labels.
+ */
+function normalizeAskFollowupQuestionInput(raw: Record<string, unknown>): Record<string, unknown> {
+  const QUESTION_ALIASES = ["text", "prompt", "message", "body", "query", "content"] as const
+
+  let questionsEarly: unknown = raw.questions
+  if (typeof questionsEarly === "string") {
+    questionsEarly = tryParseLooseJson(questionsEarly) ?? questionsEarly
+  }
+  const hasStructuredQuestions = Array.isArray(questionsEarly) && questionsEarly.length > 0
+
+  const topQuestion =
+    typeof raw.question === "string" && raw.question.trim().length > 0
+      ? raw.question.trim()
+      : !hasStructuredQuestions
+        ? pickFirstStringField(raw, [...QUESTION_ALIASES])
+        : undefined
+
+  const fromCoerceTop = coerceQuestionOptionStrings(raw.options ?? raw.choices ?? raw.answers)
+  const fromStringsTop = normalizeOptionalStringArray(raw.options) ?? []
+  const mergedTopOptions = fromCoerceTop.length > 0 ? fromCoerceTop : fromStringsTop
+
+  let nextQuestions: unknown = questionsEarly
+  if (Array.isArray(questionsEarly)) {
+    nextQuestions = questionsEarly.map((item: unknown) => {
+      if (typeof item !== "object" || item === null) return item
+      const q = item as Record<string, unknown>
+      const qText =
+        typeof q.question === "string" && q.question.trim().length > 0
+          ? q.question.trim()
+          : pickFirstStringField(q, [...QUESTION_ALIASES]) ??
+            (typeof q.q === "string" && q.q.trim() ? q.q.trim() : undefined)
+      const opts = coerceQuestionOptionStrings(q.options ?? q.choices ?? q.answers ?? q.values)
+      return {
+        ...q,
+        ...(qText ? { question: qText } : {}),
+        ...(opts.length > 0 ? { options: opts } : {}),
+      }
+    })
+  }
+
+  const out: Record<string, unknown> = { ...raw }
+  if (Array.isArray(nextQuestions)) {
+    out.questions = nextQuestions
+  }
+  if (topQuestion) {
+    out.question = topQuestion
+  }
+  out.options = mergedTopOptions.length > 0 ? mergedTopOptions : undefined
+  return out
 }
 
 /**
@@ -126,10 +258,49 @@ export function normalizeToolInputForParse(
     const target_directories = normalizeOptionalStringArray(raw.target_directories)
     return { ...raw, target_directories: target_directories ?? undefined }
   }
-  // AskFollowupQuestion: options optional array of strings
+  // AskFollowupQuestion: coerce aliases and object-shaped options before Zod parse
   if (name === "AskFollowupQuestion") {
-    const options = normalizeOptionalStringArray(raw.options)
-    return { ...raw, options: options ?? undefined }
+    return normalizeAskFollowupQuestionInput(raw)
+  }
+  // Read: gateway/provider may send path instead of file_path; offset 0 / false / "0" means "from start" (omit key)
+  if (name === "Read" || name === "read_file") {
+    const {
+      file_path: rawFilePath,
+      path: rawPath,
+      file: rawFile,
+      offset: rawOffset,
+      limit: rawLimit,
+      ...rest
+    } = raw
+    const offsetNumber =
+      typeof rawOffset === "number"
+        ? rawOffset
+        : typeof rawOffset === "string" && rawOffset.trim().length > 0
+          ? Number(rawOffset)
+          : undefined
+    const limitNumber =
+      typeof rawLimit === "number"
+        ? rawLimit
+        : typeof rawLimit === "string" && rawLimit.trim().length > 0
+          ? Number(rawLimit)
+          : undefined
+    const file_path =
+      typeof rawFilePath === "string" && rawFilePath.length > 0
+        ? rawFilePath
+        : typeof rawPath === "string" && rawPath.length > 0
+          ? rawPath
+          : typeof rawFile === "string" && rawFile.length > 0
+            ? rawFile
+            : undefined
+    const out: Record<string, unknown> = { ...rest }
+    if (file_path) out.file_path = file_path
+    if (typeof offsetNumber === "number" && Number.isFinite(offsetNumber) && offsetNumber > 0) {
+      out.offset = offsetNumber
+    }
+    if (typeof limitNumber === "number" && Number.isFinite(limitNumber) && limitNumber > 0) {
+      out.limit = limitNumber
+    }
+    return out
   }
   // Grep: ignore optional array of strings
   if (name === "Grep") {
@@ -154,6 +325,50 @@ export function normalizeToolInputForParse(
     return { ...raw, tool_uses }
   }
   return raw
+}
+
+export function formatToolValidationError(
+  toolName: string,
+  err: unknown,
+  normalizedInput?: Record<string, unknown>,
+): string {
+  if (!(err instanceof z.ZodError)) {
+    return [
+      `Tool "${toolName}" failed validation: ${String(err)}`,
+      "",
+      "Fix the arguments and call the same tool again.",
+    ].join("\n")
+  }
+  const issues = err.issues.map((issue) => {
+    const pathLabel = issue.path.length > 0 ? issue.path.join(".") : "input"
+    return `- ${pathLabel}: ${issue.message}`
+  })
+  const tips: string[] = []
+  const offsetIssue = err.issues.some(
+    (i) => i.path.join(".") === "offset" || (i.path.length === 1 && i.path[0] === "offset"),
+  )
+  if (toolName === "Read" && offsetIssue) {
+    tips.push(
+      "Read `offset` is 1-based and must be > 0 when set. To read from the start of the file, omit `offset` entirely (do not send 0).",
+    )
+  }
+  let received = ""
+  if (normalizedInput && Object.keys(normalizedInput).length > 0) {
+    try {
+      const s = JSON.stringify(normalizedInput)
+      received = s.length > 900 ? `${s.slice(0, 900)}…` : s
+    } catch {
+      received = "[unserializable input]"
+    }
+  }
+  return [
+    `Tool "${toolName}" validation failed — correct the parameters and retry:`,
+    ...issues,
+    ...(tips.length > 0 ? ["", ...tips] : []),
+    ...(received ? ["", `Received: ${received}`] : []),
+    "",
+    "Call this tool again with fixed arguments.",
+  ].join("\n")
 }
 
 function normalizeCommand(command: string): string {
@@ -501,9 +716,9 @@ export async function executeToolCall(
   }
 
   let validatedArgs: unknown
+  let inputToParse: Record<string, unknown> =
+    typeof toolInput === "object" && toolInput !== null ? { ...toolInput } : {}
   try {
-    let inputToParse: Record<string, unknown> =
-      typeof toolInput === "object" && toolInput !== null ? { ...toolInput } : {}
     inputToParse = normalizeToolInputForParse(resolvedToolName, inputToParse) as Record<string, unknown>
     validatedArgs = tool.parameters.parse(inputToParse)
   } catch (err) {
@@ -512,7 +727,7 @@ export async function executeToolCall(
     if (err instanceof z.ZodError && tool.formatValidationError) {
       return { success: false, output: tool.formatValidationError(err) }
     }
-    return { success: false, output: `Invalid arguments for ${resolvedToolName}: ${err}` }
+    return { success: false, output: formatToolValidationError(resolvedToolName, err, inputToParse) }
   }
 
   try {

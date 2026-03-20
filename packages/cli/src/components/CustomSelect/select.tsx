@@ -94,7 +94,7 @@ export function Select({
 
   useSelect({ isDisabled, state })
 
-  const { styles } = useComponentTheme<Theme>('Select')
+  const { styles } = useComponentTheme('Select') as { styles: Theme }
 
   return (
     <Box {...styles.container()}>

@@ -9,6 +9,7 @@ import { Controller, type WebviewMessage, type ExtensionMessage } from "./contro
  */
 export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = "nexuscode.sidebar"
+  private static readonly DEBUG_FILE_LOG_ENABLED = process.env.NEXUSCODE_DEBUG_FILE_LOG === "1"
   private view?: vscode.WebviewView
   private panel?: vscode.WebviewPanel
   private controller: Controller
@@ -19,9 +20,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   private latestMessages = new Map<ExtensionMessage["type"], ExtensionMessage>()
 
   constructor(private readonly context: vscode.ExtensionContext) {
-    try {
-      fs.appendFileSync("/tmp/nexuscode-extension.log", `[${new Date().toISOString()}] NexusProvider.constructor\n`)
-    } catch {}
+    this.writeDebugFileLog("NexusProvider.constructor")
     this.controller = new Controller(context, (msg) => this.postMessage(msg))
   }
 
@@ -37,7 +36,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
 
     webviewView.onDidChangeVisibility(() => {
       if (webviewView.visible) {
-        this.controller.postStateToWebview()
+        this.controller.postStateToWebview(true)
         this.sendIndexStatus()
       }
     }, null, this.disposables)
@@ -70,7 +69,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 
   private sendIndexStatus(): void {
-    this.controller.postStateToWebview()
+    this.controller.postStateToWebview(true)
   }
 
   private markWebviewReady(webview: vscode.Webview): void {
@@ -157,7 +156,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       const msg = this.latestMessages.get(type)
       if (!msg) continue
       try {
-        await webview.postMessage(this.cloneMessageForWebview(msg))
+        await webview.postMessage(msg)
       } catch (error) {
         console.warn(`[NexusCode] Failed to replay cached webview message (${type}):`, error)
         return
@@ -172,9 +171,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
         ? `[${new Date().toISOString()}] ${message}`
         : `[${new Date().toISOString()}] ${message} ${safeStringify(details)}`
     this.output.appendLine(line)
-    try {
-      fs.appendFileSync("/tmp/nexuscode-extension.log", `${line}\n`)
-    } catch {}
+    this.writeDebugFileLog(line)
     if (details === undefined) {
       console.log(`[NexusCode] ${message}`)
       return
@@ -182,15 +179,21 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     console.log(`[NexusCode] ${message}`, details)
   }
 
+  private writeDebugFileLog(line: string): void {
+    if (!NexusProvider.DEBUG_FILE_LOG_ENABLED) return
+    try {
+      fs.appendFileSync("/tmp/nexuscode-extension.log", `[${new Date().toISOString()}] ${line}\n`)
+    } catch {}
+  }
+
   private async postMessageToTarget(webview: vscode.Webview, msg: ExtensionMessage): Promise<void> {
-    this.rememberLatestMessage(msg)
     if (!this.isWebviewReady(webview)) {
       this.queueMessageForWebview(webview, msg)
       return
     }
     try {
       this.debugLog(`posting outbound message: ${msg.type}`, summarizeExtensionMessage(msg))
-      await webview.postMessage(this.cloneMessageForWebview(msg))
+      await webview.postMessage(msg)
     } catch (error) {
       console.warn("[NexusCode] Failed to post message to webview:", error)
     }
@@ -223,7 +226,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     webview.html = this.getHtml(webview)
 
     queueMicrotask(() => {
-      this.controller.postStateToWebview()
+      this.controller.postStateToWebview(true)
       this.sendIndexStatus()
     })
   }

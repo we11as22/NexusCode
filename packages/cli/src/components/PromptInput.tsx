@@ -63,6 +63,12 @@ type Props = {
   nexusIndexEnabled?: boolean
   /** Current Nexus session id shown in footer status line. */
   nexusSessionId?: string
+  /** Live Nexus context usage from core (includes system prompt/runtime state). */
+  nexusContextUsage?: {
+    usedTokens: number
+    limitTokens: number
+    percent: number
+  } | null
   /** Granular auto-approve state for Nexus actions. */
   nexusAutoApprove?: {
     read: boolean
@@ -146,6 +152,7 @@ function PromptInput({
   nexusModel,
   nexusIndexEnabled,
   nexusSessionId,
+  nexusContextUsage,
   nexusAutoApprove,
   onToggleNexusAutoApproveAction,
   onNexusConfigSaved,
@@ -556,6 +563,19 @@ Create a .md rule file with a descriptive name. The rule file should define clea
   const tokenUsage = useMemo(() => countTokens(messages), [messages])
   const theme = getTheme()
 
+  const formatCompactTokens = useCallback((value: number): string => {
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
+    return String(value)
+  }, [])
+
+  const contextFooterText = useMemo(() => {
+    if (nexusContextUsage && nexusContextUsage.limitTokens > 0) {
+      return `ctx: ${formatCompactTokens(nexusContextUsage.usedTokens)}/${formatCompactTokens(nexusContextUsage.limitTokens)} (${Math.min(100, Math.round(nexusContextUsage.percent))}%)`
+    }
+    return `ctx: ${Math.min(100, Math.round((tokenUsage / MAX_TOKENS) * 100))}%`
+  }, [formatCompactTokens, nexusContextUsage, tokenUsage])
+
   const createScopeOptions = ['Create global (~/.nexus/)', 'Create local (.nexus/)', 'Cancel']
 
   return (
@@ -716,8 +736,8 @@ Create a .md rule file with a descriptive name. The rule file should define clea
                   }% cached)`}
                 </Text>
               )}
-              {tokenUsage < WARNING_THRESHOLD && (
-                <Text dimColor>ctx: {Math.min(100, Math.round((tokenUsage / MAX_TOKENS) * 100))}%</Text>
+              {(tokenUsage < WARNING_THRESHOLD || nexusContextUsage != null) && (
+                <Text dimColor>{contextFooterText}</Text>
               )}
               <TokenWarning tokenUsage={tokenUsage} />
               <AutoUpdater

@@ -19,9 +19,15 @@ const MAX_LINES = 3000
 /** Refuse to read file into memory above this (avoids OOM). Agent must use offset/limit or grep. */
 const MAX_READ_SIZE = 20 * 1024 * 1024 // 20 MB
 
+/** 0 means “from start” (stripped); positive ints are 1-based line offsets. */
+const offsetSchema = z
+  .union([z.literal(0), z.coerce.number().int().positive()])
+  .optional()
+  .transform((v) => (v === 0 ? undefined : v))
+
 const schema = z.object({
   file_path: z.string().min(1).describe("The absolute path to the file to read. You can use either a relative path in the workspace or an absolute path. If an absolute path is provided, it will be preserved as is."),
-  offset: z.coerce.number().int().positive().optional().describe("The line number to start reading from. Only provide if the file is too large to read at once."),
+  offset: offsetSchema.describe("1-based start line. Omit to read from the beginning; 0 is treated as omit."),
   limit: z.coerce.number().int().positive().max(MAX_LINES).optional().describe(`The number of lines to read. Only provide if the file is too large to read at once. Defaults to ${DEFAULT_LIMIT} when reading from the start.`),
 }).refine(
   (data) => data.offset == null || data.limit == null || data.limit > 0,

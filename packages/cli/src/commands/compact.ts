@@ -70,6 +70,9 @@ const compact = {
       output_tokens: summaryResponse.message.usage.output_tokens,
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 0,
+    } as typeof summaryResponse.message.usage & {
+      cache_creation_input_tokens?: number
+      cache_read_input_tokens?: number
     }
 
     // Clear screen and messages

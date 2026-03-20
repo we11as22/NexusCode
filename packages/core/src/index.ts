@@ -29,10 +29,10 @@ export { MODES } from "./types.js"
 export type {
   Mode, IHost, ISession, IIndexer,
   AgentEvent, ToolDef, ToolResult, ToolContext,
-  SessionMessage, ToolPart, MessagePart,
+  SessionMessage, ToolPart, MessagePart, TextPart,
   IndexSearchResult, IndexSearchOptions, IndexStatus, SymbolKind,
   CheckpointEntry, ChangedFile,
-  DiagnosticItem, ApprovalAction, PermissionResult,
+  DiagnosticItem, ApprovalAction, PermissionResult, UserQuestionRequest, UserQuestionItem, UserQuestionOption, UserQuestionAnswer,
 } from "./types.js"
 
 // Provider
@@ -40,7 +40,19 @@ export { createLLMClient, createEmbeddingClient } from "./provider/index.js"
 export type { LLMClient, EmbeddingClient } from "./provider/types.js"
 
 // Session
-export { Session, generateSessionId, listSessions, deleteSession, deriveSessionTitle } from "./session/index.js"
+export {
+  Session,
+  generateSessionId,
+  listSessions,
+  deleteSession,
+  deriveSessionTitle,
+  getSessionMeta,
+  loadSessionMessages,
+  canonicalProjectRoot,
+  saveSession,
+  loadSession,
+} from "./session/index.js"
+export type { StoredSession, StoredSessionMeta } from "./session/storage.js"
 export { hadPlanExit, getPlanContentForFollowup } from "./session/plan-followup.js"
 export { createCompaction } from "./session/compaction.js"
 
@@ -65,6 +77,11 @@ export {
 // Tools
 export { ToolRegistry } from "./tools/registry.js"
 export { getAllBuiltinTools } from "./tools/built-in/index.js"
+export {
+  NEXUS_CUSTOM_OPTION_ID,
+  NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX,
+  formatQuestionnaireAnswersForAgent,
+} from "./tools/user-question-utils.js"
 
 // Indexer
 export { CodebaseIndexer } from "./indexer/index.js"

@@ -1180,6 +1180,29 @@ interface ApprovalAction {
         removed: number;
     };
 }
+interface UserQuestionOption {
+    id: string;
+    label: string;
+}
+interface UserQuestionItem {
+    id: string;
+    question: string;
+    options: UserQuestionOption[];
+    allowCustom?: boolean;
+}
+interface UserQuestionRequest {
+    requestId: string;
+    title?: string;
+    submitLabel?: string;
+    customOptionLabel?: string;
+    questions: UserQuestionItem[];
+}
+interface UserQuestionAnswer {
+    questionId: string;
+    optionId?: string;
+    optionLabel?: string;
+    customText?: string;
+}
 interface IHost {
     readonly cwd: string;
     readFile(path: string): Promise<string>;
@@ -1434,6 +1457,10 @@ type AgentEvent = {
     type: "tool_approval_needed";
     action: ApprovalAction;
     partId: string;
+} | {
+    type: "question_request";
+    request: UserQuestionRequest;
+    partId?: string;
 } | {
     type: "compaction_start";
 } | {
@@ -1818,6 +1845,8 @@ interface StreamOptions {
     signal?: AbortSignal;
     /** For cache-aware providers (Anthropic): mark which system blocks are cacheable */
     cacheableSystemBlocks?: number;
+    /** Stable conversation key for provider prompt caching (when supported). */
+    promptCacheKey?: string;
     maxTokens?: number;
     temperature?: number;
     topP?: number;
@@ -1855,6 +1884,40 @@ declare function createEmbeddingClient(config: EmbeddingConfig): EmbeddingClient
 
 declare function createLLMClient(config: ProviderConfig): LLMClient;
 
+/**
+ * Session storage using JSONL format (like Pi).
+ * Each line is a JSON entry with { id, parentId, role, content, ts, metadata }.
+ * Sessions are stored per project in ~/.nexus/sessions/{project-hash}/
+ *
+ * All callers should use the same logical project root: CLI, VS Code, and server
+ * resolve paths here so one bucket is used per workspace (symlinks, trailing
+ * slashes, and Windows drive casing are normalized when possible).
+ */
+declare function canonicalProjectRoot(cwd: string): string;
+interface StoredSession {
+    id: string;
+    cwd: string;
+    ts: number;
+    title?: string;
+    /** Global todo list for the chat (persisted with session) */
+    todo?: string;
+    messages: SessionMessage[];
+}
+interface StoredSessionMeta {
+    id: string;
+    cwd: string;
+    ts: number;
+    title?: string;
+    todo?: string;
+    messageCount: number;
+}
+declare function saveSession(session: StoredSession): Promise<void>;
+declare function loadSession(sessionId: string, cwd: string): Promise<StoredSession | null>;
+declare function getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
+declare function loadSessionMessages(sessionId: string, cwd: string, limit: number, offset: number): Promise<{
+    meta: StoredSessionMeta;
+    messages: SessionMessage[];
+} | null>;
 declare function listSessions(cwd: string): Promise<Array<{
     id: string;
     ts: number;
@@ -1876,8 +1939,11 @@ declare class Session implements ISession {
     private cwd;
     /** Ephemeral sessions are never persisted to disk (used for sub-agents). */
     private _ephemeral;
+    /** Cached token estimate for the active context; invalidated on every session mutation. */
+    private _tokenEstimateCache;
     constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean);
     get messages(): SessionMessage[];
+    invalidateTokenEstimate(): void;
     addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage;
     updateMessage(id: string, updates: Partial<SessionMessage>): void;
     addToolPart(messageId: string, part: ToolPart): void;
@@ -1898,6 +1964,8 @@ declare class Session implements ISession {
     /** Create a session that is never saved to disk (for sub-agents). */
     static createEphemeral(cwd: string): Session;
     static resume(sessionId: string, cwd: string): Promise<Session | null>;
+    static resumeWindow(sessionId: string, cwd: string, limit: number, offset: number): Promise<Session | null>;
+    static getMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
 }
 
 /**
@@ -2178,6 +2246,12 @@ declare class ToolRegistry {
 }
 
 declare function getAllBuiltinTools(): ToolDef[];
+
+/** Synthetic option id for the host-added “Other / custom” row (never send from the model). */
+declare const NEXUS_CUSTOM_OPTION_ID = "__nexus_other__";
+/** First line of user messages created after submitting a questionnaire (hosts may use for compact UI). */
+declare const NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX = "[nexus:questionnaire-response]\n";
+declare function formatQuestionnaireAnswersForAgent(request: UserQuestionRequest, answers: UserQuestionAnswer[]): string;
 
 /**
  * Codebase indexer: vector-only (Qdrant).
@@ -2478,4 +2552,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, DEFAULT_HEARTBEAT_TIMEOUT_MS, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type SymbolKind, TOOL_GROUP_MEMBERS, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getPlanContentForFollowup, getRunLogsDir, getSecretsPayloadFromConfig, getToolOutputDir, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, DEFAULT_HEARTBEAT_TIMEOUT_MS, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getPlanContentForFollowup, getRunLogsDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, saveSession, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

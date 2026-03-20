@@ -1,17 +1,18 @@
 import { Hono } from "hono"
 import { stream } from "hono/streaming"
-import { Session, deriveSessionTitle } from "@nexuscode/core"
+import { Session, deriveSessionTitle, canonicalProjectRoot } from "@nexuscode/core"
 import type { AgentEvent, Mode } from "@nexuscode/core"
 import {
-  createSession as dbCreateSession,
-  listSessions as dbListSessions,
-  getSession as dbGetSession,
-  getMessages as dbGetMessages,
-  getRecentMessages,
-  appendMessages,
-  deleteSession as dbDeleteSession,
-  updateSessionTitle as dbUpdateSessionTitle,
-} from "../db.js"
+  createSession as fsCreateSession,
+  ensureSessionOnDisk,
+  listSessions as fsListSessions,
+  getSession as fsGetSession,
+  getMessages as fsGetMessages,
+  getRecentMessages as fsGetRecentMessages,
+  appendMessages as fsAppendMessages,
+  deleteSession as fsDeleteSession,
+  updateSessionTitle as fsUpdateSessionTitle,
+} from "../session-fs-store.js"
 import { runSession } from "../run-session.js"
 
 const DEFAULT_MESSAGE_PAGE_SIZE = 50
@@ -20,26 +21,28 @@ const RECENT_MESSAGES_FOR_RUN = 200
 
 function getCwd(c: { req: { query: (x: string) => string | undefined; header: (x: string) => string | undefined } }): string {
   const raw = c.req.query("directory") || c.req.header("x-nexus-directory") || process.cwd()
+  let decoded = raw
   try {
-    return decodeURIComponent(raw)
+    decoded = decodeURIComponent(raw)
   } catch {
-    return raw
+    decoded = raw
   }
+  return canonicalProjectRoot(decoded)
 }
 
 export const sessionRoutes = new Hono()
 
-// GET /session — list sessions (from DB)
+// GET /session — list sessions (JSONL, same as CLI)
 sessionRoutes.get("/", async (c) => {
   const cwd = getCwd(c)
-  const sessions = dbListSessions(cwd)
+  const sessions = await fsListSessions(cwd)
   return c.json(sessions)
 })
 
-// POST /session — create new session (in DB)
+// POST /session — create new session
 sessionRoutes.post("/", async (c) => {
   const cwd = getCwd(c)
-  const meta = dbCreateSession(cwd)
+  const meta = await fsCreateSession(cwd)
   return c.json({
     id: meta.id,
     cwd: meta.cwd,
@@ -48,11 +51,11 @@ sessionRoutes.post("/", async (c) => {
   })
 })
 
-// GET /session/:id — get session meta + message count (from DB)
+// GET /session/:id — session meta
 sessionRoutes.get("/:id", async (c) => {
   const cwd = getCwd(c)
   const id = c.req.param("id")
-  const session = dbGetSession(id, cwd)
+  const session = await fsGetSession(id, cwd)
   if (!session) return c.json({ error: "Session not found" }, 404)
   return c.json({
     id: session.id,
@@ -62,44 +65,45 @@ sessionRoutes.get("/:id", async (c) => {
   })
 })
 
-// GET /session/:id/message — get messages with pagination (from DB)
-// Query: limit (default 50, max 200), offset (default 0)
+// GET /session/:id/message — paginated messages
 sessionRoutes.get("/:id/message", async (c) => {
   const cwd = getCwd(c)
   const id = c.req.param("id")
-  const session = dbGetSession(id, cwd)
+  const session = await fsGetSession(id, cwd)
   if (!session) return c.json({ error: "Session not found" }, 404)
   const limit = Math.min(
     MAX_MESSAGE_PAGE_SIZE,
     Math.max(1, parseInt(c.req.query("limit") ?? String(DEFAULT_MESSAGE_PAGE_SIZE), 10) || DEFAULT_MESSAGE_PAGE_SIZE)
   )
   const offset = Math.max(0, parseInt(c.req.query("offset") ?? "0", 10) || 0)
-  const messages = dbGetMessages(id, limit, offset)
+  const messages = await fsGetMessages(id, cwd, limit, offset)
   return c.json(messages)
 })
 
-// POST /session/:id/abort — abort current run (no-op; abort via stream close)
 sessionRoutes.post("/:id/abort", async (c) => {
   return c.json(true)
 })
 
-// DELETE /session/:id — delete session and its messages
 sessionRoutes.delete("/:id", async (c) => {
   const cwd = getCwd(c)
   const id = c.req.param("id")
-  const deleted = dbDeleteSession(id, cwd)
+  const deleted = await fsDeleteSession(id, cwd)
   if (!deleted) return c.json({ error: "Session not found" }, 404)
   return c.json({ ok: true })
 })
 
-// POST /session/:id/message — send message, stream AgentEvents as NDJSON
-// Loads last RECENT_MESSAGES_FOR_RUN messages from DB into memory, runs agent, persists only new messages to DB.
+// POST /session/:id/message — stream agent run; persist new messages to JSONL
 sessionRoutes.post("/:id/message", async (c) => {
   const cwd = getCwd(c)
   const id = c.req.param("id")
-  const sessionMeta = dbGetSession(id, cwd)
+  let sessionMeta = await fsGetSession(id, cwd)
+  if (!sessionMeta) {
+    await ensureSessionOnDisk(id, cwd)
+    sessionMeta = await fsGetSession(id, cwd)
+  }
   if (!sessionMeta) return c.json({ error: "Session not found" }, 404)
-  const body = await c.req.json().catch(() => ({})) as { content?: string; mode?: Mode }
+
+  const body = (await c.req.json().catch(() => ({}))) as { content?: string; mode?: Mode }
   const content = typeof body.content === "string" ? body.content : ""
   const mode: Mode =
     body.mode === "plan" ||
@@ -110,7 +114,7 @@ sessionRoutes.post("/:id/message", async (c) => {
       : "agent"
   if (!content.trim()) return c.json({ error: "content required" }, 400)
 
-  const recentMessages = getRecentMessages(id, RECENT_MESSAGES_FOR_RUN)
+  const recentMessages = await fsGetRecentMessages(id, cwd, RECENT_MESSAGES_FOR_RUN)
   const session = new Session(id, cwd, recentMessages)
   const messageCountBeforeRun = session.messages.length
 
@@ -155,10 +159,10 @@ sessionRoutes.post("/:id/message", async (c) => {
       })
       const newMessages = session.messages.slice(messageCountBeforeRun)
       if (newMessages.length > 0) {
-        appendMessages(id, newMessages)
+        await fsAppendMessages(id, cwd, newMessages)
         if (messageCountBeforeRun === 0) {
           const title = deriveSessionTitle(session.messages)
-          if (title) dbUpdateSessionTitle(id, cwd, title)
+          if (title) await fsUpdateSessionTitle(id, cwd, title)
         }
       }
     } catch (err) {

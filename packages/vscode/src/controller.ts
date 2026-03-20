@@ -8,8 +8,22 @@ import * as path from "path"
 import * as fs from "node:fs"
 import { promises as fsPromises } from "node:fs"
 import * as os from "node:os"
-import type { AgentEvent, NexusConfig, Mode, SessionMessage, IndexStatus, MessagePart, ToolPart } from "@nexuscode/core"
-import type { ApprovalAction, PermissionResult, CheckpointEntry, McpServerConfig } from "@nexuscode/core"
+import {
+  formatQuestionnaireAnswersForAgent,
+  type AgentEvent,
+  type NexusConfig,
+  type Mode,
+  type SessionMessage,
+  type IndexStatus,
+  type MessagePart,
+  type ToolPart,
+  type UserQuestionRequest,
+  type UserQuestionAnswer,
+  type ApprovalAction,
+  type PermissionResult,
+  type CheckpointEntry,
+  type McpServerConfig,
+} from "@nexuscode/core"
 import {
   loadConfig,
   writeConfig,
@@ -19,6 +33,8 @@ import {
   Session,
   listSessions,
   deleteSession,
+  getSessionMeta,
+  loadSessionMessages,
   createLLMClient,
   ToolRegistry,
   loadSkills,
@@ -44,6 +60,7 @@ import {
   getPlanContentForFollowup,
   NexusServerClient,
   DEFAULT_HEARTBEAT_TIMEOUT_MS,
+  canonicalProjectRoot,
 } from "@nexuscode/core"
 import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
 
@@ -206,7 +223,9 @@ export type WebviewMessage =
   | { type: "createAgentPreset"; preset: { name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string } }
   | { type: "deleteAgentPreset"; presetName: string }
   | { type: "applyAgentPreset"; presetName: string }
-  | { type: "planFollowupChoice"; choice: "new_session" | "continue" | "dismiss"; planText?: string }
+  | { type: "planFollowupChoice"; choice: "implement" | "revise" | "dismiss"; planText?: string; instruction?: string; newSession?: boolean }
+  | { type: "dismissQuestionnaire"; requestId: string }
+  | { type: "questionnaireResponse"; requestId: string; answers: UserQuestionAnswer[] }
   | { type: "loadOlderMessages" }
   | { type: "rollbackToBeforeMessage"; messageId: string }
   | { type: "startOrConnectVectorDb"; url: string; autoStart?: boolean }
@@ -268,6 +287,7 @@ export interface WebviewState {
   loadingOlderMessages?: boolean
   /** Session unaccepted edits: files changed this session not yet accepted (Undo All / Keep All). */
   sessionUnacceptedEdits?: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
+  pendingQuestionRequest?: UserQuestionRequest | null
 }
 
 function getContextLimit(modelId: string, configuredLimit?: number): number {
@@ -337,11 +357,19 @@ export class Controller {
     setSecret: async (key: string, value: string) => this.context.secrets.store(key, value),
   }
   /** Session unaccepted edits: full content for revert/diff; cleared on session change. */
-  private sessionUnacceptedEdits: Array<{ path: string; originalContent: string; newContent: string; isNewFile: boolean }> = []
+  private sessionUnacceptedEdits: Array<{ path: string; originalContent: string; newContent: string; diffStats: { added: number; removed: number }; isNewFile: boolean }> = []
   /** Active host for the running local loop; used for pending write/edit previews before approval. */
   private activeRunHost: VsCodeHost | null = null
   /** Server-stream shadow state: remembers latest SpawnAgent tool so subagent events can attach even before final server snapshot arrives. */
   private streamLastSpawnAgentPartId: string | null = null
+  /** Last context_usage from agent loop (includes system prompt tokens). Used in getStateToPostToWebview so stateUpdate does not overwrite with session-only count. */
+  private lastContextUsage: { usedTokens: number; limitTokens: number; percent: number; sessionId: string } | null = null
+  /** Coalesce frequent state snapshots during agent streaming to avoid UI thrash. */
+  private statePostTimer: ReturnType<typeof setTimeout> | null = null
+  /** True when a local session was opened as a recent-message window instead of fully loaded. */
+  private localSessionWindowed = false
+  /** Pending structured questionnaire requested by AskFollowupQuestion. */
+  private pendingQuestionRequest: UserQuestionRequest | null = null
 
   private normalizePathKey(filePath: string, cwd: string): string {
     const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
@@ -467,6 +495,7 @@ export class Controller {
       case "assistant_content_complete":
       case "tool_start":
       case "tool_end":
+      case "question_request":
       case "todo_updated":
       case "subagent_start":
       case "subagent_tool_start":
@@ -491,6 +520,7 @@ export class Controller {
       content: "",
     }
     this.session.messages.push(created)
+    this.session.invalidateTokenEstimate()
     return created
   }
 
@@ -503,6 +533,7 @@ export class Controller {
           ? ([{ type: "text", text: msg.content }] as MessagePart[])
           : ([] as MessagePart[])
       msg.content = parts
+      this.session?.invalidateTokenEstimate()
       return parts
     }
     return msg.content as MessagePart[]
@@ -710,6 +741,7 @@ export class Controller {
           }
           parts[partIndex] = { ...toolPart, subagents: nextSubagents } as ToolPart
           msg.content = parts
+          this.session.invalidateTokenEstimate()
           return
         }
         return
@@ -815,9 +847,9 @@ export class Controller {
   getCwd(): string {
     const folders = vscode.workspace.workspaceFolders
     if (folders && folders.length > 0) {
-      return folders[0]!.uri.fsPath
+      return canonicalProjectRoot(folders[0]!.uri.fsPath)
     }
-    return process.cwd()
+    return canonicalProjectRoot(process.cwd())
   }
 
   getServerUrl(): string {
@@ -859,12 +891,23 @@ export class Controller {
         serverConnectionError: this.serverConnectionError,
         modelsCatalog: this.modelsCatalogCache ?? null,
         sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
+        pendingQuestionRequest: this.pendingQuestionRequest,
       }
     }
-    const contextUsedTokens = this.session.getTokenEstimate()
-    const contextLimitTokens = getContextLimit(this.config.model.id, this.config.model.contextWindow)
-    const contextPercent =
-      contextLimitTokens > 0
+    // Use last context_usage from agent loop (includes system prompt) when it matches this session; otherwise UI would show session-only tokens and hide system prompt from context display.
+    const sessionId = this.session.id
+    const useLastContext =
+      this.lastContextUsage != null && this.lastContextUsage.sessionId === sessionId
+    if (!useLastContext && this.lastContextUsage != null) this.lastContextUsage = null
+    const contextUsedTokens = useLastContext
+      ? this.lastContextUsage!.usedTokens
+      : this.session.getTokenEstimate()
+    const contextLimitTokens = useLastContext
+      ? this.lastContextUsage!.limitTokens
+      : getContextLimit(this.config.model.id, this.config.model.contextWindow)
+    const contextPercent = useLastContext
+      ? this.lastContextUsage!.percent
+      : contextLimitTokens > 0
         ? Math.min(100, Math.round((contextUsedTokens / contextLimitTokens) * 100))
         : 0
     const messages = stripModeReminderFromMessages(this.session.messages)
@@ -894,6 +937,7 @@ export class Controller {
       hasOlderMessages: this.serverSessionOldestLoadedOffset != null && this.serverSessionOldestLoadedOffset > 0,
       loadingOlderMessages: this.loadingOlderMessages,
       sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
+      pendingQuestionRequest: this.pendingQuestionRequest,
     }
   }
 
@@ -901,7 +945,7 @@ export class Controller {
   private getSessionUnacceptedEditsForState(): Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }> {
     return this.sessionUnacceptedEdits.map((e) => ({
       path: e.path,
-      diffStats: simpleDiffStats(e.originalContent, e.newContent),
+      diffStats: e.diffStats,
       isNewFile: e.isNewFile,
     }))
   }
@@ -911,18 +955,38 @@ export class Controller {
     const key = path.replace(/\\/g, "/")
     const existing = this.sessionUnacceptedEdits.findIndex((e) => e.path.replace(/\\/g, "/") === key)
     if (existing >= 0) this.sessionUnacceptedEdits.splice(existing, 1)
-    this.sessionUnacceptedEdits.push({ path: key, originalContent, newContent, isNewFile })
+    this.sessionUnacceptedEdits.push({
+      path: key,
+      originalContent,
+      newContent,
+      diffStats: simpleDiffStats(originalContent, newContent),
+      isNewFile,
+    })
   }
 
   /** Push current state to webview (Cline-style postStateToWebview). */
-  postStateToWebview(): void {
+  postStateToWebview(force = false): void {
+    if (!force) {
+      if (this.statePostTimer != null) return
+      this.statePostTimer = setTimeout(() => {
+        this.statePostTimer = null
+        this.postStateToWebview(true)
+      }, 40)
+      return
+    }
+    if (this.statePostTimer != null) {
+      clearTimeout(this.statePostTimer)
+      this.statePostTimer = null
+    }
     const state = this.getStateToPostToWebview()
     this.postMessageToWebview({ type: "stateUpdate", state })
     if (state.planCompleted && this.session) {
       void getPlanContentForFollowup(this.session, this.getCwd()).then((planFollowupText) => {
+        const latest = this.getStateToPostToWebview()
+        if (!latest.planCompleted || this.mode !== "plan" || this.isRunning) return
         this.postMessageToWebview({
           type: "stateUpdate",
-          state: { ...this.getStateToPostToWebview(), planFollowupText },
+          state: { ...latest, planFollowupText },
         })
       })
     }
@@ -1529,9 +1593,13 @@ export class Controller {
         }
         break
       case "planFollowupChoice": {
-        if (msg.choice === "dismiss") break
+        if (msg.choice === "dismiss") {
+          this.mode = "agent"
+          this.postStateToWebview()
+          break
+        }
         const cwd = this.getCwd()
-        if (msg.choice === "continue") {
+        if (msg.choice === "implement") {
           this.mode = "agent"
           const planText =
             msg.planText?.trim() ||
@@ -1539,23 +1607,46 @@ export class Controller {
           const continueContent = planText
             ? `Implement the following plan:\n\n${planText}`
             : "Implement the plan above."
-          await this.runAgent(continueContent, "agent")
+          if (msg.newSession && this.session) {
+            const freshPlanText = planText || (await getPlanContentForFollowup(this.session, cwd))
+            this.session = Session.create(cwd)
+            this.lastRunMode = null
+            this.checkpoint = undefined
+            this.serverSessionId = undefined
+            this.serverSessionOldestLoadedOffset = undefined
+            this.localSessionWindowed = false
+            this.postStateToWebview()
+            await this.runAgent(`Implement the following plan:\n\n${freshPlanText}`, "agent")
+          } else {
+            await this.runAgent(continueContent, "agent")
+          }
           break
         }
-        if (msg.choice === "new_session" && this.session) {
+        if (msg.choice === "revise") {
+          this.mode = "plan"
           const planText =
             msg.planText?.trim() ||
-            (await getPlanContentForFollowup(this.session, cwd))
-          this.session = Session.create(cwd)
-          this.lastRunMode = null
-          this.checkpoint = undefined
-          this.serverSessionId = undefined
-          this.postStateToWebview()
-          await this.runAgent(
-            `Implement the following plan:\n\n${planText}`,
-            "agent"
-          )
+            (this.session ? await getPlanContentForFollowup(this.session, cwd) : "")
+          const instruction = msg.instruction?.trim() || "Improve the plan based on the user's feedback."
+          const reviseContent = `Revise the current implementation plan based on this feedback.\n\nCurrent plan:\n${planText || "(no extracted plan text)"}\n\nUser feedback / requested changes:\n${instruction}\n\nDo not implement the code. Update the plan file in .nexus/plans/ and call PlanExit again when the revised plan is ready.`
+          await this.runAgent(reviseContent, "plan")
         }
+        break
+      }
+      case "dismissQuestionnaire": {
+        if (this.pendingQuestionRequest?.requestId === msg.requestId) {
+          this.pendingQuestionRequest = null
+          // Force immediate sync so webview doesn't briefly re-show stale pending from a batched state post.
+          this.postStateToWebview(true)
+        }
+        break
+      }
+      case "questionnaireResponse": {
+        if (!this.pendingQuestionRequest || this.pendingQuestionRequest.requestId !== msg.requestId) break
+        const prompt = formatQuestionnaireAnswersForAgent(this.pendingQuestionRequest, msg.answers)
+        this.pendingQuestionRequest = null
+        this.postStateToWebview(true)
+        await this.runAgent(prompt, this.mode)
         break
       }
       case "slashCommand": {
@@ -1989,6 +2080,15 @@ export class Controller {
       return
     }
     const trimmedInput = content.trim()
+    this.pendingQuestionRequest = null
+    if (!this.getServerUrl() && this.localSessionWindowed && this.session) {
+      const fullSession = await Session.resume(this.session.id, this.getCwd())
+      if (fullSession) {
+        this.session = fullSession
+        this.serverSessionOldestLoadedOffset = undefined
+        this.localSessionWindowed = false
+      }
+    }
     if (/^\/compact(\s|$)/i.test(trimmedInput)) {
       await this.compactHistory()
       return
@@ -2090,6 +2190,17 @@ Return in this format:
         }
         this.setServerConnectionState("streaming")
         const forwardServerEvent = (event: AgentEvent) => {
+          if (event.type === "question_request") {
+            this.pendingQuestionRequest = event.request
+          }
+          if (event.type === "context_usage") {
+            this.lastContextUsage = {
+              usedTokens: event.usedTokens,
+              limitTokens: event.limitTokens,
+              percent: event.percent,
+              sessionId: this.session?.id ?? "",
+            }
+          }
           this.applyAgentEventToSessionShadow(event)
           this.postMessageToWebview({ type: "agentEvent", event })
           if (this.eventAffectsVisibleState(event)) {
@@ -2107,9 +2218,9 @@ Return in this format:
               }
               toCreate.reverse()
               for (const p of toCreate) {
-                void vscode.workspace.fs.createDirectory(vscode.Uri.file(p)).catch(() => {})
+                void vscode.workspace.fs.createDirectory(vscode.Uri.file(p)).then(undefined, () => {})
               }
-              void vscode.workspace.fs.writeFile(vscode.Uri.file(absPath), new TextEncoder().encode(writtenContent)).catch(() => {})
+              void vscode.workspace.fs.writeFile(vscode.Uri.file(absPath), new TextEncoder().encode(writtenContent)).then(undefined, () => {})
             }
           }
           if (event.type === "error") {
@@ -2149,6 +2260,17 @@ Return in this format:
     }
 
     const host = new VsCodeHost(cwd, (event: AgentEvent) => {
+      if (event.type === "question_request") {
+        this.pendingQuestionRequest = event.request
+      }
+      if (event.type === "context_usage") {
+        this.lastContextUsage = {
+          usedTokens: event.usedTokens,
+          limitTokens: event.limitTokens,
+          percent: event.percent,
+          sessionId: this.session?.id ?? "",
+        }
+      }
       // Track spawn agent partId for subagent event routing (local mode doesn't go through applyAgentEventToSessionShadow for non-subagent events)
       if (event.type === "tool_start") {
         if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") {
@@ -2204,6 +2326,11 @@ Return in this format:
         }
       }
     }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onSessionEditSaved: (filePath, originalContent, newContent, isNewFile) => {
+      const norm = filePath.replace(/\\/g, "/")
+      if (norm.includes(".nexus/plans")) {
+        this.postStateToWebview()
+        return
+      }
       this.addSessionUnacceptedEdit(filePath, originalContent, newContent, isNewFile)
       this.postStateToWebview()
     } })
@@ -2303,9 +2430,11 @@ Return in this format:
   private async showPlanFollowup(cwd: string): Promise<void> {
     if (!this.session) return
     const planText = await getPlanContentForFollowup(this.session, cwd)
+    const latest = this.getStateToPostToWebview()
+    if (!latest.planCompleted || this.mode !== "plan") return
     this.postMessageToWebview({
       type: "stateUpdate",
-      state: { ...this.getStateToPostToWebview(), planFollowupText: planText },
+      state: { ...latest, planFollowupText: planText },
     })
   }
 
@@ -2431,9 +2560,7 @@ Return in this format:
     const serverUrl = this.getServerUrl()
     const cwd = this.getCwd()
     if (
-      !serverUrl ||
       !this.session ||
-      this.session.id !== this.serverSessionId ||
       this.serverSessionOldestLoadedOffset == null ||
       this.serverSessionOldestLoadedOffset <= 0
     ) {
@@ -2444,15 +2571,31 @@ Return in this format:
     this.loadingOlderMessages = true
     this.postStateToWebview()
     try {
-      const msgRes = await fetch(
-        `${serverUrl.replace(/\/$/, "")}/session/${this.session.id}/message?directory=${encodeURIComponent(cwd)}&limit=${limit}&offset=0`,
-        { headers: { "x-nexus-directory": cwd } }
-      )
-      if (!msgRes.ok) return
-      const olderMessages = (await msgRes.json()) as SessionMessage[]
+      const offset = Math.max(0, this.serverSessionOldestLoadedOffset - limit)
+      let olderMessages: SessionMessage[] = []
+      if (serverUrl) {
+        if (this.session.id !== this.serverSessionId) return
+        const msgRes = await fetch(
+          `${serverUrl.replace(/\/$/, "")}/session/${this.session.id}/message?directory=${encodeURIComponent(cwd)}&limit=${limit}&offset=${offset}`,
+          { headers: { "x-nexus-directory": cwd } }
+        )
+        if (!msgRes.ok) return
+        olderMessages = (await msgRes.json()) as SessionMessage[]
+      } else {
+        const loaded = await loadSessionMessages(this.session.id, cwd, limit, offset)
+        if (!loaded) return
+        olderMessages = loaded.messages
+      }
       if (olderMessages.length === 0) return
-      this.session = new Session(this.session.id, cwd, [...olderMessages, ...this.session.messages])
-      this.serverSessionOldestLoadedOffset -= olderMessages.length
+      const existingIds = new Set(this.session.messages.map((msg) => msg.id))
+      const dedupedOlder = olderMessages.filter((msg) => !existingIds.has(msg.id))
+      if (dedupedOlder.length === 0) {
+        this.serverSessionOldestLoadedOffset = offset
+        return
+      }
+      this.session = new Session(this.session.id, cwd, [...dedupedOlder, ...this.session.messages])
+      this.serverSessionOldestLoadedOffset = offset
+      if (!serverUrl) this.localSessionWindowed = offset > 0
     } finally {
       this.loadingOlderMessages = false
       this.postStateToWebview()
@@ -2481,17 +2624,24 @@ Return in this format:
         this.session = new Session(sessionId, cwd, messages)
         this.serverSessionId = sessionId
         this.serverSessionOldestLoadedOffset = offset
+        this.localSessionWindowed = false
+        this.pendingQuestionRequest = null
         this.checkpoint = undefined
         this.postStateToWebview()
       } catch {}
       return
     }
-    const loaded = await Session.resume(sessionId, cwd)
+    const meta = await getSessionMeta(sessionId, cwd)
+    if (!meta) return
+    const offset = Math.max(0, meta.messageCount - INITIAL_SERVER_MESSAGES)
+    const loaded = await Session.resumeWindow(sessionId, cwd, INITIAL_SERVER_MESSAGES, offset)
     if (loaded) {
       this.session = loaded
       this.sessionUnacceptedEdits = []
       this.serverSessionId = undefined
-      this.serverSessionOldestLoadedOffset = undefined
+      this.serverSessionOldestLoadedOffset = offset
+      this.localSessionWindowed = offset > 0
+      this.pendingQuestionRequest = null
       this.checkpoint = undefined
       this.postStateToWebview()
     }
@@ -2525,6 +2675,8 @@ Return in this format:
     }
     this.sessionUnacceptedEdits = []
     this.serverSessionOldestLoadedOffset = undefined
+    this.localSessionWindowed = false
+    this.pendingQuestionRequest = null
     this.checkpoint = undefined
     this.postStateToWebview()
     await this.sendSessionList()

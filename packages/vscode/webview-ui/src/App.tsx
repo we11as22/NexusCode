@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react"
-import { useChatStore, type NexusConfigState } from "./stores/chat.js"
+import React, { useEffect, useMemo, useRef, useState } from "react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
+import { useChatStore, type AgentEvent, type NexusConfigState } from "./stores/chat.js"
 import type { MessagePart } from "./stores/chat.js"
 import { MessageList } from "./components/MessageList.js"
 import { InputBar } from "./components/InputBar.js"
@@ -11,6 +13,7 @@ import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import type { ExtensionMessage } from "./types/messages.js"
 import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
+import { NEXUS_CUSTOM_OPTION_ID } from "./constants/questionnaire.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
@@ -40,18 +43,37 @@ const REASONING_EFFORT_OPTIONS: Array<{ value: string; label: string }> = [
 
 export function App() {
   const store = useChatStore()
+  const pendingAgentEventsRef = useRef<AgentEvent[]>([])
+  const agentEventFrameRef = useRef<number | null>(null)
 
   useEffect(() => {
+    const flushAgentEvents = () => {
+      agentEventFrameRef.current = null
+      const queued = pendingAgentEventsRef.current
+      if (queued.length === 0) return
+      pendingAgentEventsRef.current = []
+      for (const queuedEvent of queued) {
+        store.handleAgentEvent(queuedEvent)
+      }
+    }
+
+    const scheduleAgentEventFlush = () => {
+      if (agentEventFrameRef.current != null) return
+      agentEventFrameRef.current = window.requestAnimationFrame(flushAgentEvents)
+    }
+
     const handler = (event: MessageEvent) => {
       const msg = event.data as ExtensionMessage
       if (!msg?.type) return
 
       switch (msg.type) {
         case "stateUpdate":
+          flushAgentEvents()
           store.handleStateUpdate(msg.state)
           break
         case "agentEvent":
-          store.handleAgentEvent(msg.event as any)
+          pendingAgentEventsRef.current.push(msg.event as AgentEvent)
+          scheduleAgentEventFlush()
           break
         case "indexStatus":
           store.handleIndexStatus(msg.status as any)
@@ -103,7 +125,14 @@ export function App() {
     window.addEventListener("message", handler)
     postMessage({ type: "getState" })
     postMessage({ type: "webviewDidLaunch" })
-    return () => window.removeEventListener("message", handler)
+    return () => {
+      window.removeEventListener("message", handler)
+      if (agentEventFrameRef.current != null) {
+        window.cancelAnimationFrame(agentEventFrameRef.current)
+        agentEventFrameRef.current = null
+      }
+      pendingAgentEventsRef.current = []
+    }
   }, [])
 
   return (
@@ -238,13 +267,6 @@ function ChatView() {
           </div>
         )}
 
-        {store.mode === "plan" && store.planCompleted && !store.isRunning && (
-          <PlanActionsBar
-            planFollowupText={store.planFollowupText}
-            onChoice={(choice, planText) => postMessage({ type: "planFollowupChoice", choice, planText: planText ?? undefined })}
-          />
-        )}
-
         <div className="chat-input">
           <QueuedMessagesPanel />
           <InputContextPanel />
@@ -253,6 +275,278 @@ function ChatView() {
         </div>
       </div>
     </>
+  )
+}
+
+function QuestionnaireBar({
+  request,
+  onDismiss,
+  onSubmit,
+}: {
+  request: {
+    requestId: string
+    title?: string
+    submitLabel?: string
+    customOptionLabel?: string
+    questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }>
+  }
+  onDismiss: () => void
+  onSubmit: (answers: Array<{ questionId: string; optionId?: string; optionLabel?: string; customText?: string }>) => void
+}) {
+  const [questionIndex, setQuestionIndex] = useState(0)
+  const [selectedIndex, setSelectedIndex] = useState(0)
+  const [answers, setAnswers] = useState<Record<string, { optionId?: string; optionLabel?: string; customText?: string }>>({})
+  const question = request.questions[questionIndex]
+
+  const customLabel = request.customOptionLabel?.trim() || "Other"
+  const options = question
+    ? [
+        ...question.options.map((option) => ({ ...option, isCustom: false as const })),
+        { id: NEXUS_CUSTOM_OPTION_ID, label: customLabel, isCustom: true as const },
+      ]
+    : []
+  const answeredCount = request.questions.filter((item) => {
+    const answer = answers[item.id]
+    if (!answer) return false
+    if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
+    return Boolean(answer.optionId)
+  }).length
+  const allAnswered = answeredCount === request.questions.length && request.questions.length > 0
+  const activeAnswer = question ? answers[question.id] : undefined
+  const customMode = activeAnswer?.optionId === NEXUS_CUSTOM_OPTION_ID
+  const showKicker = Boolean(request.title && request.title.trim() && request.title !== "Asking questions")
+
+  const submitAnswers = React.useCallback(
+    (nextAnswers: typeof answers) =>
+      onSubmit(
+        request.questions.map((item) => ({
+          questionId: item.id,
+          optionId: nextAnswers[item.id]?.optionId,
+          optionLabel: nextAnswers[item.id]?.optionLabel,
+          customText: nextAnswers[item.id]?.customText,
+        })),
+      ),
+    [onSubmit, request.questions],
+  )
+
+  React.useEffect(() => {
+    if (!question) return
+    const current = answers[question.id]
+    const idx = current?.optionId ? options.findIndex((option) => option.id === current.optionId) : -1
+    setSelectedIndex(idx >= 0 ? idx : 0)
+  }, [answers, options, question])
+
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!question) return
+      if (e.key === "Escape") {
+        e.preventDefault()
+        if (customMode) {
+          setAnswers((prev) => ({
+            ...prev,
+            [question.id]: { optionId: undefined, optionLabel: undefined, customText: "" },
+          }))
+          return
+        }
+        onDismiss()
+        return
+      }
+      if (customMode) {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault()
+          const nextAnswers = {
+            ...answers,
+            [question.id]: {
+              optionId: NEXUS_CUSTOM_OPTION_ID,
+              optionLabel: customLabel,
+              customText: answers[question.id]?.customText ?? "",
+            },
+          }
+          if (!(nextAnswers[question.id]?.customText ?? "").trim()) return
+          if (questionIndex < request.questions.length - 1) {
+            setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))
+            return
+          }
+          if (request.questions.every((item) => {
+            const answer = nextAnswers[item.id]
+            if (!answer) return false
+            if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
+            return Boolean(answer.optionId)
+          })) {
+            submitAnswers(nextAnswers)
+          }
+        }
+        return
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault()
+        setQuestionIndex((i) => Math.max(0, i - 1))
+        return
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault()
+        setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        setSelectedIndex((i) => (i - 1 + options.length) % options.length)
+        return
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        setSelectedIndex((i) => (i + 1) % options.length)
+        return
+      }
+      if (/^[1-9]$/.test(e.key)) {
+        const idx = Number(e.key) - 1
+        if (idx >= 0 && idx < options.length) {
+          e.preventDefault()
+          setSelectedIndex(idx)
+        }
+        return
+      }
+      if (e.key === "Enter") {
+        e.preventDefault()
+        const selected = options[selectedIndex]
+        if (!selected) return
+        const nextAnswers = {
+          ...answers,
+          [question.id]: {
+            optionId: selected.id,
+            optionLabel: selected.isCustom ? customLabel : selected.label,
+            customText: selected.isCustom ? (answers[question.id]?.customText ?? "") : undefined,
+          },
+        }
+        setAnswers(nextAnswers)
+        if (selected.isCustom) return
+        if (questionIndex < request.questions.length - 1) {
+          setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))
+          return
+        }
+        if (request.questions.every((item) => {
+          const answer = nextAnswers[item.id]
+          if (!answer) return false
+          if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
+          return Boolean(answer.optionId)
+        })) {
+          submitAnswers(nextAnswers)
+        }
+      }
+    }
+    // Capture so ArrowLeft/ArrowRight reach us before focused buttons/inputs handle them.
+    window.addEventListener("keydown", onKey, true)
+    return () => window.removeEventListener("keydown", onKey, true)
+  }, [answers, customLabel, customMode, onDismiss, options, question, questionIndex, request.questions, selectedIndex, submitAnswers])
+
+  return (
+    <div className="nexus-questionnaire-wrap nexus-questionnaire-wrap--input-slot">
+      <div className="nexus-questionnaire-card">
+        <div className="nexus-questionnaire-header">
+          <div className="nexus-questionnaire-header-text min-w-0">
+            {showKicker ? <div className="nexus-questionnaire-kicker">{request.title}</div> : null}
+            <div className="nexus-questionnaire-question-inline">{question?.question ?? ""}</div>
+          </div>
+          <div className="nexus-questionnaire-pager">
+            <button
+              type="button"
+              className="nexus-plan-mini-btn"
+              onClick={() => setQuestionIndex((i) => Math.max(0, i - 1))}
+              disabled={questionIndex === 0}
+              aria-label="Previous question"
+            >
+              ‹
+            </button>
+            <span className="nexus-questionnaire-pager-label">
+              {Math.min(questionIndex + 1, request.questions.length)} of {request.questions.length}
+            </span>
+            <button
+              type="button"
+              className="nexus-plan-mini-btn"
+              onClick={() => setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))}
+              disabled={questionIndex >= request.questions.length - 1}
+              aria-label="Next question"
+            >
+              ›
+            </button>
+          </div>
+        </div>
+        <div className="nexus-questionnaire-body">
+          <div className="nexus-questionnaire-options">
+            {options.map((option, index) => {
+              const active = activeAnswer?.optionId === option.id
+              const isCustomRow = option.isCustom
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`nexus-questionnaire-option ${(active || index === selectedIndex) ? "nexus-questionnaire-option-active" : ""} ${isCustomRow ? "nexus-questionnaire-option--custom" : ""}`}
+                  onClick={() =>
+                    question &&
+                    (() => {
+                      setSelectedIndex(index)
+                      setAnswers((prev) => ({
+                        ...prev,
+                        [question.id]: {
+                          optionId: option.id,
+                          optionLabel: isCustomRow ? customLabel : option.label,
+                          customText: isCustomRow ? (prev[question.id]?.customText ?? "") : undefined,
+                        },
+                      }))
+                    })()
+                  }
+                >
+                  <span className="nexus-questionnaire-option-num">{index + 1}.</span>
+                  <span className="nexus-questionnaire-option-label">
+                    {isCustomRow ? <span className="nexus-questionnaire-custom-placeholder" /> : option.label}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+          {activeAnswer?.optionId === NEXUS_CUSTOM_OPTION_ID && question ? (
+            <textarea
+              className="nexus-questionnaire-custom-input"
+              value={activeAnswer.customText ?? ""}
+              onChange={(e) =>
+                setAnswers((prev) => ({
+                  ...prev,
+                  [question.id]: {
+                    optionId: NEXUS_CUSTOM_OPTION_ID,
+                    optionLabel: customLabel,
+                    customText: e.target.value,
+                  },
+                }))
+              }
+              placeholder="Your answer"
+              rows={2}
+            />
+          ) : null}
+        </div>
+        <div className="nexus-questionnaire-card-footer">
+          <button type="button" className="nexus-questionnaire-dismiss" onClick={onDismiss}>
+            Dismiss <kbd className="nexus-kbd">Esc</kbd>
+          </button>
+          <button
+            type="button"
+            className="nexus-questionnaire-continue"
+            onClick={() =>
+              onSubmit(
+                request.questions.map((item) => ({
+                  questionId: item.id,
+                  optionId: answers[item.id]?.optionId,
+                  optionLabel: answers[item.id]?.optionLabel,
+                  customText: answers[item.id]?.customText,
+                })),
+              )
+            }
+            disabled={!allAnswered}
+          >
+            {request.submitLabel ?? "Continue"} <kbd className="nexus-kbd">⏎</kbd>
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -290,20 +584,72 @@ function ChatBottomBar() {
   const registerImagePickerTrigger = React.useCallback((trigger: () => void) => {
     setImagePickerTrigger(() => trigger)
   }, [])
-  const canSend = !store.isRunning && !store.awaitingApproval && (store.inputValue.trim().length > 0 || store.attachedImages.length > 0)
+  const pendingQuestion = store.pendingQuestionRequest
+  const planText = (store.planFollowupText ?? "").trim()
+  const showPlanFollowupSlot =
+    store.mode === "plan" &&
+    store.planCompleted &&
+    planText.length > 0
+  const hideChatInput = Boolean(pendingQuestion || showPlanFollowupSlot)
+  const canSend =
+    !store.isRunning &&
+    !store.awaitingApproval &&
+    (store.inputValue.trim().length > 0 || store.attachedImages.length > 0)
   const contextPercent = store.contextPercent
+
+  const planChoice = (
+    choice: "implement" | "revise" | "dismiss",
+    planTextArg?: string,
+    instruction?: string,
+    newSession?: boolean,
+  ) => {
+    store.collapsePlanPanel()
+    postMessage({
+      type: "planFollowupChoice",
+      choice,
+      planText: planTextArg ?? undefined,
+      instruction: instruction ?? undefined,
+      ...(newSession ? { newSession: true } : {}),
+    })
+  }
 
   return (
     <div className="chat-input-inner">
+      {pendingQuestion ? (
+        <div className="chat-input-area nexus-questionnaire-input-area">
+          <QuestionnaireBar
+            request={pendingQuestion}
+            onDismiss={() => {
+              postMessage({ type: "dismissQuestionnaire", requestId: pendingQuestion.requestId })
+              store.clearPendingQuestionRequest()
+            }}
+            onSubmit={(answers) => {
+              postMessage({ type: "questionnaireResponse", requestId: pendingQuestion.requestId, answers })
+              store.clearPendingQuestionRequest()
+            }}
+          />
+        </div>
+      ) : showPlanFollowupSlot ? (
+        <div className="chat-input-area nexus-plan-panel-input-area">
+          <PlanActionsBar
+            planFollowupText={store.planFollowupText}
+            collapsed={store.planPanelCollapsed}
+            onExpand={() => store.expandPlanPanel()}
+            onMinimize={() => store.collapsePlanPanel()}
+            onChoice={planChoice}
+          />
+        </div>
+      ) : (
         <div className="chat-input-area">
           <InputBar registerImagePickerTrigger={registerImagePickerTrigger} />
         </div>
-        <div className="chat-control-row">
-          <div className="chat-bottom-bar-left">
-            <ModeDropdown />
-            <AgentPresetDropdown />
-          </div>
-          <div className="chat-bottom-bar-input-wrap">
+      )}
+      <div className="chat-control-row">
+        <div className="chat-bottom-bar-left">
+          <ModeDropdown />
+          <AgentPresetDropdown />
+        </div>
+        <div className="chat-bottom-bar-input-wrap">
           {store.isRunning && (
             <span className="flex items-center justify-center w-8 h-8 flex-shrink-0" title="Running">
               <SpinnerIcon className="w-5 h-5 text-[var(--vscode-descriptionForeground)]" />
@@ -317,15 +663,17 @@ function ChatBottomBar() {
           >
             <ContextRingIcon className="w-4 h-4" percent={contextPercent} />
           </button>
-          <button
-            type="button"
-            className="nexus-image-pick-btn"
-            onClick={() => imagePickerTrigger?.()}
-            title="Attach image"
-            aria-label="Attach image"
-          >
-            <ImageIcon className="w-4 h-4" />
-          </button>
+          {!hideChatInput ? (
+            <button
+              type="button"
+              className="nexus-image-pick-btn"
+              onClick={() => imagePickerTrigger?.()}
+              title="Attach image"
+              aria-label="Attach image"
+            >
+              <ImageIcon className="w-4 h-4" />
+            </button>
+          ) : null}
           {store.isRunning || store.awaitingApproval ? (
             <button
               type="button"
@@ -335,6 +683,8 @@ function ChatBottomBar() {
             >
               <StopIcon />
             </button>
+          ) : hideChatInput ? (
+            <span className="w-8 h-8 flex-shrink-0" aria-hidden />
           ) : (
             <button
               type="button"
@@ -554,84 +904,124 @@ function SessionTabBar() {
   )
 }
 
-/** Kilocode-style: plan_exit completed — New session / Continue / Dismiss (above input). */
+/** Kilocode-style: plan_exit completed — decision UI replaces the chat input. */
 function PlanActionsBar({
   planFollowupText,
+  collapsed,
   onChoice,
+  onExpand,
+  onMinimize,
 }: {
   planFollowupText: string | null
-  onChoice: (choice: "new_session" | "continue" | "dismiss", planText?: string) => void
+  collapsed: boolean
+  onChoice: (choice: "implement" | "revise" | "dismiss", planText?: string, instruction?: string, newSession?: boolean) => void
+  onExpand: () => void
+  onMinimize: () => void
 }) {
-  const [expanded, setExpanded] = useState(false)
-  const [selected, setSelected] = useState<"continue" | "dismiss">("continue")
+  const [showMore, setShowMore] = useState(false)
+  const [selected, setSelected] = useState<"implement" | "revise">("implement")
+  const [instruction, setInstruction] = useState("")
   const fullText = (planFollowupText ?? "").trim()
   const lines = fullText.split(/\r?\n/)
-  const needsClamp = lines.length > 48 || fullText.length > 3600
-  const renderedText = !needsClamp || expanded ? fullText : `${lines.slice(0, 48).join("\n")}\n\n…`
+  const collapsedLineLimit = 12
+  const expandedLineLimit = 48
+  const collapsedNeedsClamp = lines.length > collapsedLineLimit || fullText.length > 1100
+  const expandedNeedsClamp = lines.length > expandedLineLimit || fullText.length > 3600
+  const renderedText = collapsed
+    ? (collapsedNeedsClamp ? `${lines.slice(0, collapsedLineLimit).join("\n")}\n\n…` : fullText)
+    : (!expandedNeedsClamp || showMore ? fullText : `${lines.slice(0, expandedLineLimit).join("\n")}\n\n…`)
+  const mdSource = renderedText || "Plan saved to .nexus/plans/."
 
   return (
-    <div className="nexus-plan-followup-wrap">
-      <div className="nexus-plan-followup-card">
+    <div className="nexus-plan-followup-wrap nexus-plan-followup-wrap--input-slot">
+      <div className={`nexus-plan-followup-card${collapsed ? " nexus-plan-followup-card--collapsed" : ""}`}>
         <div className="nexus-plan-followup-header">
           <span className="nexus-plan-followup-title">Plan</span>
-          <div className="nexus-plan-followup-actions">
-            {needsClamp ? (
+          {!collapsed ? (
+            <div className="nexus-plan-followup-actions">
+              <button type="button" className="nexus-plan-mini-btn" onClick={() => onMinimize()} title="Collapse plan preview">
+                Minimize
+              </button>
+              {expandedNeedsClamp ? (
+                <button
+                  type="button"
+                  className="nexus-plan-mini-btn"
+                  onClick={() => setShowMore((v) => !v)}
+                >
+                  {showMore ? "Less" : "More"}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="nexus-plan-mini-btn"
-                onClick={() => setExpanded((v) => !v)}
+                onClick={() => onChoice("implement", planFollowupText ?? undefined, undefined, true)}
               >
-                {expanded ? "Collapse" : "Expand"}
+                Implement in new session
               </button>
-            ) : null}
-            <button
-              type="button"
-              className="nexus-plan-mini-btn"
-              onClick={() => onChoice("new_session", planFollowupText ?? undefined)}
-            >
-              Open in new session
-            </button>
-          </div>
+            </div>
+          ) : null}
         </div>
-        <pre className="nexus-plan-followup-text">{renderedText || "Plan saved to .nexus/plans/."}</pre>
+        <div className={`nexus-plan-followup-text-shell${collapsed ? " nexus-plan-followup-text-shell--collapsed" : ""}`}>
+          <div className={`nexus-plan-followup-text nexus-plan-followup-markdown prose-nexus text-[11px] leading-snug overflow-y-auto overflow-x-hidden px-2 py-2${collapsed ? " nexus-plan-followup-text--collapsed" : ""}`}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{mdSource}</ReactMarkdown>
+          </div>
+          {collapsed ? (
+            <div className="nexus-plan-followup-expand-row">
+              <button type="button" className="nexus-plan-expand-btn" onClick={onExpand}>
+                Expand plan
+              </button>
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className="nexus-plan-followup-question">Implement this plan?</div>
       <div className="nexus-plan-followup-options">
         <button
           type="button"
-          className={`nexus-plan-option ${selected === "continue" ? "nexus-plan-option-active" : ""}`}
-          onClick={() => setSelected("continue")}
+          className={`nexus-plan-option ${selected === "implement" ? "nexus-plan-option-active" : ""}`}
+          onClick={() => setSelected("implement")}
         >
           1. Yes, implement this plan
         </button>
         <button
           type="button"
-          className={`nexus-plan-option ${selected === "dismiss" ? "nexus-plan-option-active" : ""}`}
-          onClick={() => setSelected("dismiss")}
+          className={`nexus-plan-option ${selected === "revise" ? "nexus-plan-option-active" : ""}`}
+          onClick={() => setSelected("revise")}
         >
-          2. No, and tell Codex what to do differently
+          2. No, and tell NexusCode what to do differently
         </button>
       </div>
+      {selected === "revise" ? (
+        <textarea
+          className="nexus-plan-followup-textarea"
+          value={instruction}
+          onChange={(e) => setInstruction(e.target.value)}
+          placeholder="Describe what should change in the plan."
+        />
+      ) : null}
       <div className="nexus-plan-followup-submit-row">
         <button
           type="button"
           className="nexus-secondary-btn text-xs"
           onClick={() => onChoice("dismiss")}
         >
-          Dismiss
+          Dismiss <kbd className="nexus-kbd">Esc</kbd>
         </button>
         <button
           type="button"
           className="nexus-primary-btn text-xs"
           onClick={() =>
             onChoice(
-              selected === "continue" ? "continue" : "dismiss",
-              selected === "continue" ? (planFollowupText ?? undefined) : undefined
+              selected,
+              planFollowupText ?? undefined,
+              selected === "revise" ? instruction : undefined,
+              false
             )
           }
+          disabled={selected === "revise" && instruction.trim().length === 0}
         >
-          Submit
+          Submit <kbd className="nexus-kbd">⏎</kbd>
         </button>
       </div>
     </div>

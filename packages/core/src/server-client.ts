@@ -1,4 +1,5 @@
 import type { AgentEvent, Mode, SessionMessage } from "./types.js"
+import { canonicalProjectRoot } from "./session/storage.js"
 
 export interface NexusServerClientOptions {
   baseUrl: string
@@ -15,7 +16,7 @@ export class NexusServerClient {
 
   constructor(opts: NexusServerClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/$/, "")
-    this.directory = opts.directory
+    this.directory = canonicalProjectRoot(opts.directory)
   }
 
   private headers(): Record<string, string> {

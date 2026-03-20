@@ -2,7 +2,7 @@
  * Generic display-only tool for Nexus/core tool names that have no CLI counterpart.
  * Ensures "Tool not found for X" never happens: any core tool_use can be rendered.
  */
-import type { Tool } from '../../Tool.js'
+import type { Tool } from '../Tool.js'
 import { Box, Text } from 'ink'
 import * as React from 'react'
 import { z } from 'zod'
@@ -50,6 +50,7 @@ export function getGenericToolForCoreName(name: string): Tool {
         <Text>{formatResult(output)}</Text>
       </Box>
     ),
+    renderResultForAssistant: (output: unknown) => formatResult(output),
     call: async function* () {
       throw new Error(`Generic display tool ${name} is not callable`)
     },

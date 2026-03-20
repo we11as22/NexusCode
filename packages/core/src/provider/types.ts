@@ -56,6 +56,8 @@ export interface StreamOptions {
   signal?: AbortSignal
   /** For cache-aware providers (Anthropic): mark which system blocks are cacheable */
   cacheableSystemBlocks?: number
+  /** Stable conversation key for provider prompt caching (when supported). */
+  promptCacheKey?: string
   maxTokens?: number
   temperature?: number
   topP?: number

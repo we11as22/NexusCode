@@ -1,5 +1,6 @@
 import type * as React from 'react'
 import type { z } from 'zod'
+import type { Command } from './commands.js'
 
 export type ValidationResult =
   | { result: true }
@@ -13,16 +14,19 @@ export type SetToolJSXFn = (arg: {
 export type ToolUseContext = {
   abortController: AbortController
   options: {
-    commands: unknown[]
+    commands: Command[]
     tools: Tool[]
-    slowAndCapableModel?: unknown
+    slowAndCapableModel?: string
     forkNumber: number
     messageLogName: string
     maxThinkingTokens: number
+    verbose?: boolean
     dangerouslySkipPermissions?: boolean
   }
   messageId?: string
-  readFileTimestamps?: Record<string, number>
+  readFileTimestamps: Record<string, number>
+  setToolJSX?: SetToolJSXFn
+  onNexusConfigSaved?: () => void | Promise<void>
 }
 
 export type ToolCallProgressResult = {
@@ -32,41 +36,44 @@ export type ToolCallProgressResult = {
   tools: Tool[]
 }
 
-export type ToolCallResultResult<TOut = unknown> = {
+export type ToolCallResultResult<TOut = any> = {
   type: 'result'
-  resultForAssistant: string | unknown[]
+  resultForAssistant: string | unknown[] | React.ReactNode
   data: TOut
 }
 
-export type ToolCallYield<TOut = unknown> =
+export type ToolCallYield<TOut = any> =
   | ToolCallProgressResult
   | ToolCallResultResult<TOut>
 
-export interface Tool<TIn = unknown, TOut = unknown> {
+type ToolInput<TSchema extends z.ZodTypeAny> = z.infer<TSchema>
+
+export interface Tool<TSchema extends z.ZodTypeAny = z.ZodTypeAny, TOut = any> {
   name: string
-  description: (input?: TIn) => Promise<string>
-  prompt: () => Promise<string>
-  inputSchema: z.ZodType<TIn>
+  description: (input?: any) => Promise<string>
+  prompt: (...args: any[]) => Promise<string>
+  inputSchema: TSchema
   isReadOnly: () => boolean
-  userFacingName: () => string
+  userFacingName: (...args: any[]) => string
   isEnabled: () => Promise<boolean>
-  needsPermissions?: (input: TIn) => Promise<boolean> | boolean
+  needsPermissions?: (input: any) => Promise<boolean> | boolean
   renderToolUseMessage: (
-    input: TIn,
-    options: { verbose?: boolean },
+    input: any,
+    options: Record<string, unknown>,
   ) => string
   renderToolResultMessage: (
-    output: TOut,
-    options: { verbose?: boolean },
+    output: any,
+    options: Record<string, unknown>,
   ) => React.ReactNode
-  renderToolUseRejectedMessage?: (message: string) => React.ReactNode
+  renderResultForAssistant: (output: TOut) => string | unknown[] | React.ReactNode
+  renderToolUseRejectedMessage?: (...args: any[]) => React.ReactNode
   validateInput?: (
-    input: TIn,
-    context: ToolUseContext,
+    input: any,
+    context?: ToolUseContext,
   ) => Promise<ValidationResult> | ValidationResult
   call: (
-    input: TIn,
+    input: any,
     context: ToolUseContext,
-    canUseTool: CanUseToolFn,
+    canUseTool?: CanUseToolFn,
   ) => AsyncGenerator<ToolCallYield<TOut>, void>
 }

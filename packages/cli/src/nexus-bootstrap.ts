@@ -33,6 +33,7 @@ import {
   type Mode,
   type NexusConfig,
   type IndexStatus,
+  canonicalProjectRoot,
 } from '@nexuscode/core'
 import type { CodebaseIndexer } from '@nexuscode/core'
 import { fileURLToPath } from 'node:url'
@@ -192,7 +193,7 @@ export async function bootstrapNexus(opts: {
   profileOverride?: string
 }): Promise<NexusBootstrapResult> {
   const {
-    cwd,
+    cwd: cwdRaw,
     mode: modeArg,
     indexEnabled = true,
     sessionId: sessionIdOpt,
@@ -203,6 +204,8 @@ export async function bootstrapNexus(opts: {
     reasoningEffortOverride,
     profileOverride,
   } = opts
+
+  const cwd = canonicalProjectRoot(cwdRaw)
 
   const secretsStore = createFileSecretsStore(getGlobalConfigDir())
   let config = await loadConfig(cwd, { secrets: secretsStore })

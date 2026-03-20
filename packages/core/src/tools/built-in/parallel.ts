@@ -1,6 +1,11 @@
 import { z } from "zod"
-import { normalizeToolInputForParse } from "../../agent/tool-execution.js"
-import type { ToolDef, ToolContext } from "../../types.js"
+import {
+  coerceQuestionOptionStrings,
+  formatToolValidationError,
+  normalizeToolInputForParse,
+} from "../../agent/tool-execution.js"
+import type { ToolDef, ToolContext, UserQuestionRequest, UserQuestionItem } from "../../types.js"
+import { buildUserQuestionOptions, normalizeCustomOptionLabel } from "../user-question-utils.js"
 
 const MAX_BATCH_TOOLS = 25
 
@@ -129,6 +134,80 @@ For concurrent sub-agents (simpler):
       tools.map((tool) => [canonicalizeToolName(tool.name), tool]),
     )
 
+    const resolvedToolUses = tool_uses
+      .map((use) => ({ use, tool: resolveTool(use, byExactName, byCanonicalName) }))
+    const allAskQuestions =
+      resolvedToolUses.length > 0 &&
+      resolvedToolUses.every(({ tool }) => tool?.name === "AskFollowupQuestion")
+    const hasAnyAskQuestion = resolvedToolUses.some(({ tool }) => tool?.name === "AskFollowupQuestion")
+
+    if (hasAnyAskQuestion && !allAskQuestions) {
+      return {
+        success: false,
+        output: 'AskFollowupQuestion calls cannot be mixed with other tools inside one Parallel batch. Put all questions in a dedicated Parallel({ tool_uses: [...] }) call or ask a single structured AskFollowupQuestion directly.',
+      }
+    }
+
+    if (allAskQuestions) {
+      const questions: UserQuestionItem[] = []
+      let title = ""
+      let submitLabel = ""
+      let customOptionLabel = ""
+      for (const { use } of resolvedToolUses) {
+        let rawParams = use.parameters
+        if (typeof rawParams === "string") {
+          try { rawParams = JSON.parse(rawParams as string) } catch {}
+        }
+        const input = typeof rawParams === "object" && rawParams != null ? { ...rawParams } : {}
+        const normalized = normalizeToolInputForParse("AskFollowupQuestion", input as Record<string, unknown>) as Record<string, unknown>
+        const nextTitle = typeof normalized.title === "string" ? normalized.title.trim() : ""
+        const nextSubmitLabel = typeof normalized.submit_label === "string" ? normalized.submit_label.trim() : ""
+        const nextCustomOptionLabel = typeof normalized.custom_option_label === "string" ? normalized.custom_option_label.trim() : ""
+        if (!title && nextTitle) title = nextTitle
+        if (!submitLabel && nextSubmitLabel) submitLabel = nextSubmitLabel
+        if (!customOptionLabel && nextCustomOptionLabel) customOptionLabel = nextCustomOptionLabel
+        if (Array.isArray(normalized.questions)) {
+          normalized.questions.forEach((item) => {
+            const q = item as Record<string, unknown>
+            const options = coerceQuestionOptionStrings(q.options ?? q.choices ?? q.answers ?? q.values)
+            if (typeof q.question !== "string" || q.question.trim().length === 0) return
+            const idx = questions.length
+            questions.push({
+              id: typeof q.id === "string" && q.id.trim() ? q.id.trim() : `parallel_question_${idx + 1}`,
+              question: q.question.trim(),
+              options: buildUserQuestionOptions(options, normalizeCustomOptionLabel(customOptionLabel), idx),
+              allowCustom: true,
+            })
+          })
+        } else if (typeof normalized.question === "string" && normalized.question.trim()) {
+          const options = coerceQuestionOptionStrings(normalized.options ?? normalized.choices ?? normalized.answers)
+          const idx = questions.length
+          questions.push({
+            id: `parallel_question_${idx + 1}`,
+            question: normalized.question.trim(),
+            options: buildUserQuestionOptions(options, normalizeCustomOptionLabel(customOptionLabel), idx),
+            allowCustom: true,
+          })
+        }
+      }
+      if (questions.length === 0) {
+        return { success: false, output: "Parallel AskFollowupQuestion batch is empty or invalid." }
+      }
+      const request: UserQuestionRequest = {
+        requestId: `question_request_${Date.now()}`,
+        title: title || "Asking questions",
+        submitLabel: submitLabel || "Continue",
+        customOptionLabel: normalizeCustomOptionLabel(customOptionLabel),
+        questions,
+      }
+      ctx.host.emit({ type: "question_request", request, partId: ctx.partId })
+      return {
+        success: true,
+        output: "User input is required before the task can continue.",
+        metadata: { questionRequest: true, request },
+      }
+    }
+
     const promises = tool_uses.map(async (use): Promise<ParallelResult> => {
       const tool = resolveTool(use, byExactName, byCanonicalName)
       if (!tool) {
@@ -157,6 +236,7 @@ For concurrent sub-agents (simpler):
       }
 
       let parsed: unknown
+      let normalized: Record<string, unknown> = {}
       try {
         // parameters may be a JSON string if LLM stringified it
         let rawParams = use.parameters
@@ -164,13 +244,16 @@ For concurrent sub-agents (simpler):
           try { rawParams = JSON.parse(rawParams as string) } catch { /* leave as-is */ }
         }
         const input = typeof rawParams === "object" && rawParams != null ? { ...rawParams } : {}
-        const normalized = normalizeToolInputForParse(tool.name, input as Record<string, unknown>)
+        normalized = normalizeToolInputForParse(tool.name, input as Record<string, unknown>)
         parsed = tool.parameters.parse(normalized)
       } catch (err) {
         // Use the tool's own formatValidationError if available (kilocode pattern)
-        const friendlyMsg = (err instanceof z.ZodError && tool.formatValidationError)
-          ? tool.formatValidationError(err)
-          : `Invalid arguments for ${tool.name}: ${err}`
+        const friendlyMsg =
+          err instanceof z.ZodError && tool.formatValidationError
+            ? tool.formatValidationError(err)
+            : err instanceof z.ZodError
+              ? formatToolValidationError(tool.name, err, normalized)
+              : `Invalid arguments for ${tool.name}: ${err}`
         return {
           recipient_name: use.recipient_name,
           resolved_name: tool.name,

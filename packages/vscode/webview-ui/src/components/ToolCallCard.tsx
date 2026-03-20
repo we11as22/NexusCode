@@ -260,10 +260,10 @@ export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approv
         onKeyDown={(e) => e.key === "Enter" && setExpanded((prev) => !prev)}
       >
         <span className="nexus-file-edit-badge flex-shrink-0">{lang}</span>
-        <div className="flex items-center gap-2 min-w-0 flex-1">
+        <div className="nexus-file-edit-title-cluster">
           <button
             type="button"
-            className="nexus-file-edit-path min-w-0 max-w-full text-left truncate font-medium text-[var(--vscode-foreground)] hover:underline"
+            className="nexus-file-edit-path min-w-0 max-w-full text-left font-medium text-[var(--vscode-foreground)] hover:underline cursor-pointer border-0 bg-transparent p-0"
             onClick={(e) => {
               e.stopPropagation()
               if (path) postMessage({ type: "showDiff", path })
@@ -352,16 +352,18 @@ function FileEditBlock({ part }: { part: ToolPart }) {
   return (
     <div className="nexus-file-edit-block">
       <div className="nexus-file-edit-header flex items-center gap-2">
-        <span className="nexus-file-edit-badge">{lang}</span>
-        <span className="nexus-file-edit-path">{fileName}</span>
-        {part.diffStats != null ? (
-          <span className="nexus-file-edit-stats flex items-center gap-1">
-            {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
-            {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
-          </span>
-        ) : fallbackLabel ? (
-          <span className="nexus-file-edit-stats">{fallbackLabel}</span>
-        ) : null}
+        <span className="nexus-file-edit-badge flex-shrink-0">{lang}</span>
+        <div className="nexus-file-edit-title-cluster">
+          <span className="nexus-file-edit-path font-medium">{fileName}</span>
+          {part.diffStats != null ? (
+            <span className="nexus-file-edit-stats flex items-center gap-1">
+              {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
+              {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
+            </span>
+          ) : fallbackLabel ? (
+            <span className="nexus-file-edit-stats">{fallbackLabel}</span>
+          ) : null}
+        </div>
       </div>
       <div className="nexus-file-edit-content">
         {hasDiffHunks ? (
@@ -521,6 +523,17 @@ function formatToolInputPreview(part: ToolPart): string {
       const desc = inp["description"]
       return desc && typeof desc === "string" ? short(desc.replace(/\s+/g, " "), 48) : "subtask"
     }
+    case "ask_followup_question":
+    case "AskFollowupQuestion": {
+      const qs = inp["questions"]
+      if (Array.isArray(qs) && qs.length > 0) {
+        const first = qs[0] as Record<string, unknown>
+        const q = typeof first.question === "string" ? short(first.question.replace(/\s+/g, " "), 36) : ""
+        return qs.length > 1 ? `${qs.length} Q · ${q}` : q || "question"
+      }
+      const q = inp["question"] && typeof inp.question === "string" ? short(String(inp.question).replace(/\s+/g, " "), 44) : ""
+      return q || "question"
+    }
     default:
       return Object.entries(inp)
         .filter(([k]) => k !== "task_progress")
@@ -578,7 +591,17 @@ function SubAgentDisplay({ subagents }: { subagents?: SubAgentState[] }) {
 export function ToolCallCard({ part, approval }: Props) {
   const [expanded, setExpanded] = useState(false)
   const icon = TOOL_ICONS[part.tool] ?? "🔧"
+  const toolTitle =
+    part.status === "error" && part.timeEnd != null
+      ? `Attempt ${toolDisplayName(part.tool)}`
+      : toolDisplayName(part.tool)
   const isMcp = part.tool.includes("__")
+  const isAskFollowup = part.tool === "AskFollowupQuestion" || part.tool === "ask_followup_question"
+  const hideGenericQuestionOutput =
+    isAskFollowup &&
+    typeof part.output === "string" &&
+    part.output.includes("User input is required") &&
+    part.status === "completed"
   const elapsed = part.timeStart && part.timeEnd
     ? `${((part.timeEnd - part.timeStart) / 1000).toFixed(1)}s`
     : null
@@ -593,13 +616,13 @@ export function ToolCallCard({ part, approval }: Props) {
   const inputPreview = formatToolInputPreview(part)
 
   return (
-    <div className={`my-1 text-xs ${STATUS_STYLES[part.status]}`}>
+    <div className={`my-1 text-xs min-w-0 max-w-full overflow-x-hidden ${STATUS_STYLES[part.status]}${isAskFollowup ? " nexus-tool-row--askfollowup" : ""}`}>
       <button
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-1 py-0.5 text-left hover:opacity-80 transition-opacity"
       >
         <span className="flex-shrink-0">{icon}</span>
-        <span className="font-mono text-[var(--vscode-foreground)] flex-shrink-0">{toolDisplayName(part.tool)}</span>
+        <span className="font-mono text-[var(--vscode-foreground)] flex-shrink-0">{toolTitle}</span>
         {isMcp && (
           <span className="flex-shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-[var(--vscode-badge-background)] text-[var(--vscode-badge-foreground)]" title="MCP tool">
             MCP
@@ -635,7 +658,7 @@ export function ToolCallCard({ part, approval }: Props) {
               </pre>
             </div>
           )}
-          {part.output && !isFileEditTool(part) && (
+          {part.output && !isFileEditTool(part) && !hideGenericQuestionOutput && (
             <div>
               <div className="flex items-center justify-between gap-2 mb-0.5">
                 <span className="text-[var(--vscode-descriptionForeground)]">Output:</span>

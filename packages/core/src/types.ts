@@ -100,6 +100,33 @@ export interface ApprovalAction {
   diffStats?: { added: number; removed: number }
 }
 
+export interface UserQuestionOption {
+  id: string
+  label: string
+}
+
+export interface UserQuestionItem {
+  id: string
+  question: string
+  options: UserQuestionOption[]
+  allowCustom?: boolean
+}
+
+export interface UserQuestionRequest {
+  requestId: string
+  title?: string
+  submitLabel?: string
+  customOptionLabel?: string
+  questions: UserQuestionItem[]
+}
+
+export interface UserQuestionAnswer {
+  questionId: string
+  optionId?: string
+  optionLabel?: string
+  customText?: string
+}
+
 export interface IHost {
   readonly cwd: string
   readFile(path: string): Promise<string>
@@ -304,6 +331,7 @@ export type AgentEvent =
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
   | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string; parentPartId?: string }
   | { type: "tool_approval_needed"; action: ApprovalAction; partId: string }
+  | { type: "question_request"; request: UserQuestionRequest; partId?: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
   | { type: "index_update"; status: IndexStatus }

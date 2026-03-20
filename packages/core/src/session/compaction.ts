@@ -44,7 +44,7 @@ export function createCompaction(): SessionCompaction {
 function prune(session: ISession): void {
   let total = 0
   let pruned = 0
-  const toPrune: ToolPart[] = []
+  const toPrune: Array<{ messageId: string; partId: string }> = []
 
   const messages = [...session.messages].reverse()
   let turns = 0
@@ -67,7 +67,7 @@ function prune(session: ISession): void {
       total += est
       if (total > PRUNE_PROTECT) {
         pruned += est
-        toPrune.push(tp)
+        toPrune.push({ messageId: msg.id, partId: tp.id })
       }
     }
   }
@@ -75,8 +75,8 @@ function prune(session: ISession): void {
   if (pruned >= PRUNE_MINIMUM) {
     for (const part of toPrune) {
       session.updateToolPart(
-        findMessageIdForPart(session, part.id) ?? "",
-        part.id,
+        part.messageId,
+        part.partId,
         { compacted: true, output: "[output pruned for context efficiency]" }
       )
     }
@@ -243,14 +243,3 @@ function buildLLMMessages(messages: SessionMessage[]) {
   return result
 }
 
-function findMessageIdForPart(session: ISession, partId: string): string | undefined {
-  for (const msg of session.messages) {
-    if (!Array.isArray(msg.content)) continue
-    for (const part of msg.content as MessagePart[]) {
-      if (part.type === "tool" && (part as ToolPart).id === partId) {
-        return msg.id
-      }
-    }
-  }
-  return undefined
-}

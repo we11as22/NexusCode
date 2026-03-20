@@ -58,7 +58,8 @@ html, body, #root {
   font-size: 13px;
   line-height: 1.6;
   word-wrap: break-word;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 .prose-nexus a {
   color: var(--nexus-accent);
@@ -1238,6 +1239,13 @@ html, body, #root {
   color: #ff8a8a;
 }
 
+/* Constrains subagent cards to the padded message column (avoids flush-right vs scrollbar). */
+.nexus-subagent-inline-outer {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
 .nexus-subtask-stack {
   display: flex;
   flex-direction: column;
@@ -1245,8 +1253,10 @@ html, body, #root {
   margin: 8px 0 6px 0;
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
-  padding: 0 1px; /* prevent right border-radius from being clipped by overflow:hidden parent */
+  /* Symmetric inset so cards never sit flush against the scroll viewport / scrollbar edge */
+  padding-inline: 4px;
   box-sizing: border-box;
 }
 
@@ -1260,6 +1270,8 @@ html, body, #root {
   background: color-mix(in srgb, var(--vscode-editor-background) 96%, #ffffff 4%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
   overflow: hidden;
+  min-width: 0;
+  width: 100%;
   max-width: 100%;
   box-sizing: border-box;
 }
@@ -1326,7 +1338,9 @@ html, body, #root {
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  min-width: 0;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .nexus-subtask-subtitle {
@@ -1338,6 +1352,9 @@ html, body, #root {
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .nexus-subtask-error {
@@ -1509,11 +1526,83 @@ html, body, #root {
   padding: 10px 12px;
 }
 
+.nexus-plan-followup-wrap--input-slot {
+  border-top: none;
+  background: transparent;
+  padding: 0;
+  width: 100%;
+  min-width: 0;
+}
+
+.nexus-plan-panel-input-area {
+  min-height: 0 !important;
+  padding: 8px 10px 6px !important;
+}
+
+.nexus-thought-block,
+.nexus-thought-inline-block,
+.nexus-reasoning-block {
+  padding-block: 4px;
+}
+
+.nexus-plan-followup-markdown h1,
+.nexus-plan-followup-markdown h2,
+.nexus-plan-followup-markdown h3 {
+  font-size: 12px;
+  font-weight: 700;
+  margin: 0.5rem 0 0.25rem;
+}
+
+.nexus-plan-followup-markdown h1:first-child,
+.nexus-plan-followup-markdown h2:first-child,
+.nexus-plan-followup-markdown h3:first-child {
+  margin-top: 0;
+}
+
+.nexus-plan-followup-markdown p {
+  margin: 0.35rem 0;
+}
+
+.nexus-plan-followup-markdown ul,
+.nexus-plan-followup-markdown ol {
+  margin: 0.35rem 0;
+  padding-left: 1.2rem;
+}
+
+.nexus-plan-followup-markdown code {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background, var(--vscode-input-background));
+}
+
+.nexus-plan-followup-markdown pre {
+  margin: 0.4rem 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--vscode-textCodeBlock-background, var(--vscode-input-background));
+  overflow-x: auto;
+  font-size: 10px;
+}
+
+.nexus-plan-followup-markdown pre code {
+  padding: 0;
+  background: none;
+}
+
 .nexus-plan-followup-card {
   border: 1px solid var(--vscode-panel-border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: color-mix(in srgb, var(--vscode-editor-background) 92%, #000 8%);
   overflow: hidden;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.nexus-plan-followup-card--collapsed {
+  border-radius: 14px;
 }
 
 .nexus-plan-followup-header {
@@ -1521,7 +1610,7 @@ html, body, #root {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--vscode-panel-border);
   background: color-mix(in srgb, var(--vscode-editor-background) 84%, var(--vscode-panel-border) 16%);
 }
@@ -1538,6 +1627,28 @@ html, body, #root {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.nexus-plan-followup-text-shell {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.nexus-plan-followup-text-shell--collapsed::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 68px;
+  background: linear-gradient(
+    180deg,
+    rgba(20, 20, 20, 0) 0%,
+    color-mix(in srgb, var(--vscode-editor-background) 70%, #000 30%) 100%
+  );
+  pointer-events: none;
 }
 
 .nexus-plan-mini-btn {
@@ -1557,7 +1668,7 @@ html, body, #root {
 
 .nexus-plan-followup-text {
   margin: 0;
-  padding: 10px;
+  padding: 12px;
   font-size: 12px;
   line-height: 1.45;
   color: var(--vscode-foreground);
@@ -1568,9 +1679,41 @@ html, body, #root {
   font-family: var(--vscode-font-family);
 }
 
+.nexus-plan-followup-text--collapsed {
+  max-height: 220px;
+  overflow: hidden;
+  padding-bottom: 38px;
+}
+
+.nexus-plan-followup-expand-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.nexus-plan-expand-btn {
+  pointer-events: auto;
+  border: 1px solid var(--vscode-panel-border);
+  background: color-mix(in srgb, var(--vscode-input-background) 92%, #000 8%);
+  color: var(--vscode-foreground);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 11px;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+
+.nexus-plan-expand-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
 .nexus-plan-followup-question {
   margin-top: 10px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   font-size: 12px;
   font-weight: 600;
   color: var(--vscode-foreground);
@@ -1586,10 +1729,10 @@ html, body, #root {
   width: 100%;
   text-align: left;
   border: 1px solid var(--vscode-panel-border);
-  background: var(--vscode-input-background);
+  background: color-mix(in srgb, var(--vscode-input-background) 92%, transparent);
   color: var(--vscode-foreground);
-  border-radius: 8px;
-  padding: 7px 10px;
+  border-radius: 10px;
+  padding: 9px 12px;
   font-size: 12px;
   cursor: pointer;
 }
@@ -1606,8 +1749,267 @@ html, body, #root {
 .nexus-plan-followup-submit-row {
   margin-top: 8px;
   display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.nexus-plan-followup-textarea {
+  width: 100%;
+  min-height: 72px;
+  margin-top: 8px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-input-background);
+  color: var(--vscode-foreground);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.nexus-questionnaire-wrap {
+  flex-shrink: 0;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+  padding: 10px 12px;
+}
+
+/* Replaces textarea in .chat-input-area — no extra chrome */
+.nexus-questionnaire-wrap--input-slot {
+  border-top: none;
+  background: transparent;
+  padding: 0;
+  width: 100%;
+  min-width: 0;
+}
+
+.nexus-questionnaire-input-area {
+  min-height: 0 !important;
+  padding: 8px 10px 6px !important;
+}
+
+.nexus-questionnaire-card {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--vscode-input-background) 94%, var(--vscode-panel-border) 6%);
+  overflow: hidden;
+}
+
+.nexus-questionnaire-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 5px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  background: color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-panel-border) 12%);
+}
+
+.nexus-questionnaire-header-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.nexus-questionnaire-kicker {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 2px;
+}
+
+.nexus-questionnaire-question-inline {
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+.nexus-questionnaire-pager {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.nexus-questionnaire-pager-label {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
+.nexus-questionnaire-body {
+  padding: 6px 8px 4px;
+}
+
+.nexus-questionnaire-options {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.nexus-questionnaire-option {
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--vscode-foreground);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.nexus-questionnaire-option-num {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-descriptionForeground);
+  min-width: 1.25rem;
+}
+
+.nexus-questionnaire-option-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.nexus-questionnaire-option--custom .nexus-questionnaire-custom-placeholder {
+  display: block;
+  min-height: 1em;
+  border-bottom: 1px dashed color-mix(in srgb, var(--vscode-descriptionForeground) 55%, transparent);
+  opacity: 0.85;
+}
+
+.nexus-questionnaire-option:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-questionnaire-option-active {
+  border-color: color-mix(in srgb, var(--nexus-accent) 58%, var(--vscode-panel-border) 42%);
+  background: color-mix(in srgb, var(--nexus-accent) 14%, var(--vscode-input-background) 86%);
+}
+
+.nexus-questionnaire-custom-input {
+  width: 100%;
+  min-height: 38px;
+  margin-top: 4px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-input-background);
+  color: var(--vscode-foreground);
+  border-radius: 6px;
+  padding: 5px 7px;
+  font-size: 11px;
+  line-height: 1.35;
+  resize: vertical;
+  font-family: var(--vscode-font-family);
+}
+
+.nexus-questionnaire-card-footer {
+  display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  padding: 5px 8px 6px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-panel-border) 8%);
+}
+
+.nexus-questionnaire-dismiss {
+  border: none;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+}
+
+.nexus-questionnaire-dismiss:hover {
+  color: var(--vscode-foreground);
+}
+
+.nexus-questionnaire-continue {
+  border: none;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--nexus-accent, var(--vscode-button-background));
+  color: var(--vscode-button-foreground);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.nexus-questionnaire-continue:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.nexus-kbd {
+  font-size: 9px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-keybindingLabel-background, var(--vscode-input-background));
+  color: var(--vscode-keybindingLabel-foreground, var(--vscode-descriptionForeground));
+}
+
+/* Minimal questionnaire answer user row (no chat bubble) */
+.nexus-qnr-user-wrap {
+  width: 100%;
+  margin: 2px 0 4px;
+}
+
+.nexus-qnr-user-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--vscode-descriptionForeground);
+  padding: 4px 0 2px 8px;
+  border-left: 2px solid var(--vscode-panel-border);
+}
+
+.nexus-qnr-user-row--rollback {
+  padding-right: 32px;
+}
+
+.nexus-qnr-user-lines {
+  flex: 1;
+  min-width: 0;
+}
+
+.nexus-qnr-user-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Compact tool row — follow-up question */
+.nexus-tool-row--askfollowup {
+  margin-top: 2px;
+  margin-bottom: 2px;
+}
+
+.nexus-tool-row--askfollowup > button {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+.nexus-tool-row--askfollowup .font-mono {
+  font-size: 10px;
 }
 
 /* File edit/add block — language badge + path + diff stats, code with green/red (reference design) */
@@ -1616,7 +2018,10 @@ html, body, #root {
   border: 1px solid var(--vscode-panel-border);
   background: var(--vscode-editor-background);
   overflow: hidden;
-  margin-top: 6px;
+  margin: 6px 0 0;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .nexus-file-edit-header {
@@ -1627,6 +2032,19 @@ html, body, #root {
   background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-panel-border) 8%);
   border-bottom: 1px solid var(--vscode-panel-border);
   font-size: 11px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Name + +/- stats stay together; name truncates, stats never hug the far edge */
+.nexus-file-edit-title-cluster {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 0%;
+  overflow: hidden;
 }
 
 .nexus-file-edit-badge {
@@ -1645,8 +2063,8 @@ html, body, #root {
 .nexus-file-edit-path {
   font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
   color: var(--vscode-foreground);
-  flex: 1;
   min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1657,6 +2075,7 @@ html, body, #root {
   font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
   color: var(--vscode-descriptionForeground);
   font-size: 10px;
+  white-space: nowrap;
 }
 
 .nexus-diff-hidden-lines {
@@ -1874,6 +2293,7 @@ html, body, #root {
   background: var(--nexus-chat-bg);
   max-width: 100%;
   overflow-x: hidden;
+  box-sizing: border-box;
 }
 
 /* Virtuoso root must fill the wrap and form a flex column so the Scroller gets a definite height (Kilo-style) */
@@ -1888,7 +2308,9 @@ html, body, #root {
   padding-bottom: 16px;
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: visible;
+  box-sizing: border-box;
 }
 
 .message-list-item:last-child {

@@ -1,6 +1,6 @@
 import { memoize } from 'lodash-es'
 import { API_ERROR_MESSAGE_PREFIX, queryHaiku } from '../services/claude.js'
-import { type ControlOperator, parse, ParseEntry } from 'shell-quote'
+import { parse } from 'shell-quote'
 import { PRODUCT_NAME } from '../constants/product.js'
 
 const SINGLE_QUOTE = '__SINGLE_QUOTE__'
@@ -22,14 +22,14 @@ export type CommandSubcommandPrefixResult = CommandPrefixResult & {
  * Splits a command string into individual commands based on shell operators
  */
 export function splitCommand(command: string): string[] {
-  const parts: ParseEntry[] = []
+  const parts: Array<string | Record<string, unknown>> = []
 
   // 1. Collapse adjacent strings
   for (const part of parse(
     command
       .replaceAll('"', `"${DOUBLE_QUOTE}`) // parse() strips out quotes :P
       .replaceAll("'", `'${SINGLE_QUOTE}`), // parse() strips out quotes :P
-    varName => `$${varName}`, // Preserve shell variables
+    (varName: string) => `$${varName}`, // Preserve shell variables
   )) {
     if (typeof part === 'string') {
       if (parts.length > 0 && typeof parts[parts.length - 1] === 'string') {
@@ -58,7 +58,7 @@ export function splitCommand(command: string): string[] {
       }
       return null
     })
-    .filter(_ => _ !== null)
+    .filter((part): part is string => part !== null)
 
   // 3. Map quotes back to their original form
   const quotedParts = stringParts.map(part => {
@@ -93,7 +93,10 @@ export const getCommandSubcommandPrefix = memoize(
       return null
     }
     const subcommandPrefixes = subcommandPrefixesResults.reduce(
-      (acc, { subcommand, prefix }) => {
+      (
+        acc: Map<string, CommandPrefixResult>,
+        { subcommand, prefix }: { subcommand: string; prefix: CommandPrefixResult | null },
+      ) => {
         if (prefix) {
           acc.set(subcommand, prefix)
         }
@@ -107,7 +110,7 @@ export const getCommandSubcommandPrefix = memoize(
       subcommandPrefixes,
     }
   },
-  command => command, // memoize by command only
+  (command: string) => command, // memoize by command only
 )
 
 const getCommandPrefix = memoize(
@@ -214,10 +217,10 @@ Command: ${command}
       commandInjectionDetected: false,
     }
   },
-  command => command, // memoize by command only
+  (command: string) => command, // memoize by command only
 )
 
-const COMMAND_LIST_SEPARATORS = new Set<ControlOperator>([
+const COMMAND_LIST_SEPARATORS = new Set<string>([
   '&&',
   '||',
   ';',
@@ -230,7 +233,7 @@ function isCommandList(command: string): boolean {
     command
       .replaceAll('"', `"${DOUBLE_QUOTE}`) // parse() strips out quotes :P
       .replaceAll("'", `'${SINGLE_QUOTE}`), // parse() strips out quotes :P
-    varName => `$${varName}`, // Preserve shell variables
+    (varName: string) => `$${varName}`, // Preserve shell variables
   )) {
     if (typeof part === 'string') {
       // Strings are safe
