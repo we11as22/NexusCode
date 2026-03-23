@@ -8,22 +8,21 @@
  *          +N more tool uses (ctrl+o to expand)
  *          ctrl+b to run in background
  *
+ * After completion (~2.5s flash, same idea as ✓ Explored):
+ *   ✓ Explore(task)
+ *     ⎿ Done
+ *
  * N agents:
  *   Running N subagents…
- *     ● Explore(task1)
- *       ⎿ Read(file.ts)
- *              Grep(pattern)
- *            +N more tool uses (ctrl+o to expand)
- *            ctrl+b to run in background
- *     ● Explore(task2)
- *       ⎿ List(src/)
- *            ctrl+b to run in background
+ *     …
  */
 import { Box, Text } from 'ink'
-import React, { useMemo } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { getTheme } from '../utils/theme.js'
 import type { SubAgentState } from '../nexus-subagents.js'
 import { truncateTask } from '../nexus-subagents.js'
+
+const COMPLETED_SUBAGENT_VISIBLE_MS = 2800
 
 type Props = {
   subagentsByPartId: Record<string, SubAgentState[]>
@@ -132,41 +131,79 @@ function AgentBlock({
 
 export function NexusSubagentBlock({
   subagentsByPartId,
-  isLoading,
+  isLoading: _isLoading,
   expandToolDetails = false,
 }: Props): React.ReactNode {
   const theme = getTheme()
+  const [dismissedCompletedIds, setDismissedCompletedIds] = useState<Set<string>>(() => new Set())
+  const dismissTimeoutByIdRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   const allSubagents = useMemo(() => {
     return Object.values(subagentsByPartId).flat().sort((a, b) => a.startedAt - b.startedAt)
   }, [subagentsByPartId])
 
-  const running = allSubagents.filter((sa) => sa.status === 'running')
+  // New run cleared parent state — reset local dismiss bookkeeping.
+  useEffect(() => {
+    if (Object.keys(subagentsByPartId).length === 0) {
+      for (const t of dismissTimeoutByIdRef.current.values()) clearTimeout(t)
+      dismissTimeoutByIdRef.current.clear()
+      setDismissedCompletedIds(new Set())
+    }
+  }, [subagentsByPartId])
 
-  // Only show live running agents; completed agents appear inline in the chat history
-  if (running.length === 0) return null
+  // After completion, keep the ✓ Done line visible for a short time (CLI footer previously hid instantly).
+  useEffect(() => {
+    for (const sa of allSubagents) {
+      if (sa.status !== 'completed' && sa.status !== 'error') continue
+      if (dismissedCompletedIds.has(sa.id)) continue
+      if (dismissTimeoutByIdRef.current.has(sa.id)) continue
+      const id = sa.id
+      const start = sa.finishedAt ?? Date.now()
+      const delay = Math.max(0, COMPLETED_SUBAGENT_VISIBLE_MS - (Date.now() - start))
+      const t = setTimeout(() => {
+        dismissTimeoutByIdRef.current.delete(id)
+        setDismissedCompletedIds((prev) => {
+          const next = new Set(prev)
+          next.add(id)
+          return next
+        })
+      }, delay)
+      dismissTimeoutByIdRef.current.set(id, t)
+    }
+  }, [allSubagents, dismissedCompletedIds])
 
-  const isMulti = running.length > 1
+  const visible = allSubagents.filter(
+    (sa) =>
+      sa.status === 'running' ||
+      ((sa.status === 'completed' || sa.status === 'error') && !dismissedCompletedIds.has(sa.id)),
+  )
+
+  if (visible.length === 0) return null
+
+  const running = visible.filter((sa) => sa.status === 'running')
+  // Multiple *visible* rows (running + recently completed): keep layout/header when only one is still running.
+  const isMulti = visible.length > 1
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      {/* Multi-agent running header */}
-      {isMulti && (
+      {isMulti && running.length > 0 && (
         <Box>
           <Text color={theme.primary}>✽ </Text>
-          <Text bold>Running {running.length} subagents…</Text>
+          <Text bold>
+            {running.length === visible.length
+              ? `Running ${running.length} subagents…`
+              : `${running.length} running · ${visible.length - running.length} done`}
+          </Text>
         </Box>
       )}
 
-      {/* Each agent — indented by 2 when multi, flat when single */}
-      {running.map((sa) => (
+      {visible.map((sa) => (
         <Box key={sa.id} paddingLeft={isMulti ? 2 : 0} flexDirection="column">
           <AgentBlock sa={sa} expandToolDetails={expandToolDetails} theme={theme} />
         </Box>
       ))}
 
-      {/* Single agent running spinner */}
-      {!isMulti && (
+      {!isMulti && running.length === 1 && (
         <Box>
           <Text color={theme.secondaryText}>✽ Running subagent…</Text>
         </Box>

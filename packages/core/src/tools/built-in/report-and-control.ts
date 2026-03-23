@@ -2,17 +2,52 @@ import { z } from "zod"
 import type { ToolDef, ToolContext, UserQuestionRequest, UserQuestionItem } from "../../types.js"
 import { buildUserQuestionOptions, normalizeCustomOptionLabel } from "../user-question-utils.js"
 
+/**
+ * Models often send `options` as a single comma/semicolon-separated string instead of string[].
+ * Coerce so Zod (and provider-side tool-arg validation) accepts both shapes.
+ */
+function preprocessQuestionOptions(val: unknown): unknown {
+  if (val === undefined || val === null) return undefined
+  if (Array.isArray(val)) {
+    const out: string[] = []
+    for (const el of val) {
+      if (typeof el === "string" && el.trim()) out.push(el.trim())
+      else if (el != null && (typeof el === "number" || typeof el === "boolean")) out.push(String(el))
+    }
+    return out.length > 0 ? out : undefined
+  }
+  if (typeof val === "string") {
+    const s = val.trim()
+    if (!s) return undefined
+    if (/[,;|]/.test(s)) {
+      const parts = s.split(/[,;|]/).map((x) => x.trim()).filter((x) => x.length > 0)
+      return parts.length > 0 ? parts : undefined
+    }
+    return [s]
+  }
+  return val
+}
+
+const optionalQuestionOptionsSchema = z.preprocess(
+  preprocessQuestionOptions,
+  z.array(z.string()).optional(),
+)
+
 const askQuestionItemSchema = z.object({
   id: z.string().optional().describe("Optional stable id for this question"),
   question: z.string().describe("The question to ask the user"),
   /** If empty or one item, core pads with generic brief/detailed choices. */
-  options: z.array(z.string()).optional().describe("Suggested answer options (2+ recommended; host pads if fewer)"),
+  options: optionalQuestionOptionsSchema.describe(
+    "Suggested answer options as string[] OR one comma/semicolon-separated string (2+ recommended; host pads if fewer)",
+  ),
   allow_custom: z.boolean().optional().describe("Deprecated — ignored. The UI always adds exactly one “Other/custom” row; do not put Other/custom in options."),
 })
 
 const askSchema = z.object({
   question: z.string().optional().describe("Single legacy question to ask the user"),
-  options: z.array(z.string()).optional().describe("Optional suggested answers (2+ recommended; if omitted, generic choices are added)"),
+  options: optionalQuestionOptionsSchema.describe(
+    "Suggested answers as string[] OR one comma/semicolon-separated string (if omitted, generic choices are added)",
+  ),
   questions: z.array(askQuestionItemSchema).optional().describe("Structured multi-question form shown to the user at once"),
   title: z.string().optional().describe("Optional title for the grouped question panel"),
   submit_label: z.string().optional().describe("Optional label for the final submit button"),
@@ -25,7 +60,10 @@ const askSchema = z.object({
   message: "Provide either question or questions.",
 })
 
-function normalizeQuestionRequest(input: z.infer<typeof askSchema>): UserQuestionRequest {
+/** Output shape after preprocess (options always string[] | undefined). */
+type AskFollowupQuestionArgs = z.output<typeof askSchema>
+
+function normalizeQuestionRequest(input: AskFollowupQuestionArgs): UserQuestionRequest {
   const customOptionLabel = normalizeCustomOptionLabel(input.custom_option_label)
   const questions: UserQuestionItem[] =
     Array.isArray(input.questions) && input.questions.length > 0
@@ -51,7 +89,7 @@ function normalizeQuestionRequest(input: z.infer<typeof askSchema>): UserQuestio
   }
 }
 
-export const askFollowupTool: ToolDef<z.infer<typeof askSchema>> = {
+export const askFollowupTool: ToolDef<AskFollowupQuestionArgs> = {
   name: "AskFollowupQuestion",
   description: `Ask the user a clarifying question when you cannot proceed without their input.
 
@@ -73,8 +111,9 @@ Prefer making a reasonable choice and stating the assumption over asking. Exampl
 Structured questionnaire mode:
 - Use \`questions\` to ask multiple tightly related questions in one panel.
 - Each question should include real answer options when possible (do NOT include Other/custom; the UI adds exactly one automatically). If you omit options or send fewer than two, the host adds generic choices (brief vs detailed) so the questionnaire can render.
+- Prefer \`options\` as a JSON array of strings. A single comma-separated string is also accepted (e.g. \`"A, B, C"\`).
 - For batching multiple AskFollowupQuestion calls, prefer \`Parallel\` with only AskFollowupQuestion entries; the host will merge them into one questionnaire.`,
-  parameters: askSchema,
+  parameters: askSchema as z.ZodType<AskFollowupQuestionArgs>,
 
   async execute(args, ctx: ToolContext) {
     const request = normalizeQuestionRequest(args)

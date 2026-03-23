@@ -924,9 +924,9 @@ function PlanActionsBar({
   const fullText = (planFollowupText ?? "").trim()
   const lines = fullText.split(/\r?\n/)
   const collapsedLineLimit = 12
-  const expandedLineLimit = 48
+  const expandedLineLimit = 220
   const collapsedNeedsClamp = lines.length > collapsedLineLimit || fullText.length > 1100
-  const expandedNeedsClamp = lines.length > expandedLineLimit || fullText.length > 3600
+  const expandedNeedsClamp = lines.length > expandedLineLimit || fullText.length > 18000
   const renderedText = collapsed
     ? (collapsedNeedsClamp ? `${lines.slice(0, collapsedLineLimit).join("\n")}\n\n…` : fullText)
     : (!expandedNeedsClamp || showMore ? fullText : `${lines.slice(0, expandedLineLimit).join("\n")}\n\n…`)

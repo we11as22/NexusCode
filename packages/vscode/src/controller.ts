@@ -61,6 +61,9 @@ import {
   NexusServerClient,
   DEFAULT_HEARTBEAT_TIMEOUT_MS,
   canonicalProjectRoot,
+  computeContextUsageMetrics,
+  estimateToolsDefinitionsTokens,
+  getAllBuiltinTools,
 } from "@nexuscode/core"
 import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
 
@@ -288,20 +291,6 @@ export interface WebviewState {
   /** Session unaccepted edits: files changed this session not yet accepted (Undo All / Keep All). */
   sessionUnacceptedEdits?: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
   pendingQuestionRequest?: UserQuestionRequest | null
-}
-
-function getContextLimit(modelId: string, configuredLimit?: number): number {
-  if (typeof configuredLimit === "number" && Number.isFinite(configuredLimit) && configuredLimit > 0) {
-    return Math.floor(configuredLimit)
-  }
-  const lower = modelId.toLowerCase()
-  if (lower.includes("claude-3") || lower.includes("claude-4") || lower.includes("claude-sonnet") || lower.includes("claude-opus")) return 200000
-  if (lower.includes("gpt-4o")) return 128000
-  if (lower.includes("gpt-4")) return 128000
-  if (lower.includes("gpt-3.5")) return 16000
-  if (lower.includes("gemini-2")) return 1000000
-  if (lower.includes("gemini")) return 200000
-  return 128000
 }
 
 function simpleDiffStats(originalContent: string, newContent: string): { added: number; removed: number } {
@@ -894,22 +883,39 @@ export class Controller {
         pendingQuestionRequest: this.pendingQuestionRequest,
       }
     }
-    // Use last context_usage from agent loop (includes system prompt) when it matches this session; otherwise UI would show session-only tokens and hide system prompt from context display.
+    // Prefer live stream snapshot; else persisted session snapshot; else same formula as agent (session + tools; no system until next run).
     const sessionId = this.session.id
     const useLastContext =
       this.lastContextUsage != null && this.lastContextUsage.sessionId === sessionId
     if (!useLastContext && this.lastContextUsage != null) this.lastContextUsage = null
-    const contextUsedTokens = useLastContext
-      ? this.lastContextUsage!.usedTokens
-      : this.session.getTokenEstimate()
-    const contextLimitTokens = useLastContext
-      ? this.lastContextUsage!.limitTokens
-      : getContextLimit(this.config.model.id, this.config.model.contextWindow)
-    const contextPercent = useLastContext
-      ? this.lastContextUsage!.percent
-      : contextLimitTokens > 0
-        ? Math.min(100, Math.round((contextUsedTokens / contextLimitTokens) * 100))
-        : 0
+
+    let contextUsedTokens: number
+    let contextLimitTokens: number
+    let contextPercent: number
+    if (useLastContext) {
+      contextUsedTokens = this.lastContextUsage!.usedTokens
+      contextLimitTokens = this.lastContextUsage!.limitTokens
+      contextPercent = this.lastContextUsage!.percent
+    } else {
+      const snap = this.session.getLastContextUsageSnapshot()
+      if (snap) {
+        contextUsedTokens = snap.usedTokens
+        contextLimitTokens = snap.limitTokens
+        contextPercent = snap.percent
+      } else {
+        const mcpN = Array.isArray(this.config.mcp?.servers) ? this.config.mcp.servers.length : 0
+        const toolsTok = estimateToolsDefinitionsTokens(getAllBuiltinTools()) + mcpN * 1200
+        const m = computeContextUsageMetrics({
+          sessionMessages: this.session.messages,
+          toolsDefinitionTokens: toolsTok,
+          modelId: this.config.model.id,
+          configuredContextWindow: this.config.model.contextWindow,
+        })
+        contextUsedTokens = m.usedTokens
+        contextLimitTokens = m.limitTokens
+        contextPercent = m.percent
+      }
+    }
     const messages = stripModeReminderFromMessages(this.session.messages)
     return {
       messages,

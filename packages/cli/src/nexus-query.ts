@@ -68,13 +68,13 @@ function isPureSubagentParallelInput(input: unknown): boolean {
   })
 }
 
-function shouldHideSubagentToolDisplay(toolName: string, input?: unknown): boolean {
-  return (
-    SPAWN_AGENT_TOOL_NAMES.has(toolName) ||
-    toolName === 'SpawnAgentOutput' ||
-    toolName === 'SpawnAgentStop' ||
-    ((toolName === 'Parallel' || toolName === 'parallel') && isPureSubagentParallelInput(input))
-  )
+/**
+ * Only hide *auxiliary* spawn tools from the timeline. The parent SpawnAgent / Parallel
+ * call must emit progress + tool_result so REPL has a `part_*` row to attach
+ * `subagentsByPartId` to (otherwise subagent events update state with nothing visible).
+ */
+function shouldHideSubagentToolDisplay(toolName: string, _input?: unknown): boolean {
+  return toolName === 'SpawnAgentOutput' || toolName === 'SpawnAgentStop'
 }
 
 export type AutoApprovePermissions = {
@@ -145,6 +145,36 @@ function buildAssistantMessageFromSession(msg: SessionMessage): AssistantMessage
       content,
     },
   }
+}
+
+function sessionUserPlainText(msg: SessionMessage): string {
+  const content = msg.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const parts = content as MessagePart[]
+  const lines: string[] = []
+  for (const p of parts) {
+    if (p.type === 'text') lines.push((p as TextPart).text ?? '')
+  }
+  return lines.join('\n').trimEnd()
+}
+
+/**
+ * Rebuild REPL timeline messages from persisted session (after checkpoint restore / rewind).
+ */
+export function replMessagesFromSession(messages: SessionMessage[]): MessageType[] {
+  const out: MessageType[] = []
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      const text = sessionUserPlainText(msg)
+      if (text.trim().length > 0) {
+        out.push(createUserMessage(text))
+      }
+    } else if (msg.role === 'assistant') {
+      out.push(buildAssistantMessageFromSession(msg))
+    }
+  }
+  return out
 }
 
 export interface QueryNexusOptions {
@@ -393,7 +423,8 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         yield pm
       } else if (event.type === 'tool_end') {
         if (TODO_TOOL_NAMES.has(event.tool)) continue
-        if (SPAWN_AGENT_TOOL_NAMES.has(event.tool)) lastSpawnAgentPartId = null
+        // Do not clear lastSpawnAgentPartId here: subagent_* events may arrive after the
+        // parent spawn tool_end; they fall back to lastSpawnAgentPartId when parentPartId is absent.
         if (shouldHideSubagentToolDisplay(event.tool)) continue
         const toolResultText = event.output ?? (event.error ?? '')
         const toolResultData = {

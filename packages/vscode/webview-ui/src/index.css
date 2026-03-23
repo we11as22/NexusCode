@@ -8,6 +8,7 @@
   --nexus-accent: #0078d4;
   --nexus-accent-hover: #106ebe;
   --nexus-accent-muted: rgba(0, 120, 212, 0.15);
+  --nexus-content-inset: 8px;
   /* Slightly darker than VSCode sidebar for extension/chat area */
   --nexus-panel-bg: color-mix(in srgb, var(--vscode-sideBar-background, #1a1a1a) 88%, #000 12%);
   --nexus-chat-bg: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 92%, #000 8%);
@@ -60,6 +61,19 @@ html, body, #root {
   word-wrap: break-word;
   overflow-wrap: anywhere;
   max-width: 100%;
+  min-width: 0;
+}
+.prose-nexus * {
+  max-width: 100%;
+  min-width: 0;
+}
+.prose-nexus pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.prose-nexus code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .prose-nexus a {
   color: var(--nexus-accent);
@@ -78,6 +92,8 @@ html, body, #root {
   border: 1px solid var(--vscode-panel-border);
   border-radius: 6px;
   background: var(--vscode-editor-background);
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .nexus-markdown-table {
@@ -726,6 +742,11 @@ html, body, #root {
 .nexus-output-pre {
   padding: 8px 12px !important;
   box-sizing: border-box;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* ========== Chat Layout ========== */
@@ -1244,6 +1265,20 @@ html, body, #root {
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
+  /* Keep the same breathing room on both sides inside message column. */
+  padding-inline: var(--nexus-content-inset);
+}
+
+/* Uniform left/right inset for all top-level assistant display blocks. */
+.nexus-tool-call-card,
+.nexus-explored-block,
+.nexus-thought-block,
+.nexus-thought-inline-block,
+.nexus-reasoning-block {
+  margin-inline: var(--nexus-content-inset);
+  width: calc(100% - (var(--nexus-content-inset) * 2));
+  max-width: calc(100% - (var(--nexus-content-inset) * 2));
+  box-sizing: border-box;
 }
 
 .nexus-subtask-stack {
@@ -1255,8 +1290,8 @@ html, body, #root {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-  /* Symmetric inset so cards never sit flush against the scroll viewport / scrollbar edge */
-  padding-inline: 4px;
+  /* Outer wrapper controls horizontal inset to keep left/right symmetric. */
+  padding-inline: 0;
   box-sizing: border-box;
 }
 
@@ -1436,6 +1471,8 @@ html, body, #root {
 .nexus-explored-entry-text {
   display: block;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: 2px 0;
   font-size: 11px;
   line-height: 1.45;
@@ -1532,11 +1569,19 @@ html, body, #root {
   padding: 0;
   width: 100%;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: min(80vh, 800px);
+  overflow-x: hidden;
 }
 
 .nexus-plan-panel-input-area {
   min-height: 0 !important;
+  max-height: min(82vh, 840px) !important;
   padding: 8px 10px 6px !important;
+  overflow-x: hidden !important;
+  overflow-y: visible !important;
 }
 
 .nexus-thought-block,
@@ -1575,6 +1620,8 @@ html, body, #root {
   padding: 1px 4px;
   border-radius: 4px;
   background: var(--vscode-textCodeBlock-background, var(--vscode-input-background));
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .nexus-plan-followup-markdown pre {
@@ -1582,6 +1629,7 @@ html, body, #root {
   padding: 6px 8px;
   border-radius: 6px;
   background: var(--vscode-textCodeBlock-background, var(--vscode-input-background));
+  max-width: 100%;
   overflow-x: auto;
   font-size: 10px;
 }
@@ -1589,6 +1637,17 @@ html, body, #root {
 .nexus-plan-followup-markdown pre code {
   padding: 0;
   background: none;
+  white-space: pre;
+}
+
+.nexus-plan-followup-markdown {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.nexus-plan-followup-markdown * {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .nexus-plan-followup-card {
@@ -1599,6 +1658,10 @@ html, body, #root {
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-x: hidden;
 }
 
 .nexus-plan-followup-card--collapsed {
@@ -1613,6 +1676,8 @@ html, body, #root {
   padding: 10px 12px;
   border-bottom: 1px solid var(--vscode-panel-border);
   background: color-mix(in srgb, var(--vscode-editor-background) 84%, var(--vscode-panel-border) 16%);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .nexus-plan-followup-title {
@@ -1627,6 +1692,8 @@ html, body, #root {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .nexus-plan-followup-text-shell {
@@ -1634,6 +1701,8 @@ html, body, #root {
   width: 100%;
   min-width: 0;
   max-width: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
 .nexus-plan-followup-text-shell--collapsed::after {
@@ -1672,16 +1741,17 @@ html, body, #root {
   font-size: 12px;
   line-height: 1.45;
   color: var(--vscode-foreground);
-  max-height: min(52vh, 520px);
+  max-height: min(58vh, 620px);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
   font-family: var(--vscode-font-family);
 }
 
 .nexus-plan-followup-text--collapsed {
-  max-height: 220px;
-  overflow: hidden;
+  max-height: min(28vh, 260px);
+  overflow: auto;
   padding-bottom: 38px;
 }
 
@@ -1752,6 +1822,11 @@ html, body, #root {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  padding-top: 8px;
+  background: var(--vscode-input-background, var(--vscode-editor-background));
 }
 
 .nexus-plan-followup-textarea {

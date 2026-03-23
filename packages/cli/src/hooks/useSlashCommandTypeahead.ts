@@ -22,6 +22,7 @@ type Props = {
 }
 
 const NEXUS_VIRTUAL_COMMANDS: CommandSuggestion[] = [
+  { name: 'undo', description: 'Revert chat & files (last turn or checkpoint)', section: 'NEXUS', isVirtual: true },
   { name: 'mode', description: 'Select agent mode (agent/plan/ask/debug/review)', section: 'NEXUS', isVirtual: true },
   { name: 'diff', description: 'Show session file changes (lines added/removed)', section: 'NEXUS', isVirtual: true },
   { name: 'compact', description: 'Compress conversation context summary', section: 'NEXUS', isVirtual: true },

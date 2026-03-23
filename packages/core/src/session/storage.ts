@@ -31,6 +31,9 @@ export function getSessionsDir(cwd: string): string {
   return path.join(os.homedir(), ".nexus", "sessions", hash)
 }
 
+/** Last UI context bar snapshot (session + system + tools overhead) from agent loop; optional for older files. */
+export type StoredContextUsage = { usedTokens: number; limitTokens: number; percent: number }
+
 export interface StoredSession {
   id: string
   cwd: string
@@ -38,6 +41,8 @@ export interface StoredSession {
   title?: string
   /** Global todo list for the chat (persisted with session) */
   todo?: string
+  /** Persisted so CLI/extension can show the same ctx bar after resume without re-running the agent. */
+  contextUsage?: StoredContextUsage
   messages: SessionMessage[]
 }
 
@@ -63,6 +68,7 @@ export async function saveSession(session: StoredSession): Promise<void> {
     ts: session.ts,
     title: session.title,
     todo: session.todo ?? "",
+    ...(session.contextUsage ? { contextUsage: session.contextUsage } : {}),
   })
 
   await fsp.writeFile(filePath, `${meta}\n${lines}\n`, "utf8")
@@ -80,8 +86,24 @@ export async function loadSession(sessionId: string, cwd: string): Promise<Store
 
   if (lines.length === 0) return null
 
-  const meta = JSON.parse(lines[0]!) as { id: string; cwd: string; ts: number; title?: string; todo?: string }
+  const meta = JSON.parse(lines[0]!) as {
+    id: string
+    cwd: string
+    ts: number
+    title?: string
+    todo?: string
+    contextUsage?: StoredContextUsage
+  }
   const messages = lines.slice(1).map(l => JSON.parse(l) as SessionMessage)
+
+  const cu = meta.contextUsage
+  const contextUsage =
+    cu &&
+    typeof cu.usedTokens === "number" &&
+    typeof cu.limitTokens === "number" &&
+    typeof cu.percent === "number"
+      ? cu
+      : undefined
 
   return {
     id: meta.id,
@@ -89,6 +111,7 @@ export async function loadSession(sessionId: string, cwd: string): Promise<Store
     ts: meta.ts,
     title: meta.title,
     todo: typeof meta.todo === "string" ? meta.todo : "",
+    contextUsage,
     messages,
   }
 }

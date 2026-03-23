@@ -50,7 +50,9 @@ export function Logo({
           <Box paddingLeft={2} flexDirection="column" gap={1}>
             <Text color={theme.secondaryText} italic>
               /help for help
-              {process.env.USER_TYPE === 'ant' && <> · Use /undo to revert the last message and file changes</>}
+              {process.env.USER_TYPE === 'ant' && (
+                <> · /undo opens revert menu (last turn or checkpoint)</>
+              )}
               {process.env.USER_TYPE === 'ant' && <> · NexusCode</>}
             </Text>
             <Text color={theme.secondaryText}>cwd: {getCwd()}</Text>

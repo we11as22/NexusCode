@@ -1577,17 +1577,62 @@ function collapseAdjacentDuplicateMessages(messages: SessionMessage[]): SessionM
   return collapsed
 }
 
+/**
+ * Drop later reasoning parts whose trimmed text exactly matches an earlier block.
+ * Fixes duplicate "Thought" rows after stream + session snapshot merge (e.g. LLM error / reconnect).
+ */
+function dedupeGlobalDuplicateReasoningText(parts: MessagePart[]): MessagePart[] {
+  const seen = new Set<string>()
+  const out: MessagePart[] = []
+  for (const part of parts) {
+    if (part.type !== "reasoning") {
+      out.push(part)
+      continue
+    }
+    const r = part as ReasoningPart
+    const t = (r.text ?? "").trim()
+    if (t === "" || t === THOUGHT_PLACEHOLDER) {
+      out.push(part)
+      continue
+    }
+    if (seen.has(t)) continue
+    seen.add(t)
+    out.push(part)
+  }
+  return out
+}
+
 function dedupeAssistantParts(parts: MessagePart[]): MessagePart[] {
   const deduped: MessagePart[] = []
   for (const part of parts) {
     const previous = deduped[deduped.length - 1]
+
+    // Consecutive reasoning with identical visible text but different reasoningId/metadata (merge).
+    if (part.type === "reasoning" && previous?.type === "reasoning") {
+      const a = previous as ReasoningPart
+      const b = part as ReasoningPart
+      const at = (a.text ?? "").trim()
+      const bt = (b.text ?? "").trim()
+      if (at !== "" && at !== THOUGHT_PLACEHOLDER && at === bt) {
+        deduped[deduped.length - 1] = {
+          ...a,
+          ...b,
+          text: bt || at,
+          reasoningId: a.reasoningId || b.reasoningId,
+          durationMs: b.durationMs ?? a.durationMs,
+          providerMetadata: b.providerMetadata ?? a.providerMetadata,
+        } as ReasoningPart
+        continue
+      }
+    }
+
     if (previous && assistantPartSignature(previous) === assistantPartSignature(part)) {
       deduped[deduped.length - 1] = part
       continue
     }
     deduped.push(part)
   }
-  return deduped
+  return dedupeGlobalDuplicateReasoningText(deduped)
 }
 
 function assistantPartSignature(part: MessagePart): string {

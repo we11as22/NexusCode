@@ -2,6 +2,10 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
 import type { ProviderConfig } from "../types.js"
 import { BaseLLMClient } from "./base.js"
+import { createOpenRouterStreamNormalizingFetch } from "./openrouter-stream-normalize-fetch.js"
+
+/** Fixes malformed SSE chunks from some OpenRouter models (e.g. x-ai) before AI SDK Zod parse. */
+const openRouterFetch = createOpenRouterStreamNormalizingFetch()
 
 const DEFAULT_OPENROUTER_HEADERS = {
   "HTTP-Referer": "https://nexuscode.dev",
@@ -123,6 +127,7 @@ function createKiloGatewayModel(baseUrl: string, apiKey: string, modelId: string
     baseURL: toKiloOpenRouterBase(baseUrl),
     apiKey,
     headers: DEFAULT_OPENROUTER_HEADERS,
+    fetch: openRouterFetch,
   }) as unknown as {
     languageModel?: (id: string) => unknown
     chatModel?: (id: string) => unknown
@@ -137,6 +142,7 @@ function createOpenRouterModel(baseUrl: string, apiKey: string, modelId: string)
     baseURL: baseUrl,
     apiKey,
     headers: DEFAULT_OPENROUTER_HEADERS,
+    fetch: openRouterFetch,
   }) as unknown as {
     languageModel?: (id: string) => unknown
     chatModel?: (id: string) => unknown

@@ -12,6 +12,7 @@ import type {
   IIndexer,
 } from "../types.js"
 import { PLAN_MODE_ALLOWED_WRITE_PATTERN, PLAN_MODE_BLOCKED_EXTENSIONS, READ_ONLY_TOOLS } from "./modes.js"
+import { getMessagesForActiveContext } from "../session/active-context.js"
 import { truncateOutput } from "../context/truncate.js"
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -55,37 +56,88 @@ export function formatToolAttemptForLanguageModel(
   return `[Tool attempt: ${toolName}]\nArguments:\n${argsBlock}\n\nOutcome:\n${body}`
 }
 
+/**
+ * Optional metadata keys that must not affect "same arguments" detection (models often drift these between calls).
+ */
+const DOOM_SIGNATURE_IGNORE_KEYS = new Set([
+  "task_progress",
+  "reason", // Condense / similar
+])
+
+function inputForDoomSignature(input: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(input)) {
+    if (DOOM_SIGNATURE_IGNORE_KEYS.has(k)) continue
+    out[k] = v
+  }
+  return out
+}
+
+/**
+ * Collect finished tool parts in **active context** only (same window as the next LLM request), chronological order.
+ * Pending omitted — the current call is still `pending` when we check.
+ */
+function collectTerminalToolParts(
+  session: ISession,
+  toolName: string,
+): Array<{ input: Record<string, unknown>; status: string }> {
+  const out: Array<{ input: Record<string, unknown>; status: string }> = []
+  for (const m of getMessagesForActiveContext(session.messages)) {
+    if (!Array.isArray(m.content)) continue
+    for (const p of m.content as Array<{ type: string; tool?: string; input?: unknown; status?: string }>) {
+      if (p.type !== "tool" || p.tool !== toolName) continue
+      const st = p.status
+      if (st !== "completed" && st !== "error") continue
+      const input = p.input && typeof p.input === "object" ? (p.input as Record<string, unknown>) : {}
+      out.push({ input, status: st })
+    }
+  }
+  return out
+}
+
+/**
+ * Doom loop: block only **repeated identical failures** (true infinite retry loops).
+ *
+ * Rules (all tools, including MCP, Write, Bash, TodoWrite, Parallel, …):
+ * 1. Ignore `pending` parts (the in-flight call is not counted).
+ * 2. Only look at messages in **active context** (after the latest compaction summary), not ancient session history.
+ * 3. Compare arguments with noise keys stripped (`task_progress`, `reason`).
+ * 4. Take the longest suffix of this tool with the same signature as the current call; doom iff length ≥ threshold and **every** part in the suffix is `error`.
+ *
+ * Any successful (`completed`) call in that suffix breaks the chain — safe for Read-after-Write, retries after transient errors,
+ * repeated TodoWrite / MCP reads with the same payload, etc. Pure "success spam" is not blocked here by design.
+ */
 export async function detectDoomLoop(
   session: ISession,
   toolName: string,
   toolInput: Record<string, unknown>
 ): Promise<boolean> {
   const threshold = toolName === "Bash" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
-  const allParts = session.messages
-    .flatMap(m => {
-      if (!Array.isArray(m.content)) return []
-      return (m.content as Array<{ type: string; tool?: string; input?: Record<string, unknown> }>)
-        .filter(p => p.type === "tool" && p.tool === toolName)
-        .map(p => p.input)
-    })
-    .slice(-threshold)
-
-  if (allParts.length < threshold) return false
-
   const currentSig = getDoomLoopSignature(toolName, toolInput)
   if (toolName === "Bash" && currentSig === "") return false
-  return allParts.every(p => getDoomLoopSignature(toolName, (p ?? {}) as Record<string, unknown>) === currentSig)
+
+  const terminal = collectTerminalToolParts(session, toolName)
+  const suffix: Array<{ input: Record<string, unknown>; status: string }> = []
+  for (let i = terminal.length - 1; i >= 0; i--) {
+    const p = terminal[i]!
+    if (getDoomLoopSignature(toolName, p.input) !== currentSig) break
+    suffix.push(p)
+  }
+
+  if (suffix.length < threshold) return false
+  return suffix.every(p => p.status === "error")
 }
 
-function getDoomLoopSignature(toolName: string, input: Record<string, unknown>): string {
+export function getDoomLoopSignature(toolName: string, input: Record<string, unknown>): string {
+  const cleaned = inputForDoomSignature(input)
   if (toolName === "Bash") {
-    const cmd = input?.command != null ? String(input.command).trim() : ""
+    const cmd = cleaned.command != null ? String(cleaned.command).trim() : ""
     return cmd
   }
-  return canonicalJson(input)
+  return canonicalJsonForDoomLoop(cleaned)
 }
 
-function canonicalJson(obj: Record<string, unknown>): string {
+function canonicalJsonForDoomLoop(obj: Record<string, unknown>): string {
   const keys = Object.keys(obj).sort()
   return JSON.stringify(obj, keys as unknown as string[])
 }
@@ -96,6 +148,187 @@ function normalizeOptionalStringArray(val: unknown): string[] | undefined {
   if (!Array.isArray(val)) return undefined
   const filtered = (val as unknown[]).filter((x): x is string => typeof x === "string")
   return filtered.length === 0 ? undefined : filtered
+}
+
+/**
+ * Models often send booleans as strings (`"true"`, `"False"`) or 0/1. Used before strict Zod parse.
+ */
+export function coerceLooseBoolean(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === "boolean") return value
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (value === 1) return true
+    if (value === 0) return false
+    return undefined
+  }
+  if (typeof value === "string") {
+    const s = value.trim().toLowerCase()
+    if (s === "true" || s === "1" || s === "yes" || s === "y") return true
+    if (s === "false" || s === "0" || s === "no" || s === "n") return false
+    return undefined
+  }
+  return undefined
+}
+
+/** Tool name (after alias resolution) → argument keys that must be strict booleans. */
+const TOOL_BOOLEAN_ARG_KEYS: Record<string, readonly string[]> = {
+  List: ["recursive"],
+  Grep: ["-n", "-i", "multiline"],
+  Bash: ["run_in_background", "dangerouslyDisableSandbox"],
+  TodoWrite: ["merge", "allow_custom"],
+  Edit: ["replace_all"],
+  create_rule: ["global"],
+  AskFollowupQuestion: ["allow_custom"],
+}
+
+function coerceBooleanFields(input: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const out = { ...input }
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(out, key)) continue
+    const v = out[key]
+    if (v === undefined) {
+      delete out[key]
+      continue
+    }
+    const c = coerceLooseBoolean(v)
+    if (c !== undefined) {
+      out[key] = c
+    } else if (typeof v === "boolean") {
+      out[key] = v
+    } else {
+      delete out[key]
+    }
+  }
+  return out
+}
+
+/**
+ * Integer fields that are plain `z.number()` in schemas (no `z.coerce`) — models often send numeric strings.
+ */
+function coerceNumericFields(
+  input: Record<string, unknown>,
+  specs: readonly { key: string; min?: number; max?: number }[],
+): Record<string, unknown> {
+  const out = { ...input }
+  for (const { key, min, max } of specs) {
+    if (!Object.prototype.hasOwnProperty.call(out, key)) continue
+    const v = out[key]
+    if (v === undefined) continue
+    const n = coerceLooseFiniteInt(v, { min, max })
+    if (n !== undefined) out[key] = n
+    else delete out[key]
+  }
+  return out
+}
+
+/** Parse string/number into a finite integer; optional bounds (inclusive). */
+export function coerceLooseFiniteInt(
+  value: unknown,
+  bounds?: { min?: number; max?: number },
+): number | undefined {
+  if (value === undefined || value === null) return undefined
+  let n: number
+  if (typeof value === "number" && Number.isFinite(value)) n = value
+  else if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value.trim().replace(/_/g, ""))
+    if (!Number.isFinite(parsed)) return undefined
+    n = parsed
+  } else {
+    return undefined
+  }
+  const r = Math.trunc(n)
+  if (!Number.isFinite(r)) return undefined
+  if (bounds?.min !== undefined && r < bounds.min) return undefined
+  if (bounds?.max !== undefined && r > bounds.max) return undefined
+  return r
+}
+
+/**
+ * Directory / path list: models send one string, newline- or comma-separated list, or a JSON array string.
+ * Not used for glob `ignore` (commas can appear inside a single pattern).
+ */
+export function normalizeToStringArray(val: unknown): string[] | undefined {
+  if (val === undefined || val === null) return undefined
+  if (Array.isArray(val)) {
+    const out: string[] = []
+    for (const x of val) {
+      if (typeof x === "string" && x.trim()) out.push(x.trim())
+      else if (typeof x === "number" && Number.isFinite(x)) out.push(String(x))
+    }
+    return out.length > 0 ? out : undefined
+  }
+  if (typeof val === "string") {
+    const s = val.trim()
+    if (!s) return undefined
+    if (s.startsWith("[") && s.endsWith("]")) {
+      const parsed = tryParseLooseJson(s)
+      const inner = normalizeToStringArray(parsed)
+      if (inner && inner.length > 0) return inner
+    }
+    if (s.includes("\n")) {
+      const parts = s.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0)
+      if (parts.length > 0) return parts
+    }
+    if (s.includes(",")) {
+      const parts = s.split(",").map((x) => x.trim()).filter((x) => x.length > 0)
+      if (parts.length > 1) return parts
+    }
+    return [s]
+  }
+  return undefined
+}
+
+/**
+ * String[] params where a single string must stay one element (e.g. glob ignore — comma may be part of pattern).
+ */
+function wrapStringAsStringArray(val: unknown): string[] | undefined {
+  if (val === undefined || val === null) return undefined
+  if (Array.isArray(val)) return normalizeToStringArray(val)
+  if (typeof val === "string") {
+    const s = val.trim()
+    if (!s) return undefined
+    if (s.startsWith("[") && s.endsWith("]")) {
+      const parsed = tryParseLooseJson(s)
+      const inner = normalizeToStringArray(parsed)
+      if (inner && inner.length > 0) return inner
+    }
+    return [s]
+  }
+  return undefined
+}
+
+const GREP_OUTPUT_MODES = new Set(["content", "files_with_matches", "count"])
+
+function normalizeGrepOutputMode(v: unknown): unknown {
+  if (typeof v !== "string") return v
+  const s = v.trim().toLowerCase().replace(/\s+/g, "_")
+  const aliases: Record<string, string> = {
+    files: "files_with_matches",
+    filenames: "files_with_matches",
+    paths: "files_with_matches",
+    file_list: "files_with_matches",
+    names: "files_with_matches",
+    lines: "content",
+    matches: "content",
+    text: "content",
+  }
+  const mapped = aliases[s] ?? s
+  return GREP_OUTPUT_MODES.has(mapped) ? mapped : v
+}
+
+const CODEBASE_KINDS = new Set(["class", "function", "method", "interface", "type", "enum", "const", "any"])
+
+function normalizeCodebaseSearchKind(v: unknown): unknown {
+  if (typeof v !== "string") return v
+  const s = v.trim().toLowerCase()
+  return CODEBASE_KINDS.has(s) ? s : v
+}
+
+function stripPlaceholderOptionalPath(v: unknown): unknown {
+  if (typeof v !== "string") return v
+  const s = v.trim()
+  if (s === "" || /^undefined$/i.test(s) || /^null$/i.test(s) || s === '""' || s === "''") return undefined
+  return v
 }
 
 /** First non-empty string among known option/label keys (LLMs often send { label, value } instead of string[]). */
@@ -113,7 +346,18 @@ function pickFirstStringField(obj: Record<string, unknown>, keys: string[]): str
  */
 export function coerceQuestionOptionStrings(val: unknown): string[] {
   if (val === undefined || val === null) return []
-  if (typeof val === "string") return val.trim() ? [val.trim()] : []
+  if (typeof val === "string") {
+    const s = val.trim()
+    if (!s) return []
+    // Models often send one CSV string instead of string[] (e.g. "A, B, C, Other").
+    if (/[,;|]/.test(s)) {
+      return s
+        .split(/[,;|]/)
+        .map((x) => x.trim())
+        .filter((x) => x.length > 0)
+    }
+    return [s]
+  }
   if (typeof val === "number" || typeof val === "boolean") return [String(val)]
   if (!Array.isArray(val)) return []
   const out: string[] = []
@@ -219,18 +463,26 @@ function normalizeAskFollowupQuestionInput(raw: Record<string, unknown>): Record
 
 /**
  * Normalize tool input before Zod parse so gateway/API quirks (paths vs path, [undefined] in arrays) don't cause validation errors.
- * Applied to all built-in tools that have optional string arrays or path/paths.
+ * Also coerces common LLM type mistakes (string booleans, etc.) for known tools so execution-time Zod matches provider-time intent.
  */
 export function normalizeToolInputForParse(
   toolName: string,
   input: Record<string, unknown>
 ): Record<string, unknown> {
-  const raw = input
   // Resolve gateway name so we apply the right normalizer
   const name =
     toolName === "list_dir" || toolName === "ListDirectory" || toolName === "list_directory"
       ? "List"
-      : toolName
+      : toolName === "ask_followup_question"
+        ? "AskFollowupQuestion"
+        : toolName
+
+  let raw: Record<string, unknown> = input && typeof input === "object" ? { ...input } : {}
+  const boolKeys = TOOL_BOOLEAN_ARG_KEYS[name]
+  if (boolKeys) {
+    raw = coerceBooleanFields(raw, boolKeys)
+  }
+
   // List: only "path" (string); gateway may send "paths" (array) or paths[0] undefined
   if (name === "List") {
     const pathVal =
@@ -239,24 +491,27 @@ export function normalizeToolInputForParse(
         : Array.isArray(raw.paths) && raw.paths.length > 0 && typeof raw.paths[0] === "string"
           ? (raw.paths[0] as string)
           : "."
+    const ign = wrapStringAsStringArray(raw.ignore) ?? normalizeOptionalStringArray(raw.ignore)
     return {
       path: pathVal,
-      ignore: raw.ignore,
+      ignore: ign ?? undefined,
       recursive: raw.recursive,
       include: raw.include,
       max_entries: raw.max_entries,
       task_progress: raw.task_progress,
     }
   }
-  // ReadLints: paths optional array of strings
+  // ReadLints: paths optional array of strings (often sent as one path string or JSON string)
   if (name === "ReadLints") {
-    const paths = normalizeOptionalStringArray(raw.paths)
+    const paths = normalizeToStringArray(raw.paths) ?? normalizeOptionalStringArray(raw.paths)
     return { ...raw, paths: paths ?? undefined }
   }
-  // CodebaseSearch: target_directories optional array of strings
+  // CodebaseSearch: target_directories optional array of strings; kind enum case drift
   if (name === "CodebaseSearch") {
-    const target_directories = normalizeOptionalStringArray(raw.target_directories)
-    return { ...raw, target_directories: target_directories ?? undefined }
+    const target_directories =
+      normalizeToStringArray(raw.target_directories) ?? normalizeOptionalStringArray(raw.target_directories)
+    const kind = normalizeCodebaseSearchKind(raw.kind)
+    return { ...raw, target_directories: target_directories ?? undefined, kind }
   }
   // AskFollowupQuestion: coerce aliases and object-shaped options before Zod parse
   if (name === "AskFollowupQuestion") {
@@ -302,10 +557,63 @@ export function normalizeToolInputForParse(
     }
     return out
   }
-  // Grep: ignore optional array of strings
+  // Grep: ignore optional array of strings; output_mode enum / alias drift
   if (name === "Grep") {
-    const ignore = normalizeOptionalStringArray(raw.ignore)
-    return { ...raw, ignore: ignore ?? undefined }
+    const ignore = wrapStringAsStringArray(raw.ignore) ?? normalizeOptionalStringArray(raw.ignore)
+    const output_mode = normalizeGrepOutputMode(raw.output_mode)
+    return { ...raw, ignore: ignore ?? undefined, output_mode }
+  }
+  // Bash: timeout is z.number() — often arrives as string
+  if (name === "Bash") {
+    return coerceNumericFields(raw, [{ key: "timeout", min: 1, max: 600_000 }])
+  }
+  // WebFetch / WebSearch: numeric caps as strings
+  if (name === "WebFetch") {
+    return coerceNumericFields(raw, [{ key: "max_length", min: 1, max: 200_000 }])
+  }
+  if (name === "WebSearch") {
+    return coerceNumericFields(raw, [{ key: "max_results", min: 1, max: 10 }])
+  }
+  // Exa tools (optional MCP): numeric args as strings
+  if (name === "exa_web_search") {
+    let n = coerceNumericFields(raw, [
+      { key: "numResults", min: 1, max: 20 },
+      { key: "contextMaxCharacters", min: 1, max: 500_000 },
+    ])
+    const liveSet = new Set(["fallback", "preferred"])
+    if (typeof n.livecrawl === "string") {
+      const s = n.livecrawl.trim().toLowerCase()
+      if (liveSet.has(s)) n = { ...n, livecrawl: s }
+    }
+    const typeSet = new Set(["auto", "fast", "deep"])
+    if (typeof n.type === "string") {
+      const s = n.type.trim().toLowerCase()
+      if (typeSet.has(s)) n = { ...n, type: s }
+    }
+    return n
+  }
+  if (name === "exa_code_search") {
+    return coerceNumericFields(raw, [{ key: "tokensNum", min: 1000, max: 50_000 }])
+  }
+  // Glob: model sometimes literally sends path: "undefined"
+  if (name === "Glob") {
+    const next = { ...raw }
+    const pc = stripPlaceholderOptionalPath(next.path)
+    if (pc === undefined) {
+      delete next.path
+    } else {
+      next.path = pc
+    }
+    return next
+  }
+  // TodoWrite: todos array sometimes JSON-stringified
+  if (name === "TodoWrite") {
+    let todos: unknown = raw.todos
+    if (typeof todos === "string") {
+      const parsed = tryParseLooseJson(todos)
+      if (parsed !== null) todos = parsed
+    }
+    return { ...raw, todos }
   }
   // Parallel: tool_uses may arrive as a JSON string from some LLM providers.
   // Also: recipient_name may appear at the top level instead of inside each element.
@@ -351,6 +659,26 @@ export function formatToolValidationError(
     tips.push(
       "Read `offset` is 1-based and must be > 0 when set. To read from the start of the file, omit `offset` entirely (do not send 0).",
     )
+  }
+  const booleanTypeIssue = err.issues.some(
+    (i) => typeof i.message === "string" && /\bboolean\b/i.test(i.message),
+  )
+  if (booleanTypeIssue) {
+    tips.push(
+      'For boolean parameters use JSON `true` or `false` only — not strings like `"False"` or `"true"`.',
+    )
+  }
+  const numberTypeIssue = err.issues.some(
+    (i) => typeof i.message === "string" && /\bnumber\b/i.test(i.message) && /\bstring\b/i.test(i.message),
+  )
+  if (numberTypeIssue) {
+    tips.push("For numeric parameters send a JSON number (e.g. `120000`), not a quoted string.")
+  }
+  const arrayTypeIssue = err.issues.some(
+    (i) => typeof i.message === "string" && /\barray\b/i.test(i.message) && /\bstring\b/i.test(i.message),
+  )
+  if (arrayTypeIssue) {
+    tips.push('For array parameters send a JSON array of strings (e.g. `["src","tests"]`), not one comma-separated string.')
   }
   let received = ""
   if (normalizedInput && Object.keys(normalizedInput).length > 0) {
@@ -593,7 +921,9 @@ export async function executeToolCall(
   const resolvedToolName =
     toolName === "list_dir" || toolName === "ListDirectory" || toolName === "list_directory"
       ? "List"
-      : toolName
+      : toolName === "ask_followup_question"
+        ? "AskFollowupQuestion"
+        : toolName
   const tool = tools.find(t => t.name === resolvedToolName)
   if (!tool) {
     const availableList = tools.map(t => t.name).join(", ")

@@ -52,7 +52,7 @@ export {
   saveSession,
   loadSession,
 } from "./session/index.js"
-export type { StoredSession, StoredSessionMeta } from "./session/storage.js"
+export type { StoredSession, StoredSessionMeta, StoredContextUsage } from "./session/storage.js"
 export { hadPlanExit, getPlanContentForFollowup } from "./session/plan-followup.js"
 export { createCompaction } from "./session/compaction.js"
 
@@ -93,6 +93,14 @@ export { ensureQdrantRunning } from "./indexer/qdrant-manager.js"
 export { parseMentions } from "./context/mentions.js"
 export { loadRules } from "./context/rules.js"
 export { estimateTokens } from "./context/condense.js"
+export {
+  computeContextUsageMetrics,
+  estimateToolsDefinitionsTokens,
+  estimateActiveContextSessionTokens,
+  getContextWindowLimit,
+  MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE,
+} from "./context/context-usage.js"
+export type { ContextUsageSnapshot } from "./context/context-usage.js"
 
 // Skills
 export { loadSkills } from "./skills/manager.js"

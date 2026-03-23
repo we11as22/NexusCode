@@ -29,13 +29,24 @@ import {
   formatToolValidationError,
   normalizeToolInputForParse,
   formatToolAttemptForLanguageModel,
+  detectDoomLoop,
+  DOOM_LOOP_THRESHOLD,
+  DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND,
 } from "./tool-execution.js"
+import {
+  buildUserMessageForInvalidSdkToolArgs,
+  isAiSdkInvalidToolArgumentsError,
+} from "./tool-sdk-recovery.js"
 import { getBackgroundBashJobsForPrompt } from "../tools/built-in/execute-command.js"
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
 import { getMessagesForActiveContext } from "../session/active-context.js"
-import { estimateTokens } from "../context/condense.js"
+import {
+  computeContextUsageMetrics,
+  estimateToolsDefinitionsTokens,
+  getContextWindowLimit,
+} from "../context/context-usage.js"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import {
@@ -45,9 +56,6 @@ import {
   getDefaultTopP,
 } from "../provider/provider-options.js"
 
-const DOOM_LOOP_THRESHOLD = 3
-/** execute_command: allow more repeats → Bash: allow more repeats so init/scripts can run same command a few times (e.g. retries) without triggering. */
-const DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND = 5
 /** OpenCode-style: generous tool budgets so "study codebase" and multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   ask: 80,
@@ -333,18 +341,30 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     pending: { current: false },
     checkpoint: opts.checkpoint,
   }
-  /** Emit context usage. When systemPrompt is provided, include it in usedTokens (Cline/OpenCode-style: UI shows real request size). */
+  /** Full system prompt from the last completed loop iteration (for context bar + next iteration's pre-build estimate). */
   let lastBuiltSystemPrompt = ""
+  const toolsDefinitionTokens = estimateToolsDefinitionsTokens(resolvedTools)
   const emitContextUsage = (systemPromptText?: string) => {
     const text = systemPromptText ?? lastBuiltSystemPrompt
-    const limitTokens = getContextLimit(activeClient.modelId, config.model.contextWindow)
-    const sessionTokens = session.getTokenEstimate()
-    const systemTokens = text ? estimateTokens(text) : 0
-    const usedTokens = sessionTokens + systemTokens
-    const percent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
-    host.emit({ type: "context_usage", usedTokens, limitTokens, percent })
+    const metrics = computeContextUsageMetrics({
+      sessionMessages: session.messages,
+      systemPromptText: text || undefined,
+      toolsDefinitionTokens,
+      modelId: activeClient.modelId,
+      configuredContextWindow: config.model.contextWindow,
+    })
+    session.recordContextUsage({
+      usedTokens: metrics.usedTokens,
+      limitTokens: metrics.limitTokens,
+      percent: metrics.percent,
+    })
+    host.emit({
+      type: "context_usage",
+      usedTokens: metrics.usedTokens,
+      limitTokens: metrics.limitTokens,
+      percent: metrics.percent,
+    })
   }
-  emitContextUsage()
 
   let lastToolName = ""
   let attemptedCompletionThisIteration = false
@@ -353,7 +373,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     loopIterations++
 
     // Proactive context management (Cline/OpenCode-style): prune/compact before building prompt when near limit
-    const limitForCompaction = getContextLimit(activeClient.modelId, config.model.contextWindow)
+    const limitForCompaction = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
     if (limitForCompaction > 0 && loopIterations > 1) {
       let sessionTokens = session.getTokenEstimate()
       const threshold = config.summarization?.threshold ?? 0.75
@@ -388,9 +408,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           new Promise<DiagnosticItem[]>((r) => setTimeout(() => r([]), PROBLEMS_TIMEOUT_MS)),
         ])
       : []
-    const limitTokens = getContextLimit(activeClient.modelId, config.model.contextWindow)
-    const usedTokens = session.getTokenEstimate()
-    const contextPercent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
+    const rollingCtx = computeContextUsageMetrics({
+      sessionMessages: session.messages,
+      systemPromptText: lastBuiltSystemPrompt || undefined,
+      toolsDefinitionTokens,
+      modelId: activeClient.modelId,
+      configuredContextWindow: config.model.contextWindow,
+    })
+    const limitTokens = rollingCtx.limitTokens
+    const usedTokens = rollingCtx.usedTokens
+    const contextPercent = rollingCtx.percent
     const promptCtx: PromptContext = {
       mode, // same mode used for tool resolution above; system prompt block and Environment "Current mode" come from this
       config,
@@ -506,6 +533,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     attemptedCompletionThisIteration = false
     let finishReason: string | undefined
     let fatalStreamError = false
+    /** When the AI SDK rejects tool-call args before execution, we inject a user hint and must not treat the turn as a normal text-only stop. */
+    let sdkInvalidToolArgsRecovery = false
     let budgetExceededThisIteration = false
     const markToolBudgetExceeded = () => {
       if (budgetExceededThisIteration) return
@@ -921,8 +950,18 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           case "error":
             if (event.error) {
               await flushPendingReads()
-              const message = event.error.message
+              const err = event.error
+              const message = err.message
               const isRetrying = message.startsWith("Retrying after error")
+              if (!isRetrying && isAiSdkInvalidToolArgumentsError(err)) {
+                sdkInvalidToolArgsRecovery = true
+                session.addMessage({
+                  role: "user",
+                  content: buildUserMessageForInvalidSdkToolArgs(err),
+                })
+                host.emit({ type: "error", error: message, fatal: false })
+                break
+              }
               host.emit({ type: "error", error: message, fatal: !isRetrying })
               if (!isRetrying) {
                 fatalStreamError = true
@@ -1133,6 +1172,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     )
       break
     if (finishReason === "stop" && !executedToolThisIteration) {
+      if (sdkInvalidToolArgsRecovery) {
+        flushAssistantContent()
+        await session.save()
+        emitContextUsage()
+        continue
+      }
       let mandatoryTool = MANDATORY_END_TOOL[mode]
       if (!mandatoryTool) break
       // Revision pass: user asked to change the plan — never inject PlanExit on a text-only stop; run another outer iteration so the model can edit .nexus/plans first.
@@ -1213,7 +1258,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     // Check for context overflow proactively
     const tokenCount = session.getTokenEstimate()
-    const contextLimit = getContextLimit(activeClient.modelId, config.model.contextWindow)
+    const contextLimit = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
     if (contextLimit > 0 && tokenCount / contextLimit > config.summarization.threshold) {
       host.emit({ type: "compaction_start" })
       await handleCompaction(session, activeClient, config, host, compaction, signal)
@@ -1315,7 +1360,9 @@ async function executeToolCall(
   const resolvedToolName =
     toolName === "list_dir" || toolName === "ListDirectory" || toolName === "list_directory"
       ? "List"
-      : toolName
+      : toolName === "ask_followup_question"
+        ? "AskFollowupQuestion"
+        : toolName
   const tool = tools.find(t => t.name === resolvedToolName)
   if (!tool) {
     const availableList = tools.map(t => t.name).join(", ")
@@ -1483,42 +1530,6 @@ async function executeToolCall(
   }
 }
 
-async function detectDoomLoop(
-  session: ISession,
-  toolName: string,
-  toolInput: Record<string, unknown>
-): Promise<boolean> {
-  const threshold = toolName === "Bash" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
-  const allParts = session.messages
-    .flatMap(m => {
-      if (!Array.isArray(m.content)) return []
-      return (m.content as Array<{ type: string; tool?: string; input?: Record<string, unknown> }>)
-        .filter(p => p.type === "tool" && p.tool === toolName)
-        .map(p => p.input)
-    })
-    .slice(-threshold)
-
-  if (allParts.length < threshold) return false
-
-  const currentSig = getDoomLoopSignature(toolName, toolInput)
-  if (toolName === "Bash" && currentSig === "") return false
-  return allParts.every(p => getDoomLoopSignature(toolName, (p ?? {}) as Record<string, unknown>) === currentSig)
-}
-
-/** Canonical signature for doom-loop comparison. For execute_command we compare only the command string so different commands are not treated as a loop. */
-function getDoomLoopSignature(toolName: string, input: Record<string, unknown>): string {
-  if (toolName === "Bash") {
-    const cmd = input?.command != null ? String(input.command).trim() : ""
-    return cmd
-  }
-  return canonicalJson(input)
-}
-
-function canonicalJson(obj: Record<string, unknown>): string {
-  const keys = Object.keys(obj).sort()
-  return JSON.stringify(obj, keys as unknown as string[])
-}
-
 async function handleCompaction(
   session: ISession,
   client: LLMClient,
@@ -1533,7 +1544,7 @@ async function handleCompaction(
 
     // Check again
     const tokenCount = session.getTokenEstimate()
-    const contextLimit = getContextLimit(client.modelId, config.model.contextWindow)
+    const contextLimit = getContextWindowLimit(client.modelId, config.model.contextWindow)
     if (contextLimit > 0 && tokenCount / contextLimit > config.summarization.threshold) {
       // Full compaction with LLM
       await compaction.compact(session, client, signal)
@@ -1621,25 +1632,10 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
     const toolCallParts = toolParts.filter(tp => tp.input != null)
     const completedToolParts = toolParts.filter(tp => tp.status === "completed" || tp.status === "error")
 
-    // Codex-style: include reasoning summary so model preserves chain-of-thought across turns.
-    // IMPORTANT: must NOT use type="thinking" — Anthropic requires original cryptographic signatures
-    // for thinking blocks; fabricated thinking blocks cause 400 errors. Plain type="text" is safe
-    // across all providers (Anthropic, OpenAI, Google, etc.).
-    const REASONING_CONTEXT_CAP = 1500
-    const reasoningParts = parts.filter((p): p is ReasoningPart => p.type === "reasoning")
-    const rawReasoning = reasoningParts.map(p => p.text ?? "").join("").trim()
-    const cappedReasoning = rawReasoning.length > REASONING_CONTEXT_CAP
-      ? rawReasoning.slice(0, REASONING_CONTEXT_CAP) + "…"
-      : rawReasoning
-
     if (toolCallParts.length > 0) {
-      // Build combined text: reasoning prefix + assistant text
-      const combinedText = cappedReasoning
-        ? (textContent ? `[Reasoning: ${cappedReasoning}]\n${textContent}` : `[Reasoning: ${cappedReasoning}]`)
-        : textContent
       const assistantContent: Array<Record<string, unknown>> = []
-      if (combinedText) {
-        assistantContent.push({ type: "text", text: combinedText })
+      if (textContent) {
+        assistantContent.push({ type: "text", text: textContent })
       }
       for (const tp of toolCallParts) {
         assistantContent.push({
@@ -1677,12 +1673,9 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
         messages.push({ role: "tool" as SessionRole, content: toolResultContent as LLMMessage["content"] })
       }
     } else {
-      // Pure text response (no tool calls): include reasoning prefix + text
-      const combinedText = cappedReasoning
-        ? (textContent ? `[Reasoning: ${cappedReasoning}]\n${textContent}` : `[Reasoning: ${cappedReasoning}]`)
-        : textContent
-      if (combinedText) {
-        messages.push({ role: "assistant", content: combinedText })
+      // Pure text response (no tool calls)
+      if (textContent) {
+        messages.push({ role: "assistant", content: textContent })
       }
     }
   }
@@ -1935,20 +1928,3 @@ function extractWriteTargetPath(toolName: string, toolInput: Record<string, unkn
   return undefined
 }
 
-function getContextLimit(modelId: string, configuredLimit?: number): number {
-  if (typeof configuredLimit === "number" && Number.isFinite(configuredLimit) && configuredLimit > 0) {
-    return Math.floor(configuredLimit)
-  }
-  const lower = modelId.toLowerCase()
-  if (lower.includes("claude-3") || lower.includes("claude-4") || lower.includes("claude-sonnet") || lower.includes("claude-opus")) return 200000
-  if (lower.includes("gpt-4o")) return 128000
-  if (lower.includes("gpt-4")) return 128000
-  if (lower.includes("gpt-3.5")) return 16000
-  if (lower.includes("gemini-2")) return 1000000
-  if (lower.includes("gemini")) return 200000
-  return 128000 // default
-}
-
-function estimateTokensFallback(text: string): number {
-  return Math.ceil(text.length / 4)
-}

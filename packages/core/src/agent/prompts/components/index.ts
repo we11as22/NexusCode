@@ -489,7 +489,7 @@ Skip for:
 const RESPONSE_STYLE = `## Response Style
 
 - **Always give a final answer** — Every turn must end with a text response to the user. After tool use, summarize what you did or found. Never end with only tool calls.
-- **Use plain text, not JSON preambles** — Do not emit JSON preambles for reasoning. Write normal plain text and tool calls.
+- **Use plain text** — Write normal plain text and tool calls.
 - **Status before tool batches** — Before the first tool call each turn, write a brief progress note about what you are about to do. Before each new batch of tools, add another short note. If you say you are about to do something, do it in the same turn — call the tool right after. Do not announce actions without following through in the same turn.
 - **Concise**: Be direct and to the point. Match verbosity to task complexity.
 - **No preamble**: Do not start with filler phrases like "Great!", "Sure!", "Certainly!", "Of course!", "I'd be happy to help!", "Absolutely!". Go straight to the answer or action.

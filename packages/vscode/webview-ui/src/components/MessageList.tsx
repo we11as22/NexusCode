@@ -327,7 +327,9 @@ function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): C
         if (explorationItems.length > 0) {
           if (!activeExploration) {
             activeExploration = {
-              key: pendingReasoning[0]?.key ?? `${message.id}-explored-${partIndex}`,
+              // Never reuse `${message.id}-part-*` here — Virtuoso keys must stay unique vs assistant rows
+              // (reusing part-0 caused wrong row reuse / “ghost” duplicates when expanding Thought).
+              key: `${message.id}-explored-${partIndex}`,
               prefixItems: pendingReasoning
                 .filter((item) => item.part.type === "reasoning" && isReasoningPartRenderable(item.part))
                 .map((item) => {
@@ -1267,13 +1269,6 @@ function ThoughtInlineBlock({ text, durationMs }: { text: string; durationMs?: n
   const [open, setOpen] = useState(false)
   const seconds = durationMs != null ? Math.max(1, Math.round(durationMs / 1000)) : undefined
   const label = seconds != null ? `Thought for ${seconds}s` : text.trim().length < 80 ? "Thought briefly" : "Thought"
-
-  useEffect(() => {
-    const raf = window.requestAnimationFrame(() => {
-      window.dispatchEvent(new Event("resize"))
-    })
-    return () => window.cancelAnimationFrame(raf)
-  }, [open])
 
   return (
     <div className="nexus-thought-inline-block">

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react"
+import React, { useState } from "react"
 
 interface Props {
   reasoningText: string
@@ -9,13 +9,6 @@ interface Props {
 /** Live thinking block: shows "Thinking…" with shimmer wave while model is reasoning. Expandable on click. */
 export function ThoughtBlock({ reasoningText, isRunning }: Props) {
   const [expanded, setExpanded] = useState(false)
-
-  useEffect(() => {
-    const raf = window.requestAnimationFrame(() => {
-      window.dispatchEvent(new Event("resize"))
-    })
-    return () => window.cancelAnimationFrame(raf)
-  }, [expanded])
 
   if (!isRunning) return null
 

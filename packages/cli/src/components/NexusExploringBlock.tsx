@@ -1,19 +1,10 @@
 /**
- * Grouped "Exploring / Explored" block for the MAIN agent's code-exploration tools.
- *
- * While tools are running (same structure as single-agent subagent):
- *   ◎ Exploring  reads:3 · searches:2 · lists:1
- *     ⎿ Read(src/store.ts)
- *            Grep(listSessions)
- *            List(src/)
- *          +40 more tool uses (ctrl+o to expand)
- *          ctrl+b to run in background
- *
- * After completion (2.5s flash):
- *   ✓ Explored · reads:3 · searches:2 · lists:1
+ * One explore *wave* in the chat timeline (inserted by REPL via buildChatTimeline).
+ * Same rhythm as assistant rows: marginTop + ●/✓ in a 2-col gutter, then title + ⎿ history.
+ * Counters: Read → Grep → Glob → List → Search (non-zero only), scoped to this segment only.
  */
 import { Box, Text } from 'ink'
-import React, { useMemo, useEffect, useState } from 'react'
+import React, { useMemo } from 'react'
 import { getTheme } from '../utils/theme.js'
 import { ToolHistorySection } from './NexusSubagentBlock.js'
 import type { NormalizedMessage } from '../utils/messages.js'
@@ -27,36 +18,71 @@ import {
 } from '../utils/exploreTools.js'
 
 type Props = {
-  normalizedMessages: NormalizedMessage[]
+  /** Messages that belong to this explore wave only (chronological slice). */
+  segmentMessages: NormalizedMessage[]
+  /** Full chat (for tool_result error flags). */
+  errorLookupMessages: NormalizedMessage[]
   inProgressToolUseIDs: Set<string>
   expandToolDetails?: boolean
-  isLoading: boolean
+  /**
+   * When this wave follows SpawnAgent / subagent Parallel, show mode(task) instead of
+   * generic "Exploring" / "Explored".
+   */
+  segmentTitles?: { exploring: string; explored: string }
+  /**
+   * From timeline: true only after a non-explore action has completed (or assistant text /
+   * new user message). While false, keep ● Exploring even if all tools in this segment
+   * already returned (host still thinking or a non-explore tool is in flight).
+   */
+  waveFinalized: boolean
+  /**
+   * `host_explore` — main agent code discovery (Exploring/Explored + read/search counts).
+   * `subagent_child` — tools run inside SpawnAgent: show Mode(task) only, no “Explored”.
+   */
+  variant?: 'host_explore' | 'subagent_child'
+}
+
+type ExploreBucket = 'read' | 'grep' | 'glob' | 'list' | 'codebase'
+
+function toolNameToExploreBucket(name: string): ExploreBucket | null {
+  const c = canonToolName(name)
+  if (c === 'read' || c === 'readfile') return 'read'
+  if (c === 'grep' || c === 'grepsearch') return 'grep'
+  if (c === 'glob' || c === 'filesearch' || c === 'globfilesearch') return 'glob'
+  if (c === 'list' || c === 'listdir' || c === 'listdirectory') return 'list'
+  if (c === 'codebasesearch') return 'codebase'
+  return null
+}
+
+/** Header line: "2 reads, 3 searches, 1 list" (grep/glob/codebase → searches). */
+function buildExploreHeaderSummary(toolNames: string[]): string {
+  const counts: Record<ExploreBucket, number> = {
+    read: 0,
+    grep: 0,
+    glob: 0,
+    list: 0,
+    codebase: 0,
+  }
+  for (const n of toolNames) {
+    const b = toolNameToExploreBucket(n)
+    if (b) counts[b]++
+  }
+  const searches = counts.grep + counts.glob + counts.codebase
+  const parts: string[] = []
+  if (counts.read > 0) {
+    parts.push(`${counts.read} read${counts.read === 1 ? '' : 's'}`)
+  }
+  if (searches > 0) {
+    parts.push(`${searches} search${searches === 1 ? '' : 'es'}`)
+  }
+  if (counts.list > 0) {
+    parts.push(`${counts.list} list${counts.list === 1 ? '' : 's'}`)
+  }
+  return parts.join(', ')
 }
 
 function makeLabel(name: string, input: Record<string, unknown>): string {
   return exploreLabelFromRecipientAndParams(name, input)
-}
-
-function toolCat(name: string): 'read' | 'search' | 'list' {
-  const c = canonToolName(name)
-  if (c === 'read' || c === 'readfile') return 'read'
-  if (c === 'list' || c === 'listdir' || c === 'listdirectory') return 'list'
-  return 'search'
-}
-
-function buildCtrs(labels: string[], names: string[]): string {
-  let reads = 0, searches = 0, lists = 0
-  names.forEach(n => {
-    const cat = toolCat(n)
-    if (cat === 'read') reads++
-    else if (cat === 'search') searches++
-    else lists++
-  })
-  const parts: string[] = []
-  if (reads > 0) parts.push(`${reads} file${reads === 1 ? '' : 's'}`)
-  if (searches > 0) parts.push(`${searches} ${searches === 1 ? 'search' : 'searches'}`)
-  if (lists > 0) parts.push(`${lists} list${lists === 1 ? '' : 's'}`)
-  return parts.join(', ')
 }
 
 interface ExploreEntry {
@@ -67,40 +93,25 @@ interface ExploreEntry {
 }
 
 export function NexusExploringBlock({
-  normalizedMessages,
+  segmentMessages,
+  errorLookupMessages,
   inProgressToolUseIDs,
   expandToolDetails = false,
-  isLoading: _isLoading,
+  segmentTitles,
+  waveFinalized,
+  variant = 'host_explore',
 }: Props): React.ReactNode {
   const theme = getTheme()
-  const [showExplored, setShowExplored] = useState(false)
-  const [exploredCtrs, setExploredCtrs] = useState('')
-  const prevHadInProgress = React.useRef(false)
+  const isSubagentChild = variant === 'subagent_child'
+  const titleExploring = segmentTitles?.exploring ?? (isSubagentChild ? 'Subagent' : 'Exploring')
+  const titleExplored = segmentTitles?.explored ?? (isSubagentChild ? 'Subagent' : 'Explored')
 
-  // Collect exploration tool_use entries from the current turn.
-  // In Nexus mode tools appear as ProgressMessages (type='progress') during execution;
-  // the AssistantMessage only arrives after assistant_content_complete.
-  // So we scan progress messages from the current turn start first, then fall back
-  // to the original assistant-message logic for non-Nexus mode.
+  // Progress-first within this segment, then last assistant explore blocks (non-Nexus fallback).
   const allEntries = useMemo((): ExploreEntry[] => {
-    const toolErr = getToolUseResultErrorMap(normalizedMessages)
-    // Find the start of the current turn: last user message with text content
-    let turnStartIdx = 0
-    for (let i = normalizedMessages.length - 1; i >= 0; i--) {
-      const msg = normalizedMessages[i]!
-      if (msg.type !== 'user') continue
-      const content = (msg as any).message?.content
-      if (Array.isArray(content) && content.some((b: any) => b?.type === 'text')) {
-        turnStartIdx = i + 1
-        break
-      }
-    }
-
-    // Primary path: scan ProgressMessages from turn start
+    const toolErr = getToolUseResultErrorMap(errorLookupMessages)
     const progressEntries: ExploreEntry[] = []
     const seenIds = new Set<string>()
-    for (let i = turnStartIdx; i < normalizedMessages.length; i++) {
-      const msg = normalizedMessages[i]!
+    for (const msg of segmentMessages) {
       if (msg.type !== 'progress') continue
       const pm = msg as any
       const blocks = pm.content?.message?.content
@@ -152,10 +163,9 @@ export function NexusExploringBlock({
     }
     if (progressEntries.length > 0) return progressEntries
 
-    // Fallback: original assistant-message logic (non-Nexus mode)
     const entries: ExploreEntry[] = []
-    for (let i = normalizedMessages.length - 1; i >= 0; i--) {
-      const msg = normalizedMessages[i]!
+    for (let i = segmentMessages.length - 1; i >= 0; i--) {
+      const msg = segmentMessages[i]!
       if (msg.type !== 'assistant') continue
       const blocks = msg.message.content
       let addedAny = false
@@ -204,50 +214,69 @@ export function NexusExploringBlock({
       if (addedAny) break
     }
     return entries
-  }, [normalizedMessages, inProgressToolUseIDs])
+  }, [segmentMessages, errorLookupMessages, inProgressToolUseIDs])
 
-  // Do not gate on isLoading: it can flip false between tool rounds while tools are still unresolved.
   const hasInProgress = allEntries.length > 0 && allEntries.some(e => !e.done)
+  /** ● until the wave is settled *and* every segment tool has a result. */
+  const showExploring = !waveFinalized || hasInProgress
 
-  useEffect(() => {
-    const was = prevHadInProgress.current
-    prevHadInProgress.current = hasInProgress
-    if (was && !hasInProgress && allEntries.length > 0) {
-      setExploredCtrs(buildCtrs(allEntries.map(e => e.label), allEntries.map(e => e.toolName)))
-      setShowExplored(true)
-    }
-  }, [hasInProgress, allEntries])
+  const history = allEntries.map(e => e.label)
+  const headerSummary = buildExploreHeaderSummary(allEntries.map(e => e.toolName))
 
-  // "Explored" flash
-  if (!hasInProgress && showExplored) {
-    return (
-      <Box paddingX={1}>
-        <Text color={theme.success ?? 'green'}>✓ Explored</Text>
-        {exploredCtrs ? <Text dimColor> {exploredCtrs}.</Text> : null}
+  if (allEntries.length === 0) return null
+
+  // Settled header (✓) only after waveFinalized; same last-3 + ctrl+o for both states.
+  /** Match `AssistantTextMessage` / tool rows: top gap + 2-char bullet column so we don’t sit flush under the previous row. */
+  const root = (
+    bullet: React.ReactNode,
+    titleLine: React.ReactNode,
+    agentId: 'explored' | 'exploring',
+  ) => (
+    <Box flexDirection="column" marginTop={1} width="100%">
+      <Box flexDirection="row" alignItems="flex-start" width="100%">
+        <Box minWidth={2}>{bullet}</Box>
+        <Box flexDirection="column" flexGrow={1}>
+          <Box flexDirection="row" flexWrap="wrap">
+            {titleLine}
+          </Box>
+          <ToolHistorySection
+            history={history}
+            expandToolDetails={expandToolDetails}
+            agentId={agentId}
+            theme={theme}
+          />
+        </Box>
       </Box>
+    </Box>
+  )
+
+  if (!showExploring) {
+    return root(
+      <Text color={theme.success}>✓</Text>,
+      <>
+        <Text bold>{titleExplored}</Text>
+        {!isSubagentChild && !expandToolDetails && headerSummary ? (
+          <Text dimColor>
+            {' '}
+            {headerSummary}
+          </Text>
+        ) : null}
+      </>,
+      'explored',
     )
   }
 
-  if (!hasInProgress) return null
-
-  const ctrs = buildCtrs(allEntries.map(e => e.label), allEntries.map(e => e.toolName))
-  const history = allEntries.map(e => e.label)
-
-  return (
-    <Box flexDirection="column" paddingX={1}>
-      {/* Header with counters — same level as single agent ● header */}
-      <Box>
-        <Text color={theme.primary}>◎ </Text>
-        <Text bold>Exploring</Text>
-        {ctrs ? <Text dimColor> {ctrs}...</Text> : null}
-      </Box>
-      {/* Tool history — same section as subagent, same indentation */}
-      <ToolHistorySection
-        history={history}
-        expandToolDetails={expandToolDetails}
-        agentId="exploring"
-        theme={theme}
-      />
-    </Box>
+  return root(
+    <Text color={theme.primary}>●</Text>,
+    <>
+      <Text bold>{titleExploring}</Text>
+      {!isSubagentChild && headerSummary ? (
+        <Text dimColor>
+          {' '}
+          {headerSummary}
+        </Text>
+      ) : null}
+    </>,
+    'exploring',
   )
 }

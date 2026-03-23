@@ -616,7 +616,7 @@ export function ToolCallCard({ part, approval }: Props) {
   const inputPreview = formatToolInputPreview(part)
 
   return (
-    <div className={`my-1 text-xs min-w-0 max-w-full overflow-x-hidden ${STATUS_STYLES[part.status]}${isAskFollowup ? " nexus-tool-row--askfollowup" : ""}`}>
+    <div className={`nexus-tool-call-card my-1 text-xs min-w-0 max-w-full overflow-x-hidden ${STATUS_STYLES[part.status]}${isAskFollowup ? " nexus-tool-row--askfollowup" : ""}`}>
       <button
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-1 py-0.5 text-left hover:opacity-80 transition-opacity"

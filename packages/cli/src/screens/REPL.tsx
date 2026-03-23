@@ -10,7 +10,6 @@ import { CostThresholdDialog } from '../components/CostThresholdDialog.js'
 import { NexusApprovalPanel } from '../components/NexusApprovalPanel.js'
 import { NexusPlanFollowupPanel } from '../components/NexusPlanFollowupPanel.js'
 import { NexusQuestionPanel } from '../components/NexusQuestionPanel.js'
-import { NexusSubagentBlock } from '../components/NexusSubagentBlock.js'
 import { NexusExploringBlock } from '../components/NexusExploringBlock.js'
 import { NexusTodoBlock } from '../components/NexusTodoBlock.js'
 import * as React from 'react'
@@ -42,7 +41,7 @@ import {
   ProgressMessage,
   query,
 } from '../query.js'
-import { queryNexus } from '../nexus-query.js'
+import { queryNexus, replMessagesFromSession } from '../nexus-query.js'
 import type { NexusApprovalMessage, NexusBannerMessage, NexusTodoMessage, NexusQuestionMessage, NexusContextMessage } from '../nexus-query.js'
 import type { AutoApprovePermissions } from '../nexus-query.js'
 import type { WrappedClient } from '../services/mcpClient.js'
@@ -67,6 +66,7 @@ import {
   normalizeMessagesForAPI,
   processUserInput,
   reorderMessages,
+  timelineSourceMessages,
 } from '../utils/messages.js'
 import { getSlowAndCapableModel } from '../utils/model.js'
 import { clearTerminal, updateTerminalTitle } from '../utils/terminal.js'
@@ -75,19 +75,25 @@ import { BinaryFeedback } from '../components/binary-feedback/BinaryFeedback.js'
 import { getMaxThinkingTokens } from '../utils/thinking.js'
 import { getOriginalCwd } from '../utils/state.js'
 import type { ConfigSnapshot } from '../nexus-bootstrap.js'
-import { reduceSubagentEvent } from '../nexus-subagents.js'
-import type { RestoreType } from '../task-restore.js'
+import { reduceSubagentEvent, truncateTask } from '../nexus-subagents.js'
+import type { SubAgentState } from '../nexus-subagents.js'
+import { applyCheckpointRestore, type RestoreType } from '../task-restore.js'
 import type { SessionMessage, ToolPart } from '@nexuscode/core'
 import { createLLMClient, loadConfig } from '@nexuscode/core'
-import { Session, hadPlanExit, getPlanContentForFollowup, formatQuestionnaireAnswersForAgent } from '@nexuscode/core'
+import {
+  Session,
+  hadPlanExit,
+  getPlanContentForFollowup,
+  formatQuestionnaireAnswersForAgent,
+  computeContextUsageMetrics,
+  estimateToolsDefinitionsTokens,
+} from '@nexuscode/core'
 import type { SessionDiffEntry } from '../components/NexusSessionDiffBlock.js'
 import { NexusSessionDiffBlock } from '../components/NexusSessionDiffBlock.js'
 import {
-  canonToolName,
-  isExploreToolName,
-  parallelInputIsPureExplore,
-} from '../utils/exploreTools.js'
-import { nexusContextWindowLimit } from '../utils/nexusContextWindow.js'
+  buildChatTimeline,
+  exploreSegmentShouldBeTransient,
+} from '../utils/exploreTimeline.js'
 
 const NEXUS_MODES = ['agent', 'plan', 'ask', 'debug'] as const
 function cycleNexusMode(current: string): string {
@@ -95,71 +101,22 @@ function cycleNexusMode(current: string): string {
   return NEXUS_MODES[(i + 1) % NEXUS_MODES.length] ?? 'agent'
 }
 
-function collectCurrentTurnExploreToolUseIDs(messages: NormalizedMessage[]): Set<string> {
-  let turnStartIdx = 0
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]!
-    if (msg.type !== 'user') continue
-    const content = (msg as any).message?.content
-    if (Array.isArray(content) && content.some((b: any) => b?.type === 'text')) {
-      turnStartIdx = i + 1
-      break
-    }
-  }
-
-  const ids = new Set<string>()
-  for (let i = turnStartIdx; i < messages.length; i++) {
-    const msg = messages[i]!
-    if (msg.type !== 'assistant') continue
-    const blocks = msg.message.content
-    if (!Array.isArray(blocks)) continue
-    for (const block of blocks) {
-      if (block?.type !== 'tool_use') continue
-      const nm = canonToolName(block.name)
-      if (nm === 'parallel') {
-        const input =
-          typeof block.input === 'object' && block.input != null
-            ? (block.input as Record<string, unknown>)
-            : {}
-        if (parallelInputIsPureExplore(input)) {
-          ids.add(block.id)
-        }
-        continue
-      }
-      if (!isExploreToolName(block.name)) continue
-      ids.add(block.id)
-    }
-  }
-  return ids
-}
-
-function isExploreNormalizedMessage(
-  message: NormalizedMessage,
-  exploreToolUseIDs: Set<string>,
-): boolean {
-  if (message.type === 'assistant') {
-    const blocks = message.message.content
-    if (!Array.isArray(blocks)) return false
-    return blocks.some(
-      b => b?.type === 'tool_use' && exploreToolUseIDs.has(b.id),
-    )
-  }
-  if (message.type === 'progress') {
-    return exploreToolUseIDs.has(message.toolUseID)
-  }
-  if (message.type === 'user') {
-    const content = message.message.content
-    if (!Array.isArray(content)) return false
-    return content.some(
-      b =>
-        b?.type === 'tool_result' &&
-        exploreToolUseIDs.has((b as { tool_use_id: string }).tool_use_id),
-    )
-  }
-  return false
+function subagentSegmentTitles(
+  map: Record<string, SubAgentState[]>,
+  partId: string,
+): { exploring: string; explored: string } {
+  const list = map[partId]
+  if (!list?.length) return { exploring: 'Subagent', explored: 'Subagent' }
+  const sa = list[list.length - 1]!
+  const modeStr = String(sa.mode)
+  const mode =
+    modeStr.charAt(0).toUpperCase() + modeStr.slice(1).toLowerCase()
+  const label = `${mode}(${truncateTask(sa.task, 56)})`
+  return { exploring: label, explored: label }
 }
 
 type MessageRenderItem = {
+  key: string
   type: 'static' | 'transient'
   jsx: React.ReactNode
 }
@@ -232,6 +189,31 @@ type Props = {
   nexusBootstrap?: import('../nexus-bootstrap.js').NexusBootstrapResult
   /** Called when a Nexus panel saves config so the header can show the new model/index */
   onNexusConfigSaved?: () => void | Promise<void>
+}
+
+/** Footer context bar: same formula as agent loop (persisted snapshot, else session + tools; system included after last emit). */
+function computeNexusContextFooter(
+  bootstrap: import('../nexus-bootstrap.js').NexusBootstrapResult,
+): { usedTokens: number; limitTokens: number; percent: number } {
+  const snap = bootstrap.session.getLastContextUsageSnapshot()
+  if (snap) return snap
+  const model = bootstrap.config.model
+  const mcpN = Array.isArray(bootstrap.configSnapshot.mcp?.servers)
+    ? bootstrap.configSnapshot.mcp.servers.length
+    : 0
+  const toolsTok =
+    estimateToolsDefinitionsTokens(bootstrap.toolRegistry.getAll()) + mcpN * 1200
+  const m = computeContextUsageMetrics({
+    sessionMessages: bootstrap.session.messages,
+    toolsDefinitionTokens: toolsTok,
+    modelId: model.id,
+    configuredContextWindow: model.contextWindow,
+  })
+  return {
+    usedTokens: m.usedTokens,
+    limitTokens: m.limitTokens,
+    percent: m.percent,
+  }
 }
 
 function getUserPromptFromMessage(m: MessageType): string {
@@ -429,11 +411,50 @@ export function REPL({
     session.rewindBeforeTimestamp(lastUserMessage.ts)
     await host.revertLastTurnFiles()
     await session.save().catch(() => {})
-    setMessages(prev => [
-      ...(prev.length >= 2 ? prev.slice(0, -2) : prev),
+    setSubagentsByPartId({})
+    setMessages([
+      ...replMessagesFromSession(session.messages),
       createAssistantMessage('Reverted the last turn and restored edited files.'),
     ])
   }, [nexusBootstrap])
+
+  /** Restore from checkpoint (chat and/or workspace); syncs REPL messages from session. */
+  const onNexusCheckpointRestore = useCallback(
+    async (
+      checkpointId: string,
+      restoreType: RestoreType,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      if (!nexusBootstrap || nexusSessionId == null) {
+        return { ok: false, error: 'No active Nexus session.' }
+      }
+      const result = await applyCheckpointRestore(
+        nexusBootstrap.cwd,
+        nexusBootstrap.session,
+        nexusSessionId,
+        checkpointId,
+        restoreType,
+      )
+      if (!result.ok) {
+        return result
+      }
+      setSubagentsByPartId({})
+      const rebuilt = replMessagesFromSession(nexusBootstrap.session.messages)
+      const modeLabel =
+        restoreType === 'workspace'
+          ? 'Workspace files'
+          : restoreType === 'task'
+            ? 'Chat'
+            : 'Chat and workspace'
+      setMessages([
+        ...rebuilt,
+        createAssistantMessage(
+          `${modeLabel} restored to checkpoint #${checkpointId} (${result.hash.slice(0, 7)}).`,
+        ),
+      ])
+      return { ok: true }
+    },
+    [nexusBootstrap, nexusSessionId],
+  )
 
   /** Nexus-native /compact: run core compaction pipeline directly (no legacy Anthropic path). */
   const onNexusCompact = useCallback(async () => {
@@ -954,6 +975,15 @@ export function REPL({
     }
   }, [nexusSessionId])
 
+  /** Nexus context footer: snapshot from disk/last agent emit, or unified estimate (session + tools). */
+  useEffect(() => {
+    if (!nexusBootstrap) {
+      setNexusContextUsage(null)
+      return
+    }
+    setNexusContextUsage(computeNexusContextFooter(nexusBootstrap))
+  }, [nexusBootstrap, nexusBootstrap?.session.messages.length, nexusSessionId])
+
   /** After `/sessions` switch: sync in-memory Session, footer id, chat, and context estimate. */
   const prevNexusSessionIdRef = useRef<string | undefined>(undefined)
   useEffect(() => {
@@ -965,24 +995,12 @@ export function REPL({
     if (prevNexusSessionIdRef.current === nexusSessionId) return
     prevNexusSessionIdRef.current = nexusSessionId
 
-    const model = nexusBootstrap.config.model as {
-      id: string
-      contextWindow?: number
-    }
-    const limitTokens = nexusContextWindowLimit(model.id, model.contextWindow)
-    const usedTokens = nexusBootstrap.session.getTokenEstimate()
-    const percent =
-      limitTokens > 0
-        ? Math.min(100, Math.round((usedTokens / limitTokens) * 100))
-        : 0
-
     setNexusBannerText('')
     setNexusApprovalAction(null)
     setNexusQuestionRequest(null)
     setSubagentsByPartId({})
     setNexusPlanFollowup(null)
     setNexusTodo(nexusBootstrap.session.getTodo())
-    setNexusContextUsage({ usedTokens, limitTokens, percent })
     setForkNumber(n => n + 1)
     const sid =
       nexusSessionId.length > 24
@@ -996,15 +1014,6 @@ export function REPL({
       ),
     ])
   }, [nexusSessionId, nexusBootstrap])
-
-  // Clear stale subagents when a new query starts (isLoading: false → true)
-  const prevIsLoadingRef = useRef(false)
-  useEffect(() => {
-    if (isLoading && !prevIsLoadingRef.current) {
-      setSubagentsByPartId({})
-    }
-    prevIsLoadingRef.current = isLoading
-  }, [isLoading])
 
   // Re-render on terminal resize to prevent input field duplication
   useEffect(() => {
@@ -1048,148 +1057,194 @@ export function REPL({
     [normalizedMessages],
   )
 
-  const currentTurnExploreToolUseIDs = useMemo(
-    () => collectCurrentTurnExploreToolUseIDs(normalizedMessages),
-    [normalizedMessages],
-  )
+  const messagesJSX = useMemo<MessageRenderItem[]>(() => {
+    // Unsplit messages so explore waves are not broken by text-only rows from
+    // normalizeMessages' per-block splitting.
+    const ordered = reorderMessages(timelineSourceMessages(messages))
+    const timeline = nexusBootstrap
+      ? buildChatTimeline(ordered)
+      : ordered.map((m) => ({ kind: 'message' as const, message: m }))
 
-  const messagesJSX = useMemo<MessageRenderItem[]>(
-    () =>
-      reorderMessages(normalizedMessages)
-        .map(_ => {
-          if (
+    return timeline
+      .map((piece): MessageRenderItem | null => {
+        if (piece.kind === 'explore') {
+          const exploreKey = piece.messages.map((m) => m.uuid).join('|')
+          const rowKey = `explore-${exploreKey}`
+          const segmentTitles =
             nexusBootstrap &&
-            currentTurnExploreToolUseIDs.size > 0 &&
-            isExploreNormalizedMessage(_, currentTurnExploreToolUseIDs)
-          ) {
-            return null
-          }
-          // Progress items are only for in-flight tool calls.
-          // Once a matching tool_result arrives, hide progress and keep the final tool_use line.
-          if (_.type === 'progress' && !unresolvedToolUseIDs.has(_.toolUseID)) {
-            return null
-          }
-          const toolUseID = getToolUseID(_)
-          const message =
-            _.type === 'progress' ? (
-              _.content.message.content[0]?.type === 'text' &&
-              // AgentTool interrupts use text progress payloads.
-              _.content.message.content[0].text === INTERRUPT_MESSAGE ? (
-                <Message
-                  message={_.content}
-                  messages={_.normalizedMessages}
-                  addMargin={false}
-                  tools={_.tools}
-                  verbose={verbose ?? false}
-                  debug={debug}
-                  erroredToolUseIDs={new Set()}
-                  inProgressToolUseIDs={new Set()}
-                  unresolvedToolUseIDs={new Set()}
-                  shouldAnimate={false}
-                  shouldShowDot={true}
-                  subagentsByPartId={subagentsByPartId}
-                  expandToolDetails={toolDetailsExpanded}
-                />
-              ) : (
-                <Message
-                  message={_.content}
-                  messages={_.normalizedMessages}
-                  addMargin={false}
-                  tools={_.tools}
-                  verbose={verbose ?? false}
-                  debug={debug}
-                  erroredToolUseIDs={new Set()}
-                  inProgressToolUseIDs={new Set()}
-                  unresolvedToolUseIDs={
-                    new Set([
-                      (_.content.message.content[0]! as ToolUseBlockParam).id,
-                    ])
-                  }
-                  shouldAnimate={false}
-                  shouldShowDot={true}
-                  subagentsByPartId={subagentsByPartId}
-                  expandToolDetails={toolDetailsExpanded}
-                />
-              )
-            ) : (
-              <Message
-                message={_}
-                messages={normalizedMessages}
-                addMargin={true}
-                tools={tools}
-                verbose={verbose}
-                debug={debug}
-                erroredToolUseIDs={erroredToolUseIDs}
-                inProgressToolUseIDs={inProgressToolUseIDs}
-                shouldAnimate={
-                  !toolJSX &&
-                  !toolUseConfirm &&
-                  !isMessageSelectorVisible &&
-                  (!toolUseID || inProgressToolUseIDs.has(toolUseID))
-                }
-                shouldShowDot={true}
-                unresolvedToolUseIDs={unresolvedToolUseIDs}
-                subagentsByPartId={subagentsByPartId}
-                expandToolDetails={toolDetailsExpanded}
-              />
-            )
-
-          const type = shouldRenderStatically(
-            _,
-            normalizedMessages,
+            piece.subagentChild &&
+            piece.parentSpawnPartId
+              ? subagentSegmentTitles(
+                  subagentsByPartId,
+                  piece.parentSpawnPartId,
+                )
+              : undefined
+          const type = exploreSegmentShouldBeTransient(
+            piece,
             unresolvedToolUseIDs,
+            inProgressToolUseIDs,
           )
-            ? 'static'
-            : 'transient'
-
+            ? 'transient'
+            : 'static'
+          const inner = (
+            <NexusExploringBlock
+              segmentMessages={piece.messages}
+              errorLookupMessages={normalizedMessages}
+              inProgressToolUseIDs={inProgressToolUseIDs}
+              expandToolDetails={toolDetailsExpanded}
+              segmentTitles={segmentTitles}
+              waveFinalized={piece.waveFinalized}
+              variant={
+                piece.subagentChild ? 'subagent_child' : 'host_explore'
+              }
+            />
+          )
           if (debug) {
             return {
+              key: rowKey,
               type,
               jsx: (
                 <Box
                   borderStyle="single"
                   borderColor={type === 'static' ? 'green' : 'red'}
-                  key={_.uuid}
                   width="100%"
                 >
-                  {message}
+                  {inner}
                 </Box>
               ),
             }
           }
-
           return {
+            key: rowKey,
+            type,
+            jsx: <Box width="100%">{inner}</Box>,
+          }
+        }
+
+        const _ = piece.message
+
+        if (_.type === 'progress' && !unresolvedToolUseIDs.has(_.toolUseID)) {
+          return null
+        }
+        const toolUseID = getToolUseID(_)
+        const message =
+          _.type === 'progress' ? (
+            _.content.message.content[0]?.type === 'text' &&
+            // AgentTool interrupts use text progress payloads.
+            _.content.message.content[0].text === INTERRUPT_MESSAGE ? (
+              <Message
+                message={_.content}
+                messages={_.normalizedMessages}
+                addMargin={false}
+                tools={_.tools}
+                verbose={verbose ?? false}
+                debug={debug}
+                erroredToolUseIDs={new Set()}
+                inProgressToolUseIDs={new Set()}
+                unresolvedToolUseIDs={new Set()}
+                shouldAnimate={false}
+                shouldShowDot={true}
+                subagentsByPartId={subagentsByPartId}
+                expandToolDetails={toolDetailsExpanded}
+              />
+            ) : (
+              <Message
+                message={_.content}
+                messages={_.normalizedMessages}
+                addMargin={false}
+                tools={_.tools}
+                verbose={verbose ?? false}
+                debug={debug}
+                erroredToolUseIDs={erroredToolUseIDs}
+                inProgressToolUseIDs={inProgressToolUseIDs}
+                unresolvedToolUseIDs={unresolvedToolUseIDs}
+                shouldAnimate={
+                  !toolJSX &&
+                  !toolUseConfirm &&
+                  !isMessageSelectorVisible &&
+                  inProgressToolUseIDs.has(_.toolUseID)
+                }
+                shouldShowDot={true}
+                subagentsByPartId={subagentsByPartId}
+                expandToolDetails={toolDetailsExpanded}
+              />
+            )
+          ) : (
+            <Message
+              message={_}
+              messages={normalizedMessages}
+              addMargin={true}
+              tools={tools}
+              verbose={verbose}
+              debug={debug}
+              erroredToolUseIDs={erroredToolUseIDs}
+              inProgressToolUseIDs={inProgressToolUseIDs}
+              shouldAnimate={
+                !toolJSX &&
+                !toolUseConfirm &&
+                !isMessageSelectorVisible &&
+                (!toolUseID || inProgressToolUseIDs.has(toolUseID))
+              }
+              shouldShowDot={true}
+              unresolvedToolUseIDs={unresolvedToolUseIDs}
+              subagentsByPartId={subagentsByPartId}
+              expandToolDetails={toolDetailsExpanded}
+            />
+          )
+
+        const type = shouldRenderStatically(
+          _,
+          normalizedMessages,
+          unresolvedToolUseIDs,
+          subagentsByPartId,
+        )
+          ? 'static'
+          : 'transient'
+
+        if (debug) {
+          return {
+            key: _.uuid,
             type,
             jsx: (
-              <Box key={_.uuid} width="100%">
+              <Box
+                borderStyle="single"
+                borderColor={type === 'static' ? 'green' : 'red'}
+                width="100%"
+              >
                 {message}
               </Box>
             ),
           }
-        })
-        .filter((item): item is MessageRenderItem => item !== null),
-    [
-      normalizedMessages,
-      tools,
-      verbose,
-      debug,
-      erroredToolUseIDs,
-      inProgressToolUseIDs,
-      toolJSX,
-      toolUseConfirm,
-      isMessageSelectorVisible,
-      unresolvedToolUseIDs,
-      mcpClients,
-      isDefaultModel,
-      nexusBootstrap,
-      nexusConfigSnapshot,
-      currentTurnExploreToolUseIDs,
-      nexusModeOverride,
-      nexusSessionId,
-      subagentsByPartId,
-      toolDetailsExpanded,
-    ],
-  )
+        }
+
+        return {
+          key: _.uuid,
+          type,
+          jsx: <Box width="100%">{message}</Box>,
+        }
+      })
+      .filter((item): item is MessageRenderItem => item !== null)
+  }, [
+    messages,
+    normalizedMessages,
+    tools,
+    verbose,
+    debug,
+    erroredToolUseIDs,
+    inProgressToolUseIDs,
+    toolJSX,
+    toolUseConfirm,
+    isMessageSelectorVisible,
+    unresolvedToolUseIDs,
+    mcpClients,
+    isDefaultModel,
+    nexusBootstrap,
+    nexusConfigSnapshot,
+    nexusModeOverride,
+    nexusSessionId,
+    subagentsByPartId,
+    toolDetailsExpanded,
+  ])
 
   const staticMessageItems = messagesJSX.filter((item) => item.type === 'static')
   const transientMessageItems = messagesJSX.filter((item) => item.type === 'transient')
@@ -1198,30 +1253,63 @@ export function REPL({
     [staticMessageItems],
   )
   const chatMessagesSection = useMemo(
-    () => (
-      <>
-        <Static
-          key={`static-messages-${forkNumber}`}
-          items={staticItemsWithHeader}
-        >
-          {item =>
-            item.id === 'header' ? (
-              <Box key="nexus-header" flexDirection="column">
-                <Logo
-                  mcpClients={mcpClients}
-                  isDefaultModel={isDefaultModel}
-                />
-                <ProjectOnboarding workspaceDir={getOriginalCwd()} />
-              </Box>
-            ) : (
-              item.jsx
-            )
-          }
-        </Static>
-        {transientMessageItems.map((item) => item.jsx)}
-      </>
-    ),
-    [forkNumber, staticItemsWithHeader, transientMessageItems, mcpClients, isDefaultModel],
+    () =>
+      nexusBootstrap ? (
+        <>
+          <Static
+            key={`static-header-only-${forkNumber}`}
+            items={[{ id: 'header' as const }]}
+          >
+            {item =>
+              item.id === 'header' ? (
+                <Box key="nexus-header" flexDirection="column">
+                  <Logo
+                    mcpClients={mcpClients}
+                    isDefaultModel={isDefaultModel}
+                  />
+                  <ProjectOnboarding workspaceDir={getOriginalCwd()} />
+                </Box>
+              ) : null
+            }
+          </Static>
+          {messagesJSX.map(item => (
+            <React.Fragment key={item.key}>{item.jsx}</React.Fragment>
+          ))}
+        </>
+      ) : (
+        <>
+          <Static
+            key={`static-messages-${forkNumber}`}
+            items={staticItemsWithHeader}
+          >
+            {item =>
+              item.id === 'header' ? (
+                <Box key="nexus-header" flexDirection="column">
+                  <Logo
+                    mcpClients={mcpClients}
+                    isDefaultModel={isDefaultModel}
+                  />
+                  <ProjectOnboarding workspaceDir={getOriginalCwd()} />
+                </Box>
+              ) : (
+                item.jsx
+              )
+            }
+          </Static>
+          {transientMessageItems.map(item => (
+            <React.Fragment key={item.key}>{item.jsx}</React.Fragment>
+          ))}
+        </>
+      ),
+    [
+      nexusBootstrap,
+      forkNumber,
+      staticItemsWithHeader,
+      transientMessageItems,
+      messagesJSX,
+      mcpClients,
+      isDefaultModel,
+    ],
   )
 
   // only show the dialog once not loading
@@ -1238,13 +1326,6 @@ export function REPL({
       >
         {toolJSX ? (
           <Box flexDirection="column" width="100%">
-            {nexusBootstrap ? (
-              <NexusSubagentBlock
-                subagentsByPartId={subagentsByPartId}
-                isLoading={isLoading}
-                expandToolDetails={toolDetailsExpanded}
-              />
-            ) : null}
             {nexusBootstrap && nexusTodo.trim() ? (
               <NexusTodoBlock todo={nexusTodo} />
             ) : null}
@@ -1287,13 +1368,6 @@ export function REPL({
           !binaryFeedbackContext &&
           nexusApprovalAction && (
             <>
-              {nexusBootstrap ? (
-                <NexusSubagentBlock
-                  subagentsByPartId={subagentsByPartId}
-                  isLoading={isLoading}
-                  expandToolDetails={toolDetailsExpanded}
-                />
-              ) : null}
               {nexusBootstrap && nexusTodo.trim() ? (
                 <NexusTodoBlock todo={nexusTodo} />
               ) : null}
@@ -1338,21 +1412,6 @@ export function REPL({
                 <Box paddingX={1} marginTop={1}>
                   <Text dimColor>{nexusBannerText}</Text>
                 </Box>
-              ) : null}
-              {nexusBootstrap ? (
-                <NexusSubagentBlock
-                  subagentsByPartId={subagentsByPartId}
-                  isLoading={isLoading}
-                  expandToolDetails={toolDetailsExpanded}
-                />
-              ) : null}
-              {nexusBootstrap ? (
-                <NexusExploringBlock
-                  normalizedMessages={normalizedMessages}
-                  inProgressToolUseIDs={inProgressToolUseIDs}
-                  expandToolDetails={toolDetailsExpanded}
-                  isLoading={isLoading}
-                />
               ) : null}
               {nexusBootstrap && nexusTodo.trim() ? (
                 <NexusTodoBlock todo={nexusTodo} />
@@ -1445,6 +1504,10 @@ export function REPL({
                 }
                 onNexusConfigSaved={onNexusConfigSaved}
                 onNexusUndo={nexusBootstrap ? onNexusUndo : undefined}
+                nexusListCheckpoints={nexusGetCheckpointList}
+                onNexusCheckpointRestore={
+                  nexusBootstrap ? onNexusCheckpointRestore : undefined
+                }
                 onNexusCompact={nexusBootstrap ? onNexusCompact : undefined}
                 onNexusPlanFollowupSubmit={
                   nexusBootstrap ? handleNexusPlanFollowupInput : undefined
@@ -1514,6 +1577,10 @@ function shouldRenderStatically(
   message: NormalizedMessage,
   messages: NormalizedMessage[],
   unresolvedToolUseIDs: Set<string>,
+  subagentsByPartId: Record<
+    string,
+    import('../nexus-subagents.js').SubAgentState[]
+  >,
 ): boolean {
   switch (message.type) {
     case 'user':
@@ -1536,6 +1603,12 @@ function shouldRenderStatically(
       if (unresolvedToolUseIDs.has(toolUseID)) {
         return false
       }
+      // Spawn/Parallel parent can be "resolved" in the transcript while subagents still run.
+      if (
+        subagentsByPartId[toolUseID]?.some(sa => sa.status === 'running')
+      ) {
+        return false
+      }
 
       const correspondingProgressMessage = messages.find(
         _ => _.type === 'progress' && _.toolUseID === toolUseID,
@@ -1549,8 +1622,20 @@ function shouldRenderStatically(
         correspondingProgressMessage.siblingToolUseIDs,
       )
     }
-    case 'progress':
-      return !intersects(unresolvedToolUseIDs, message.siblingToolUseIDs)
+    case 'progress': {
+      if (unresolvedToolUseIDs.has(message.toolUseID)) return false
+      if (intersects(unresolvedToolUseIDs, message.siblingToolUseIDs)) {
+        return false
+      }
+      if (
+        subagentsByPartId[message.toolUseID]?.some(
+          sa => sa.status === 'running',
+        )
+      ) {
+        return false
+      }
+      return true
+    }
   }
 }
 

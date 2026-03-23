@@ -1265,6 +1265,18 @@ interface ISession {
     updateTodo(markdown: string): void;
     getTodo(): string;
     getTokenEstimate(): number;
+    /** Last full context bar values from agent (session + system + tools); undefined if stale or never recorded. */
+    getLastContextUsageSnapshot(): {
+        usedTokens: number;
+        limitTokens: number;
+        percent: number;
+    } | undefined;
+    /** Called by agent loop when emitting context_usage so resume/switch session can show the same numbers. */
+    recordContextUsage(snapshot: {
+        usedTokens: number;
+        limitTokens: number;
+        percent: number;
+    }): void;
     fork(messageId: string): ISession;
     /** Rewind chat to timestamp; keeps only messages with ts <= timestamp (for checkpoint restore). */
     rewindToTimestamp(timestamp: number): void;
@@ -1894,6 +1906,12 @@ declare function createLLMClient(config: ProviderConfig): LLMClient;
  * slashes, and Windows drive casing are normalized when possible).
  */
 declare function canonicalProjectRoot(cwd: string): string;
+/** Last UI context bar snapshot (session + system + tools overhead) from agent loop; optional for older files. */
+type StoredContextUsage = {
+    usedTokens: number;
+    limitTokens: number;
+    percent: number;
+};
 interface StoredSession {
     id: string;
     cwd: string;
@@ -1901,6 +1919,8 @@ interface StoredSession {
     title?: string;
     /** Global todo list for the chat (persisted with session) */
     todo?: string;
+    /** Persisted so CLI/extension can show the same ctx bar after resume without re-running the agent. */
+    contextUsage?: StoredContextUsage;
     messages: SessionMessage[];
 }
 interface StoredSessionMeta {
@@ -1941,9 +1961,12 @@ declare class Session implements ISession {
     private _ephemeral;
     /** Cached token estimate for the active context; invalidated on every session mutation. */
     private _tokenEstimateCache;
-    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean);
+    /** Last context_usage from agent (full formula). Cleared when messages change. */
+    private _contextUsageSnapshot;
+    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean, contextUsageSnapshot?: StoredContextUsage | null);
     get messages(): SessionMessage[];
     invalidateTokenEstimate(): void;
+    private clearContextUsageSnapshot;
     addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage;
     updateMessage(id: string, updates: Partial<SessionMessage>): void;
     addToolPart(messageId: string, part: ToolPart): void;
@@ -1951,6 +1974,8 @@ declare class Session implements ISession {
     updateTodo(markdown: string): void;
     getTodo(): string;
     getTokenEstimate(): number;
+    getLastContextUsageSnapshot(): StoredContextUsage | undefined;
+    recordContextUsage(snapshot: StoredContextUsage): void;
     fork(messageId: string): ISession;
     /** Rewind chat to timestamp (Cline/Roo-Code style). Keeps only messages with ts <= timestamp. */
     rewindToTimestamp(timestamp: number): void;
@@ -2363,6 +2388,41 @@ declare function loadRules(cwd: string, rulePatterns: string[]): Promise<string>
  */
 declare function estimateTokens(text: string): number;
 
+/** Same cap as buildMessagesFromSession in loop.ts — large tool results are truncated in the request. */
+declare const MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE = 16000;
+/**
+ * Model context window limit: config override or known defaults by model id substring.
+ */
+declare function getContextWindowLimit(modelId: string, configuredLimit?: number): number;
+/**
+ * Token estimate for messages that count toward the next model request (active context only).
+ * Includes reasoning and images; tool outputs capped like the LLM message builder.
+ */
+declare function estimateActiveContextSessionTokens(messages: SessionMessage[]): number;
+/**
+ * Rough token overhead for tool definitions sent with each request (name + description + schema fudge).
+ */
+declare function estimateToolsDefinitionsTokens(tools: Array<{
+    name: string;
+    description: string;
+}>): number;
+type ContextUsageSnapshot = {
+    usedTokens: number;
+    limitTokens: number;
+    percent: number;
+};
+declare function computeContextUsageMetrics(opts: {
+    sessionMessages: SessionMessage[];
+    systemPromptText?: string;
+    toolsDefinitionTokens?: number;
+    modelId: string;
+    configuredContextWindow?: number;
+}): ContextUsageSnapshot & {
+    sessionTokens: number;
+    systemTokens: number;
+    toolsTokens: number;
+};
+
 /**
  * Load skills from configured paths and standard locations.
  *
@@ -2552,4 +2612,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, DEFAULT_HEARTBEAT_TIMEOUT_MS, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateTokens, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getPlanContentForFollowup, getRunLogsDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, saveSession, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type ContextUsageSnapshot, DEFAULT_HEARTBEAT_TIMEOUT_MS, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getPlanContentForFollowup, getRunLogsDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, saveSession, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

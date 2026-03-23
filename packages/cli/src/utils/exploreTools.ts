@@ -25,6 +25,13 @@ export function isExploreToolName(name: string): boolean {
   return EXPLORE_CANONICAL.has(canonToolName(name))
 }
 
+/** TodoWrite / update_todo_list — may sit between Read/Grep without closing the explore wave. */
+const EXPLORE_GLUE_CANONICAL = new Set(['todowrite', 'updatetodolist'])
+
+export function isExploreGlueToolName(name: string): boolean {
+  return EXPLORE_GLUE_CANONICAL.has(canonToolName(name))
+}
+
 export function normalizeRecipientName(raw: string): string {
   const trimmed = raw.trim()
   if (!trimmed) return trimmed

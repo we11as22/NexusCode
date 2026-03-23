@@ -9,8 +9,8 @@ import {
   canonicalProjectRoot,
   type StoredSession,
 } from "./storage.js"
-import { estimateTokens } from "../context/condense.js"
-import { getMessagesForActiveContext } from "./active-context.js"
+import { estimateActiveContextSessionTokens } from "../context/context-usage.js"
+import type { StoredContextUsage } from "./storage.js"
 
 const SESSION_TITLE_MAX_LEN = 80
 
@@ -41,13 +41,23 @@ export class Session implements ISession {
   private _ephemeral: boolean
   /** Cached token estimate for the active context; invalidated on every session mutation. */
   private _tokenEstimateCache: number | null = null
+  /** Last context_usage from agent (full formula). Cleared when messages change. */
+  private _contextUsageSnapshot: StoredContextUsage | null = null
 
-  constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral = false) {
+  constructor(
+    id: string,
+    cwd: string,
+    messages?: SessionMessage[],
+    initialTodo?: string,
+    ephemeral = false,
+    contextUsageSnapshot?: StoredContextUsage | null,
+  ) {
     this.id = id
     this.cwd = canonicalProjectRoot(cwd)
     this._messages = messages ?? []
     this._todo = typeof initialTodo === "string" ? initialTodo : ""
     this._ephemeral = ephemeral
+    this._contextUsageSnapshot = contextUsageSnapshot ?? null
   }
 
   get messages(): SessionMessage[] {
@@ -58,6 +68,10 @@ export class Session implements ISession {
     this._tokenEstimateCache = null
   }
 
+  private clearContextUsageSnapshot(): void {
+    this._contextUsageSnapshot = null
+  }
+
   addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage {
     const full: SessionMessage = {
       ...msg,
@@ -66,6 +80,10 @@ export class Session implements ISession {
     }
     this._messages.push(full)
     this.invalidateTokenEstimate()
+    // Only clear on a new user turn — assistant/tool updates happen after context_usage emit and must keep the last snapshot for CLI/extension idle display.
+    if (msg.role === "user") {
+      this.clearContextUsageSnapshot()
+    }
     return full
   }
 
@@ -111,34 +129,23 @@ export class Session implements ISession {
 
   getTokenEstimate(): number {
     if (this._tokenEstimateCache != null) return this._tokenEstimateCache
-    let total = 0
-    for (const msg of getMessagesForActiveContext(this._messages)) {
-      if (typeof msg.content === "string") {
-        total += estimateTokens(msg.content)
-      } else {
-        for (const part of msg.content as MessagePart[]) {
-          if (part.type === "text") {
-            total += estimateTokens(part.text)
-          } else if (part.type === "tool") {
-            const tp = part as ToolPart
-            if (!tp.compacted && tp.output) {
-              total += estimateTokens(tp.output)
-            }
-            if (tp.input) {
-              total += estimateTokens(JSON.stringify(tp.input))
-            }
-          }
-        }
-      }
-    }
+    const total = estimateActiveContextSessionTokens(this._messages)
     this._tokenEstimateCache = total
     return total
+  }
+
+  getLastContextUsageSnapshot(): StoredContextUsage | undefined {
+    return this._contextUsageSnapshot ?? undefined
+  }
+
+  recordContextUsage(snapshot: StoredContextUsage): void {
+    this._contextUsageSnapshot = { ...snapshot }
   }
 
   fork(messageId: string): ISession {
     const idx = this._messages.findIndex(m => m.id === messageId)
     const messages = idx === -1 ? [...this._messages] : this._messages.slice(0, idx + 1)
-    return new Session(generateSessionId(), this.cwd, JSON.parse(JSON.stringify(messages)))
+    return new Session(generateSessionId(), this.cwd, JSON.parse(JSON.stringify(messages)), undefined, false, null)
   }
 
   /** Rewind chat to timestamp (Cline/Roo-Code style). Keeps only messages with ts <= timestamp. */
@@ -147,6 +154,7 @@ export class Session implements ISession {
     if (keep.length < this._messages.length) {
       this._messages = keep
       this.invalidateTokenEstimate()
+      this.clearContextUsageSnapshot()
     }
   }
 
@@ -156,6 +164,7 @@ export class Session implements ISession {
     if (keep.length < this._messages.length) {
       this._messages = keep
       this.invalidateTokenEstimate()
+      this.clearContextUsageSnapshot()
     }
   }
 
@@ -166,11 +175,13 @@ export class Session implements ISession {
       if (idx === 0) {
         this._messages = []
         this.invalidateTokenEstimate()
+        this.clearContextUsageSnapshot()
       }
       return
     }
     this._messages = this._messages.slice(0, idx)
     this.invalidateTokenEstimate()
+    this.clearContextUsageSnapshot()
   }
 
   async save(): Promise<void> {
@@ -182,6 +193,7 @@ export class Session implements ISession {
       ts: Date.now(),
       title: title || undefined,
       todo: this._todo,
+      ...(this._contextUsageSnapshot ? { contextUsage: this._contextUsageSnapshot } : {}),
       messages: this._messages,
     }
     await saveSession(stored)
@@ -192,6 +204,7 @@ export class Session implements ISession {
     if (stored) {
       this._messages = stored.messages
       this._todo = typeof stored.todo === "string" ? stored.todo : ""
+      this._contextUsageSnapshot = stored.contextUsage ?? null
       this.invalidateTokenEstimate()
     }
   }
@@ -209,13 +222,13 @@ export class Session implements ISession {
     const stored = await loadSession(sessionId, cwd)
     if (!stored) return null
     const todo = typeof stored.todo === "string" ? stored.todo : ""
-    return new Session(sessionId, cwd, stored.messages, todo)
+    return new Session(sessionId, cwd, stored.messages, todo, false, stored.contextUsage ?? null)
   }
 
   static async resumeWindow(sessionId: string, cwd: string, limit: number, offset: number): Promise<Session | null> {
     const loaded = await loadSessionMessages(sessionId, cwd, limit, offset)
     if (!loaded) return null
-    return new Session(sessionId, cwd, loaded.messages, loaded.meta.todo ?? "")
+    return new Session(sessionId, cwd, loaded.messages, loaded.meta.todo ?? "", false, null)
   }
 
   static async getMeta(sessionId: string, cwd: string) {

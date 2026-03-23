@@ -190,6 +190,10 @@ export interface ISession {
   updateTodo(markdown: string): void
   getTodo(): string
   getTokenEstimate(): number
+  /** Last full context bar values from agent (session + system + tools); undefined if stale or never recorded. */
+  getLastContextUsageSnapshot(): { usedTokens: number; limitTokens: number; percent: number } | undefined
+  /** Called by agent loop when emitting context_usage so resume/switch session can show the same numbers. */
+  recordContextUsage(snapshot: { usedTokens: number; limitTokens: number; percent: number }): void
   fork(messageId: string): ISession
   /** Rewind chat to timestamp; keeps only messages with ts <= timestamp (for checkpoint restore). */
   rewindToTimestamp(timestamp: number): void

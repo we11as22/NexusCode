@@ -15,6 +15,10 @@ import type {
 import * as path from "node:path"
 import { READ_ONLY_TOOLS, MANDATORY_END_TOOL, PLAN_MODE_ALLOWED_WRITE_PATTERN } from "./modes.js"
 import {
+  buildUserMessageForInvalidSdkToolArgs,
+  isAiSdkInvalidToolArgumentsError,
+} from "./tool-sdk-recovery.js"
+import {
   executeToolCall,
   detectDoomLoop,
   extractWriteTargetPath,
@@ -94,6 +98,8 @@ export interface ProcessStepResult {
   budgetExceededThisIteration: boolean
   /** Set when context is near limit after this step (loop should compact). */
   needsCompaction?: boolean
+  /** AI SDK rejected tool-call args; a user message was injected — outer loop should call the model again. */
+  sdkInvalidToolArgsRecovery?: boolean
 }
 
 /**
@@ -144,6 +150,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
   let attemptedCompletionThisIteration = false
   let finishReason: string | undefined
   let fatalStreamError = false
+  let sdkInvalidToolArgsRecovery = false
   let budgetExceededThisIteration = false
   let needsCompaction = false
 
@@ -568,8 +575,18 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
         case "error":
           if (event.error) {
             await flushPendingReads()
-            const message = event.error.message
+            const err = event.error
+            const message = err.message
             const isRetrying = message.startsWith("Retrying after error")
+            if (!isRetrying && isAiSdkInvalidToolArgumentsError(err)) {
+              sdkInvalidToolArgsRecovery = true
+              session.addMessage({
+                role: "user",
+                content: buildUserMessageForInvalidSdkToolArgs(err),
+              })
+              await emit({ type: "error", error: message, fatal: false })
+              break
+            }
             await emit({ type: "error", error: message, fatal: !isRetrying })
             if (!isRetrying) {
               fatalStreamError = true
@@ -598,6 +615,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
       attemptedCompletionThisIteration,
       fatalStreamError: true,
       budgetExceededThisIteration,
+      sdkInvalidToolArgsRecovery,
     }
   }
 
@@ -622,5 +640,6 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
     fatalStreamError,
     budgetExceededThisIteration,
     needsCompaction,
+    ...(sdkInvalidToolArgsRecovery ? { sdkInvalidToolArgsRecovery: true } : {}),
   }
 }

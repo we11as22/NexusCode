@@ -9,7 +9,7 @@ export type RestoreType = "task" | "workspace" | "taskAndWorkspace"
 /**
  * Resolve checkpoint id to an entry: numeric string = 1-based index, otherwise = hash prefix match.
  */
-function findCheckpointEntry(
+export function findCheckpointEntry(
   entries: Array<{ hash: string; ts: number; description?: string }>,
   id: string
 ): { hash: string; ts: number; description?: string } | null {
@@ -22,6 +22,55 @@ function findCheckpointEntry(
   return match ?? null
 }
 
+type SessionRestoreTarget = {
+  rewindToTimestamp: (timestamp: number) => void
+  save: () => Promise<void>
+}
+
+/**
+ * Apply checkpoint restore to an in-memory session (REPL) or after Session.resume (CLI).
+ * Does not call process.exit.
+ */
+export async function applyCheckpointRestore(
+  cwd: string,
+  session: SessionRestoreTarget,
+  sessionId: string,
+  checkpointId: string,
+  restoreType: RestoreType
+): Promise<
+  | { ok: true; hash: string; ts: number }
+  | { ok: false; error: string }
+> {
+  const entries = await readCheckpointEntries(cwd, sessionId)
+  if (entries.length === 0) {
+    return { ok: false, error: "No checkpoints for this session." }
+  }
+
+  const entry = findCheckpointEntry(entries, checkpointId)
+  if (!entry) {
+    return {
+      ok: false,
+      error: `Checkpoint "${checkpointId}" not found. Use "nexus task checkpoints" to list (by index or hash).`,
+    }
+  }
+
+  const tracker = new CheckpointTracker(sessionId, cwd)
+  const ok = await tracker.init()
+  if (!ok) {
+    return { ok: false, error: "Checkpoint tracker init failed." }
+  }
+
+  if (restoreType === "workspace" || restoreType === "taskAndWorkspace") {
+    await tracker.resetHead(entry.hash)
+  }
+  if (restoreType === "task" || restoreType === "taskAndWorkspace") {
+    session.rewindToTimestamp(entry.ts)
+  }
+
+  await session.save().catch(() => {})
+  return { ok: true, hash: entry.hash, ts: entry.ts }
+}
+
 /**
  * Run task restore (Cline 1:1): load session and checkpoint entries, find entry by id,
  * init tracker, then restore workspace and/or task per type.
@@ -32,42 +81,25 @@ export async function runTaskRestore(
   checkpointId: string,
   restoreType: RestoreType
 ): Promise<void> {
-  const entries = await readCheckpointEntries(cwd, sessionId)
-  if (entries.length === 0) {
-    console.error("[nexus] No checkpoints for this session.")
-    process.exit(1)
-  }
-
-  const entry = findCheckpointEntry(entries, checkpointId)
-  if (!entry) {
-    console.error(
-      `[nexus] Checkpoint "${checkpointId}" not found. Use "nexus task checkpoints" to list (by index or hash).`
-    )
-    process.exit(1)
-  }
-
   const session = await Session.resume(sessionId, cwd)
   if (!session) {
     console.error("[nexus] Session not found.")
     process.exit(1)
   }
 
-  const tracker = new CheckpointTracker(sessionId, cwd)
-  const ok = await tracker.init()
-  if (!ok) {
-    console.error("[nexus] Checkpoint tracker init failed.")
+  const result = await applyCheckpointRestore(
+    cwd,
+    session,
+    sessionId,
+    checkpointId,
+    restoreType
+  )
+  if (!result.ok) {
+    console.error(`[nexus] ${result.error}`)
     process.exit(1)
   }
 
-  if (restoreType === "workspace" || restoreType === "taskAndWorkspace") {
-    await tracker.resetHead(entry.hash)
-  }
-  if (restoreType === "task" || restoreType === "taskAndWorkspace") {
-    session.rewindToTimestamp(entry.ts)
-  }
-
-  await session.save()
   console.log(
-    `Restored ${restoreType}: ${entry.hash.slice(0, 7)} (${new Date(entry.ts).toISOString()})`
+    `Restored ${restoreType}: ${result.hash.slice(0, 7)} (${new Date(result.ts).toISOString()})`
   )
 }

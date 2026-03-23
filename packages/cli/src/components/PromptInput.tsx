@@ -23,6 +23,7 @@ import { setTerminalTitle } from '../utils/terminal.js'
 import terminalSetup, {
   isShiftEnterKeyBindingInstalled,
 } from '../commands/terminalSetup.js'
+import type { RestoreType } from '../task-restore.js'
 
 type Props = {
   commands: Command[]
@@ -85,6 +86,15 @@ type Props = {
   onNexusConfigSaved?: () => void | Promise<void>
   /** When set (Nexus), /undo reverts the last message and file changes. */
   onNexusUndo?: () => Promise<void>
+  /** When set with onNexusCheckpointRestore, /undo opens a checkpoint menu instead of only last turn. */
+  nexusListCheckpoints?: () => Promise<
+    Array<{ hash: string; ts: number; description?: string }>
+  >
+  /** Restore session/workspace to a checkpoint by id (1-based index or hash prefix). */
+  onNexusCheckpointRestore?: (
+    checkpointId: string,
+    restoreType: RestoreType,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>
   /** When set (Nexus), /compact triggers core compaction. */
   onNexusCompact?: () => Promise<void>
   /** Handle post-plan followup choices (1/2/3/4/custom). Return true if consumed. */
@@ -157,6 +167,8 @@ function PromptInput({
   onToggleNexusAutoApproveAction,
   onNexusConfigSaved,
   onNexusUndo,
+  nexusListCheckpoints,
+  onNexusCheckpointRestore,
   onNexusCompact,
   onNexusPlanFollowupSubmit,
   onToggleToolDetails,
@@ -193,6 +205,46 @@ function PromptInput({
     isSkill: boolean
     scopeIndex: number
   } | null>(null)
+
+  type UndoPanelReady = {
+    phase: 'ready'
+    entries: Array<{ hash: string; ts: number; description?: string }>
+    selectedIndex: number
+    restoreType: RestoreType
+    loadError?: string
+  }
+  const [undoPanel, setUndoPanel] = useState<
+    null | { phase: 'loading' } | UndoPanelReady
+  >(null)
+
+  const undoLoadGenerationRef = React.useRef(0)
+  useEffect(() => {
+    if (undoPanel?.phase !== 'loading') return
+    const gen = ++undoLoadGenerationRef.current
+    void (async () => {
+      try {
+        const entries = nexusListCheckpoints
+          ? await nexusListCheckpoints()
+          : []
+        if (undoLoadGenerationRef.current !== gen) return
+        setUndoPanel({
+          phase: 'ready',
+          entries,
+          selectedIndex: 0,
+          restoreType: 'taskAndWorkspace',
+        })
+      } catch (e) {
+        if (undoLoadGenerationRef.current !== gen) return
+        setUndoPanel({
+          phase: 'ready',
+          entries: [],
+          selectedIndex: 0,
+          restoreType: 'taskAndWorkspace',
+          loadError: e instanceof Error ? e.message : String(e),
+        })
+      }
+    })()
+  }, [undoPanel, nexusListCheckpoints])
 
   useEffect(() => {
     getExampleCommands().then(commands => {
@@ -295,16 +347,24 @@ function PromptInput({
     setPastedImage(null)
     setPastedText(null)
     onSubmitCountChange(_ => _ + 1)
-    setIsLoading(true)
 
     const trimmed = finalInput.trim()
     if (/^\/undo(\s|$)/i.test(trimmed) && onNexusUndo) {
-      await onNexusUndo()
       onInputChange('')
-      setIsLoading(false)
       addToHistory(trimmed)
+      resetHistory()
+      if (nexusListCheckpoints && onNexusCheckpointRestore) {
+        setUndoPanel({ phase: 'loading' })
+        return
+      }
+      setIsLoading(true)
+      await onNexusUndo()
+      setIsLoading(false)
       return
     }
+
+    setIsLoading(true)
+
     if (/^\/compact(\s|$)/i.test(trimmed) && onNexusCompact) {
       await onNexusCompact()
       onInputChange('')
@@ -451,8 +511,79 @@ function PromptInput({
     setPastedText(text)
   }
 
-  // Handle pending create-skill/rule scope selection
+  // Handle /undo checkpoint panel and pending create-skill/rule scope selection
   useInput((inputChar, key) => {
+    if (undoPanel?.phase === 'loading') {
+      if (key.escape) {
+        undoLoadGenerationRef.current += 1
+        setUndoPanel(null)
+      }
+      return
+    }
+    if (undoPanel?.phase === 'ready') {
+      const p = undoPanel
+      if (key.escape) {
+        setUndoPanel(null)
+        return
+      }
+      const maxIdx = p.entries.length
+      if (key.upArrow) {
+        setUndoPanel({
+          ...p,
+          selectedIndex: Math.max(0, p.selectedIndex - 1),
+        })
+        return
+      }
+      if (key.downArrow) {
+        setUndoPanel({
+          ...p,
+          selectedIndex: Math.min(maxIdx, p.selectedIndex + 1),
+        })
+        return
+      }
+      if (
+        key.tab &&
+        !key.shift &&
+        !key.ctrl &&
+        p.selectedIndex > 0
+      ) {
+        setUndoPanel({
+          ...p,
+          restoreType:
+            p.restoreType === 'taskAndWorkspace' ? 'workspace' : 'taskAndWorkspace',
+        })
+        return
+      }
+      if (key.return) {
+        if (p.selectedIndex === 0) {
+          setUndoPanel(null)
+          void (async () => {
+            setIsLoading(true)
+            await onNexusUndo?.()
+            setIsLoading(false)
+          })()
+          return
+        }
+        const checkpointId = String(p.selectedIndex)
+        const restoreType = p.restoreType
+        setUndoPanel(null)
+        void (async () => {
+          if (!onNexusCheckpointRestore) return
+          setIsLoading(true)
+          const r = await onNexusCheckpointRestore(checkpointId, restoreType)
+          setIsLoading(false)
+          if (!r.ok) {
+            setMessage({
+              show: true,
+              text: `[undo] ${r.error}`,
+            })
+            setTimeout(() => setMessage({ show: false }), 5000)
+          }
+        })()
+        return
+      }
+      return
+    }
     if (!pendingCreate) return
     if (key.escape || inputChar === 'c' || inputChar === 'C') {
       setPendingCreate(null)
@@ -554,7 +685,13 @@ Create a .md rule file with a descriptive name. The rule file should define clea
     // - when we're loading a response, it's used to cancel the request
     // - otherwise, it's used to show the message selector
     // - when double pressed, it's used to clear the input
-    if (key.escape && messages.length > 0 && !input && !isLoading) {
+    if (
+      key.escape &&
+      messages.length > 0 &&
+      !input &&
+      !isLoading &&
+      !undoPanel
+    ) {
       onShowMessageSelector()
     }
   })
@@ -619,8 +756,10 @@ Create a .md rule file with a descriptive name. The rule file should define clea
             onMessage={(show, text) => setMessage({ show, text })}
             onImagePaste={onImagePaste}
             columns={textInputColumns}
-            isDimmed={isDisabled || isLoading}
-            disableCursorMovementForUpDownKeys={suggestions.length > 0}
+            isDimmed={isDisabled || isLoading || undoPanel != null}
+            disableCursorMovementForUpDownKeys={
+              suggestions.length > 0 || undoPanel?.phase === 'ready'
+            }
             cursorOffset={cursorOffset}
             onChangeCursorOffset={setCursorOffsetAndRef}
             onPaste={onTextPaste}
@@ -644,6 +783,67 @@ Create a .md rule file with a descriptive name. The rule file should define clea
           <Box marginTop={1}>
             <Text dimColor>↑/↓ navigate · Enter confirm · Esc cancel</Text>
           </Box>
+        </Box>
+      )}
+      {undoPanel && (
+        <Box
+          flexDirection="column"
+          marginTop={1}
+          borderStyle="round"
+          borderColor={theme.secondaryBorder}
+          paddingX={1}
+        >
+          <Text bold>Revert (/undo)</Text>
+          {undoPanel.phase === 'loading' ? (
+            <Text dimColor>Loading checkpoints…</Text>
+          ) : (
+            <>
+              {undoPanel.loadError ? (
+                <Text color={theme.error}>{undoPanel.loadError}</Text>
+              ) : null}
+              <Box height={1}>
+                <Text
+                  color={undoPanel.selectedIndex === 0 ? theme.primary : undefined}
+                >
+                  {undoPanel.selectedIndex === 0 ? '▶' : ' '} Last turn only — chat + last file edits
+                </Text>
+              </Box>
+              {undoPanel.entries.map((e, i) => {
+                const idx = i + 1
+                const sel = undoPanel.selectedIndex === idx
+                const short = e.hash.slice(0, 7)
+                const when = new Date(e.ts).toLocaleString(undefined, {
+                  dateStyle: 'short',
+                  timeStyle: 'short',
+                })
+                const desc = (e.description ?? '').trim().slice(0, 72)
+                return (
+                  <Box key={`${e.hash}-${i}`} height={1}>
+                    <Text color={sel ? theme.primary : undefined}>
+                      {sel ? '▶' : ' '} #{idx} {short} · {when}
+                      {desc ? ` — ${desc}` : ''}
+                    </Text>
+                  </Box>
+                )
+              })}
+              {undoPanel.entries.length === 0 && !undoPanel.loadError ? (
+                <Text dimColor>
+                  No checkpoints yet. Only “last turn” is available, or enable checkpoints in
+                  config.
+                </Text>
+              ) : null}
+              <Box marginTop={1}>
+                <Text dimColor>
+                  ↑/↓ select · Enter confirm · Esc cancel
+                  {undoPanel.selectedIndex > 0
+                    ? undoPanel.restoreType === 'taskAndWorkspace'
+                      ? ' · Tab: switch to workspace-only'
+                      : ' · Tab: switch to chat + workspace'
+                    : ''}
+                </Text>
+              </Box>
+            </>
+          )}
         </Box>
       )}
       {nexusMode != null && suggestions.length === 0 && (

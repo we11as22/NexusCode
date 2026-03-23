@@ -611,6 +611,16 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
   })
 }
 
+/**
+ * For `reorderMessages` + explore-wave timeline only: keep each assistant/user message
+ * intact. `normalizeMessages` splits one API message into many rows (one block each),
+ * which inserts text-only assistant rows between tool_uses and breaks merging of explore
+ * segments in the chat.
+ */
+export function timelineSourceMessages(messages: Message[]): NormalizedMessage[] {
+  return messages.filter(isNotEmptyMessage).map(m => m as NormalizedMessage)
+}
+
 type ToolUseRequestMessage = AssistantMessage & {
   message: { content: ToolUseBlock[] }
 }
@@ -729,15 +739,32 @@ export function getToolUseResultErrorMap(
   return buildToolUseResultErrorMap(normalizedMessages)
 }
 
+/**
+ * Tool uses from assistant messages and from Nexus in-flight `ProgressMessage` rows.
+ * During Nexus streaming, tool_use blocks often exist only on progress messages until
+ * `assistant_content_complete`; ignoring those made `getInProgressToolUseIDs` empty and broke
+ * Exploring / loader UX.
+ */
+function iterToolUseBlocksFromNormalized(m: NormalizedMessage): ToolUseBlockParam[] {
+  if (m.type === 'assistant' && Array.isArray(m.message.content)) {
+    return m.message.content.filter((b): b is ToolUseBlockParam => b?.type === 'tool_use')
+  }
+  if (m.type === 'progress') {
+    const inner = m.content?.message?.content
+    if (!Array.isArray(inner)) return []
+    return inner.filter((b): b is ToolUseBlockParam => b?.type === 'tool_use')
+  }
+  return []
+}
+
 export function getUnresolvedToolUseIDs(
   normalizedMessages: NormalizedMessage[],
 ): Set<string> {
   const toolResults = getToolResultIDs(normalizedMessages)
   const ids = new Set<string>()
   for (const m of normalizedMessages) {
-    if (m.type !== 'assistant' || !Array.isArray(m.message.content)) continue
-    for (const b of m.message.content) {
-      if (b.type === 'tool_use' && !(b.id in toolResults)) {
+    for (const b of iterToolUseBlocksFromNormalized(m)) {
+      if (!(b.id in toolResults)) {
         ids.add(b.id)
       }
     }
