@@ -2,7 +2,7 @@
 
 **⚠️ Проект находится в разработке. Это не финальная версия.** Интерфейсы, поведение и документация могут меняться. Актуальное состояние — в [ARCHITECTURE.md](ARCHITECTURE.md) и [DOCS.md](DOCS.md).
 
-> AI coding agent combining the best practices from Cline, Continue, KiloCode, OpenCode, Pi, and Roo-Code.
+> AI coding agent: VS Code extension + CLI + optional server.
 
 **VS Code extension + CLI** with:
 - Modes: **agent** | **plan** | **debug** | **ask** | **review**
@@ -16,11 +16,11 @@
 - **Skill & tool classification** — smart context selection from large sets
 - **Parallel sub-agents** for concurrent task execution
 - **Shadow git checkpoints** with task/workspace restore
-- **Two-level context compaction** (prune output → LLM summary with OpenCode-style structure)
+- **Two-level context compaction** (prune output → LLM summary)
 - **MCP support** with OAuth and tool classification
 - **Optional NexusCode Server**: HTTP agent + the **same JSONL session store** as the CLI/extension (canonical project root); connect for shared runs, session list parity, and paginated history (no OOM on long chats)
-- Beautiful Cline/agent-style UI: thought progress ("Thought for Xs"), loading states, todo checklist, diff-style tool output
-- CLI TUI refactored to KiloCode-style Home + Prompt shell: centered logo/prompt/tips, Kilo-like slash command palette, and `Vector index` + `/agent-config` in menu
+- Webview UI: thought progress ("Thought for Xs"), loading states, todo checklist, diff-style tool output
+- CLI TUI: Home + prompt shell, slash command palette, `Vector index` + `/agent-config` in menu
 
 ---
 
@@ -527,7 +527,7 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for details.
 2. **Built-in tools always active** — Mode permissions gate which tools are available; the classifier filters by **MCP server** (and by skill) when thresholds are exceeded, not by individual tools.
 3. **Parallel reads** — Multiple read-only tools execute concurrently with `Promise.all`
 4. **Cache-aware prompts** — Stable blocks (role, rules, skills) use `cache_control: ephemeral` on Anthropic
-5. **Two-level compaction** — Fast prune (remove old tool outputs) + LLM compact (full summary) from OpenCode
+5. **Two-level compaction** — Fast prune (remove old tool outputs) + LLM compact (full summary)
 6. **Multi-project** — Separate vector index and metadata per project hash in `~/.nexus/index/`
 
 ---

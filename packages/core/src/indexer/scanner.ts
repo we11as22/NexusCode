@@ -4,13 +4,24 @@ import * as crypto from "node:crypto"
 import * as fsSync from "node:fs"
 import { glob } from "glob"
 import ignore from "ignore"
+import { scannerExtensions as rooScannerExtensions } from "./roo/extensions.js"
 
-const SUPPORTED_EXTENSIONS = new Set([
+const BASE_EXTENSIONS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp",
   ".cs", ".rb", ".php", ".swift", ".kt", ".scala",
   ".md", ".mdx",
 ])
+
+/** When `vectorIndexing` is true, include full tree-sitter extension set from `roo/extensions`. */
+export function getIndexableExtensions(vectorIndexing: boolean): Set<string> {
+  if (!vectorIndexing) return BASE_EXTENSIONS
+  const m = new Set(BASE_EXTENSIONS)
+  for (const e of rooScannerExtensions) {
+    m.add(e.toLowerCase())
+  }
+  return m
+}
 
 const DEFAULT_EXCLUDE = [
   "node_modules/**", ".git/**", "dist/**", "build/**",
@@ -30,8 +41,10 @@ export interface FileInfo {
 
 export async function* walkDir(
   root: string,
-  excludePatterns: string[] = []
+  excludePatterns: string[] = [],
+  opts?: { vectorIndexing?: boolean }
 ): AsyncIterable<FileInfo> {
+  const allowed = getIndexableExtensions(opts?.vectorIndexing ?? false)
   const ig = ignore()
   ig.add(DEFAULT_EXCLUDE)
   ig.add(excludePatterns)
@@ -75,7 +88,7 @@ export async function* walkDir(
         yield* walkInternal(absPath)
       } else if (stat.isFile()) {
         const ext = path.extname(entry).toLowerCase()
-        if (!SUPPORTED_EXTENSIONS.has(ext)) continue
+        if (!allowed.has(ext)) continue
         if (stat.size > 1024 * 1024) continue // Skip files >1MB
 
         const hash = await hashFile(absPath, stat.size)

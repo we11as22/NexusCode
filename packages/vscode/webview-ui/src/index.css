@@ -2703,7 +2703,7 @@ button, input, textarea {
   font-size: 16px;
 }
 
-/* In-webview approval bar (Roo-Code style: Allow / Deny in panel) */
+/* In-webview approval bar (Allow / Deny in panel) */
 .nexus-approval-bar {
   flex-shrink: 0;
   display: flex;

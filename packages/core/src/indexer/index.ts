@@ -7,8 +7,9 @@ import type { IIndexer, IndexStatus, IndexSearchOptions, IndexSearchResult, Nexu
 import type { FileInfo } from "./scanner.js"
 import { FileTracker } from "./file-tracker.js"
 import { VectorIndex, VectorAuthError } from "./vector.js"
-import { walkDir } from "./scanner.js"
+import { walkDir, getIndexableExtensions } from "./scanner.js"
 import { extractSymbols, extractChunks } from "./ast-extractor.js"
+import { rooCodeParser, rooBlocksToSymbolEntries } from "./roo/index.js"
 import { getIndexDir } from "./multi-project.js"
 import type { EmbeddingClient } from "../provider/types.js"
 
@@ -18,10 +19,6 @@ const SUPPORTED_CODE_EXTENSIONS = new Set([
   ".cs", ".rb", ".php", ".swift", ".kt", ".scala",
 ])
 const SUPPORTED_MARKDOWN_EXTENSIONS = new Set([".md", ".mdx"])
-const SUPPORTED_INDEX_EXTENSIONS = new Set([
-  ...SUPPORTED_CODE_EXTENSIONS,
-  ...SUPPORTED_MARKDOWN_EXTENSIONS,
-])
 
 /** Concurrency for file parsing in Phase 1 (parallel read + extract). */
 const PARSE_CONCURRENCY = 10
@@ -62,6 +59,11 @@ export class CodebaseIndexer implements IIndexer {
       this.vector = new VectorIndex(vectorUrl, projectHash, embeddingClient, {
         embeddingBatchSize: config.indexing.embeddingBatchSize,
         embeddingConcurrency: config.indexing.embeddingConcurrency,
+        qdrantApiKey: config.vectorDb.apiKey || undefined,
+        upsertWait: config.vectorDb.upsertWait ?? true,
+        searchMinScore: config.vectorDb.searchMinScore,
+        searchHnswEf: config.vectorDb.searchHnswEf ?? 128,
+        searchExact: config.vectorDb.searchExact ?? false,
       })
     }
   }
@@ -121,7 +123,9 @@ export class CodebaseIndexer implements IIndexer {
     const seen = new Set<string>()
     const discovered: FileInfo[] = []
 
-    for await (const file of walkDir(this.projectRoot, this.config.indexing.excludePatterns)) {
+    for await (const file of walkDir(this.projectRoot, this.config.indexing.excludePatterns, {
+      vectorIndexing: Boolean(this.config.indexing.vector),
+    })) {
       if (this.abortController?.signal.aborted) break
       seen.add(file.path)
       discovered.push(file)
@@ -152,7 +156,7 @@ export class CodebaseIndexer implements IIndexer {
             if (incrementalMode && unchanged) return null
             const content = await fs.readFile(file.absPath, "utf8").catch(() => null)
             if (content == null) return null
-            const extracted = this.extractEntries(file, content)
+            const extracted = await this.extractEntriesForIndex(file, content)
             return { file, unchanged, shouldUpdateVector, extracted } as PreparedFile
           })
         )
@@ -212,7 +216,25 @@ export class CodebaseIndexer implements IIndexer {
     this.indexing = false
   }
 
-  private extractEntries(file: FileInfo, content: string): SymbolEntry[] {
+  /**
+   * Vector index: tree-sitter semantic chunks (`indexer/roo`). Non-vector: legacy AST / line chunks.
+   */
+  private async extractEntriesForIndex(file: FileInfo, content: string): Promise<SymbolEntry[]> {
+    if (this.config.indexing.vector) {
+      const absPath = path.join(this.projectRoot, file.path)
+      try {
+        const blocks = await rooCodeParser.parseFile(absPath, { content, fileHash: file.hash })
+        return rooBlocksToSymbolEntries(file.path, blocks)
+      } catch (err) {
+        console.warn("[nexus] Semantic chunk parse failed, using line chunks:", (err as Error).message)
+        return extractChunks(content, file.path)
+      }
+    }
+    return this.extractEntriesLegacy(file, content)
+  }
+
+  /** Legacy indexer (no vector): symbol extract or line chunks — unchanged for non-vector workflows. */
+  private extractEntriesLegacy(file: FileInfo, content: string): SymbolEntry[] {
     const supportsStructuredSymbols = SUPPORTED_CODE_EXTENSIONS.has(file.ext) && this.config.indexing.symbolExtract
     const supportsMarkdownSections = SUPPORTED_MARKDOWN_EXTENSIONS.has(file.ext)
     return (supportsStructuredSymbols || supportsMarkdownSections)
@@ -248,7 +270,9 @@ export class CodebaseIndexer implements IIndexer {
 
       if (this.vector && this.config.indexing.vector && shouldUpdateVector) {
         for (const sym of extracted) {
-          const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`
+          const id = sym.segmentHash
+            ? `${file.hash}_${sym.segmentHash}`
+            : `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`
           vectorEntries.push({
             id,
             path: file.path,
@@ -256,6 +280,7 @@ export class CodebaseIndexer implements IIndexer {
             kind: sym.kind,
             parent: sym.parent,
             startLine: sym.startLine,
+            endLine: sym.endLine,
             content: sym.content,
           })
         }
@@ -296,7 +321,7 @@ export class CodebaseIndexer implements IIndexer {
       }
 
       const shouldUpdateVector = unchanged ? this.forceVectorBackfill : true
-      const extracted = this.extractEntries(file, content)
+      const extracted = await this.extractEntriesForIndex(file, content)
 
       plannedChunks += extracted.length
       indexedChunks += extracted.length
@@ -306,7 +331,9 @@ export class CodebaseIndexer implements IIndexer {
 
       if (this.vector && this.config.indexing.vector && shouldUpdateVector) {
         for (const sym of extracted) {
-          const id = `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`
+          const id = sym.segmentHash
+            ? `${file.hash}_${sym.segmentHash}`
+            : `${file.hash}_${sym.startLine}_${sym.kind}_${sym.name}_${sym.parent ?? ""}`
           vectorEntries.push({
             id,
             path: file.path,
@@ -314,6 +341,7 @@ export class CodebaseIndexer implements IIndexer {
             kind: sym.kind,
             parent: sym.parent,
             startLine: sym.startLine,
+            endLine: sym.endLine,
             content: sym.content,
           })
         }
@@ -352,7 +380,7 @@ export class CodebaseIndexer implements IIndexer {
   }
 
   async refreshFileNow(filePath: string): Promise<void> {
-    const fileInfo = await buildFileInfo(filePath, this.projectRoot)
+    const fileInfo = await buildFileInfo(filePath, this.projectRoot, Boolean(this.config.indexing.vector))
     if (!fileInfo) {
       const relPath = path.relative(this.projectRoot, filePath)
       if (!relPath || relPath.startsWith("..")) return
@@ -433,7 +461,7 @@ export class CodebaseIndexer implements IIndexer {
   }
 }
 
-async function buildFileInfo(absPath: string, root: string): Promise<FileInfo | null> {
+async function buildFileInfo(absPath: string, root: string, vectorIndexing: boolean): Promise<FileInfo | null> {
   try {
     const s = await fs.stat(absPath)
     if (!s.isFile()) return null
@@ -441,7 +469,7 @@ async function buildFileInfo(absPath: string, root: string): Promise<FileInfo | 
     const relPath = path.relative(root, absPath)
     if (!relPath || relPath.startsWith("..")) return null
     const ext = path.extname(absPath).toLowerCase()
-    if (!SUPPORTED_INDEX_EXTENSIONS.has(ext)) return null
+    if (!getIndexableExtensions(vectorIndexing).has(ext)) return null
     const content = await fs.readFile(absPath)
     const hash = crypto.createHash("md5").update(content).digest("hex")
     return {

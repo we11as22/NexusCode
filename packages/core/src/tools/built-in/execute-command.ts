@@ -315,7 +315,7 @@ function sanitizeOutput(raw: string): string {
       }
       return line
     })
-  // Collapse consecutive progress-like lines (when each update was emitted with \n, like in Cline)
+  // Collapse consecutive progress-like lines (when each update was emitted with \n)
   lines = collapseProgressLines(lines)
   return lines.join("\n")
 }

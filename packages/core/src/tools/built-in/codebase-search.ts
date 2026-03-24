@@ -109,6 +109,7 @@ Only available when vector search is enabled (indexing.vector + vectorDb.enabled
       const scopesToUse = normalizedScopes.length > 0 ? normalizedScopes : [""]
       const effectiveLimit = limit ?? 10
       const effectiveKind = kind === "any" ? undefined : (kind as any)
+      const snippetMax = Math.max(1, ctx.config.indexing?.codebaseSearchSnippetMaxChars ?? 4000)
 
       // Run all (query, scope) searches in parallel
       const pairs: Array<{ q: string; scope: string }> = []
@@ -153,7 +154,9 @@ Only available when vector search is enabled (indexing.vector + vectorDb.enabled
               : ""
             const parent = r.parent ? ` (in ${r.parent})` : ""
             const kindStr = r.kind ? `[${r.kind}]` : ""
-            return `${i + 1}. ${r.path}${loc} ${kindStr}${parent}\n   ${r.content.slice(0, 200).replace(/\n/g, " ")}`
+            const scoreStr = r.score != null ? ` score=${r.score.toFixed(4)}` : ""
+            const snippet = r.content.slice(0, snippetMax).replace(/\n/g, "\n   ")
+            return `${i + 1}. ${r.path}${loc}${scoreStr} ${kindStr}${parent}\n   ${snippet}`
           }).join("\n\n")
           scopedSections.push(`${scope ? `Scope: ${scope}\n` : ""}${formatted}`)
         }

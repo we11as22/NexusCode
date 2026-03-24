@@ -56,7 +56,7 @@ import {
   getDefaultTopP,
 } from "../provider/provider-options.js"
 
-/** OpenCode-style: generous tool budgets so "study codebase" and multi-file tasks can complete. */
+/** Generous tool budgets so multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
   ask: 80,
   plan: 80,
@@ -163,7 +163,7 @@ export interface AgentLoopOptions {
   compaction: SessionCompaction
   signal: AbortSignal
   gitBranch?: string
-  /** When set, commit on completion of an agent turn and optionally double-check (Cline-style). */
+  /** When set, commit on completion of an agent turn and optionally double-check. */
   checkpoint?: { commit(description?: string): Promise<string> }
   /** When true, inject create-skill instructions; host must allow writes to .nexus/skills and .cursor/skills */
   createSkillMode?: boolean
@@ -372,7 +372,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   while (!signal.aborted) {
     loopIterations++
 
-    // Proactive context management (Cline/OpenCode-style): prune/compact before building prompt when near limit
+    // Proactive context management: prune/compact before building prompt when near limit
     const limitForCompaction = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
     if (limitForCompaction > 0 && loopIterations > 1) {
       let sessionTokens = session.getTokenEstimate()
@@ -463,7 +463,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     const systemPrompt = blocks.join("\n\n---\n\n")
     lastBuiltSystemPrompt = systemPrompt
 
-    // Emit context usage including system prompt so UI shows real request size (Cline/OpenCode-style)
+    // Emit context usage including system prompt so UI shows real request size
     emitContextUsage(systemPrompt)
 
     // 4. Build LLM tool definitions
@@ -1565,7 +1565,7 @@ async function handleCompaction(
  *
  * This function converts our session format (assistant messages that contain
  * both the text AND tool call parts) into that interleaved format.
- * Tool outputs are capped per result (Cline/OpenCode-style) to avoid one read_file filling context.
+ * Tool outputs are capped per result to avoid one read_file filling context.
  */
 const MAX_TOOL_OUTPUT_CHARS = 16_000 // ~4k tokens per tool result
 

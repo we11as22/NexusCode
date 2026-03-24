@@ -11,9 +11,9 @@ This file provides guidance to agents when working with the NexusCode repository
 ## Configuration
 
 - Config is loaded from `.nexus/nexus.yaml` (project) and `~/.nexus/nexus.yaml` (global). Env vars (e.g. `NEXUS_API_KEY`, `OPENROUTER_API_KEY`) override. VS Code settings under `nexuscode.*` override when the extension runs.
-- **API keys (secrets)** are never written to YAML (Roo-Code/Cline best practice). Precedence: env vars → secrets store → config file. Extension uses VS Code Secret Storage (`context.secrets`); CLI uses `~/.nexus/secrets.json` (mode 0o600). Model, embeddings, and **per-profile API keys** are stored in the secrets store; on save, keys are persisted there and stripped before any YAML write (including `writeGlobalProfiles` for global profiles).
-- **Env substitution** in config files (KiloCode-style): use `{env:VAR_NAME}` in YAML/JSON values to substitute `process.env.VAR_NAME` at load time (e.g. `apiKey: "{env:OPENROUTER_API_KEY}"` — key still not written on save).
-- **File substitution** (KiloCode-style): use `{file:path}` to inject file contents at load time; path is relative to the config file or `~/` for home. Useful for keys in a separate file (e.g. `apiKey: "{file:~/.nexus/key.txt}"`).
+- **API keys (secrets)** are never written to YAML. Precedence: env vars → secrets store → config file. Extension uses VS Code Secret Storage (`context.secrets`); CLI uses `~/.nexus/secrets.json` (mode 0o600). Model, embeddings, and **per-profile API keys** are stored in the secrets store; on save, keys are persisted there and stripped before any YAML write (including `writeGlobalProfiles` for global profiles).
+- **Env substitution** in config files: use `{env:VAR_NAME}` in YAML/JSON values to substitute `process.env.VAR_NAME` at load time (e.g. `apiKey: "{env:OPENROUTER_API_KEY}"` — key still not written on save).
+- **File substitution**: use `{file:path}` to inject file contents at load time; path is relative to the config file or `~/` for home. Useful for keys in a separate file (e.g. `apiKey: "{file:~/.nexus/key.txt}"`).
 - If no config file exists, the extension still gets a default config via `NexusConfigSchema.parse({})` so the Settings UI and agent can run once the user sets an API key in Settings or in the secrets store.
 
 ## Extension ↔ agent
@@ -23,7 +23,7 @@ This file provides guidance to agents when working with the NexusCode repository
 
 ## Settings view
 
-- Settings inputs in the webview bind to a local draft; "Apply Settings" sends `saveConfig` to the extension, which merges into config, persists API keys to Secret Storage, writes the rest to `.nexus/nexus.yaml` (keys stripped), and reconnects MCP / reinitializes the indexer when relevant keys change. Do not wire inputs directly to the live extension state; use the same cached draft pattern as in Roo-Code’s SettingsView.
+- Settings inputs in the webview bind to a local draft; "Apply Settings" sends `saveConfig` to the extension, which merges into config, persists API keys to Secret Storage, writes the rest to `.nexus/nexus.yaml` (keys stripped), and reconnects MCP / reinitializes the indexer when relevant keys change. Do not wire inputs directly to the live extension state; keep a cached draft until Apply.
 
 ## Indexer
 

@@ -254,7 +254,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     void this.controller.ensureInitialized()
   }
 
-  /** Switch webview tab from sidebar title (Roo-Code style). */
+  /** Switch webview tab from sidebar title. */
   switchView(view: "chat" | "sessions" | "settings"): void {
     this.postMessage({ type: "action", action: "switchView", view })
   }

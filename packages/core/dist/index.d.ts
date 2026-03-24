@@ -74,16 +74,36 @@ declare const NexusConfigSchema: z.ZodObject<{
         url: z.ZodDefault<z.ZodString>;
         collection: z.ZodDefault<z.ZodString>;
         autoStart: z.ZodDefault<z.ZodBoolean>;
+        /** Qdrant API key (e.g. Qdrant Cloud). Also read from env `QDRANT_API_KEY` when unset. */
+        apiKey: z.ZodOptional<z.ZodString>;
+        /** Wait for Qdrant to persist upserts/deletes (recommended). */
+        upsertWait: z.ZodDefault<z.ZodBoolean>;
+        /** Minimum similarity score (0–1 for cosine) for search hits. Omit for no threshold (legacy behavior). */
+        searchMinScore: z.ZodOptional<z.ZodNumber>;
+        /** HNSW `ef` at query time (higher → better recall, slower). Default 128. */
+        searchHnswEf: z.ZodOptional<z.ZodNumber>;
+        /** Exhaustive/exact vector search (slower). */
+        searchExact: z.ZodOptional<z.ZodBoolean>;
     }, "strip", z.ZodTypeAny, {
         url: string;
         enabled: boolean;
         collection: string;
         autoStart: boolean;
+        upsertWait: boolean;
+        apiKey?: string | undefined;
+        searchMinScore?: number | undefined;
+        searchHnswEf?: number | undefined;
+        searchExact?: boolean | undefined;
     }, {
+        apiKey?: string | undefined;
         url?: string | undefined;
         enabled?: boolean | undefined;
         collection?: string | undefined;
         autoStart?: boolean | undefined;
+        upsertWait?: boolean | undefined;
+        searchMinScore?: number | undefined;
+        searchHnswEf?: number | undefined;
+        searchExact?: boolean | undefined;
     }>>;
     modes: z.ZodDefault<z.ZodObject<{
         agent: z.ZodOptional<z.ZodObject<{
@@ -330,6 +350,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         embeddingBatchSize: z.ZodDefault<z.ZodNumber>;
         embeddingConcurrency: z.ZodDefault<z.ZodNumber>;
         debounceMs: z.ZodDefault<z.ZodNumber>;
+        /** Max characters of each hit’s code snippet in CodebaseSearch output (indexed payload is capped separately). */
+        codebaseSearchSnippetMaxChars: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
         enabled: boolean;
         excludePatterns: string[];
@@ -339,6 +361,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         embeddingBatchSize: number;
         embeddingConcurrency: number;
         debounceMs: number;
+        codebaseSearchSnippetMaxChars: number;
     }, {
         enabled?: boolean | undefined;
         excludePatterns?: string[] | undefined;
@@ -348,6 +371,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         embeddingBatchSize?: number | undefined;
         embeddingConcurrency?: number | undefined;
         debounceMs?: number | undefined;
+        codebaseSearchSnippetMaxChars?: number | undefined;
     }>>;
     permissions: z.ZodDefault<z.ZodObject<{
         autoApproveRead: z.ZodDefault<z.ZodBoolean>;
@@ -768,6 +792,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         embeddingBatchSize: number;
         embeddingConcurrency: number;
         debounceMs: number;
+        codebaseSearchSnippetMaxChars: number;
     };
     rules: {
         files: string[];
@@ -875,6 +900,11 @@ declare const NexusConfigSchema: z.ZodObject<{
         enabled: boolean;
         collection: string;
         autoStart: boolean;
+        upsertWait: boolean;
+        apiKey?: string | undefined;
+        searchMinScore?: number | undefined;
+        searchHnswEf?: number | undefined;
+        searchExact?: boolean | undefined;
     } | undefined;
 }, {
     model?: {
@@ -911,10 +941,15 @@ declare const NexusConfigSchema: z.ZodObject<{
         region?: string | undefined;
     } | undefined;
     vectorDb?: {
+        apiKey?: string | undefined;
         url?: string | undefined;
         enabled?: boolean | undefined;
         collection?: string | undefined;
         autoStart?: boolean | undefined;
+        upsertWait?: boolean | undefined;
+        searchMinScore?: number | undefined;
+        searchHnswEf?: number | undefined;
+        searchExact?: boolean | undefined;
     } | undefined;
     modes?: z.objectInputType<{
         agent: z.ZodOptional<z.ZodObject<{
@@ -1004,6 +1039,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         embeddingBatchSize?: number | undefined;
         embeddingConcurrency?: number | undefined;
         debounceMs?: number | undefined;
+        codebaseSearchSnippetMaxChars?: number | undefined;
     } | undefined;
     rules?: {
         files?: string[] | undefined;
@@ -1225,7 +1261,7 @@ interface IHost {
     addAllowedMcpTool?(cwd: string, toolName: string): Promise<void>;
     resolveAtMention?(mention: string): Promise<string | null>;
     getProblems?(): Promise<DiagnosticItem[]>;
-    /** Restore workspace to a checkpoint (Cline-style). Optional if host has no checkpoint. */
+    /** Restore workspace to a checkpoint. Optional if host has no checkpoint. */
     restoreCheckpoint?(hash: string): Promise<void>;
     /** List checkpoint entries for UI. */
     getCheckpointEntries?(): Promise<CheckpointEntry[]>;
@@ -1234,7 +1270,7 @@ interface IHost {
     /** Called by the loop after a checkpoint is committed so the host can push updated entries to the UI. */
     notifyCheckpointEntriesUpdated?(): void;
     /**
-     * Roo/Cline-style file edit flow: open → [approval] → save or revert.
+     * File edit flow: open → [approval] → save or revert.
      * openFileEdit: open diff view (extension) or store pending edit (CLI). Do not write to disk yet.
      * saveFileEdit: commit current pending edit to disk.
      * revertFileEdit: discard pending edit; for new files do not create, for existing restore original (if view was opened).
@@ -1551,6 +1587,11 @@ interface NexusConfig {
         url: string;
         collection: string;
         autoStart: boolean;
+        apiKey?: string;
+        upsertWait?: boolean;
+        searchMinScore?: number;
+        searchHnswEf?: number;
+        searchExact?: boolean;
     };
     modes: {
         agent?: ModeConfig;
@@ -1569,6 +1610,7 @@ interface NexusConfig {
         embeddingBatchSize: number;
         embeddingConcurrency: number;
         debounceMs: number;
+        codebaseSearchSnippetMaxChars: number;
     };
     permissions: {
         autoApproveRead: boolean;
@@ -1596,7 +1638,7 @@ interface NexusConfig {
         enabled: boolean;
         timeoutMs: number;
         createOnWrite: boolean;
-        /** When true, first completion attempt (agent) is rejected; model must re-verify and complete again (Cline-style). */
+        /** When true, first completion attempt (agent) is rejected; model must re-verify and complete again. */
         doubleCheckCompletion?: boolean;
     };
     /** UI preferences (e.g. chat pane). */
@@ -1701,7 +1743,7 @@ interface ChangedFile {
 }
 
 /**
- * Secrets store abstraction (Roo-Code / Cline best practice).
+ * Secrets store abstraction for hosts that support it.
  * API keys are never written to YAML; they are stored in a secure store and
  * applied at load time after env overrides.
  */
@@ -1710,6 +1752,8 @@ declare const NEXUS_SECRETS_STORAGE_KEY = "nexuscode_api";
 interface NexusSecretsPayload {
     model?: string;
     embeddings?: string;
+    /** Qdrant / vector DB API key (same store as other keys; never written to YAML). */
+    qdrantApiKey?: string;
     /** API keys per profile name (global profiles in ~/.nexus/nexus.yaml). */
     profiles?: Record<string, string>;
 }
@@ -1719,12 +1763,12 @@ interface NexusSecretsStore {
 }
 /**
  * Apply secrets from store into config (in-place).
- * Only sets model.apiKey, embeddings.apiKey, and profiles[name].apiKey if not already set (env/config takes precedence).
+ * Only sets model.apiKey, embeddings.apiKey, vectorDb.apiKey, and profiles[name].apiKey if not already set (env/config takes precedence).
  */
 declare function applySecretsToConfig(config: Record<string, unknown>, store: NexusSecretsStore): Promise<void>;
 /**
  * Strip secret fields from config for persisting to YAML (never write apiKey to repo).
- * Returns a deep copy with model.apiKey, embeddings.apiKey, and each profiles[name].apiKey removed.
+ * Returns a deep copy with model.apiKey, embeddings.apiKey, vectorDb.apiKey, and each profiles[name].apiKey removed.
  */
 declare function stripSecretsFromConfig<T extends Record<string, unknown>>(config: T): T;
 /**
@@ -1733,7 +1777,7 @@ declare function stripSecretsFromConfig<T extends Record<string, unknown>>(confi
  */
 declare function stripProfileSecrets(profiles: Record<string, unknown>): Record<string, unknown>;
 /**
- * Build payload from current config (model.apiKey, embeddings.apiKey, profile apiKeys) for persisting to secrets store.
+ * Build payload from current config (model.apiKey, embeddings.apiKey, vectorDb.apiKey, profile apiKeys) for persisting to secrets store.
  */
 declare function getSecretsPayloadFromConfig(config: Record<string, unknown>): NexusSecretsPayload;
 /**
@@ -1742,7 +1786,7 @@ declare function getSecretsPayloadFromConfig(config: Record<string, unknown>): N
  */
 declare function persistSecretsFromConfig(config: Record<string, unknown>, store: NexusSecretsStore): Promise<void>;
 /**
- * File-based secrets store for CLI (Cline-style: single file with mode 0o600).
+ * File-based secrets store for CLI (single file with mode 0o600).
  * Path: {globalConfigDir}/secrets.json
  */
 declare function createFileSecretsStore(globalConfigDir: string): NexusSecretsStore;
@@ -1947,7 +1991,7 @@ declare function listSessions(cwd: string): Promise<Array<{
 declare function deleteSession(sessionId: string, cwd: string): Promise<boolean>;
 declare function generateSessionId(): string;
 
-/** Derive session title from first user message (Cline-style). */
+/** Derive session title from first user message. */
 declare function deriveSessionTitle(messages: SessionMessage[]): string;
 /**
  * In-memory session implementation backed by JSONL storage.
@@ -1977,7 +2021,7 @@ declare class Session implements ISession {
     getLastContextUsageSnapshot(): StoredContextUsage | undefined;
     recordContextUsage(snapshot: StoredContextUsage): void;
     fork(messageId: string): ISession;
-    /** Rewind chat to timestamp (Cline/Roo-Code style). Keeps only messages with ts <= timestamp. */
+    /** Rewind chat to timestamp. Keeps only messages with ts <= timestamp. */
     rewindToTimestamp(timestamp: number): void;
     /** Rewind so that only messages strictly before this timestamp remain (used for rollback before a given message). */
     rewindBeforeTimestamp(timestamp: number): void;
@@ -2070,7 +2114,7 @@ interface AgentLoopOptions {
     compaction: SessionCompaction;
     signal: AbortSignal;
     gitBranch?: string;
-    /** When set, commit on completion of an agent turn and optionally double-check (Cline-style). */
+    /** When set, commit on completion of an agent turn and optionally double-check. */
     checkpoint?: {
         commit(description?: string): Promise<string>;
     };
@@ -2194,7 +2238,7 @@ declare class ParallelAgentManager {
     private controllers;
     private history;
     private static readonly HISTORY_CAP;
-    /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns (Cline-style guard). */
+    /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns. */
     private recentSpawnTasks;
     private static readonly RECENT_SPAWN_CAP;
     private static readonly TASK_KEY_LEN;
@@ -2299,7 +2343,12 @@ declare class CodebaseIndexer implements IIndexer {
     private notifyStatus;
     startIndexing(): Promise<void>;
     private indexInBackground;
-    private extractEntries;
+    /**
+     * Vector index: tree-sitter semantic chunks (`indexer/roo`). Non-vector: legacy AST / line chunks.
+     */
+    private extractEntriesForIndex;
+    /** Legacy indexer (no vector): symbol extract or line chunks — unchanged for non-vector workflows. */
+    private extractEntriesLegacy;
     private processPreparedBatch;
     private processBatch;
     refreshFile(filePath: string): Promise<void>;
@@ -2559,7 +2608,7 @@ declare function buildReviewPromptUncommitted(cwd: string): Promise<string>;
 declare function buildReviewPromptBranch(cwd: string): Promise<string>;
 
 /**
- * Shadow git repository for checkpoints (Cline/Roo-Code style).
+ * Shadow git repository for checkpoints.
  * - Shadow repo lives in ~/.nexus/checkpoints/{cwdHash}/.git
  * - core.worktree points to the workspace; no file copy — worktree is the workspace.
  * - saveCheckpoint = stage + commit in shadow; restore = git clean -fd + git reset --hard hash.
@@ -2583,7 +2632,7 @@ declare class CheckpointTracker {
      */
     init(timeoutMs?: number): Promise<boolean>;
     private initInternal;
-    /** Stage files in worktree; temporarily renames nested .git dirs so git doesn't treat them as submodules (Cline-style). */
+    /** Stage files in worktree; temporarily renames nested .git dirs so git doesn't treat them as submodules. */
     private addCheckpointFiles;
     private renameNestedGitRepos;
     commit(description?: string): Promise<string>;
@@ -2594,7 +2643,7 @@ declare class CheckpointTracker {
     commitForMessage(messageId: string, description?: string): Promise<string>;
     private commitInternal;
     /**
-     * Restore workspace to a checkpoint (Cline/Roo-Code style).
+     * Restore workspace to a checkpoint.
      * Runs git clean -fd then git reset --hard in the shadow repo; worktree = workspace so files are restored in place.
      */
     resetHead(hash: string): Promise<void>;

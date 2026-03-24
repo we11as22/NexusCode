@@ -1,7 +1,8 @@
-import { QdrantClient } from "@qdrant/js-client-rest"
 import type { IndexSearchResult, SymbolKind } from "../types.js"
 import type { EmbeddingClient } from "../provider/types.js"
+import type { QdrantClient as QdrantClientType } from "@qdrant/js-client-rest"
 import crypto from "node:crypto"
+import { createQdrantClient } from "./qdrant-client-factory.js"
 
 /** Thrown when vector upsert fails due to missing/invalid embeddings API key; indexer should disable vector for this run. */
 export class VectorAuthError extends Error {
@@ -34,10 +35,10 @@ const INITIAL_RETRY_DELAY_MS = 500
 /**
  * Qdrant vector store for semantic code search.
  * One collection per project, named nexus_{project_hash}.
- * Uses pathSegments in payload for server-side path filtering (Roo-Code style).
+ * Uses pathSegments in payload for server-side path filtering.
  */
 export class VectorIndex {
-  private client: QdrantClient
+  private client: QdrantClientType
   private collectionName: string
   private embeddings: EmbeddingClient
   private initialized = false
@@ -46,6 +47,10 @@ export class VectorIndex {
   private embeddingConcurrency: number
   readonly dimensions: number
   private authErrorLogged = false
+  private readonly upsertWait: boolean
+  private readonly searchMinScore?: number
+  private readonly searchHnswEf: number
+  private readonly searchExact: boolean
 
   constructor(
     url: string,
@@ -54,15 +59,24 @@ export class VectorIndex {
     opts?: {
       embeddingBatchSize?: number
       embeddingConcurrency?: number
+      qdrantApiKey?: string
+      upsertWait?: boolean
+      searchMinScore?: number
+      searchHnswEf?: number
+      searchExact?: boolean
     }
   ) {
-    this.client = new QdrantClient({ url, checkCompatibility: false })
+    this.client = createQdrantClient(url, opts?.qdrantApiKey)
     this.collectionName = `nexus_${projectHash}`
     this.embeddings = embeddings
     this.dimensions = embeddings.dimensions
     this.vectorSize = embeddings.dimensions
     this.embeddingBatchSize = Math.max(1, opts?.embeddingBatchSize ?? 60)
     this.embeddingConcurrency = Math.max(1, opts?.embeddingConcurrency ?? 2)
+    this.upsertWait = opts?.upsertWait ?? true
+    this.searchMinScore = opts?.searchMinScore
+    this.searchHnswEf = opts?.searchHnswEf ?? 128
+    this.searchExact = opts?.searchExact ?? false
   }
 
   async init(): Promise<void> {
@@ -172,6 +186,7 @@ export class VectorIndex {
     kind?: SymbolKind
     parent?: string
     startLine?: number
+    endLine?: number
     content: string
   }>, onProgress?: (indexedCount: number) => void): Promise<void> {
     if (!this.initialized || symbols.length === 0) return
@@ -225,6 +240,7 @@ export class VectorIndex {
     kind?: SymbolKind
     parent?: string
     startLine?: number
+    endLine?: number
     content: string
   }>): Promise<void> {
     if (symbols.length === 0) return
@@ -252,6 +268,7 @@ export class VectorIndex {
           kind: s.kind ?? "chunk",
           parent: s.parent ?? null,
           startLine: s.startLine ?? 0,
+          endLine: s.endLine ?? s.startLine ?? 0,
           content: s.content.slice(0, 1000),
         },
       }
@@ -259,20 +276,21 @@ export class VectorIndex {
 
     if (points.length === 0) return
 
+    const upsertOpts = { wait: this.upsertWait }
     try {
-      await this.client.upsert(this.collectionName, { points })
+      await this.client.upsert(this.collectionName, { points, ...upsertOpts })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       const sizeHint = detectSizeFromMessage(message)
       if (sizeHint && sizeHint !== this.vectorSize) {
         await this.recreateCollection(sizeHint)
-        await this.client.upsert(this.collectionName, { points })
+        await this.client.upsert(this.collectionName, { points, ...upsertOpts })
         return
       }
       if (/bad request/i.test(message)) {
         const fallbackSize = observedSize > 0 ? observedSize : this.vectorSize
         await this.recreateCollection(fallbackSize)
-        await this.client.upsert(this.collectionName, { points })
+        await this.client.upsert(this.collectionName, { points, ...upsertOpts })
         return
       }
       throw err
@@ -287,6 +305,7 @@ export class VectorIndex {
       if (keys.length === 0) {
         await this.client.delete(this.collectionName, {
           filter: { must: [{ key: "path", match: { value: filePath } }] },
+          wait: this.upsertWait,
         })
         return
       }
@@ -294,7 +313,7 @@ export class VectorIndex {
         key: `pathSegments.${i}`,
         match: { value: segments[i]! },
       }))
-      await this.client.delete(this.collectionName, { filter: { must } })
+      await this.client.delete(this.collectionName, { filter: { must }, wait: this.upsertWait })
     } catch {}
   }
 
@@ -326,26 +345,51 @@ export class VectorIndex {
         }
       }
 
-      const filter: { must?: Array<{ key: string; match: { value: string } }>; must_not?: Array<{ key: string; match: { value: string } }> } =
-        must.length > 0 ? { must } : {}
-      filter.must_not = [{ key: "type", match: { value: "metadata" } }]
+      const metadataExclusion = {
+        must_not: [{ key: "type", match: { value: "metadata" } }],
+      }
+      const mergedFilter =
+        must.length > 0
+          ? { must, must_not: metadataExclusion.must_not }
+          : metadataExclusion
 
-      const results = await this.client.search(this.collectionName, {
-        vector,
+      /** Unified `query` API against Qdrant. */
+      const queryRequest = {
+        query: vector,
+        filter: mergedFilter,
         limit,
-        filter,
-        with_payload: true,
-      })
+        params: {
+          hnsw_ef: this.searchHnswEf,
+          exact: this.searchExact,
+        },
+        with_payload: {
+          include: [
+            "path",
+            "pathSegments",
+            "name",
+            "kind",
+            "parent",
+            "startLine",
+            "endLine",
+            "content",
+          ],
+        },
+        ...(this.searchMinScore !== undefined ? { score_threshold: this.searchMinScore } : {}),
+      }
 
-      return results.map(r => ({
-        path: r.payload?.["path"] as string ?? "",
+      const operationResult = await this.client.query(this.collectionName, queryRequest)
+      const rows = operationResult.points ?? []
+
+      return rows.map(r => ({
+        path: (r.payload?.["path"] as string) ?? "",
         name: r.payload?.["name"] as string | undefined,
         kind: r.payload?.["kind"] as SymbolKind | undefined,
         parent: r.payload?.["parent"] as string | undefined,
         startLine: r.payload?.["startLine"] as number | undefined,
-        content: r.payload?.["content"] as string ?? "",
+        endLine: r.payload?.["endLine"] as number | undefined,
+        content: (r.payload?.["content"] as string) ?? "",
         score: r.score,
-      }))
+      })).filter(row => row.path.length > 0 || (row.content?.length ?? 0) > 0)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.warn(`[nexus] Vector search failed: ${message}`)
@@ -375,7 +419,7 @@ export class VectorIndex {
   }
 
   /**
-   * True if collection has data and indexing has been marked complete (Roo-Code style).
+   * True if collection has data and indexing has been marked complete.
    * Used to avoid treating in-progress or stale index as ready.
    */
   async hasIndexedData(): Promise<boolean> {
@@ -407,6 +451,7 @@ export class VectorIndex {
           vector: new Array(this.vectorSize).fill(0),
           payload: { type: "metadata", indexing_complete: false, started_at: Date.now() },
         }],
+        wait: this.upsertWait,
       })
     } catch (e) {
       if (process.env["NEXUS_DEBUG"]) {
@@ -425,6 +470,7 @@ export class VectorIndex {
           vector: new Array(this.vectorSize).fill(0),
           payload: { type: "metadata", indexing_complete: true, completed_at: Date.now() },
         }],
+        wait: this.upsertWait,
       })
     } catch (e) {
       console.warn("[nexus] markIndexingComplete failed:", (e as Error)?.message)

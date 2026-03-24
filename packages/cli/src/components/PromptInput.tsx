@@ -247,16 +247,11 @@ function PromptInput({
   }, [undoPanel, nexusListCheckpoints])
 
   useEffect(() => {
-    getExampleCommands().then(commands => {
-      setPlaceholder(`Try "${sample(commands)}"`)
+    getExampleCommands().then((exampleCommands: string[]) => {
+      setPlaceholder(`Try "${sample(exampleCommands)}"`)
     })
   }, [])
-  const { columns } = useTerminalSize()
-
-  const commandWidth = useMemo(
-    () => Math.max(...commands.map(cmd => cmd.userFacingName().length)) + 5,
-    [commands],
-  )
+  const { columns, rows } = useTerminalSize()
 
   const {
     suggestions,
@@ -270,6 +265,65 @@ function PromptInput({
     setCursorOffset,
     isNexus: nexusMode != null,
   })
+
+  const visibleSuggestions = useMemo(() => {
+    if (suggestions.length === 0) return [] as Array<
+      | { type: 'section'; key: string; label: string }
+      | { type: 'item'; key: string; suggestion: CommandSuggestion; index: number }
+    >
+
+    const allRows: Array<
+      | { type: 'section'; key: string; label: string }
+      | { type: 'item'; key: string; suggestion: CommandSuggestion; index: number }
+    > = []
+    let lastSection: string | null = null
+    suggestions.forEach((suggestion, index) => {
+      if (suggestion.section !== lastSection) {
+        lastSection = suggestion.section
+        allRows.push({
+          type: 'section',
+          key: `section-${suggestion.section}`,
+          label: suggestion.section,
+        })
+      }
+      allRows.push({
+        type: 'item',
+        key: `${suggestion.section}-${suggestion.name}`,
+        suggestion,
+        index,
+      })
+    })
+
+    const maxMenuRows = Math.max(4, rows - 10)
+    if (allRows.length <= maxMenuRows) return allRows
+
+    const selectedRowIndex = Math.max(
+      0,
+      allRows.findIndex(
+        row => row.type === 'item' && row.index === selectedSuggestion,
+      ),
+    )
+    let start = Math.max(0, selectedRowIndex - Math.floor(maxMenuRows / 2))
+    let end = Math.min(allRows.length, start + maxMenuRows)
+    start = Math.max(0, end - maxMenuRows)
+
+    const sliced = allRows.slice(start, end)
+    if (sliced[0]?.type === 'item') {
+      const firstItemSection = sliced[0].suggestion.section
+      sliced.unshift({
+        type: 'section',
+        key: `section-${firstItemSection}-window`,
+        label: firstItemSection,
+      })
+      if (sliced.length > maxMenuRows) sliced.pop()
+    }
+    return sliced
+  }, [rows, selectedSuggestion, suggestions])
+  const hiddenSuggestionCount = Math.max(
+    0,
+    suggestions.length -
+      visibleSuggestions.filter(row => row.type === 'item').length,
+  )
 
   const onChange = useCallback(
     (value: string) => {
@@ -953,80 +1007,52 @@ Create a .md rule file with a descriptive name. The rule file should define clea
       )}
       {suggestions.length > 0 && (
         <Box
-          flexDirection="row"
-          justifyContent="space-between"
+          flexDirection="column"
           paddingX={2}
           paddingY={0}
+          width={columns}
+          overflow="hidden"
         >
-          <Box flexDirection="column">
-            {(() => {
-              const rendered: React.ReactNode[] = []
-              let lastSection: string | null = null
-              suggestions.forEach((suggestion: CommandSuggestion, index: number) => {
-                if (suggestion.section !== lastSection) {
-                  lastSection = suggestion.section
-                  rendered.push(
-                    <Box key={`section-${suggestion.section}`} paddingTop={rendered.length > 0 ? 0 : 0}>
-                      <Text dimColor bold> {suggestion.section}</Text>
-                    </Box>
-                  )
-                }
-                const isSelected = index === selectedSuggestion
-                // Find the underlying command if it's not virtual
-                const command = !suggestion.isVirtual
-                  ? commands.find(cmd => cmd.userFacingName() === suggestion.name)
-                  : undefined
-                const argHint = command?.type === 'prompt' && command.argNames?.length
-                  ? ` (${command.argNames.join(', ')})`
-                  : ''
-                rendered.push(
-                  <Box
-                    key={suggestion.name}
-                    flexDirection={columns < 80 ? 'column' : 'row'}
-                  >
-                    <Box width={columns < 80 ? undefined : commandWidth + 2}>
-                      <Text
-                        color={isSelected ? theme.suggestion : undefined}
-                        dimColor={!isSelected}
-                      >
-                        {'  '}/{suggestion.name}
-                        {suggestion.aliases && suggestion.aliases.length > 0 && (
-                          <Text dimColor> ({suggestion.aliases.join(', ')})</Text>
-                        )}
-                      </Text>
-                    </Box>
-                    {suggestion.description && (
-                      <Box
-                        width={columns - (columns < 80 ? 4 : commandWidth + 6)}
-                        paddingLeft={columns < 80 ? 4 : 0}
-                      >
-                        <Text
-                          color={isSelected ? theme.suggestion : undefined}
-                          dimColor={!isSelected}
-                          wrap="wrap"
-                        >
-                          {suggestion.description}{argHint}
-                        </Text>
-                      </Box>
-                    )}
-                  </Box>
-                )
-              })
-              return rendered
-            })()}
+          {visibleSuggestions.map(row => {
+            if (row.type === 'section') {
+              return (
+                <Box key={row.key}>
+                  <Text dimColor bold>
+                    {' '}{row.label}
+                  </Text>
+                </Box>
+              )
+            }
+
+            const suggestion = row.suggestion
+            const isSelected = row.index === selectedSuggestion
+            const command = !suggestion.isVirtual
+              ? commands.find(cmd => cmd.userFacingName() === suggestion.name)
+              : undefined
+            const argHint =
+              command?.type === 'prompt' && command.argNames?.length
+                ? ` (${command.argNames.join(', ')})`
+                : ''
+
+            return (
+              <Box key={row.key} width={columns} overflow="hidden">
+                <Text
+                  color={isSelected ? theme.suggestion : undefined}
+                  dimColor={!isSelected}
+                  wrap="truncate-end"
+                >
+                  {'  '}/{suggestion.name}
+                  {suggestion.description ? `  ${suggestion.description}${argHint}` : ''}
+                </Text>
+              </Box>
+            )
+          })}
+          <Box marginTop={hiddenSuggestionCount > 0 ? 1 : 0}>
+            <Text dimColor>
+              Enter select · Tab autocomplete · ↑/↓ navigate
+              {hiddenSuggestionCount > 0 ? ` · ${hiddenSuggestionCount} more` : ''}
+            </Text>
           </Box>
-          <SentryErrorBoundary>
-            <Box justifyContent="flex-end" gap={1}>
-              <TokenWarning tokenUsage={countTokens(messages)} />
-              <AutoUpdater
-                debug={debug}
-                onAutoUpdaterResult={onAutoUpdaterResult}
-                autoUpdaterResult={autoUpdaterResult}
-                isUpdating={isAutoUpdating}
-                onChangeIsUpdating={setIsAutoUpdating}
-              />
-            </Box>
-          </SentryErrorBoundary>
         </Box>
       )}
     </Box>

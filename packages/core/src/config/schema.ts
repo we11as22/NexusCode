@@ -65,6 +65,16 @@ export const NexusConfigSchema = z.object({
     url: z.string().default("http://localhost:6333"),
     collection: z.string().default("nexus"),
     autoStart: z.boolean().default(true),
+    /** Qdrant API key (e.g. Qdrant Cloud). Also read from env `QDRANT_API_KEY` when unset. */
+    apiKey: z.string().optional(),
+    /** Wait for Qdrant to persist upserts/deletes (recommended). */
+    upsertWait: z.boolean().default(true),
+    /** Minimum similarity score (0–1 for cosine) for search hits. Omit for no threshold (legacy behavior). */
+    searchMinScore: z.number().min(0).max(1).optional(),
+    /** HNSW `ef` at query time (higher → better recall, slower). Default 128. */
+    searchHnswEf: z.number().int().positive().optional(),
+    /** Exhaustive/exact vector search (slower). */
+    searchExact: z.boolean().optional(),
   }).optional(),
 
   modes: z.object({
@@ -88,6 +98,8 @@ export const NexusConfigSchema = z.object({
     embeddingBatchSize: z.number().int().positive().default(60),
     embeddingConcurrency: z.number().int().positive().default(2),
     debounceMs: z.number().int().positive().default(800),
+    /** Max characters of each hit’s code snippet in CodebaseSearch output (indexed payload is capped separately). */
+    codebaseSearchSnippetMaxChars: z.number().int().positive().max(50_000).default(4000),
   }).default({}),
 
   permissions: z.object({

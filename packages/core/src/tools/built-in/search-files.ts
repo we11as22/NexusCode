@@ -203,7 +203,7 @@ export const listTool: ToolDef<z.infer<typeof listSchema>> = {
 
       let ig = ignoreFactory()
       // When listing a specific subdirectory, do NOT use project .gitignore — otherwise
-      // listing e.g. "sources" would show nothing if sources/ is in .gitignore.
+      // A dirname that matches an ignored path pattern would list as empty.
       const useGitignore = !listPath || listPath === "."
       if (useGitignore) {
         try {

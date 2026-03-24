@@ -137,7 +137,7 @@ export function App() {
 
   return (
     <div className="container">
-      {/* Roo-Code style: view switched via sidebar title icons; optional in-webview nav for quick switch */}
+      {/* View switched via sidebar title icons; optional in-webview nav for quick switch */}
       <div className="nexus-nav nexus-nav-minimal">
         <TabButton active={store.view === "chat"} onClick={() => store.setView("chat")} label="Chat" />
         <TabButton active={store.view === "sessions"} onClick={() => store.setView("sessions")} label="Sessions" />
@@ -1171,6 +1171,7 @@ interface SettingsDraft {
   embeddingConcurrency: string
   vectorDbEnabled: boolean
   vectorDbUrl: string
+  vectorDbApiKey: string
   vectorDbAutoStart: boolean
   filterTools: boolean
   toolClassifyThreshold: string
@@ -1863,6 +1864,15 @@ function IndexingAndDocsView({
           ) : null}
           <SettingsToggle label="Vector index (semantic search)" checked={draft.indexingVector} onChange={(checked) => setDraft({ ...draft, indexingVector: checked })} />
           <SettingsInput label="Vector DB URL (Qdrant)" value={draft.vectorDbUrl} onChange={(v) => setDraft({ ...draft, vectorDbUrl: v })} />
+          <SettingsInput
+            type="password"
+            label="Qdrant API key"
+            value={draft.vectorDbApiKey}
+            onChange={(v) => setDraft({ ...draft, vectorDbApiKey: v })}
+          />
+          <p className="text-[10px] text-[var(--vscode-descriptionForeground)] -mt-1">
+            Optional (Qdrant Cloud / secured cluster). Stored with other API keys, not in nexus.yaml. Env: <code className="text-[10px]">QDRANT_API_KEY</code>.
+          </p>
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -2557,6 +2567,7 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     embeddingConcurrency: String(config.indexing.embeddingConcurrency ?? 2),
     vectorDbEnabled: Boolean(config.vectorDb?.enabled),
     vectorDbUrl: config.vectorDb?.url ?? "http://127.0.0.1:6333",
+    vectorDbApiKey: config.vectorDb?.apiKey ?? "",
     vectorDbAutoStart: config.vectorDb?.autoStart ?? true,
     filterTools: config.tools.classifyToolsEnabled === true,
     toolClassifyThreshold: String(
@@ -2614,6 +2625,7 @@ function getDefaultDraft(): SettingsDraft {
     embeddingConcurrency: "2",
     vectorDbEnabled: false,
     vectorDbUrl: "http://127.0.0.1:6333",
+    vectorDbApiKey: "",
     vectorDbAutoStart: true,
     filterTools: false,
     toolClassifyThreshold: "20",
@@ -2706,6 +2718,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       url: draft.vectorDbUrl.trim() || "http://127.0.0.1:6333",
       collection: "nexus",
       autoStart: draft.vectorDbAutoStart,
+      apiKey: draft.vectorDbApiKey.trim() || undefined,
     },
     tools: {
       classifyToolsEnabled: draft.filterTools,

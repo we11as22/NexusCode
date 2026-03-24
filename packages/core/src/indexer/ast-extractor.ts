@@ -29,6 +29,22 @@ export function extractSymbols(
       return extractGoSymbols(content, filePath)
     case ".java":
       return extractJavaSymbols(content, filePath)
+    case ".c":
+    case ".h":
+    case ".cpp":
+    case ".hpp":
+      return extractCStyleSymbols(content, filePath)
+    case ".cs":
+      return extractCSharpSymbols(content, filePath)
+    case ".kt":
+    case ".scala":
+      return extractKotlinLikeSymbols(content, filePath)
+    case ".rb":
+      return extractRubySymbols(content, filePath)
+    case ".php":
+      return extractPhpSymbols(content, filePath)
+    case ".swift":
+      return extractSwiftSymbols(content, filePath)
     case ".md":
     case ".mdx":
       return extractMarkdownSections(content, filePath)
@@ -245,6 +261,7 @@ function extractGoSymbols(content: string, filePath: string): SymbolEntry[] {
     if (m) {
       const endLine = findClosingBrace(lines, i)
       symbols.push({ path: filePath, name: m[1]!, kind: "interface", startLine: lineNum, endLine, content: stripped })
+      continue
     }
   }
 
@@ -268,6 +285,277 @@ function extractJavaSymbols(content: string, filePath: string): SymbolEntry[] {
     }
 
     m = stripped.match(/(?:public|private|protected)?\s*interface\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "interface", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(
+      /^(?:@\w+(?:\([^)]*\))?\s+)*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?(?:abstract\s+)?(?:native\s+)?(?:[\w.<>,\s\[\]]+)\s+(\w+)\s*\(/,
+    )
+    if (m && !["if", "for", "while", "switch", "catch", "synchronized"].includes(m[1]!)) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({
+        path: filePath,
+        name: m[1]!,
+        kind: "method",
+        startLine: lineNum,
+        endLine,
+        content: stripped,
+      })
+    }
+  }
+
+  return symbols.length > 0 ? symbols : extractChunks(content, filePath)
+}
+
+/** C/C++: structs, enums, typedefs, namespaces, rough global signatures (no preprocessor). */
+function extractCStyleSymbols(content: string, filePath: string): SymbolEntry[] {
+  const symbols: SymbolEntry[] = []
+  const lines = content.split("\n")
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]!
+    const stripped = raw.trim()
+    if (stripped === "" || stripped.startsWith("//") || stripped.startsWith("/*") || stripped.startsWith("*")) continue
+    const lineNum = i + 1
+
+    let m = stripped.match(/^typedef\s+struct\s+(\w+)\s*\{/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "type", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^struct\s+(\w+)\s*(?:\{|;)/)
+    if (m) {
+      const endLine = stripped.includes("{") ? findClosingBrace(lines, i) : lineNum
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^union\s+(\w+)\s*(?:\{|;)/)
+    if (m) {
+      const endLine = stripped.includes("{") ? findClosingBrace(lines, i) : lineNum
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^enum\s+(?:class\s+)?(\w+)\s*(?:\{|:)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "enum", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^namespace\s+(\w+)\s*\{?/)
+    if (m) {
+      symbols.push({ path: filePath, name: m[1]!, kind: "type", startLine: lineNum, endLine: lineNum, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^class\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^typedef\s+.+?\s+(\w+)\s*;\s*$/)
+    if (m) {
+      symbols.push({ path: filePath, name: m[1]!, kind: "type", startLine: lineNum, endLine: lineNum, content: stripped })
+    }
+  }
+
+  return symbols.length > 0 ? symbols : extractChunks(content, filePath)
+}
+
+function extractCSharpSymbols(content: string, filePath: string): SymbolEntry[] {
+  const symbols: SymbolEntry[] = []
+  const lines = content.split("\n")
+
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i]!.trim()
+    if (stripped.startsWith("//")) continue
+    const lineNum = i + 1
+
+    let m = stripped.match(
+      /^(?:public|private|protected|internal)?\s*(?:static\s+|abstract\s+|sealed\s+|partial\s+)*(?:record\s+)?class\s+(\w+)/,
+    )
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^(?:public|private|protected|internal)?\s*interface\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "interface", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^(?:public|private|protected|internal)?\s*(?:readonly\s+)?struct\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^(?:public|private|protected|internal)?\s*enum\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "enum", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+  }
+
+  return symbols.length > 0 ? symbols : extractChunks(content, filePath)
+}
+
+function extractKotlinLikeSymbols(content: string, filePath: string): SymbolEntry[] {
+  const symbols: SymbolEntry[] = []
+  const lines = content.split("\n")
+
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i]!.trim()
+    if (stripped.startsWith("//")) continue
+    const lineNum = i + 1
+
+    let m = stripped.match(/^(?:public\s+|private\s+|protected\s+|internal\s+)?(?:abstract\s+|sealed\s+|data\s+|enum\s+)?class\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^interface\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "interface", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^object\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^(?:public\s+|private\s+|protected\s+|internal\s+)?(?:suspend\s+)?fun\s+(\w+)\s*\(/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "function", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+  }
+
+  return symbols.length > 0 ? symbols : extractChunks(content, filePath)
+}
+
+function extractRubySymbols(content: string, filePath: string): SymbolEntry[] {
+  const symbols: SymbolEntry[] = []
+  const lines = content.split("\n")
+
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i]!.trim()
+    if (stripped.startsWith("#")) continue
+    const lineNum = i + 1
+
+    let m = stripped.match(/^class\s+(\w+)/)
+    if (m) {
+      const endLine = findRubyBlockEnd(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^module\s+(\w+)/)
+    if (m) {
+      const endLine = findRubyBlockEnd(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "interface", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^def\s+(self\.)?(\w+)/)
+    if (m) {
+      const endLine = findRubyBlockEnd(lines, i)
+      symbols.push({ path: filePath, name: m[2]!, kind: m[1] ? "method" : "function", startLine: lineNum, endLine, content: stripped })
+    }
+  }
+
+  return symbols.length > 0 ? symbols : extractChunks(content, filePath)
+}
+
+function findRubyBlockEnd(lines: string[], startLine: number): number {
+  const baseIndent = lines[startLine]!.length - lines[startLine]!.trimStart().length
+  for (let i = startLine + 1; i < lines.length; i++) {
+    const line = lines[i]!
+    if (line.trim() === "") continue
+    const indent = line.length - line.trimStart().length
+    if (indent === baseIndent && line.trim() === "end") return i
+  }
+  return Math.min(startLine + 200, lines.length)
+}
+
+function extractPhpSymbols(content: string, filePath: string): SymbolEntry[] {
+  const symbols: SymbolEntry[] = []
+  const lines = content.split("\n")
+
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i]!.trim()
+    if (stripped.startsWith("//") || stripped.startsWith("#") || stripped.startsWith("/*")) continue
+    const lineNum = i + 1
+
+    let m = stripped.match(/^class\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^interface\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "interface", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^function\s+(\w+)\s*\(/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "function", startLine: lineNum, endLine, content: stripped })
+    }
+  }
+
+  return symbols.length > 0 ? symbols : extractChunks(content, filePath)
+}
+
+function extractSwiftSymbols(content: string, filePath: string): SymbolEntry[] {
+  const symbols: SymbolEntry[] = []
+  const lines = content.split("\n")
+
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i]!.trim()
+    if (stripped.startsWith("//")) continue
+    const lineNum = i + 1
+
+    let m = stripped.match(/^(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?(?:final\s+)?(?:class|struct|enum|actor)\s+(\w+)/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "class", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^(?:public\s+|private\s+|internal\s+)?(?:static\s+|class\s+)?func\s+(\w+)\s*\(/)
+    if (m) {
+      const endLine = findClosingBrace(lines, i)
+      symbols.push({ path: filePath, name: m[1]!, kind: "function", startLine: lineNum, endLine, content: stripped })
+      continue
+    }
+
+    m = stripped.match(/^protocol\s+(\w+)/)
     if (m) {
       const endLine = findClosingBrace(lines, i)
       symbols.push({ path: filePath, name: m[1]!, kind: "interface", startLine: lineNum, endLine, content: stripped })

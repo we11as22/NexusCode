@@ -8,6 +8,7 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   external: [
+    "web-tree-sitter",
     "vscode",
     "@xenova/transformers",
     "puppeteer",
@@ -26,4 +27,15 @@ export default defineConfig({
   noExternal: [],
   treeshake: true,
   target: "node18",
+  // ESM bundles have no `__dirname`; wasm-paths uses createRequire(path.join(__dirname, ...)).
+  esbuildOptions(options, { format }) {
+    if (format === "esm") {
+      options.banner = {
+        js: `import { fileURLToPath } from "node:url";
+import * as nodePath from "node:path";
+const __dirname = nodePath.dirname(fileURLToPath(import.meta.url));
+`,
+      }
+    }
+  },
 })

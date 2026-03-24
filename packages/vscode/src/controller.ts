@@ -340,7 +340,7 @@ export class Controller {
   private indexerFileWatcher?: vscode.Disposable
   private disposables: vscode.Disposable[] = []
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
-  /** VS Code Secret Storage for API keys (Roo-Code best practice — keys never in YAML). */
+  /** VS Code Secret Storage for API keys (keys not stored in YAML). */
   private readonly secretsStore = {
     getSecret: async (key: string) => this.context.secrets.get(key),
     setSecret: async (key: string, value: string) => this.context.secrets.store(key, value),
@@ -1761,7 +1761,7 @@ export class Controller {
   }
 
   /**
-   * Restore workspace/chat to a checkpoint (Cline/Roo-Code style).
+   * Restore workspace/chat to a checkpoint.
    * restoreType: task = rewind chat only; workspace = files only; taskAndWorkspace = both.
    */
   private async restoreCheckpointToHash(hash: string, restoreType: "task" | "workspace" | "taskAndWorkspace"): Promise<void> {

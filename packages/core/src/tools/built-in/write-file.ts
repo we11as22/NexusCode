@@ -72,7 +72,7 @@ WARNING: Write replaces the entire file. Provide complete final content. Creates
     }
     const diffStats = { added: addedLines, removed: removedLines }
 
-    // Roo/Cline-style: open → approve → save or revert (when host supports it)
+    // open → approve → save or revert (when host supports it)
     const useFileEditFlow =
       typeof ctx.host.openFileEdit === "function" &&
       typeof ctx.host.saveFileEdit === "function" &&

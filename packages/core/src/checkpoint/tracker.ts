@@ -11,7 +11,7 @@ const CHECKPOINT_WARN_MS = 7_000
 const GIT_DISABLED_SUFFIX = "_disabled"
 
 /**
- * Shadow git repository for checkpoints (Cline/Roo-Code style).
+ * Shadow git repository for checkpoints.
  * - Shadow repo lives in ~/.nexus/checkpoints/{cwdHash}/.git
  * - core.worktree points to the workspace; no file copy — worktree is the workspace.
  * - saveCheckpoint = stage + commit in shadow; restore = git clean -fd + git reset --hard hash.
@@ -114,7 +114,7 @@ export class CheckpointTracker {
     }
   }
 
-  /** Stage files in worktree; temporarily renames nested .git dirs so git doesn't treat them as submodules (Cline-style). */
+  /** Stage files in worktree; temporarily renames nested .git dirs so git doesn't treat them as submodules. */
   private async addCheckpointFiles(): Promise<void> {
     await this.renameNestedGitRepos(true)
     try {
@@ -190,7 +190,7 @@ export class CheckpointTracker {
   }
 
   /**
-   * Restore workspace to a checkpoint (Cline/Roo-Code style).
+   * Restore workspace to a checkpoint.
    * Runs git clean -fd then git reset --hard in the shadow repo; worktree = workspace so files are restored in place.
    */
   async resetHead(hash: string): Promise<void> {

@@ -44,7 +44,7 @@ export class ParallelAgentManager {
   private controllers = new Map<string, AbortController>()
   private history: string[] = []
   private static readonly HISTORY_CAP = 100
-  /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns (Cline-style guard). */
+  /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns. */
   private recentSpawnTasks: string[] = []
   private static readonly RECENT_SPAWN_CAP = 3
   private static readonly TASK_KEY_LEN = 80

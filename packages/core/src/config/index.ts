@@ -335,6 +335,17 @@ function normalizeProviderAliases(config: Record<string, unknown>): void {
     }
   }
 
+  const envQdrant = process.env["QDRANT_API_KEY"]
+  if (isNonEmptyString(envQdrant)) {
+    if (!config["vectorDb"] || typeof config["vectorDb"] !== "object" || Array.isArray(config["vectorDb"])) {
+      config["vectorDb"] = {}
+    }
+    const vectorDb = config["vectorDb"] as Record<string, unknown>
+    if (!isNonEmptyString(vectorDb["apiKey"])) {
+      vectorDb["apiKey"] = envQdrant
+    }
+  }
+
   const profiles = asRecord(config["profiles"])
   if (profiles) {
     for (const value of Object.values(profiles)) {

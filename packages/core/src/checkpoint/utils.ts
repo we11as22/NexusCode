@@ -3,7 +3,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 
 /**
- * Hash workspace path to a short stable id for shadow dir (Cline-style).
+ * Hash workspace path to a short stable id for shadow dir.
  */
 export function hashWorkingDir(workingDir: string): string {
   if (!workingDir) throw new Error("Working directory path cannot be empty")
@@ -16,7 +16,7 @@ export function hashWorkingDir(workingDir: string): string {
 }
 
 /**
- * Validate workspace path for checkpoints (Cline-style).
+ * Validate workspace path for checkpoints.
  * Rejects home, Desktop, Documents, Downloads to avoid accidental data loss.
  */
 export async function validateWorkspacePath(workspacePath: string): Promise<void> {
@@ -38,7 +38,7 @@ export async function validateWorkspacePath(workspacePath: string): Promise<void
   if (resolved === downloads) throw new Error("Cannot use checkpoints in Downloads directory")
 }
 
-/** Default exclude patterns for shadow git (Cline-style). */
+/** Default exclude patterns for shadow git. */
 export const DEFAULT_EXCLUDES = [
   ".git/",
   "node_modules/",

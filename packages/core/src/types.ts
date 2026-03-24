@@ -149,7 +149,7 @@ export interface IHost {
   addAllowedMcpTool?(cwd: string, toolName: string): Promise<void>
   resolveAtMention?(mention: string): Promise<string | null>
   getProblems?(): Promise<DiagnosticItem[]>
-  /** Restore workspace to a checkpoint (Cline-style). Optional if host has no checkpoint. */
+  /** Restore workspace to a checkpoint. Optional if host has no checkpoint. */
   restoreCheckpoint?(hash: string): Promise<void>
   /** List checkpoint entries for UI. */
   getCheckpointEntries?(): Promise<CheckpointEntry[]>
@@ -159,7 +159,7 @@ export interface IHost {
   notifyCheckpointEntriesUpdated?(): void
 
   /**
-   * Roo/Cline-style file edit flow: open → [approval] → save or revert.
+   * File edit flow: open → [approval] → save or revert.
    * openFileEdit: open diff view (extension) or store pending edit (CLI). Do not write to disk yet.
    * saveFileEdit: commit current pending edit to disk.
    * revertFileEdit: discard pending edit; for new files do not create, for existing restore original (if view was opened).
@@ -311,6 +311,8 @@ export interface SymbolEntry {
   endLine: number
   docstring?: string
   content: string
+  /** Semantic chunk hash — stable vector point id when present. */
+  segmentHash?: string
 }
 
 export type IndexStatus =
@@ -411,6 +413,11 @@ export interface NexusConfig {
     url: string
     collection: string
     autoStart: boolean
+    apiKey?: string
+    upsertWait?: boolean
+    searchMinScore?: number
+    searchHnswEf?: number
+    searchExact?: boolean
   }
   modes: {
     agent?: ModeConfig
@@ -429,6 +436,7 @@ export interface NexusConfig {
     embeddingBatchSize: number
     embeddingConcurrency: number
     debounceMs: number
+    codebaseSearchSnippetMaxChars: number
   }
   permissions: {
     autoApproveRead: boolean
@@ -456,7 +464,7 @@ export interface NexusConfig {
     enabled: boolean
     timeoutMs: number
     createOnWrite: boolean
-    /** When true, first completion attempt (agent) is rejected; model must re-verify and complete again (Cline-style). */
+    /** When true, first completion attempt (agent) is rejected; model must re-verify and complete again. */
     doubleCheckCompletion?: boolean
   }
   /** UI preferences (e.g. chat pane). */

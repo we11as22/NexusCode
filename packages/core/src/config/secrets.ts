@@ -1,5 +1,5 @@
 /**
- * Secrets store abstraction (Roo-Code / Cline best practice).
+ * Secrets store abstraction for hosts that support it.
  * API keys are never written to YAML; they are stored in a secure store and
  * applied at load time after env overrides.
  */
@@ -15,6 +15,8 @@ export const NEXUS_SECRETS_STORAGE_KEY = NEXUS_SECRETS_KEY
 export interface NexusSecretsPayload {
   model?: string
   embeddings?: string
+  /** Qdrant / vector DB API key (same store as other keys; never written to YAML). */
+  qdrantApiKey?: string
   /** API keys per profile name (global profiles in ~/.nexus/nexus.yaml). */
   profiles?: Record<string, string>
 }
@@ -26,7 +28,7 @@ export interface NexusSecretsStore {
 
 /**
  * Apply secrets from store into config (in-place).
- * Only sets model.apiKey, embeddings.apiKey, and profiles[name].apiKey if not already set (env/config takes precedence).
+ * Only sets model.apiKey, embeddings.apiKey, vectorDb.apiKey, and profiles[name].apiKey if not already set (env/config takes precedence).
  */
 export async function applySecretsToConfig(
   config: Record<string, unknown>,
@@ -51,6 +53,12 @@ export async function applySecretsToConfig(
       emb["apiKey"] = payload.embeddings.trim()
     }
   }
+  if (config.vectorDb && typeof config.vectorDb === "object") {
+    const vd = config.vectorDb as Record<string, unknown>
+    if (payload.qdrantApiKey && !isNonEmptyString(vd["apiKey"])) {
+      vd["apiKey"] = payload.qdrantApiKey.trim()
+    }
+  }
   if (payload.profiles && config.profiles && typeof config.profiles === "object") {
     const profiles = config.profiles as Record<string, Record<string, unknown>>
     for (const [name, key] of Object.entries(payload.profiles)) {
@@ -65,7 +73,7 @@ export async function applySecretsToConfig(
 
 /**
  * Strip secret fields from config for persisting to YAML (never write apiKey to repo).
- * Returns a deep copy with model.apiKey, embeddings.apiKey, and each profiles[name].apiKey removed.
+ * Returns a deep copy with model.apiKey, embeddings.apiKey, vectorDb.apiKey, and each profiles[name].apiKey removed.
  */
 export function stripSecretsFromConfig<T extends Record<string, unknown>>(config: T): T {
   const out = JSON.parse(JSON.stringify(config)) as T
@@ -76,6 +84,10 @@ export function stripSecretsFromConfig<T extends Record<string, unknown>>(config
   if (out.embeddings && typeof out.embeddings === "object") {
     const e = out.embeddings as Record<string, unknown>
     delete e["apiKey"]
+  }
+  if (out.vectorDb && typeof out.vectorDb === "object") {
+    const vd = out.vectorDb as Record<string, unknown>
+    delete vd["apiKey"]
   }
   if (out.profiles && typeof out.profiles === "object") {
     for (const p of Object.values(out.profiles as Record<string, Record<string, unknown>>)) {
@@ -104,7 +116,7 @@ export function stripProfileSecrets(profiles: Record<string, unknown>): Record<s
 }
 
 /**
- * Build payload from current config (model.apiKey, embeddings.apiKey, profile apiKeys) for persisting to secrets store.
+ * Build payload from current config (model.apiKey, embeddings.apiKey, vectorDb.apiKey, profile apiKeys) for persisting to secrets store.
  */
 export function getSecretsPayloadFromConfig(config: Record<string, unknown>): NexusSecretsPayload {
   const payload: NexusSecretsPayload = {}
@@ -115,6 +127,10 @@ export function getSecretsPayloadFromConfig(config: Record<string, unknown>): Ne
   if (config.embeddings && typeof config.embeddings === "object") {
     const apiKey = (config.embeddings as Record<string, unknown>)["apiKey"]
     if (typeof apiKey === "string" && apiKey.trim()) payload.embeddings = apiKey.trim()
+  }
+  if (config.vectorDb && typeof config.vectorDb === "object") {
+    const apiKey = (config.vectorDb as Record<string, unknown>)["apiKey"]
+    if (typeof apiKey === "string" && apiKey.trim()) payload.qdrantApiKey = apiKey.trim()
   }
   if (config.profiles && typeof config.profiles === "object") {
     const profileKeys: Record<string, string> = {}
@@ -147,7 +163,7 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 /**
- * File-based secrets store for CLI (Cline-style: single file with mode 0o600).
+ * File-based secrets store for CLI (single file with mode 0o600).
  * Path: {globalConfigDir}/secrets.json
  */
 export function createFileSecretsStore(globalConfigDir: string): NexusSecretsStore {

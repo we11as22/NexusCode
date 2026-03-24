@@ -1,7 +1,7 @@
 {
   "name": "nexuscode",
   "displayName": "NexusCode",
-  "description": "AI coding agent combining best practices from Cline, Continue, KiloCode, OpenCode, Roo-Code: agent/plan/debug/ask modes, AST + optional vector indexing, MCP, skills, rules, parallel tools, NexusCode Server. Repository: https://github.com/we11as22/NexusCode",
+  "description": "AI coding agent: agent/plan/debug/ask modes, AST + optional vector indexing, MCP, skills, rules, parallel tools, NexusCode Server. Repository: https://github.com/we11as22/NexusCode",
   "version": "0.1.0",
   "private": true,
   "publisher": "nexuscode",

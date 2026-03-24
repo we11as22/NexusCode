@@ -14,7 +14,7 @@ import type { StoredContextUsage } from "./storage.js"
 
 const SESSION_TITLE_MAX_LEN = 80
 
-/** Derive session title from first user message (Cline-style). */
+/** Derive session title from first user message. */
 export function deriveSessionTitle(messages: SessionMessage[]): string {
   const user = messages.find((m) => m.role === "user")
   if (!user) return ""
@@ -148,7 +148,7 @@ export class Session implements ISession {
     return new Session(generateSessionId(), this.cwd, JSON.parse(JSON.stringify(messages)), undefined, false, null)
   }
 
-  /** Rewind chat to timestamp (Cline/Roo-Code style). Keeps only messages with ts <= timestamp. */
+  /** Rewind chat to timestamp. Keeps only messages with ts <= timestamp. */
   rewindToTimestamp(timestamp: number): void {
     const keep = this._messages.filter(m => m.ts <= timestamp)
     if (keep.length < this._messages.length) {

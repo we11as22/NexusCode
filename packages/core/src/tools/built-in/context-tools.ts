@@ -2,7 +2,7 @@ import { z } from "zod"
 import type { ToolDef, ToolContext } from "../../types.js"
 
 /**
- * Condense — compress conversation context (Cline-style).
+ * Condense — compress conversation context.
  * Triggers LLM-based compaction so the next turn has a summary of prior messages.
  */
 const condenseSchema = z.object({
@@ -34,7 +34,7 @@ When NOT to use:
 }
 
 /**
- * Summarize task — brief summary of the current task state (Cline-style).
+ * Summarize task — brief summary of the current task state.
  */
 const summarizeTaskSchema = z.object({
   task_progress: z.string().optional(),

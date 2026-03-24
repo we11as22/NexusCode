@@ -84,6 +84,7 @@ export interface NexusConfigState {
     url: string
     collection: string
     autoStart: boolean
+    apiKey?: string
   }
   tools: {
     classifyToolsEnabled?: boolean

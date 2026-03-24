@@ -1,53 +1,100 @@
 import { z } from "zod"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import type { ToolDef, ToolContext } from "../../types.js"
+import { extractSymbols } from "../../indexer/ast-extractor.js"
+import {
+  loadDefinitionQueryParsers,
+  parseDefinitionsForFile,
+  parseDefinitionsTopLevelDirectory,
+  isDefinitionQueryExtension,
+  type DefinitionQueryParsersByExt,
+} from "../../indexer/definition-queries/index.js"
+import type { SymbolEntry, ToolDef, ToolContext } from "../../types.js"
+
+/** Same language coverage as the codebase indexer (symbolExtract path), minus markdown sections. */
+const WALK_EXTENSIONS = new Set([
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+  ".py", ".rs", ".go", ".java",
+  ".c", ".h", ".cpp", ".hpp",
+  ".cs", ".rb", ".php", ".swift", ".kt", ".scala",
+])
+
+const DEFAULT_MAX_DEPTH = 3
+const DEFAULT_MAX_FILES = 80
+const DEFAULT_MAX_OUTPUT_CHARS = 120_000
 
 const schema = z.object({
-  path: z.string().describe("File or directory to extract code definitions from"),
+  path: z.string().describe("File or directory to extract code definitions from (relative to project root or absolute)"),
+  shallow: z
+    .boolean()
+    .optional()
+    .describe(
+      "If true, non-recursive directory listing: only immediate files in the folder (max 50 parseable sources after extension filter). Ignored when path is a file.",
+    ),
+  max_depth: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(8)
+    .optional()
+    .describe(
+      `Max directory nesting depth when listing a folder (default ${DEFAULT_MAX_DEPTH}). Ignored when shallow is true.`,
+    ),
+  max_files: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(500)
+    .optional()
+    .describe(`Max source files to analyze (default ${DEFAULT_MAX_FILES}). Prevents huge context usage.`),
+  max_output_chars: z.coerce
+    .number()
+    .int()
+    .min(5_000)
+    .max(500_000)
+    .optional()
+    .describe(`Truncate combined output past this many characters (default ${DEFAULT_MAX_OUTPUT_CHARS}).`),
   task_progress: z.string().optional(),
 })
 
-export const listDefinitionsTool: ToolDef<z.infer<typeof schema>> = {
-  name: "ListCodeDefinitions",
-  description: `List top-level code definitions (classes, functions, methods, interfaces, types, enums) for a file or directory. Returns structure only — no full bodies. Use before Read to get symbol names and line numbers, then call Read with offset/limit for only the ranges you need.
-
-When to use:
-- **Before reading:** Run ListCodeDefinitions on a file or directory to get symbols and approximate line ranges; then use Read(path, offset, limit) for the specific sections. Use it on every relevant file or dir when exploring, not only once.
-- Understand file or module structure before reading or searching.
-- Find where a symbol is defined (then use Read or Grep for the full implementation).
-- Quick overview of many files in a directory.
-
-When NOT to use:
-- Semantic search ("how does X work?"): use CodebaseSearch.
-- Exact pattern or identifier in content: use Grep.
-- Reading full implementation: use Read after you have path and line range from ListCodeDefinitions or Grep.
-
-Supports: TS/JS, Python, Rust, Go, Java, C/C++. Returns path and line (e.g. "function foo (L42)", "class Bar (L10)"). Chunk signatures from CodebaseSearch may show only signatures — use ListCodeDefinitions or Read to get full code for those ranges.`,
-  parameters: schema,
-  readOnly: true,
-
-  async execute({ path: targetPath }, ctx: ToolContext) {
-    const absPath = path.resolve(ctx.cwd, targetPath)
-
-    try {
-      const stat = await fs.stat(absPath)
-      if (stat.isDirectory()) {
-        return extractFromDirectory(absPath, ctx.cwd)
-      }
-      return extractFromFile(absPath, ctx.cwd)
-    } catch {
-      return { success: false, output: `Path not found: ${targetPath}` }
-    }
-  },
+function formatSymbolsForTool(relPath: string, symbols: SymbolEntry[]): string {
+  const defs = symbols.filter((s) => s.kind !== "chunk")
+  if (defs.length === 0) {
+    return `${relPath}: no named definitions extracted (file may be minified or use patterns we do not parse). Use Read or Grep.`
+  }
+  const lines = defs.map((s) => {
+    const parent = s.parent ? ` in ${s.parent}` : ""
+    return `  [${s.kind}] ${s.name}${parent} (L${s.startLine})`
+  })
+  return `${relPath}:\n${lines.join("\n")}`
 }
 
-async function extractFromFile(absPath: string, cwd: string): Promise<{ success: boolean; output: string }> {
-  const relPath = path.relative(cwd, absPath)
+async function extractFromFile(
+  absPath: string,
+  cwd: string,
+  sharedParsers?: DefinitionQueryParsersByExt,
+): Promise<{ success: boolean; output: string }> {
+  const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
   const ext = path.extname(absPath).toLowerCase()
 
-  if (!SUPPORTED_EXTENSIONS.has(ext)) {
-    return { success: true, output: `${relPath}: unsupported file type (${ext})` }
+  if (!WALK_EXTENSIONS.has(ext)) {
+    return { success: true, output: `${relPath}: unsupported file type (${ext}) for ListCodeDefinitions` }
+  }
+
+  /** Tree-sitter definition queries from `indexer/definition-queries/queries`. */
+  if (isDefinitionQueryExtension(ext)) {
+    try {
+      const parsers = sharedParsers ?? (await loadDefinitionQueryParsers([absPath]))
+      const defs = await parseDefinitionsForFile(absPath, parsers)
+      if (defs !== null) {
+        if (defs.startsWith("Unsupported file type:")) {
+          return { success: true, output: `${relPath}\n${defs}` }
+        }
+        return { success: true, output: `${relPath}\n${defs}`.trimEnd() }
+      }
+    } catch (err) {
+      console.warn("[nexus] ListCodeDefinitions tree-sitter failed, using regex fallback:", (err as Error).message)
+    }
   }
 
   let content: string
@@ -57,34 +104,35 @@ async function extractFromFile(absPath: string, cwd: string): Promise<{ success:
     return { success: false, output: `Cannot read ${relPath}` }
   }
 
-  const definitions = extractDefinitions(content, ext)
-  if (definitions.length === 0) {
-    return { success: true, output: `${relPath}: no top-level definitions found` }
-  }
-
-  const output = `${relPath}:\n${definitions.map(d => `  ${d}`).join("\n")}`
-  return { success: true, output }
+  const symbols = extractSymbols(content, relPath, ext)
+  return { success: true, output: formatSymbolsForTool(relPath, symbols) }
 }
 
-async function extractFromDirectory(
+async function collectFiles(
   absDir: string,
-  cwd: string
-): Promise<{ success: boolean; output: string }> {
-  const { readdir } = await import("node:fs/promises")
-  const results: string[] = []
+  cwd: string,
+  opts: { shallow: boolean; maxDepth: number; maxFiles: number },
+): Promise<string[]> {
+  const out: string[] = []
   const ignoreMod = await import("ignore")
   const ignoreFactory = (ignoreMod as any).default ?? ignoreMod
   let ig = ignoreFactory()
   try {
     const gi = await fs.readFile(path.join(cwd, ".gitignore"), "utf8").catch(() => "")
     ig = ignoreFactory().add(gi)
-  } catch {}
+  } catch {
+    /* empty */
+  }
   ig.add([".git", "node_modules", "dist", "build", ".nexus"])
 
-  async function processDir(dir: string, depth: number) {
-    if (depth > 3) return
-    const items = await readdir(dir).catch(() => [] as string[])
+  async function processDir(dir: string, depth: number): Promise<void> {
+    if (out.length >= opts.maxFiles) return
+    if (opts.shallow && depth > 0) return
+    if (!opts.shallow && depth > opts.maxDepth) return
+
+    const items = await fs.readdir(dir).catch(() => [] as string[])
     for (const item of items.sort()) {
+      if (out.length >= opts.maxFiles) return
       const fullPath = path.join(dir, item)
       const relPath = path.relative(cwd, fullPath)
       if (ig.ignores(relPath)) continue
@@ -93,103 +141,116 @@ async function extractFromDirectory(
       if (!st) continue
 
       if (st.isDirectory()) {
-        await processDir(fullPath, depth + 1)
+        if (!opts.shallow) {
+          await processDir(fullPath, depth + 1)
+        }
       } else {
         const ext = path.extname(item).toLowerCase()
-        if (SUPPORTED_EXTENSIONS.has(ext)) {
-          const r = await extractFromFile(fullPath, cwd)
-          if (r.success && r.output && !r.output.includes("no top-level")) {
-            results.push(r.output)
-          }
+        if (WALK_EXTENSIONS.has(ext)) {
+          out.push(fullPath)
         }
       }
     }
   }
 
   await processDir(absDir, 0)
-
-  if (results.length === 0) {
-    return { success: true, output: "No code definitions found" }
-  }
-
-  return { success: true, output: results.join("\n\n") }
+  return out
 }
 
-const SUPPORTED_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp"])
-
-// Regex-based extraction (lightweight, no tree-sitter dependency needed for basic use)
-function extractDefinitions(content: string, ext: string): string[] {
-  const defs: string[] = []
-  const lines = content.split("\n")
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trimEnd()
-    const def = extractDefinitionFromLine(line, ext, i + 1)
-    if (def) defs.push(def)
-  }
-
-  return defs
+function truncateOutput(text: string, maxChars: number, filesProcessed: number, totalFiles: number): string {
+  if (text.length <= maxChars) return text
+  const head = text.slice(0, maxChars)
+  const note = `\n\n[Output truncated at ${maxChars} characters. Processed ${filesProcessed}/${totalFiles} files — narrow path, raise max_output_chars, or use Glob+Grep.]`
+  return head + note
 }
 
-function extractDefinitionFromLine(line: string, ext: string, lineNum: number): string | null {
-  const stripped = line.trim()
+export const listDefinitionsTool: ToolDef<z.infer<typeof schema>> = {
+  name: "ListCodeDefinitions",
+  description: `List code definitions for a file or directory.
 
-  // TypeScript/JavaScript
-  if ([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].includes(ext)) {
-    // Export class
-    let m = stripped.match(/^(export\s+)?(abstract\s+)?class\s+(\w+)/)
-    if (m) return `class ${m[3]} (L${lineNum})`
+**Parsing:** For supported languages, **web-tree-sitter** runs bundled **definition queries** (\`packages/core/src/indexer/definition-queries/queries\`). Output uses \`│\` lines and \`|----\` separators when parsing succeeds. Other extensions (e.g. \`.scala\`) use the legacy regex extractor.
 
-    // Export function
-    m = stripped.match(/^(export\s+)?(async\s+)?function\s+(\w+)/)
-    if (m) return `function ${m[3]} (L${lineNum})`
+**Directory behavior:** **shallow: true** — non-recursive, only files directly in the folder, up to 50 parseable files. **shallow: false** — recursion with \`max_depth\` / \`max_files\`.
 
-    // Export const arrow function
-    m = stripped.match(/^(export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?\(/)
-    if (m) return `const ${m[2]} (L${lineNum})`
+When to use:
+- Before Read: see definition lines, then Read(path, offset, limit) for detail.
+- Quick structural overview of a file or folder.
 
-    // Export interface
-    m = stripped.match(/^(export\s+)?interface\s+(\w+)/)
-    if (m) return `interface ${m[2]} (L${lineNum})`
+When NOT to use: semantic search → CodebaseSearch; exact text → Grep.`,
 
-    // Export type
-    m = stripped.match(/^(export\s+)?type\s+(\w+)\s*=/)
-    if (m) return `type ${m[2]} (L${lineNum})`
+  parameters: schema,
+  readOnly: true,
 
-    // Export enum
-    m = stripped.match(/^(export\s+)?(?:const\s+)?enum\s+(\w+)/)
-    if (m) return `enum ${m[2]} (L${lineNum})`
-  }
+  async execute(
+    {
+      path: targetPath,
+      shallow = false,
+      max_depth: maxDepthArg,
+      max_files: maxFilesArg,
+      max_output_chars: maxOutArg,
+    },
+    ctx: ToolContext,
+  ) {
+    const absPath = path.resolve(ctx.cwd, targetPath)
+    const maxDepth = maxDepthArg ?? DEFAULT_MAX_DEPTH
+    const maxFiles = maxFilesArg ?? DEFAULT_MAX_FILES
+    const maxOut = maxOutArg ?? DEFAULT_MAX_OUTPUT_CHARS
 
-  // Python
-  if (ext === ".py") {
-    let m = stripped.match(/^class\s+(\w+)/)
-    if (m) return `class ${m[1]} (L${lineNum})`
-    m = stripped.match(/^(async\s+)?def\s+(\w+)/)
-    if (m) return `def ${m[2]} (L${lineNum})`
-  }
+    let indexerNote = ""
+    const stIndexer = ctx.indexer?.status()
+    if (stIndexer && stIndexer.state === "ready" && "symbols" in stIndexer) {
+      indexerNote = `\n(Indexer: ${stIndexer.files} files indexed, ${stIndexer.symbols} vector/chunk entries — index uses semantic chunks; this tool uses definition-query tree-sitter.)`
+    }
 
-  // Rust
-  if (ext === ".rs") {
-    let m = stripped.match(/^pub\s+(?:async\s+)?fn\s+(\w+)/)
-    if (m) return `fn ${m[1]} (L${lineNum})`
-    m = stripped.match(/^pub\s+struct\s+(\w+)/)
-    if (m) return `struct ${m[1]} (L${lineNum})`
-    m = stripped.match(/^pub\s+trait\s+(\w+)/)
-    if (m) return `trait ${m[1]} (L${lineNum})`
-    m = stripped.match(/^pub\s+enum\s+(\w+)/)
-    if (m) return `enum ${m[1]} (L${lineNum})`
-  }
+    try {
+      const stat = await fs.stat(absPath)
+      if (stat.isDirectory() && shallow) {
+        const body = await parseDefinitionsTopLevelDirectory(absPath)
+        return {
+          success: true,
+          output: truncateOutput(body + indexerNote, maxOut, 1, 1),
+        }
+      }
 
-  // Go
-  if (ext === ".go") {
-    let m = stripped.match(/^func\s+(?:\([\w\s*]+\)\s+)?(\w+)/)
-    if (m) return `func ${m[1]} (L${lineNum})`
-    m = stripped.match(/^type\s+(\w+)\s+struct/)
-    if (m) return `struct ${m[1]} (L${lineNum})`
-    m = stripped.match(/^type\s+(\w+)\s+interface/)
-    if (m) return `interface ${m[1]} (L${lineNum})`
-  }
+      if (stat.isDirectory()) {
+        const files = await collectFiles(absPath, ctx.cwd, {
+          shallow,
+          maxDepth,
+          maxFiles,
+        })
+        if (files.length === 0) {
+          return { success: true, output: `No matching source files under ${path.relative(ctx.cwd, absPath) || "."}.${indexerNote}` }
+        }
 
-  return null
+        const definitionQueryFiles = files.filter((f) => isDefinitionQueryExtension(path.extname(f)))
+        let sharedParsers: DefinitionQueryParsersByExt | undefined
+        if (definitionQueryFiles.length > 0) {
+          try {
+            sharedParsers = await loadDefinitionQueryParsers(definitionQueryFiles)
+          } catch {
+            sharedParsers = undefined
+          }
+        }
+
+        const parts: string[] = []
+        for (const file of files) {
+          const r = await extractFromFile(file, ctx.cwd, sharedParsers)
+          parts.push(r.output)
+        }
+
+        let body = parts.join("\n\n")
+        if (files.length >= maxFiles) {
+          body += `\n\n[Stopped after ${maxFiles} files (max_files). Narrow the path or increase max_files.]`
+        }
+        body = truncateOutput(body, maxOut, files.length, files.length)
+        return { success: true, output: body + indexerNote }
+      }
+
+      const r = await extractFromFile(absPath, ctx.cwd)
+      if (!r.success) return r
+      return { success: true, output: truncateOutput(r.output, maxOut, 1, 1) + indexerNote }
+    } catch {
+      return { success: false, output: `Path not found: ${targetPath}` }
+    }
+  },
 }

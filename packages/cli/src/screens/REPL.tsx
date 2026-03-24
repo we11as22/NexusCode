@@ -1252,26 +1252,22 @@ export function REPL({
     () => [{ id: 'header' as const }, ...staticMessageItems],
     [staticMessageItems],
   )
+  const shouldHideNexusHeader =
+    nexusBootstrap != null && inputValue.trimStart().startsWith('/')
+
   const chatMessagesSection = useMemo(
     () =>
       nexusBootstrap ? (
         <>
-          <Static
-            key={`static-header-only-${forkNumber}`}
-            items={[{ id: 'header' as const }]}
-          >
-            {item =>
-              item.id === 'header' ? (
-                <Box key="nexus-header" flexDirection="column">
-                  <Logo
-                    mcpClients={mcpClients}
-                    isDefaultModel={isDefaultModel}
-                  />
-                  <ProjectOnboarding workspaceDir={getOriginalCwd()} />
-                </Box>
-              ) : null
-            }
-          </Static>
+          {!shouldHideNexusHeader ? (
+            <Box key={`nexus-header-${forkNumber}`} flexDirection="column">
+              <Logo
+                mcpClients={mcpClients}
+                isDefaultModel={isDefaultModel}
+              />
+              <ProjectOnboarding workspaceDir={getOriginalCwd()} />
+            </Box>
+          ) : null}
           {messagesJSX.map(item => (
             <React.Fragment key={item.key}>{item.jsx}</React.Fragment>
           ))}
@@ -1283,7 +1279,7 @@ export function REPL({
             items={staticItemsWithHeader}
           >
             {item =>
-              item.id === 'header' ? (
+              'id' in item && item.id === 'header' ? (
                 <Box key="nexus-header" flexDirection="column">
                   <Logo
                     mcpClients={mcpClients}
@@ -1292,7 +1288,7 @@ export function REPL({
                   <ProjectOnboarding workspaceDir={getOriginalCwd()} />
                 </Box>
               ) : (
-                item.jsx
+                ('jsx' in item ? item.jsx : null)
               )
             }
           </Static>
@@ -1309,6 +1305,7 @@ export function REPL({
       messagesJSX,
       mcpClients,
       isDefaultModel,
+      shouldHideNexusHeader,
     ],
   )
 
