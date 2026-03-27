@@ -1,66 +1,67 @@
 import { z } from "zod"
-import type { ToolDef, ToolContext } from "../../types.js"
-import { loadSkills } from "../../skills/manager.js"
+import { pathToFileURL } from "node:url"
+import type { ToolDef, ToolContext, NexusConfig } from "../../types.js"
+import {
+  buildSkillToolDynamicDescription,
+  loadSkillToolCatalogRows,
+  resolveSkillBody,
+  sampleSkillSiblingFiles,
+} from "../../skills/skill-tool-catalog.js"
 
 const schema = z.object({
-  skill: z.string().describe("Name of the skill to activate"),
+  name: z.string().min(1).describe("Exact skill name from <available_skills> in this tool's description (or Active Skills)"),
   task_progress: z.string().optional(),
 })
 
-/** Normalize a skill name for loose matching: lowercase + collapse separators */
-function normalizeName(n: string): string {
-  return n.trim().toLowerCase().replace(/[-_\s]+/g, "-")
+export const SKILL_TOOL_PLACEHOLDER_DESCRIPTION = buildSkillToolDynamicDescription([])
+
+export async function buildSkillToolDescriptionMerged(cwd: string, config: NexusConfig): Promise<string> {
+  const rows = await loadSkillToolCatalogRows(cwd, config).catch(() => [])
+  return buildSkillToolDynamicDescription(rows)
 }
 
 export const useSkillTool: ToolDef<z.infer<typeof schema>> = {
   name: "Skill",
-  description: `Load a skill's content (markdown) for specialized knowledge. Skills live in .nexus/skills/ or ~/.nexus/skills/ (same resolution as classifier).
-
-When to use:
-- Task matches a skill's domain (e.g. testing, deployment, framework).
-- You need patterns or instructions from a project skill file.
-
-When NOT to use:
-- General coding: skills are optional and add context.
-- If the skill name is unknown: list .nexus/skills/ or rely on classifier-selected skills.`,
+  description: SKILL_TOOL_PLACEHOLDER_DESCRIPTION,
   parameters: schema,
   readOnly: true,
 
-  async execute({ skill }, ctx: ToolContext) {
-    const skillPaths = ctx.config.skills ?? []
-    const loaded = await loadSkills(skillPaths, ctx.cwd).catch(() => [])
-
-    const inputNorm = normalizeName(skill)
-
-    // 1. Exact case-insensitive match
-    let found = loaded.find(s => s.name.toLowerCase() === skill.trim().toLowerCase())
-
-    // 2. Normalized match (hyphens/underscores/spaces treated the same)
-    if (!found) {
-      found = loaded.find(s => normalizeName(s.name) === inputNorm)
-    }
-
-    // 3. Partial match: input contains skill name or vice versa
-    if (!found) {
-      found = loaded.find(s => {
-        const sn = normalizeName(s.name)
-        return sn.includes(inputNorm) || inputNorm.includes(sn)
-      })
-    }
-
-    if (!found) {
-      const available = loaded.length > 0
-        ? loaded.map((s) => s.name).slice(0, 20).join(", ")
-        : "none (add paths in config or create .nexus/skills/<name>/SKILL.md)"
+  async execute({ name }, ctx: ToolContext) {
+    const resolved = await resolveSkillBody(name, ctx.cwd, ctx.config)
+    if (!resolved) {
+      const rows = await loadSkillToolCatalogRows(ctx.cwd, ctx.config).catch(() => [])
+      const available = rows.length > 0 ? rows.map((r) => r.name).slice(0, 30).join(", ") : "none discovered"
       return {
         success: false,
-        output: `Skill "${skill}" not found. Available skills: ${available}.`,
+        output: `Skill "${name}" not found. Available: ${available}.`,
       }
     }
 
+    const base = pathToFileURL(resolved.skillDir).href
+    const files = await sampleSkillSiblingFiles(resolved.skillDir, ctx.signal)
+    const fileBlock = files.map((f) => `<file>${f}</file>`).join("\n")
+
     return {
       success: true,
-      output: `<skill name="${found.name}">\n${found.content}\n</skill>`,
+      output: [
+        `<skill_content name="${resolved.displayName}">`,
+        `# Skill: ${resolved.displayName}`,
+        "",
+        resolved.content.trim(),
+        "",
+        `Base directory for this skill: ${base}`,
+        "Relative paths in this skill (e.g. scripts/, reference/) are relative to this base directory.",
+        "Note: file list is sampled.",
+        "",
+        "<skill_files>",
+        fileBlock,
+        "</skill_files>",
+        "</skill_content>",
+      ].join("\n"),
+      metadata: {
+        name: resolved.displayName,
+        dir: resolved.skillDir,
+      },
     }
   },
 }

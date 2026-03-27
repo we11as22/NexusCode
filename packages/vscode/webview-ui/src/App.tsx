@@ -14,6 +14,7 @@ import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import type { ExtensionMessage } from "./types/messages.js"
 import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
 import { NEXUS_CUSTOM_OPTION_ID } from "./constants/questionnaire.js"
+import { MarketplacePanel } from "./components/marketplace/MarketplacePanel.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
@@ -1184,6 +1185,7 @@ interface SettingsDraft {
   autoApproveCommand: boolean
   autoApproveMcp: boolean
   autoApproveBrowser: boolean
+  autoApproveSkillLoad: boolean
   autoApproveReadPatternsText: string
   allowedCommandsText: string
   allowCommandPatternsText: string
@@ -1194,6 +1196,8 @@ interface SettingsDraft {
   /** For Rules & Skills panel: path + enabled. skillsText is derived for raw edit. */
   skillsConfig?: Array<{ path: string; enabled: boolean }>
   skillsText: string
+  /** Remote registries (index.json), one URL per line. */
+  skillsUrlsText: string
   rulesFilesText: string
   claudeMdPath: string
   agentInstructions: string
@@ -1207,7 +1211,7 @@ interface SettingsDraft {
 }
 
 type SettingsTabId = "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"
-type SettingsIntegTabId = "rules-skills" | "mcp" | "rules-instructions"
+type SettingsIntegTabId = "marketplace" | "rules-skills" | "mcp" | "rules-instructions"
 
 function SettingsView({
   initialTab,
@@ -1484,6 +1488,11 @@ function SettingsView({
           checked={draft.autoApproveBrowser}
           onChange={(checked) => setDraft({ ...draft, autoApproveBrowser: checked })}
         />
+        <SettingsToggle
+          label="Auto-approve Skill load (off = ask before loading each skill)"
+          checked={draft.autoApproveSkillLoad}
+          onChange={(checked) => setDraft({ ...draft, autoApproveSkillLoad: checked })}
+        />
         <SettingsTextarea
           label="Auto-approve Read path patterns (one per line)"
           value={draft.autoApproveReadPatternsText}
@@ -1528,6 +1537,13 @@ function SettingsView({
         <div className="flex flex-wrap gap-1.5 mb-2">
           <button
             type="button"
+            className={`nexus-tab-btn ${integTab === "marketplace" ? "nexus-tab-btn-active" : ""}`}
+            onClick={() => setIntegTab("marketplace")}
+          >
+            Marketplace
+          </button>
+          <button
+            type="button"
             className={`nexus-tab-btn ${integTab === "rules-skills" ? "nexus-tab-btn-active" : ""}`}
             onClick={() => setIntegTab("rules-skills")}
           >
@@ -1548,6 +1564,8 @@ function SettingsView({
             Instructions
           </button>
         </div>
+
+        {integTab === "marketplace" && <MarketplacePanel />}
 
         {integTab === "rules-skills" && (
           <RulesSkillsSubagentsView
@@ -2075,7 +2093,7 @@ function RulesSkillsSubagentsView({
   )
 }
 
-/** MCP server list + marketplace (Cline-style: Marketplace | Remote Servers | Configure). */
+/** MCP server list (Remote Servers | Configure). Use Integrations → Marketplace for Kilo catalog installs. */
 function IntegrationsMcpView({
   draft,
   setDraft,
@@ -2086,7 +2104,7 @@ function IntegrationsMcpView({
   const mcpStatus = useChatStore((s) => s.mcpStatus)
   const [showRaw, setShowRaw] = useState(false)
   const [testing, setTesting] = useState(false)
-  const [mcpTab, setMcpTab] = useState<"marketplace" | "remote" | "configure">("marketplace")
+  const [mcpTab, setMcpTab] = useState<"remote" | "configure">("configure")
   const servers = parseJsonArray(draft.mcpServersJson)
   const statusByName = Object.fromEntries(mcpStatus.map((r) => [r.name, r]))
 
@@ -2153,14 +2171,10 @@ function IntegrationsMcpView({
 
   return (
     <div className="nexus-integrations-block">
+      <p className="text-[11px] text-[var(--vscode-descriptionForeground)] mb-2">
+        Browse and one-click install MCP servers from the <strong>Marketplace</strong> tab. This screen is for manual remote URLs and JSON editing.
+      </p>
       <div className="flex gap-1 border-b border-[var(--vscode-panel-border)] mb-3 pb-0" style={{ marginBottom: "-1px" }}>
-        <button
-          type="button"
-          className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${mcpTab === "marketplace" ? "border-[var(--vscode-foreground)] text-[var(--vscode-foreground)]" : "border-transparent text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"}`}
-          onClick={() => setMcpTab("marketplace")}
-        >
-          Marketplace
-        </button>
         <button
           type="button"
           className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${mcpTab === "remote" ? "border-[var(--vscode-foreground)] text-[var(--vscode-foreground)]" : "border-transparent text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"}`}
@@ -2176,53 +2190,6 @@ function IntegrationsMcpView({
           Configure
         </button>
       </div>
-
-      {/* Marketplace (Cline-style) */}
-      {mcpTab === "marketplace" && (
-        <div className="flex flex-col gap-4">
-          <p className="text-[13px] text-[var(--vscode-descriptionForeground)]">
-            Browse and add MCP servers from official and community sources.
-          </p>
-          <div className="flex flex-col gap-2">
-            <a
-              href="#"
-              onClick={(e) => { e.preventDefault(); postMessage({ type: "openExternal", url: "https://github.com/modelcontextprotocol/servers" }) }}
-              className="block px-4 py-3 rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 hover:bg-[var(--vscode-list-hoverBackground)] no-underline text-inherit"
-            >
-              <span className="font-semibold text-[13px] text-[var(--vscode-foreground)]">GitHub — MCP Servers</span>
-              <span className="block text-[12px] text-[var(--vscode-descriptionForeground)] mt-1">Browse community servers</span>
-            </a>
-            <a
-              href="#"
-              onClick={(e) => { e.preventDefault(); postMessage({ type: "openExternal", url: "https://registry.modelcontextprotocol.io" }) }}
-              className="block px-4 py-3 rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/30 hover:bg-[var(--vscode-list-hoverBackground)] no-underline text-inherit"
-            >
-              <span className="font-semibold text-[13px] text-[var(--vscode-foreground)]">MCP Registry</span>
-              <span className="block text-[12px] text-[var(--vscode-descriptionForeground)] mt-1">Official registry</span>
-            </a>
-          </div>
-          {/* Submit MCP Server card (Cline-style) */}
-          <div
-            className="flex flex-col items-center gap-3 py-4 px-4 rounded-md text-center"
-            style={{ backgroundColor: "var(--vscode-textBlockQuote-background)" }}
-          >
-            <i className="codicon codicon-add text-[18px]" />
-            <div className="flex flex-col items-center gap-1 max-w-[480px]">
-              <h3 className="m-0 text-sm font-semibold text-[var(--vscode-foreground)]">Submit MCP Server</h3>
-              <p className="text-[13px] m-0 text-[var(--vscode-descriptionForeground)]">
-                Help others discover great MCP servers by submitting an issue to{" "}
-                <button
-                  type="button"
-                  className="text-[var(--vscode-textLink-foreground)] hover:underline bg-transparent border-none cursor-pointer p-0"
-                  onClick={() => postMessage({ type: "openExternal", url: "https://github.com/modelcontextprotocol/servers" })}
-                >
-                  github.com/modelcontextprotocol/servers
-                </button>
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Remote Servers (Cline-style form) */}
       {mcpTab === "remote" && (
@@ -2458,7 +2425,8 @@ function IntegrationsSkillsView({
   return (
     <div className="nexus-integrations-block">
       <p className="nexus-muted text-[10px] mb-2">
-        Skills are loaded from paths (files or directories). One path per line.
+        Skills load from local paths below, plus standard dirs (including <code className="text-[10px]">~/.claude/skills</code> and walk-up{" "}
+        <code className="text-[10px]">.claude/skills</code>), and from remote URLs if configured.
       </p>
       <div className="flex flex-col gap-2 mb-2">
         {skills.length === 0 ? (
@@ -2517,6 +2485,12 @@ function IntegrationsSkillsView({
           />
         )}
       </label>
+      <SettingsTextarea
+        label="Remote skill registry URLs (one per line; each base URL must expose index.json — files cache under ~/.nexus/cache/skills/)"
+        value={draft.skillsUrlsText}
+        onChange={(v) => setDraft((d) => ({ ...d, skillsUrlsText: v }))}
+        rows={3}
+      />
     </div>
   )
 }
@@ -2584,6 +2558,7 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     autoApproveCommand: config.permissions?.autoApproveCommand ?? false,
     autoApproveMcp: config.permissions?.autoApproveMcp ?? false,
     autoApproveBrowser: config.permissions?.autoApproveBrowser ?? false,
+    autoApproveSkillLoad: config.permissions?.autoApproveSkillLoad !== false,
     autoApproveReadPatternsText: (config.permissions?.autoApproveReadPatterns ?? []).join("\n"),
     allowedCommandsText: (config.permissions?.allowedCommands ?? []).join("\n"),
     allowCommandPatternsText: (config.permissions?.allowCommandPatterns ?? []).join("\n"),
@@ -2593,6 +2568,7 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     mcpServersJson: JSON.stringify(config.mcp?.servers ?? [], null, 2),
     skillsConfig: config.skillsConfig ?? (config.skills ?? []).map((p) => ({ path: p, enabled: true })),
     skillsText: (config.skillsConfig ?? (config.skills ?? []).map((p) => ({ path: p, enabled: true }))).map((s) => s.path).join("\n"),
+    skillsUrlsText: (config.skillsUrls ?? []).join("\n"),
     rulesFilesText: (config.rules?.files ?? []).filter((f) => !/CLAUDE\.md$/i.test(f)).join("\n"),
     claudeMdPath: (config.rules?.files ?? []).find((f) => /CLAUDE\.md$/i.test(f)) ?? "CLAUDE.md",
     agentInstructions: config.modes?.agent?.customInstructions ?? "",
@@ -2638,6 +2614,7 @@ function getDefaultDraft(): SettingsDraft {
     autoApproveCommand: false,
     autoApproveMcp: false,
     autoApproveBrowser: false,
+    autoApproveSkillLoad: true,
     autoApproveReadPatternsText: ".nexus/tool-output/**",
     allowedCommandsText: "",
     allowCommandPatternsText: "",
@@ -2646,6 +2623,7 @@ function getDefaultDraft(): SettingsDraft {
     allowedMcpToolsText: "",
     mcpServersJson: "[]",
     skillsText: "",
+    skillsUrlsText: "",
     rulesFilesText: "",
     claudeMdPath: "CLAUDE.md",
     agentInstructions: "",
@@ -2733,6 +2711,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       autoApproveCommand: draft.autoApproveCommand,
       autoApproveMcp: draft.autoApproveMcp,
       autoApproveBrowser: draft.autoApproveBrowser,
+      autoApproveSkillLoad: draft.autoApproveSkillLoad,
       autoApproveReadPatterns: linesToList(draft.autoApproveReadPatternsText),
       allowedCommands: linesToList(draft.allowedCommandsText),
       allowCommandPatterns: linesToList(draft.allowCommandPatternsText),
@@ -2747,6 +2726,7 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
     },
     skillsConfig,
     skills,
+    skillsUrls: linesToList(draft.skillsUrlsText),
     rules: {
       files: [...(claudePath ? [claudePath] : []), ...ruleFiles],
     },

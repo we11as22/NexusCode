@@ -261,7 +261,7 @@ export class ParallelAgentManager {
     const { builtin: tools } = toolRegistry.getForMode(mode)
 
     const rulesContent = await loadRules(cwd, config.rules.files).catch(() => "")
-    const skills = await loadSkills(config.skills, cwd).catch(() => [])
+    const skills = await loadSkills(config.skills, cwd, config.skillsUrls).catch(() => [])
     const compaction = createCompaction()
 
     let output = ""

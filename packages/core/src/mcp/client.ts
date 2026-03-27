@@ -1,7 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import type { McpServerConfig, ToolDef } from "../types.js"
+import { createMcpTransport } from "./transport-factory.js"
 import { normalizeToolSchema } from "../provider/tool-schema.js"
 import { z } from "zod"
 
@@ -26,20 +25,7 @@ export class McpClient {
         version: "0.1.0",
       })
 
-      let transport: StdioClientTransport | SSEClientTransport
-
-      if (config.url) {
-        transport = new SSEClientTransport(new URL(config.url))
-      } else if (config.command) {
-        transport = new StdioClientTransport({
-          command: config.command,
-          args: config.args ?? [],
-          env: { ...process.env, ...config.env } as Record<string, string>,
-        })
-      } else {
-        throw new Error(`MCP server "${config.name}" requires either command or url`)
-      }
-
+      const transport = createMcpTransport(config)
       await client.connect(transport)
 
       const toolsResponse = await client.listTools()
@@ -76,19 +62,7 @@ export class McpClient {
           name: "nexuscode",
           version: "0.1.0",
         })
-        let transport: StdioClientTransport | SSEClientTransport
-        if (config.url) {
-          transport = new SSEClientTransport(new URL(config.url))
-        } else if (config.command) {
-          transport = new StdioClientTransport({
-            command: config.command,
-            args: config.args ?? [],
-            env: { ...process.env, ...config.env } as Record<string, string>,
-          })
-        } else {
-          results.push({ name: config.name, status: "error", error: "Missing command or url" })
-          continue
-        }
+        const transport = createMcpTransport(config)
         await client.connect(transport)
         await client.listTools()
         await client.close()
@@ -129,10 +103,20 @@ export class McpClient {
               arguments: args,
             })
 
-            const output = (result.content as Array<{ type: string; text?: string }>)
-              .filter(c => c.type === "text")
-              .map(c => c.text ?? "")
-              .join("\n")
+            const parts = (result.content ?? []) as Array<{ type: string; text?: string; data?: string; mimeType?: string }>
+            const lines: string[] = []
+            for (const c of parts) {
+              if (c.type === "text" && c.text) {
+                lines.push(c.text)
+              } else if (c.type === "image" || c.type === "audio" || c.type === "resource") {
+                lines.push(`[MCP ${c.type}${c.mimeType ? `: ${c.mimeType}` : ""}]`)
+              } else if (c.type && c.text) {
+                lines.push(c.text)
+              } else if (c.type) {
+                lines.push(`[MCP content type: ${c.type}]`)
+              }
+            }
+            const output = lines.join("\n").trim()
 
             return { success: !result.isError, output }
           } catch (err) {

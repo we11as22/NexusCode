@@ -566,6 +566,11 @@ function RenderItemRow({
     return (
       <div className="nexus-user-msg-wrap">
         <div className={`nexus-user-msg-bubble${canRollback ? " nexus-user-msg-bubble-has-rollback" : ""}`}>
+          {message.presetName ? (
+            <div className="text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
+              Preset: <span className="font-medium">{message.presetName}</span>
+            </div>
+          ) : null}
           <div className="nexus-user-msg-content">{renderUserTextWithPasteChips(userText)}</div>
           {canRollback && (
             <MessageCheckpointMenu

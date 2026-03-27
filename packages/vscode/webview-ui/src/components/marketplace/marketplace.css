@@ -1,0 +1,298 @@
+/* Kilo-style marketplace (VS Code theme tokens) */
+
+.nexus-marketplace-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 280px;
+  gap: 8px;
+}
+
+.nexus-marketplace-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  margin-bottom: 8px;
+}
+
+.nexus-marketplace-tab {
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+}
+
+.nexus-marketplace-tab:hover {
+  color: var(--vscode-foreground);
+}
+
+.nexus-marketplace-tab-active {
+  color: var(--vscode-foreground);
+  border-bottom-color: var(--vscode-foreground);
+}
+
+.nexus-marketplace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.nexus-marketplace-filters {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.nexus-marketplace-search {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--vscode-input-border);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border-radius: 2px;
+}
+
+.nexus-marketplace-select {
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--vscode-dropdown-border);
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  border-radius: 2px;
+}
+
+.nexus-marketplace-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.nexus-marketplace-tag-btn {
+  all: unset;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--vscode-widget-border);
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.65;
+}
+
+.nexus-marketplace-tag-btn:hover {
+  opacity: 0.9;
+}
+
+.nexus-marketplace-tag-btn-active {
+  opacity: 1;
+  border-color: var(--vscode-focusBorder);
+  color: var(--vscode-foreground);
+}
+
+.nexus-marketplace-loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 160px;
+  font-size: 13px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-marketplace-empty {
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+  padding: 24px;
+  font-size: 13px;
+}
+
+.nexus-marketplace-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 12px;
+}
+
+.nexus-marketplace-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-inactiveSelectionBackground);
+}
+
+.nexus-marketplace-card-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--vscode-foreground);
+}
+
+.nexus-marketplace-card-name-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.nexus-marketplace-card-author {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-marketplace-card-desc {
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.nexus-marketplace-card-desc-expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+}
+
+.nexus-marketplace-card-expand {
+  all: unset;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--vscode-textLink-foreground);
+}
+
+.nexus-marketplace-card-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  flex-wrap: wrap;
+}
+
+.nexus-marketplace-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.nexus-marketplace-pill {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-marketplace-pill-installed {
+  border-color: var(--vscode-charts-green);
+  color: var(--vscode-charts-green);
+}
+
+.nexus-marketplace-card-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.nexus-marketplace-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  border: 1px solid var(--vscode-inputValidation-errorBorder);
+  background: var(--vscode-inputValidation-errorBackground);
+  color: var(--vscode-errorForeground);
+  border-radius: 4px;
+}
+
+/* Modal overlay */
+.nexus-mp-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 16px;
+}
+
+.nexus-mp-modal {
+  max-width: 480px;
+  width: 100%;
+  max-height: 90vh;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+  color: var(--vscode-foreground);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+.nexus-mp-modal h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
+.nexus-mp-modal-section {
+  margin-bottom: 14px;
+}
+
+.nexus-mp-modal-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.nexus-mp-modal-prereq {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-mp-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.nexus-mp-modal-param label {
+  display: block;
+  font-size: 11px;
+  margin-bottom: 4px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-mp-modal-param input {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--vscode-input-border);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  box-sizing: border-box;
+}
+
+.nexus-mp-success {
+  color: var(--vscode-charts-green);
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+
+.nexus-mp-error {
+  color: var(--vscode-errorForeground);
+  font-size: 12px;
+  margin: 0 0 12px;
+}

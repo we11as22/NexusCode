@@ -66,6 +66,7 @@ import {
   getAllBuiltinTools,
 } from "@nexuscode/core"
 import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
+import { MarketplaceService, type MarketplaceItem } from "./services/marketplace/index.js"
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
@@ -190,7 +191,7 @@ function stripModeReminderFromMessages(messages: SessionMessage[]): SessionMessa
 }
 
 export type WebviewMessage =
-  | { type: "newMessage"; content: string; mode: Mode; mentions?: string; images?: Array<{ data: string; mimeType: string }> }
+  | { type: "newMessage"; content: string; mode: Mode; mentions?: string; images?: Array<{ data: string; mimeType: string }>; presetName?: string }
   | { type: "abort" }
   | { type: "compact" }
   | { type: "clearChat" }
@@ -238,6 +239,27 @@ export type WebviewMessage =
   | { type: "revertSessionEditFile"; path: string }
   | { type: "acceptSessionEditFile"; path: string }
   | { type: "slashCommand"; command: string }
+  | { type: "setChatPreset"; presetName: string }
+  | {
+      type: "fetchMarketplaceData"
+      /** When false, skip SkillNet (e.g. MCP-only tab). Default: fetch skills. */
+      includeSkills?: boolean
+      skillSearchQuery?: string
+      skillSearchMode?: "keyword" | "vector"
+      skillPage?: number
+      skillCategory?: string
+      skillVectorThreshold?: number
+    }
+  | {
+      type: "installMarketplaceItem"
+      mpItem: MarketplaceItem
+      mpInstallOptions: { target?: "global" | "project"; parameters?: Record<string, unknown> }
+    }
+  | {
+      type: "removeInstalledMarketplaceItem"
+      mpItem: MarketplaceItem
+      mpInstallOptions: { target: "global" | "project" }
+    }
 
 export type ExtensionMessage =
   | { type: "stateUpdate"; state: WebviewState }
@@ -255,6 +277,15 @@ export type ExtensionMessage =
   | { type: "modelsCatalog"; catalog: import("@nexuscode/core").ModelsCatalog }
   | { type: "agentPresets"; presets: Array<{ name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string }> }
   | { type: "agentPresetOptions"; options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } }
+  | {
+      type: "marketplaceData"
+      marketplaceItems: MarketplaceItem[]
+      marketplaceInstalledMetadata: { project: Record<string, { type: string }>; global: Record<string, { type: string }> }
+      errors?: string[]
+      skillSearchMeta?: { query: string; mode: string; total: number; limit: number; page: number }
+    }
+  | { type: "marketplaceInstallResult"; slug: string; success: boolean; error?: string }
+  | { type: "marketplaceRemoveResult"; slug: string; success: boolean; error?: string }
 
 export type ServerConnectionState = "idle" | "connecting" | "streaming" | "error"
 
@@ -291,6 +322,8 @@ export interface WebviewState {
   /** Session unaccepted edits: files changed this session not yet accepted (Undo All / Keep All). */
   sessionUnacceptedEdits?: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
   pendingQuestionRequest?: UserQuestionRequest | null
+  /** Active preset name for the chat (per-message scoping for skills + MCP). */
+  activePresetName?: string
 }
 
 function simpleDiffStats(originalContent: string, newContent: string): { added: number; removed: number } {
@@ -309,6 +342,8 @@ export class Controller {
   private session?: Session
   private config?: NexusConfig
   private defaultModelProfile?: NexusConfig["model"]
+  /** Active preset for chat messages (per-message; does not persist to config). */
+  private chatPresetName: string = "Default"
   /** Snapshot of skills/mcp/rules/indexing at first config load; used for "Default" preset. */
   private initialFullConfigSnapshot?: {
     skills: string[]
@@ -339,6 +374,7 @@ export class Controller {
   private indexStatusUnsubscribe?: () => void
   private indexerFileWatcher?: vscode.Disposable
   private disposables: vscode.Disposable[] = []
+  private readonly marketplaceService = new MarketplaceService()
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
   /** VS Code Secret Storage for API keys (keys not stored in YAML). */
   private readonly secretsStore = {
@@ -881,6 +917,7 @@ export class Controller {
         modelsCatalog: this.modelsCatalogCache ?? null,
         sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
         pendingQuestionRequest: this.pendingQuestionRequest,
+        activePresetName: this.chatPresetName,
       }
     }
     // Prefer live stream snapshot; else persisted session snapshot; else same formula as agent (session + tools; no system until next run).
@@ -944,6 +981,7 @@ export class Controller {
       loadingOlderMessages: this.loadingOlderMessages,
       sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
       pendingQuestionRequest: this.pendingQuestionRequest,
+      activePresetName: this.chatPresetName,
     }
   }
 
@@ -1004,11 +1042,11 @@ export class Controller {
     this.postStateToWebview()
   }
 
-  /** Load skills from config paths and standard dirs (~/.nexus/skills, .nexus/skills) and send to webview for Skills list UI. */
+  /** Load skills from config paths, skillsUrls registries, standard dirs (.nexus, Claude ~/.claude/skills, .kilo, walk-up), send to webview Skills list. */
   private loadAndSendSkillDefinitions(): void {
     const cwd = this.getCwd()
     const paths = this.config?.skills ?? []
-    loadSkills(paths, cwd)
+    loadSkills(paths, cwd, this.config?.skillsUrls)
       .then((skills) => {
         this.postMessageToWebview({
           type: "skillDefinitions",
@@ -1018,6 +1056,21 @@ export class Controller {
       .catch(() => {
         this.postMessageToWebview({ type: "skillDefinitions", definitions: [] })
       })
+  }
+
+  private async refreshAfterMarketplaceChange(): Promise<void> {
+    const cwd = this.getCwd()
+    try {
+      this.config = await loadConfig(cwd, { secrets: this.secretsStore })
+    } catch {
+      /* keep previous config */
+    }
+    if (this.config) {
+      this.postMessageToWebview({ type: "configLoaded", config: this.config })
+      void this.loadAndSendSkillDefinitions()
+      void this.reconnectMcpServers().catch(() => {})
+    }
+    this.postStateToWebview()
   }
 
   /** Clear current task/session and reset run state. */
@@ -1132,8 +1185,14 @@ export class Controller {
     switch (msg.type) {
       case "newMessage":
         await this.ensureInitialized()
-        await this.runAgent(msg.content, msg.mode, msg.images)
+        await this.runAgent(msg.content, msg.mode, msg.images, msg.presetName)
         break
+      case "setChatPreset": {
+        const name = (msg.presetName ?? "").trim() || "Default"
+        this.chatPresetName = name
+        this.postStateToWebview()
+        break
+      }
       case "abort":
         this.abortController?.abort()
         this.isRunning = false
@@ -1470,7 +1529,7 @@ export class Controller {
           try {
             await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir))
           } catch {}
-          const defaultContent = JSON.stringify([], null, 2)
+          const defaultContent = JSON.stringify({ servers: [] }, null, 2)
           await vscode.workspace.fs.writeFile(uri, Buffer.from(defaultContent, "utf8"))
           return vscode.workspace.openTextDocument(uri)
         })
@@ -1495,6 +1554,77 @@ export class Controller {
             type: "mcpServerStatus",
             results: this.config.mcp.servers.map((s) => ({ name: s.name, status: "error" as const, error: message })),
           })
+        }
+        break
+      }
+      case "fetchMarketplaceData": {
+        await this.ensureInitialized()
+        const cwd = this.getCwd()
+        const folders = vscode.workspace.workspaceFolders
+        const ws = folders && folders.length > 0 ? cwd : undefined
+        const includeSkills = msg.includeSkills !== false
+        const skillSearch = includeSkills
+          ? {
+              q: msg.skillSearchQuery?.trim() || "skill",
+              mode: msg.skillSearchMode ?? "keyword",
+              page: msg.skillPage ?? 1,
+              category: msg.skillCategory,
+              limit: 24,
+              threshold: msg.skillVectorThreshold,
+            }
+          : undefined
+        try {
+          const data = await this.marketplaceService.fetchData(ws, { includeSkills, skillSearch })
+          this.postMessageToWebview({
+            type: "marketplaceData",
+            marketplaceItems: data.marketplaceItems,
+            marketplaceInstalledMetadata: data.marketplaceInstalledMetadata,
+            errors: data.errors,
+            skillSearchMeta: data.skillSearchMeta,
+          })
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e)
+          this.postMessageToWebview({
+            type: "marketplaceData",
+            marketplaceItems: [],
+            marketplaceInstalledMetadata: { project: {}, global: {} },
+            errors: [message],
+          })
+        }
+        break
+      }
+      case "installMarketplaceItem": {
+        await this.ensureInitialized()
+        const cwd = this.getCwd()
+        const folders = vscode.workspace.workspaceFolders
+        const ws = folders && folders.length > 0 ? cwd : undefined
+        const result = await this.marketplaceService.install(msg.mpItem, msg.mpInstallOptions, ws)
+        this.postMessageToWebview({
+          type: "marketplaceInstallResult",
+          slug: msg.mpItem.id,
+          success: result.success,
+          error: result.error,
+        })
+        if (result.success) {
+          await this.refreshAfterMarketplaceChange()
+        }
+        break
+      }
+      case "removeInstalledMarketplaceItem": {
+        await this.ensureInitialized()
+        const cwd = this.getCwd()
+        const folders = vscode.workspace.workspaceFolders
+        const ws = folders && folders.length > 0 ? cwd : undefined
+        const scope = msg.mpInstallOptions.target
+        const result = await this.marketplaceService.remove(msg.mpItem, scope, ws)
+        this.postMessageToWebview({
+          type: "marketplaceRemoveResult",
+          slug: msg.mpItem.id,
+          success: result.success,
+          error: result.error,
+        })
+        if (result.success) {
+          await this.refreshAfterMarketplaceChange()
         }
         break
       }
@@ -1883,10 +2013,60 @@ export class Controller {
     }
   }
 
+  private async getPresetByName(name: string): Promise<
+    | { name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string }
+    | null
+  > {
+    const trimmed = name.trim()
+    if (!trimmed || trimmed === "Default") return null
+    const presets = await this.readAgentPresets()
+    return presets.find((p) => p.name === trimmed) ?? null
+  }
+
+  private resolveConfigForPreset(base: NexusConfig, presetName: string): NexusConfig {
+    const trimmed = presetName.trim() || "Default"
+    if (trimmed === "Default") {
+      const snap = this.initialFullConfigSnapshot
+      if (!snap) return base
+      return {
+        ...base,
+        indexing: { ...base.indexing, ...snap.indexing },
+        skills: snap.skills,
+        mcp: { servers: [...snap.mcp.servers] },
+        rules: { files: snap.rules.files.length > 0 ? [...snap.rules.files] : ["AGENTS.md", "CLAUDE.md"] },
+      }
+    }
+    // NOTE: preset lookup is async; this function expects caller to already resolve selected preset if needed.
+    return base
+  }
+
+  private applyPresetFields(base: NexusConfig, preset: { vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string }): NexusConfig {
+    const current = base
+    const namedServers = (current.mcp?.servers ?? []).map((s) => ({ name: (s as McpServerConfig).name ?? "", server: s }))
+    const selectedServers = namedServers
+      .filter((item) => item.name && preset.mcpServers.includes(item.name))
+      .map((item) => item.server)
+    const next: NexusConfig = {
+      ...current,
+      indexing: { ...current.indexing, vector: preset.vector },
+      skills: preset.skills,
+      mcp: { servers: preset.mcpServers.length === 0 ? [] : selectedServers },
+      rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["AGENTS.md", "CLAUDE.md"] },
+    }
+    if (preset.modelProvider && preset.modelId) {
+      const provider =
+        preset.modelProvider === "openrouter"
+          ? "openai-compatible"
+          : (preset.modelProvider as NexusConfig["model"]["provider"])
+      next.model = { ...current.model, provider, id: preset.modelId }
+    }
+    return next
+  }
+
   /** Discover available skills, MCP server names, and rules files for preset builder. Uses same source as Skills tab (loadSkills) so ~/.nexus and all .md are included. */
   private async getAgentPresetOptions(): Promise<{ skills: string[]; mcpServers: string[]; rulesFiles: string[] }> {
     const cwd = this.getCwd()
-    const skillDefs = await loadSkills(this.config?.skills ?? [], cwd).catch(() => [])
+    const skillDefs = await loadSkills(this.config?.skills ?? [], cwd, this.config?.skillsUrls).catch(() => [])
     const skills = dedupeStringList(skillDefs.map((s) => s.path))
     const fromConfig = (this.config?.mcp?.servers ?? []).map((s) => (s as McpServerConfig).name).filter((n): n is string => Boolean(n?.trim()))
     const discoveredMcp = await discoverMcpServerNamesForExtension(cwd)
@@ -1970,7 +2150,7 @@ export class Controller {
         vector: preset.vector,
       },
       skills: preset.skills,
-      mcp: { servers: selectedServers.length > 0 ? selectedServers : current.mcp?.servers ?? [] },
+      mcp: { servers: preset.mcpServers.length === 0 ? [] : selectedServers },
       rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["AGENTS.md", "CLAUDE.md"] },
     }
     if (preset.modelProvider && preset.modelId) {
@@ -2074,7 +2254,7 @@ export class Controller {
     return ""
   }
 
-  private async runAgent(content: string, mode?: Mode, images?: Array<{ data: string; mimeType: string }>): Promise<void> {
+  private async runAgent(content: string, mode?: Mode, images?: Array<{ data: string; mimeType: string }>, presetName?: string): Promise<void> {
     if (this.isRunning) return
     if (!this.session || !this.config) {
       this.isRunning = false
@@ -2110,7 +2290,13 @@ export class Controller {
 
     let actualContent = content
     let createSkillMode = false
-    let configForRun = this.config
+    const effectivePresetName = (presetName ?? this.chatPresetName).trim() || "Default"
+    this.chatPresetName = effectivePresetName
+    let configForRun = this.resolveConfigForPreset(this.config, effectivePresetName)
+    if (effectivePresetName !== "Default") {
+      const preset = await this.getPresetByName(effectivePresetName)
+      if (preset) configForRun = this.applyPresetFields(configForRun, preset)
+    }
     if (reviewCommand) {
       const reviewArgs = trimmedInput.replace(/^\/review\s*/i, "").trim()
       actualContent =
@@ -2158,7 +2344,7 @@ Return in this format:
             ...images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType })),
           ]
         : actualContent
-    const userMessage = this.session.addMessage({ role: "user", content: userContent })
+    const userMessage = this.session.addMessage({ role: "user", content: userContent, presetName: effectivePresetName })
     this.postStateToWebview()
 
     const cwd = this.getCwd()
@@ -2235,7 +2421,7 @@ Return in this format:
             this.postStateToWebview()
           }
         }
-        for await (const event of client.streamMessage(sid, actualContent, runMode, this.abortController!.signal)) {
+        for await (const event of client.streamMessage(sid, actualContent, runMode, effectivePresetName, this.abortController!.signal)) {
           if (this.abortController?.signal.aborted) break
           resetHeartbeat()
           forwardServerEvent(event)
@@ -2363,7 +2549,7 @@ Return in this format:
           ])
         : Promise.resolve()
       const rulesP = loadRules(cwd, configForRun.rules.files).catch(() => "")
-      const skillsP = loadSkills(configForRun.skills, cwd).catch(() => [])
+      const skillsP = loadSkills(configForRun.skills, cwd, configForRun.skillsUrls).catch(() => [])
       const RULES_SKILLS_TIMEOUT_MS = 2000
       const rulesAndSkillsP = Promise.race([
         Promise.all([rulesP, skillsP]).then(([rulesContent, skills]) => ({ type: "ok" as const, rulesContent, skills })),
@@ -2375,9 +2561,15 @@ Return in this format:
 
       const client = createLLMClient(configForRun.model)
       const toolRegistry = new ToolRegistry()
-      if (this.mcpClient) {
+      const allowedMcpServers = new Set(
+        (configForRun.mcp?.servers ?? [])
+          .map((s) => (s as McpServerConfig).name)
+          .filter((n): n is string => typeof n === "string" && n.trim().length > 0),
+      )
+      if (this.mcpClient && allowedMcpServers.size > 0) {
         for (const tool of this.mcpClient.getTools()) {
-          toolRegistry.register(tool)
+          const serverName = tool.name.split("__", 1)[0] ?? ""
+          if (allowedMcpServers.has(serverName)) toolRegistry.register(tool)
         }
       }
       const parallelManager = new ParallelAgentManager()
@@ -2873,6 +3065,7 @@ Return in this format:
 
   dispose(): void {
     this.abortController?.abort()
+    this.marketplaceService.dispose()
     this.indexStatusUnsubscribe?.()
     this.indexerFileWatcher?.dispose()
     this.indexerFileWatcher = undefined
@@ -2991,11 +3184,14 @@ function toDisplayPathForExtension(filePath: string, projectDir: string): string
 }
 
 async function discoverSkillPathsForExtension(projectDir: string): Promise<string[]> {
+  const home = path.resolve(process.env.HOME || os.homedir())
   const roots = [
+    path.join(projectDir, ".kilo", "skills"),
     path.join(projectDir, ".nexus", "skills"),
     path.join(projectDir, ".agents", "skills"),
-    path.join(path.resolve(process.env.HOME || os.homedir()), ".nexus", "skills"),
-    path.join(path.resolve(process.env.HOME || os.homedir()), ".agents", "skills"),
+    path.join(home, ".kilo", "skills"),
+    path.join(home, ".nexus", "skills"),
+    path.join(home, ".agents", "skills"),
   ]
   const files: string[] = []
   for (const root of roots) {

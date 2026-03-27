@@ -22,6 +22,7 @@ import {
   CheckpointTracker,
   NexusConfigSchema,
 } from "@nexuscode/core"
+import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { ServerHost } from "./host.js"
@@ -55,10 +56,16 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   if (!config) config = await loadConfig(process.cwd(), { secrets: secretsStore }).catch(() => undefined)
   if (!config) config = NexusConfigSchema.parse({}) as NexusConfig
 
-  const host = new ServerHost(cwd, onEvent)
-  session.addMessage({ role: "user", content })
+  const presetName =
+    configOverride && typeof (configOverride as { presetName?: unknown }).presetName === "string"
+      ? String((configOverride as { presetName?: string }).presetName).trim()
+      : ""
+  const configForRun = presetName ? await applyPresetForRun(config, cwd, presetName) : config
 
-  const client = createLLMClient(config.model)
+  const host = new ServerHost(cwd, onEvent)
+  session.addMessage({ role: "user", content, presetName: presetName || "Default" })
+
+  const client = createLLMClient(configForRun.model)
   const toolRegistry = new ToolRegistry()
 
   let mcpClient: McpClient | undefined
@@ -67,8 +74,8 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
       const mc = new McpClient()
       setMcpClientInstance(mc)
       await mc.disconnectAll().catch(() => {})
-      if (config.mcp.servers.length > 0) {
-        const resolved = resolveBundledMcpServers(config.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
+      if (configForRun.mcp.servers.length > 0) {
+        const resolved = resolveBundledMcpServers(configForRun.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
         process.env.CLAUDE_PROJECT_DIR = cwd
         await mc.connectAll(resolved).catch(() => {})
       }
@@ -78,7 +85,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     }
   })()
   const mcpWithTimeout =
-    config.mcp.servers.length > 0
+    configForRun.mcp.servers.length > 0
       ? Promise.race([
           mcpPromise,
           new Promise<undefined>((r) => setTimeout(() => r(undefined), MCP_CONNECT_TIMEOUT_MS)),
@@ -86,8 +93,8 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
       : mcpPromise
 
   const rulesAndSkillsPromise = Promise.all([
-    loadRules(cwd, config.rules.files).catch(() => ""),
-    loadSkills(config.skills, cwd).catch(() => []),
+    loadRules(cwd, configForRun.rules.files).catch(() => ""),
+    loadSkills(configForRun.skills, cwd, configForRun.skillsUrls).catch(() => []),
   ]).then(([rulesContent, skills]) => ({ type: "ok" as const, rulesContent, skills }))
   const rulesAndSkillsWithTimeout = Promise.race([
     rulesAndSkillsPromise,
@@ -107,8 +114,8 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   }
 
   const parallelManager = new ParallelAgentManager()
-  toolRegistry.register(createSpawnAgentTool(parallelManager, config))
-  toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, config))
+  toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
+  toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, configForRun))
   toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
   toolRegistry.register(createSpawnAgentStopTool(parallelManager))
   const { builtin: tools, dynamic } = toolRegistry.getForMode(mode)
@@ -118,15 +125,15 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   const compaction = createCompaction()
 
   let checkpoint: CheckpointTracker | undefined
-  if (config.checkpoint.enabled) {
+  if (configForRun.checkpoint.enabled) {
     checkpoint = new CheckpointTracker(session.id, cwd)
-    void checkpoint.init(config.checkpoint.timeoutMs).catch(() => {})
+    void checkpoint.init(configForRun.checkpoint.timeoutMs).catch(() => {})
   }
 
   let indexer: Awaited<ReturnType<typeof createCodebaseIndexer>> | undefined
-  if (config.indexing.enabled) {
+  if (configForRun.indexing.enabled) {
     indexer = await Promise.race([
-      createCodebaseIndexer(cwd, config, {
+      createCodebaseIndexer(cwd, configForRun, {
         onWarning: () => {},
         maxQdrantWaitMs: 2500,
       }),
@@ -139,7 +146,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     session,
     client,
     host,
-    config,
+    config: configForRun,
     mode,
     tools: allTools,
     skills,
@@ -149,4 +156,61 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     signal,
     checkpoint,
   })
+}
+
+async function applyPresetForRun(base: NexusConfig, cwd: string, presetName: string): Promise<NexusConfig> {
+  const trimmed = presetName.trim()
+  if (!trimmed || trimmed === "Default") return base
+  const preset = await readPresetFromDisk(cwd, trimmed)
+  if (!preset) return base
+  const named = (base.mcp?.servers ?? []).map((s) => ({ name: (s as { name?: string }).name ?? "", server: s }))
+  const selectedServers = named.filter((it) => it.name && preset.mcpServers.includes(it.name)).map((it) => it.server)
+  const next: NexusConfig = {
+    ...base,
+    indexing: { ...base.indexing, vector: preset.vector },
+    skills: preset.skills,
+    mcp: { servers: preset.mcpServers.length === 0 ? [] : selectedServers },
+    rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["AGENTS.md", "CLAUDE.md"] },
+  }
+  if (preset.modelProvider && preset.modelId) {
+    const provider =
+      preset.modelProvider === "openrouter"
+        ? "openai-compatible"
+        : (preset.modelProvider as NexusConfig["model"]["provider"])
+    next.model = { ...base.model, provider, id: preset.modelId }
+  }
+  return next
+}
+
+async function readPresetFromDisk(
+  cwd: string,
+  presetName: string
+): Promise<{ name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string } | null> {
+  const filePath = path.join(cwd, ".nexus", "agent-configs.json")
+  try {
+    const raw = await fs.readFile(filePath, "utf-8")
+    const parsed = JSON.parse(raw) as { presets?: unknown[]; configs?: unknown[] } | unknown[]
+    const list = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray((parsed as { presets?: unknown[] }).presets)
+        ? (parsed as { presets: unknown[] }).presets
+        : Array.isArray((parsed as { configs?: unknown[] }).configs)
+          ? (parsed as { configs: unknown[] }).configs
+          : []
+    const found = list.find((p) => p && typeof p === "object" && (p as { name?: unknown }).name === presetName) as
+      | Record<string, unknown>
+      | undefined
+    if (!found) return null
+    return {
+      name: presetName,
+      vector: found.vector === true,
+      skills: Array.isArray(found.skills) ? (found.skills as unknown[]).filter((s): s is string => typeof s === "string") : [],
+      mcpServers: Array.isArray(found.mcpServers) ? (found.mcpServers as unknown[]).filter((s): s is string => typeof s === "string") : [],
+      rulesFiles: Array.isArray(found.rulesFiles) ? (found.rulesFiles as unknown[]).filter((s): s is string => typeof s === "string") : [],
+      modelProvider: typeof found.modelProvider === "string" ? found.modelProvider : undefined,
+      modelId: typeof found.modelId === "string" ? found.modelId : undefined,
+    }
+  } catch {
+    return null
+  }
 }

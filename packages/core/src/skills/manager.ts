@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
 import { glob } from "glob"
+import yaml from "js-yaml"
 import type { SkillDef } from "../types.js"
 
 /**
@@ -12,18 +13,17 @@ import type { SkillDef } from "../types.js"
  *  - A glob pattern like ".nexus/skills/**\/*.md"
  *  - A direct file path like ".nexus/skills/my-skill/SKILL.md"
  *
- * Standard locations are also auto-searched.
+ * Standard locations are also auto-searched (`.nexus`, `.agents`, **Claude** `~/.claude/skills` and walk-up `.claude/skills`,
+ * `.kilo` / `.kilocode` / `.roo` / `.opencode`, walk-up from cwd).
+ *
+ * Optional `skillsUrls`: remote registries (each base URL must serve `index.json` + skill files); cached under `~/.nexus/cache/skills/`.
  */
-export async function loadSkills(skillPaths: string[], cwd: string): Promise<SkillDef[]> {
+export async function loadSkills(skillPaths: string[], cwd: string, skillsUrls?: string[]): Promise<SkillDef[]> {
   const skills: SkillDef[] = []
   const seen = new Set<string>()
 
-  // Resolve all configured paths (could be dirs, files, or globs)
-  const configPaths = skillPaths.map(p =>
-    path.isAbsolute(p) ? p : path.resolve(cwd, p)
-  )
+  const configPaths = skillPaths.map(p => (path.isAbsolute(p) ? p : path.resolve(cwd, p)))
 
-  // Standard auto-search locations
   const standardGlobs = [
     path.join(cwd, ".nexus", "skills", "**", "SKILL.md"),
     path.join(cwd, ".nexus", "skills", "**", "*.md"),
@@ -33,28 +33,35 @@ export async function loadSkills(skillPaths: string[], cwd: string): Promise<Ski
     path.join(os.homedir(), ".agents", "skills", "**", "*.md"),
   ]
 
-  // Process config paths first (they take priority)
   for (const cfgPath of configPaths) {
     await collectSkillFiles(cfgPath, seen, skills, cwd)
   }
 
-  // Then standard locations
   for (const pattern of standardGlobs) {
-    let files: string[]
-    try {
-      files = await glob(pattern, { absolute: true })
-    } catch {
-      continue
-    }
-    for (const file of files) {
-      if (seen.has(file)) continue
-      seen.add(file)
-      const skill = await loadSkillFile(file, cwd)
-      if (skill) skills.push(skill)
+    await globAndLoadSkills(pattern, seen, skills, cwd)
+  }
+
+  for (const pattern of homeCompatSkillGlobs()) {
+    await globAndLoadSkills(pattern, seen, skills, cwd)
+  }
+
+  for (const pattern of await walkupCompatSkillPatterns(cwd)) {
+    await globAndLoadSkills(pattern, seen, skills, cwd)
+  }
+
+  if (skillsUrls && skillsUrls.length > 0) {
+    const { fetchSkillUrlRegistryRoots } = await import("./url-registry.js")
+    for (const raw of skillsUrls) {
+      const url = raw.trim()
+      if (!url) continue
+      const roots = await fetchSkillUrlRegistryRoots(url).catch(() => [] as string[])
+      for (const root of roots) {
+        const pattern = path.join(root, "**", "SKILL.md")
+        await globAndLoadSkills(pattern, seen, skills, cwd)
+      }
     }
   }
 
-  // Deduplicate by name (keep first seen)
   const byName = new Map<string, SkillDef>()
   for (const skill of skills) {
     if (!byName.has(skill.name)) {
@@ -65,13 +72,80 @@ export async function loadSkills(skillPaths: string[], cwd: string): Promise<Ski
   return Array.from(byName.values())
 }
 
+async function globAndLoadSkills(
+  pattern: string,
+  seen: Set<string>,
+  skills: SkillDef[],
+  cwd: string,
+): Promise<void> {
+  let files: string[]
+  try {
+    files = await glob(pattern, { absolute: true })
+  } catch {
+    return
+  }
+  for (const file of files) {
+    if (seen.has(file)) continue
+    seen.add(file)
+    const skill = await loadSkillFile(file, cwd)
+    if (skill) skills.push(skill)
+  }
+}
+
+/** ~/.claude/skills, ~/.kilo/skills, ~/.roo/skills, ~/.opencode/skill, etc. */
+function homeCompatSkillGlobs(): string[] {
+  const home = os.homedir()
+  const pairs = [
+    [".claude", "skills"],
+    [".kilo", "skills"],
+    [".kilocode", "skills"],
+    [".roo", "skills"],
+    [".opencode", "skill"],
+  ] as const
+  return pairs.map(([a, b]) => path.join(home, a, b, "**", "SKILL.md"))
+}
+
+/** Walk from cwd to root; include compat skill roots at each level (nested project / monorepo). */
+async function walkupCompatSkillPatterns(startDir: string, maxHops = 40): Promise<string[]> {
+  const patterns: string[] = []
+  const seen = new Set<string>()
+  let dir = path.resolve(startDir)
+  for (let h = 0; h < maxHops; h++) {
+    const bases = [
+      [".claude", "skills"],
+      [".kilo", "skills"],
+      [".kilocode", "skills"],
+      [".roo", "skills"],
+      [".opencode", "skill"],
+    ] as const
+    for (const [hidden, sub] of bases) {
+      const base = path.join(dir, hidden, sub)
+      try {
+        const st = await fs.stat(base)
+        if (st.isDirectory()) {
+          const g = path.join(base, "**", "SKILL.md")
+          if (!seen.has(g)) {
+            seen.add(g)
+            patterns.push(g)
+          }
+        }
+      } catch {
+        /* */
+      }
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return patterns
+}
+
 async function collectSkillFiles(
   cfgPath: string,
   seen: Set<string>,
   skills: SkillDef[],
-  cwd: string
+  cwd: string,
 ): Promise<void> {
-  // Glob pattern
   if (cfgPath.includes("*")) {
     const files = await glob(cfgPath, { absolute: true }).catch(() => [] as string[])
     for (const file of files) {
@@ -95,7 +169,6 @@ async function collectSkillFiles(
   }
 
   if (stat.isDirectory()) {
-    // Try SKILL.md first, then any .md file
     const candidates = [
       path.join(cfgPath, "SKILL.md"),
       path.join(cfgPath, "skill.md"),
@@ -113,7 +186,6 @@ async function collectSkillFiles(
         }
       }
     }
-    // Fallback: any .md in directory tree (recursive — catches skills organized in subdirs)
     const files = await glob(path.join(cfgPath, "**", "*.md"), { absolute: true }).catch(() => [] as string[])
     for (const file of files.sort()) {
       if (seen.has(file)) continue
@@ -124,25 +196,64 @@ async function collectSkillFiles(
   }
 }
 
-// Subdirectory names whose files are included as additional skill context
-const SKILL_CONTEXT_DIRS = new Set(["examples", "example", "templates", "template", "docs", "doc", "snippets", "snippet", "reference", "references"])
-// File extensions included from context subdirectories
-const SKILL_CONTEXT_EXTENSIONS = new Set([".md", ".ts", ".tsx", ".js", ".jsx", ".py", ".yaml", ".yml", ".json", ".sh", ".sql", ".graphql", ".toml", ".go", ".rs", ".java", ".cs"])
-// Max total skill content size (main + subdirectory context)
+const SKILL_CONTEXT_DIRS = new Set([
+  "examples",
+  "example",
+  "templates",
+  "template",
+  "docs",
+  "doc",
+  "snippets",
+  "snippet",
+  "reference",
+  "references",
+])
+const SKILL_CONTEXT_EXTENSIONS = new Set([
+  ".md",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".py",
+  ".yaml",
+  ".yml",
+  ".json",
+  ".sh",
+  ".sql",
+  ".graphql",
+  ".toml",
+  ".go",
+  ".rs",
+  ".java",
+  ".cs",
+])
 const MAX_SKILL_TOTAL_BYTES = 80_000
-// Max size per individual extra file
 const MAX_EXTRA_FILE_BYTES = 20_000
 
-/**
- * Load additional context from well-known subdirectories of a skill directory.
- * Finds files in examples/, templates/, docs/, snippets/, reference/ etc. and appends
- * them to the skill content so the agent sees the full skill directory, not just SKILL.md.
- */
+/** Parse optional YAML frontmatter (Claude / Roo / Kilo style). */
+function splitYamlFrontmatter(raw: string): { frontmatter: Record<string, unknown>; body: string } {
+  const text = raw.replace(/^\uFEFF/, "")
+  if (!text.startsWith("---")) {
+    return { frontmatter: {}, body: text }
+  }
+  const m = text.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n([\s\S]*)$/)
+  if (!m) {
+    return { frontmatter: {}, body: text }
+  }
+  try {
+    const data = yaml.load(m[1])
+    const fm =
+      data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {}
+    return { frontmatter: fm, body: m[2] }
+  } catch {
+    return { frontmatter: {}, body: text }
+  }
+}
+
 async function loadSkillDirContext(skillDir: string, mainContent: string): Promise<string> {
   let totalSize = Buffer.byteLength(mainContent, "utf8")
   const extras: string[] = []
 
-  // Only look at immediate subdirectories that are known context dirs
   let entryNames: string[]
   try {
     const raw = await fs.readdir(skillDir, { withFileTypes: true })
@@ -155,7 +266,9 @@ async function loadSkillDirContext(skillDir: string, mainContent: string): Promi
     if (!SKILL_CONTEXT_DIRS.has(entryName.toLowerCase())) continue
 
     const subDirPath = path.join(skillDir, entryName)
-    const subFiles = await glob(path.join(subDirPath, "**", "*"), { absolute: true, nodir: true }).catch(() => [] as string[])
+    const subFiles = await glob(path.join(subDirPath, "**", "*"), { absolute: true, nodir: true }).catch(
+      () => [] as string[],
+    )
 
     for (const file of subFiles.sort()) {
       const ext = path.extname(file).toLowerCase()
@@ -170,14 +283,14 @@ async function loadSkillDirContext(skillDir: string, mainContent: string): Promi
       if (!fileContent?.trim()) continue
 
       const relPath = path.relative(skillDir, file)
-      const lang = ext.slice(1) // Remove dot: .ts -> ts
+      const lang = ext.slice(1)
       const isMarkdown = ext === ".md"
 
       totalSize += Buffer.byteLength(fileContent, "utf8")
       extras.push(
         isMarkdown
           ? `### ${relPath}\n\n${fileContent}`
-          : `### ${relPath}\n\n\`\`\`${lang}\n${fileContent.trimEnd()}\n\`\`\``
+          : `### ${relPath}\n\n\`\`\`${lang}\n${fileContent.trimEnd()}\n\`\`\``,
       )
     }
   }
@@ -187,34 +300,48 @@ async function loadSkillDirContext(skillDir: string, mainContent: string): Promi
     : mainContent
 }
 
+const GENERIC_SKILL_PARENTS = new Set([
+  "skills",
+  ".nexus",
+  ".agents",
+  ".claude",
+  ".kilo",
+  ".kilocode",
+  ".roo",
+  ".opencode",
+  "skill",
+])
+
 async function loadSkillFile(filePath: string, _cwd: string): Promise<SkillDef | null> {
   try {
-    const content = await fs.readFile(filePath, "utf8")
-    if (!content.trim()) return null
+    const raw = await fs.readFile(filePath, "utf8")
+    if (!raw.trim()) return null
 
-    // Determine skill name: prefer parent directory name over file name
+    const { frontmatter, body } = splitYamlFrontmatter(raw)
+    const contentForMeta = body.trim() ? body : raw
+
     const dirName = path.basename(path.dirname(filePath))
     const fileName = path.basename(filePath, path.extname(filePath))
 
-    // Skip files that live inside context subdirectories — they're included as part of the
-    // parent skill's content (via loadSkillDirContext), not separate skills.
     if (SKILL_CONTEXT_DIRS.has(dirName.toLowerCase())) return null
-    // If parent dir is a skill dir (not "skills" itself), use its name
-    const name = !["skills", ".nexus", ".agents"].includes(dirName.toLowerCase())
-      ? dirName
-      : fileName
 
-    // Extract first heading line as title, otherwise first non-empty line
-    const lines = content.split("\n").filter(l => l.trim())
+    const fmName = typeof frontmatter.name === "string" ? frontmatter.name.trim() : ""
+    const fmDesc = typeof frontmatter.description === "string" ? frontmatter.description.trim() : ""
+
+    const heuristicName = !GENERIC_SKILL_PARENTS.has(dirName.toLowerCase()) ? dirName : fileName
+    const name = fmName || heuristicName
+
+    const lines = contentForMeta.split("\n").filter(l => l.trim())
     const headingLine = lines.find(l => l.startsWith("#"))
-    const summaryLine = headingLine
-      ? headingLine.replace(/^#+\s*/, "")
-      : lines.find(l => !l.startsWith("#")) ?? ""
-    const summary = summaryLine.replace(/^[-*]\s*/, "").slice(0, 120)
+    const summaryLine = fmDesc
+      ? fmDesc
+      : headingLine
+        ? headingLine.replace(/^#+\s*/, "")
+        : lines.find(l => !l.startsWith("#")) ?? ""
+    const summary = summaryLine.replace(/^[-*]\s*/, "").slice(0, 200)
 
-    // Load additional context from skill subdirectories (examples/, templates/, docs/, etc.)
     const skillDir = path.dirname(filePath)
-    const fullContent = await loadSkillDirContext(skillDir, content)
+    const fullContent = await loadSkillDirContext(skillDir, body.trim() ? body : raw)
 
     return { name, path: filePath, summary, content: fullContent }
   } catch {

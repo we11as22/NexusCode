@@ -517,6 +517,18 @@ export function normalizeToolInputForParse(
   if (name === "AskFollowupQuestion") {
     return normalizeAskFollowupQuestionInput(raw)
   }
+  if (name === "Skill") {
+    const n =
+      typeof raw.name === "string" && raw.name.trim()
+        ? raw.name.trim()
+        : typeof raw.skill === "string" && raw.skill.trim()
+          ? raw.skill.trim()
+          : undefined
+    const out = { ...raw }
+    if (n !== undefined) out.name = n
+    delete out.skill
+    return out
+  }
   // Read: gateway/provider may send path instead of file_path; offset 0 / false / "0" means "from start" (omit key)
   if (name === "Read" || name === "read_file") {
     const {
@@ -745,6 +757,14 @@ export function buildApprovalAction(toolName: string, toolInput: Record<string, 
       description: `MCP: ${toolName}`,
     }
   }
+  if (toolName === "Skill") {
+    const n = typeof toolInput["name"] === "string" ? toolInput["name"] : ""
+    return {
+      type: "read",
+      tool: toolName,
+      description: `Load skill: ${n || "(unnamed)"}`,
+    }
+  }
   return {
     type: "read",
     tool: toolName,
@@ -763,6 +783,9 @@ export function toolNeedsApproval(
     const allowedMcp = config.permissions.allowedMcpTools ?? []
     if (allowedMcp.includes(toolName)) return false
     return !(config.permissions.autoApproveMcp ?? false)
+  }
+  if (toolName === "Skill") {
+    return config.permissions.autoApproveSkillLoad === false
   }
   if (READ_ONLY_TOOLS.has(toolName)) {
     if (autoApproveActions.has("read")) return false
@@ -833,8 +856,10 @@ function ruleMatchesTool(pattern: string | undefined, toolName: string): boolean
 
 function ruleMatchesPath(pathPattern: string, toolInput: Record<string, unknown>): boolean {
   const filePath = (toolInput["file_path"] ?? toolInput["path"]) as string | undefined
-  if (!filePath) return false
-  return matchesGlob(filePath, pathPattern)
+  if (filePath) return matchesGlob(filePath, pathPattern)
+  const skillName = toolInput["name"] as string | undefined
+  if (typeof skillName === "string" && skillName.trim()) return matchesGlob(skillName.trim(), pathPattern)
+  return false
 }
 
 function ruleMatchesCommand(commandPattern: string, toolInput: Record<string, unknown>): boolean {

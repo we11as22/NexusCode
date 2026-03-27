@@ -324,7 +324,8 @@
   },
   "dependencies": {
     "@nexuscode/core": "workspace:*",
-    "execa": "^9.5.0"
+    "execa": "^9.5.0",
+    "yaml": "^2.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",

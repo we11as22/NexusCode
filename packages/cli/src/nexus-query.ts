@@ -296,7 +296,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     const sid = bootstrapSession.id
     runPromise = (async () => {
       try {
-        for await (const event of serverClient.streamMessage(sid, userPrompt, mode, signal)) {
+        for await (const event of serverClient.streamMessage(sid, userPrompt, mode, undefined, signal)) {
           if (event.type === 'assistant_content_complete') {
             try {
               const msgs = await serverClient.getMessages(sid, { limit: 500 })

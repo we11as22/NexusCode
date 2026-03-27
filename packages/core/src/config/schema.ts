@@ -43,8 +43,11 @@ const mcpServerSchema = z.object({
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),
+  cwd: z.string().optional(),
   url: z.string().optional(),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
+  type: z.enum(["stdio", "sse", "streamable-http", "http"]).optional(),
+  headers: z.record(z.string()).optional(),
   enabled: z.boolean().optional().default(true),
   /** Bundled server id (e.g. "context-mode"); resolved by host to command/args/env */
   bundle: z.string().optional(),
@@ -108,6 +111,8 @@ export const NexusConfigSchema = z.object({
     autoApproveCommand: z.boolean().default(false),
     autoApproveMcp: z.boolean().default(false),
     autoApproveBrowser: z.boolean().default(false),
+    /** When false, loading a skill via `Skill` shows an approval dialog (Kilo-style). Default true = no prompt. */
+    autoApproveSkillLoad: z.boolean().default(true),
     autoApproveReadPatterns: z.array(z.string()).default([
     ".nexus/tool-output/**",
     "**/.nexus/data/tool-output/**",
@@ -160,6 +165,9 @@ export const NexusConfigSchema = z.object({
     z.string(),
     z.object({ path: z.string(), enabled: z.boolean().optional() }),
   ])).default([]),
+
+  /** Remote skill registries (base URL → index.json + files), cached under ~/.nexus/cache/skills/. */
+  skillsUrls: z.array(z.string()).optional(),
 
   tools: z.object({
     custom: z.array(z.string()).default([]),

@@ -234,6 +234,15 @@ For concurrent sub-agents (simpler):
           output: `Tool "${tool.name}" is not read-only and cannot be run via Parallel. Call it directly.`,
         }
       }
+      if (tool.name === "Skill" && ctx.config.permissions.autoApproveSkillLoad === false) {
+        return {
+          recipient_name: use.recipient_name,
+          resolved_name: tool.name,
+          success: false,
+          output:
+            "Skill cannot run inside Parallel when skill load approval is enabled (auto-approve skill load is off). Call Skill directly so the approval prompt can run.",
+        }
+      }
 
       let parsed: unknown
       let normalized: Record<string, unknown> = {}

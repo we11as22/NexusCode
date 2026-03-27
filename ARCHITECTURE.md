@@ -244,7 +244,7 @@ NexusCode/
 - **write:** `Write`, `Edit`
 - **execute:** `Bash`
 - **search:** `Grep`, `CodebaseSearch`, `WebFetch`, `WebSearch`, `Glob`
-- **skills:** `Skill`
+- **skills:** `Skill` — catalog in the tool description (`<available_skills>`) comes from `loadSkills` (local paths, `skillsUrls` remote `index.json` caches, `~/.claude/skills` + walk-up, marketplace installs under `.kilo/skills`, `.nexus/skills`, etc.). Response uses `<skill_content>` + sampled `<skill_files>`. Classifier + **Active Skills** unchanged. `permissions.autoApproveSkillLoad` defaults to **true**; set **false** to require approval. With approval required, `Skill` cannot run inside `Parallel`. **Integrations → Marketplace:** **Skills** use **[SkillNet](http://api-skillnet.openkg.cn)** (install from GitHub links into **`.kilo/skills/<id>`**); **MCP** tab lists the **Kilo** marketplace API (`api.kilo.ai/.../mcps`) for one-click adds to **`.nexus/mcp-servers.json`**. Legacy **`.nexus/skills`** is still detected and removable.
 - **agents:** `SpawnAgent`, `SpawnAgentOutput`, `SpawnAgentStop`
 - **context:** `Condense`
 - **plan_exit tool group:** `PlanExit` (plan mode only)

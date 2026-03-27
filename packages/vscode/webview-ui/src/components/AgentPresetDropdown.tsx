@@ -1,10 +1,9 @@
 import React, { useState, useRef, useEffect } from "react"
 import { createPortal } from "react-dom"
 import { useChatStore } from "../stores/chat.js"
-import { postMessage } from "../vscode.js"
 
 export function AgentPresetDropdown() {
-  const { agentPresets, requestAgentPresets } = useChatStore()
+  const { agentPresets, requestAgentPresets, activePresetName, setActivePresetName } = useChatStore()
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({})
@@ -46,7 +45,7 @@ export function AgentPresetDropdown() {
       <button
         type="button"
         onClick={() => {
-          postMessage({ type: "applyAgentPreset", presetName: "Default" })
+          setActivePresetName("Default")
           setOpen(false)
         }}
         title="Use all skills, MCP servers, and default rules from config"
@@ -67,7 +66,7 @@ export function AgentPresetDropdown() {
             key={preset.name}
             type="button"
             onClick={() => {
-              postMessage({ type: "applyAgentPreset", presetName: preset.name })
+              setActivePresetName(preset.name)
               setOpen(false)
             }}
             title={`${preset.skills.length} skills · ${preset.mcpServers.length} MCP · ${preset.rulesFiles.length} rules`}
@@ -92,7 +91,7 @@ export function AgentPresetDropdown() {
         title="Agent preset (skills + MCP + rules)"
         className="nexus-profile-pill flex items-center gap-1.5"
       >
-        <span className="truncate max-w-[90px]">Preset</span>
+        <span className="truncate max-w-[90px]">{activePresetName || "Preset"}</span>
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="opacity-70 flex-shrink-0">
           <path d="M6 9l6 6 6-6" />
         </svg>

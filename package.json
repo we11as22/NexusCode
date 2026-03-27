@@ -26,6 +26,7 @@
         "dev:core": "pnpm --filter @nexuscode/core dev",
         "dev:cli": "pnpm --filter @nexuscode/cli dev",
         "typecheck": "pnpm -r --stream typecheck",
+        "validate:mcp-skills": "pnpm run build:core && node scripts/validate-mcp-skills-workflow.mjs",
         "clean": "pnpm -r --stream clean && rm -rf node_modules",
         "build:server": "pnpm --filter @nexuscode/server build",
         "rebuild:native": "pnpm rebuild",

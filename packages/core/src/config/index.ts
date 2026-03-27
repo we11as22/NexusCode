@@ -19,6 +19,33 @@ const GLOBAL_CONFIG_PATH = path.join(GLOBAL_CONFIG_DIR, "nexus.yaml")
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 const DEFAULT_FREE_MODELS_BASE_URL = "https://api.kilo.ai/api/openrouter"
 
+function readMcpServersFromJsonFile(filePath: string): Record<string, unknown>[] {
+  try {
+    if (!fs.existsSync(filePath)) return []
+    const mcpData = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown
+    const servers = Array.isArray(mcpData)
+      ? mcpData
+      : (mcpData as { servers?: unknown; mcp?: { servers?: unknown } })?.servers ??
+        (mcpData as { mcp?: { servers?: unknown } })?.mcp?.servers
+    if (!Array.isArray(servers)) return []
+    return servers.filter((s): s is Record<string, unknown> => s !== null && typeof s === "object" && !Array.isArray(s))
+  } catch {
+    return []
+  }
+}
+
+/** Later layers override earlier by `name`. */
+function mergeMcpServerLayers(...layers: Record<string, unknown>[][]): Record<string, unknown>[] {
+  const byName = new Map<string, Record<string, unknown>>()
+  for (const layer of layers) {
+    for (const s of layer) {
+      const name = typeof s.name === "string" ? s.name.trim() : ""
+      if (name) byName.set(name, s)
+    }
+  }
+  return [...byName.values()]
+}
+
 /**
  * Load config by walking up from cwd.
  * Merges project config over global config.
@@ -58,21 +85,19 @@ export async function loadConfig(
   // 3. Merge global + project
   const merged = deepMerge(globalRaw ?? {}, projectRaw ?? {})
 
-  // 3b. If project has .nexus/mcp-servers.json, use it for mcp.servers
-  if (projectDir) {
-    const mcpJsonPath = path.join(projectDir, ".nexus", "mcp-servers.json")
-    if (fs.existsSync(mcpJsonPath)) {
-      try {
-        const mcpContent = fs.readFileSync(mcpJsonPath, "utf8")
-        const mcpData = JSON.parse(mcpContent)
-        const servers = Array.isArray(mcpData) ? mcpData : (mcpData?.servers ?? mcpData?.mcp?.servers)
-        if (Array.isArray(servers) && servers.length > 0) {
-          (merged as Record<string, unknown>).mcp = { ...(merged.mcp as object), servers }
-        }
-      } catch {
-        // ignore
-      }
-    }
+  // 3b. Merge MCP servers: nexus.yaml + ~/.nexus/mcp-servers.json + <project>/.nexus/mcp-servers.json (later wins by name)
+  const yamlMcp = (merged.mcp as { servers?: unknown } | undefined)?.servers
+  const yamlServers = Array.isArray(yamlMcp)
+    ? yamlMcp.filter((s): s is Record<string, unknown> => s !== null && typeof s === "object" && !Array.isArray(s))
+    : []
+  const globalMcpPath = path.join(GLOBAL_CONFIG_DIR, "mcp-servers.json")
+  const globalServers = readMcpServersFromJsonFile(globalMcpPath)
+  const projectMcpPath = projectDir ? path.join(projectDir, ".nexus", "mcp-servers.json") : ""
+  const projectServers = projectMcpPath ? readMcpServersFromJsonFile(projectMcpPath) : []
+  const mergedMcpServers = mergeMcpServerLayers(yamlServers, globalServers, projectServers)
+  if (mergedMcpServers.length > 0) {
+    const prevMcp = (merged.mcp as Record<string, unknown> | undefined) ?? {}
+    ;(merged as Record<string, unknown>).mcp = { ...prevMcp, servers: mergedMcpServers }
   }
 
   // 4. Apply env overrides

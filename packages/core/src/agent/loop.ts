@@ -38,6 +38,7 @@ import {
   isAiSdkInvalidToolArgumentsError,
 } from "./tool-sdk-recovery.js"
 import { getBackgroundBashJobsForPrompt } from "../tools/built-in/execute-command.js"
+import { buildSkillToolDescriptionMerged, useSkillTool } from "../tools/built-in/use-skill.js"
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
@@ -281,6 +282,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const resolvedTools = [...builtinTools, ...resolvedDynamicTools, ...blockedFallbackTools]
   const mcpToolNames = new Set(resolvedDynamicTools.filter(t => t.name.includes("__")).map(t => t.name))
 
+  const skillToolDescription = await buildSkillToolDescriptionMerged(host.cwd, config).catch(() => useSkillTool.description)
+  const resolvedToolsForLlm = resolvedTools.map((t) =>
+    t.name === "Skill" ? { ...t, description: skillToolDescription } : t,
+  )
+
   // Tool context
   const toolCtx: ToolContext = {
     cwd: host.cwd,
@@ -343,7 +349,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
   /** Full system prompt from the last completed loop iteration (for context bar + next iteration's pre-build estimate). */
   let lastBuiltSystemPrompt = ""
-  const toolsDefinitionTokens = estimateToolsDefinitionsTokens(resolvedTools)
+  const toolsDefinitionTokens = estimateToolsDefinitionsTokens(resolvedToolsForLlm)
   const emitContextUsage = (systemPromptText?: string) => {
     const text = systemPromptText ?? lastBuiltSystemPrompt
     const metrics = computeContextUsageMetrics({
@@ -467,7 +473,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     emitContextUsage(systemPrompt)
 
     // 4. Build LLM tool definitions
-    const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedTools).map(t => ({
+    const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedToolsForLlm).map(t => ({
       name: t.name,
       description: t.description,
       parameters: t.parameters,

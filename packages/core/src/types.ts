@@ -212,6 +212,11 @@ export interface SessionMessage {
   ts: number
   role: SessionRole
   content: string | MessagePart[]
+  /**
+   * Optional per-user-message preset name (extension/server may attach).
+   * Used to scope skills + MCP/tool visibility for the run that produced the assistant reply.
+   */
+  presetName?: string
   parentId?: string
   model?: string
   tokens?: { input: number; output: number; cacheRead?: number; cacheWrite?: number }
@@ -444,6 +449,8 @@ export interface NexusConfig {
     autoApproveCommand: boolean
     autoApproveMcp?: boolean
     autoApproveBrowser?: boolean
+    /** Default true: skill loads without approval. Set false for Kilo-style confirmation. */
+    autoApproveSkillLoad?: boolean
     autoApproveReadPatterns: string[]
     /** Commands allowed without approval for this project (from .nexus/allowed-commands.json) */
     allowedCommands: string[]
@@ -478,6 +485,8 @@ export interface NexusConfig {
   /** Normalized list for UI: path + enabled. skills is derived (enabled only). */
   skillsConfig?: Array<{ path: string; enabled: boolean }>
   skills: string[]
+  /** Remote skill index URLs (optional). */
+  skillsUrls?: string[]
   tools: {
     custom: string[]
     classifyToolsEnabled: boolean
@@ -548,8 +557,18 @@ export interface McpServerConfig {
   command?: string
   args?: string[]
   env?: Record<string, string>
+  /** Working directory for stdio MCP server process. */
+  cwd?: string
   url?: string
+  /** Remote transport. `http` = Streamable HTTP (MCP spec). `sse` = legacy SSE+POST. */
   transport?: "stdio" | "http" | "sse"
+  /**
+   * Roo / external configs: `streamable-http` | `sse` | `stdio`.
+   * Used when `transport` is omitted (URL servers default to SSE unless type says streamable-http).
+   */
+  type?: "stdio" | "sse" | "streamable-http" | "http"
+  /** Extra headers for SSE / Streamable HTTP (e.g. Authorization). */
+  headers?: Record<string, string>
   enabled?: boolean
   /** Resolve to a bundled MCP server (e.g. "context-mode") when nexusRoot is set by host */
   bundle?: string
@@ -560,7 +579,7 @@ export interface McpServerConfig {
 export interface SkillDef {
   name: string
   path: string
-  /** First non-empty line as summary */
+  /** Short description (YAML `description` or first heading / line). */
   summary: string
   content: string
 }

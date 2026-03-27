@@ -104,9 +104,18 @@ export type { ContextUsageSnapshot } from "./context/context-usage.js"
 
 // Skills
 export { loadSkills } from "./skills/manager.js"
+export {
+  loadSkillToolCatalogRows,
+  resolveSkillBody,
+  buildSkillToolDynamicDescription,
+  sampleSkillSiblingFiles,
+} from "./skills/skill-tool-catalog.js"
+export type { SkillToolDescriptionRow, ResolvedSkillBody } from "./skills/skill-tool-catalog.js"
+export { fetchSkillUrlRegistryRoots } from "./skills/url-registry.js"
 
 // MCP
 export { McpClient, setMcpClientInstance, testMcpServers } from "./mcp/client.js"
+export { createMcpTransport, effectiveUrlTransport } from "./mcp/transport-factory.js"
 export { resolveBundledMcpServers } from "./mcp/resolve-bundled.js"
 export type { ResolveBundledOptions } from "./mcp/resolve-bundled.js"
 

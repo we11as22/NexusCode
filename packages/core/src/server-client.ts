@@ -97,12 +97,13 @@ export class NexusServerClient {
     sessionId: string,
     content: string,
     mode: Mode,
+    presetName?: string,
     signal?: AbortSignal
   ): AsyncGenerator<AgentEvent> {
     const res = await fetch(this.url(`/session/${sessionId}/message`, { directory: this.directory }), {
       method: "POST",
       headers: this.headers(),
-      body: JSON.stringify({ content, mode }),
+      body: JSON.stringify({ content, mode, presetName }),
       signal,
     })
     if (!res.ok) {

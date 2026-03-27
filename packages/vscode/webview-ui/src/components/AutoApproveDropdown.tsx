@@ -7,6 +7,7 @@ const PERM_KEYS = [
   "autoApproveCommand",
   "autoApproveMcp",
   "autoApproveBrowser",
+  "autoApproveSkillLoad",
 ] as const
 
 type PermKey = (typeof PERM_KEYS)[number]
@@ -17,6 +18,7 @@ const LABELS: Record<PermKey, string> = {
   autoApproveCommand: "Execute",
   autoApproveMcp: "MCP",
   autoApproveBrowser: "Browser",
+  autoApproveSkillLoad: "Skill load",
 }
 
 const DEFAULTS: Record<PermKey, boolean> = {
@@ -25,6 +27,7 @@ const DEFAULTS: Record<PermKey, boolean> = {
   autoApproveCommand: false,
   autoApproveMcp: false,
   autoApproveBrowser: false,
+  autoApproveSkillLoad: true,
 }
 
 export function AutoApproveDropdown() {

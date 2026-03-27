@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { LanguageModelV1 } from 'ai';
+import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 declare function getNexusDataDir(): string;
 declare function getToolOutputDir(): string;
@@ -379,6 +380,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand: z.ZodDefault<z.ZodBoolean>;
         autoApproveMcp: z.ZodDefault<z.ZodBoolean>;
         autoApproveBrowser: z.ZodDefault<z.ZodBoolean>;
+        /** When false, loading a skill via `Skill` shows an approval dialog (Kilo-style). Default true = no prompt. */
+        autoApproveSkillLoad: z.ZodDefault<z.ZodBoolean>;
         autoApproveReadPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
         allowedCommands: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
@@ -414,6 +417,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand: boolean;
         autoApproveMcp: boolean;
         autoApproveBrowser: boolean;
+        autoApproveSkillLoad: boolean;
         autoApproveReadPatterns: string[];
         allowedCommands: string[];
         allowCommandPatterns: string[];
@@ -434,6 +438,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand?: boolean | undefined;
         autoApproveMcp?: boolean | undefined;
         autoApproveBrowser?: boolean | undefined;
+        autoApproveSkillLoad?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
         allowedCommands?: string[] | undefined;
         allowCommandPatterns?: string[] | undefined;
@@ -499,27 +504,36 @@ declare const NexusConfigSchema: z.ZodObject<{
             command: z.ZodOptional<z.ZodString>;
             args: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
             env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+            cwd: z.ZodOptional<z.ZodString>;
             url: z.ZodOptional<z.ZodString>;
             transport: z.ZodOptional<z.ZodEnum<["stdio", "http", "sse"]>>;
+            type: z.ZodOptional<z.ZodEnum<["stdio", "sse", "streamable-http", "http"]>>;
+            headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
             enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
             /** Bundled server id (e.g. "context-mode"); resolved by host to command/args/env */
             bundle: z.ZodOptional<z.ZodString>;
         }, "strip", z.ZodTypeAny, {
             name: string;
             enabled: boolean;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
             command?: string | undefined;
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
+            cwd?: string | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            headers?: Record<string, string> | undefined;
             bundle?: string | undefined;
         }, {
             name: string;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
             command?: string | undefined;
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
+            cwd?: string | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            headers?: Record<string, string> | undefined;
             enabled?: boolean | undefined;
             bundle?: string | undefined;
         }>, "many">>;
@@ -527,21 +541,27 @@ declare const NexusConfigSchema: z.ZodObject<{
         servers: {
             name: string;
             enabled: boolean;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
             command?: string | undefined;
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
+            cwd?: string | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            headers?: Record<string, string> | undefined;
             bundle?: string | undefined;
         }[];
     }, {
         servers?: {
             name: string;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
             command?: string | undefined;
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
+            cwd?: string | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            headers?: Record<string, string> | undefined;
             enabled?: boolean | undefined;
             bundle?: string | undefined;
         }[] | undefined;
@@ -556,6 +576,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         path: string;
         enabled?: boolean | undefined;
     }>]>, "many">>;
+    /** Remote skill registries (base URL → index.json + files), cached under ~/.nexus/cache/skills/. */
+    skillsUrls: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
     tools: z.ZodDefault<z.ZodObject<{
         custom: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
         /** When true, use LLM to filter which MCP servers to use when server count > classifyThreshold. Default off. */
@@ -742,11 +764,14 @@ declare const NexusConfigSchema: z.ZodObject<{
         servers: {
             name: string;
             enabled: boolean;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
             command?: string | undefined;
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
+            cwd?: string | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            headers?: Record<string, string> | undefined;
             bundle?: string | undefined;
         }[];
     };
@@ -803,6 +828,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand: boolean;
         autoApproveMcp: boolean;
         autoApproveBrowser: boolean;
+        autoApproveSkillLoad: boolean;
         autoApproveReadPatterns: string[];
         allowedCommands: string[];
         allowCommandPatterns: string[];
@@ -906,6 +932,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         searchHnswEf?: number | undefined;
         searchExact?: boolean | undefined;
     } | undefined;
+    skillsUrls?: string[] | undefined;
 }, {
     model?: {
         provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
@@ -923,11 +950,14 @@ declare const NexusConfigSchema: z.ZodObject<{
     mcp?: {
         servers?: {
             name: string;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
             command?: string | undefined;
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
+            cwd?: string | undefined;
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
+            headers?: Record<string, string> | undefined;
             enabled?: boolean | undefined;
             bundle?: string | undefined;
         }[] | undefined;
@@ -1050,6 +1080,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         autoApproveCommand?: boolean | undefined;
         autoApproveMcp?: boolean | undefined;
         autoApproveBrowser?: boolean | undefined;
+        autoApproveSkillLoad?: boolean | undefined;
         autoApproveReadPatterns?: string[] | undefined;
         allowedCommands?: string[] | undefined;
         allowCommandPatterns?: string[] | undefined;
@@ -1085,6 +1116,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         path: string;
         enabled?: boolean | undefined;
     })[] | undefined;
+    skillsUrls?: string[] | undefined;
     tools?: {
         custom?: string[] | undefined;
         classifyToolsEnabled?: boolean | undefined;
@@ -1329,6 +1361,11 @@ interface SessionMessage {
     ts: number;
     role: SessionRole;
     content: string | MessagePart[];
+    /**
+     * Optional per-user-message preset name (extension/server may attach).
+     * Used to scope skills + MCP/tool visibility for the run that produced the assistant reply.
+     */
+    presetName?: string;
     parentId?: string;
     model?: string;
     tokens?: {
@@ -1618,6 +1655,8 @@ interface NexusConfig {
         autoApproveCommand: boolean;
         autoApproveMcp?: boolean;
         autoApproveBrowser?: boolean;
+        /** Default true: skill loads without approval. Set false for Kilo-style confirmation. */
+        autoApproveSkillLoad?: boolean;
         autoApproveReadPatterns: string[];
         /** Commands allowed without approval for this project (from .nexus/allowed-commands.json) */
         allowedCommands: string[];
@@ -1655,6 +1694,8 @@ interface NexusConfig {
         enabled: boolean;
     }>;
     skills: string[];
+    /** Remote skill index URLs (optional). */
+    skillsUrls?: string[];
     tools: {
         custom: string[];
         classifyToolsEnabled: boolean;
@@ -1716,8 +1757,18 @@ interface McpServerConfig {
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    /** Working directory for stdio MCP server process. */
+    cwd?: string;
     url?: string;
+    /** Remote transport. `http` = Streamable HTTP (MCP spec). `sse` = legacy SSE+POST. */
     transport?: "stdio" | "http" | "sse";
+    /**
+     * Roo / external configs: `streamable-http` | `sse` | `stdio`.
+     * Used when `transport` is omitted (URL servers default to SSE unless type says streamable-http).
+     */
+    type?: "stdio" | "sse" | "streamable-http" | "http";
+    /** Extra headers for SSE / Streamable HTTP (e.g. Authorization). */
+    headers?: Record<string, string>;
     enabled?: boolean;
     /** Resolve to a bundled MCP server (e.g. "context-mode") when nexusRoot is set by host */
     bundle?: string;
@@ -1725,7 +1776,7 @@ interface McpServerConfig {
 interface SkillDef {
     name: string;
     path: string;
-    /** First non-empty line as summary */
+    /** Short description (YAML `description` or first heading / line). */
     summary: string;
     content: string;
 }
@@ -2096,7 +2147,7 @@ declare class NexusServerClient {
      * Send message and stream AgentEvents as NDJSON. Yields each event (heartbeat lines are skipped).
      * Malformed lines yield an error event. Throws on fetch error.
      */
-    streamMessage(sessionId: string, content: string, mode: Mode, signal?: AbortSignal): AsyncGenerator<AgentEvent>;
+    streamMessage(sessionId: string, content: string, mode: Mode, presetName?: string, signal?: AbortSignal): AsyncGenerator<AgentEvent>;
 }
 /** If no event (including heartbeat) received for this long, consider stream dead. */
 declare const DEFAULT_HEARTBEAT_TIMEOUT_MS = 20000;
@@ -2480,9 +2531,38 @@ declare function computeContextUsageMetrics(opts: {
  *  - A glob pattern like ".nexus/skills/**\/*.md"
  *  - A direct file path like ".nexus/skills/my-skill/SKILL.md"
  *
- * Standard locations are also auto-searched.
+ * Standard locations are also auto-searched (`.nexus`, `.agents`, **Claude** `~/.claude/skills` and walk-up `.claude/skills`,
+ * `.kilo` / `.kilocode` / `.roo` / `.opencode`, walk-up from cwd).
+ *
+ * Optional `skillsUrls`: remote registries (each base URL must serve `index.json` + skill files); cached under `~/.nexus/cache/skills/`.
  */
-declare function loadSkills(skillPaths: string[], cwd: string): Promise<SkillDef[]>;
+declare function loadSkills(skillPaths: string[], cwd: string, skillsUrls?: string[]): Promise<SkillDef[]>;
+
+type SkillToolDescriptionRow = {
+    name: string;
+    description: string;
+    location: string;
+};
+type ResolvedSkillBody = {
+    displayName: string;
+    content: string;
+    skillDir: string;
+};
+/** Rows for the `Skill` tool description (`<available_skills>`), from the same set as `loadSkills`. */
+declare function loadSkillToolCatalogRows(cwd: string, config: NexusConfig): Promise<SkillToolDescriptionRow[]>;
+/**
+ * Resolve skill body from `loadSkills` only (case-insensitive / normalized / partial match).
+ */
+declare function resolveSkillBody(query: string, cwd: string, config: NexusConfig): Promise<ResolvedSkillBody | null>;
+/** Dynamic `Skill` tool description: lists discoverable skills for the LLM. */
+declare function buildSkillToolDynamicDescription(rows: SkillToolDescriptionRow[]): string;
+/** Sample files under the skill directory (paths containing `skill.md` skipped). */
+declare function sampleSkillSiblingFiles(skillDir: string, signal?: AbortSignal): Promise<string[]>;
+
+/**
+ * Download registry from `baseUrl` (append index.json), return directories under cache that contain SKILL.md.
+ */
+declare function fetchSkillUrlRegistryRoots(baseUrl: string): Promise<string[]>;
 
 /**
  * MCP client that connects to MCP servers and exposes their tools.
@@ -2509,6 +2589,17 @@ declare function testMcpServers(configs: McpServerConfig[]): Promise<Array<{
     status: "ok" | "error";
     error?: string;
 }>>;
+
+/**
+ * MCP client transports: stdio, SSE (legacy remote), Streamable HTTP (current spec).
+ */
+
+/** Remote URL transport: explicit `transport`, or Roo-style `type`, else SSE (backward compatible). */
+declare function effectiveUrlTransport(config: McpServerConfig): "http" | "sse";
+/**
+ * Build MCP transport. `bundle` must already be resolved to `command`/`url` by the host.
+ */
+declare function createMcpTransport(config: McpServerConfig): Transport;
 
 interface ResolveBundledOptions {
     /** Project directory (agent cwd); passed as CLAUDE_PROJECT_DIR to bundled servers */
@@ -2661,4 +2752,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type ContextUsageSnapshot, DEFAULT_HEARTBEAT_TIMEOUT_MS, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, Session, type SessionMessage, type SkillDef, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, ensureGlobalConfigDir, ensureQdrantRunning, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getPlanContentForFollowup, getRunLogsDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, runAgentLoop, saveSession, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type ContextUsageSnapshot, DEFAULT_HEARTBEAT_TIMEOUT_MS, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, type ResolvedSkillBody, Session, type SessionMessage, type SkillDef, type SkillToolDescriptionRow, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createMcpTransport, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getPlanContentForFollowup, getRunLogsDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, resolveSkillBody, runAgentLoop, sampleSkillSiblingFiles, saveSession, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

@@ -20,6 +20,7 @@ export interface SessionMessage {
   role: "user" | "assistant" | "system" | "tool"
   content: string | MessagePart[]
   summary?: boolean
+  presetName?: string
 }
 
 export type MessagePart = TextPart | ToolPart | ReasoningPart
@@ -109,6 +110,8 @@ export interface NexusConfigState {
   /** For UI: path + enabled. skills is derived (enabled only). */
   skillsConfig?: Array<{ path: string; enabled: boolean }>
   skills: string[]
+  /** Remote skill registry base URLs (optional). */
+  skillsUrls?: string[]
   rules: {
     files: string[]
   }
@@ -126,6 +129,7 @@ export interface NexusConfigState {
     autoApproveCommand: boolean
     autoApproveMcp?: boolean
     autoApproveBrowser?: boolean
+    autoApproveSkillLoad?: boolean
     autoApproveReadPatterns?: string[]
     allowedCommands?: string[]
     allowCommandPatterns?: string[]
@@ -348,6 +352,10 @@ interface ChatState {
   requestAgentPresets: () => void
   handleAgentPresets: (presets: AgentPresetFromCore[]) => void
 
+  /** Active preset for the next user message (does NOT modify saved config). */
+  activePresetName: string
+  setActivePresetName: (name: string) => void
+
   /** Options for creating a preset (skills, MCP, rules) — loaded when opening create modal. */
   agentPresetOptions: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } | null
   requestAgentPresetOptions: () => void
@@ -363,11 +371,11 @@ interface ChatState {
   /** When opening Settings from a slash command, open this tab (cleared after applied). */
   initialSettingsTab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets" | null
   /** When opening Settings → Integrations, open this sub-tab (cleared after applied). */
-  initialSettingsIntegTab: "rules-skills" | "mcp" | "rules-instructions" | null
+  initialSettingsIntegTab: "marketplace" | "rules-skills" | "mcp" | "rules-instructions" | null
   clearInitialSettingsTab: () => void
 
   // Actions
-  setView: (view: AppView, options?: { settingsTab?: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"; settingsIntegTab?: "rules-skills" | "mcp" | "rules-instructions" }) => void
+  setView: (view: AppView, options?: { settingsTab?: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"; settingsIntegTab?: "marketplace" | "rules-skills" | "mcp" | "rules-instructions" }) => void
   setInputValue: (v: string) => void
   appendToInput: (v: string) => void
   addAttachedImage: (data: string, mimeType: string) => void
@@ -505,6 +513,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ agentPresets: presets })
   },
 
+  activePresetName: "Default",
+  setActivePresetName: (name: string) => {
+    const trimmed = (name ?? "").trim() || "Default"
+    set({ activePresetName: trimmed })
+    postMessage({ type: "setChatPreset", presetName: trimmed })
+  },
+
   agentPresetOptions: null,
   requestAgentPresetOptions: () => {
     postMessage({ type: "getAgentPresetOptions" })
@@ -593,7 +608,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendMessage: (content, options) => {
-    const { mode, isRunning, attachedImages, compact } = get()
+    const { mode, isRunning, attachedImages, compact, activePresetName } = get()
     if (isRunning) return
     const text = (typeof content === "string" ? content : "").trim()
     if (!text) return
@@ -618,6 +633,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ts: Date.now(),
           role: "user",
           content: displayText || text,
+          presetName: activePresetName,
         },
       ],
     }))
@@ -626,6 +642,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       content: runContent,
       mode: runMode,
       images: attachedImages.length > 0 ? attachedImages.map((img) => ({ data: img.data, mimeType: img.mimeType })) : undefined,
+      presetName: activePresetName,
     })
   },
 

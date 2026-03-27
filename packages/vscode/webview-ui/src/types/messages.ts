@@ -1,4 +1,5 @@
 import type { IndexStatusKind, Mode, NexusConfigState, SessionMessage } from "../stores/chat.js"
+import type { MarketplaceItem, MarketplaceInstalledMetadata } from "./marketplace.js"
 
 /** Same shape as @nexuscode/core ModelsCatalog (used by extension host) */
 export interface ModelsCatalogFromCore {
@@ -58,6 +59,8 @@ export interface WebviewState {
     customOptionLabel?: string
     questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }>
   } | null
+  /** Active preset name for chat (per-message). */
+  activePresetName?: string
 }
 
 export type ExtensionMessage =
@@ -68,7 +71,7 @@ export type ExtensionMessage =
   | { type: "indexStatus"; status: IndexStatusKind }
   | { type: "configLoaded"; config: NexusConfigState }
   | { type: "addToChatContent"; content: string }
-  | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings"; settingsTab?: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"; settingsIntegTab?: "rules-skills" | "mcp" | "rules-instructions" }
+  | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings"; settingsTab?: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"; settingsIntegTab?: "marketplace" | "rules-skills" | "mcp" | "rules-instructions" }
   | { type: "mcpServerStatus"; results: Array<{ name: string; status: "ok" | "error"; error?: string }> }
   | { type: "pendingApproval"; partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } }
   | { type: "confirmResult"; id: string; ok: boolean }
@@ -76,3 +79,12 @@ export type ExtensionMessage =
   | { type: "agentPresets"; presets: AgentPresetFromCore[] }
   | { type: "agentPresetOptions"; options: { skills: string[]; mcpServers: string[]; rulesFiles: string[] } }
   | { type: "skillDefinitions"; definitions: Array<{ name: string; path: string; summary: string }> }
+  | {
+      type: "marketplaceData"
+      marketplaceItems: MarketplaceItem[]
+      marketplaceInstalledMetadata: MarketplaceInstalledMetadata
+      errors?: string[]
+      skillSearchMeta?: { query: string; mode: string; total: number; limit: number; page: number }
+    }
+  | { type: "marketplaceInstallResult"; slug: string; success: boolean; error?: string }
+  | { type: "marketplaceRemoveResult"; slug: string; success: boolean; error?: string }

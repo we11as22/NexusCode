@@ -295,7 +295,7 @@ export async function bootstrapNexus(opts: {
   toolRegistry.register(createSpawnAgentStopTool(parallelManager))
 
   const rulesContent = await loadRules(cwd, config.rules.files).catch(() => '')
-  const skills = await loadSkills(config.skills, cwd).catch(() => [])
+  const skills = await loadSkills(config.skills, cwd, config.skillsUrls).catch(() => [])
 
   let session: Session
   if (continueFlag) {

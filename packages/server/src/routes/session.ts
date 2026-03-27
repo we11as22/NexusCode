@@ -103,8 +103,9 @@ sessionRoutes.post("/:id/message", async (c) => {
   }
   if (!sessionMeta) return c.json({ error: "Session not found" }, 404)
 
-  const body = (await c.req.json().catch(() => ({}))) as { content?: string; mode?: Mode }
+  const body = (await c.req.json().catch(() => ({}))) as { content?: string; mode?: Mode; presetName?: string }
   const content = typeof body.content === "string" ? body.content : ""
+  const presetName = typeof body.presetName === "string" ? body.presetName.trim() : ""
   const mode: Mode =
     body.mode === "plan" ||
     body.mode === "ask" ||
@@ -154,6 +155,7 @@ sessionRoutes.post("/:id/message", async (c) => {
         cwd,
         content,
         mode,
+        configOverride: presetName ? { presetName } : undefined,
         onEvent: write,
         signal: abortController.signal,
       })
