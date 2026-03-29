@@ -8,7 +8,8 @@
   --nexus-accent: #0078d4;
   --nexus-accent-hover: #106ebe;
   --nexus-accent-muted: rgba(0, 120, 212, 0.15);
-  --nexus-content-inset: 8px;
+  /* Horizontal inset for assistant “cards” (bash, tools, diffs, code) — symmetric in the chat column */
+  --nexus-content-inset: 12px;
   /* Slightly darker than VSCode sidebar for extension/chat area */
   --nexus-panel-bg: color-mix(in srgb, var(--vscode-sideBar-background, #1a1a1a) 88%, #000 12%);
   --nexus-chat-bg: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 92%, #000 8%);
@@ -260,12 +261,43 @@ html, body, #root {
   margin: 8px 0;
 }
 
+/* Single readiness bar: neutral track (gray), green fill — core overallPercent (Roo-style phase ratio) */
+.nexus-index-readiness-track {
+  height: 10px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--vscode-descriptionForeground) 18%, var(--vscode-editor-background));
+  overflow: hidden;
+  border: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-index-readiness-track.h-2 {
+  height: 8px;
+  border-radius: 4px;
+}
+
+.nexus-index-readiness-fill {
+  height: 100%;
+  min-width: 0;
+  background: var(--vscode-charts-green, #3fb950);
+  transition: width 0.22s ease;
+}
+
 .nexus-index-progress-bar {
   height: 8px;
   border-radius: 4px;
   background: var(--vscode-progressBar-background);
   overflow: hidden;
   margin: 8px 0;
+}
+
+/* Legacy — kept if referenced elsewhere */
+.nexus-index-progress-bar-overall {
+  height: 10px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--vscode-progressBar-background) 85%, transparent);
+  overflow: hidden;
+  margin: 6px 0 10px;
+  border: 1px solid var(--vscode-panel-border);
 }
 
 .nexus-index-progress-fill {
@@ -1263,22 +1295,47 @@ html, body, #root {
 /* Constrains subagent cards to the padded message column (avoids flush-right vs scrollbar). */
 .nexus-subagent-inline-outer {
   min-width: 0;
-  max-width: 100%;
   box-sizing: border-box;
-  /* Keep the same breathing room on both sides inside message column. */
-  padding-inline: var(--nexus-content-inset);
 }
 
-/* Uniform left/right inset for all top-level assistant display blocks. */
+/*
+ * Centered column: equal left/right gutter (margin auto + width calc) inside the message list.
+ * Use .nexus-chat-column-frame with .nexus-file-edit-block for standalone file/diff rows only.
+ */
 .nexus-tool-call-card,
 .nexus-explored-block,
 .nexus-thought-block,
 .nexus-thought-inline-block,
-.nexus-reasoning-block {
-  margin-inline: var(--nexus-content-inset);
+.nexus-reasoning-block,
+.nexus-bash-command-block,
+.nexus-markdown-code-frame,
+.nexus-markdown-table-wrap,
+.nexus-chat-chart-frame,
+.nexus-subagent-inline-outer {
+  margin-left: auto;
+  margin-right: auto;
   width: calc(100% - (var(--nexus-content-inset) * 2));
   max-width: calc(100% - (var(--nexus-content-inset) * 2));
+  min-width: 0;
   box-sizing: border-box;
+}
+
+/* Inline file edit in the timeline (not nested inside a tool card). */
+.nexus-file-edit-block.nexus-chat-column-frame {
+  margin-left: auto;
+  margin-right: auto;
+  width: calc(100% - (var(--nexus-content-inset) * 2));
+  max-width: calc(100% - (var(--nexus-content-inset) * 2));
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+/* Expanded preview inside a tool card: fill the card width (do not double-apply column frame). */
+.nexus-tool-call-card .nexus-file-edit-block {
+  width: 100%;
+  max-width: 100%;
+  margin-left: 0;
+  margin-right: 0;
 }
 
 .nexus-subtask-stack {
@@ -2094,8 +2151,6 @@ html, body, #root {
   background: var(--vscode-editor-background);
   overflow: hidden;
   margin: 6px 0 0;
-  width: 100%;
-  max-width: 100%;
   box-sizing: border-box;
 }
 
@@ -2363,8 +2418,34 @@ html, body, #root {
   scrollbar-gutter: stable;
 }
 
+/*
+ * react-virtuoso (≤4.x): inner viewport uses inline style
+ *   { position: "absolute", top: 0, width: "100%", height: "100%" }
+ * without left/right. Percentage width against a scroll container is resolved in a way
+ * that often ignores the vertical scrollbar gutter, so list content extends under the
+ * scrollbar and rounded cards look flush against the extension’s right edge while the
+ * left still shows padding. Pin both horizontal edges and let width follow.
+ */
+.nexus-message-list-scroller[data-virtuoso-scroller] [data-viewport-type="element"] {
+  left: 0 !important;
+  right: 0 !important;
+  width: auto !important;
+  max-width: none;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  min-width: 0;
+}
+
+/* List column must not expand past the viewport (long file paths / pre output). */
+.nexus-message-list-scroller[data-virtuoso-scroller] [data-test-id="virtuoso-item-list"],
+.nexus-message-list-scroller[data-virtuoso-scroller] [data-test-id="virtuoso-top-item-list"] {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  box-sizing: border-box;
+}
+
 .message-list-virtuoso-inner {
-  padding: 12px 16px;
+  padding: 12px 20px;
   background: var(--nexus-chat-bg);
   max-width: 100%;
   overflow-x: hidden;
@@ -2401,7 +2482,7 @@ html, body, #root {
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 12px 16px;
+  padding: 12px 20px;
   background: var(--nexus-chat-bg);
 }
 

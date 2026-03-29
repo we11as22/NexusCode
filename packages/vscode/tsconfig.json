@@ -12,5 +12,13 @@
     "types": ["node"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "webview-ui"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "webview-ui",
+    "src/services/autocomplete/**/*.test.ts",
+    "src/services/autocomplete/continuedev/core/test",
+    "src/services/autocomplete/continuedev/**/test/**",
+    "src/services/autocomplete/**/testUtils.ts"
+  ]
 }

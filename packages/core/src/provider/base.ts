@@ -5,7 +5,12 @@ import type {
   LLMStreamEvent,
   StreamOptions,
   GenerateOptions,
+  ReasoningHistoryMode,
 } from "./types.js"
+import {
+  normalizeReasoningHistoryForSdkMessages,
+  resolveInterleavedReasoningField,
+} from "./reasoning-history-normalize.js"
 import { generateStructuredWithFallback, supportsStructuredOutput } from "./structured-output.js"
 
 const DEFAULT_MAX_RETRIES = 3
@@ -48,7 +53,12 @@ export class BaseLLMClient implements LLMClient {
         )
       : undefined
 
-    const messages = buildAISDKMessages(opts.messages, this.providerName)
+    const messages = buildAISDKMessages(
+      opts.messages,
+      this.providerName,
+      this.modelId,
+      opts.reasoningHistoryMode ?? "auto",
+    )
 
     let attempt = 0
     const maxAttempts = opts.maxRetries ?? DEFAULT_MAX_RETRIES
@@ -888,7 +898,9 @@ function findReasoningStringDeep(
 
 function buildAISDKMessages(
   messages: StreamOptions["messages"],
-  providerName: string
+  providerName: string,
+  modelId: string,
+  reasoningHistoryMode: ReasoningHistoryMode,
 ): Parameters<typeof streamText>[0]["messages"] {
   const result: Parameters<typeof streamText>[0]["messages"] = []
 
@@ -927,6 +939,9 @@ function buildAISDKMessages(
         case "text":
           parts.push({ type: "text", text: part.text })
           break
+        case "reasoning":
+          parts.push({ type: "reasoning", text: part.text })
+          break
         case "image":
           parts.push({ type: "image", image: part.data, mimeType: part.mimeType })
           break
@@ -954,11 +969,23 @@ function buildAISDKMessages(
     }
   }
 
+  const interleavedField = resolveInterleavedReasoningField(reasoningHistoryMode, modelId)
+  normalizeReasoningHistoryForSdkMessages(result as Record<string, unknown>[], {
+    anthropicPipeline: isAnthropicLikeMessagesPipeline(providerName),
+    interleavedField,
+  })
+
   if (supportsPromptCacheHints(providerName)) {
     addPromptCacheBreakpoints(result)
   }
 
   return result
+}
+
+/** Strip empty text/reasoning parts from array content (Claude / Bedrock). */
+function isAnthropicLikeMessagesPipeline(providerName: string): boolean {
+  const p = providerName.toLowerCase()
+  return p === "anthropic" || p === "bedrock"
 }
 
 function supportsPromptCacheHints(providerName: string): boolean {

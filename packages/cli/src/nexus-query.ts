@@ -31,8 +31,8 @@ import type { Message as APIAssistantMessage } from '@anthropic-ai/sdk/resources
 import type { ApprovalAction } from '@nexuscode/core'
 
 export type NexusApprovalMessage = { type: 'nexus_approval'; action: ApprovalAction; partId: string }
-/** Shown above input (e.g. "Compacting conversation..."). text empty clears. */
-export type NexusBannerMessage = { type: 'nexus_banner'; text: string }
+/** Shown above input (e.g. Compacting…). text empty clears. clearAfterMs auto-clears success lines. */
+export type NexusBannerMessage = { type: 'nexus_banner'; text: string; clearAfterMs?: number }
 /** Todo list update from agent (TodoWrite tool). Rendered above input, below progress. */
 export type NexusTodoMessage = { type: 'nexus_todo'; todo: string }
 export type NexusQuestionMessage = { type: 'nexus_question'; request: UserQuestionRequest }
@@ -346,11 +346,15 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         continue
       }
       if (event.type === 'compaction_start') {
-        yield { type: 'nexus_banner', text: 'Compacting conversation…' }
+        yield { type: 'nexus_banner', text: 'Compacting…' }
         continue
       }
       if (event.type === 'compaction_end') {
-        yield { type: 'nexus_banner', text: '' }
+        yield {
+          type: 'nexus_banner',
+          text: '● Conversation compacted. Summary was added to session context.',
+          clearAfterMs: 4500,
+        }
         continue
       }
       if (event.type === 'doom_loop_detected') {
@@ -427,6 +431,13 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         // parent spawn tool_end; they fall back to lastSpawnAgentPartId when parentPartId is absent.
         if (shouldHideSubagentToolDisplay(event.tool)) continue
         const toolResultText = event.output ?? (event.error ?? '')
+        const mergedMetadata: Record<string, unknown> =
+          event.metadata && typeof event.metadata === "object" && !Array.isArray(event.metadata)
+            ? { ...(event.metadata as Record<string, unknown>) }
+            : {}
+        if (Array.isArray(event.appliedReplacements) && event.appliedReplacements.length > 0) {
+          mergedMetadata.appliedReplacements = event.appliedReplacements
+        }
         const toolResultData = {
           tool: event.tool,
           output: toolResultText,
@@ -435,7 +446,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           diffHunks: event.diffHunks,
           compacted: event.compacted,
           writtenContent: event.writtenContent,
-          metadata: event.metadata,
+          metadata: Object.keys(mergedMetadata).length > 0 ? mergedMetadata : event.metadata,
           success: event.success,
         }
         const userMsg = createUserMessage([

@@ -7,6 +7,15 @@ import { isNexusPlansPath } from "../plan-paths.js"
 
 const MAX_DIFF_PREVIEW_LINES = 80
 
+/** CLI: show the model’s replace intent, not a recomputed whole-file line diff. */
+const MAX_APPLIED_SNIPPET_CHARS = 900
+
+function truncateForUiSnippet(s: string, max = MAX_APPLIED_SNIPPET_CHARS): string {
+  const t = s.replace(/\r\n/g, "\n")
+  if (t.length <= max) return t
+  return `${t.slice(0, max - 1)}…`
+}
+
 /** Normalize to LF for comparison; avoids Edit failing when the model uses \\n but the file is CRLF. */
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -46,9 +55,24 @@ function createDiffPreview(oldContent: string, newContent: string, label: string
 
 const schema = z.object({
   file_path: z.string().min(1).describe("The absolute path to the file to modify"),
-  old_string: z.string().min(1).describe("The text to replace"),
-  new_string: z.string().describe("The text to replace it with (must be different from old_string)"),
+  old_string: z.string().min(1).optional().describe("The text to replace"),
+  new_string: z.string().optional().describe("The text to replace it with (must be different from old_string)"),
   replace_all: z.boolean().optional().describe("Replace all occurrences of old_string (default false)"),
+  blocks: z.array(z.object({
+    old_string: z.string().min(1),
+    new_string: z.string(),
+    replace_all: z.boolean().optional(),
+  })).optional().describe("Optional batched replacements for one Edit call. Applied in order, each block uses the current file content after previous blocks."),
+}).superRefine((value, ctx) => {
+  const hasSingle = typeof value.old_string === "string" && typeof value.new_string === "string"
+  const hasBlocks = Array.isArray(value.blocks) && value.blocks.length > 0
+  if (!hasSingle && !hasBlocks) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Provide either old_string/new_string or non-empty blocks.",
+      path: ["old_string"],
+    })
+  }
 })
 
 export const editTool: ToolDef<z.infer<typeof schema>> = {
@@ -61,11 +85,13 @@ Usage:
 - ALWAYS prefer editing existing files. NEVER create new files unless explicitly required.
 - Only use emojis if the user explicitly requests them.
 - The edit will FAIL if old_string is not unique in the file. Either provide a larger string with more surrounding context to make it unique, or use replace_all to change every occurrence.
-- Use replace_all for replacing and renaming strings across the entire file (e.g. renaming a variable).`,
+- Use replace_all for replacing and renaming strings across the entire file (e.g. renaming a variable).
+- For multiple changes in the same file, prefer ONE Edit call with \`blocks\` (applied in order) instead of many sequential Edit calls.
+- If you need multiple changes in the same file, do not make many tiny Edit calls. Re-read once and apply remaining changes with one larger old_string/new_string replacement when feasible.`,
   parameters: schema,
   requiresApproval: true,
 
-  async execute({ file_path, old_string, new_string, replace_all }, ctx: ToolContext) {
+  async execute({ file_path, old_string, new_string, replace_all, blocks }, ctx: ToolContext) {
     const filePath = file_path
     let originalContent: string
     try {
@@ -74,36 +100,45 @@ Usage:
       return { success: false, output: `File not found: ${filePath}` }
     }
 
-    const { oldPrepared, newPrepared } = prepareEditStrings(
-      originalContent,
-      old_string,
-      new_string,
-    )
-    if (oldPrepared === newPrepared) {
-      return {
-        success: false,
-        output: `'old_string' and 'new_string' are identical after normalizing line endings; nothing to change in ${filePath}.`,
-      }
-    }
+    const editBlocks =
+      Array.isArray(blocks) && blocks.length > 0
+        ? blocks
+        : [{ old_string: old_string ?? "", new_string: new_string ?? "", replace_all }]
 
-    let content: string
-    if (replace_all) {
-      content = originalContent.split(oldPrepared).join(newPrepared)
-      if (content === originalContent) {
-        return { success: false, output: `No occurrences of old_string found in ${filePath}.` }
-      }
-    } else {
-      const idx = originalContent.indexOf(oldPrepared)
-      if (idx === -1) {
+    let content = originalContent
+    for (let i = 0; i < editBlocks.length; i++) {
+      const block = editBlocks[i]!
+      const { oldPrepared, newPrepared } = prepareEditStrings(
+        content,
+        block.old_string,
+        block.new_string,
+      )
+      if (oldPrepared === newPrepared) {
         return {
           success: false,
-          output: `old_string not found in ${filePath}.\nHint: Read the file first to verify the exact content (whitespace, quotes, and line endings must match; try Read again if the file changed).`,
+          output: `Edit block #${i + 1}: old_string and new_string are identical after normalizing line endings; nothing to change in ${filePath}.`,
         }
       }
-      content =
-        originalContent.slice(0, idx) +
-        newPrepared +
-        originalContent.slice(idx + oldPrepared.length)
+
+      if (block.replace_all) {
+        const next = content.split(oldPrepared).join(newPrepared)
+        if (next === content) {
+          return { success: false, output: `Edit block #${i + 1}: no occurrences of old_string found in ${filePath}.` }
+        }
+        content = next
+      } else {
+        const idx = content.indexOf(oldPrepared)
+        if (idx === -1) {
+          return {
+            success: false,
+            output: `Edit block #${i + 1}: old_string not found in ${filePath}.\nHint: Read the file first to verify the exact content (whitespace, quotes, and line endings must match; try Read again if the file changed).`,
+          }
+        }
+        content =
+          content.slice(0, idx) +
+          newPrepared +
+          content.slice(idx + oldPrepared.length)
+      }
     }
 
     const changesForStats = diff.diffLines(originalContent, content)
@@ -183,10 +218,20 @@ Usage:
     }
 
     const diffHunks = buildDiffHunks(originalContent, content)
+    const appliedReplacements = editBlocks.map((b) => ({
+      oldSnippet: truncateForUiSnippet(b.old_string),
+      newSnippet: truncateForUiSnippet(b.new_string),
+    }))
     return {
       success: true,
       output: `Successfully updated ${filePath}\n\n<updated_content>\n${content}\n</updated_content>`,
-      metadata: { addedLines, removedLines, diffHunks, writtenContent: content },
+      metadata: {
+        addedLines,
+        removedLines,
+        diffHunks,
+        writtenContent: content,
+        appliedReplacements,
+      },
     }
   },
 }

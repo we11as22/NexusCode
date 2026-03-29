@@ -24,20 +24,10 @@ export class InstallationDetector {
     return { project, global }
   }
 
-  /** Kilo-style `.kilo/skills` first; merge legacy `.nexus/skills` so older installs still show. */
   private async mergedSkillEntries(scope: "project" | "global", workspace?: string): Promise<Entry[]> {
-    const bases =
-      scope === "project" && workspace
-        ? [this.paths.skillsDir("project", workspace), this.paths.legacySkillsDir("project", workspace)]
-        : [this.paths.skillsDir("global"), this.paths.legacySkillsDir("global")]
-    const map = new Map<string, Entry>()
-    for (const base of bases) {
-      for (const e of await this.skillDirEntries(base)) {
-        const id = e[0]
-        if (!map.has(id)) map.set(id, e)
-      }
-    }
-    return [...map.values()]
+    const base =
+      scope === "project" && workspace ? this.paths.skillsDir("project", workspace) : this.paths.skillsDir("global")
+    return await this.skillDirEntries(base)
   }
 
   private async mcpEntriesFromFile(filepath: string): Promise<Entry[]> {

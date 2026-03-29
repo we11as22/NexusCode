@@ -99,23 +99,21 @@ export class MarketplaceInstaller {
       return { success: false, slug: item.id, error: "No workspace directory for project-scope install" }
     }
 
-    const kiloBase = this.paths.skillsDir(scope, workspace)
-    const dir = path.join(kiloBase, item.id)
-    if (!path.resolve(dir).startsWith(path.resolve(kiloBase))) {
+    const skillsBase = this.paths.skillsDir(scope, workspace)
+    const dir = path.join(skillsBase, item.id)
+    if (!path.resolve(dir).startsWith(path.resolve(skillsBase))) {
       return { success: false, slug: item.id, error: "Invalid skill id" }
     }
 
-    for (const base of [kiloBase, this.paths.legacySkillsDir(scope, workspace)]) {
-      const existing = path.join(base, item.id)
-      try {
-        await fs.access(existing)
-        return { success: false, slug: item.id, error: "Skill already installed. Remove it before installing again." }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
-      }
+    const existing = path.join(skillsBase, item.id)
+    try {
+      await fs.access(existing)
+      return { success: false, slug: item.id, error: "Skill already installed. Remove it before installing again." }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
     }
 
-    const base = kiloBase
+    const base = skillsBase
     const stamp = Date.now()
     const tarball = path.join(os.tmpdir(), `nexus-skill-${item.id}-${stamp}.tar.gz`)
     await fs.mkdir(base, { recursive: true })
@@ -185,23 +183,21 @@ export class MarketplaceInstaller {
       return { success: false, slug: item.id, error: "No workspace directory for project-scope install" }
     }
 
-    const kiloBase = this.paths.skillsDir(scope, workspace)
-    const dir = path.join(kiloBase, item.id)
-    if (!path.resolve(dir).startsWith(path.resolve(kiloBase))) {
+    const skillsBase = this.paths.skillsDir(scope, workspace)
+    const dir = path.join(skillsBase, item.id)
+    if (!path.resolve(dir).startsWith(path.resolve(skillsBase))) {
       return { success: false, slug: item.id, error: "Invalid skill id" }
     }
 
-    for (const base of [kiloBase, this.paths.legacySkillsDir(scope, workspace)]) {
-      const existing = path.join(base, item.id)
-      try {
-        await fs.access(existing)
-        return { success: false, slug: item.id, error: "Skill already installed. Remove it before installing again." }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
-      }
+    const existingGh = path.join(skillsBase, item.id)
+    try {
+      await fs.access(existingGh)
+      return { success: false, slug: item.id, error: "Skill already installed. Remove it before installing again." }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
     }
 
-    await fs.mkdir(kiloBase, { recursive: true })
+    await fs.mkdir(skillsBase, { recursive: true })
 
     try {
       await extractGithubSkillFromBlobUrl(url, dir)
@@ -239,21 +235,19 @@ export class MarketplaceInstaller {
     if (!isSafeId(item.id)) {
       return { success: false, slug: item.id, error: "Invalid skill id" }
     }
-    const bases = [this.paths.skillsDir(scope, workspace), this.paths.legacySkillsDir(scope, workspace)]
+    const base = this.paths.skillsDir(scope, workspace)
+    const dir = path.join(base, item.id)
+    if (!path.resolve(dir).startsWith(path.resolve(base))) {
+      return { success: false, slug: item.id, error: "Invalid skill id" }
+    }
     let removed = false
     let lastErr: unknown
-    for (const base of bases) {
-      const dir = path.join(base, item.id)
-      if (!path.resolve(dir).startsWith(path.resolve(base))) {
-        return { success: false, slug: item.id, error: "Invalid skill id" }
-      }
-      try {
-        await fs.access(dir)
-        await fs.rm(dir, { recursive: true })
-        removed = true
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") lastErr = err
-      }
+    try {
+      await fs.access(dir)
+      await fs.rm(dir, { recursive: true })
+      removed = true
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") lastErr = err
     }
     if (removed) return { success: true, slug: item.id }
     if (lastErr) return { success: false, slug: item.id, error: String(lastErr) }

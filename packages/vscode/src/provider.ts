@@ -1,7 +1,10 @@
 import * as vscode from "vscode"
+import * as path from "node:path"
 import * as crypto from "crypto"
 import * as fs from "node:fs"
+import { setIndexTelemetrySink } from "@nexuscode/core"
 import { Controller, type WebviewMessage, type ExtensionMessage } from "./controller.js"
+import { registerAutocompleteProvider } from "./services/autocomplete/index.js"
 
 /**
  * VS Code WebviewView provider for NexusCode.
@@ -21,7 +24,14 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.writeDebugFileLog("NexusProvider.constructor")
+    setIndexTelemetrySink((event, payload) => {
+      this.output.appendLine(`[nexus:index:${event}] ${JSON.stringify(payload ?? {})}`)
+    })
     this.controller = new Controller(context, (msg) => this.postMessage(msg))
+    const autocompleteManager = registerAutocompleteProvider(context, () => this.controller.getConfig())
+    this.controller.setAutocompleteConfigReady(() => {
+      void autocompleteManager.load()
+    })
   }
 
   async resolveWebviewView(
@@ -271,6 +281,42 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     await this.controller.clearIndex()
   }
 
+  async fullRebuildIndex(): Promise<void> {
+    await this.controller.fullRebuildIndex()
+  }
+
+  /** Explorer context: remove index data for this folder/file prefix only (one shared collection per workspace). */
+  async deleteIndexForResource(uri: vscode.Uri): Promise<void> {
+    const cwd = this.controller.getCwd()
+    const rel = path.relative(cwd, uri.fsPath).replace(/\\/g, "/")
+    if (rel.startsWith("..")) {
+      void vscode.window.showErrorMessage("NexusCode: That path is outside the active workspace folder for indexing.")
+      return
+    }
+    if (!rel || rel === ".") {
+      const pick = await vscode.window.showWarningMessage(
+        "Delete the entire NexusCode index for this workspace (tracker + vector collection)? Nothing will be rebuilt automatically.",
+        { modal: true },
+        "Delete all",
+        "Cancel",
+      )
+      if (pick !== "Delete all") return
+      await this.controller.clearIndex()
+      void vscode.window.showInformationMessage("NexusCode: Workspace index removed.")
+      return
+    }
+    const label = rel.endsWith("/") ? rel.slice(0, -1) : rel
+    const pick = await vscode.window.showWarningMessage(
+      `Remove NexusCode index entries under “${label}” only? Other paths stay indexed.`,
+      { modal: true },
+      "Delete scoped",
+      "Cancel",
+    )
+    if (pick !== "Delete scoped") return
+    await this.controller.deleteIndexScope(rel)
+    void vscode.window.showInformationMessage(`NexusCode: Index data removed under “${label}”.`)
+  }
+
   private getCwd(): string {
     return this.controller.getCwd()
   }
@@ -380,6 +426,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
    * Dispose all resources. Called when extension is deactivated.
    */
   dispose(): void {
+    setIndexTelemetrySink(undefined)
     this.controller.dispose()
     this.panel?.dispose()
     this.panel = undefined

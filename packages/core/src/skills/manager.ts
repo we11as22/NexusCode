@@ -13,8 +13,7 @@ import type { SkillDef } from "../types.js"
  *  - A glob pattern like ".nexus/skills/**\/*.md"
  *  - A direct file path like ".nexus/skills/my-skill/SKILL.md"
  *
- * Standard locations are also auto-searched (`.nexus`, `.agents`, **Claude** `~/.claude/skills` and walk-up `.claude/skills`,
- * `.kilo` / `.kilocode` / `.roo` / `.opencode`, walk-up from cwd).
+ * Standard locations are also auto-searched: **`~/.nexus/skills`** and **walk-up** from `cwd` for each ancestor’s **`.nexus/skills`** (monorepos / nested roots).
  *
  * Optional `skillsUrls`: remote registries (each base URL must serve `index.json` + skill files); cached under `~/.nexus/cache/skills/`.
  */
@@ -24,13 +23,10 @@ export async function loadSkills(skillPaths: string[], cwd: string, skillsUrls?:
 
   const configPaths = skillPaths.map(p => (path.isAbsolute(p) ? p : path.resolve(cwd, p)))
 
+  const home = os.homedir()
   const standardGlobs = [
-    path.join(cwd, ".nexus", "skills", "**", "SKILL.md"),
-    path.join(cwd, ".nexus", "skills", "**", "*.md"),
-    path.join(cwd, ".agents", "skills", "**", "*.md"),
-    path.join(os.homedir(), ".nexus", "skills", "**", "SKILL.md"),
-    path.join(os.homedir(), ".nexus", "skills", "**", "*.md"),
-    path.join(os.homedir(), ".agents", "skills", "**", "*.md"),
+    path.join(home, ".nexus", "skills", "**", "SKILL.md"),
+    path.join(home, ".nexus", "skills", "**", "*.md"),
   ]
 
   for (const cfgPath of configPaths) {
@@ -41,11 +37,7 @@ export async function loadSkills(skillPaths: string[], cwd: string, skillsUrls?:
     await globAndLoadSkills(pattern, seen, skills, cwd)
   }
 
-  for (const pattern of homeCompatSkillGlobs()) {
-    await globAndLoadSkills(pattern, seen, skills, cwd)
-  }
-
-  for (const pattern of await walkupCompatSkillPatterns(cwd)) {
+  for (const pattern of await walkupNexusSkillPatterns(cwd)) {
     await globAndLoadSkills(pattern, seen, skills, cwd)
   }
 
@@ -92,46 +84,26 @@ async function globAndLoadSkills(
   }
 }
 
-/** ~/.claude/skills, ~/.kilo/skills, ~/.roo/skills, ~/.opencode/skill, etc. */
-function homeCompatSkillGlobs(): string[] {
-  const home = os.homedir()
-  const pairs = [
-    [".claude", "skills"],
-    [".kilo", "skills"],
-    [".kilocode", "skills"],
-    [".roo", "skills"],
-    [".opencode", "skill"],
-  ] as const
-  return pairs.map(([a, b]) => path.join(home, a, b, "**", "SKILL.md"))
-}
-
-/** Walk from cwd to root; include compat skill roots at each level (nested project / monorepo). */
-async function walkupCompatSkillPatterns(startDir: string, maxHops = 40): Promise<string[]> {
+/** Walk from cwd to root; load `.nexus/skills` at each ancestor (monorepo / workspace roots). */
+async function walkupNexusSkillPatterns(startDir: string, maxHops = 40): Promise<string[]> {
   const patterns: string[] = []
   const seen = new Set<string>()
   let dir = path.resolve(startDir)
   for (let h = 0; h < maxHops; h++) {
-    const bases = [
-      [".claude", "skills"],
-      [".kilo", "skills"],
-      [".kilocode", "skills"],
-      [".roo", "skills"],
-      [".opencode", "skill"],
-    ] as const
-    for (const [hidden, sub] of bases) {
-      const base = path.join(dir, hidden, sub)
-      try {
-        const st = await fs.stat(base)
-        if (st.isDirectory()) {
-          const g = path.join(base, "**", "SKILL.md")
+    const base = path.join(dir, ".nexus", "skills")
+    try {
+      const st = await fs.stat(base)
+      if (st.isDirectory()) {
+        for (const tail of [["**", "SKILL.md"], ["**", "*.md"]] as const) {
+          const g = path.join(base, ...tail)
           if (!seen.has(g)) {
             seen.add(g)
             patterns.push(g)
           }
         }
-      } catch {
-        /* */
       }
+    } catch {
+      /* */
     }
     const parent = path.dirname(dir)
     if (parent === dir) break

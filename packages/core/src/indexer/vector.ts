@@ -29,6 +29,47 @@ function pathToSegments(filePath: string): Record<string, string> {
   return out
 }
 
+/**
+ * Qdrant REST returns `{ result: CollectionInfo }`. `@qdrant/js-client-rest` returns `CollectionInfo`
+ * at the top level. Older code assumed `.result` only — then `points_count` was always missing and
+ * `hasIndexedData()` stayed false while the UI showed "ready", so semantic search never ran.
+ */
+function qdrantCollectionBody(response: unknown): Record<string, unknown> | null {
+  if (response == null || typeof response !== "object") return null
+  const o = response as Record<string, unknown>
+  const inner = o["result"]
+  if (inner != null && typeof inner === "object" && !Array.isArray(inner)) {
+    return inner as Record<string, unknown>
+  }
+  return o
+}
+
+function pointsFromQueryResponse(response: unknown): Array<Record<string, unknown>> {
+  if (response == null || typeof response !== "object") return []
+  const o = response as Record<string, unknown>
+  const top = o["points"]
+  if (Array.isArray(top)) return top as Array<Record<string, unknown>>
+  const inner = o["result"]
+  if (inner != null && typeof inner === "object") {
+    const p = (inner as Record<string, unknown>)["points"]
+    if (Array.isArray(p)) return p as Array<Record<string, unknown>>
+  }
+  return []
+}
+
+function pointsFromScrollResponse(response: unknown): Array<Record<string, unknown>> {
+  if (response == null || typeof response !== "object") return []
+  const o = response as Record<string, unknown>
+  const top = o["points"]
+  if (Array.isArray(top)) return top as Array<Record<string, unknown>>
+  const inner = o["result"]
+  if (inner != null && typeof inner === "object") {
+    const p = (inner as Record<string, unknown>)["points"]
+    if (Array.isArray(p)) return p as Array<Record<string, unknown>>
+  }
+  return []
+}
+
 const MAX_BATCH_RETRIES = 3
 const INITIAL_RETRY_DELAY_MS = 500
 
@@ -142,13 +183,17 @@ export class VectorIndex {
   }
 
   private async getExistingVectorSize(): Promise<number | null> {
-    const info = await this.client.getCollection(this.collectionName) as Record<string, unknown>
-    const result = info["result"] as Record<string, unknown> | undefined
-    const config = result?.["config"] as Record<string, unknown> | undefined
+    const body = qdrantCollectionBody(await this.client.getCollection(this.collectionName))
+    if (!body) return null
+    const config = body["config"] as Record<string, unknown> | undefined
     const params = config?.["params"] as Record<string, unknown> | undefined
-    const vectors = params?.["vectors"] as Record<string, unknown> | undefined
-    const size = vectors?.["size"]
-    return typeof size === "number" && Number.isFinite(size) ? size : null
+    const vectors = params?.["vectors"]
+    if (typeof vectors === "number" && Number.isFinite(vectors)) return vectors
+    if (vectors && typeof vectors === "object" && "size" in vectors) {
+      const size = (vectors as { size?: unknown }).size
+      return typeof size === "number" && Number.isFinite(size) ? size : null
+    }
+    return null
   }
 
   /** Create payload indexes for pathSegments (server-side path filter) and type (metadata). */
@@ -317,6 +362,22 @@ export class VectorIndex {
     } catch {}
   }
 
+  /** Delete all points under a repo-relative directory prefix (same segment filter as scoped search). */
+  async deleteByPathPrefix(dirPrefix: string): Promise<void> {
+    if (!this.initialized) return
+    const normalized = dirPrefix.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim()
+    if (!normalized) return
+    const segments = normalized.split("/").filter(Boolean)
+    if (segments.length === 0) return
+    try {
+      const must = segments.map((s, i) => ({
+        key: `pathSegments.${i}`,
+        match: { value: s },
+      }))
+      await this.client.delete(this.collectionName, { filter: { must }, wait: this.upsertWait })
+    } catch {}
+  }
+
   async search(
     query: string,
     limit: number,
@@ -378,18 +439,22 @@ export class VectorIndex {
       }
 
       const operationResult = await this.client.query(this.collectionName, queryRequest)
-      const rows = operationResult.points ?? []
+      const rows = pointsFromQueryResponse(operationResult)
 
-      return rows.map(r => ({
-        path: (r.payload?.["path"] as string) ?? "",
-        name: r.payload?.["name"] as string | undefined,
-        kind: r.payload?.["kind"] as SymbolKind | undefined,
-        parent: r.payload?.["parent"] as string | undefined,
-        startLine: r.payload?.["startLine"] as number | undefined,
-        endLine: r.payload?.["endLine"] as number | undefined,
-        content: (r.payload?.["content"] as string) ?? "",
-        score: r.score,
-      })).filter(row => row.path.length > 0 || (row.content?.length ?? 0) > 0)
+      return rows.map(raw => {
+        const r = raw as { payload?: Record<string, unknown>; score?: number | null }
+        const pl = r.payload
+        return {
+          path: (pl?.["path"] as string) ?? "",
+          name: pl?.["name"] as string | undefined,
+          kind: pl?.["kind"] as SymbolKind | undefined,
+          parent: pl?.["parent"] as string | undefined,
+          startLine: pl?.["startLine"] as number | undefined,
+          endLine: pl?.["endLine"] as number | undefined,
+          content: (pl?.["content"] as string) ?? "",
+          score: r.score ?? undefined,
+        }
+      }).filter(row => row.path.length > 0 || (row.content?.length ?? 0) > 0)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.warn(`[nexus] Vector search failed: ${message}`)
@@ -409,12 +474,27 @@ export class VectorIndex {
   async isEmpty(): Promise<boolean> {
     if (!this.initialized) return true
     try {
-      const info = await this.client.getCollection(this.collectionName) as Record<string, unknown>
-      const result = info["result"] as Record<string, unknown> | undefined
-      const pointsCount = result?.["points_count"]
+      const body = qdrantCollectionBody(await this.client.getCollection(this.collectionName))
+      const pointsCount = body?.["points_count"]
       return typeof pointsCount !== "number" || pointsCount <= 0
     } catch {
       return true
+    }
+  }
+
+  /** True if at least one non-metadata point exists (partial index during long runs). */
+  async hasSearchableCodePoints(): Promise<boolean> {
+    if (!this.initialized) return false
+    try {
+      const res = await this.client.scroll(this.collectionName, {
+        filter: { must_not: [{ key: "type", match: { value: "metadata" } }] },
+        limit: 1,
+        with_payload: false,
+        with_vector: false,
+      })
+      return pointsFromScrollResponse(res).length > 0
+    } catch {
+      return false
     }
   }
 
@@ -425,9 +505,8 @@ export class VectorIndex {
   async hasIndexedData(): Promise<boolean> {
     if (!this.initialized) return false
     try {
-      const info = await this.client.getCollection(this.collectionName) as Record<string, unknown>
-      const result = info["result"] as Record<string, unknown> | undefined
-      const pointsCount = result?.["points_count"]
+      const body = qdrantCollectionBody(await this.client.getCollection(this.collectionName))
+      const pointsCount = body?.["points_count"]
       if (typeof pointsCount !== "number" || pointsCount <= 0) return false
 
       const metaId = getIndexingMetadataPointId()

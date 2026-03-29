@@ -1,4 +1,4 @@
-import React, { useRef, useState, useCallback, useEffect, useMemo } from "react"
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useMemo } from "react"
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -8,7 +8,7 @@ import { ExploredSummaryInline, getExplorationItemsFromToolPart, type ExploredPr
 import { ThoughtBlock } from "./ThoughtBlock.js"
 import { MermaidBlock } from "./MermaidBlock.js"
 import { postMessage } from "../vscode.js"
-import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
+import type { SessionMessage, MessagePart, ToolPart, ReasoningPart } from "../stores/chat.js"
 import type { SubAgentState } from "../stores/chat.js"
 import { useChatStore } from "../stores/chat.js"
 
@@ -125,7 +125,16 @@ function ApprovalInline({
 }
 
 /** Bash (execute_command) block: command in header, expandable output (tail when long). */
-function BashCommandBlock({ part, approval }: { part: ToolPart; approval?: React.ReactNode }) {
+function BashCommandBlock({
+  part,
+  approval,
+  onListLayoutHint,
+}: {
+  part: ToolPart
+  approval?: React.ReactNode
+  /** Notify parent when height may change (expand/collapse, streaming output) so Virtuoso can re-pin to bottom. */
+  onListLayoutHint?: () => void
+}) {
   // null = follow auto logic; true/false = user override
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
   // Auto-expand when command completes; stay collapsed while pending/running (so approval doesn't look like edit field)
@@ -144,8 +153,12 @@ function BashCommandBlock({ part, approval }: { part: ToolPart; approval?: React
       : null
   const shortCommand = command.length > 72 ? command.slice(0, 69) + "…" : command
 
+  useLayoutEffect(() => {
+    onListLayoutHint?.()
+  }, [expanded, onListLayoutHint, part.output, part.status, part.error])
+
   return (
-    <div className="my-2 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
+    <div className="nexus-bash-command-block my-2 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
@@ -213,6 +226,15 @@ type ChatRenderItem =
       prefixItems: ExploredPrefixItem[]
       isRunning: boolean
     }
+  | {
+      type: "compaction_live"
+      key: string
+    }
+  | {
+      type: "compaction_done"
+      key: string
+      durationSec: number
+    }
 
 function getCanonicalReplyIndex(parts: MessagePart[]): number {
   const textPartIndices = parts
@@ -240,6 +262,21 @@ function isReasoningPartRenderable(part: MessagePart): boolean {
   const reasoning = part as { text?: string }
   const PLACEHOLDER_TEXT = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
   return Boolean(reasoning.text?.trim()) && reasoning.text !== PLACEHOLDER_TEXT
+}
+
+/** Virtuoso row keys must stay stable when parts reorder; index-only keys reuse wrong rows (duplicate/ghost tool UI). */
+function assistantPartStableKey(messageId: string, part: MessagePart, partIndex: number): string {
+  if (part.type === "tool") {
+    return `${messageId}-tool-${(part as ToolPart).id}`
+  }
+  if (part.type === "reasoning") {
+    const r = part as ReasoningPart
+    return `${messageId}-reasoning-${r.reasoningId ?? "noid"}-${partIndex}`
+  }
+  if (part.type === "text") {
+    return `${messageId}-text-${partIndex}`
+  }
+  return `${messageId}-part-${partIndex}`
 }
 
 function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): ChatRenderItem[] {
@@ -294,7 +331,7 @@ function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): C
     parts.forEach((part, partIndex) => {
       const baseItem: Extract<ChatRenderItem, { type: "assistant_part" }> = {
         type: "assistant_part",
-        key: `${message.id}-part-${partIndex}`,
+        key: assistantPartStableKey(message.id, part, partIndex),
         message,
         messageIndex,
         isComplete,
@@ -327,9 +364,8 @@ function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): C
         if (explorationItems.length > 0) {
           if (!activeExploration) {
             activeExploration = {
-              // Never reuse `${message.id}-part-*` here — Virtuoso keys must stay unique vs assistant rows
-              // (reusing part-0 caused wrong row reuse / “ghost” duplicates when expanding Thought).
-              key: `${message.id}-explored-${partIndex}`,
+              // Stable key per tool call — part indices shift when reasoning/tools reorder.
+              key: `${message.id}-explored-tool-${(part as ToolPart).id}`,
               prefixItems: pendingReasoning
                 .filter((item) => item.part.type === "reasoning" && isReasoningPartRenderable(item.part))
                 .map((item) => {
@@ -381,9 +417,69 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const initialTopMostItemIndexRef = useRef<number | undefined>(undefined)
   const [stickToBottom, setStickToBottom] = useState(true)
+  const stickToBottomRef = useRef(true)
+  const renderLenRef = useRef(0)
+  const scrollBottomRafRef = useRef<number | null>(null)
+  const prevLastUserIdRef = useRef<string | undefined>(undefined)
   const store = useChatStore()
-  const renderedMessages = useMemo(() => buildChatRenderItems(messages, isRunning), [messages, isRunning])
+  const compactionUi = useChatStore((s) => s.compactionUi)
+  const compactionLog = useChatStore((s) => s.compactionLog)
+  const renderedMessages = useMemo(() => {
+    const base = buildChatRenderItems(messages, isRunning)
+    const extra: ChatRenderItem[] = compactionLog.map((e) => ({
+      type: "compaction_done" as const,
+      key: e.id,
+      durationSec: e.durationSec,
+    }))
+    if (compactionUi === "compacting") {
+      extra.push({ type: "compaction_live", key: "compaction-live" })
+    }
+    return [...base, ...extra]
+  }, [messages, isRunning, compactionLog, compactionUi])
   const virtuosoComponents = useMemo(() => ({ Scroller: MessageListScroller }), [])
+
+  renderLenRef.current = renderedMessages.length
+  useEffect(() => {
+    stickToBottomRef.current = stickToBottom
+  }, [stickToBottom])
+
+  const onListLayoutHint = useCallback(() => {
+    if (!stickToBottomRef.current) return
+    if (scrollBottomRafRef.current != null) return
+    scrollBottomRafRef.current = requestAnimationFrame(() => {
+      scrollBottomRafRef.current = null
+      if (!stickToBottomRef.current) return
+      const n = renderLenRef.current
+      if (n <= 0) return
+      virtuosoRef.current?.scrollToIndex({
+        index: n - 1,
+        align: "end",
+        behavior: "auto",
+      })
+    })
+  }, [])
+
+  useEffect(() => {
+    const last = messages[messages.length - 1]
+    if (!last) {
+      prevLastUserIdRef.current = undefined
+      return
+    }
+    if (last.role !== "user") return
+    if (last.id === prevLastUserIdRef.current) return
+    prevLastUserIdRef.current = last.id
+    setStickToBottom(true)
+    stickToBottomRef.current = true
+    requestAnimationFrame(() => {
+      const n = renderLenRef.current
+      if (n <= 0) return
+      virtuosoRef.current?.scrollToIndex({
+        index: n - 1,
+        align: "end",
+        behavior: "auto",
+      })
+    })
+  }, [messages])
 
   if (initialTopMostItemIndexRef.current == null && renderedMessages.length > 0) {
     initialTopMostItemIndexRef.current = renderedMessages.length - 1
@@ -429,7 +525,8 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
           initialTopMostItemIndex={initialTopMostItemIndexRef.current}
           followOutput={stickToBottom ? "auto" : false}
           atBottomStateChange={setStickToBottom}
-          atBottomThreshold={10}
+          atBottomThreshold={120}
+          increaseViewportBy={{ top: 200, bottom: 480 }}
           computeItemKey={(_, item) => (item as ChatRenderItem).key}
           itemContent={(idx, item) => (
             <div className="message-list-item">
@@ -437,6 +534,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
                 item={item as ChatRenderItem}
                 pendingApproval={store.pendingApproval}
                 onResolveApproval={store.resolveApproval}
+                onListLayoutHint={onListLayoutHint}
               />
             </div>
           )}
@@ -464,15 +562,33 @@ function RenderItemRow({
   item,
   pendingApproval,
   onResolveApproval,
+  onListLayoutHint,
 }: {
   item: ChatRenderItem
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
+  onListLayoutHint?: () => void
 }) {
   const showReasoningInChat = useChatStore((s) => s.config?.ui?.showReasoningInChat ?? false)
   const reasoningStartTime = useChatStore((s) => s.reasoningStartTime)
   const activeReasoning = useChatStore((s) => s.activeReasoning)
   const isRunning = useChatStore((s) => s.isRunning)
+
+  if (item.type === "compaction_live") {
+    return (
+      <div className="w-full min-w-0">
+        <CompactionLiveBlock />
+      </div>
+    )
+  }
+
+  if (item.type === "compaction_done") {
+    return (
+      <div className="w-full min-w-0">
+        <CompactionDoneBlock durationSec={item.durationSec} />
+      </div>
+    )
+  }
 
   if (item.type === "explored") {
     return (
@@ -505,26 +621,21 @@ function RenderItemRow({
           pendingApproval={pendingApproval}
           onResolveApproval={onResolveApproval}
           showReasoningInChat={showReasoningInChat}
+          onListLayoutHint={onListLayoutHint}
         />
       </div>
     )
   }
 
-  const { message, messageIndex, isComplete } = item
-  const canRollback = messageIndex > 0 && message.role === "user"
+  const { message, isComplete } = item
+  /** Every user turn can roll back (incl. first); host clears chat / restores workspace when possible. */
+  const canRollback = message.role === "user"
   const checkpointEntries = useChatStore((s) => s.checkpointEntries)
   const restoreCheckpoint = useChatStore((s) => s.restoreCheckpoint)
   const showCheckpointDiff = useChatStore((s) => s.showCheckpointDiff)
 
   if (message.summary) {
-    return (
-      <div className="text-xs text-[var(--vscode-descriptionForeground)] py-2">
-        <div className="font-medium mb-1">📝 Conversation compacted</div>
-        <ReactMarkdown className="prose-nexus text-xs" remarkPlugins={[remarkGfm]}>
-          {typeof message.content === "string" ? message.content : ""}
-        </ReactMarkdown>
-      </div>
-    )
+    return null
   }
 
   if (message.role === "user") {
@@ -566,11 +677,6 @@ function RenderItemRow({
     return (
       <div className="nexus-user-msg-wrap">
         <div className={`nexus-user-msg-bubble${canRollback ? " nexus-user-msg-bubble-has-rollback" : ""}`}>
-          {message.presetName ? (
-            <div className="text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
-              Preset: <span className="font-medium">{message.presetName}</span>
-            </div>
-          ) : null}
           <div className="nexus-user-msg-content">{renderUserTextWithPasteChips(userText)}</div>
           {canRollback && (
             <MessageCheckpointMenu
@@ -809,7 +915,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
   }
 
   return (
-    <div className="relative group/code my-2 max-w-full overflow-x-auto overflow-y-hidden min-w-0 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+    <div className="nexus-markdown-code-frame relative group/code my-2 overflow-x-auto overflow-y-hidden min-w-0 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
       <pre className="m-0 p-3 text-xs font-mono bg-transparent overflow-visible whitespace-pre">
         {children}
       </pre>
@@ -830,14 +936,14 @@ const AssistantText = React.memo(function AssistantText({ text, streaming, varia
   const isMuted = variant === "muted"
   if (streaming) {
     return (
-      <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words whitespace-pre-wrap ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
+      <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words whitespace-pre-wrap pl-[var(--nexus-content-inset)] box-border ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
         {text}
         <span className={`nexus-streaming-cursor inline-block w-0.5 h-4 ml-0.5 align-middle animate-pulse ${isMuted ? "bg-[var(--vscode-descriptionForeground)]" : "bg-[var(--vscode-foreground)]"}`} aria-hidden />
       </div>
     )
   }
   return (
-    <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
+    <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words pl-[var(--nexus-content-inset)] box-border ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
       <ReactMarkdown
         className="prose-nexus"
         remarkPlugins={[remarkGfm]}
@@ -885,7 +991,11 @@ const AssistantText = React.memo(function AssistantText({ text, streaming, varia
             return <blockquote className="border-l-4 border-[var(--nexus-accent)] pl-3 py-0.5 my-2 text-[var(--vscode-descriptionForeground)] bg-[var(--nexus-accent-muted)] rounded-r">{children}</blockquote>
           },
           table({ children }) {
-            return <div className="nexus-markdown-table-wrap my-2 overflow-x-auto"><table className="nexus-markdown-table">{children}</table></div>
+            return (
+              <div className="nexus-markdown-table-wrap my-2 overflow-x-auto">
+                <table className="nexus-markdown-table">{children}</table>
+              </div>
+            )
           },
           thead({ children }) {
             return <thead className="nexus-markdown-thead">{children}</thead>
@@ -1077,7 +1187,7 @@ function StatusCircleIcon({ status }: { status: SubagentDisplayItem["status"] })
 function SubagentInlineList({ items }: { items: SubagentDisplayItem[] }) {
   if (items.length === 0) return null
   return (
-    <div className="nexus-subagent-inline-outer w-full min-w-0 max-w-full box-border">
+    <div className="nexus-subagent-inline-outer min-w-0 box-border">
     <div className="nexus-subtask-stack">
       {items.map((item) => {
         const isRunning = item.status === "running"
@@ -1143,6 +1253,7 @@ function AssistantPartRow({
   pendingApproval,
   onResolveApproval,
   showReasoningInChat,
+  onListLayoutHint,
 }: {
   part: MessagePart
   partIndex: number
@@ -1157,6 +1268,7 @@ function AssistantPartRow({
   pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
   showReasoningInChat: boolean
+  onListLayoutHint?: () => void
 }) {
   if (part.type === "reasoning") {
     const r = part as { text: string; durationMs?: number; reasoningId?: string }
@@ -1228,7 +1340,7 @@ function AssistantPartRow({
         pendingApproval?.partId === toolPart.id ? (
           <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
         ) : undefined
-      return <BashCommandBlock part={toolPart} approval={approval} />
+      return <BashCommandBlock part={toolPart} approval={approval} onListLayoutHint={onListLayoutHint} />
     }
     if (
       toolPart.tool === "Parallel" ||
@@ -1267,6 +1379,63 @@ function AssistantPartRow({
   }
 
   return null
+}
+
+/** Live compaction row — same interaction pattern as ThoughtBlock (shimmer label, expandable). */
+function CompactionLiveBlock() {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div className="nexus-thought-block flex-shrink-0">
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        className="w-full flex items-center gap-1.5 px-0 py-1 text-left text-xs hover:text-[var(--vscode-foreground)]"
+      >
+        <span
+          className="flex-shrink-0 transition-transform text-[10px] text-[var(--vscode-descriptionForeground)]"
+          style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
+        >
+          ▼
+        </span>
+        <span className="nexus-thinking-wave-text">Compacting…</span>
+      </button>
+      {expanded && (
+        <div className="px-2 pb-1">
+          <div className="px-2 py-2 max-h-64 overflow-y-auto text-xs text-[var(--vscode-descriptionForeground)] whitespace-pre-wrap break-words leading-relaxed font-sans border border-[var(--vscode-panel-border)] rounded bg-[var(--vscode-editor-background)]">
+            Summarizing conversation for context limits. Older turns will be merged into a hidden summary message; the agent continues with the compacted context.
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Finished compaction — ThoughtInlineBlock-style header with duration. */
+function CompactionDoneBlock({ durationSec }: { durationSec: number }) {
+  const [open, setOpen] = useState(false)
+  const label = `Compacted · ${durationSec}s`
+
+  return (
+    <div className="nexus-thought-inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-1.5 px-0 py-1 text-left text-xs text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
+      >
+        <span className="flex-shrink-0 text-[10px] transition-transform" style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}>
+          ▼
+        </span>
+        <span className="flex-shrink-0">{label}</span>
+      </button>
+      {open && (
+        <div className="px-2 pb-1">
+          <div className="px-2 py-2 text-[11px] text-[var(--vscode-foreground)] whitespace-pre-wrap break-words leading-relaxed font-sans max-h-[min(50vh,320px)] overflow-y-auto border border-[var(--vscode-panel-border)] rounded bg-[var(--vscode-editor-background)]">
+            Context was summarized to free space. The summary is stored as a user message with the summary flag and is injected into the model context; it may be hidden in this chat view.
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 /** Thought inline: one reasoning part, tool-like (header + optional duration, expandable body). Always shown chronologically. */

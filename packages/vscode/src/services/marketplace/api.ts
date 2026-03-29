@@ -13,10 +13,11 @@ import {
   type SkillNetSearchResponse,
 } from "./skillnet.js"
 
-/** MCP catalog from Kilo (skills use SkillNet separately). */
+/** Hosted marketplace API (MCP list); skills use SkillNet separately. */
 const KILO_MARKETPLACE_BASE = "https://api.kilo.ai/api/marketplace"
 
-const CACHE_TTL = 120_000
+/** How long cached MCP / SkillNet responses are reused (same query + params). */
+const CACHE_TTL_MS = 300_000
 const MAX_RETRIES = 3
 const TIMEOUT = 25_000
 
@@ -39,6 +40,32 @@ function sanitizeSkillId(raw: string): string {
     .replace(/[^a-zA-Z0-9\-_@.]+/g, "-")
     .replace(/^-+|-+$/g, "")
   return (s || "skill").slice(0, 128)
+}
+
+/** Stable cache key for SkillNet params (field order independent). */
+function skillSearchCacheKey(opts: SkillSearchOptions): string {
+  const normalized = {
+    q: (opts.q ?? "").trim() || "skill",
+    mode: opts.mode ?? "keyword",
+    category: (opts.category ?? "").trim(),
+    limit: Math.min(Math.max(opts.limit ?? 24, 1), 50),
+    page: Math.max(opts.page ?? 1, 1),
+    threshold: opts.threshold,
+  }
+  return `skillnet:${JSON.stringify(normalized)}`
+}
+
+/** SkillNet sometimes returns the same skill row multiple times; one card per URL. */
+function dedupeSkillNetRows(rows: SkillNetSearchRow[]): SkillNetSearchRow[] {
+  const seen = new Set<string>()
+  const out: SkillNetSearchRow[] = []
+  for (const row of rows) {
+    const u = (row.skill_url ?? "").trim()
+    if (!u || seen.has(u)) continue
+    seen.add(u)
+    out.push(row)
+  }
+  return out
 }
 
 function transformSkillNetRow(row: SkillNetSearchRow): SkillMarketplaceItem {
@@ -91,11 +118,13 @@ export interface SkillSearchOptions {
 
 export class MarketplaceApiClient {
   private cache = new Map<string, CacheEntry>()
+  /** Coalesce identical in-flight requests (cache miss) so rapid UI changes don't stack duplicate network calls. */
+  private inFlight = new Map<string, Promise<unknown>>()
 
   private getCached(key: string): unknown | undefined {
     const entry = this.cache.get(key)
     if (!entry) return undefined
-    if (Date.now() - entry.timestamp > CACHE_TTL) {
+    if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
       this.cache.delete(key)
       return undefined
     }
@@ -107,57 +136,84 @@ export class MarketplaceApiClient {
   }
 
   /** MCP catalog from Kilo marketplace API (`/mcps`). Skills are loaded via SkillNet elsewhere. */
-  private async fetchMcps(): Promise<McpMarketplaceItem[]> {
-    const cached = this.getCached("mcps")
-    if (cached) return cached as McpMarketplaceItem[]
+  private async fetchMcps(bypassCache = false): Promise<McpMarketplaceItem[]> {
+    const cacheKey = "mcps"
+    if (!bypassCache) {
+      const cached = this.getCached(cacheKey) as McpMarketplaceItem[] | undefined
+      if (cached) return cached
+      const inflight = this.inFlight.get(cacheKey) as Promise<McpMarketplaceItem[]> | undefined
+      if (inflight) return inflight
+    }
 
-    const text = await fetchWithRetry(`${KILO_MARKETPLACE_BASE}/mcps`)
-    const parsed = parseResponse(text) as { items?: unknown[] }
-    const items = (parsed.items ?? []) as Array<Record<string, unknown>>
-    const result = items.map((item) => ({ ...item, type: "mcp" as const }) as McpMarketplaceItem)
-    this.setCache("mcps", result)
-    return result
+    const promise = (async (): Promise<McpMarketplaceItem[]> => {
+      const text = await fetchWithRetry(`${KILO_MARKETPLACE_BASE}/mcps`)
+      const parsed = parseResponse(text) as { items?: unknown[] }
+      const items = (parsed.items ?? []) as Array<Record<string, unknown>>
+      const result = items.map((item) => ({ ...item, type: "mcp" as const }) as McpMarketplaceItem)
+      if (!bypassCache) this.setCache(cacheKey, result)
+      return result
+    })().finally(() => {
+      if (!bypassCache) this.inFlight.delete(cacheKey)
+    })
+
+    if (!bypassCache) this.inFlight.set(cacheKey, promise as Promise<unknown>)
+    return promise
   }
 
-  private async fetchSkillsFromSkillNet(opts: SkillSearchOptions): Promise<{
+  private async fetchSkillsFromSkillNet(opts: SkillSearchOptions, bypassCache = false): Promise<{
     skills: SkillMarketplaceItem[]
     meta: SkillSearchMeta
   }> {
-    const cacheKey = `skillnet:${JSON.stringify(opts)}`
-    const cached = this.getCached(cacheKey) as { skills: SkillMarketplaceItem[]; meta: SkillSearchMeta } | undefined
-    if (cached) return cached
+    const cacheKey = skillSearchCacheKey(opts)
+    if (!bypassCache) {
+      const cached = this.getCached(cacheKey) as { skills: SkillMarketplaceItem[]; meta: SkillSearchMeta } | undefined
+      if (cached) return cached
+      const inflight = this.inFlight.get(cacheKey) as Promise<{
+        skills: SkillMarketplaceItem[]
+        meta: SkillSearchMeta
+      }> | undefined
+      if (inflight) return inflight
+    }
 
-    const url = buildSkillNetSearchUrl({
-      q: opts.q,
-      mode: opts.mode ?? "keyword",
-      category: opts.category,
-      limit: opts.limit ?? 24,
-      page: opts.page ?? 1,
-      threshold: opts.threshold,
+    const promise = (async (): Promise<{ skills: SkillMarketplaceItem[]; meta: SkillSearchMeta }> => {
+      const url = buildSkillNetSearchUrl({
+        q: opts.q,
+        mode: opts.mode ?? "keyword",
+        category: opts.category,
+        limit: opts.limit ?? 24,
+        page: opts.page ?? 1,
+        threshold: opts.threshold,
+      })
+      const text = await fetchWithRetry(url)
+      const parsed = parseResponse(text) as Partial<SkillNetSearchResponse>
+      if (!Array.isArray(parsed.data)) {
+        throw new Error("SkillNet: unexpected response (missing data array)")
+      }
+      const rows = dedupeSkillNetRows(parsed.data)
+      const skills = rows.map(transformSkillNetRow)
+      const m = parsed.meta
+      const meta: SkillSearchMeta = {
+        query: m?.query ?? opts.q,
+        mode: m?.mode ?? (opts.mode ?? "keyword"),
+        total: typeof m?.total === "number" ? m.total : skills.length,
+        limit: typeof m?.limit === "number" ? m.limit : (opts.limit ?? 24),
+        page: typeof m?.page === "number" ? m.page : (opts.page ?? 1),
+      }
+      const payload = { skills, meta }
+      if (!bypassCache) this.setCache(cacheKey, payload)
+      return payload
+    })().finally(() => {
+      if (!bypassCache) this.inFlight.delete(cacheKey)
     })
-    const text = await fetchWithRetry(url)
-    const parsed = parseResponse(text) as Partial<SkillNetSearchResponse>
-    if (!Array.isArray(parsed.data)) {
-      throw new Error("SkillNet: unexpected response (missing data array)")
-    }
-    const rows = parsed.data
-    const skills = rows.map(transformSkillNetRow)
-    const m = parsed.meta
-    const meta: SkillSearchMeta = {
-      query: m?.query ?? opts.q,
-      mode: m?.mode ?? (opts.mode ?? "keyword"),
-      total: typeof m?.total === "number" ? m.total : skills.length,
-      limit: typeof m?.limit === "number" ? m.limit : (opts.limit ?? 24),
-      page: typeof m?.page === "number" ? m.page : (opts.page ?? 1),
-    }
-    const payload = { skills, meta }
-    this.setCache(cacheKey, payload)
-    return payload
+
+    if (!bypassCache) this.inFlight.set(cacheKey, promise as Promise<unknown>)
+    return promise
   }
 
   async fetchAll(options?: {
     includeSkills?: boolean
     skillSearch?: SkillSearchOptions
+    bypassCache?: boolean
   }): Promise<{
     items: MarketplaceItem[]
     errors: string[]
@@ -165,8 +221,9 @@ export class MarketplaceApiClient {
   }> {
     const errors: string[] = []
     const includeSkills = options?.includeSkills !== false
+    const bypassCache = options?.bypassCache === true
 
-    const mcps = await this.fetchMcps().catch((err: unknown) => {
+    const mcps = await this.fetchMcps(bypassCache).catch((err: unknown) => {
       errors.push(`MCP catalog: ${err instanceof Error ? err.message : String(err)}`)
       return [] as McpMarketplaceItem[]
     })
@@ -177,7 +234,7 @@ export class MarketplaceApiClient {
     if (includeSkills) {
       const search = options?.skillSearch ?? { q: "skill", mode: "keyword" as const, limit: 24, page: 1 }
       try {
-        const r = await this.fetchSkillsFromSkillNet(search)
+        const r = await this.fetchSkillsFromSkillNet(search, bypassCache)
         skills = r.skills
         skillSearchMeta = r.meta
       } catch (err: unknown) {
@@ -198,5 +255,6 @@ export class MarketplaceApiClient {
 
   dispose(): void {
     this.cache.clear()
+    this.inFlight.clear()
   }
 }

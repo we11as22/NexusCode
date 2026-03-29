@@ -3,21 +3,21 @@ import type { LLMClient } from "../provider/index.js"
 import { estimateTokens } from "../context/condense.js"
 import { getActiveMessagesAfterLatestSummary, getLatestSummaryMessage } from "./active-context.js"
 
-// Minimum tokens to bother pruning
-const PRUNE_MINIMUM = 10_000
+// Minimum tokens to bother pruning (aligned with kilocode-style thresholds)
+const PRUNE_MINIMUM = 20_000
 // Keep at least this many tokens of recent tool output (don't prune)
-const PRUNE_PROTECT = 30_000
-// Tools whose output should never be pruned (keep completion, plan exit, key context).
-// read_file is NOT protected so old file reads can be pruned when context is full (agent reads quickly fill context).
-const PRUNE_PROTECTED_TOOLS = new Set([
-  "use_skill",
-  "codebase_search",
-  "PlanExit",
-  "AskFollowupQuestion",
-  "TodoWrite",
-])
+const PRUNE_PROTECT = 40_000
+// KiloCode SessionCompaction: only the skill tool is protected (see PRUNE_PROTECTED_TOOLS = ["skill"]).
+// Nexus registers it as "Skill".
+const PRUNE_PROTECTED_TOOLS = new Set<string>(["Skill"])
 
 const COMPACTION_BUFFER = 20_000
+
+/** Estimated input token budget for the summarizer LLM call (tail of history + prompt). */
+const COMPACTION_LLM_INPUT_TOKEN_BUDGET = 45_000
+const COMPACTION_MIN_TAIL_MESSAGES = 4
+/** Per-message cap so one huge paste does not dominate the summarizer request. */
+const MAX_COMPACTION_MESSAGE_CHARS = 14_000
 
 export interface SessionCompaction {
   prune(session: ISession): void
@@ -72,13 +72,12 @@ function prune(session: ISession): void {
     }
   }
 
-  if (pruned >= PRUNE_MINIMUM) {
+  if (pruned > PRUNE_MINIMUM) {
     for (const part of toPrune) {
-      session.updateToolPart(
-        part.messageId,
-        part.partId,
-        { compacted: true, output: "[output pruned for context efficiency]" }
-      )
+      session.updateToolPart(part.messageId, part.partId, {
+        compacted: true,
+        output: "[Old tool result content cleared]",
+      })
     }
   }
 }
@@ -149,12 +148,13 @@ Rules:
 
   let summaryText = ""
   try {
-    const llmMessages = buildLLMMessages(recentMessages)
+    let llmMessages = trimLLMMessagesForBudget(buildLLMMessages(recentMessages))
     if (previousSummaryText) {
       llmMessages.unshift({
         role: "user",
-        content: `<previous_conversation_summary>\n${previousSummaryText}\n</previous_conversation_summary>`,
+        content: `<previous_conversation_summary>\n${capCompactionText(previousSummaryText)}\n</previous_conversation_summary>`,
       })
+      llmMessages = trimLLMMessagesForBudget(llmMessages, { preserveFirst: true })
     }
     for await (const event of client.stream({
       messages: [
@@ -210,6 +210,44 @@ function buildConversationText(messages: SessionMessage[]): string {
   }).join("\n\n")
 }
 
+function capCompactionText(text: string): string {
+  if (text.length <= MAX_COMPACTION_MESSAGE_CHARS) return text
+  return `${text.slice(0, MAX_COMPACTION_MESSAGE_CHARS)}\n...[truncated for compaction input]`
+}
+
+/**
+ * Drop oldest turns until estimated tokens are under budget so automatic compaction
+ * does not send the full ~100k-token transcript to the summarizer (slow / easy to hit limits).
+ */
+function trimLLMMessagesForBudget(
+  msgs: { role: "user" | "assistant"; content: string }[],
+  opts?: { preserveFirst?: boolean },
+): { role: "user" | "assistant"; content: string }[] {
+  const estimateOne = (m: { content: string }) => estimateTokens(m.content)
+  let total = msgs.reduce((s, m) => s + estimateOne(m), 0)
+  if (total <= COMPACTION_LLM_INPUT_TOKEN_BUDGET) return msgs
+
+  const minDropIndex = opts?.preserveFirst && msgs.length > 0 ? 1 : 0
+  let endDrop = minDropIndex
+  total = msgs.reduce((s, m) => s + estimateOne(m), 0)
+  while (endDrop < msgs.length - COMPACTION_MIN_TAIL_MESSAGES && total > COMPACTION_LLM_INPUT_TOKEN_BUDGET) {
+    total -= estimateOne(msgs[endDrop]!)
+    endDrop++
+  }
+  const head = msgs.slice(0, minDropIndex)
+  const tail = msgs.slice(endDrop)
+  const dropped = endDrop - minDropIndex
+  if (dropped <= 0) return [...head, ...tail]
+  return [
+    ...head,
+    {
+      role: "user",
+      content: `[System note: ${dropped} older message(s) were omitted from this summarization batch due to size limits. Merge with any prior summary and the retained tail.]`,
+    },
+    ...tail,
+  ]
+}
+
 function buildLLMMessages(messages: SessionMessage[]) {
   const result: { role: "user" | "assistant"; content: string }[] = []
   for (const m of messages) {
@@ -222,7 +260,7 @@ function buildLLMMessages(messages: SessionMessage[]) {
       text = parts.map(p => {
         if (p.type === "reasoning") {
           const rp = p as import("../types.js").ReasoningPart
-          return rp.text?.trim() ? `[Thinking: ${rp.text.slice(0, 500)}]` : ""
+          return rp.text?.trim() ? rp.text : ""
         }
         if (p.type === "image") return "" // images not included in compaction summary
         if (p.type === "text") {
@@ -232,13 +270,13 @@ function buildLLMMessages(messages: SessionMessage[]) {
         }
         if (p.type === "tool") {
           const tp = p as ToolPart
-          if (tp.compacted) return `[${tp.tool}: output pruned]`
-          return `[${tp.tool}: ${(tp.output ?? "").slice(0, 300)}]`
+          return `[${tp.tool}: ${tp.output ?? ""}]`
         }
         return ""
       }).filter(Boolean).join("\n")
     }
-    if (text.trim()) result.push({ role: m.role as "user" | "assistant", content: text })
+    const capped = capCompactionText(text)
+    if (capped.trim()) result.push({ role: m.role as "user" | "assistant", content: capped })
   }
   return result
 }

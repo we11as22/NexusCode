@@ -34,7 +34,7 @@ Both hosts call the same `runAgentLoop()` in core, so behavior is consistent acr
 
 Optional **`packages/server`** runs the agent and persists sessions/messages via the **same JSONL store** as in-process hosts (`@nexuscode/core` session storage under `~/.nexus/sessions/…`, keyed by **canonical project root**). Extension and CLI connect over HTTP for shared runs, pagination, and long chats without loading full history into memory.
 
-**Context usage bar (CLI + VS Code):** The “used / limit” indicator is driven by a single formula in `packages/core/src/context/context-usage.ts`: **active session messages** (same window as the next request, with tool outputs capped like `buildMessagesFromSession`), plus **last built system prompt** tokens, plus a **heuristic for tool definitions** (name + description + fixed schema overhead per tool). The agent loop calls `emitContextUsage` after each system build and records `contextUsage` on the session (persisted in JSONL meta). The snapshot is **cleared only on a new user message**, not on every assistant/tool mutation, so idle UIs can still show the last full estimate after a run. When no snapshot exists yet, hosts show **session + tools** (and optional MCP server count fudge), not system — until the next loop iteration emits.
+**Context usage bar (CLI + VS Code):** The “used / limit” indicator is driven by a single formula in `packages/core/src/context/context-usage.ts`: **active session messages** (same window as the next request; tool text is whatever is stored after execution-time truncation / compaction, with no extra per-request cap in `buildMessagesFromSession`), plus **last built system prompt** tokens, plus a **heuristic for tool definitions** (name + description + fixed schema overhead per tool). The agent loop calls `emitContextUsage` after each system build and records `contextUsage` on the session (persisted in JSONL meta). The snapshot is **cleared only on a new user message**, not on every assistant/tool mutation, so idle UIs can still show the last full estimate after a run. When no snapshot exists yet, hosts show **session + tools** (and optional MCP server count fudge), not system — until the next loop iteration emits.
 
 **Terminal output (Kilo-style):** Bash run logs and large tool output are written to the **global data dir** (`~/.nexus/data` or `$NEXUS_DATA_HOME`), not in the project. So `run_*.log` and `tool-output/*.out` never appear in the project tree, in git status, or in the extension/CLI "N Files" / session-edits list (those lists only include paths from Write/Edit tool results). The agent can read these files via `Read("~/.nexus/data/run/run_<id>.log")` or `Read("~/.nexus/data/tool-output/...")`; the Read tool expands `~` to the home directory, and `autoApproveReadPatterns` includes `**/.nexus/data/run/**` and `**/.nexus/data/tool-output/**` so no approval is required.
 
@@ -42,7 +42,7 @@ Optional **`packages/server`** runs the agent and persists sessions/messages via
 
 | Mode | Who runs the agent | Where sessions live | How client connects |
 |------|--------------------|----------------------|----------------------|
-| **Extension in-process** | `runAgentLoop()` in extension process, `VsCodeHost` | Local JSONL (`.nexus/`) | N/A |
+| **Extension in-process** | `runAgentLoop()` in extension process, `VsCodeHost` | JSONL under `~/.nexus/sessions/<project-hash>/` (see `session/storage.ts`) | N/A |
 | **Extension + server** | Server process (`runSession` → `runAgentLoop` with `ServerHost`) | Same JSONL as local (per canonical `directory`) | Extension uses `nexuscode.serverUrl`; `NexusServerClient` (core) for list/get messages and **stream** |
 | **CLI in-process** | `runAgentLoop()` in CLI process, `CliHost` | Local JSONL | N/A |
 | **CLI + server** | Server process | Same JSONL as local (per canonical `directory`) | CLI `--server <url>` (or `NEXUS_SERVER_URL`); `queryNexus` reuses the bootstrap session id with `streamMessage` (no per-message session fork); REPL consumes identically |
@@ -72,6 +72,8 @@ The provider/webview bridge is readiness-gated. `onDidReceiveMessage` is attache
 The webview store treats `agentEvent` as the live source of truth during a run and merges later `stateUpdate` snapshots conservatively. If a snapshot arrives without the assistant tail that was already assembled from streamed events, the store preserves the richer local tail instead of dropping the in-flight assistant reply. This prevents the common race where a stale snapshot temporarily rewinds the visible chat back to only the user message.
 
 The webview should not apply every streamed event in its own React/Zustand turn. Streaming `agentEvent`s are batched to animation frames before they hit the store, which keeps tool/text updates visually live but avoids per-token render thrash in long runs with reasoning, subagent, and tool progress updates.
+
+The chat transcript uses `react-virtuoso` with **stable row keys** derived from tool part ids (not only array indices), a larger `atBottomThreshold`, extra viewport padding, explicit scroll-to-end when a new user message is appended, and layout hints from expandable bash blocks so dynamic row heights do not strand the latest content off-screen or recycle the wrong virtual row (ghost duplicates).
 
 The sessions sidebar uses the same anti-stale rule for optimistic deletes. When the user deletes a session, the row is hidden immediately and marked with a short-lived tombstone in the store. Any stale `sessionList` that still contains that session is filtered out until a fresh list confirms the deletion or the tombstone expires, so the row cannot flicker back into view during refresh.
 
@@ -135,7 +137,7 @@ Only modes with a configured mandatory tool are force-gated by that tool (curren
 
 ### Unified config flow
 
-Config is loaded from **`.nexus/nexus.yaml`** (project) and **`~/.nexus/nexus.yaml`** (global). Both VS Code and CLI persist updates into the project file with deep-merge of nested sections (`model`, `embeddings`, `indexing`, `vectorDb`, `tools`, `mcp`, etc.). Env vars override file config; VS Code settings (`nexuscode.*`) override when the extension runs.
+Config is loaded from **`.nexus/nexus.yaml`** / **`.nexus/nexus.yml`** / **`.nexusrc.yaml`** / **`.nexusrc.yml`** (walk up from cwd) and **`~/.nexus/nexus.yaml`** (global). MCP server lists are merged from **`~/.nexus/mcp-servers.json`** and **`<project>/.nexus/mcp-servers.json`**. Both VS Code and CLI persist updates into the project file with deep-merge of nested sections (`model`, `embeddings`, `indexing`, `vectorDb`, `tools`, `mcp`, etc.). Env vars override file config; VS Code settings (`nexuscode.*`) override when the extension runs. Default model `baseUrl` in schema: **`https://api.kilo.ai/api/openrouter`** (not legacy `/api/gateway`).
 
 ### MCP server filtering (not tool filtering)
 
@@ -155,11 +157,19 @@ For router/free-tier models where tool support is inconsistent, runtime fallback
 
 ### Vector index factory
 
-`createCodebaseIndexer()` wires embeddings and vector store only when prerequisites are valid. If embeddings or Qdrant are missing, the indexer falls back to FTS-only. This avoids silent misconfiguration.
+`createCodebaseIndexer()` wires embeddings and vector store only when prerequisites are valid. If embeddings or Qdrant are missing, the indexer runs without vector upserts; **`CodebaseSearch` stays disabled** until `indexing.vector` and `vectorDb.enabled` are satisfied (see `codebase-search` tool).
 
 ### Qdrant availability and auto-start
 
-`ensureQdrantRunning()` performs a health check and can auto-start Qdrant (local binary, then Docker). Auto-start is local-only. If Qdrant is unavailable, vector search is disabled; FTS remains available.
+`ensureQdrantRunning()` performs a health check and can auto-start Qdrant (local binary, then Docker). Auto-start is local-only. If Qdrant is unavailable, semantic (`CodebaseSearch`) indexing/search is off until Qdrant is reachable.
+
+`@qdrant/js-client-rest` returns **`CollectionInfo` at the top level** from `getCollection` (the raw REST body nests it under `result`). `packages/core/src/indexer/vector.ts` normalizes both shapes when reading **`points_count`** and vector config; otherwise **`hasIndexedData()`** could stay false after indexing finished and **`codebase_search`** would never query Qdrant.
+
+**Indexing pipeline (Roo-style):** One logical index per workspace: **one** Qdrant collection `nexus_{projectHash}`. **VS Code:** file-hash tracker JSON lives under **`globalStorageUri`** (`nexus-index-tracker-{hash}.json`); **CLI/server** keep tracker under `~/.nexus/index/{hash}/file-tracker.json`. Full scan uses **ripgrep `--files`** in the extension when available, then **`materializeIndexFileInfos`** (Nexus ignores); fallback is **`walkDir`**. **`indexing.maxIndexedFiles === 0`** means **no scan** (Roo `listFiles` limit 0). Watcher glob is **`buildIndexWatcherGlobPattern`**. Optional **`captureIndexTelemetry`** events go to the NexusCode output channel in VS Code. The scanner applies **`DEFAULT_EXCLUDE`**, YAML **`indexing.excludePatterns`**, **`.gitignore`**, **`.nexusignore`**, and **`.cursorignore`** (shared helper `createIndexerIgnore`); incremental **`refreshFilesBatchNow`** uses the same rules so ignored paths are removed from the index when touched. Walk / rg listing uses **`maxIndexedFiles`** (**0 = no scan**, Roo parity; default 50k), per-file **SHA-256**, and **`ignore-dirs`** where applicable. **`syncIndexing` / Sync** only runs `startIndexing()` (incremental / resume). **`fullRebuildIndex`** clears tracker + collection then indexes. **`deleteIndex`** clears workspace index without starting a new run; **`deleteIndexScope(prefix)`** removes tracker + vector points under a repo-relative prefix (Explorer command). **`CodebaseSearch`** scopes with **`target_directories`** → `pathScope` / Qdrant `pathSegments` filter. **`maxIndexingFailureRate`** (default 0.1) triggers a fatal reset when embed failures dominate after indexing has started.
+
+**Indexing progress (Roo-aligned):** `CodebaseIndexer` emits `IndexStatus` with **`overallPercent`**, **`message`**, **`phase`**, optional **`paused`**, **`watcherQueue`**, and counters; UI bar under **Settings → Index**. With vector on, **`overallPercent`** follows Roo **`reportBlockIndexingProgress`**: **chunks indexed / max(chunks found, indexed)** (denominator grows as files parse). **`message`** leads with `Indexed … / … chunks found · Files … / …`. Full scan uses **all files queued on `p-limit(INDEX_PARSING_CONCURRENCY)`** (Roo `PARSING_CONCURRENCY` = 10), then applies results in **discovery order**. **Capacity:** **`INDEX_MAX_FILE_SIZE_BYTES`** (1 MiB) and list cap via **`indexing.maxIndexedFiles`** (schema default 50,000 = Roo `MAX_LIST_FILES_LIMIT_CODE_INDEX`). **`state: "stopping"`** is emitted when **`stop()`** aborts a run; aborted paths **`notifyStatus({ state: "idle" })`**. Debounced watcher → **`refreshFilesBatchNow`**: Roo-style **`Processing i / n files from queue. Current: basename`**, then **`ready`** (pause buttons hidden when **`watcherQueue`**). **`indexing.searchWhileIndexing`**: **`CodebaseSearch`** blocked while **`stopping`**; during **`indexing`**, partial search when **`hasSearchableCodePoints()`** (tool warns). **`pauseIndexing` / `resumeIndexing`** between checkpoints (in-flight embed HTTP not cancelled).
+
+**Settings:** Advanced indexing knobs (batch size, concurrency, caps, `searchWhileIndexing`, failure rate) are editable under Settings → Index → “Vector DB & advanced”.
 
 ### Mention resolution in prompts
 
@@ -182,9 +192,9 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 - **Mode switching is live within one chat.** When the mode changes, the current mode's permissions and end-of-turn rules override any earlier assumptions from the same conversation; prompts must make that explicit so the agent does not blend plan/ask/review/agent behaviors.
 - **Built-in tools** are always available per mode; filtering applies only to dynamic (MCP/custom) tools, and by **MCP server** count (not individual tool count) when classification is enabled.
 - **MCP config**: enable/disable is per **server** (all tools of that server). The classifier selects servers, not individual tools.
-- If vector prerequisites are invalid, the agent runs with **FTS-only** search.
+- If vector prerequisites are invalid, **`CodebaseSearch` is unavailable**; use **Grep** / **ListCodeDefinitions** for discovery until vector indexing is configured.
 - Host UI must not change `runAgentLoop` contracts (options, events, tool results).
-- `write_to_file` and `replace_in_file` skip explicit approval dialogs in file-edit flow when `autoApproveWrite` (or mode auto-approve `write`) is enabled; otherwise they emit `tool_approval_needed` and wait for host approval.
+- **`Write`** and **`Edit`** skip explicit approval when `autoApproveWrite` (or mode `autoApprove` includes `write`) is enabled; otherwise they emit `tool_approval_needed` and wait for the host.
 - When the **tool-call budget** is exceeded, the loop allows one more iteration with tools disabled so the model can emit a final text-only answer.
 - **`config.agentLoop.toolCallBudget`** and **`config.agentLoop.maxIterations`** override per-mode limits when set.
 - **Models catalog**: CLI and extension use models.dev (`NEXUS_MODELS_PATH` / `NEXUS_MODELS_URL`) and live gateway model list where applicable; unavailable free IDs are filtered from pickers.
@@ -200,12 +210,12 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 ## Data flow
 
 1. User message enters the VS Code webview or CLI TUI.
-2. **Without server:** the host appends the message to the local session (JSONL). **With server:** the message is sent to the NexusCode server; sessions and messages live in the server SQLite DB.
+2. **Without server:** the host appends the message to the local session (JSONL under `~/.nexus/sessions/…`). **With server:** the message is sent over HTTP; the server process appends to the **same JSONL files** for that canonical project root (`packages/server/src/session-fs-store.ts` → core `saveSession` / `loadSessionMessages`), not a separate SQLite DB.
 3. Core (in-process or on server) builds prompt blocks (role, rules, skills, system, mentions, compaction).
 4. The model streams text and tool calls.
 5. Tools run via the host adapter with permission checks (rules, approval dialogs).
 6. In **plan** mode, **PlanExit** ends the turn after a plan file is written to `.nexus/plans/`. In other modes, turns end naturally when the model stops without tool calls.
-7. Session and tool traces are saved (local or server) and sent back to the UI. With the server, extension and CLI can list/switch sessions; messages are loaded in pages to avoid OOM. Local extension sessions also open as a recent-message window first, then page older messages on demand.
+7. Session and tool traces are persisted to JSONL (whether the client talked to the server or not) and reflected in the UI. With the server, extension and CLI list/switch sessions via HTTP; messages are loaded in windows/pages to avoid OOM. Local extension sessions also open as a recent-message window first, then page older messages on demand.
 8. Index updates run in the background and emit status events (in-process only; server mode does not run the indexer in the extension).
 
 ---
@@ -229,7 +239,7 @@ NexusCode/
 │   │   └── review/        ← Review helpers (if any)
 │   ├── vscode/            ← Extension + React webview (controller, settings, chat, presets)
 │   ├── cli/               ← CLI host + TUI (slash commands, agent-config, sessions)
-│   └── server/            ← Optional: SQLite sessions, streaming API
+│   └── server/            ← Optional: HTTP server + NDJSON streaming; JSONL session store (shared with CLI/extension)
 ├── sources/
 │   └── claude-context-mode/  ← Bundled MCP (context compression, FTS, batch_execute)
 └── .nexus/                ← Project config (nexus.yaml, agent-configs.json, rules, skills)
@@ -239,17 +249,24 @@ NexusCode/
 
 ## Built-in tools (by group)
 
+Static registry (`getAllBuiltinTools` in `packages/core/src/tools/built-in/index.ts`):
+
 - **always:** `AskFollowupQuestion`, `TodoWrite`, `Parallel`
 - **read:** `Read`, `List`, `ListCodeDefinitions`, `ReadLints`
 - **write:** `Write`, `Edit`
-- **execute:** `Bash`
+- **execute:** `Bash`, `BashOutput`, `KillBash` (background jobs log under the global data dir; see `execute-command.ts`)
 - **search:** `Grep`, `CodebaseSearch`, `WebFetch`, `WebSearch`, `Glob`
-- **skills:** `Skill` — catalog in the tool description (`<available_skills>`) comes from `loadSkills` (local paths, `skillsUrls` remote `index.json` caches, `~/.claude/skills` + walk-up, marketplace installs under `.kilo/skills`, `.nexus/skills`, etc.). Response uses `<skill_content>` + sampled `<skill_files>`. Classifier + **Active Skills** unchanged. `permissions.autoApproveSkillLoad` defaults to **true**; set **false** to require approval. With approval required, `Skill` cannot run inside `Parallel`. **Integrations → Marketplace:** **Skills** use **[SkillNet](http://api-skillnet.openkg.cn)** (install from GitHub links into **`.kilo/skills/<id>`**); **MCP** tab lists the **Kilo** marketplace API (`api.kilo.ai/.../mcps`) for one-click adds to **`.nexus/mcp-servers.json`**. Legacy **`.nexus/skills`** is still detected and removable.
-- **agents:** `SpawnAgent`, `SpawnAgentOutput`, `SpawnAgentStop`
+- **skills:** `Skill` — catalog in the tool description (`<available_skills>`) from `loadSkills` (configured paths, `skillsUrls` → cache under `~/.nexus/cache/skills`, **`~/.nexus/skills`**, walk-up **`.nexus/skills`** from cwd ancestors). Marketplace installs use **`<project>/.nexus/skills/<id>`** or **`~/.nexus/skills/<id>`**. `permissions.autoApproveSkillLoad` defaults to **true**; when approval is required, `Skill` must not run inside `Parallel`. **Integrations → Marketplace:** SkillNet skills index; MCP tab appends servers to **`.nexus/mcp-servers.json`** (project) or **`~/.nexus/mcp-servers.json`** (global). **Rules:** configured patterns plus walk-up **`AGENTS.md` / `CLAUDE.md`**, same filenames under **`.nexus/`**, **`.nexus/rules/**/*.md`**, **`~/.nexus/rules/**`**.
 - **context:** `Condense`
-- **plan_exit tool group:** `PlanExit` (plan mode only)
+- **plan_exit:** `PlanExit` (plan mode only)
 
-Mode-specific blocks: **plan** blocks `Bash`; **ask** blocks `Write`, `Edit`, `Bash`, `PlanExit`; **review** blocks `Write`, `Edit`, `PlanExit`; **agent/debug** block `PlanExit`.
+Host registration (after `ToolRegistry` + MCP): **`packages/cli/src/nexus-bootstrap.ts`** and **`packages/vscode/src/controller.ts`** register `SpawnAgent`, `SpawnAgentsParallel`, `SpawnAgentOutput`, `SpawnAgentStop`. **`packages/server/src/run-session.ts`** registers `SpawnAgent`, the deprecated alias **`SpawnAgents`**, `SpawnAgentOutput`, and `SpawnAgentStop` — it does **not** call `createSpawnAgentsParallelTool`, so on the HTTP server the model must use **`Parallel` with multiple `SpawnAgent` calls** (or sequential `SpawnAgent` / `SpawnAgents`) instead of `SpawnAgentsParallel`.
+
+`CodebaseSearch` is included in the loop only when **`indexing.vector`** and **`vectorDb.enabled`** (see `runAgentLoop`); otherwise the tool name is removed from the per-mode builtin set.
+
+**Not wired into the runtime registry:** exported `createRuleTool` (`name: "create_rule"`) in `report-and-control.ts` — CLI, VS Code, and server never call `toolRegistry.register` for it, so the model does not see this tool (webview still has an icon mapping in `ToolCallCard` for future use). **`exa_web_search` / `exa_code_search`** in `exa-search.ts` are not registered anywhere; argument normalization for those names in `tool-execution.ts` exists for compatibility only.
+
+Mode-specific blocks (`MODE_BLOCKED_TOOLS`): **plan** — `Bash`; **ask** — `Write`, `Edit`, `Bash`, `PlanExit`; **review** — `Write`, `Edit`, `PlanExit`; **agent** / **debug** — `PlanExit`.
 
 ---
 
@@ -265,8 +282,8 @@ Mode-specific blocks: **plan** blocks `Bash`; **ask** blocks `Write`, `Edit`, `B
 
 ## Version requirements
 
-- **Node.js**: **20+** is required for packaging the VS Code extension (`pnpm package:vscode`) — `vsce` needs the global `File` API. The rest of the build (`pnpm build`, core, webview, extension bundle) runs on Node 18+. `.nvmrc` is set to `20` for nvm/fnm.
-- **pnpm**: used for the workspace and scripts; no minimum version enforced in code.
+- **Node.js**: в корневом `package.json` указано `"engines": { "node": ">=18.0.0" }`, но **`pnpm run serve`** и `scripts/check-node.js` требуют **Node 20+** (совместимость с prebuild **better-sqlite3**). Сборка и публикация **.vsix** (`pnpm package:vscode` / vsce) на практике тоже ожидают **20+**. **`.nvmrc` = 20** — рекомендуемая версия для всего рабочего цикла.
+- **pnpm**: workspace и скрипты; минимальная версия в коде не зафиксирована.
 
 ---
 

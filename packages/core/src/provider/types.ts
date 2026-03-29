@@ -37,6 +37,8 @@ export type LLMMessageContent =
   | string
   | Array<
       | { type: "text"; text: string }
+      /** Prior-turn chain-of-thought (KiloCode UIMessage / AI SDK); may be hoisted per model in buildAISDKMessages. */
+      | { type: "reasoning"; text: string }
       | { type: "image"; data: string; mimeType: string }
       // AI SDK uses "tool-call" (with dash) — this must match exactly
       | { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> }
@@ -68,7 +70,15 @@ export interface StreamOptions {
   retryOnStatus?: number[]
   /** Provider-specific options (e.g. anthropic: { thinking: { type: 'enabled', budgetTokens } }) */
   providerOptions?: Record<string, unknown>
+  /**
+   * How assistant reasoning from history is sent on the next request (KiloCode-style).
+   * `auto` hoists to `reasoning_content` for models like DeepSeek; otherwise keeps `type: "reasoning"` in content.
+   */
+  reasoningHistoryMode?: ReasoningHistoryMode
 }
+
+/** @see StreamOptions.reasoningHistoryMode */
+export type ReasoningHistoryMode = "auto" | "inline" | "reasoning_content" | "reasoning_details"
 
 export interface GenerateOptions<T> {
   messages: LLMMessage[]

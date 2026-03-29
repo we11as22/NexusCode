@@ -1,6 +1,6 @@
 import { create } from "zustand"
 import { postMessage } from "../vscode.js"
-import type { ModelsCatalogFromCore, AgentPresetFromCore } from "../types/messages.js"
+import type { ModelsCatalogFromCore, AgentPresetFromCore, AutocompleteExtensionUiState } from "../types/messages.js"
 
 /** Detects a new plan snapshot so the full follow-up panel re-opens. */
 let planFollowupTextFingerprint: string | null = null
@@ -10,7 +10,19 @@ export type AppView = "chat" | "sessions" | "settings"
 
 export type IndexStatusKind =
   | { state: "idle" }
-  | { state: "indexing"; progress: number; total: number; chunksProcessed?: number; chunksTotal?: number }
+  | { state: "stopping"; message?: string }
+  | {
+      state: "indexing"
+      progress: number
+      total: number
+      chunksProcessed?: number
+      chunksTotal?: number
+      overallPercent?: number
+      phase?: "parsing" | "embedding"
+      message?: string
+      watcherQueue?: boolean
+      paused?: boolean
+    }
   | { state: "ready"; files: number; symbols: number; chunks?: number }
   | { state: "error"; error: string }
 
@@ -49,6 +61,8 @@ export interface ToolPart {
   diffStats?: { added: number; removed: number }
   /** Line-by-line diff for UI (red/green); set from tool_end when available */
   diffHunks?: Array<{ type: string; lineNum: number; line: string }>
+  /** Edit tool: snippets that were replaced (compact preview); full +/- counts stay in diffStats */
+  appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>
   /** Subagents for SpawnAgent: filled by subagent_start/tool_start/done, shown inline under this tool card */
   subagents?: SubAgentState[]
 }
@@ -77,6 +91,11 @@ export interface NexusConfigState {
     batchSize: number
     embeddingBatchSize: number
     embeddingConcurrency: number
+    maxPendingEmbedBatches?: number
+    batchProcessingConcurrency?: number
+    maxIndexedFiles?: number
+    searchWhileIndexing?: boolean
+    maxIndexingFailureRate?: number
     debounceMs: number
     excludePatterns: string[]
   }
@@ -288,7 +307,12 @@ interface ChatState {
   /** Optimistic deletions: hide sessions until a fresh list confirms removal or the tombstone expires. */
   pendingDeletedSessionIds: Record<string, number>
   config: NexusConfigState | null
-  isCompacting: boolean
+  /** Compaction: none | compacting (inline in chat list, Thought-style). */
+  compactionUi: "none" | "compacting"
+  /** When automatic compaction started (for duration). */
+  compactionStartTime: number | null
+  /** Completed compaction rows (chronological, like collapsed Thought). */
+  compactionLog: Array<{ id: string; durationSec: number }>
   subagents: SubAgentState[]
   /** partId of the last tool_start(SpawnAgent); used to attach subagent_start to that part */
   lastSpawnAgentPartId: string | null
@@ -368,6 +392,9 @@ interface ChatState {
   /** True after first stateUpdate received — prevents flash during initial load. */
   isInitialized: boolean
 
+  /** VS Code nexuscode.autocomplete.* (Editor inline completion). */
+  autocompleteExtension: AutocompleteExtensionUiState | null
+
   /** When opening Settings from a slash command, open this tab (cleared after applied). */
   initialSettingsTab: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets" | null
   /** When opening Settings → Integrations, open this sub-tab (cleared after applied). */
@@ -428,7 +455,7 @@ export type AgentEvent =
   | { type: "reasoning_delta"; delta: string; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "reasoning_end"; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
-  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
+  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }> }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string; parentPartId?: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown>; parentPartId?: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
@@ -445,6 +472,18 @@ export type AgentEvent =
   | { type: "done"; messageId: string }
   | { type: "todo_updated"; todo: string }
   | { type: "doom_loop_detected"; tool: string }
+
+const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
+
+/** Index from the end of `parts` of the open reasoning segment for `reasoningId` (no durationMs yet). */
+function findOpenReasoningReverseIndex(parts: MessagePart[], reasoningId: string): number {
+  return [...parts].reverse().findIndex(
+    (p) =>
+      p.type === "reasoning" &&
+      (p as ReasoningPart).durationMs == null &&
+      ((p as ReasoningPart).reasoningId ?? "reasoning-0") === reasoningId
+  )
+}
 
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
@@ -469,7 +508,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionsLoading: false,
   pendingDeletedSessionIds: {},
   config: null,
-  isCompacting: false,
+  compactionUi: "none",
+  compactionStartTime: null,
+  compactionLog: [],
   subagents: [],
   lastSpawnAgentPartId: null,
   selectedProfile: "",
@@ -483,6 +524,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingApproval: null,
 
   isInitialized: false,
+  autocompleteExtension: null,
   initialSettingsTab: null,
   initialSettingsIntegTab: null,
   modelsCatalog: null,
@@ -648,7 +690,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   abort: () => {
     postMessage({ type: "abort" })
-    set({ isRunning: false })
+    set((s) => ({
+      isRunning: false,
+      ...(s.compactionUi === "compacting"
+        ? { compactionUi: "none" as const, compactionStartTime: null }
+        : {}),
+    }))
   },
 
   compact: () => {
@@ -658,7 +705,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearChat: () => {
     planFollowupTextFingerprint = null
     postMessage({ type: "clearChat" })
-    set({ messages: [], todo: "", view: "chat", subagents: [], lastSpawnAgentPartId: null, planCompleted: false, planFollowupText: null, planPanelCollapsed: false, hasOlderMessages: false, loadingOlderMessages: false })
+    set({
+      messages: [],
+      todo: "",
+      view: "chat",
+      subagents: [],
+      lastSpawnAgentPartId: null,
+      planCompleted: false,
+      planFollowupText: null,
+      planPanelCollapsed: false,
+      hasOlderMessages: false,
+      loadingOlderMessages: false,
+      compactionUi: "none",
+      compactionStartTime: null,
+      compactionLog: [],
+    })
   },
 
   forkSession: (messageId) => {
@@ -736,6 +797,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       const next = { ...prev, ...state, isInitialized: true, suppressedQuestionRequestId }
+      if (typeof state.sessionId === "string" && state.sessionId !== prev.sessionId && prev.sessionId !== "") {
+        next.compactionLog = []
+        next.compactionUi = "none"
+        next.compactionStartTime = null
+      }
       if (state.pendingQuestionRequest !== undefined) {
         const inc = state.pendingQuestionRequest
         const hideStale =
@@ -959,7 +1025,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "tool_end": {
-        const ev = event as { output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }> }
+        const ev = event as {
+          output?: string
+          error?: string
+          compacted?: boolean
+          path?: string
+          diffStats?: { added: number; removed: number }
+          diffHunks?: Array<{ type: string; lineNum: number; line: string }>
+          appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>
+        }
         if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") set({ lastSpawnAgentPartId: null })
         set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
         const msgs = messages.map((msg) => {
@@ -976,6 +1050,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...(ev.path != null ? { path: ev.path } : {}),
                 ...(ev.diffStats != null ? { diffStats: ev.diffStats } : {}),
                 ...(Array.isArray(ev.diffHunks) ? { diffHunks: ev.diffHunks } : {}),
+                ...(Array.isArray(ev.appliedReplacements) && ev.appliedReplacements.length > 0
+                  ? { appliedReplacements: ev.appliedReplacements }
+                  : {}),
               } as ToolPart
             }
             return p
@@ -1134,7 +1211,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const parts = Array.isArray(updated.content)
           ? [...(updated.content as MessagePart[])]
           : (typeof updated.content === "string" && updated.content.length > 0 ? [{ type: "text" as const, text: updated.content }] : [])
-        const revIdx = [...parts].reverse().findIndex((p) => p.type === "reasoning" && ((p as ReasoningPart).reasoningId ?? "reasoning-0") === reasoningId)
+        const revIdx = findOpenReasoningReverseIndex(parts, reasoningId)
         const partIndex = revIdx >= 0 ? parts.length - 1 - revIdx : -1
         if (partIndex >= 0) {
           const reasoningPart = parts[partIndex] as ReasoningPart
@@ -1173,7 +1250,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const parts = Array.isArray(updated.content)
           ? [...(updated.content as MessagePart[])]
           : (typeof updated.content === "string" && updated.content.length > 0 ? [{ type: "text" as const, text: updated.content }] : [])
-        const revIdx = [...parts].reverse().findIndex((p) => p.type === "reasoning" && ((p as ReasoningPart).reasoningId ?? "reasoning-0") === reasoningId)
+        const revIdx = findOpenReasoningReverseIndex(parts, reasoningId)
         if (revIdx < 0) {
           parts.push({
             type: "reasoning",
@@ -1204,7 +1281,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const updated = { ...target }
         const parts = [...(updated.content as MessagePart[])]
         const reasoningRevIndex = [...parts].reverse().findIndex((p) =>
-          p.type === "reasoning" && (reasoningId == null || ((p as ReasoningPart).reasoningId ?? "reasoning-0") === reasoningId)
+          p.type === "reasoning" &&
+          (p as ReasoningPart).durationMs == null &&
+          (reasoningId == null || ((p as ReasoningPart).reasoningId ?? "reasoning-0") === reasoningId)
         )
         if (reasoningRevIndex >= 0) {
           const reasoningIndex = parts.length - 1 - reasoningRevIndex
@@ -1232,11 +1311,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "compaction_start":
-        set({ isCompacting: true })
+        set({ compactionUi: "compacting", compactionStartTime: Date.now() })
         break
 
       case "compaction_end":
-        set({ isCompacting: false })
+        set((s) => {
+          if (s.compactionUi !== "compacting" || s.compactionStartTime == null) {
+            return { compactionStartTime: null }
+          }
+          const durationMs = Date.now() - s.compactionStartTime
+          const durationSec = Math.max(1, Math.round(durationMs / 1000))
+          return {
+            compactionUi: "none",
+            compactionStartTime: null,
+            compactionLog: [
+              ...s.compactionLog,
+              { id: `compaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, durationSec },
+            ],
+          }
+        })
         break
 
       case "doom_loop_detected":
@@ -1746,8 +1839,6 @@ function hasRenderableAssistantContent(content: string | MessagePart[]): boolean
     return false
   })
 }
-
-const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
 
 function isSlashCommand(text: string, command: string): boolean {
   return new RegExp(`^/${command}(\\s|$)`, "i").test(text.trim())

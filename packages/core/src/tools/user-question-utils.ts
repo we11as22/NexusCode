@@ -1,5 +1,64 @@
 import type { UserQuestionAnswer, UserQuestionItem, UserQuestionOption, UserQuestionRequest } from "../types.js"
 
+/**
+ * Split model-supplied options (one string or CSV) into separate choices.
+ * - Commas/semicolons/pipes inside `()`, `[]`, `{}` do not split (fixes "API (req, err)").
+ * - Multiline numbered lists (`1. …\\n2. …`) are split by line and prefixes stripped.
+ * - Multiline bullet lists (`- …`, `• …`) get bullet prefixes stripped.
+ */
+export function splitQuestionOptionListString(s: string): string[] {
+  const trimmed = s.trim()
+  if (!trimmed) return []
+
+  if (/\r?\n/.test(trimmed)) {
+    const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0)
+    const numberedRe = /^\d+[\.\)]\s/
+    const numberedCount = lines.filter((l) => numberedRe.test(l)).length
+    if (lines.length >= 2 && numberedCount >= Math.max(2, Math.ceil(lines.length * 0.5))) {
+      return lines
+        .map((l) => l.replace(/^\d+[\.\)]\s*/, "").trim())
+        .filter((l) => l.length > 0)
+    }
+    const bulletRe = /^[-•*]\s/
+    const bulletCount = lines.filter((l) => bulletRe.test(l)).length
+    if (lines.length >= 2 && bulletCount >= Math.max(2, Math.ceil(lines.length * 0.5))) {
+      return lines.map((l) => l.replace(/^[-•*]\s*/, "").trim()).filter((l) => l.length > 0)
+    }
+    if (lines.length > 1) return lines
+  }
+
+  return splitOnCommaSemicolonPipeRespectingParens(trimmed)
+}
+
+function splitOnCommaSemicolonPipeRespectingParens(s: string): string[] {
+  const parts: string[] = []
+  let buf = ""
+  let depthParen = 0
+  let depthBracket = 0
+  let depthBrace = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!
+    if (c === "(") depthParen++
+    else if (c === ")") depthParen = Math.max(0, depthParen - 1)
+    else if (c === "[") depthBracket++
+    else if (c === "]") depthBracket = Math.max(0, depthBracket - 1)
+    else if (c === "{") depthBrace++
+    else if (c === "}") depthBrace = Math.max(0, depthBrace - 1)
+
+    const canSplit = depthParen === 0 && depthBracket === 0 && depthBrace === 0
+    if (canSplit && (c === "," || c === ";" || c === "|")) {
+      const t = buf.trim()
+      if (t) parts.push(t)
+      buf = ""
+      continue
+    }
+    buf += c
+  }
+  const last = buf.trim()
+  if (last) parts.push(last)
+  return parts.length > 0 ? parts : (s.trim() ? [s.trim()] : [])
+}
+
 /** Synthetic option id for the host-added “Other / custom” row (never send from the model). */
 export const NEXUS_CUSTOM_OPTION_ID = "__nexus_other__"
 

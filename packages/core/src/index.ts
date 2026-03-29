@@ -22,7 +22,15 @@ export {
 } from "./config/index.js"
 export type { ProjectSettings, NexusSecretsStore, NexusSecretsPayload } from "./config/index.js"
 export { NexusConfigSchema } from "./config/schema.js"
-export type { NexusConfig, ProviderConfig, EmbeddingConfig, McpServerConfig, SkillDef, ModeConfig } from "./types.js"
+export type {
+  NexusConfig,
+  ProviderConfig,
+  EmbeddingConfig,
+  McpServerConfig,
+  SkillDef,
+  ModeConfig,
+  ProviderName,
+} from "./types.js"
 
 // Types
 export { MODES } from "./types.js"
@@ -76,6 +84,10 @@ export {
 
 // Tools
 export { ToolRegistry } from "./tools/registry.js"
+export {
+  normalizedAppliedReplacementsFromMetadata,
+  type AppliedReplacementSnippet,
+} from "./tools/applied-replacements.js"
 export { getAllBuiltinTools } from "./tools/built-in/index.js"
 export {
   NEXUS_CUSTOM_OPTION_ID,
@@ -85,8 +97,20 @@ export {
 
 // Indexer
 export { CodebaseIndexer } from "./indexer/index.js"
+export {
+  INDEX_FILE_WATCHER_DEBOUNCE_MS,
+  DEFAULT_MAX_INDEXED_FILES,
+  DEFAULT_MAX_PENDING_EMBED_BATCHES,
+  DEFAULT_BATCH_PROCESSING_CONCURRENCY,
+} from "./indexer/constants.js"
 export { ProjectRegistry, getIndexDir } from "./indexer/multi-project.js"
-export { createCodebaseIndexer } from "./indexer/factory.js"
+export {
+  createCodebaseIndexer,
+  type ListIndexAbsolutePathsFn,
+  type CodebaseIndexerHostOptions,
+} from "./indexer/factory.js"
+export { setIndexTelemetrySink } from "./indexer/index-telemetry.js"
+export { buildIndexWatcherGlobPattern, getIndexableExtensions } from "./indexer/scanner.js"
 export { ensureQdrantRunning } from "./indexer/qdrant-manager.js"
 
 // Context
@@ -98,7 +122,6 @@ export {
   estimateToolsDefinitionsTokens,
   estimateActiveContextSessionTokens,
   getContextWindowLimit,
-  MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE,
 } from "./context/context-usage.js"
 export type { ContextUsageSnapshot } from "./context/context-usage.js"
 

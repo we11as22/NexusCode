@@ -1,8 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { useChatStore, type AgentEvent, type NexusConfigState } from "./stores/chat.js"
-import type { MessagePart } from "./stores/chat.js"
+import {
+  useChatStore,
+  type AgentEvent,
+  type IndexStatusKind,
+  type NexusConfigState,
+  type MessagePart,
+} from "./stores/chat.js"
 import { MessageList } from "./components/MessageList.js"
 import { InputBar } from "./components/InputBar.js"
 import { ImageIcon } from "./components/AttachedImagesStrip.js"
@@ -11,7 +16,7 @@ import { QueuedMessagesPanel } from "./components/QueuedMessagesPanel.js"
 import { ModeDropdown } from "./components/ModeDropdown.js"
 import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
-import type { ExtensionMessage } from "./types/messages.js"
+import type { AutocompleteExtensionUiState, ExtensionMessage } from "./types/messages.js"
 import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
 import { NEXUS_CUSTOM_OPTION_ID } from "./constants/questionnaire.js"
 import { MarketplacePanel } from "./components/marketplace/MarketplacePanel.js"
@@ -22,6 +27,18 @@ const BTN_CLASS =
 const BTN_SM_CLASS =
   "p-1 rounded text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
 const MODEL_PROVIDER_OPTIONS = ["anthropic", "openai", "google", "openai-compatible", "openrouter", "ollama", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity"]
+
+const DEFAULT_AUTOCOMPLETE_UI: AutocompleteExtensionUiState = {
+  enableAutoTrigger: true,
+  useSeparateModel: false,
+  modelProvider: "",
+  modelId: "",
+  modelApiKey: "",
+  modelBaseUrl: "",
+  modelTemperature: "0.2",
+  modelReasoningEffort: "",
+  modelContextWindow: "",
+}
 const EMB_PROVIDER_OPTIONS = [
   "openai",
   "openai-compatible",
@@ -72,10 +89,19 @@ export function App() {
           flushAgentEvents()
           store.handleStateUpdate(msg.state)
           break
-        case "agentEvent":
-          pendingAgentEventsRef.current.push(msg.event as AgentEvent)
+        case "agentEvent": {
+          const ev = msg.event as AgentEvent
+          // Apply index status immediately — same payload used to be duplicated as `indexStatus` + deferred
+          // `index_update`, which could reorder and clear `paused` after Pause was applied.
+          if (ev.type === "index_update" && ev && typeof (ev as { status?: unknown }).status === "object") {
+            flushAgentEvents()
+            store.handleIndexStatus((ev as { status: IndexStatusKind }).status)
+            break
+          }
+          pendingAgentEventsRef.current.push(ev)
           scheduleAgentEventFlush()
           break
+        }
         case "indexStatus":
           store.handleIndexStatus(msg.status as any)
           break
@@ -145,10 +171,6 @@ export function App() {
         <TabButton active={store.view === "settings"} onClick={() => store.setView("settings")} label="Settings" />
       </div>
 
-      {store.indexStatus.state === "indexing" && (
-        <IndexProgress status={store.indexStatus} />
-      )}
-
       {store.vectorDbProgressMessage && (
         <div className="flex-shrink-0 px-3 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-badge-background)] text-[11px] text-[var(--vscode-descriptionForeground)]">
           {store.vectorDbProgressMessage}
@@ -217,18 +239,6 @@ function ChatView() {
 
   return (
     <>
-      {store.isCompacting && (
-        <div className="flex-shrink-0 px-3 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-badge-background)] text-[10px] text-[var(--vscode-descriptionForeground)]">
-          Compacting conversation...
-        </div>
-      )}
-
-      {store.isCompacting === false && store.messages.some((m) => m.summary) && (
-        <div className="flex-shrink-0 px-3 py-1.5 border-b border-[var(--vscode-panel-border)] text-[10px] text-[var(--vscode-descriptionForeground)]">
-          Summarized Chat context summarized.
-        </div>
-      )}
-
       {store.awaitingApproval && !store.pendingApproval && (
         <div className="nexus-approval-banner">
           <span className="nexus-approval-icon">⚠</span>
@@ -1170,6 +1180,16 @@ interface SettingsDraft {
   indexingVector: boolean
   embeddingBatchSize: string
   embeddingConcurrency: string
+  /** Max embed batches queued while parsing (backpressure). */
+  maxPendingEmbedBatches: string
+  /** Parallel embed/upsert pipelines. */
+  batchProcessingConcurrency: string
+  /** 0 = disable listing (Roo parity). */
+  maxIndexedFiles: string
+  /** Allow CodebaseSearch during indexing (partial results if vectors exist). */
+  searchWhileIndexing: boolean
+  /** 0–1; fraction of chunk embed failures that triggers index reset. */
+  maxIndexingFailureRate: string
   vectorDbEnabled: boolean
   vectorDbUrl: string
   vectorDbApiKey: string
@@ -1222,8 +1242,24 @@ function SettingsView({
   initialIntegTab: SettingsIntegTabId | null
   onInitialTabApplied: () => void
 }) {
-  const { config, provider, model, saveConfig, serverUrl, modelsCatalog, modelsCatalogLoading, requestModelsCatalog, agentPresets, requestAgentPresets, agentPresetOptions, requestAgentPresetOptions, handleAgentPresetOptions } = useChatStore()
+  const {
+    config,
+    provider,
+    model,
+    saveConfig,
+    serverUrl,
+    modelsCatalog,
+    modelsCatalogLoading,
+    requestModelsCatalog,
+    agentPresets,
+    requestAgentPresets,
+    agentPresetOptions,
+    requestAgentPresetOptions,
+    handleAgentPresetOptions,
+    autocompleteExtension,
+  } = useChatStore()
   const [draft, setDraft] = useState<SettingsDraft>(() => getDefaultDraft())
+  const serverSettingsFingerprintRef = useRef<string>("")
   const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
   const [tab, setTab] = useState<SettingsTabId>("llm")
   const [integTab, setIntegTab] = useState<SettingsIntegTabId>("rules-skills")
@@ -1237,6 +1273,11 @@ function SettingsView({
   const [presetCreateSkills, setPresetCreateSkills] = useState<Set<string>>(new Set())
   const [presetCreateMcp, setPresetCreateMcp] = useState<Set<string>>(new Set())
   const [presetCreateRules, setPresetCreateRules] = useState<Set<string>>(new Set())
+  const [acPanelOpen, setAcPanelOpen] = useState(false)
+  const [acModelPickerOpen, setAcModelPickerOpen] = useState(false)
+  const [acModelPickerQuery, setAcModelPickerQuery] = useState("")
+
+  const ac = autocompleteExtension ?? DEFAULT_AUTOCOMPLETE_UI
 
   useEffect(() => {
     if (initialTab) {
@@ -1250,8 +1291,16 @@ function SettingsView({
     setServerUrlLocal(serverUrl)
   }, [serverUrl])
   useEffect(() => {
-    if (config) setDraft(toDraft(config, provider, model))
-  }, [config, provider, model])
+    if (!config) {
+      serverSettingsFingerprintRef.current = ""
+      return
+    }
+    const fp = settingsConfigFingerprint(config)
+    if (fp === serverSettingsFingerprintRef.current) return
+    serverSettingsFingerprintRef.current = fp
+    const { provider: fallbackProvider, model: fallbackModel } = useChatStore.getState()
+    setDraft(toDraft(config, fallbackProvider, fallbackModel))
+  }, [config])
   useEffect(() => {
     requestModelsCatalog()
   }, [requestModelsCatalog])
@@ -1389,6 +1438,135 @@ function SettingsView({
             <SettingsInput label="Base URL" value={draft.modelBaseUrl} onChange={(v) => setDraft({ ...draft, modelBaseUrl: v })} />
             <div className="nexus-muted text-[10px]">Default context window fallback: 128k tokens.</div>
           </section>
+
+          <section className="nexus-section border-t border-[var(--vscode-widget-border)] pt-3 mt-3">
+            <h3 className="nexus-section-title">Editor inline autocomplete</h3>
+            <p className="nexus-muted text-[10px] mb-2">
+              Gray ghost text at the cursor; Tab accepts. When off, inline suggestions are fully disabled (no provider
+              registration).
+            </p>
+            <SettingsToggle
+              label="Enable inline autocomplete in the editor"
+              checked={ac.enableAutoTrigger}
+              onChange={(checked) =>
+                postMessage({ type: "setAutocompleteExtensionSettings", patch: { enableAutoTrigger: checked } })
+              }
+            />
+            <button
+              type="button"
+              className="nexus-secondary-btn text-xs mt-2 w-full flex items-center justify-between gap-2"
+              onClick={() => setAcPanelOpen((o) => !o)}
+            >
+              <span>LLM settings for autocomplete</span>
+              <span className="text-[10px] opacity-80 shrink-0" aria-hidden>
+                {acPanelOpen ? "▼" : "▶"}
+              </span>
+            </button>
+            {acPanelOpen && (
+              <div className="mt-2 pl-2 border-l-2 border-[var(--vscode-widget-border)] space-y-2">
+                <SettingsToggle
+                  label="Use a different model than the agent (settings above)"
+                  checked={ac.useSeparateModel}
+                  onChange={(checked) =>
+                    postMessage({ type: "setAutocompleteExtensionSettings", patch: { useSeparateModel: checked } })
+                  }
+                />
+                {!ac.useSeparateModel && (
+                  <p className="nexus-muted text-[10px]">
+                    Autocomplete uses the same provider and model as the agent (project config + overrides).
+                  </p>
+                )}
+                {ac.useSeparateModel && (
+                  <>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        className="nexus-secondary-btn text-xs"
+                        onClick={() => {
+                          setAcModelPickerOpen(true)
+                          setAcModelPickerQuery("")
+                          if (!modelsCatalog) requestModelsCatalog()
+                        }}
+                      >
+                        Select model (catalog)
+                      </button>
+                    </div>
+                    {acModelPickerOpen && (
+                      <ModelPickerModal
+                        catalog={modelsCatalog}
+                        loading={modelsCatalogLoading}
+                        query={acModelPickerQuery}
+                        onQueryChange={setAcModelPickerQuery}
+                        onSelect={(providerId, modelId, baseUrl) => {
+                          postMessage({
+                            type: "setAutocompleteExtensionSettings",
+                            patch: {
+                              useSeparateModel: true,
+                              modelProvider: providerId,
+                              modelId,
+                              modelBaseUrl: baseUrl || "",
+                            },
+                          })
+                          setAcModelPickerOpen(false)
+                        }}
+                        onClose={() => setAcModelPickerOpen(false)}
+                      />
+                    )}
+                    <SettingsSelect
+                      label="Provider"
+                      value={ac.modelProvider}
+                      onChange={(v) =>
+                        postMessage({ type: "setAutocompleteExtensionSettings", patch: { modelProvider: v } })
+                      }
+                      options={MODEL_PROVIDER_OPTIONS}
+                    />
+                    <SettingsInput
+                      label="Model"
+                      value={ac.modelId}
+                      onChange={(v) => postMessage({ type: "setAutocompleteExtensionSettings", patch: { modelId: v } })}
+                    />
+                    <SettingsInput
+                      label="Temperature (0-2)"
+                      value={ac.modelTemperature}
+                      onChange={(v) =>
+                        postMessage({ type: "setAutocompleteExtensionSettings", patch: { modelTemperature: v } })
+                      }
+                    />
+                    <SettingsSelect
+                      label="Reasoning effort"
+                      value={ac.modelReasoningEffort}
+                      onChange={(v) =>
+                        postMessage({ type: "setAutocompleteExtensionSettings", patch: { modelReasoningEffort: v } })
+                      }
+                      options={REASONING_EFFORT_OPTIONS}
+                    />
+                    <SettingsInput
+                      label="Context window (tokens, 0 = omit)"
+                      value={ac.modelContextWindow}
+                      onChange={(v) =>
+                        postMessage({ type: "setAutocompleteExtensionSettings", patch: { modelContextWindow: v } })
+                      }
+                    />
+                    <SettingsInput
+                      type="password"
+                      label="API Key"
+                      value={ac.modelApiKey}
+                      onChange={(v) =>
+                        postMessage({ type: "setAutocompleteExtensionSettings", patch: { modelApiKey: v } })
+                      }
+                    />
+                    <SettingsInput
+                      label="Base URL"
+                      value={ac.modelBaseUrl}
+                      onChange={(v) =>
+                        postMessage({ type: "setAutocompleteExtensionSettings", patch: { modelBaseUrl: v } })
+                      }
+                    />
+                  </>
+                )}
+              </div>
+            )}
+          </section>
         </>
       )}
 
@@ -1414,7 +1592,11 @@ function SettingsView({
         setDraft={setDraft}
         onReindex={() => postMessage({ type: "reindex" })}
         onDeleteIndex={async () => {
-          if (await confirmAsync("Delete the codebase index? You can re-sync later.")) {
+          if (
+            await confirmAsync(
+              "Delete the entire index for this workspace (tracker + vector data)? Nothing rebuilds automatically — press Sync when you want to index again.",
+            )
+          ) {
             postMessage({ type: "clearIndex" })
           }
         }}
@@ -1750,6 +1932,105 @@ function SettingsView({
   )
 }
 
+/** Core `overallPercent`: files-only without vector; with vector, Roo-style chunk indexed / max(found, indexed). */
+function indexReadinessPercent(status: IndexStatusKind): number {
+  switch (status.state) {
+    case "ready":
+      return 100
+    case "idle":
+    case "error":
+    case "stopping":
+      return 0
+    case "indexing": {
+      const o = status.overallPercent
+      if (typeof o === "number" && Number.isFinite(o)) return Math.max(0, Math.min(100, Math.round(o)))
+      const { total, progress } = status
+      if (total > 0) return Math.max(0, Math.min(100, Math.round((progress / total) * 100)))
+      return 0
+    }
+    default:
+      return 0
+  }
+}
+
+function indexReadinessPhaseLabel(status: IndexStatusKind): string {
+  switch (status.state) {
+    case "ready":
+      return "Ready for CodebaseSearch"
+    case "error":
+      return "Failed"
+    case "idle":
+      return "Not indexed"
+    case "stopping":
+      return "Stopping"
+    case "indexing":
+      return status.watcherQueue ? "Updating from disk" : status.paused ? "Paused" : "Indexing"
+    default:
+      return ""
+  }
+}
+
+function indexReadinessDetail(status: IndexStatusKind): string {
+  switch (status.state) {
+    case "ready": {
+      const chunks = typeof status.chunks === "number" ? status.chunks : status.symbols
+      return `${status.files.toLocaleString()} files · ${chunks.toLocaleString()} chunks in index`
+    }
+    case "error":
+      return status.error ?? "Unknown error"
+    case "idle":
+      return "Click Sync to build the index. With vector on, progress follows Roo-style chunk counts (indexed / chunks found so far); file totals are shown in the same line."
+    case "stopping":
+      return status.message?.trim() || "Stopping indexer (abort in progress)…"
+    case "indexing": {
+      const base = status.message?.trim() || "…"
+      return status.paused ? `${base} — indexing paused (resume to continue).` : base
+    }
+    default:
+      return ""
+  }
+}
+
+/** Single gray track + green fill; % matches current phase (files or chunks) like Roo. */
+function IndexReadinessBar({ status }: { status: IndexStatusKind }) {
+  const pct = indexReadinessPercent(status)
+  const isError = status.state === "error"
+  const isStopping = status.state === "stopping"
+  const fillWidth = isError || isStopping ? 0 : pct
+  return (
+    <div
+      className="nexus-index-readiness"
+      role="progressbar"
+      aria-valuenow={pct}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label="Codebase index readiness"
+    >
+      <div className="flex items-end justify-between gap-2 mb-1">
+        <div className="text-[22px] font-semibold tabular-nums leading-none text-[var(--vscode-foreground)]">
+          {isError || isStopping ? "—" : pct}
+          {!isError && !isStopping ? (
+            <span className="text-[13px] font-normal text-[var(--vscode-descriptionForeground)]">%</span>
+          ) : null}
+        </div>
+        <span className="text-[11px] text-[var(--vscode-descriptionForeground)] text-right max-w-[60%]">
+          {indexReadinessPhaseLabel(status)}
+        </span>
+      </div>
+      <div className="nexus-index-readiness-track">
+        <div className="nexus-index-readiness-fill" style={{ width: `${fillWidth}%` }} />
+      </div>
+      <p
+        className={`text-[11px] mt-1.5 leading-snug ${
+          isError ? "text-[var(--vscode-errorForeground)]" : "text-[var(--vscode-descriptionForeground)]"
+        }`}
+      >
+        {indexReadinessDetail(status)}
+      </p>
+    </div>
+  )
+}
+
 /** Indexing panel (codebase index, ignore files, vector/advanced). */
 function IndexingAndDocsView({
   draft,
@@ -1768,20 +2049,6 @@ function IndexingAndDocsView({
 }) {
   const indexStatus = useChatStore((s) => s.indexStatus)
   const vectorDbProgressMessage = useChatStore((s) => s.vectorDbProgressMessage)
-  const filesTotal = indexStatus.state === "indexing" ? indexStatus.total : 0
-  const filesDone = indexStatus.state === "indexing" ? indexStatus.progress : 0
-  const chunksTotal = indexStatus.state === "indexing" && typeof indexStatus.chunksTotal === "number" ? indexStatus.chunksTotal : 0
-  const chunksDone = indexStatus.state === "indexing" && typeof indexStatus.chunksProcessed === "number" ? indexStatus.chunksProcessed : 0
-  const filesPct = filesTotal > 0 ? Math.round((filesDone / filesTotal) * 100) : 0
-  const chunksPct = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0
-  const progressPct =
-    indexStatus.state === "ready"
-      ? 100
-      : indexStatus.state === "indexing" && filesTotal > 0
-        ? filesPct
-        : 0
-  const fileCount = indexStatus.state === "ready" ? indexStatus.files : 0
-  const chunkCount = indexStatus.state === "ready" && typeof indexStatus.chunks === "number" ? indexStatus.chunks : 0
 
   return (
     <div className="nexus-section">
@@ -1793,53 +2060,28 @@ function IndexingAndDocsView({
           <span className="nexus-info-icon" title="Embed codebase for context">ⓘ</span>
         </h4>
         <p className="nexus-panel-section-desc">
-          Embed codebase for improved contextual understanding. Embeddings and metadata are stored locally (or in vector DB when enabled).
+          One index per workspace (single tracker + one Qdrant collection). Semantic search can be scoped with CodebaseSearch <code className="text-[10px]">target_directories</code>. Sync updates incrementally; it does not wipe the index. Explorer: right-click a folder → “Delete Index for This Path” to drop only that subtree.
         </p>
         <div className="nexus-index-progress-wrap">
-          {indexStatus.state === "indexing" && (
-            <>
-              <div className="flex items-center justify-between text-[11px] text-[var(--vscode-descriptionForeground)] mb-1">
-                <span>Files scanned</span>
-                <span>{filesDone.toLocaleString()} / {filesTotal > 0 ? filesTotal.toLocaleString() : "…"} ({filesPct}%)</span>
-              </div>
-              <div className="nexus-index-progress-bar">
-                <div className="nexus-index-progress-fill" style={{ width: `${filesTotal > 0 ? filesPct : 0}%` }} />
-              </div>
-              {chunksTotal > 0 && (
-                <>
-                  <div className="flex items-center justify-between text-[11px] text-[var(--vscode-descriptionForeground)] mb-1 mt-2">
-                    <span>Chunks indexed</span>
-                    <span>{chunksDone.toLocaleString()} / {chunksTotal.toLocaleString()} ({chunksPct}%)</span>
-                  </div>
-                  <div className="nexus-index-progress-bar">
-                    <div className="nexus-index-progress-fill nexus-index-progress-fill-chunks" style={{ width: `${chunksPct}%` }} />
-                  </div>
-                </>
-              )}
-            </>
-          )}
-          {(indexStatus.state === "idle" || indexStatus.state === "ready" || indexStatus.state === "error") && (
-            <>
-              <div className="nexus-index-progress-bar">
-                <div className="nexus-index-progress-fill" style={{ width: `${progressPct}%` }} />
-              </div>
-              <div className="nexus-muted text-[11px] mt-1">
-                {indexStatus.state === "ready"
-                  ? `${fileCount.toLocaleString()} files${chunkCount > 0 ? `, ${chunkCount.toLocaleString()} chunks` : ""} indexed`
-                  : indexStatus.state === "error"
-                    ? `Error: ${indexStatus.error ?? "unknown"}`
-                    : "No index. Click Sync to build."}
-              </div>
-            </>
-          )}
+          <IndexReadinessBar status={indexStatus} />
         </div>
-        <div className="nexus-index-actions">
-          <button type="button" className="nexus-secondary-btn text-xs" onClick={onReindex}>
+        <div className="nexus-index-actions flex flex-wrap items-center gap-2">
+          <button type="button" className="nexus-secondary-btn text-xs" onClick={onReindex} title="Incremental sync / resume (no full wipe)">
             Sync
           </button>
-          <button type="button" className="nexus-secondary-btn text-xs" onClick={onDeleteIndex}>
+          <button type="button" className="nexus-secondary-btn text-xs" onClick={onDeleteIndex} title="Remove all index data for this workspace; use Sync to rebuild">
             Delete Index
           </button>
+          {indexStatus.state === "indexing" && !indexStatus.paused && !indexStatus.watcherQueue ? (
+            <button type="button" className="nexus-secondary-btn text-xs" onClick={() => postMessage({ type: "pauseIndexing" })}>
+              Pause indexing
+            </button>
+          ) : null}
+          {indexStatus.state === "indexing" && indexStatus.paused && !indexStatus.watcherQueue ? (
+            <button type="button" className="nexus-secondary-btn text-xs" onClick={() => postMessage({ type: "resumeIndexing" })}>
+              Resume indexing
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -1902,7 +2144,54 @@ function IndexingAndDocsView({
             <span className="text-[11px] text-[var(--vscode-descriptionForeground)]">Connect to existing or auto-start (binary/Docker)</span>
           </div>
           <SettingsToggle label="Vector DB enabled (use for indexer)" checked={draft.vectorDbEnabled} onChange={(checked) => setDraft({ ...draft, vectorDbEnabled: checked })} />
-          <SettingsInput label="Embedding batch size" value={draft.embeddingBatchSize} onChange={(v) => setDraft({ ...draft, embeddingBatchSize: v })} />
+          <SettingsInput label="Embedding batch size (min segments per upsert)" value={draft.embeddingBatchSize} onChange={(v) => setDraft({ ...draft, embeddingBatchSize: v })} />
+          <SettingsInput label="Embedding request concurrency" value={draft.embeddingConcurrency} onChange={(v) => setDraft({ ...draft, embeddingConcurrency: v })} />
+          <SettingsInput
+            label="Max pending embed batches"
+            value={draft.maxPendingEmbedBatches}
+            onChange={(v) => setDraft({ ...draft, maxPendingEmbedBatches: v })}
+          />
+          <SettingsInput
+            label="Parallel embed pipelines"
+            value={draft.batchProcessingConcurrency}
+            onChange={(v) => setDraft({ ...draft, batchProcessingConcurrency: v })}
+          />
+          <SettingsInput
+            label="Max indexed files (0 = no scan, Roo-style)"
+            value={draft.maxIndexedFiles}
+            onChange={(v) => setDraft({ ...draft, maxIndexedFiles: v })}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className="nexus-secondary-btn text-xs"
+              onClick={async () => {
+                if (
+                  await confirmAsync(
+                    "Wipe the index and rebuild from scratch? This clears the tracker and vector collection, then re-indexes everything.",
+                  )
+                ) {
+                  postMessage({ type: "fullRebuildIndex" })
+                }
+              }}
+            >
+              Rebuild index from scratch
+            </button>
+            <span className="text-[10px] text-[var(--vscode-descriptionForeground)]">Unlike Sync, this clears all indexed data first.</span>
+          </div>
+          <SettingsToggle
+            label="CodebaseSearch while indexing (partial results; on by default)"
+            checked={draft.searchWhileIndexing}
+            onChange={(checked) => setDraft({ ...draft, searchWhileIndexing: checked })}
+          />
+          <p className="text-[10px] text-[var(--vscode-descriptionForeground)] -mt-1">
+            When on, semantic search runs as soon as Qdrant has points, even if the UI still shows indexing (e.g. final batches or metadata). Turn off to block until indexing fully completes.
+          </p>
+          <SettingsInput
+            label="Max indexing failure rate (0–1, e.g. 0.1)"
+            value={draft.maxIndexingFailureRate}
+            onChange={(v) => setDraft({ ...draft, maxIndexingFailureRate: v })}
+          />
         </div>
       </details>
     </div>
@@ -2441,7 +2730,7 @@ function IntegrationsSkillsView({
                 type="text"
                 value={path}
                 onChange={(e) => setLine(i, e.target.value)}
-                placeholder="Path to skill (e.g. .cursor/skills/foo/SKILL.md)"
+                placeholder="Path to skill (e.g. .nexus/skills/foo/SKILL.md)"
                 className="nexus-input flex-1 min-w-0 text-xs font-mono"
               />
               <button
@@ -2518,6 +2807,52 @@ function TabPill({
   )
 }
 
+/**
+ * Canonical tree for fingerprinting: sort object keys so logically identical configs always match.
+ * Plain JSON.stringify breaks when the host builds the same fields in different key order (duplicate
+ * configLoaded would then clear unsaved toggles like indexing.enabled / indexing.vector).
+ */
+function stableSerializeForFingerprint(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value
+  if (Array.isArray(value)) return value.map(stableSerializeForFingerprint)
+  const obj = value as Record<string, unknown>
+  const sorted: Record<string, unknown> = {}
+  for (const key of Object.keys(obj).sort()) {
+    const v = obj[key]
+    if (v === undefined) continue
+    sorted[key] = stableSerializeForFingerprint(v)
+  }
+  return sorted
+}
+
+/** Stable snapshot of everything `toDraft` reads — avoids resetting the settings form when `config` is a new object reference with identical data (duplicate configLoaded / replay / unrelated host events). */
+function settingsConfigFingerprint(config: NexusConfigState): string {
+  try {
+    return JSON.stringify(
+      stableSerializeForFingerprint({
+        model: config.model,
+        embeddings: config.embeddings,
+        indexing: config.indexing,
+        vectorDb: config.vectorDb,
+        tools: config.tools,
+        permissions: config.permissions,
+        skillClassifyEnabled: config.skillClassifyEnabled,
+        skillClassifyThreshold: config.skillClassifyThreshold,
+        mcp: config.mcp,
+        skillsConfig: config.skillsConfig,
+        skills: config.skills,
+        skillsUrls: config.skillsUrls,
+        rules: config.rules,
+        modes: config.modes,
+        profiles: config.profiles,
+        ui: config.ui,
+      })
+    )
+  } catch {
+    return `${Date.now()}`
+  }
+}
+
 function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackModel: string): SettingsDraft {
   const provider = config.model.provider ?? fallbackProvider
   const baseUrl = config.model.baseUrl ?? ""
@@ -2539,6 +2874,15 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     indexingVector: Boolean(config.indexing.vector),
     embeddingBatchSize: String(config.indexing.embeddingBatchSize ?? 60),
     embeddingConcurrency: String(config.indexing.embeddingConcurrency ?? 2),
+    maxPendingEmbedBatches: String(config.indexing.maxPendingEmbedBatches ?? 20),
+    batchProcessingConcurrency: String(config.indexing.batchProcessingConcurrency ?? 10),
+    maxIndexedFiles: String(
+      config.indexing.maxIndexedFiles !== undefined ? config.indexing.maxIndexedFiles : 50_000
+    ),
+    searchWhileIndexing: config.indexing.searchWhileIndexing !== false,
+    maxIndexingFailureRate: String(
+      config.indexing.maxIndexingFailureRate !== undefined ? config.indexing.maxIndexingFailureRate : 0.1
+    ),
     vectorDbEnabled: Boolean(config.vectorDb?.enabled),
     vectorDbUrl: config.vectorDb?.url ?? "http://127.0.0.1:6333",
     vectorDbApiKey: config.vectorDb?.apiKey ?? "",
@@ -2599,6 +2943,11 @@ function getDefaultDraft(): SettingsDraft {
     indexingVector: false,
     embeddingBatchSize: "60",
     embeddingConcurrency: "2",
+    maxPendingEmbedBatches: "20",
+    batchProcessingConcurrency: "10",
+    maxIndexedFiles: "50000",
+    searchWhileIndexing: true,
+    maxIndexingFailureRate: "0.1",
     vectorDbEnabled: false,
     vectorDbUrl: "http://127.0.0.1:6333",
     vectorDbApiKey: "",
@@ -2690,6 +3039,11 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       vector: draft.indexingVector,
       embeddingBatchSize: parsePositiveInt(draft.embeddingBatchSize, 60),
       embeddingConcurrency: parsePositiveInt(draft.embeddingConcurrency, 2),
+      maxPendingEmbedBatches: parsePositiveInt(draft.maxPendingEmbedBatches, 20),
+      batchProcessingConcurrency: parsePositiveInt(draft.batchProcessingConcurrency, 10),
+      maxIndexedFiles: parseNonNegativeInt(draft.maxIndexedFiles, 50_000),
+      searchWhileIndexing: draft.searchWhileIndexing,
+      maxIndexingFailureRate: parseFailureRate(draft.maxIndexingFailureRate, 0.1),
     },
     vectorDb: {
       enabled: draft.vectorDbEnabled,
@@ -2789,6 +3143,18 @@ function parsePositiveInt(value: string, fallback: number): number {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return fallback
   return Math.floor(n)
+}
+
+function parseNonNegativeInt(value: string, fallback: number): number {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return fallback
+  return Math.floor(n)
+}
+
+function parseFailureRate(value: string, fallback: number): number {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0 || n > 1) return fallback
+  return n
 }
 
 function toInputNumber(value: number | undefined): string {
@@ -2906,47 +3272,6 @@ function TabButton({
     >
       {label}
     </button>
-  )
-}
-
-function IndexProgress({
-  status,
-}: {
-  status: { progress: number; total: number; chunksProcessed?: number; chunksTotal?: number }
-}) {
-  const progress = status.progress
-  const total = status.total
-  const filesPct = total > 0 ? Math.max(0, Math.min(100, Math.floor((progress / total) * 100))) : 0
-  const chunksTotal = typeof status.chunksTotal === "number" ? status.chunksTotal : 0
-  const chunksDone = typeof status.chunksProcessed === "number" ? status.chunksProcessed : 0
-  const chunksPct = chunksTotal > 0 ? Math.max(0, Math.min(100, Math.floor((chunksDone / chunksTotal) * 100))) : 0
-  return (
-    <div className="px-3 py-1 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
-      <div className="flex items-center justify-between text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
-        <span>Files scanned</span>
-        <span>{progress}/{total} ({filesPct}%)</span>
-      </div>
-      <div className="w-full h-1 rounded-full bg-[var(--vscode-progressBar-background)]/30 overflow-hidden">
-        <div
-          className="h-full bg-[var(--nexus-accent)] transition-all duration-200"
-          style={{ width: `${filesPct}%` }}
-        />
-      </div>
-      {chunksTotal > 0 && (
-        <>
-          <div className="flex items-center justify-between text-[10px] text-[var(--vscode-descriptionForeground)] mt-1 mb-1">
-            <span>Chunks indexed</span>
-            <span>{chunksDone}/{chunksTotal} ({chunksPct}%)</span>
-          </div>
-          <div className="w-full h-1 rounded-full bg-[var(--vscode-progressBar-background)]/30 overflow-hidden">
-            <div
-              className="h-full transition-all duration-200"
-              style={{ width: `${chunksPct}%`, background: "var(--vscode-charts-green, #89d185)" }}
-            />
-          </div>
-        </>
-      )}
-    </div>
   )
 }
 

@@ -274,6 +274,24 @@ export interface IIndexer {
   status(): IndexStatus
   refreshFile?(filePath: string): Promise<void>
   refreshFileNow?(filePath: string): Promise<void>
+  /** Batched incremental refresh (single tracker load/save). */
+  refreshFilesBatchNow?(absPaths: string[]): Promise<void>
+  /**
+   * True when Qdrant + embeddings are actually wired (not only indexing.vector in YAML).
+   * Used by CodebaseSearch to explain YAML vs runtime mismatch.
+   */
+  semanticSearchActive?(): boolean
+  /** Pause full workspace indexing between parse/embed steps (Settings). */
+  pauseIndexing?(): void
+  resumeIndexing?(): void
+  /** Incremental index run without clearing tracker/Qdrant (one index per workspace). */
+  syncIndexing?(): Promise<void>
+  /** Clear tracker + collection and re-index from scratch. */
+  fullRebuildIndex?(): Promise<void>
+  /** Remove indexed data for paths under this repo-relative prefix only. */
+  deleteIndexScope?(relPathOrAbs: string): Promise<void>
+  /** Clear all index data for the workspace (tracker + vector collection). */
+  deleteIndex?(): Promise<void>
 }
 
 export interface IndexSearchOptions {
@@ -322,7 +340,21 @@ export interface SymbolEntry {
 
 export type IndexStatus =
   | { state: "idle" }
-  | { state: "indexing"; progress: number; total: number; chunksProcessed?: number; chunksTotal?: number }
+  | { state: "stopping"; message?: string }
+  | {
+      state: "indexing"
+      progress: number
+      total: number
+      chunksProcessed?: number
+      chunksTotal?: number
+      /** Without vector: files parsed / total files. With vector: chunks indexed / max(found, indexed) — Roo-style block ratio. */
+      overallPercent?: number
+      phase?: "parsing" | "embedding"
+      message?: string
+      /** Debounced file-watcher batch (Roo-style queue line), not full `startIndexing` scan. */
+      watcherQueue?: boolean
+      paused?: boolean
+    }
   | { state: "ready"; files: number; symbols: number; chunks?: number }
   | { state: "error"; error: string }
 
@@ -336,7 +368,7 @@ export type AgentEvent =
   | { type: "reasoning_delta"; delta: string; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "reasoning_end"; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
-  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; metadata?: Record<string, unknown> }
+  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>; metadata?: Record<string, unknown> }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string; parentPartId?: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown>; parentPartId?: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
@@ -373,6 +405,11 @@ export interface ProviderConfig {
    * Supported values depend on provider/model (e.g. low/medium/high/minimal/none/max).
    */
   reasoningEffort?: string
+  /**
+   * Prior assistant reasoning on the next LLM request (KiloCode-style).
+   * `auto` uses model heuristics (e.g. DeepSeek → `reasoning_content` on the message).
+   */
+  reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details"
   /** Optional explicit context window override in tokens for this model. */
   contextWindow?: number
   /** Azure-specific */
@@ -440,6 +477,11 @@ export interface NexusConfig {
     batchSize: number
     embeddingBatchSize: number
     embeddingConcurrency: number
+    maxPendingEmbedBatches: number
+    batchProcessingConcurrency: number
+    maxIndexedFiles: number
+    searchWhileIndexing: boolean
+    maxIndexingFailureRate: number
     debounceMs: number
     codebaseSearchSnippetMaxChars: number
   }

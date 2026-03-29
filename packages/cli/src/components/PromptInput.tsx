@@ -777,7 +777,7 @@ Create a .md rule file with a descriptive name. The rule file should define clea
         borderColor={mode === 'bash' ? theme.bashBorder : theme.secondaryBorder}
         borderDimColor
         borderStyle="round"
-        marginTop={1}
+        marginTop={sessionDiffPanelVisible ? 0 : 1}
         width="100%"
       >
         <Box

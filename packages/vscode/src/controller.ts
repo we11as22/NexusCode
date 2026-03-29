@@ -5,6 +5,7 @@
 
 import * as vscode from "vscode"
 import * as path from "path"
+import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import { promises as fsPromises } from "node:fs"
 import * as os from "node:os"
@@ -53,6 +54,7 @@ import {
   CheckpointTracker,
   CodebaseIndexer,
   createCodebaseIndexer,
+  buildIndexWatcherGlobPattern,
   ensureQdrantRunning,
   NexusConfigSchema,
   getModelsCatalog,
@@ -60,6 +62,7 @@ import {
   getPlanContentForFollowup,
   NexusServerClient,
   DEFAULT_HEARTBEAT_TIMEOUT_MS,
+  INDEX_FILE_WATCHER_DEBOUNCE_MS,
   canonicalProjectRoot,
   computeContextUsageMetrics,
   estimateToolsDefinitionsTokens,
@@ -67,9 +70,19 @@ import {
 } from "@nexuscode/core"
 import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
 import { MarketplaceService, type MarketplaceItem } from "./services/marketplace/index.js"
+import { listAbsolutePathsRipgrep } from "./services/indexing/list-absolute-paths-rg.js"
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
+
+function findOpenReasoningReverseIndexShadow(parts: MessagePart[], reasoningId: string): number {
+  return [...parts].reverse().findIndex(
+    (part) =>
+      part.type === "reasoning" &&
+      (part as MessagePart & { durationMs?: number }).durationMs == null &&
+      ((part as MessagePart & { reasoningId?: string }).reasoningId ?? "reasoning-0") === reasoningId
+  )
+}
 
 /** Number of messages to load when opening a server session (same as server RECENT_MESSAGES_FOR_RUN for agent context). */
 const INITIAL_SERVER_MESSAGES = 200
@@ -207,6 +220,9 @@ export type WebviewMessage =
   | { type: "deleteSession"; sessionId: string }
   | { type: "reindex" }
   | { type: "clearIndex" }
+  | { type: "fullRebuildIndex" }
+  | { type: "pauseIndexing" }
+  | { type: "resumeIndexing" }
   | { type: "openFileAtLocation"; path: string; line?: number; endLine?: number }
   | { type: "showDiff"; path: string }
   | { type: "setServerUrl"; url: string }
@@ -249,6 +265,8 @@ export type WebviewMessage =
       skillPage?: number
       skillCategory?: string
       skillVectorThreshold?: number
+      /** When true, skip extension cache and refetch catalogs (Refresh button). */
+      forceRefresh?: boolean
     }
   | {
       type: "installMarketplaceItem"
@@ -259,6 +277,20 @@ export type WebviewMessage =
       type: "removeInstalledMarketplaceItem"
       mpItem: MarketplaceItem
       mpInstallOptions: { target: "global" | "project" }
+    }
+  | {
+      type: "setAutocompleteExtensionSettings"
+      patch: Partial<{
+        enableAutoTrigger: boolean
+        useSeparateModel: boolean
+        modelProvider: string
+        modelId: string
+        modelApiKey: string
+        modelBaseUrl: string
+        modelTemperature: string
+        modelReasoningEffort: string
+        modelContextWindow: string
+      }>
     }
 
 export type ExtensionMessage =
@@ -288,6 +320,19 @@ export type ExtensionMessage =
   | { type: "marketplaceRemoveResult"; slug: string; success: boolean; error?: string }
 
 export type ServerConnectionState = "idle" | "connecting" | "streaming" | "error"
+
+/** Inline autocomplete UI (backed by nexuscode.autocomplete.* VS Code settings). */
+export interface AutocompleteExtensionUiState {
+  enableAutoTrigger: boolean
+  useSeparateModel: boolean
+  modelProvider: string
+  modelId: string
+  modelApiKey: string
+  modelBaseUrl: string
+  modelTemperature: string
+  modelReasoningEffort: string
+  modelContextWindow: string
+}
 
 export interface WebviewState {
   messages: SessionMessage[]
@@ -324,6 +369,8 @@ export interface WebviewState {
   pendingQuestionRequest?: UserQuestionRequest | null
   /** Active preset name for the chat (per-message scoping for skills + MCP). */
   activePresetName?: string
+  /** Inline editor autocomplete: master toggle + optional separate model (VS Code settings). */
+  autocompleteExtension: AutocompleteExtensionUiState
 }
 
 function simpleDiffStats(originalContent: string, newContent: string): { added: number; removed: number } {
@@ -373,8 +420,12 @@ export class Controller {
   private modelsCatalogCache: import("@nexuscode/core").ModelsCatalog | null = null
   private indexStatusUnsubscribe?: () => void
   private indexerFileWatcher?: vscode.Disposable
+  /** Debounced paths for batched incremental reindex (see INDEX_FILE_WATCHER_DEBOUNCE_MS). */
+  private indexerWatcherPending = new Set<string>()
+  private indexerWatcherDebounceTimer: ReturnType<typeof setTimeout> | undefined
   private disposables: vscode.Disposable[] = []
   private readonly marketplaceService = new MarketplaceService()
+  private onAutocompleteConfigReady?: () => void
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
   /** VS Code Secret Storage for API keys (keys not stored in YAML). */
   private readonly secretsStore = {
@@ -587,10 +638,7 @@ export class Controller {
       case "reasoning_start": {
         const parts = this.ensureShadowAssistantParts(event.messageId)
         const reasoningId = event.reasoningId || "reasoning-0"
-        const exists = parts.some(
-          (part) => part.type === "reasoning" && ((part as MessagePart & { reasoningId?: string }).reasoningId ?? "reasoning-0") === reasoningId
-        )
-        if (!exists) {
+        if (findOpenReasoningReverseIndexShadow(parts, reasoningId) < 0) {
           parts.push({
             type: "reasoning",
             text: THOUGHT_PLACEHOLDER,
@@ -604,9 +652,7 @@ export class Controller {
       case "reasoning_delta": {
         const parts = this.ensureShadowAssistantParts(event.messageId)
         const reasoningId = event.reasoningId || "reasoning-0"
-        const idx = [...parts].reverse().findIndex(
-          (part) => part.type === "reasoning" && ((part as MessagePart & { reasoningId?: string }).reasoningId ?? "reasoning-0") === reasoningId
-        )
+        const idx = findOpenReasoningReverseIndexShadow(parts, reasoningId)
         if (idx >= 0) {
           const actualIdx = parts.length - 1 - idx
           const current = parts[actualIdx] as MessagePart & { text: string; providerMetadata?: Record<string, unknown>; reasoningId?: string }
@@ -632,7 +678,10 @@ export class Controller {
         const parts = this.ensureShadowAssistantParts(event.messageId)
         const reasoningId = event.reasoningId
         const idx = [...parts].reverse().findIndex(
-          (part) => part.type === "reasoning" && (reasoningId == null || ((part as MessagePart & { reasoningId?: string }).reasoningId ?? "reasoning-0") === reasoningId)
+          (part) =>
+            part.type === "reasoning" &&
+            (part as MessagePart & { durationMs?: number }).durationMs == null &&
+            (reasoningId == null || ((part as MessagePart & { reasoningId?: string }).reasoningId ?? "reasoning-0") === reasoningId)
         )
         if (idx >= 0) {
           const actualIdx = parts.length - 1 - idx
@@ -684,6 +733,9 @@ export class Controller {
             path: event.path,
             diffStats: event.diffStats,
             ...(Array.isArray(event.diffHunks) ? { diffHunks: event.diffHunks } : {}),
+            ...(Array.isArray(event.appliedReplacements) && event.appliedReplacements.length > 0
+              ? { appliedReplacements: event.appliedReplacements }
+              : {}),
             timeEnd: Date.now(),
           } as ToolPart
         }
@@ -808,7 +860,7 @@ export class Controller {
     if (!this.session || !this.config) return
     const msgs = this.session.messages
     const idx = msgs.findIndex((m) => m.id === messageId)
-    if (idx <= 0) return
+    if (idx < 0) return
     const target = msgs[idx]!
     if (target.role !== "user") return
 
@@ -881,12 +933,34 @@ export class Controller {
     return vscode.workspace.getConfiguration("nexuscode").get<string>("serverUrl")?.trim() ?? ""
   }
 
+  private readAutocompleteExtensionSettingsForWebview(): AutocompleteExtensionUiState {
+    const c = vscode.workspace.getConfiguration()
+    const temp = c.get<number>("nexuscode.autocomplete.temperature")
+    const cw = c.get<number>("nexuscode.autocomplete.contextWindow")
+    return {
+      enableAutoTrigger: c.get<boolean>("nexuscode.autocomplete.enableAutoTrigger") ?? true,
+      useSeparateModel: c.get<boolean>("nexuscode.autocomplete.useSeparateModel") ?? false,
+      modelProvider: c.get<string>("nexuscode.autocomplete.provider") ?? "",
+      modelId: c.get<string>("nexuscode.autocomplete.model") ?? "",
+      modelApiKey: c.get<string>("nexuscode.autocomplete.apiKey") ?? "",
+      modelBaseUrl: c.get<string>("nexuscode.autocomplete.baseUrl") ?? "",
+      modelTemperature:
+        typeof temp === "number" && !Number.isNaN(temp) ? String(temp) : "0.2",
+      modelReasoningEffort: c.get<string>("nexuscode.autocomplete.reasoningEffort") ?? "",
+      modelContextWindow: typeof cw === "number" && cw > 0 ? String(cw) : "",
+    }
+  }
+
   getSession(): Session | undefined {
     return this.session
   }
 
   getConfig(): NexusConfig | undefined {
     return this.config
+  }
+
+  setAutocompleteConfigReady(fn: () => void): void {
+    this.onAutocompleteConfigReady = fn
   }
 
   getIsRunning(): boolean {
@@ -918,6 +992,7 @@ export class Controller {
         sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
         pendingQuestionRequest: this.pendingQuestionRequest,
         activePresetName: this.chatPresetName,
+        autocompleteExtension: this.readAutocompleteExtensionSettingsForWebview(),
       }
     }
     // Prefer live stream snapshot; else persisted session snapshot; else same formula as agent (session + tools; no system until next run).
@@ -982,6 +1057,7 @@ export class Controller {
       sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
       pendingQuestionRequest: this.pendingQuestionRequest,
       activePresetName: this.chatPresetName,
+      autocompleteExtension: this.readAutocompleteExtensionSettingsForWebview(),
     }
   }
 
@@ -1042,7 +1118,7 @@ export class Controller {
     this.postStateToWebview()
   }
 
-  /** Load skills from config paths, skillsUrls registries, standard dirs (.nexus, Claude ~/.claude/skills, .kilo, walk-up), send to webview Skills list. */
+  /** Load skills from config paths, skillsUrls registries, Nexus skill dirs (.nexus/skills), Claude ~/.claude/skills, walk-up, send to webview Skills list. */
   private loadAndSendSkillDefinitions(): void {
     const cwd = this.getCwd()
     const paths = this.config?.skills ?? []
@@ -1154,6 +1230,7 @@ export class Controller {
       this.applyVscodeOverrides(this.config)
       this.defaultModelProfile = { ...this.config.model }
       this.session = Session.create(cwd)
+      this.onAutocompleteConfigReady?.()
       this.postStateToWebview()
       this.sendIndexStatus()
       // Resolve init here so first message is not blocked. MCP/indexer/catalog/skills run in background.
@@ -1317,6 +1394,15 @@ export class Controller {
       case "clearIndex":
         await this.clearIndex()
         break
+      case "fullRebuildIndex":
+        await this.fullRebuildIndex()
+        break
+      case "pauseIndexing":
+        this.indexer?.pauseIndexing?.()
+        break
+      case "resumeIndexing":
+        this.indexer?.resumeIndexing?.()
+        break
       case "startOrConnectVectorDb": {
         const url = (msg as { url: string; autoStart?: boolean }).url?.trim() || "http://127.0.0.1:6333"
         const autoStart = (msg as { autoStart?: boolean }).autoStart !== false
@@ -1470,6 +1556,46 @@ export class Controller {
         this.postStateToWebview()
         break
       }
+      case "setAutocompleteExtensionSettings": {
+        const c = vscode.workspace.getConfiguration()
+        const p = msg.patch
+        const t = vscode.ConfigurationTarget.Global
+        if (p.enableAutoTrigger !== undefined) {
+          await c.update("nexuscode.autocomplete.enableAutoTrigger", p.enableAutoTrigger, t)
+        }
+        if (p.useSeparateModel !== undefined) {
+          await c.update("nexuscode.autocomplete.useSeparateModel", p.useSeparateModel, t)
+        }
+        if (p.modelProvider !== undefined) {
+          await c.update("nexuscode.autocomplete.provider", p.modelProvider.trim() || undefined, t)
+        }
+        if (p.modelId !== undefined) {
+          await c.update("nexuscode.autocomplete.model", p.modelId.trim() || undefined, t)
+        }
+        if (p.modelApiKey !== undefined) {
+          await c.update("nexuscode.autocomplete.apiKey", p.modelApiKey.trim() || undefined, t)
+        }
+        if (p.modelBaseUrl !== undefined) {
+          await c.update("nexuscode.autocomplete.baseUrl", p.modelBaseUrl.trim() || undefined, t)
+        }
+        if (p.modelTemperature !== undefined) {
+          const n = parseFloat(p.modelTemperature)
+          await c.update("nexuscode.autocomplete.temperature", Number.isFinite(n) ? n : 0.2, t)
+        }
+        if (p.modelReasoningEffort !== undefined) {
+          await c.update("nexuscode.autocomplete.reasoningEffort", p.modelReasoningEffort.trim() || undefined, t)
+        }
+        if (p.modelContextWindow !== undefined) {
+          const n = parseInt(p.modelContextWindow, 10)
+          await c.update(
+            "nexuscode.autocomplete.contextWindow",
+            Number.isFinite(n) && n > 0 ? n : 0,
+            t,
+          )
+        }
+        this.postStateToWebview()
+        break
+      }
       case "openNexusConfigFolder": {
         const scope = msg.scope === "project" ? "project" : "global"
         if (scope === "global") {
@@ -1574,7 +1700,11 @@ export class Controller {
             }
           : undefined
         try {
-          const data = await this.marketplaceService.fetchData(ws, { includeSkills, skillSearch })
+          const data = await this.marketplaceService.fetchData(ws, {
+            includeSkills,
+            skillSearch,
+            bypassCache: msg.forceRefresh === true,
+          })
           this.postMessageToWebview({
             type: "marketplaceData",
             marketplaceItems: data.marketplaceItems,
@@ -2324,13 +2454,8 @@ Return in this format:
             ...this.config.permissions.rules,
             { tool: "Write", pathPattern: ".nexus/skills/**", action: "allow" as const },
             { tool: "Edit", pathPattern: ".nexus/skills/**", action: "allow" as const },
-            { tool: "Write", pathPattern: ".cursor/skills/**", action: "allow" as const },
-            { tool: "Edit", pathPattern: ".cursor/skills/**", action: "allow" as const },
-            // Backward compatibility for legacy tool aliases.
             { tool: "write_to_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
             { tool: "replace_in_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
-            { tool: "write_to_file", pathPattern: ".cursor/skills/**", action: "allow" as const },
-            { tool: "replace_in_file", pathPattern: ".cursor/skills/**", action: "allow" as const },
           ],
         },
       }
@@ -2707,10 +2832,32 @@ Return in this format:
   async clearIndex(): Promise<void> {
     if (!this.config || !this.config.indexing.enabled) return
     const cwd = this.getCwd()
-    await this.initializeIndexer(cwd)
-    await this.indexer?.reindex()
+    await this.initializeIndexer(cwd, { skipStartIndexing: true })
+    await this.indexer?.deleteIndex?.()
     this.sendIndexStatus()
     this.postStateToWebview()
+  }
+
+  async fullRebuildIndex(): Promise<void> {
+    await this.ensureInitialized()
+    if (!this.indexer || !this.config) return
+    try {
+      await this.indexer.fullRebuildIndex?.()
+    } catch (err) {
+      console.warn("[nexus] fullRebuildIndex error:", err)
+    }
+  }
+
+  async deleteIndexScope(relPathOrAbs: string): Promise<void> {
+    await this.ensureInitialized()
+    if (!this.indexer || !this.config?.indexing.enabled) return
+    try {
+      await this.indexer.deleteIndexScope?.(relPathOrAbs)
+      this.sendIndexStatus()
+      this.postStateToWebview()
+    } catch (err) {
+      console.warn("[nexus] deleteIndexScope error:", err)
+    }
   }
 
   addToChat(text: string): void {
@@ -2982,7 +3129,27 @@ Return in this format:
     if (typeof autoApproveBrowser === "boolean") config.permissions.autoApproveBrowser = autoApproveBrowser
   }
 
-  private async initializeIndexer(cwd: string): Promise<void> {
+  private queueIndexerRefresh(fsPath: string): void {
+    this.indexerWatcherPending.add(fsPath)
+    if (this.indexerWatcherDebounceTimer) clearTimeout(this.indexerWatcherDebounceTimer)
+    this.indexerWatcherDebounceTimer = setTimeout(() => {
+      this.indexerWatcherDebounceTimer = undefined
+      const paths = [...this.indexerWatcherPending]
+      this.indexerWatcherPending.clear()
+      if (paths.length === 0) return
+      const ix = this.indexer
+      if (!ix) return
+      if (ix.refreshFilesBatchNow) void ix.refreshFilesBatchNow(paths)
+      else void Promise.all(paths.map((p) => ix.refreshFile(p)))
+    }, INDEX_FILE_WATCHER_DEBOUNCE_MS)
+  }
+
+  private async initializeIndexer(cwd: string, opts?: { skipStartIndexing?: boolean }): Promise<void> {
+    this.indexerWatcherPending.clear()
+    if (this.indexerWatcherDebounceTimer) {
+      clearTimeout(this.indexerWatcherDebounceTimer)
+      this.indexerWatcherDebounceTimer = undefined
+    }
     this.indexStatusUnsubscribe?.()
     this.indexStatusUnsubscribe = undefined
     this.indexerFileWatcher?.dispose()
@@ -2995,6 +3162,11 @@ Return in this format:
     }
     // Same as server run-session: short timeout so first message is not delayed (Qdrant default is 20s).
     const INDEXER_CREATE_TIMEOUT_MS = 2500
+    const projectHash = createHash("sha1").update(cwd).digest("hex").slice(0, 16)
+    const fileTrackerJsonPath = vscode.Uri.joinPath(
+      this.context.globalStorageUri,
+      `nexus-index-tracker-${projectHash}.json`,
+    ).fsPath
     this.indexer = await Promise.race([
       createCodebaseIndexer(cwd, this.config, {
         onWarning: (message: string) => console.warn(message),
@@ -3002,6 +3174,8 @@ Return in this format:
           this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_progress", message } })
         },
         maxQdrantWaitMs: INDEXER_CREATE_TIMEOUT_MS,
+        listAbsolutePaths: listAbsolutePathsRipgrep,
+        fileTrackerJsonPath,
       }),
       new Promise<undefined>((r) => setTimeout(() => r(undefined), INDEXER_CREATE_TIMEOUT_MS)),
     ])
@@ -3012,19 +3186,21 @@ Return in this format:
       return
     }
     this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_ready" } })
+    // Only `indexStatus` messages update the webview store. Do not mirror via `agentEvent` / `index_update`:
+    // agent events are applied in a deferred RAF batch and can reorder after immediate `indexStatus`, wiping
+    // fields like `paused` and making Pause/Resume labels disagree with the progress line.
     this.indexStatusUnsubscribe = this.indexer.onStatusChange((status: IndexStatus) => {
       this.sendIndexStatus(status)
-      this.postMessageToWebview({ type: "agentEvent", event: { type: "index_update", status } })
     })
-    this.indexer.startIndexing().catch((err: unknown) => console.warn("[nexus] Indexer start error:", err))
+    if (!opts?.skipStartIndexing) {
+      this.indexer.startIndexing().catch((err: unknown) => console.warn("[nexus] Indexer start error:", err))
+    }
 
-    const pattern = new vscode.RelativePattern(
-      vscode.Uri.file(cwd),
-      "**/*.{ts,tsx,js,jsx,mjs,cjs,py,rs,go,java,c,cpp,h,hpp,cs,rb,php,swift,kt,scala,md,mdx}"
-    )
+    const watcherGlob = buildIndexWatcherGlobPattern(Boolean(this.config.indexing.vector))
+    const pattern = new vscode.RelativePattern(vscode.Uri.file(cwd), watcherGlob)
     const watcher = vscode.workspace.createFileSystemWatcher(pattern)
-    watcher.onDidChange((uri) => this.indexer?.refreshFile(uri.fsPath))
-    watcher.onDidCreate((uri) => this.indexer?.refreshFile(uri.fsPath))
+    watcher.onDidChange((uri) => this.queueIndexerRefresh(uri.fsPath))
+    watcher.onDidCreate((uri) => this.queueIndexerRefresh(uri.fsPath))
     watcher.onDidDelete((uri) => this.indexer?.refreshFileNow(uri.fsPath))
     this.indexerFileWatcher = watcher
   }
@@ -3055,17 +3231,30 @@ Return in this format:
       if (p) deleted.add(p)
     }
     const all = [...changed, ...deleted].slice(0, 512)
-    for (let i = 0; i < all.length; i += 16) {
-      const chunk = all.slice(i, i + 16)
-      await Promise.allSettled(
-        chunk.map((relPath) => this.indexer!.refreshFileNow!(path.resolve(cwd, relPath)))
-      )
+    const batch = this.indexer.refreshFilesBatchNow
+    if (batch) {
+      for (let i = 0; i < all.length; i += 16) {
+        const chunk = all.slice(i, i + 16).map((relPath) => path.resolve(cwd, relPath))
+        await batch.call(this.indexer, chunk)
+      }
+    } else {
+      for (let i = 0; i < all.length; i += 16) {
+        const chunk = all.slice(i, i + 16)
+        await Promise.allSettled(
+          chunk.map((relPath) => this.indexer!.refreshFileNow!(path.resolve(cwd, relPath)))
+        )
+      }
     }
   }
 
   dispose(): void {
     this.abortController?.abort()
     this.marketplaceService.dispose()
+    this.indexerWatcherPending.clear()
+    if (this.indexerWatcherDebounceTimer) {
+      clearTimeout(this.indexerWatcherDebounceTimer)
+      this.indexerWatcherDebounceTimer = undefined
+    }
     this.indexStatusUnsubscribe?.()
     this.indexerFileWatcher?.dispose()
     this.indexerFileWatcher = undefined
@@ -3185,14 +3374,7 @@ function toDisplayPathForExtension(filePath: string, projectDir: string): string
 
 async function discoverSkillPathsForExtension(projectDir: string): Promise<string[]> {
   const home = path.resolve(process.env.HOME || os.homedir())
-  const roots = [
-    path.join(projectDir, ".kilo", "skills"),
-    path.join(projectDir, ".nexus", "skills"),
-    path.join(projectDir, ".agents", "skills"),
-    path.join(home, ".kilo", "skills"),
-    path.join(home, ".nexus", "skills"),
-    path.join(home, ".agents", "skills"),
-  ]
+  const roots = [path.join(projectDir, ".nexus", "skills"), path.join(home, ".nexus", "skills")]
   const files: string[] = []
   for (const root of roots) {
     const fromRoot = await walkSkillFilesForExtension(root, 5)
@@ -3212,24 +3394,26 @@ async function discoverRuleFilesForExtension(projectDir: string): Promise<string
     if (visited.has(current)) break
     visited.add(current)
     for (const name of names) {
-      const file = path.join(current, name)
-      try {
-        const stat = await fsPromises.stat(file)
-        if (stat.isFile()) out.push(file)
-      } catch {
-        // skip
+      for (const file of [path.join(current, name), path.join(current, ".nexus", name)]) {
+        try {
+          const stat = await fsPromises.stat(file)
+          if (stat.isFile()) out.push(file)
+        } catch {
+          // skip
+        }
       }
     }
     if (current === path.dirname(current) || current === home) break
     current = path.dirname(current)
   }
   for (const name of names) {
-    const file = path.join(home, name)
-    try {
-      const stat = await fsPromises.stat(file)
-      if (stat.isFile()) out.push(file)
-    } catch {
-      // skip
+    for (const file of [path.join(home, name), path.join(home, ".nexus", name)]) {
+      try {
+        const stat = await fsPromises.stat(file)
+        if (stat.isFile()) out.push(file)
+      } catch {
+        // skip
+      }
     }
   }
   return dedupeStringList(out)

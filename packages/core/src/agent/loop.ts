@@ -48,8 +48,10 @@ import {
   estimateToolsDefinitionsTokens,
   getContextWindowLimit,
 } from "../context/context-usage.js"
+import { findLastOpenReasoningPartIndex } from "./reasoning-segment-utils.js"
 import * as path from "node:path"
 import * as fs from "node:fs"
+import { normalizedAppliedReplacementsFromMetadata } from "../tools/applied-replacements.js"
 import {
   buildReasoningProviderOptions,
   getDefaultTemperature,
@@ -166,7 +168,7 @@ export interface AgentLoopOptions {
   gitBranch?: string
   /** When set, commit on completion of an agent turn and optionally double-check. */
   checkpoint?: { commit(description?: string): Promise<string> }
-  /** When true, inject create-skill instructions; host must allow writes to .nexus/skills and .cursor/skills */
+  /** When true, inject create-skill instructions; host must allow writes to .nexus/skills (and ~/.nexus/skills if applicable). */
   createSkillMode?: boolean
 }
 
@@ -188,9 +190,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   //    getBlockedToolsForMode(mode) / getBuiltinToolsForMode(mode) are derived from this single value on every run.
   const blockedTools = getBlockedToolsForMode(mode)
   const builtinToolNames = new Set(getBuiltinToolsForMode(mode))
-  // Vector search is opt-in: when disabled, codebase_search is not available.
+  // Vector search is opt-in: when disabled, CodebaseSearch is not available (tool name is PascalCase).
   if (!config.indexing?.vector || !config.vectorDb?.enabled) {
-    builtinToolNames.delete("codebase_search")
+    builtinToolNames.delete("CodebaseSearch")
   }
   const builtinTools = tools.filter(t => builtinToolNames.has(t.name) && !blockedTools.has(t.name))
   const dynamicTools = tools.filter(t => !builtinToolNames.has(t.name) && !blockedTools.has(t.name))
@@ -299,7 +301,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     resolvedTools,
     compactSession: async () => {
       host.emit({ type: "compaction_start" })
-      await handleCompaction(session, activeClient, config, host, compaction, signal)
+      await handleCompaction(session, activeClient, config, host, compaction, signal, {
+        systemPromptText: lastBuiltSystemPrompt,
+        toolsDefinitionTokens,
+      })
       host.emit({ type: "compaction_end" })
     },
   }
@@ -378,22 +383,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   while (!signal.aborted) {
     loopIterations++
 
-    // Proactive context management: prune/compact before building prompt when near limit
-    const limitForCompaction = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
-    if (limitForCompaction > 0 && loopIterations > 1) {
-      let sessionTokens = session.getTokenEstimate()
-      const threshold = config.summarization?.threshold ?? 0.75
-      if (compaction.isOverflow(sessionTokens, limitForCompaction, threshold)) {
-        compaction.prune(session)
-        sessionTokens = session.getTokenEstimate()
-        if (compaction.isOverflow(sessionTokens, limitForCompaction, threshold)) {
-          host.emit({ type: "compaction_start" })
-          await handleCompaction(session, activeClient, config, host, compaction, signal)
-          host.emit({ type: "compaction_end" })
-        }
-      }
-    }
-
     if (loopIterations > maxIterations) {
       if (!forceFinalAnswerNext) {
         host.emit({
@@ -471,6 +460,40 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
     // Emit context usage including system prompt so UI shows real request size
     emitContextUsage(systemPrompt)
+
+    // Compact before streaming when the *full* next request (messages + system + tools) exceeds the
+    // same threshold as the UI — session-only estimates were too low and caused API 400s.
+    const sumTh = config.summarization?.threshold ?? 0.8
+    const limitCtx = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
+    if (limitCtx > 0) {
+      const roll = computeContextUsageMetrics({
+        sessionMessages: session.messages,
+        systemPromptText: systemPrompt,
+        toolsDefinitionTokens,
+        modelId: activeClient.modelId,
+        configuredContextWindow: config.model.contextWindow,
+      })
+      if (compaction.isOverflow(roll.usedTokens, limitCtx, sumTh)) {
+        compaction.prune(session)
+        const roll2 = computeContextUsageMetrics({
+          sessionMessages: session.messages,
+          systemPromptText: systemPrompt,
+          toolsDefinitionTokens,
+          modelId: activeClient.modelId,
+          configuredContextWindow: config.model.contextWindow,
+        })
+        if (compaction.isOverflow(roll2.usedTokens, limitCtx, sumTh)) {
+          host.emit({ type: "compaction_start" })
+          await handleCompaction(session, activeClient, config, host, compaction, signal, {
+            systemPromptText: systemPrompt,
+            toolsDefinitionTokens,
+          })
+          host.emit({ type: "compaction_end" })
+          loopIterations--
+          continue
+        }
+      }
+    }
 
     // 4. Build LLM tool definitions
     const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedToolsForLlm).map(t => ({
@@ -558,18 +581,21 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       const msg = session.messages.find((m) => m.id === newMessageId)
       const existingParts = msg && Array.isArray(msg.content) ? (msg.content as MessagePart[]) : []
       const parts: MessagePart[] = [...existingParts]
-      const reasoningIdx = parts.findIndex((p) => p.type === "reasoning")
-      if (currentReasoning) {
-        const reasoningText = currentReasoning
-        if (reasoningIdx >= 0) {
-          parts[reasoningIdx] = {
-            ...(parts[reasoningIdx] as ReasoningPart),
+      if (currentReasoning || currentReasoningDurationMs != null) {
+        const openIdx = findLastOpenReasoningPartIndex(parts, currentReasoningId)
+        const reasoningText =
+          currentReasoning ||
+          (openIdx >= 0 ? ((parts[openIdx] as ReasoningPart).text ?? "") : "") ||
+          ""
+        if (openIdx >= 0) {
+          parts[openIdx] = {
+            ...(parts[openIdx] as ReasoningPart),
             text: reasoningText,
             ...(currentReasoningId ? { reasoningId: currentReasoningId } : {}),
             ...(currentReasoningDurationMs != null ? { durationMs: currentReasoningDurationMs } : {}),
             ...(currentReasoningMetadata ? { providerMetadata: currentReasoningMetadata } : {}),
           } as ReasoningPart
-        } else {
+        } else if (currentReasoning) {
           parts.push({
             type: "reasoning",
             text: reasoningText,
@@ -658,6 +684,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         topP: getDefaultTopP(config.model),
         topK: getDefaultTopK(config.model),
         providerOptions,
+        reasoningHistoryMode: config.model.reasoningHistoryMode ?? "auto",
         maxRetries: retryMaxAttempts,
         initialRetryDelayMs: config.retry?.initialDelayMs,
         maxRetryDelayMs: config.retry?.maxDelayMs,
@@ -725,9 +752,27 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               reasoningId: currentReasoningId ?? event.reasoningId,
               providerMetadata: event.providerMetadata,
             })
+            // Next reasoning segment must not append into this buffer (provider often reuses reasoning-0).
+            currentReasoning = ""
+            currentReasoningDurationMs = undefined
             break
 
           case "tool_call": {
+            // Some gateways omit reasoning_end before tool-call; close the open segment so the next stream does not append to the same Thought.
+            if (currentReasoning.trim().length > 0 || currentReasoningStartedAt != null) {
+              if (currentReasoningStartedAt != null) {
+                currentReasoningDurationMs = Math.max(1, Date.now() - currentReasoningStartedAt)
+              }
+              flushAssistantContent()
+              host.emit({
+                type: "reasoning_end",
+                messageId: newMessageId,
+                reasoningId: currentReasoningId,
+              })
+              currentReasoning = ""
+              currentReasoningStartedAt = undefined
+              currentReasoningDurationMs = undefined
+            }
             let { toolCallId, toolName, toolInput } = event
             if (!toolCallId || !toolName || !toolInput) break
             // CLI/gateway may send list_dir or ListDirectory (Kilo); resolve to builtin name and normalize args
@@ -883,6 +928,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                   : {}),
               })
 
+              const appliedReplacements = normalizedAppliedReplacementsFromMetadata(result.metadata)
+
               host.emit({
                 type: "tool_end",
                 tool: toolName,
@@ -906,6 +953,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                       ...(Array.isArray((result.metadata as { diffHunks?: unknown[] })?.diffHunks)
                         ? { diffHunks: (result.metadata as { diffHunks: Array<{ type: string; lineNum: number; line: string }> }).diffHunks }
                         : {}),
+                      ...(appliedReplacements ? { appliedReplacements } : {}),
                     }
                   : {}),
               })
@@ -992,7 +1040,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           host.emit({ type: "error", error: "Context overflow could not be resolved after compaction. Stopping.", fatal: true })
           break
         }
-        await handleCompaction(session, activeClient, config, host, compaction, signal)
+        host.emit({ type: "compaction_start" })
+        await handleCompaction(session, activeClient, config, host, compaction, signal, {
+          systemPromptText: lastBuiltSystemPrompt,
+          toolsDefinitionTokens,
+        })
+        host.emit({ type: "compaction_end" })
         continue
       }
       break
@@ -1084,6 +1137,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               : {}),
           })
 
+          const appliedReplacementsFollowUp = normalizedAppliedReplacementsFromMetadata(result.metadata)
+
           host.emit({
             type: "tool_end",
             tool: call.toolName,
@@ -1107,6 +1162,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                   ...(Array.isArray((result.metadata as { diffHunks?: unknown[] })?.diffHunks)
                     ? { diffHunks: (result.metadata as { diffHunks: Array<{ type: string; lineNum: number; line: string }> }).diffHunks }
                     : {}),
+                  ...(appliedReplacementsFollowUp ? { appliedReplacements: appliedReplacementsFollowUp } : {}),
                 }
               : {}),
           })
@@ -1262,12 +1318,21 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
     if (signal.aborted) break
 
-    // Check for context overflow proactively
-    const tokenCount = session.getTokenEstimate()
-    const contextLimit = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
-    if (contextLimit > 0 && tokenCount / contextLimit > config.summarization.threshold) {
+    const sumThEnd = config.summarization?.threshold ?? 0.8
+    const metricsEnd = computeContextUsageMetrics({
+      sessionMessages: session.messages,
+      systemPromptText: lastBuiltSystemPrompt,
+      toolsDefinitionTokens,
+      modelId: activeClient.modelId,
+      configuredContextWindow: config.model.contextWindow,
+    })
+    const limitEnd = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
+    if (limitEnd > 0 && compaction.isOverflow(metricsEnd.usedTokens, limitEnd, sumThEnd)) {
       host.emit({ type: "compaction_start" })
-      await handleCompaction(session, activeClient, config, host, compaction, signal)
+      await handleCompaction(session, activeClient, config, host, compaction, signal, {
+        systemPromptText: lastBuiltSystemPrompt,
+        toolsDefinitionTokens,
+      })
       host.emit({ type: "compaction_end" })
     }
 
@@ -1536,23 +1601,35 @@ async function executeToolCall(
   }
 }
 
+type HandleCompactionOpts = {
+  /** Full next-request size (session + system + tools); required for accurate overflow vs UI/API limits. */
+  systemPromptText?: string
+  toolsDefinitionTokens?: number
+}
+
 async function handleCompaction(
   session: ISession,
   client: LLMClient,
   config: NexusConfig,
   host: IHost,
   compaction: SessionCompaction,
-  signal: AbortSignal
+  signal: AbortSignal,
+  opts?: HandleCompactionOpts,
 ) {
   try {
     // First try prune (no LLM call needed)
     compaction.prune(session)
 
-    // Check again
-    const tokenCount = session.getTokenEstimate()
     const contextLimit = getContextWindowLimit(client.modelId, config.model.contextWindow)
-    if (contextLimit > 0 && tokenCount / contextLimit > config.summarization.threshold) {
-      // Full compaction with LLM
+    const threshold = config.summarization?.threshold ?? 0.8
+    const metrics = computeContextUsageMetrics({
+      sessionMessages: session.messages,
+      systemPromptText: opts?.systemPromptText,
+      toolsDefinitionTokens: opts?.toolsDefinitionTokens,
+      modelId: client.modelId,
+      configuredContextWindow: config.model.contextWindow,
+    })
+    if (contextLimit > 0 && compaction.isOverflow(metrics.usedTokens, contextLimit, threshold)) {
       await compaction.compact(session, client, signal)
     }
   } catch (err) {
@@ -1565,15 +1642,185 @@ async function handleCompaction(
  *
  * Vercel AI SDK expects interleaved format:
  *   [user] question
- *   [assistant] { type: "tool-call", toolCallId, toolName, args }
- *   [tool]      { type: "tool-result", toolCallId, toolName, result }
- *   [assistant] final text answer
+ *   [assistant] text / tool-call blocks
+ *   [tool]      { type: "tool-result", ... }
+ *   [assistant] further text / tool-call blocks (repeated per tool round)
  *
- * This function converts our session format (assistant messages that contain
- * both the text AND tool call parts) into that interleaved format.
- * Tool outputs are capped per result to avoid one read_file filling context.
+ * Assistant `parts` are walked in **array order** (reasoning → text → tools),
+ * matching UI chronology. Reasoning is sent as `{ type: "reasoning", text }` (KiloCode
+ * UIMessage shape); `BaseLLMClient` may hoist to `reasoning_content` for interleaved APIs.
+ * Pending/running tools get a synthetic error result (APIs require a result per call).
+ * Tool output size is bounded at execution time (KiloCode `Truncate.output` parity in `truncate.ts`);
+ * we do not apply a second hard cap when building the next LLM request (KiloCode `toModelMessages`
+ * sends stored output as-is).
  */
-const MAX_TOOL_OUTPUT_CHARS = 16_000 // ~4k tokens per tool result
+function reasoningPartRawForLlm(part: ReasoningPart): string | null {
+  const t = part.text?.trim() ?? ""
+  if (!t || t === THOUGHT_PLACEHOLDER) return null
+  return part.text
+}
+
+function formatAssistantTextPartForLlm(p: TextPart): string {
+  return p.user_message?.trim() ? p.user_message.trim() + "\n" + p.text : p.text
+}
+
+type AssistantLlmBlock =
+  | { type: "text"; text: string }
+  | { type: "reasoning"; text: string }
+  | { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> }
+
+function assistantBlocksToLlmContent(blocks: AssistantLlmBlock[]): LLMMessage["content"] | null {
+  if (blocks.length === 0) return null
+  const hasReasoning = blocks.some(b => b.type === "reasoning")
+  const hasTool = blocks.some(b => b.type === "tool-call")
+  if (!hasReasoning && !hasTool) {
+    const merged = blocks
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map(b => b.text)
+      .join("")
+      .trim()
+    return merged || null
+  }
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "reasoning"; text: string }
+    | { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> }
+  > = []
+  let textBuf = ""
+  const flushText = () => {
+    if (textBuf.trim()) {
+      content.push({ type: "text", text: textBuf })
+      textBuf = ""
+    }
+  }
+  for (const b of blocks) {
+    if (b.type === "text") {
+      textBuf += b.text
+    } else if (b.type === "reasoning") {
+      flushText()
+      content.push({ type: "reasoning", text: b.text })
+    } else {
+      flushText()
+      content.push({
+        type: "tool-call",
+        toolCallId: b.toolCallId,
+        toolName: b.toolName,
+        args: b.args,
+      })
+    }
+  }
+  flushText()
+  return content.length > 0 ? (content as LLMMessage["content"]) : null
+}
+
+function toolPartToLlmResult(tp: ToolPart): {
+  type: "tool-result"
+  toolCallId: string
+  toolName: string
+  result: string
+  isError?: boolean
+} {
+  let result: string
+  if (tp.compacted) {
+    result = "[Old tool result content cleared]"
+  } else {
+    result = tp.output ?? ""
+  }
+  if (tp.status === "error") {
+    result = formatToolAttemptForLanguageModel(tp.tool, tp.input, result)
+  }
+  return {
+    type: "tool-result",
+    toolCallId: tp.id,
+    toolName: tp.tool,
+    result,
+    isError: tp.status === "error",
+  }
+}
+
+/**
+ * Walk assistant `parts` in array order (same chronology as the UI) and emit
+ * interleaved [assistant] / [tool] LLM messages with native `reasoning` parts (KiloCode-style).
+ */
+function buildAssistantLlmMessagesFromParts(parts: MessagePart[]): LLMMessage[] {
+  const out: LLMMessage[] = []
+  let i = 0
+
+  while (i < parts.length) {
+    const blocks: AssistantLlmBlock[] = []
+
+    while (i < parts.length && parts[i].type !== "tool") {
+      const p = parts[i]
+      if (p.type === "reasoning") {
+        const rt = reasoningPartRawForLlm(p)
+        if (rt) blocks.push({ type: "reasoning", text: rt })
+      } else if (p.type === "text") {
+        const chunk = formatAssistantTextPartForLlm(p)
+        if (chunk) {
+          const last = blocks[blocks.length - 1]
+          if (last?.type === "text") last.text += chunk
+          else blocks.push({ type: "text", text: chunk })
+        }
+      }
+      // image / unknown: skip but advance (session order preserved for handled parts)
+      i++
+    }
+
+    if (i < parts.length && parts[i].type === "tool") {
+      const tools: ToolPart[] = []
+      while (i < parts.length && parts[i].type === "tool") {
+        tools.push(parts[i] as ToolPart)
+        i++
+      }
+      for (const tp of tools) {
+        if (tp.input != null) {
+          blocks.push({
+            type: "tool-call",
+            toolCallId: tp.id,
+            toolName: tp.tool,
+            args: tp.input ?? {},
+          })
+        }
+      }
+      const assistantContent = assistantBlocksToLlmContent(blocks)
+      if (assistantContent) {
+        out.push({ role: "assistant", content: assistantContent })
+      }
+
+      const toolResultParts: Array<{
+        type: "tool-result"
+        toolCallId: string
+        toolName: string
+        result: string
+        isError?: boolean
+      }> = []
+      for (const tp of tools) {
+        if (tp.input == null) continue
+        if (tp.status === "completed" || tp.status === "error") {
+          toolResultParts.push(toolPartToLlmResult(tp))
+        } else {
+          toolResultParts.push({
+            type: "tool-result",
+            toolCallId: tp.id,
+            toolName: tp.tool,
+            result: "[Tool execution was interrupted]",
+            isError: true,
+          })
+        }
+      }
+      if (toolResultParts.length > 0) {
+        out.push({ role: "tool" as SessionRole, content: toolResultParts as LLMMessage["content"] })
+      }
+      continue
+    }
+
+    const trailing = assistantBlocksToLlmContent(blocks)
+    if (trailing) out.push({ role: "assistant", content: trailing })
+    break
+  }
+
+  return out
+}
 
 function buildMessagesFromSession(session: ISession): LLMMessage[] {
   const messages: LLMMessage[] = []
@@ -1627,63 +1874,7 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
 
     if (msg.role !== "assistant") continue
 
-    // ── Assistant message ────────────────────────────────────────────────────
-    const textParts = parts.filter((p): p is TextPart => p.type === "text")
-    const toolParts = parts.filter((p): p is ToolPart => p.type === "tool")
-
-    const textContent = textParts
-      .map(p => (p.user_message?.trim() ? p.user_message.trim() + "\n" + p.text : p.text))
-      .join("")
-      .trim()
-    const toolCallParts = toolParts.filter(tp => tp.input != null)
-    const completedToolParts = toolParts.filter(tp => tp.status === "completed" || tp.status === "error")
-
-    if (toolCallParts.length > 0) {
-      const assistantContent: Array<Record<string, unknown>> = []
-      if (textContent) {
-        assistantContent.push({ type: "text", text: textContent })
-      }
-      for (const tp of toolCallParts) {
-        assistantContent.push({
-          type: "tool-call",
-          toolCallId: tp.id,
-          toolName: tp.tool,
-          args: tp.input ?? {},
-        })
-      }
-      messages.push({ role: "assistant", content: assistantContent as LLMMessage["content"] })
-
-      // Tool results as a "tool" role message (AI SDK format)
-      if (completedToolParts.length > 0) {
-        const toolResultContent = completedToolParts.map(tp => {
-          let result: string
-          if (tp.compacted) {
-            result = "[output pruned for context efficiency]"
-          } else {
-            const raw = tp.output ?? ""
-            result = raw.length <= MAX_TOOL_OUTPUT_CHARS
-              ? raw
-              : raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + "\n\n[... output truncated for context ...]"
-          }
-          if (tp.status === "error") {
-            result = formatToolAttemptForLanguageModel(tp.tool, tp.input, result)
-          }
-          return {
-            type: "tool-result",
-            toolCallId: tp.id,
-            toolName: tp.tool,
-            result,
-            isError: tp.status === "error",
-          }
-        })
-        messages.push({ role: "tool" as SessionRole, content: toolResultContent as LLMMessage["content"] })
-      }
-    } else {
-      // Pure text response (no tool calls)
-      if (textContent) {
-        messages.push({ role: "assistant", content: textContent })
-      }
-    }
+    messages.push(...buildAssistantLlmMessagesFromParts(parts))
   }
 
   return messages

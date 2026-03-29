@@ -112,19 +112,41 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand("nexuscode.reindex", async () => {
       await provider?.reindex()
-      vscode.window.showInformationMessage("NexusCode: Re-indexing codebase...")
+      vscode.window.showInformationMessage("NexusCode: Syncing index (incremental update, no full wipe)...")
     }),
 
     vscode.commands.registerCommand("nexuscode.clearIndex", async () => {
       const confirm = await vscode.window.showWarningMessage(
-        "NexusCode: Clear the entire codebase index and re-build it from scratch?",
-        "Clear & Rebuild",
-        "Cancel"
+        "NexusCode: Delete the entire index for this workspace (file tracker + Qdrant collection)? Nothing is rebuilt automatically — use Re-index to sync again.",
+        { modal: true },
+        "Delete index",
+        "Cancel",
       )
-      if (confirm === "Clear & Rebuild") {
+      if (confirm === "Delete index") {
         await provider?.clearIndex()
-        vscode.window.showInformationMessage("NexusCode: Index cleared. Re-indexing...")
+        vscode.window.showInformationMessage("NexusCode: Index deleted.")
       }
+    }),
+
+    vscode.commands.registerCommand("nexuscode.fullRebuildIndex", async () => {
+      const confirm = await vscode.window.showWarningMessage(
+        "NexusCode: Wipe the index and rebuild from scratch? This clears the tracker and vector collection, then re-indexes everything.",
+        { modal: true },
+        "Rebuild",
+        "Cancel",
+      )
+      if (confirm === "Rebuild") {
+        await provider?.fullRebuildIndex()
+        vscode.window.showInformationMessage("NexusCode: Full rebuild started.")
+      }
+    }),
+
+    vscode.commands.registerCommand("nexuscode.deleteIndexHere", async (uri: vscode.Uri) => {
+      if (!uri) {
+        vscode.window.showInformationMessage("NexusCode: Run this command from the Explorer context menu on a file or folder.")
+        return
+      }
+      await provider?.deleteIndexForResource(uri)
     }),
 
     vscode.commands.registerCommand("nexuscode.openTerminal", () => {

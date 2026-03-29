@@ -14,6 +14,13 @@ const providerSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   /** Reasoning effort hint for reasoning-capable models. "auto" (default) enables thinking only for known reasoning models. */
   reasoningEffort: z.string().default("auto"),
+  /**
+   * How stored assistant reasoning is sent on the next request (KiloCode-style).
+   * `auto` hoists to `reasoning_content` for e.g. DeepSeek; otherwise keeps native `reasoning` parts in message content.
+   */
+  reasoningHistoryMode: z
+    .enum(["auto", "inline", "reasoning_content", "reasoning_details"])
+    .default("auto"),
   /** Optional explicit context window size override (tokens). */
   contextWindow: z.number().int().positive().optional(),
   resourceName: z.string().optional(),
@@ -98,8 +105,28 @@ export const NexusConfigSchema = z.object({
     /** Disabled by default. Set to true with vectorDb.enabled to use semantic codebase_search. */
     vector: z.boolean().default(false),
     batchSize: z.number().int().positive().default(50),
+    /** Min semantic segments per embed/upsert batch (Roo-style segment threshold). */
     embeddingBatchSize: z.number().int().positive().default(60),
     embeddingConcurrency: z.number().int().positive().default(2),
+    /** Max embed batches in flight while parsing (backpressure / memory). */
+    maxPendingEmbedBatches: z.number().int().positive().default(20),
+    /** Parallel embed/upsert pipelines (batches). */
+    batchProcessingConcurrency: z.number().int().positive().default(10),
+    /**
+     * Max indexable files per workspace. Roo parity: **0 = scan nothing** (same as `listFiles(..., 0)`).
+     * Use a large positive value if you need an effectively unlimited tree. Default 50_000 matches Roo.
+     */
+    maxIndexedFiles: z.number().int().min(0).default(50_000),
+    /**
+     * Allow CodebaseSearch while indexing is in progress when Qdrant already has points (partial results).
+     * Default true. Set false to wait until `markIndexingComplete` (strict consistency).
+     */
+    searchWhileIndexing: z.boolean().default(true),
+    /**
+     * If >0, indexing is treated as failed when more than this fraction of chunks could not be embedded
+     * (after retries). Triggers index + tracker reset (Roo-style).
+     */
+    maxIndexingFailureRate: z.number().min(0).max(1).default(0.1),
     debounceMs: z.number().int().positive().default(800),
     /** Max characters of each hit’s code snippet in CodebaseSearch output (indexed payload is capped separately). */
     codebaseSearchSnippetMaxChars: z.number().int().positive().max(50_000).default(4000),

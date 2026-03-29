@@ -115,12 +115,22 @@
       },
       {
         "command": "nexuscode.reindex",
-        "title": "Re-index Codebase",
+        "title": "Sync Codebase Index (Incremental)",
         "category": "NexusCode"
       },
       {
         "command": "nexuscode.clearIndex",
-        "title": "Clear Index and Rebuild",
+        "title": "Delete Codebase Index (Workspace)",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.fullRebuildIndex",
+        "title": "Rebuild Codebase Index from Scratch",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.deleteIndexHere",
+        "title": "NexusCode: Delete Index for This Path…",
         "category": "NexusCode"
       },
       {
@@ -128,9 +138,41 @@
         "title": "Open NexusCode Terminal",
         "category": "NexusCode",
         "icon": "$(terminal)"
+      },
+      {
+        "command": "nexuscode.autocomplete.generateSuggestions",
+        "title": "NexusCode: Generate Inline Completion",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.autocomplete.cancelSuggestions",
+        "title": "NexusCode: Cancel Inline Suggestion",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.autocomplete.reload",
+        "title": "NexusCode: Reload Autocomplete",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.autocomplete.disable",
+        "title": "NexusCode: Disable Inline Autocomplete",
+        "category": "NexusCode"
+      },
+      {
+        "command": "nexuscode.autocomplete.showIncompatibilityExtensionPopup",
+        "title": "NexusCode: Copilot / Autocomplete Conflict",
+        "category": "NexusCode"
       }
     ],
     "menus": {
+      "explorer/context": [
+        {
+          "command": "nexuscode.deleteIndexHere",
+          "when": "explorerResourceIsFolder || resourceScheme == file",
+          "group": "nexuscode@30"
+        }
+      ],
       "editor/context": [
         {
           "command": "nexuscode.addToChat",
@@ -164,6 +206,23 @@
         "command": "nexuscode.newTask",
         "key": "ctrl+shift+a",
         "mac": "cmd+shift+a"
+      },
+      {
+        "command": "nexuscode.autocomplete.cancelSuggestions",
+        "key": "escape",
+        "when": "editorTextFocus && !editorTabMovesFocus && !inSnippetMode && nexuscode.autocomplete.hasSuggestions"
+      },
+      {
+        "command": "nexuscode.autocomplete.generateSuggestions",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorTextFocus && !editorTabMovesFocus && !inSnippetMode && nexuscode.autocomplete.enableSmartInlineTaskKeybinding && !github.copilot.completions.enabled"
+      },
+      {
+        "command": "nexuscode.autocomplete.showIncompatibilityExtensionPopup",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorTextFocus && !editorTabMovesFocus && !inSnippetMode && nexuscode.autocomplete.enableSmartInlineTaskKeybinding && github.copilot.completions.enabled"
       }
     ],
     "configuration": {
@@ -318,16 +377,88 @@
           "type": "boolean",
           "default": true,
           "description": "Run approved commands in the integrated terminal (Cline-style). When enabled, a 'NexusCode' terminal is created or reused and shown; command output is captured for the agent. When disabled, commands run in the background without opening the terminal."
+        },
+        "nexuscode.autocomplete.enableAutoTrigger": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline (ghost) code completions in the editor (Tab to accept). When off, inline autocomplete is fully disabled."
+        },
+        "nexuscode.autocomplete.useSeparateModel": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use the autocomplete model fields below instead of the agent model from .nexus/nexus.yaml"
+        },
+        "nexuscode.autocomplete.provider": {
+          "type": "string",
+          "default": "",
+          "description": "Provider for inline autocomplete when useSeparateModel is enabled (e.g. anthropic, openai, openai-compatible)"
+        },
+        "nexuscode.autocomplete.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model id for inline autocomplete when useSeparateModel is enabled"
+        },
+        "nexuscode.autocomplete.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for autocomplete-only model (optional if env / agent key applies)"
+        },
+        "nexuscode.autocomplete.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL for openai-compatible / local autocomplete model"
+        },
+        "nexuscode.autocomplete.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for inline autocomplete requests"
+        },
+        "nexuscode.autocomplete.reasoningEffort": {
+          "type": "string",
+          "default": "",
+          "description": "Optional reasoning effort for capable models (empty = default)"
+        },
+        "nexuscode.autocomplete.contextWindow": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Optional context window override for autocomplete (0 = omit)"
+        },
+        "nexuscode.autocomplete.enableSmartInlineTaskKeybinding": {
+          "type": "boolean",
+          "default": false,
+          "description": "Bind Ctrl+L / Cmd+L to manually trigger inline completion (may conflict with Copilot)"
+        },
+        "nexuscode.autocomplete.enableChatAutocomplete": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reserved for future chat input suggestions"
+        },
+        "nexuscode.autocomplete.snoozeUntil": {
+          "type": "number",
+          "description": "Internal: timestamp until which autocomplete is snoozed (ms since epoch)"
         }
       }
     }
   },
   "dependencies": {
     "@nexuscode/core": "workspace:*",
+    "diff": "^7.0.0",
     "execa": "^9.5.0",
+    "fastest-levenshtein": "^1.0.16",
+    "ignore": "^7.0.3",
+    "js-tiktoken": "^1.0.18",
+    "lru-cache": "^11.0.2",
+    "openai": "^4.85.4",
+    "quick-lru": "^7.0.0",
+    "uri-js": "^4.4.1",
+    "web-tree-sitter": "^0.25.6",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
+    "@types/diff": "^7.0.0",
     "@types/node": "^22.10.1",
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.2.0",

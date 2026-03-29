@@ -2,7 +2,7 @@ import * as path from 'node:path'
 import * as fs from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
-import { Box, Newline, Static, Text } from 'ink'
+import { Box, Newline, Text } from 'ink'
 import ProjectOnboarding, {
   markProjectOnboardingComplete,
 } from '../ProjectOnboarding.js'
@@ -309,8 +309,22 @@ export function REPL({
   >(null)
   /** Host from last completed Nexus run; used by /undo to revert file edits. */
   const lastNexusHostRef = useRef<import('../host.js').CliHost | null>(null)
-  /** Banner above input (e.g. "Compacting conversation…", "Loop detected…"). */
+  /** Banner above input (e.g. "Compacting…", "Loop detected…"). */
   const [nexusBannerText, setNexusBannerText] = useState('')
+  const nexusBannerClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const applyNexusBanner = useCallback((m: NexusBannerMessage) => {
+    setNexusBannerText(m.text)
+    if (nexusBannerClearTimerRef.current) {
+      clearTimeout(nexusBannerClearTimerRef.current)
+      nexusBannerClearTimerRef.current = null
+    }
+    if (m.clearAfterMs && m.text) {
+      nexusBannerClearTimerRef.current = setTimeout(() => {
+        setNexusBannerText('')
+        nexusBannerClearTimerRef.current = null
+      }, m.clearAfterMs)
+    }
+  }, [])
   /** Todo list from agent (TodoWrite). Rendered above input, below progress. */
   const [nexusTodo, setNexusTodo] = useState('')
   const [nexusQuestionRequest, setNexusQuestionRequest] = useState<{
@@ -460,7 +474,11 @@ export function REPL({
   const onNexusCompact = useCallback(async () => {
     if (!nexusBootstrap) return
     try {
-      setNexusBannerText('Compacting conversation…')
+      if (nexusBannerClearTimerRef.current) {
+        clearTimeout(nexusBannerClearTimerRef.current)
+        nexusBannerClearTimerRef.current = null
+      }
+      setNexusBannerText('Compacting…')
       const config = await loadConfig(nexusBootstrap.cwd, {
         secrets: nexusBootstrap.secretsStore,
       })
@@ -470,23 +488,22 @@ export function REPL({
         client,
       )
       await nexusBootstrap.session.save().catch(() => {})
-      setMessages(prev => [
-        ...prev,
-        createAssistantMessage(
-          'Conversation compacted. Summary was added to session context.',
-        ),
-      ])
+      setMessages(replMessagesFromSession(nexusBootstrap.session.messages))
+      applyNexusBanner({
+        type: 'nexus_banner',
+        text: '● Conversation compacted. Summary was added to session context.',
+        clearAfterMs: 4500,
+      })
     } catch (error) {
+      setNexusBannerText('')
       setMessages(prev => [
         ...prev,
         createAssistantAPIErrorMessage(
           `Compaction failed: ${error instanceof Error ? error.message : String(error)}`,
         ),
       ])
-    } finally {
-      setNexusBannerText('')
     }
-  }, [nexusBootstrap])
+  }, [nexusBootstrap, applyNexusBanner])
 
   const onSetNexusMode = useCallback((mode: string) => {
     setNexusModeOverride(mode)
@@ -744,7 +761,7 @@ export function REPL({
             continue
           }
           if (message && 'type' in message && message.type === 'nexus_banner') {
-            setNexusBannerText((message as NexusBannerMessage).text)
+            applyNexusBanner(message as NexusBannerMessage)
             continue
           }
           if (message && 'type' in message && message.type === 'nexus_todo') {
@@ -880,7 +897,7 @@ export function REPL({
           continue
         }
         if (message && 'type' in message && message.type === 'nexus_banner') {
-          setNexusBannerText((message as NexusBannerMessage).text)
+          applyNexusBanner(message as NexusBannerMessage)
           continue
         }
         if (message && 'type' in message && message.type === 'nexus_todo') {
@@ -1246,62 +1263,28 @@ export function REPL({
     toolDetailsExpanded,
   ])
 
-  const staticMessageItems = messagesJSX.filter((item) => item.type === 'static')
-  const transientMessageItems = messagesJSX.filter((item) => item.type === 'transient')
-  const staticItemsWithHeader = useMemo(
-    () => [{ id: 'header' as const }, ...staticMessageItems],
-    [staticMessageItems],
-  )
   const shouldHideNexusHeader =
     nexusBootstrap != null && inputValue.trimStart().startsWith('/')
 
+  /** Single chronological list (no Static/transient split): splitting froze history above live rows so tool results appeared above their tool_use lines. */
   const chatMessagesSection = useMemo(
     () =>
-      nexusBootstrap ? (
-        <>
-          {!shouldHideNexusHeader ? (
-            <Box key={`nexus-header-${forkNumber}`} flexDirection="column">
-              <Logo
-                mcpClients={mcpClients}
-                isDefaultModel={isDefaultModel}
-              />
-              <ProjectOnboarding workspaceDir={getOriginalCwd()} />
-            </Box>
-          ) : null}
-          {messagesJSX.map(item => (
-            <React.Fragment key={item.key}>{item.jsx}</React.Fragment>
-          ))}
-        </>
-      ) : (
-        <>
-          <Static
-            key={`static-messages-${forkNumber}`}
-            items={staticItemsWithHeader}
-          >
-            {item =>
-              'id' in item && item.id === 'header' ? (
-                <Box key="nexus-header" flexDirection="column">
-                  <Logo
-                    mcpClients={mcpClients}
-                    isDefaultModel={isDefaultModel}
-                  />
-                  <ProjectOnboarding workspaceDir={getOriginalCwd()} />
-                </Box>
-              ) : (
-                ('jsx' in item ? item.jsx : null)
-              )
-            }
-          </Static>
-          {transientMessageItems.map(item => (
-            <React.Fragment key={item.key}>{item.jsx}</React.Fragment>
-          ))}
-        </>
-      ),
+      <>
+        {!shouldHideNexusHeader ? (
+          <Box key={`nexus-header-${forkNumber}`} flexDirection="column">
+            <Logo
+              mcpClients={mcpClients}
+              isDefaultModel={isDefaultModel}
+            />
+            <ProjectOnboarding workspaceDir={getOriginalCwd()} />
+          </Box>
+        ) : null}
+        {messagesJSX.map(item => (
+          <React.Fragment key={item.key}>{item.jsx}</React.Fragment>
+        ))}
+      </>,
     [
-      nexusBootstrap,
       forkNumber,
-      staticItemsWithHeader,
-      transientMessageItems,
       messagesJSX,
       mcpClients,
       isDefaultModel,
@@ -1592,6 +1575,15 @@ function shouldRenderStatically(
         ) {
           return false
         }
+      }
+      // Keep tool results in the same transient region as assistant tool_use rows. Otherwise
+      // Static(history) renders before transient(live), and outputs appear above tool lines.
+      if (
+        message.type === 'user' &&
+        Array.isArray(message.message.content) &&
+        message.message.content.some(b => b?.type === 'tool_result')
+      ) {
+        return false
       }
       const toolUseID = getToolUseID(message)
       if (!toolUseID) {

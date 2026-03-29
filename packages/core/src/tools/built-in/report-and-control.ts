@@ -1,6 +1,6 @@
 import { z } from "zod"
 import type { ToolDef, ToolContext, UserQuestionRequest, UserQuestionItem } from "../../types.js"
-import { buildUserQuestionOptions, normalizeCustomOptionLabel } from "../user-question-utils.js"
+import { buildUserQuestionOptions, normalizeCustomOptionLabel, splitQuestionOptionListString } from "../user-question-utils.js"
 
 /**
  * Models often send `options` as a single comma/semicolon-separated string instead of string[].
@@ -11,19 +11,19 @@ function preprocessQuestionOptions(val: unknown): unknown {
   if (Array.isArray(val)) {
     const out: string[] = []
     for (const el of val) {
-      if (typeof el === "string" && el.trim()) out.push(el.trim())
-      else if (el != null && (typeof el === "number" || typeof el === "boolean")) out.push(String(el))
+      if (typeof el === "string" && el.trim()) {
+        out.push(...splitQuestionOptionListString(el))
+      } else if (el != null && (typeof el === "number" || typeof el === "boolean")) {
+        out.push(String(el))
+      }
     }
     return out.length > 0 ? out : undefined
   }
   if (typeof val === "string") {
     const s = val.trim()
     if (!s) return undefined
-    if (/[,;|]/.test(s)) {
-      const parts = s.split(/[,;|]/).map((x) => x.trim()).filter((x) => x.length > 0)
-      return parts.length > 0 ? parts : undefined
-    }
-    return [s]
+    const parts = splitQuestionOptionListString(s)
+    return parts.length > 0 ? parts : undefined
   }
   return val
 }

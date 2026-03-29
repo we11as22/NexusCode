@@ -1,7 +1,6 @@
 /**
- * Kilocode/OpenCode-style truncation of tool output.
- * When output exceeds MAX_LINES or MAX_BYTES, it is truncated; full output is saved to
- * the global data dir (~/.nexus/data/tool-output/) and the model gets a shortened version + hint to use Read/Grep.
+ * KiloCode `Truncate.output` parity: max lines + max bytes, head/tail direction,
+ * full output spooled to disk, model-facing message matches OpenCode wording.
  */
 import * as fs from "node:fs"
 import * as path from "node:path"
@@ -15,12 +14,15 @@ const RETENTION_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 const MAX_FILE_BYTES = 50 * 1024 * 1024 // 50 MB
 
 export interface TruncateOptions {
-  /** Working directory (used only for relative path display when possible). Output is saved to global data dir. */
+  /** Unused for output path (always global data dir); kept for call-site compatibility. */
   cwd: string
   maxLines?: number
   maxBytes?: number
-  /** Which end to keep when truncating by lines: "head" (default) or "tail" */
   direction?: "head" | "tail"
+  /**
+   * When true, hint mentions KiloCode's Task tool (explore agent). Nexus has no Task tool by default.
+   */
+  suggestTaskTool?: boolean
 }
 
 export interface TruncateResult {
@@ -36,20 +38,67 @@ export interface TruncateResultTruncated {
 
 export type TruncateOutputResult = TruncateResult | TruncateResultTruncated
 
-const DEFAULT_HINT =
-  "Full output saved to the file above. Use Read with offset/limit to view specific sections or Grep to search the full content. Do NOT paste the entire file — use tools to inspect it."
-
 /**
- * If text exceeds maxLines or maxBytes, truncate it, write full output to global data dir (tool-output/<id>.out),
- * and return shortened content + path hint. Otherwise return content unchanged.
+ * Same decision tree as KiloCode `Truncate.output` (tool/truncation.ts).
  */
+function buildTruncatedMessage(
+  lines: string[],
+  maxLines: number,
+  maxBytes: number,
+  direction: "head" | "tail",
+  absoluteFilePath: string,
+  suggestTaskTool: boolean,
+): string {
+  const text = lines.join("\n")
+  const totalBytes = Buffer.byteLength(text, "utf-8")
+
+  const out: string[] = []
+  let hitBytes = false
+  let bytes = 0
+
+  if (direction === "head") {
+    for (let i = 0; i < lines.length && i < maxLines; i++) {
+      const size = Buffer.byteLength(lines[i]!, "utf-8") + (i > 0 ? 1 : 0)
+      if (bytes + size > maxBytes) {
+        hitBytes = true
+        break
+      }
+      out.push(lines[i]!)
+      bytes += size
+    }
+  } else {
+    for (let i = lines.length - 1; i >= 0 && out.length < maxLines; i--) {
+      const size = Buffer.byteLength(lines[i]!, "utf-8") + (out.length > 0 ? 1 : 0)
+      if (bytes + size > maxBytes) {
+        hitBytes = true
+        break
+      }
+      out.unshift(lines[i]!)
+      bytes += size
+    }
+  }
+
+  const removed = hitBytes ? totalBytes - bytes : lines.length - out.length
+  const unit = hitBytes ? "bytes" : "lines"
+  const preview = out.join("\n")
+
+  const hint = suggestTaskTool
+    ? `The tool call succeeded but the output was truncated. Full output saved to: ${absoluteFilePath}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
+    : `The tool call succeeded but the output was truncated. Full output saved to: ${absoluteFilePath}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
+
+  return direction === "head"
+    ? `${preview}\n\n...${removed} ${unit} truncated...\n\n${hint}`
+    : `...${removed} ${unit} truncated...\n\n${hint}\n\n${preview}`
+}
+
 export async function truncateOutput(
   text: string,
-  options: TruncateOptions
+  options: TruncateOptions,
 ): Promise<TruncateOutputResult> {
   const maxLines = options.maxLines ?? MAX_LINES
   const maxBytes = options.maxBytes ?? MAX_BYTES
   const direction = options.direction ?? "head"
+  const suggestTaskTool = options.suggestTaskTool ?? false
 
   const lines = text.split("\n")
   const totalBytes = Buffer.byteLength(text, "utf-8")
@@ -62,10 +111,9 @@ export async function truncateOutput(
   try {
     fs.mkdirSync(outDir, { recursive: true })
   } catch {
-    // If we can't create dir, return truncated in-memory only (no file)
-    const truncated = truncateInMemory(text, lines, totalBytes, maxLines, maxBytes, direction)
+    const fallback = buildTruncatedMessage(lines, maxLines, maxBytes, direction, "(could not save)", suggestTaskTool)
     return {
-      content: truncated + "\n\n(Output truncated; could not save full output to disk.)",
+      content: `${fallback}\n\n(Output truncated; could not save full output to disk.)`,
       truncated: false,
     }
   }
@@ -81,64 +129,17 @@ export async function truncateOutput(
         "\n\n[output truncated at 50 MB in file]\n"
   await fs.promises.writeFile(filePath, fileContent, "utf8").catch(() => {})
 
+  const content = buildTruncatedMessage(lines, maxLines, maxBytes, direction, filePath, suggestTaskTool)
+
   const displayPath = filePath.startsWith(os.homedir())
     ? path.join("~", ".nexus", "data", "tool-output", `${id}.out`).replace(/\\/g, "/")
     : filePath.replace(/\\/g, "/")
-  const truncated = truncateInMemory(text, lines, totalBytes, maxLines, maxBytes, direction)
-  const hint = `\n\nFull output saved to: ${displayPath}\n${DEFAULT_HINT}`
 
   return {
-    content: truncated + hint,
+    content,
     truncated: true,
     outputPath: displayPath,
   }
-}
-
-function truncateInMemory(
-  text: string,
-  lines: string[],
-  totalBytes: number,
-  maxLines: number,
-  maxBytes: number,
-  direction: "head" | "tail"
-): string {
-  if (lines.length <= maxLines && totalBytes <= maxBytes) return text
-
-  let result: string
-  if (lines.length > maxLines) {
-    const removedLines = lines.length - maxLines
-    let out: string[]
-    if (direction === "head") {
-      const headCount = Math.ceil(maxLines / 2)
-      const tailCount = maxLines - headCount
-      out = [
-        ...lines.slice(0, headCount),
-        `... ${removedLines} lines truncated ...`,
-        ...lines.slice(-tailCount),
-      ]
-    } else {
-      const tailCount = Math.ceil(maxLines / 2)
-      const headCount = maxLines - tailCount
-      out = [
-        ...lines.slice(0, headCount),
-        `... ${removedLines} lines truncated ...`,
-        ...lines.slice(-tailCount),
-      ]
-    }
-    result = out.join("\n")
-  } else {
-    const buf = Buffer.from(text, "utf8")
-    result = buf.subarray(0, maxBytes).toString("utf8")
-    const removed = totalBytes - Buffer.byteLength(result, "utf8")
-    result += `\n\n... ${removed} bytes truncated ...`
-  }
-
-  const resultBytes = Buffer.byteLength(result, "utf8")
-  if (resultBytes > maxBytes) {
-    const buf = Buffer.from(result, "utf8")
-    result = buf.subarray(0, maxBytes).toString("utf8") + "\n\n... (output truncated by size) ..."
-  }
-  return result
 }
 
 async function cleanupOldFiles(dir: string): Promise<void> {

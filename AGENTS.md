@@ -27,7 +27,7 @@ This file provides guidance to agents when working with the NexusCode repository
 
 ## Indexer
 
-- FTS-only by default. Vector index is used when `indexing.vector` and `vectorDb.enabled` are true and embeddings + Qdrant are available. The factory falls back to FTS-only on missing embeddings or Qdrant. Index status is pushed to the webview via `indexStatus` and `agentEvent` with `index_update`.
+- FTS-only by default. Vector index is used when `indexing.vector` and `vectorDb.enabled` are true and embeddings + Qdrant are available. The factory falls back to FTS-only on missing embeddings or Qdrant. Index status is pushed to the webview via **`indexStatus` only** (one indexer per workspace host; mirroring the same snapshot through deferred `agentEvent` queues caused stale overwrites of `paused` / progress).
 
 ## CLI
 

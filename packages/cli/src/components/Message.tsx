@@ -71,6 +71,7 @@ export function Message({
             durationMs={message.durationMs}
             addMargin={addMargin}
             tools={tools}
+            messages={messages}
             debug={debug}
             options={{ verbose }}
             erroredToolUseIDs={erroredToolUseIDs}
@@ -156,6 +157,7 @@ function AssistantMessage({
   durationMs,
   addMargin,
   tools,
+  messages,
   debug,
   options: { verbose },
   erroredToolUseIDs,
@@ -178,6 +180,7 @@ function AssistantMessage({
   durationMs: number
   addMargin: boolean
   tools: Tool[]
+  messages: NormalizedMessage[]
   debug: boolean
   options: {
     verbose: boolean
@@ -200,6 +203,7 @@ function AssistantMessage({
           durationMs={durationMs}
           addMargin={addMargin}
           tools={tools}
+          messages={messages}
           debug={debug}
           verbose={verbose}
           erroredToolUseIDs={erroredToolUseIDs}

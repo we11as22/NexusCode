@@ -1,9 +1,9 @@
 # NexusCode — полная документация
 
-**NexusCode** — AI-агент для кодинга с поддержкой VS Code, CLI и опционального HTTP-сервера агента. Сессии хранятся в **одном JSONL-хранилище** (ядро `~/.nexus/sessions/…`, ключ — канонический корень проекта): локальный режим и сервер читают одни и те же файлы; отдельная SQLite-база сервера не используется.
+**NexusCode** — AI-агент для кода: расширение VS Code, CLI (TUI) и опциональный HTTP-сервер. Сессии и сообщения хранятся в **JSONL** под `~/.nexus/sessions/<хэш канонического корня проекта>/` через `@nexuscode/core`. Сервер (`packages/server`) пишет в **те же файлы**, что и локальный CLI/расширение (`session-fs-store.ts`), а не в отдельную SQLite.
 
-- **README** (English): [README.md](README.md) — установка, быстрый старт, конфигурация, ссылки на документацию.
-- **Архитектура**: [ARCHITECTURE.md](ARCHITECTURE.md) — слои, ключевые решения, инварианты, структура репозитория.
+- **README** (English): [README.md](README.md) — установка, быстрый старт, ссылки.
+- **Архитектура** (English): [ARCHITECTURE.md](ARCHITECTURE.md) — слои, инварианты, потоки данных, детали UI/loop.
 
 ---
 
@@ -13,18 +13,19 @@
 2. [Быстрый старт](#быстрый-старт)
 3. [Конфигурация](#конфигурация)
 4. [Режимы работы](#режимы-работы)
-5. [Индексация кодовой базы](#индексация-кодовой-базы)
+5. [Индексация](#индексация-кодовой-базы)
 6. [Инструменты агента](#инструменты-агента)
 7. [CLI](#cli)
 8. [Расширение VS Code](#расширение-vs-code)
-9. [Мультиагентность и сабагенты](#мультиагентность-и-сабагенты)
+9. [Сабагенты и параллельность](#мультиагентность-и-сабагенты)
 10. [Безопасность и права](#безопасность-и-права)
 11. [Переменные окружения](#переменные-окружения)
-12. [Чекпоинты и откат](#чекпоинты-и-откат)
+12. [Чекпоинты](#чекпоинты-и-откат)
 13. [MCP](#mcp)
 14. [Skills](#skills)
-15. [Правила и правила проекта](#правила-и-правила-проекта)
-16. [Устранение неполадок](#устранение-неполадок)
+15. [Правила](#правила-и-правила-проекта)
+16. [Сервер NexusCode](#сервер-nexuscode)
+17. [Устранение неполадок](#устранение-неполадок)
 
 ---
 
@@ -32,82 +33,45 @@
 
 ### Требования
 
-- **Node.js** 20+ (для сборки расширения VS Code и нативного модуля better-sqlite3)
-- **pnpm** (рекомендуется для монорепозитория) или npm
+- **Node.js 20+** — рекомендуется для `better-sqlite3`, `pnpm run serve`, сборки .vsix и CLI; в корне репозитория в `package.json` формально указано `>=18`, но скрипты сервера и практика проекта ориентированы на 20 (файл `.nvmrc`: `20`).
+- **pnpm** — монорепозиторий и скрипты в корне.
+- **Bun** — для OpenTUI в CLI (см. README).
 
 ### Установка pnpm
 
-Если `pnpm` не найден:
-
-**Вариант 1 — через npm** (если уже есть Node.js):
-
 ```bash
 npm install -g pnpm
+# или
+corepack enable && corepack prepare pnpm@latest --activate
 ```
 
-**Вариант 2 — через Corepack** (встроен в Node.js 16+):
-
-```bash
-corepack enable
-corepack prepare pnpm@latest --activate
-```
-
-Проверка: `pnpm -v`.
-
-### Из репозитория (разработка)
+### Из репозитория
 
 ```bash
 git clone <repo-url>
 cd NexusCode
+nvm use 20   # при использовании nvm
 pnpm install
 pnpm build
 ```
 
-### Установка CLI глобально
+Одна команда «всё для CLI»: `pnpm run cli` (см. README). Полная переустановка: `pnpm run one`; CLI + .vsix: `pnpm run ready`.
 
-После сборки из репозитория:
+### Глобальная команда `nexus`
 
-```bash
-cd NexusCode
-pnpm install
-pnpm build
-# Создать симлинк или добавить в PATH
-ln -s "$(pwd)/packages/cli/dist/index.js" /usr/local/bin/nexus
-# или (после сборки в dist появляется скрипт nexus)
-export PATH="$(pwd)/packages/cli/dist:$PATH"
-nexus
-```
+После `pnpm run cli` или `cd packages/cli && npm link` добавьте `~/bin` (или каталог установки) в `PATH`. Запуск: `nexus`.
 
-### Устранение неполадок
+### Устранение (native module)
 
-**Ошибка `better_sqlite3.node was compiled against a different Node.js version` (NODE_MODULE_VERSION)**  
-Нативный модуль `better-sqlite3` собран под другую версию Node. Пересоберите его под текущую:
+Ошибка `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`: запускайте `nexus` той же мажорной версией Node, под которой собирали `better-sqlite3` (обычно `nvm use 20`, затем `pnpm run one` или `pnpm rebuild better-sqlite3`).
 
-1. В проекте включена сборка нативных модулей: в `pnpm-workspace.yaml` задано `allowBuilds: better-sqlite3: true`. Если после свежего `pnpm install` скрипты сборки не запускались — проверьте этот пункт.
-2. Пересборка под текущий Node:
-   ```bash
-   pnpm rebuild better-sqlite3
-   ```
-   Если после этого ошибка сохраняется (например, в сообщении фигурируют 108 и 109), пересоберите в каталоге пакета тем же `node`, которым запускаете `nexus`:
-   ```bash
-   cd node_modules/.pnpm/better-sqlite3@9.6.0/node_modules/better-sqlite3 && npm run build-release
-   ```
-   Запускайте `nexus` той же версией Node, под которую собирали модуль (например: `nvm use 20 && nexus`).
-3. Если пересборка падает из‑за отсутствия компилятора, установите (Debian/Ubuntu): `sudo apt-get install -y build-essential python3`.
-4. После смены мажорной версии Node (20 ↔ 18) лучше переустановить зависимости: `rm -rf node_modules packages/*/node_modules && pnpm install`.
+Временно без индекса: `nexus --no-index`.
 
-**Временно обойтись без индекса** (индексация и `codebase_search` отключены, остальное работает):
+### Расширение VS Code
 
-```bash
-nexus --no-index
-```
-
-### Установка расширения VS Code
-
-1. Собрать проект: `pnpm build` в корне NexusCode.
-2. В VS Code: **Extensions** → **...** → **Install from VSIX** (если есть .vsix).
-3. Либо **Run and Debug** → **Run Extension** из корня `packages/vscode` для разработки.
-4. Либо скопировать папку `packages/vscode` в `~/.vscode/extensions/nexuscode-0.1.0/` и перезапустить VS Code.
+1. `pnpm build` в корне (или `pnpm run ready`).
+2. `pnpm package:vscode` → установить `packages/vscode/nexuscode-0.1.0.vsix` (**Install from VSIX**).
+3. Разработка: открыть `packages/vscode`, **F5** (Extension Development Host).
 
 ---
 
@@ -115,413 +79,302 @@ nexus --no-index
 
 ### CLI
 
-```bash
-# Убедитесь, что API-ключ задан (см. раздел Переменные окружения)
-export ANTHROPIC_API_KEY="sk-ant-..."
+По умолчанию в `NexusConfigSchema` задан бесплатный маршрут Kilo/OpenRouter (`minimax/minimax-m2.5:free`, `https://api.kilo.ai/api/openrouter`) — отдельный API-ключ для старта не обязателен.
 
-# Интерактивный режим в текущей папке
+```bash
+cd /path/to/your/project
 nexus
 
-# Режим агента с первым сообщением
-nexus agent "Добавь в README секцию про установку"
+# Одно сообщение и выход (неинтерактивно)
+nexus -p "Кратко опиши структуру пакета"
 
-# Режим «только план» (без изменений кода)
-nexus plan "Предложи план рефакторинга auth модуля"
-
-# Печать ответа без интерактива (CI)
-nexus agent --print "Что делает функция parseConfig?"
+# Режим (флаг, не позиционный аргумент)
+nexus --mode plan -p "План рефакторинга модуля auth"
+nexus --mode ask -p "Как устроен слой конфигурации?"
+nexus --mode debug -p "Почему падает тест X?"
 ```
+
+**Важно:** в `packages/cli/src/entrypoints/cli.tsx` флаг `--mode` допускает только `agent` | `ask` | `plan` | `debug`. Значение `review` не распознаётся и сбрасывается в `agent`. Режим **review** в ядре есть; в интерактивном TUI его можно выбрать через **`/mode`** (см. `PromptInput.tsx`, `VALID_MODES`). Цикл **Shift+Tab** в `REPL.tsx` переключает только `agent → plan → ask → debug` (без `review`).
 
 ### VS Code
 
-1. Откройте палитру команд: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**).
-2. **NexusCode: Open NexusCode Panel** или **Ctrl+Shift+N**.
-3. Либо откройте боковую панель **NexusCode** на Activity Bar.
-4. Введите запрос в поле ввода и нажмите Enter.
+Панель: **Ctrl+Shift+N** (macOS: **Cmd+Shift+N**) или команда **NexusCode: Open NexusCode Panel**.
 
 ---
 
 ## Конфигурация
 
-Конфиг загружается из:
+### Где читается конфиг
 
-1. **Глобальный**: `~/.nexus/nexus.yaml`
-2. **Проектный**: `.nexus/nexus.yaml` или `.nexusrc.yaml` (поиск вверх от текущей директории)
-3. Проектный переопределяет глобальный; переменные окружения переопределяют оба.
+Реализация: `packages/core/src/config/index.ts`.
 
-### Минимальный пример `.nexus/nexus.yaml`
+1. Глобальный файл: `~/.nexus/nexus.yaml`
+2. Проектный (поиск вверх от cwd): `.nexus/nexus.yaml`, `.nexus/nexus.yml`, `.nexusrc.yaml`, `.nexusrc.yml`
+3. MCP дополняется merge из `~/.nexus/mcp-servers.json` и `<project>/.nexus/mcp-servers.json` (по имени сервера, позднее побеждает)
+4. Переменные окружения и настройки VS Code (`nexuscode.*`) могут переопределять значения в рантайме хоста
 
-По умолчанию используется бесплатный шлюз Nexus/Kilo (`minimax/minimax-m2.5:free`, baseUrl api.kilo.ai). Ключ можно не указывать для этого шлюза. Для OpenRouter или своей модели задайте конфиг и при необходимости ключ через переменную окружения.
-
-```bash
-export OPENROUTER_API_KEY=sk-or-...
-```
-
-Чтобы переопределить модель, создайте конфиг:
+### Дефолт модели (schema)
 
 ```yaml
 model:
   provider: openai-compatible
-  id: minimax/minimax-m2:free
-  baseUrl: https://openrouter.ai/api/v1
-  # apiKey задаётся через OPENROUTER_API_KEY
+  id: minimax/minimax-m2.5:free
+  baseUrl: https://api.kilo.ai/api/openrouter
 ```
 
-Или своя модель, например Anthropic:
+Старые `baseUrl` с `/api/gateway` при загрузке нормализуются на `/api/openrouter` (`normalizeModelConfig` в CLI bootstrap).
 
-```yaml
-model:
-  provider: anthropic
-  id: claude-sonnet-4-5
-  # apiKey задаётся через ANTHROPIC_API_KEY
-```
+### Опорная таблица полей (`NexusConfigSchema`)
 
-### Полная схема конфигурации
-
-| Секция | Ключ | Тип | По умолчанию | Описание |
-|--------|------|-----|--------------|----------|
-| **model** | provider | string | openai-compatible | Провайдер LLM: anthropic, openai, google, ollama, azure, bedrock, groq, mistral, xai, deepinfra, cerebras, cohere, togetherai, perplexity, openai-compatible (OpenRouter через openai-compatible + baseUrl) |
-| | id | string | minimax/minimax-m2.5:free | Идентификатор модели (по умолчанию — бесплатная MiniMax на шлюзе api.kilo.ai) |
-| | apiKey | string | — | API-ключ (можно не указывать, если задан в env) |
-| | baseUrl | string | — | Кастомный URL API (для openai-compatible) |
-| **indexing** | enabled | boolean | true | Включить индексацию кодовой базы |
-| | excludePatterns | string[] | node_modules/**, .git/**, dist/**, ... | Glob-паттерны исключения при индексации |
-| | symbolExtract | boolean | true | Извлекать символы (классы, функции) для умной индексации |
-| | vector | boolean | false | Векторный поиск (нужен Qdrant и embeddings) |
-| | batchSize | number | 50 | Размер батча при индексации |
-| | embeddingBatchSize | number | 60 | Размер батча embedding-запросов при векторной индексации |
-| | embeddingConcurrency | number | 2 | Параллелизм embedding-запросов при векторной индексации |
-| | debounceMs | number | 800 | Задержка перед обновлением индекса при изменении файла |
-| **vectorDb** | enabled | boolean | false | Включить векторную БД (Qdrant) |
-| | url | string | http://localhost:6333 | URL Qdrant |
-| | collection | string | nexus | Имя коллекции |
-| | autoStart | boolean | true | Пытаться автоматически запустить Qdrant (локальный бинарник или Docker) при недоступности |
-| **permissions** | autoApproveRead | boolean | true | Авто-одобрение чтения файлов |
-| | autoApproveWrite | boolean | false | Авто-одобрение записи |
-| | autoApproveCommand | boolean | false | Авто-одобрение выполнения команд |
-| | autoApproveReadPatterns | string[] | [] | Glob-паттерны путей с авто-одобрением чтения |
-| | denyPatterns | string[] | **/.env, **/secrets/**, ... | Пути, запрещённые для доступа |
-| | rules | array | [] | Тонкие правила: tool, pathPattern, commandPattern, action (allow/deny/ask), reason |
-| **modes** | agent, plan, debug, ask | object | {} | autoApprove, systemPrompt, customInstructions для каждого режима |
-| **retry** | enabled | boolean | true | Повторы при сбоях API |
-| | maxAttempts | number | 3 | Максимум попыток |
-| | initialDelayMs, maxDelayMs | number | 1000, 30000 | Задержки между попытками |
-| | retryOnStatus | number[] | [429,500,502,503,504] | HTTP-коды для повтора |
-| **checkpoint** | enabled | boolean | true | Чекпоинты (требуется git) |
-| | timeoutMs | number | 15000 | Таймаут создания чекпоинта |
-| | createOnWrite | boolean | true | Создавать чекпоинт при записи файлов |
-| | doubleCheckCompletion | boolean | false | Дополнительная перепроверка перед завершением хода (если режим требует явный end-tool) |
-| **mcp** | servers | array | [] | Список MCP-серверов (name, command, args, env, url, transport, bundle для встроенных вроде context-mode) |
-| **skills** | — | string[] | [] | Пути к SKILL.md или папкам с навыками |
-| **tools** | custom | string[] | [] | Кастомные инструменты |
-| | classifyToolsEnabled | boolean | false | Включить фильтр MCP-серверов по задаче (LLM выбирает серверы при числе серверов > classifyThreshold) |
-| | classifyThreshold | number | 20 | Порог по числу MCP-серверов: при превышении классификатор выбирает, какие серверы использовать |
-| | parallelReads | boolean | true | Параллельное выполнение read-only инструментов |
-| | maxParallelReads | number | 5 | Макс. параллельных чтений |
-| **skillClassifyEnabled** | — | boolean | false | Включить фильтр skills по задаче |
-| **skillClassifyThreshold** | — | number | 20 | Порог для классификации skills (при превышении выбирается подмножество по задаче) |
-| **summarization** | auto | boolean | true | Авто-компактизация контекста |
-| | threshold | number | 0.80 | Доля контекста (0–1), при которой запускается компактизация |
-| | keepRecentMessages | number | 8 | Сколько последних сообщений не трогать |
-| **parallelAgents** | maxParallel | number | 4 | Макс. число одновременных сабагентов |
-| **rules** | files | string[] | CLAUDE.md, AGENTS.md, .nexus/rules/** | Файлы с правилами проекта |
-| **profiles** | &lt;name&gt; | object | {} | Именованные профили (переопределения model), выбор через --profile |
-| **agentLoop** | toolCallBudget | object | {} | Опциональные лимиты вызовов тулов по режимам (ask, plan, agent, debug) |
-| | maxIterations | object | {} | Опциональные лимиты итераций цикла по режимам |
-| **structuredOutput** | — | "auto" \| "always" \| "never" | auto | Использование структурированного вывода (JSON schema) когда модель поддерживает |
+| Секция | Ключ | По умолчанию / тип | Комментарий |
+|--------|------|-------------------|-------------|
+| **model** | provider | `openai-compatible` | см. список в schema |
+| | id | `minimax/minimax-m2.5:free` | |
+| | baseUrl | `https://api.kilo.ai/api/openrouter` | |
+| | reasoningEffort | `"auto"` | |
+| | reasoningHistoryMode | `"auto"` | `auto` \| `inline` \| `reasoning_content` \| `reasoning_details` |
+| | temperature, apiKey, contextWindow, … | опционально | |
+| **embeddings** | | опционально | провайдер embeddings для вектора |
+| **vectorDb** | enabled | `false` | без этого + `indexing.vector` нет семантического `CodebaseSearch` |
+| | url | `http://localhost:6333` | |
+| | collection | `nexus` | фактическое имя коллекции в коде индексатора: `nexus_<projectHash>` |
+| | autoStart | `true` | локальный Qdrant |
+| | apiKey, upsertWait, searchMinScore, searchHnswEf, searchExact | опционально | |
+| **indexing** | enabled | `true` | |
+| | excludePatterns | массив glob | включая `".nexus/**"` |
+| | symbolExtract | `true` | AST / символы для `ListCodeDefinitions` |
+| | vector | `false` | вместе с `vectorDb.enabled` включает векторный пайплайн |
+| | maxIndexedFiles | `50000` | **0 = не сканировать дерево** (Roo-совместимость) |
+| | debounceMs | `800` | дебаунс watcher |
+| | searchWhileIndexing | `true` | частичный поиск при наличии точек в Qdrant |
+| | maxIndexingFailureRate | `0.1` | порог сброса индекса |
+| | batchSize, embeddingBatchSize, embeddingConcurrency, maxPendingEmbedBatches, batchProcessingConcurrency, codebaseSearchSnippetMaxChars | см. schema | |
+| **permissions** | autoApproveRead / Write / Command / Mcp / Browser / SkillLoad | см. schema | `autoApproveSkillLoad` по умолчанию `true` |
+| | autoApproveReadPatterns | дефолт включает пути к `~/.nexus/data/run/**` и tool-output | |
+| | allowedCommands, allowCommandPatterns, allowedMcpTools, denyCommandPatterns, askCommandPatterns, denyPatterns, rules | см. schema | |
+| **modes** | agent, plan, ask, debug, review | опционально | `autoApprove`, `systemPrompt`, `customInstructions` |
+| **retry** | | см. schema | |
+| **checkpoint** | enabled, timeoutMs, createOnWrite, doubleCheckCompletion | см. schema | |
+| **ui** | showReasoningInChat | `false` | показ потокового reasoning в чате |
+| **mcp** | servers | `[]` | `name`, `command`, `args`, `env`, `url`, `transport`, `type`, `headers`, `enabled`, `bundle` |
+| **skills** | | `[]` | строки или `{ path, enabled? }` |
+| **skillsUrls** | | опционально | удалённые реестры → `~/.nexus/cache/skills/` |
+| **tools** | classifyToolsEnabled | `false` | при `true` и числе MCP-серверов > threshold — классификация **серверов** |
+| | classifyThreshold | `20` | |
+| | parallelReads, maxParallelReads | `true`, `5` | |
+| **skillClassifyEnabled** | | `false` | |
+| **skillClassifyThreshold** | | `20` | |
+| **structuredOutput** | | `"auto"` | `auto` \| `always` \| `never` |
+| **summarization** | auto, threshold, keepRecentMessages, model | `true`, `0.80`, `8`, `""` | |
+| **parallelAgents** | maxParallel, maxTasksPerCall | `4`, `12` | второе — устаревший задел; параллельные сабагенты через `Parallel` / `SpawnAgentsParallel` |
+| **rules** | files | `CLAUDE.md`, `AGENTS.md`, `.nexus/rules/**` | |
+| **agentLoop** | toolCallBudget, maxIterations | опционально по режимам | включая `review` |
+| **profiles** | | `{}` | именованные профили модели |
 
 ---
 
 ## Режимы работы
 
-| Режим | Описание | Чтение | Запись | Команды | Поиск | MCP/Skills/Agents | Завершение хода |
-|-------|----------|--------|--------|---------|--------|-------------------|-----------------|
-| **agent** | Полноценный агент: чтение, запись, команды, поиск, браузер, MCP, сабагенты | ✅ | ✅ | ✅ | ✅ | ✅ | Естественное завершение по `stop` без tool_calls |
-| **plan** | Только план: чтение + поиск; запись только в `.nexus/plans/*.md` | ✅ | Только .md в .nexus/plans | ❌ | ✅ | ✅ | **plan_exit** |
-| **debug** | Фокус на отладке: как agent, но с акцентом на воспроизведение → изоляция → фикс | ✅ | ✅ | ✅ | ✅ | ✅ | Естественное завершение по `stop` без tool_calls |
-| **ask** | Только вопросы: объяснения, анализ кода; без изменений и команд | ✅ | ❌ | ❌ | ✅ | ✅ | Естественное завершение по `stop` без tool_calls |
+Источник: `packages/core/src/agent/modes.ts`, `MANDATORY_END_TOOL`.
 
-Переключение режима: в CLI — **Tab**; в VS Code — кнопки режимов в панели NexusCode. Только **plan** требует явный `plan_exit`; **agent/debug/ask** завершают ход естественно, когда модель возвращает `stop` без новых tool_calls.
+| Режим | Смысл | Запись | Bash | Обязательное завершение |
+|-------|--------|--------|------|-------------------------|
+| **agent** | Полный агент | да | да | нет (стоп без tool calls) |
+| **plan** | План в `.nexus/plans/*.md\|*.txt` | только туда | **заблокирован** | **PlanExit** |
+| **ask** | Только чтение / поиск | нет | нет | нет |
+| **debug** | Диагностика и правки | да | да | нет |
+| **review** | Обзор изменений (git и т.д.) | нет | да (для git) | нет |
+
+Заблокированные имена инструментов: у **ask** — `Write`, `Edit`, `Bash`, `PlanExit`; у **review** — `Write`, `Edit`, `PlanExit`; у **agent**/**debug** — `PlanExit`; у **plan** — `Bash`.
 
 ---
 
 ## Индексация кодовой базы
 
-Индексация даёт семантический поиск по коду (`codebase_search`).
-
-### Возможности
-
-- **Умная разметка**: классы, функции, методы, интерфейсы, типы, enum (TypeScript/JavaScript, Python, Rust, Go, Java и др.).
-- **Fallback**: для остальных файлов — чанки по строкам с перекрытием (overlap), чтобы не терять код на границах.
-- **Один индекс на проект**: директория индекса — `~/.nexus/index/<hash_проекта>/`; при нескольких проектах в workspace они не смешиваются.
-- **Автообновление**: при изменении файлов индекс обновляется с debounce (по умолчанию 1.5 с).
-
-### Где хранится
-
-- **Метаданные инкрементальной индексации**: `~/.nexus/index/<project_hash>/file-tracker.json`
-- **Векторный индекс (Qdrant)**: коллекция `nexus_<project_hash>` по адресу `vectorDb.url`
-
-### Управление в VS Code
-
-- **Re-index** (↺): полная переиндексация.
-- **Clear index** (✕): очистка индекса и пересборка с нуля.
-- В заголовке отображается статус: «indexing», «✓ Nf Ns» (файлы/символы), ошибка.
-
-### Отключение индекса
-
-- В конфиге: `indexing.enabled: false`.
-- В CLI: флаг `--no-index`.
+- **Символы (AST)** и файловый трекер: для навигации и `ListCodeDefinitions`; трекер в VS Code под `globalStorageUri`, в CLI — `~/.nexus/index/<hash>/file-tracker.json`.
+- **Вектор (Qdrant):** коллекция `nexus_<projectHash>`. Включается **`indexing.vector: true`** и **`vectorDb.enabled: true`**.
+- **`CodebaseSearch`** в промпт модели попадает **только** при включённом векторе (`runAgentLoop` удаляет имя инструмента иначе). Сообщение об ошибке в теле инструмента указывает на эти флаги.
+- Игноры: `DEFAULT_EXCLUDE`, `indexing.excludePatterns`, `.gitignore`, `.nexusignore`, `.cursorignore` (см. ARCHITECTURE).
+- **debounce** индекса по умолчанию **800 ms** (не 1.5 с).
 
 ---
 
 ## Инструменты агента
 
-### Встроенные
+Имена ниже — те, что видит модель (PascalCase для основного набора). В логах провайдера могут встречаться алиасы; исполнение нормализует часть из них (`tool-execution.ts`).
 
-| Инструмент | Описание | Режимы |
-|------------|----------|--------|
-| **read_file** | Чтение файла с опциональным диапазоном строк (start_line, end_line). Для больших файлов — обрезка по размеру/строкам. | agent, plan, debug, ask |
-| **write_to_file** | Создание/перезапись файла | agent, debug |
-| **replace_in_file** | Несколько search/replace блоков в одном вызове | agent, debug |
-| **execute_command** | Выполнение shell-команды (таймаут, обрезка вывода) | agent, debug |
-| **grep** | Поиск по содержимому (ripgrep), regex | agent, plan, debug, ask |
-| **list** | Список файлов/папок с опциональным glob include | все |
-| **list_code_definitions** | Список определений кода в файле/папке | все |
-| **read_lints** | Чтение диагностик (ошибки/предупреждения) по путям | все |
-| **codebase_search** | Семантический/ключевой поиск по индексу (FTS + опционально вектор) | все при включённом индексе |
-| **web_fetch** | GET-запрос по URL | agent, plan, debug, ask |
-| **web_search** | Поиск в интернете (Brave/Serper; нужны BRAVE_API_KEY или SERPER_API_KEY) | agent, plan, debug, ask |
-| **glob** | Поиск файлов по glob-паттерну (например \`**/*.ts\`), сортировка по времени изменения | agent, plan, debug, ask |
-| **browser_action** | Действия в браузере (MCP cursor-ide-browser или аналог) | agent, plan, debug, ask |
-| **use_skill** | Подключение навыка из SKILL.md | agent, plan, debug, ask |
-| **SpawnAgents** | Запуск параллельного сабагента с описанием задачи и режимом | agent, plan, ask, debug |
-| **condense** | Компактизация истории диалога (сокращение контекста) | все |
-| **summarize_task** | Краткое резюме задачи для контекста | все |
-| **plan_exit** | Завершение фазы планирования (только в режиме plan) | plan |
-| **ask_followup_question** | Уточняющий вопрос пользователю | все |
-| **update_todo_list** | Обновление чек-листа прогресса (task_progress) | все |
-| **create_rule** | Создание правила в .nexus/rules/ или ~/.nexus/rules/ | agent, debug |
+### Статические built-in (`getAllBuiltinTools`)
 
-### Ограничения для больших файлов и логов
+| Имя | Назначение |
+|-----|------------|
+| **AskFollowupQuestion** | Структурированные вопросы пользователю |
+| **TodoWrite** | Чеклист задач |
+| **Parallel** | Пакет read-only инструментов и/или несколько **SpawnAgent** |
+| **Read** | Чтение файла (`file_path`, `offset`, `limit`); `~` → домашний каталог |
+| **List** | Один каталог — параметр **`path`** (не массив `paths`) |
+| **ListCodeDefinitions** | Символы в файле/каталоге |
+| **ReadLints** | Диагностики по путям |
+| **Write** | Запись файла |
+| **Edit** | Замены в файле (search/replace блоки) |
+| **Bash** | Shell; `run_in_background` → лог в `~/.nexus/data/run/` |
+| **BashOutput** | Вывод/статус фонового Bash |
+| **KillBash** | Остановка фонового процесса |
+| **Grep** | Ripgrep |
+| **CodebaseSearch** | Семантический поиск (только при векторе) |
+| **WebFetch**, **WebSearch** | Сеть (для WebSearch могут нуждаться внешние ключи — см. описание инструмента) |
+| **Glob** | Поиск путей по glob |
+| **Condense** | Сжатие контекста |
+| **PlanExit** | Выход из режима плана |
+| **Skill** | Загрузка навыка по имени из каталога |
 
-- **read_file**: лимит размера файла и числа строк за один вызов; для больших файлов рекомендуется указывать `start_line`/`end_line`.
-- **execute_command**: вывод обрезается (head + tail), убираются ANSI-коды и дубликаты строк прогресса.
-- Контекст защищён от переполнения: компактизация (prune + LLM-summary) при приближении к лимиту; при ошибках «context length» контекст автоматически сжимается.
+### Регистрация хостом
+
+| Имя | Примечание |
+|-----|------------|
+| **SpawnAgent**, **SpawnAgentsParallel**, **SpawnAgentOutput**, **SpawnAgentStop** | CLI и VS Code (`nexus-bootstrap` / `controller`) |
+| **SpawnAgent**, **SpawnAgents** (алиас), **SpawnAgentOutput**, **SpawnAgentStop** | HTTP-сервер (`run-session.ts`) — **`SpawnAgentsParallel` на сервере не регистрируется**; для параллельных сабагентов используйте **`Parallel`** с несколькими `SpawnAgent` |
+
+**Не зарегистрировано в типичном рантайме:** `create_rule` (файл `report-and-control.ts`), инструменты **exa_*** из `exa-search.ts` — в реестр не попадают.
 
 ---
 
 ## CLI
 
-### Запуск
+### Синтаксис
 
-```bash
-nexus [mode] [message...] [options]
-```
+Интерактивно: `nexus` или `nexus "текст"`. Неинтерактивно: обязателен промпт или stdin с **`-p` / `--print`**.
 
-### Режимы (позиционный аргумент)
+Короткий help без загрузки TUI: `nexus -h` (`packages/cli/src/index.ts`). Полный Commander — в `entrypoints/cli.tsx`.
 
-- `agent` (по умолчанию)
-- `plan`
-- `debug`
-- `ask`
+### Основные опции
 
-### Опции
+| Опция | Описание |
+|-------|----------|
+| `-c, --cwd` | Текущая директория shell |
+| `--project <dir>` | Корень проекта (резолвится относительно cwd) |
+| `-p, --print` | Печать ответа и выход |
+| `--mode` | `agent` \| `ask` \| `plan` \| `debug` (см. ограничение для `review` выше) |
+| `-m, --model` | Модель |
+| `--temperature`, `--reasoning-effort` | См. help |
+| `--no-index` | Отключить индексацию в bootstrap |
+| `-s, --session`, `--continue` | Сессия |
+| `--server`, `NEXUS_SERVER_URL` | URL HTTP-сервера |
+| `--profile` | Профиль из `nexus.yaml` |
+| `--dangerously-skip-permissions` | Только изолированные сценарии |
+| `-d, --debug`, `--verbose` | Отладка / логирование |
 
-| Опция | Короткая | Описание |
-|-------|----------|----------|
-| --model, -m | | Провайдер/модель, например `anthropic/claude-sonnet-4-5` или `openai/gpt-4o` |
-| --auto | | Авто-одобрение всех действий (для CI) |
-| --project | | Рабочая директория проекта |
-| --no-index | | Отключить индексацию |
-| --session, -s | | Продолжить сессию по ID |
-| --continue, -c | | Продолжить последнюю сессию |
-| --print, -p | | Неинтерактивный вывод: напечатать ответ и выйти |
-| --profile | | Имя профиля из `profiles` в nexus.yaml |
-| --nexus-version, -v | | Показать версию |
-| --help, -h | | Справка |
+### Подкоманды и slash-команды
 
-### Горячие клавиши в TUI
+В TUI: `/settings`, `/model`, `/embeddings`, `/index`, `/sessions`, `/agent-config`, `/mode`, … См. `useSlashCommandTypeahead.ts` и README.
 
-- **Enter** — отправить сообщение.
-- **Ctrl+C** — прервать агента или выйти.
-- **Ctrl+K** — очистить чат.
-- **Ctrl+S** — компактизировать историю.
-- **Tab** — сменить режим (agent → plan → debug → ask).
-- **↑ / ↓** — история ввода.
+Команды верхнего уровня: `task` (чекпоинты), `config`, `approved-tools`, `mcp`, `doctor` — см. help Commander.
+
+### Горячие клавиши (Nexus TUI)
+
+Enter — отправить; Shift+Enter — новая строка; Shift+Tab — смена режима (четырёхрежимный цикл); Ctrl+S — компактизация; Ctrl+K — очистка чата; Ctrl+C — прервать/выход.
 
 ---
 
 ## Расширение VS Code
 
-### Команды
+### Команды (фрагмент `package.json`)
 
-| Команда | Описание | Горячая клавиша |
-|---------|----------|------------------|
-| NexusCode: Open NexusCode Panel | Открыть панель справа | Ctrl+Shift+N (Cmd+Shift+N) |
-| NexusCode: New Task | Фокус на панели NexusCode | Ctrl+Shift+A |
-| NexusCode: Add to NexusCode Chat | Добавить выделение в чат | Из контекстного меню редактора |
-| NexusCode: Compact Conversation History | Запустить компактизацию | — |
-| NexusCode: Clear Chat | Очистить чат | — |
-| NexusCode: Reindex | Переиндексировать кодовую базу | — |
-| NexusCode: Clear Index | Очистить и пересобрать индекс | — |
+| Команда | Назначение |
+|---------|------------|
+| NexusCode: Open NexusCode Panel | Панель чата |
+| NexusCode: New Task | Новая задача (**Ctrl+Shift+A**) |
+| NexusCode: Add to Chat / Explain / Improve / Fix | Контекст редактора |
+| NexusCode: Compact Conversation History | Компактизация |
+| NexusCode: Clear Chat | Очистка |
+| NexusCode: Sync Codebase Index (Incremental) | Инкрементальный sync |
+| NexusCode: Delete Codebase Index (Workspace) | Удаление индекса воркспейса |
+| NexusCode: Rebuild Codebase Index from Scratch | Полная пересборка |
+| NexusCode: Delete Index for This Path… | Explorer |
+| NexusCode: Open NexusCode Terminal | Терминал |
+| NexusCode: Generate Inline Completion / … | Автодополнение |
 
-### Настройки (Settings)
+### Настройки
 
-- `nexuscode.provider` — провайдер по умолчанию.
-- `nexuscode.model` — модель по умолчанию.
-- `nexuscode.apiKey` — API-ключ (альтернатива переменным окружения).
-- `nexuscode.enableCheckpoints` — включить чекпоинты (нужен git).
-- `nexuscode.enableIndexing` — включить индексацию.
-
-Конфиг из `.nexus/nexus.yaml` имеет приоритет над настройками VS Code; переменные окружения — наивысший приоритет.
-
-### UI панели
-
-- Заголовок: логотип, статус индекса, кнопки Compact / Re-index / Clear index / Clear chat.
-- Переключатель режимов: Agent, Plan, Debug, Ask.
-- Блок «Progress» (todo list от агента).
-- Список сообщений с раскрываемыми карточками инструментов.
-- Строка статуса: провайдер/модель, индикатор «thinking» при работе.
-- Поле ввода с подсказками по @ (file, folder, url, problems, git).
+Секция `nexuscode.*`: `serverUrl`, `provider`, `model`, `apiKey`, `baseUrl`, `temperature`, `enableIndexing`, `enableVectorIndex`, `enableVectorDb`, … — см. `packages/vscode/package.json` → `contributes.configuration`. Приоритет: переменные окружения и YAML vs UI зависят от порядка merge в контроллере (обзор — ARCHITECTURE).
 
 ---
 
 ## Мультиагентность и сабагенты
 
-В режиме **agent** доступен инструмент **SpawnAgents**:
-
-- Описание задачи и опциональный режим сабагента (agent, plan, debug, ask).
-- Сабагент работает в отдельной сессии с полным набором инструментов выбранного режима.
-- Ограничение одновременных сабагентов задаётся в `parallelAgents.maxParallel` (по умолчанию 4).
-- Результат возвращается в основной чат по завершении.
-
-Использование: когда задача разбивается на независимые подзадачи, которые можно выполнять параллельно.
+- Параллельные независимые вызовы: инструмент **`Parallel`** (только read-only + **SpawnAgent** внутри по правилам).
+- Несколько сабагентов одним вызовом: **`SpawnAgentsParallel`** — в **CLI и VS Code**; на **HTTP-сервере** этот инструмент не подключается к реестру, там — **`Parallel`** с несколькими **`SpawnAgent`** (или последовательные вызовы).
+- Фон: **`SpawnAgent`** с `run_in_background`, ожидание через **`SpawnAgentOutput`** (`block: true` по умолчанию), отмена — **`SpawnAgentStop`**.
+- Лимит параллельности: **`parallelAgents.maxParallel`** (по умолчанию 4).
 
 ---
 
 ## Безопасность и права
 
-- **Чтение**: по умолчанию авто-одобрение (`autoApproveRead: true`). Исключения — `denyPatterns` и правила в `permissions.rules`.
-- **Запись и команды**: по умолчанию запрос подтверждения; в VS Code показывается диалог Allow / Allow Always / Deny.
-- **Правила** `permissions.rules`: первый совпавший правило определяет действие (allow / deny / ask). Задаются по инструменту, пути (pathPattern), команде (commandPattern), с опциональным reason.
-
-Пример:
-
-```yaml
-permissions:
-  rules:
-    - tool: execute_command
-      commandPattern: "rm -rf"
-      action: deny
-      reason: "Block recursive delete"
-    - tool: write_to_file
-      pathPattern: "**/.env*"
-      action: deny
-```
+- Чтение: `autoApproveRead`, `denyPatterns`, `permissions.rules`.
+- Запись и команды: подтверждение в UI; allowlist команд — `.nexus/allowed-commands.json`, паттерны в настройках.
+- MCP и браузер: отдельные флаги auto-approve в конфиге.
+- Пример `permissions.rules` в YAML — инструменты указывайте **реальными именами** (`Bash`, `Write`, …), а не legacy-строки вроде `execute_command`.
 
 ---
 
 ## Переменные окружения
 
-| Переменная | Описание |
-|------------|----------|
-| **NEXUS_API_KEY** | Универсальный API-ключ (если в конфиге не указан apiKey) |
-| **ANTHROPIC_API_KEY** | Ключ Anthropic |
-| **OPENAI_API_KEY** | Ключ OpenAI |
-| **GOOGLE_API_KEY**, **GEMINI_API_KEY** | Ключ Google |
-| **OPENROUTER_API_KEY** | Ключ OpenRouter |
-| И другие по провайдеру (GROQ_API_KEY, MISTRAL_API_KEY, XAI_API_KEY, …) | См. код конфига (PROVIDER_API_KEY_ENV) |
-| **NEXUS_MODEL** | Модель: `provider/id` или только `id` |
-| **NEXUS_BASE_URL** | Базовый URL API |
-| **OPENROUTER_MODEL**, **ANTHROPIC_MODEL**, … | Переопределение модели для конкретного провайдера |
+Ключи провайдеров задаются через стандартные имена (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, …) и/или универсальный **`NEXUS_API_KEY`** — детали резолва в слое конфигурации core/hosts.
+
+Для сервера: **`NEXUS_SERVER_PORT`**, **`PORT`**, **`NEXUS_SERVER_HOST`** (см. `packages/server/src/index.ts`).
 
 ---
 
 ## Чекпоинты и откат
 
-При `checkpoint.enabled: true` и наличии git в проекте:
-
-- Перед записью файлов создаётся чекпоинт (git stash / commit или тег в зависимости от реализации).
-- Таймаут создания — `checkpoint.timeoutMs`.
-- Используется для отката изменений агента (детали зависят от реализации CheckpointTracker).
+При `checkpoint.enabled` и git: shadow-git чекпоинты (см. `packages/core/src/checkpoint/`). В CLI: `nexus task checkpoints`, `nexus task restore <id>`; в TUI — `/undo` (см. README / ARCHITECTURE).
 
 ---
 
 ## MCP
 
-Model Context Protocol позволяет подключать внешние инструменты (базы, API, браузер и т.д.). Включение и выключение в конфигурации задаётся **по серверам**: чекбокс у каждого сервера включает или отключает весь сервер (все его инструменты).
+Конфигурация списка серверов в `mcp.servers` + merge с `mcp-servers.json`. Включение/выключение — **по серверу целиком**. При большом числе серверов и **`tools.classifyToolsEnabled`** классификатор выбирает **какие серверы** подключить; инструменты встроенного набора не отфильтровываются этим механизмом.
 
-В конфиге:
+Транспорты в schema: `stdio`, `http`, `sse`; поле `type` — расширенные варианты для SDK.
 
-```yaml
-mcp:
-  servers:
-    - name: my-server
-      command: npx
-      args: ["-y", "my-mcp-server"]
-      env:
-        API_KEY: "xxx"
-    # или HTTP/SSE
-    - name: remote
-      url: https://mcp.example.com
-      transport: sse
-```
-
-После подключения инструменты MCP появляются в агенте и подчиняются тем же режимам и правилам прав.
+Встроенный bundle **`context-mode`**: `bundle: "context-mode"` → `resolveBundledMcpServers` (см. ARCHITECTURE).
 
 ---
 
 ## Skills
 
-**Skills** — переиспользуемые инструкции и сценарии (аналог правил с приоритетом под задачу).
-
-В конфиге задаётся список путей к файлам или папкам с `SKILL.md`:
-
-```yaml
-skills:
-  - /path/to/skill
-  - .nexus/skills/refactor.md
-```
-
-При большом количестве skills срабатывает классификатор (`skillClassifyThreshold`, по умолчанию 20): по описанию задачи выбирается подмножество релевантных skills. Аналогично, при большом числе MCP-серверов включается фильтр по серверам (`tools.classifyToolsEnabled` и `tools.classifyThreshold`, по умолчанию 20): классификатор выбирает, какие **MCP-серверы** использовать; все инструменты выбранных серверов попадают в контекст. В настройках MCP включение/выключение чекбоксом применяется к **серверу** (всем его инструментам), а не к отдельным тулзам.
+Пути из `skills`, удалённые индексы `skillsUrls`, walk-up `.nexus/skills`, глобальный `~/.nexus/skills`, установки маркетплейса. При **`skillClassifyEnabled`** и числе навыков > **`skillClassifyThreshold`** — LLM-отбор под задачу.
 
 ---
 
 ## Правила и правила проекта
 
-Текст из файлов правил подставляется в системный промпт. По умолчанию подключаются:
-
-- `CLAUDE.md`
-- `AGENTS.md`
-- `.nexus/rules/**`
-
-Настройка:
-
-```yaml
-rules:
-  files:
-    - CLAUDE.md
-    - AGENTS.md
-    - .nexus/rules/**"
-```
-
-Файлы ищутся от корня проекта вверх; можно задать абсолютные пути.
+Файлы из `rules.files` плюс walk-up `AGENTS.md`, `CLAUDE.md`, `.nexus/rules/**`, `~/.nexus/rules/**` — см. `loadRules` / ARCHITECTURE.
 
 ---
 
-## Версии и сборка
+## Сервер NexusCode
 
-- **Версия**: в конфиге пакетов и в CLI (`nexus --nexus-version`) — 0.1.0.
-- **Сборка всего**: `pnpm build` в корне.
-- **Только core**: `pnpm --filter @nexuscode/core build`.
-- **Только CLI**: `pnpm --filter @nexuscode/cli build`.
-- **Только VS Code**: `pnpm --filter nexuscode build` (собирает extension и webview-ui).
+Запуск из корня: `pnpm build` затем **`pnpm serve`** (через `scripts/check-node.js`, Node 20+). Порт по умолчанию **4097**, хост **127.0.0.1**.
 
-Документация актуальна для текущего состояния репозитория. Ключевые изменения: естественное завершение хода в **agent/ask/debug**, явный **plan_exit** в **plan**, встроенный поиск по содержимому — **grep** (ripgrep), индексация — FTS всегда, вектор опционально. При добавлении новых фич и опций конфига их стоит дополнять в этот файл.
+API: поток сообщений **NDJSON** с heartbeat; health **GET /health** — см. ARCHITECTURE.
+
+---
+
+## Устранение неполадок
+
+| Симптом | Что проверить |
+|---------|----------------|
+| `CodebaseSearch` «disabled» | `indexing.vector` и `vectorDb.enabled`, доступность Qdrant |
+| Расхождение Node / native | Одна версия Node при build и run; `pnpm rebuild better-sqlite3` |
+| Пустая коллекция после индексации | Нормализация ответа Qdrant `getCollection` (`vector.ts`) |
+| Сервер не стартует на Node 18 | `pnpm serve` требует 20+ (`check-node.js`) |
 
 ---
 
 ## См. также
 
-- [README.md](README.md) — установка, быстрый старт, конфигурация по умолчанию (English).
-- [ARCHITECTURE.md](ARCHITECTURE.md) — архитектура, решения, инварианты (English).
+- [README.md](README.md)
+- [ARCHITECTURE.md](ARCHITECTURE.md)
+
+Документ синхронизирован с состоянием кода в репозитории NexusCode (packages/core, cli, vscode, server) на момент правки.

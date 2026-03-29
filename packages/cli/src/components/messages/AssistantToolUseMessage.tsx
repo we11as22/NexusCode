@@ -11,6 +11,8 @@ import { getGenericToolForCoreName } from '../../tools/GenericCoreTool.js'
 import type { SubAgentState } from '../../nexus-subagents.js'
 import { subagentStatusLine, truncateTask } from '../../nexus-subagents.js'
 import { AssistantThinkingMessage } from './AssistantThinkingMessage.js'
+import type { NormalizedMessage } from '../../utils/messages.js'
+import { getDiffStatsForToolUseId } from '../../utils/messages.js'
 
 function modeLabel(mode: string): string {
   return mode.charAt(0).toUpperCase() + mode.slice(1).toLowerCase()
@@ -61,6 +63,8 @@ type Props = {
   expandToolDetails?: boolean
   /** Subagents for SpawnAgent; shown under the tool line. */
   subagents?: SubAgentState[]
+  /** Full transcript (for matching tool_result diffStats to this tool_use). */
+  messages?: NormalizedMessage[]
 }
 
 type ParallelToolUseInput = {
@@ -208,6 +212,81 @@ function summarizeInput(
   return ''
 }
 
+function countLines(text: string): number {
+  if (!text) return 0
+  return text.split(/\r?\n/).length
+}
+
+function getEditInputStats(
+  toolName: string,
+  input: Record<string, unknown>,
+): { path: string; added: number; removed: number } | null {
+  if (toolName !== 'Edit') return null
+  const path = formatPrimitive(input.file_path ?? input.path)
+  const blocks = Array.isArray(input.blocks) ? input.blocks : []
+  if (!path) return null
+  if (blocks.length > 0) {
+    let added = 0
+    let removed = 0
+    for (const b of blocks) {
+      if (typeof b !== 'object' || b == null) continue
+      const rec = b as Record<string, unknown>
+      const oldRaw = formatPrimitive(rec.old_string)
+      const newRaw = formatPrimitive(rec.new_string)
+      if (!oldRaw && !newRaw) continue
+      removed += countLines(oldRaw)
+      added += countLines(newRaw)
+    }
+    return { path, added, removed }
+  }
+  const oldRaw = formatPrimitive(input.old_string)
+  const newRaw = formatPrimitive(input.new_string)
+  if (!oldRaw || !newRaw) return null
+  return {
+    path,
+    added: countLines(newRaw),
+    removed: countLines(oldRaw),
+  }
+}
+
+function getWriteInputStats(
+  toolName: string,
+  input: Record<string, unknown>,
+): { path: string; added: number; removed: number } | null {
+  if (toolName !== 'Write') return null
+  const path = formatPrimitive(input.file_path ?? input.path)
+  if (!path) return null
+  const content = formatPrimitive(input.content)
+  return { path, added: countLines(content), removed: 0 }
+}
+
+/** Prefer core diffStats from the tool result when present so +N/-M matches the real patch. */
+function getFileChangeLineStats(
+  toolName: string,
+  input: Record<string, unknown>,
+  toolUseId: string,
+  messages: NormalizedMessage[],
+): { path: string; added: number; removed: number } | null {
+  const resolved = getDiffStatsForToolUseId(messages, toolUseId)
+  if (toolName === 'Edit') {
+    const base = getEditInputStats('Edit', input)
+    if (!base) return null
+    if (resolved) {
+      return { path: base.path, added: resolved.added, removed: resolved.removed }
+    }
+    return base
+  }
+  if (toolName === 'Write') {
+    const base = getWriteInputStats('Write', input)
+    if (!base) return null
+    if (resolved) {
+      return { path: base.path, added: resolved.added, removed: resolved.removed }
+    }
+    return base
+  }
+  return null
+}
+
 function shouldShowExpandHint(
   toolName: string,
   input: Record<string, unknown>,
@@ -245,6 +324,7 @@ export function AssistantToolUseMessage({
   shouldShowDot,
   expandToolDetails = false,
   subagents = [],
+  messages = [],
 }: Props): React.ReactNode {
   const isNexusToolUse = typeof param.id === 'string' && param.id.startsWith('part_')
   const tool =
@@ -297,6 +377,12 @@ export function AssistantToolUseMessage({
   const collapsedInput = hasInput
     ? summarizeInput(param.name, inputRecord, renderedInput)
     : ''
+  const fileChangeLineStats = getFileChangeLineStats(
+    normalizedToolName,
+    inputRecord,
+    param.id,
+    messages,
+  )
   let collapsedLine =
     normalizedToolName === 'Parallel' || normalizedToolName === 'parallel'
       ? (collapsedInput || userFacingToolName)
@@ -307,6 +393,7 @@ export function AssistantToolUseMessage({
   const showExpandHint =
     !expandToolDetails &&
     hasInput &&
+    !fileChangeLineStats &&
     shouldShowExpandHint(normalizedToolName, inputRecord, renderedInput)
   const mainBlock = (
     <Box
@@ -332,21 +419,40 @@ export function AssistantToolUseMessage({
                 isError={erroredToolUseIDs.has(param.id)}
               />
             ))}
-          <Text color={color} bold={!isQueued}>
-            {expandToolDetails
-              ? `${erroredToolUseIDs.has(param.id) ? 'Attempt ' : ''}${userFacingToolName}`
-              : collapsedLine}
-            {showExpandHint ? ' (ctrl+o to expand)' : ''}
-          </Text>
+          {fileChangeLineStats ? (
+            <Text color={color} bold={!isQueued}>
+              {expandToolDetails
+                ? `${erroredToolUseIDs.has(param.id) ? 'Attempt ' : ''}${userFacingToolName} ${truncateInline(fileChangeLineStats.path, 56)}`
+                : `${userFacingToolName} ${truncateInline(fileChangeLineStats.path, 56)}`}
+              {' '}
+              <Text color={getTheme().diff.added}>+{fileChangeLineStats.added}</Text>
+              {fileChangeLineStats.removed > 0 || normalizedToolName !== 'Write' ? (
+                <>
+                  {' '}
+                  <Text color={getTheme().diff.removed}>-{fileChangeLineStats.removed}</Text>
+                </>
+              ) : null}
+              {showExpandHint ? ' (ctrl+o to expand)' : ''}
+            </Text>
+          ) : (
+            <Text color={color} bold={!isQueued}>
+              {expandToolDetails
+                ? `${erroredToolUseIDs.has(param.id) ? 'Attempt ' : ''}${userFacingToolName}`
+                : collapsedLine}
+              {showExpandHint ? ' (ctrl+o to expand)' : ''}
+            </Text>
+          )}
         </Box>
-        {expandToolDetails ? (
-          <Box flexWrap="nowrap">
-            {hasInput && (
-              <Text color={color}>
-                ({renderedInput})
-              </Text>
-            )}
-            <Text color={color}>…</Text>
+        {expandToolDetails && !fileChangeLineStats ? (
+          <Box flexDirection="column">
+            <Box flexWrap="nowrap">
+              {hasInput && (
+                <Text color={color}>
+                  ({renderedInput})
+                </Text>
+              )}
+              <Text color={color}>…</Text>
+            </Box>
           </Box>
         ) : null}
       </Box>
@@ -501,11 +607,6 @@ export function AssistantToolUseMessage({
               </React.Fragment>
             )
           })}
-          {expandToolDetails ? (
-            <Text color={theme.secondaryText}>
-              {'     '}ctrl+b to run in background
-            </Text>
-          ) : null}
         </Box>
       </Box>
     )
@@ -600,15 +701,12 @@ export function AssistantToolUseMessage({
         {primary.status === 'completed' || primary.status === 'error' ? (
           <Text dimColor>  ⎿ {primary.status === 'error' ? (primary.error ?? 'Failed') : 'Done'}</Text>
         ) : suppressExploreDup && expandToolDetails ? (
-          <>
-            <Text dimColor>
-              {'  '}⎿{' '}
-              {primary.toolHistory.length > 0
-                ? `${primary.toolHistory.length} explore tool use${primary.toolHistory.length === 1 ? '' : 's'} — see exploration block below`
-                : 'Starting…'}
-            </Text>
-            <Text color={getTheme().secondaryText}>{'     '}ctrl+b to run in background</Text>
-          </>
+          <Text dimColor>
+            {'  '}⎿{' '}
+            {primary.toolHistory.length > 0
+              ? `${primary.toolHistory.length} explore tool use${primary.toolHistory.length === 1 ? '' : 's'} — see exploration block below`
+              : 'Starting…'}
+          </Text>
         ) : (
           <>
             {visibleHistory.length > 0 ? (
@@ -626,7 +724,6 @@ export function AssistantToolUseMessage({
                 {'     '}+{hiddenUses} more tool uses (ctrl+o to expand)
               </Text>
             ) : null}
-            <Text color={getTheme().secondaryText}>{'     '}ctrl+b to run in background</Text>
           </>
         )}
       </Box>

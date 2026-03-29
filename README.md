@@ -274,10 +274,10 @@ By default NexusCode uses the **Nexus free-model gateway** with `minimax/minimax
 model:
   provider: openai-compatible
   id: minimax/minimax-m2.5:free
-  baseUrl: https://api.kilo.ai/api/gateway
+  baseUrl: https://api.kilo.ai/api/openrouter
 ```
 
-No API key is required for the default free gateway route.
+No API key is required for the default free gateway route. Saved configs that still use `https://api.kilo.ai/api/gateway` are normalized to `/api/openrouter` at load time (`normalizeModelConfig` in the CLI bootstrap).
 
 Override the model in `.nexus/nexus.yaml` in your project root, or use Settings in the extension / `--model` in CLI.
 
@@ -290,7 +290,7 @@ Example — keep default (free gateway):
 model:
   provider: openai-compatible
   id: minimax/minimax-m2.5:free
-  baseUrl: https://api.kilo.ai/api/gateway
+  baseUrl: https://api.kilo.ai/api/openrouter
 ```
 
 Example — use another OpenRouter model or your own provider:
@@ -319,7 +319,7 @@ See `.nexus/nexus.yaml` for the complete reference.
 
 ## NexusCode Server (optional)
 
-When you run the **NexusCode server**, sessions and messages are stored in a **SQLite database** (`~/.nexus/nexus-server.db`). The extension and CLI can connect to the server to use the same sessions, switch between them, and load messages in pages (no OOM on long dialogs).
+When you run the **NexusCode server**, sessions and messages use the **same JSONL store** as the local CLI and extension: `~/.nexus/sessions/<project-hash>/*.jsonl` via `@nexuscode/core` (see `packages/server/src/session-fs-store.ts`). There is **no** separate SQLite DB for sessions. The extension and CLI connect over HTTP for shared runs, paginated message loading, and long chats without loading full history into memory.
 
 ### 1. Start the server
 
@@ -347,8 +347,8 @@ The server listens on **http://127.0.0.1:4097** by default. Set `NEXUS_SERVER_PO
 
 When the server URL is set:
 - **Sessions** tab loads the session list from the server (with a loading indicator).
-- You can switch between sessions; messages are loaded from the server (last 100 per session).
-- Each new message is sent to the server; replies are streamed back. All data is persisted in the server DB.
+- You can switch between sessions; messages load in a recent window first, with older turns fetched on demand (see server routes).
+- Each new message is sent to the server; replies are streamed back. Data is persisted to the same on-disk JSONL files as in local mode.
 
 ### 3. CLI: use the server
 
@@ -362,13 +362,13 @@ NEXUS_SERVER_URL=http://127.0.0.1:4097 nexus
 
 - `--continue` uses the most recent session from the server.
 - `--session <id>` resumes a specific session.
-- Only the last 100 messages are loaded into memory; the rest stay in the DB.
+- Only a bounded window of recent messages is held in memory; the rest stays in JSONL and is loaded in pages when needed.
 
 ### 4. Run order (extension + CLI with server)
 
 1. Start the server once: `pnpm serve`.
 2. In VS Code: set **Settings → NexusCode Server → Server URL** to `http://127.0.0.1:4097`.
-3. Use the extension (sessions and chat) or CLI (`nexus --server http://127.0.0.1:4097`) — they share the same DB and sessions.
+3. Use the extension (sessions and chat) or CLI (`nexus --server http://127.0.0.1:4097`) — they share the same on-disk session files.
 
 ---
 
@@ -410,10 +410,12 @@ nexus -p "Summarize this codebase"
 |-----|--------|
 | Enter | Send message |
 | Shift+Enter | Newline |
-| Tab | Switch mode |
+| Shift+Tab | Cycle mode (agent → plan → ask → debug; **review** is not in this cycle — use `/mode`) |
 | Ctrl+S | Compact history |
 | Ctrl+K | Clear chat |
 | Ctrl+C | Abort / Quit |
+
+In non-interactive runs, `--mode` only accepts `agent` \| `ask` \| `plan` \| `debug`; anything else falls back to `agent`. Core and the TUI support **review** (e.g. `/mode`), but `review` is not wired to `--mode` in `packages/cli/src/entrypoints/cli.tsx` today.
 
 ### Slash Commands (CLI TUI)
 | Command | Action |
@@ -489,10 +491,10 @@ NexusCode includes **[claude-context-mode](sources/claude-context-mode)** (MCP +
 
 NexusCode indexes your codebase on startup (incremental updates on file save):
 
-- **Symbols**: classes, functions, methods, interfaces, types, enums (via AST)
-- **Vector** (optional): semantic search via Qdrant + embeddings (auto-start supported via `vectorDb.autoStart`)
+- **Symbols**: classes, functions, methods, interfaces, types, enums (via AST) — powers `ListCodeDefinitions` and navigation.
+- **Vector** (optional): semantic tool **`CodebaseSearch`** is only available when **`indexing.vector: true`** and **`vectorDb.enabled: true`** (Qdrant + embeddings; auto-start via `vectorDb.autoStart`).
 
-Use `codebase_search` tool or `@problems` in chat to leverage the index.
+For repo-wide text discovery without vectors, use **Grep** / **Glob** / **ListCodeDefinitions**. Chat **`@problems`** and other mentions work as before.
 
 ---
 
@@ -513,7 +515,7 @@ NexusCode/
 │   │   └── mcp/         ← MCP client
 │   ├── vscode/          ← VS Code extension + React UI
 │   ├── cli/             ← CLI + TUI (OpenTUI/React)
-│   └── server/          ← Optional: SQLite sessions, streaming API
+│   └── server/          ← Optional: HTTP API + streaming; same JSONL sessions as CLI/extension
 └── .nexus/               ← Project config (nexus.yaml, agent-configs.json, rules, skills)
 ```
 

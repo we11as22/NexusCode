@@ -15,6 +15,11 @@ declare const NexusConfigSchema: z.ZodObject<{
         temperature: z.ZodOptional<z.ZodNumber>;
         /** Reasoning effort hint for reasoning-capable models. "auto" (default) enables thinking only for known reasoning models. */
         reasoningEffort: z.ZodDefault<z.ZodString>;
+        /**
+         * How stored assistant reasoning is sent on the next request (KiloCode-style).
+         * `auto` hoists to `reasoning_content` for e.g. DeepSeek; otherwise keeps native `reasoning` parts in message content.
+         */
+        reasoningHistoryMode: z.ZodDefault<z.ZodEnum<["auto", "inline", "reasoning_content", "reasoning_details"]>>;
         /** Optional explicit context window size override (tokens). */
         contextWindow: z.ZodOptional<z.ZodNumber>;
         resourceName: z.ZodOptional<z.ZodString>;
@@ -25,6 +30,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
         id: string;
         reasoningEffort: string;
+        reasoningHistoryMode: "auto" | "inline" | "reasoning_content" | "reasoning_details";
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
@@ -40,6 +46,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         baseUrl?: string | undefined;
         temperature?: number | undefined;
         reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -348,8 +355,28 @@ declare const NexusConfigSchema: z.ZodObject<{
         /** Disabled by default. Set to true with vectorDb.enabled to use semantic codebase_search. */
         vector: z.ZodDefault<z.ZodBoolean>;
         batchSize: z.ZodDefault<z.ZodNumber>;
+        /** Min semantic segments per embed/upsert batch (Roo-style segment threshold). */
         embeddingBatchSize: z.ZodDefault<z.ZodNumber>;
         embeddingConcurrency: z.ZodDefault<z.ZodNumber>;
+        /** Max embed batches in flight while parsing (backpressure / memory). */
+        maxPendingEmbedBatches: z.ZodDefault<z.ZodNumber>;
+        /** Parallel embed/upsert pipelines (batches). */
+        batchProcessingConcurrency: z.ZodDefault<z.ZodNumber>;
+        /**
+         * Max indexable files per workspace. Roo parity: **0 = scan nothing** (same as `listFiles(..., 0)`).
+         * Use a large positive value if you need an effectively unlimited tree. Default 50_000 matches Roo.
+         */
+        maxIndexedFiles: z.ZodDefault<z.ZodNumber>;
+        /**
+         * Allow CodebaseSearch while indexing is in progress when Qdrant already has points (partial results).
+         * Default true. Set false to wait until `markIndexingComplete` (strict consistency).
+         */
+        searchWhileIndexing: z.ZodDefault<z.ZodBoolean>;
+        /**
+         * If >0, indexing is treated as failed when more than this fraction of chunks could not be embedded
+         * (after retries). Triggers index + tracker reset (Roo-style).
+         */
+        maxIndexingFailureRate: z.ZodDefault<z.ZodNumber>;
         debounceMs: z.ZodDefault<z.ZodNumber>;
         /** Max characters of each hit’s code snippet in CodebaseSearch output (indexed payload is capped separately). */
         codebaseSearchSnippetMaxChars: z.ZodDefault<z.ZodNumber>;
@@ -361,6 +388,11 @@ declare const NexusConfigSchema: z.ZodObject<{
         batchSize: number;
         embeddingBatchSize: number;
         embeddingConcurrency: number;
+        maxPendingEmbedBatches: number;
+        batchProcessingConcurrency: number;
+        maxIndexedFiles: number;
+        searchWhileIndexing: boolean;
+        maxIndexingFailureRate: number;
         debounceMs: number;
         codebaseSearchSnippetMaxChars: number;
     }, {
@@ -371,6 +403,11 @@ declare const NexusConfigSchema: z.ZodObject<{
         batchSize?: number | undefined;
         embeddingBatchSize?: number | undefined;
         embeddingConcurrency?: number | undefined;
+        maxPendingEmbedBatches?: number | undefined;
+        batchProcessingConcurrency?: number | undefined;
+        maxIndexedFiles?: number | undefined;
+        searchWhileIndexing?: boolean | undefined;
+        maxIndexingFailureRate?: number | undefined;
         debounceMs?: number | undefined;
         codebaseSearchSnippetMaxChars?: number | undefined;
     }>>;
@@ -716,6 +753,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         baseUrl: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         temperature: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
         reasoningEffort: z.ZodOptional<z.ZodDefault<z.ZodString>>;
+        reasoningHistoryMode: z.ZodOptional<z.ZodDefault<z.ZodEnum<["auto", "inline", "reasoning_content", "reasoning_details"]>>>;
         contextWindow: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
         resourceName: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         deploymentId: z.ZodOptional<z.ZodOptional<z.ZodString>>;
@@ -728,6 +766,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         baseUrl?: string | undefined;
         temperature?: number | undefined;
         reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -740,6 +779,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         baseUrl?: string | undefined;
         temperature?: number | undefined;
         reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -751,6 +791,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
         id: string;
         reasoningEffort: string;
+        reasoningHistoryMode: "auto" | "inline" | "reasoning_content" | "reasoning_details";
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         temperature?: number | undefined;
@@ -816,6 +857,11 @@ declare const NexusConfigSchema: z.ZodObject<{
         batchSize: number;
         embeddingBatchSize: number;
         embeddingConcurrency: number;
+        maxPendingEmbedBatches: number;
+        batchProcessingConcurrency: number;
+        maxIndexedFiles: number;
+        searchWhileIndexing: boolean;
+        maxIndexingFailureRate: number;
         debounceMs: number;
         codebaseSearchSnippetMaxChars: number;
     };
@@ -907,6 +953,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         baseUrl?: string | undefined;
         temperature?: number | undefined;
         reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -941,6 +988,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         baseUrl?: string | undefined;
         temperature?: number | undefined;
         reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -1068,6 +1116,11 @@ declare const NexusConfigSchema: z.ZodObject<{
         batchSize?: number | undefined;
         embeddingBatchSize?: number | undefined;
         embeddingConcurrency?: number | undefined;
+        maxPendingEmbedBatches?: number | undefined;
+        batchProcessingConcurrency?: number | undefined;
+        maxIndexedFiles?: number | undefined;
+        searchWhileIndexing?: boolean | undefined;
+        maxIndexingFailureRate?: number | undefined;
         debounceMs?: number | undefined;
         codebaseSearchSnippetMaxChars?: number | undefined;
     } | undefined;
@@ -1160,6 +1213,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         baseUrl?: string | undefined;
         temperature?: number | undefined;
         reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
         contextWindow?: number | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -1423,6 +1477,24 @@ interface IIndexer {
     status(): IndexStatus;
     refreshFile?(filePath: string): Promise<void>;
     refreshFileNow?(filePath: string): Promise<void>;
+    /** Batched incremental refresh (single tracker load/save). */
+    refreshFilesBatchNow?(absPaths: string[]): Promise<void>;
+    /**
+     * True when Qdrant + embeddings are actually wired (not only indexing.vector in YAML).
+     * Used by CodebaseSearch to explain YAML vs runtime mismatch.
+     */
+    semanticSearchActive?(): boolean;
+    /** Pause full workspace indexing between parse/embed steps (Settings). */
+    pauseIndexing?(): void;
+    resumeIndexing?(): void;
+    /** Incremental index run without clearing tracker/Qdrant (one index per workspace). */
+    syncIndexing?(): Promise<void>;
+    /** Clear tracker + collection and re-index from scratch. */
+    fullRebuildIndex?(): Promise<void>;
+    /** Remove indexed data for paths under this repo-relative prefix only. */
+    deleteIndexScope?(relPathOrAbs: string): Promise<void>;
+    /** Clear all index data for the workspace (tracker + vector collection). */
+    deleteIndex?(): Promise<void>;
 }
 interface IndexSearchOptions {
     limit?: number;
@@ -1445,11 +1517,21 @@ type SymbolKind = "class" | "function" | "method" | "interface" | "type" | "enum
 type IndexStatus = {
     state: "idle";
 } | {
+    state: "stopping";
+    message?: string;
+} | {
     state: "indexing";
     progress: number;
     total: number;
     chunksProcessed?: number;
     chunksTotal?: number;
+    /** Without vector: files parsed / total files. With vector: chunks indexed / max(found, indexed) — Roo-style block ratio. */
+    overallPercent?: number;
+    phase?: "parsing" | "embedding";
+    message?: string;
+    /** Debounced file-watcher batch (Roo-style queue line), not full `startIndexing` scan. */
+    watcherQueue?: boolean;
+    paused?: boolean;
 } | {
     state: "ready";
     files: number;
@@ -1511,6 +1593,10 @@ type AgentEvent = {
         type: string;
         lineNum: number;
         line: string;
+    }>;
+    appliedReplacements?: Array<{
+        oldSnippet: string;
+        newSnippet: string;
     }>;
     metadata?: Record<string, unknown>;
 } | {
@@ -1598,6 +1684,11 @@ interface ProviderConfig {
      * Supported values depend on provider/model (e.g. low/medium/high/minimal/none/max).
      */
     reasoningEffort?: string;
+    /**
+     * Prior assistant reasoning on the next LLM request (KiloCode-style).
+     * `auto` uses model heuristics (e.g. DeepSeek → `reasoning_content` on the message).
+     */
+    reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details";
     /** Optional explicit context window override in tokens for this model. */
     contextWindow?: number;
     /** Azure-specific */
@@ -1646,6 +1737,11 @@ interface NexusConfig {
         batchSize: number;
         embeddingBatchSize: number;
         embeddingConcurrency: number;
+        maxPendingEmbedBatches: number;
+        batchProcessingConcurrency: number;
+        maxIndexedFiles: number;
+        searchWhileIndexing: boolean;
+        maxIndexingFailureRate: number;
         debounceMs: number;
         codebaseSearchSnippetMaxChars: number;
     };
@@ -1924,6 +2020,11 @@ interface LLMMessage {
 type LLMMessageContent = string | Array<{
     type: "text";
     text: string;
+}
+/** Prior-turn chain-of-thought (KiloCode UIMessage / AI SDK); may be hoisted per model in buildAISDKMessages. */
+ | {
+    type: "reasoning";
+    text: string;
 } | {
     type: "image";
     data: string;
@@ -1964,7 +2065,14 @@ interface StreamOptions {
     retryOnStatus?: number[];
     /** Provider-specific options (e.g. anthropic: { thinking: { type: 'enabled', budgetTokens } }) */
     providerOptions?: Record<string, unknown>;
+    /**
+     * How assistant reasoning from history is sent on the next request (KiloCode-style).
+     * `auto` hoists to `reasoning_content` for models like DeepSeek; otherwise keeps `type: "reasoning"` in content.
+     */
+    reasoningHistoryMode?: ReasoningHistoryMode;
 }
+/** @see StreamOptions.reasoningHistoryMode */
+type ReasoningHistoryMode = "auto" | "inline" | "reasoning_content" | "reasoning_details";
 interface GenerateOptions<T> {
     messages: LLMMessage[];
     schema: z.ZodType<T>;
@@ -2169,7 +2277,7 @@ interface AgentLoopOptions {
     checkpoint?: {
         commit(description?: string): Promise<string>;
     };
-    /** When true, inject create-skill instructions; host must allow writes to .nexus/skills and .cursor/skills */
+    /** When true, inject create-skill instructions; host must allow writes to .nexus/skills (and ~/.nexus/skills if applicable). */
     createSkillMode?: boolean;
 }
 /**
@@ -2365,6 +2473,14 @@ declare class ToolRegistry {
     loadFromDirectory(dir: string): Promise<void>;
 }
 
+/** Snippets actually applied by the Edit tool — for compact CLI/webview previews. */
+type AppliedReplacementSnippet = {
+    oldSnippet: string;
+    newSnippet: string;
+};
+/** Normalize metadata from Edit.execute() for host events and UIs. */
+declare function normalizedAppliedReplacementsFromMetadata(metadata: unknown): AppliedReplacementSnippet[] | undefined;
+
 declare function getAllBuiltinTools(): ToolDef[];
 
 /** Synthetic option id for the host-added “Other / custom” row (never send from the model). */
@@ -2374,9 +2490,19 @@ declare const NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX = "[nexus:questionnaire-respon
 declare function formatQuestionnaireAnswersForAgent(request: UserQuestionRequest, answers: UserQuestionAnswer[]): string;
 
 /**
- * Codebase indexer: vector-only (Qdrant).
- * When vector client is missing, indexing is no-op and search returns [].
+ * Optional host-provided behavior (VS Code: ripgrep file list + globalStorage tracker).
+ * Roo-Code parity: `listFiles` + `CacheManager` in extension storage vs core walk + ~/.nexus tracker.
  */
+type ListIndexAbsolutePathsFn = (root: string, maxList: number, signal: AbortSignal) => Promise<{
+    paths: string[];
+    limitReached: boolean;
+}>;
+interface CodebaseIndexerHostOptions {
+    listAbsolutePaths?: ListIndexAbsolutePathsFn;
+    /** When set, `file-tracker.json` is stored at this path (e.g. `globalStorageUri`). */
+    fileTrackerJsonPath?: string;
+}
+
 declare class CodebaseIndexer implements IIndexer {
     private readonly projectRoot;
     private readonly config;
@@ -2388,29 +2514,58 @@ declare class CodebaseIndexer implements IIndexer {
     private abortController?;
     private debounceTimers;
     private statusListeners;
-    constructor(projectRoot: string, config: NexusConfig, embeddingClient?: EmbeddingClient, vectorUrl?: string, projectHash?: string);
+    private indexingPaused;
+    private pauseWaiters;
+    private readonly hostListAbsolutePaths?;
+    constructor(projectRoot: string, config: NexusConfig, embeddingClient?: EmbeddingClient, vectorUrl?: string, projectHash?: string, hostOptions?: CodebaseIndexerHostOptions);
     status(): IndexStatus;
+    /** False when config requests vector search but factory fell back (no Qdrant, missing embed key, etc.). */
+    semanticSearchActive(): boolean;
     onStatusChange(listener: (status: IndexStatus) => void): () => void;
     private notifyStatus;
+    private flushPauseWaiters;
+    private waitIfPaused;
+    /** Pause between parse/embed checkpoints (does not cancel in-flight embedding API calls). */
+    pauseIndexing(): void;
+    resumeIndexing(): void;
     startIndexing(): Promise<void>;
+    private fatalResetAfterIndexingStarted;
     private indexInBackground;
-    /**
-     * Vector index: tree-sitter semantic chunks (`indexer/roo`). Non-vector: legacy AST / line chunks.
-     */
     private extractEntriesForIndex;
-    /** Legacy indexer (no vector): symbol extract or line chunks — unchanged for non-vector workflows. */
     private extractEntriesLegacy;
-    private processPreparedBatch;
-    private processBatch;
+    private processBatchLegacy;
     refreshFile(filePath: string): Promise<void>;
     refreshFileNow(filePath: string): Promise<void>;
+    refreshFilesBatchNow(absPaths: string[]): Promise<void>;
+    /** Roo `reportFileQueueProgress` — debounced watcher batch, not full scan. */
+    private notifyWatcherQueueProgress;
+    private refreshOneFileCore;
     search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]>;
+    /**
+     * Incremental sync / resume: one Qdrant collection + one tracker per project; does not wipe data.
+     * Use `fullRebuildIndex` to clear and rebuild from scratch.
+     */
+    syncIndexing(): Promise<void>;
+    /** Full wipe + re-index (same collection name, empty contents). */
+    fullRebuildIndex(): Promise<void>;
+    /** @deprecated use syncIndexing */
     reindex(): Promise<void>;
-    /** Clear index (vector + file tracker) without reindexing. */
     deleteIndex(): Promise<void>;
+    /**
+     * Remove tracker + vector points for a repo-relative prefix (folder or file path).
+     * Does not delete other paths; one collection remains for the workspace.
+     */
+    deleteIndexScope(relPathOrAbs: string): Promise<void>;
     stop(): void;
     close(): void;
 }
+
+/** Schema default; Roo parity: `maxIndexedFiles === 0` disables listing. */
+declare const DEFAULT_MAX_INDEXED_FILES = 50000;
+declare const DEFAULT_MAX_PENDING_EMBED_BATCHES = 20;
+declare const DEFAULT_BATCH_PROCESSING_CONCURRENCY = 10;
+/** VS Code–style batch debounce for file watcher (ms). */
+declare const INDEX_FILE_WATCHER_DEBOUNCE_MS = 500;
 
 interface ProjectInfo {
     root: string;
@@ -2440,12 +2595,27 @@ interface IndexerFactoryOptions {
     onProgress?: (message: string) => void;
     /** Max ms to wait for Qdrant when vector is enabled (e.g. 2500 for fast first message). Omit for default 20s. */
     maxQdrantWaitMs?: number;
+    /** VS Code: ripgrep `listFiles` parity. Omit = recursive `walkDir` in core. */
+    listAbsolutePaths?: ListIndexAbsolutePathsFn;
+    /** VS Code `globalStorageUri` JSON path for file hashes (Roo `CacheManager` parity). */
+    fileTrackerJsonPath?: string;
 }
 /**
  * Creates a CodebaseIndexer with optional vector search (Qdrant).
  * When vector prerequisites are missing, returns indexer without vector (no semantic search; agent works without codebase_search).
  */
 declare function createCodebaseIndexer(projectRoot: string, config: NexusConfig, options?: IndexerFactoryOptions): Promise<CodebaseIndexer>;
+
+/**
+ * Optional sink for indexing diagnostics (Roo-style telemetry hooks without bundling a telemetry SDK).
+ */
+type IndexTelemetryPayload = Record<string, unknown>;
+declare function setIndexTelemetrySink(fn: ((event: string, payload?: IndexTelemetryPayload) => void) | undefined): void;
+
+/** When `vectorIndexing` is true, include full tree-sitter extension set from `roo/extensions`. */
+declare function getIndexableExtensions(vectorIndexing: boolean): Set<string>;
+/** VS Code `RelativePattern` glob: all indexable extensions (Roo `scannerExtensions`–style coverage when vector on). */
+declare function buildIndexWatcherGlobPattern(vectorIndexing: boolean): string;
 
 interface EnsureQdrantOptions {
     url: string;
@@ -2488,15 +2658,13 @@ declare function loadRules(cwd: string, rulePatterns: string[]): Promise<string>
  */
 declare function estimateTokens(text: string): number;
 
-/** Same cap as buildMessagesFromSession in loop.ts — large tool results are truncated in the request. */
-declare const MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE = 16000;
 /**
  * Model context window limit: config override or known defaults by model id substring.
  */
 declare function getContextWindowLimit(modelId: string, configuredLimit?: number): number;
 /**
  * Token estimate for messages that count toward the next model request (active context only).
- * Includes reasoning and images; tool outputs capped like the LLM message builder.
+ * Includes reasoning and images; tool outputs use stored text (already truncated at execution when huge).
  */
 declare function estimateActiveContextSessionTokens(messages: SessionMessage[]): number;
 /**
@@ -2531,8 +2699,7 @@ declare function computeContextUsageMetrics(opts: {
  *  - A glob pattern like ".nexus/skills/**\/*.md"
  *  - A direct file path like ".nexus/skills/my-skill/SKILL.md"
  *
- * Standard locations are also auto-searched (`.nexus`, `.agents`, **Claude** `~/.claude/skills` and walk-up `.claude/skills`,
- * `.kilo` / `.kilocode` / `.roo` / `.opencode`, walk-up from cwd).
+ * Standard locations are also auto-searched: **`~/.nexus/skills`** and **walk-up** from `cwd` for each ancestor’s **`.nexus/skills`** (monorepos / nested roots).
  *
  * Optional `skillsUrls`: remote registries (each base URL must serve `index.json` + skill files); cached under `~/.nexus/cache/skills/`.
  */
@@ -2752,4 +2919,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentEvent, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type ContextUsageSnapshot, DEFAULT_HEARTBEAT_TIMEOUT_MS, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, READ_ONLY_TOOLS, type ResolveBundledOptions, type ResolvedSkillBody, Session, type SessionMessage, type SkillDef, type SkillToolDescriptionRow, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, applySecretsToConfig, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createMcpTransport, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getPlanContentForFollowup, getRunLogsDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, resolveSkillBody, runAgentLoop, sampleSkillSiblingFiles, saveSession, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AgentEvent, type AppliedReplacementSnippet, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type ContextUsageSnapshot, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, type ListIndexAbsolutePathsFn, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, type ProviderName, READ_ONLY_TOOLS, type ResolveBundledOptions, type ResolvedSkillBody, Session, type SessionMessage, type SkillDef, type SkillToolDescriptionRow, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, applySecretsToConfig, buildIndexWatcherGlobPattern, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createMcpTransport, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getPlanContentForFollowup, getRunLogsDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, normalizedAppliedReplacementsFromMetadata, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, resolveSkillBody, runAgentLoop, sampleSkillSiblingFiles, saveSession, setIndexTelemetrySink, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

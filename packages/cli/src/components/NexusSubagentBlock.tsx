@@ -6,7 +6,6 @@
  *     ⎿ Read(file.ts)
  *            Grep(pattern)
  *          +N more tool uses (ctrl+o to expand)
- *          ctrl+b to run in background
  *
  * After completion (~2.5s flash, same idea as ✓ Explored):
  *   ✓ Explore(task)
@@ -41,18 +40,21 @@ function modeLabel(mode: string): string {
  *   ⎿ Read(file.ts)          ← "  ⎿ " = 2sp + ⎿ + sp
  *          Grep(pattern)     ← "       " = 7sp (aligns with tool text after ⎿)
  *        +N more…            ← "     " = 5sp
- *        ctrl+b…             ← "     " = 5sp
+ *        (subagents: ctrl+b hint)
  */
 export function ToolHistorySection({
   history,
   expandToolDetails,
   agentId,
   theme,
+  showBackgroundHint = true,
 }: {
   history: string[]
   expandToolDetails: boolean
   agentId: string
   theme: ReturnType<typeof getTheme>
+  /** Hide “ctrl+b to run in background” (e.g. host Exploring/Explored block). */
+  showBackgroundHint?: boolean
 }): React.ReactNode {
   const maxShown = expandToolDetails ? history.length : 3
   const visible = history.slice(-maxShown)
@@ -84,9 +86,11 @@ export function ToolHistorySection({
           <Text dimColor>    +{hidden} more tool uses (ctrl+o to expand)</Text>
         </Box>
       )}
-      <Box>
-        <Text dimColor>    ctrl+b to run in background</Text>
-      </Box>
+      {showBackgroundHint ? (
+        <Box>
+          <Text dimColor>    ctrl+b to run in background</Text>
+        </Box>
+      ) : null}
     </Box>
   )
 }

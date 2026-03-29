@@ -68,7 +68,7 @@ export function MarketplacePanel() {
     setSkillPage(1)
   }, [debouncedSkillQuery, skillMode])
 
-  const fetchData = useCallback(() => {
+  const fetchData = useCallback((forceRefresh = false) => {
     setFetching(true)
     postMessage({
       type: "fetchMarketplaceData",
@@ -77,6 +77,7 @@ export function MarketplacePanel() {
       skillSearchMode: skillMode,
       skillPage,
       skillVectorThreshold: skillMode === "vector" ? vectorThreshold : undefined,
+      forceRefresh: forceRefresh || undefined,
     })
   }, [tab, debouncedSkillQuery, skillMode, skillPage, vectorThreshold])
 
@@ -184,13 +185,18 @@ export function MarketplacePanel() {
         >
           Skills
         </button>
-        <button type="button" className="nexus-secondary-btn text-xs ml-auto self-center" onClick={fetchData}>
+        <button
+          type="button"
+          className="nexus-secondary-btn text-xs ml-auto self-center"
+          onClick={() => fetchData(true)}
+          title="Refetch from servers (bypass cache)"
+        >
           Refresh
         </button>
       </div>
 
       <p className="text-[11px] text-[var(--vscode-descriptionForeground)] m-0">
-        <strong>Skills</strong> —{" "}
+        <strong>Skills</strong> — search index{" "}
         <button
           type="button"
           className="text-[var(--vscode-textLink-foreground)] underline bg-transparent border-none cursor-pointer p-0"
@@ -198,18 +204,12 @@ export function MarketplacePanel() {
         >
           SkillNet
         </button>{" "}
-        (OpenKG). <strong>MCP Servers</strong> — catalog from{" "}
-        <button
-          type="button"
-          className="text-[var(--vscode-textLink-foreground)] underline bg-transparent border-none cursor-pointer p-0"
-          onClick={() => postMessage({ type: "openExternal", url: "https://kilo.ai" })}
-        >
-          Kilo
-        </button>{" "}
-        (<code className="text-[10px]">api.kilo.ai</code>). MCP installs append to{" "}
-        <code className="text-[10px]">.nexus/mcp-servers.json</code> or global. Skills install to{" "}
-        <code className="text-[10px]">.kilo/skills/&lt;id&gt;</code>; legacy <code className="text-[10px]">.nexus/skills</code>{" "}
-        is still detected.
+        (OpenKG). <strong>MCP Servers</strong> — Nexus marketplace catalog (hosted API). MCP installs append to{" "}
+        <code className="text-[10px]">.nexus/mcp-servers.json</code> (project) or{" "}
+        <code className="text-[10px]">~/.nexus/mcp-servers.json</code> (global). Marketplace skills install under{" "}
+        <code className="text-[10px]">.nexus/skills/&lt;id&gt;</code> (project) or{" "}
+        <code className="text-[10px]">~/.nexus/skills/&lt;id&gt;</code> (global). Agent config, rules, MCP, and permissions
+        also resolve under <code className="text-[10px]">.nexus</code> / <code className="text-[10px]">~/.nexus</code>.
       </p>
 
       <div className="nexus-marketplace-list">
@@ -305,17 +305,25 @@ export function MarketplacePanel() {
         )}
 
         {allTags.length > 0 && (
-          <div className="nexus-marketplace-tags">
-            {allTags.map((t) => (
-              <button
-                key={t}
-                type="button"
-                className={`nexus-marketplace-tag-btn ${activeTags.includes(t) ? "nexus-marketplace-tag-btn-active" : ""}`}
-                onClick={() => toggleTag(t)}
-              >
-                {t}
-              </button>
-            ))}
+          <div className="nexus-marketplace-tags flex flex-col gap-1">
+            {tab === "skill" && (
+              <p className="text-[10px] text-[var(--vscode-descriptionForeground)] m-0">
+                Category chips filter the <strong>current page</strong>. Several selected = <strong>any</strong> of them
+                (union), not intersection.
+              </p>
+            )}
+            <div className="flex flex-wrap gap-1">
+              {allTags.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className={`nexus-marketplace-tag-btn ${activeTags.includes(t) ? "nexus-marketplace-tag-btn-active" : ""}`}
+                  onClick={() => toggleTag(t)}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -336,7 +344,11 @@ export function MarketplacePanel() {
           <div className="nexus-marketplace-grid">
             {filtered.map((item) => (
               <MarketplaceCard
-                key={`${item.type}-${item.id}`}
+                key={
+                  item.type === "skill"
+                    ? `skill-${(item as SkillMarketplaceItem).githubUrl || item.id}`
+                    : `mcp-${(item as McpMarketplaceItem).url || item.id}`
+                }
                 item={item}
                 metadata={metadata}
                 onInstall={() => setInstallItem(item)}

@@ -636,6 +636,69 @@ function isToolUseRequestMessage(
   )
 }
 
+/** User row that is only `tool_result` block(s); used for post-reorder placement. */
+function tryExtractToolResultOwnerPair(
+  m: NormalizedMessage,
+): { toolUseId: string; message: NormalizedMessage } | null {
+  if (m.type !== 'user' || !Array.isArray(m.message.content)) return null
+  const results = m.message.content.filter(
+    (b): b is ToolResultBlockParam => b?.type === 'tool_result',
+  )
+  if (results.length !== 1) return null
+  const onlyAllowed = m.message.content.every((b) => {
+    if (b?.type === 'tool_result') return true
+    if (b?.type === 'text') {
+      return String((b as TextBlockParam).text ?? '').trim().length === 0
+    }
+    return false
+  })
+  if (!onlyAllowed) return null
+  return { toolUseId: results[0]!.tool_use_id, message: m }
+}
+
+/**
+ * Nexus streams `tool_end` (user tool_result) before `assistant_content_complete`, so the
+ * incremental reorder places results after `progress` or at the tail — diffs appear above the
+ * tool row and assistant text gets wedged between. Re-attach each lone tool_result immediately
+ * after the assistant message that contains the matching `tool_use`, in block order.
+ */
+function stabilizeToolResultsAfterOwningAssistant(
+  ms: NormalizedMessage[],
+): NormalizedMessage[] {
+  const pendingById = new Map<string, NormalizedMessage>()
+  const body: NormalizedMessage[] = []
+
+  for (const m of ms) {
+    const pair = tryExtractToolResultOwnerPair(m)
+    if (pair) {
+      pendingById.set(pair.toolUseId, pair.message)
+    } else {
+      body.push(m)
+    }
+  }
+
+  const out: NormalizedMessage[] = []
+  for (const m of body) {
+    out.push(m)
+    if (m.type !== 'assistant') continue
+    const blocks = m.message.content
+    if (!Array.isArray(blocks)) continue
+    for (const b of blocks) {
+      if (b?.type !== 'tool_use') continue
+      const id = (b as ToolUseBlockParam).id
+      const res = pendingById.get(id)
+      if (res) {
+        out.push(res)
+        pendingById.delete(id)
+      }
+    }
+  }
+  for (const orphan of pendingById.values()) {
+    out.push(orphan)
+  }
+  return out
+}
+
 // Re-order, to move result messages to be after their tool use messages
 export function reorderMessages(
   messages: NormalizedMessage[],
@@ -709,7 +772,7 @@ export function reorderMessages(
     ms.push(message)
   }
 
-  return ms
+  return stabilizeToolResultsAfterOwningAssistant(ms)
 }
 
 function buildToolUseResultErrorMap(
@@ -921,6 +984,59 @@ export function getToolUseID(message: NormalizedMessage): string | null {
     case 'progress':
       return message.toolUseID
   }
+}
+
+function normalizeDiffStats(
+  ds: { added?: number; removed?: number } | undefined,
+): { added: number; removed: number } | undefined {
+  if (!ds || typeof ds.added !== 'number' || typeof ds.removed !== 'number') {
+    return undefined
+  }
+  return { added: ds.added, removed: ds.removed }
+}
+
+function tryParseDiffStats(raw: unknown): { added: number; removed: number } | undefined {
+  if (raw == null) return undefined
+  if (typeof raw === 'string') {
+    try {
+      const j = JSON.parse(raw) as { diffStats?: { added?: number; removed?: number } }
+      return normalizeDiffStats(j?.diffStats)
+    } catch {
+      return undefined
+    }
+  }
+  if (typeof raw === 'object' && raw !== null && 'diffStats' in raw) {
+    return normalizeDiffStats(
+      (raw as { diffStats?: { added?: number; removed?: number } }).diffStats,
+    )
+  }
+  return undefined
+}
+
+/**
+ * After a tool finishes, core attaches `diffStats` to the tool result — use this on the
+ * assistant tool_use row so +N/-M matches the actual patch (not input string line counts).
+ */
+export function getDiffStatsForToolUseId(
+  messages: NormalizedMessage[],
+  toolUseId: string,
+): { added: number; removed: number } | undefined {
+  for (const m of messages) {
+    if (m.type !== 'user') continue
+    const um = m as UserMessage
+    const blocks = um.message.content
+    if (!Array.isArray(blocks)) continue
+    const tr = blocks.find(
+      (b): b is ToolResultBlockParam =>
+        b?.type === 'tool_result' && b.tool_use_id === toolUseId,
+    )
+    if (!tr) continue
+    const fromData = tryParseDiffStats(um.toolUseResult?.data)
+    if (fromData) return fromData
+    const fromContent = tryParseDiffStats(tr.content)
+    if (fromContent) return fromContent
+  }
+  return undefined
 }
 
 export function getLastAssistantMessageId(

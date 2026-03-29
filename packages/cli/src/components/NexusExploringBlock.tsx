@@ -244,6 +244,7 @@ export function NexusExploringBlock({
             expandToolDetails={expandToolDetails}
             agentId={agentId}
             theme={theme}
+            showBackgroundHint={false}
           />
         </Box>
       </Box>

@@ -3,7 +3,7 @@ import * as os from "node:os"
 
 const GLOBAL_NEXUS = path.join(os.homedir(), ".nexus")
 
-/** Kilo-compatible layout: marketplace skills install to `.kilo/skills/<id>` (project or global). */
+/** Marketplace skills install only under Nexus dirs (project `.nexus/skills` or `~/.nexus/skills`). */
 export class MarketplacePaths {
   mcpServersJsonPath(scope: "project" | "global", workspace?: string): string {
     if (scope === "project") {
@@ -13,14 +13,6 @@ export class MarketplacePaths {
   }
 
   skillsDir(scope: "project" | "global", workspace?: string): string {
-    if (scope === "project") {
-      return path.join(workspace!, ".kilo", "skills")
-    }
-    return path.join(os.homedir(), ".kilo", "skills")
-  }
-
-  /** Legacy installs under ~/.nexus/skills or project .nexus/skills (before Kilo layout). */
-  legacySkillsDir(scope: "project" | "global", workspace?: string): string {
     if (scope === "project") {
       return path.join(workspace!, ".nexus", "skills")
     }

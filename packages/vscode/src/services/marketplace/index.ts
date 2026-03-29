@@ -27,12 +27,13 @@ export class MarketplaceService {
 
   async fetchData(
     workspace?: string,
-    options?: { includeSkills?: boolean; skillSearch?: SkillSearchOptions },
+    options?: { includeSkills?: boolean; skillSearch?: SkillSearchOptions; bypassCache?: boolean },
   ): Promise<MarketplaceDataResponse> {
     const [fetched, metadata] = await Promise.all([
       this.api.fetchAll({
         includeSkills: options?.includeSkills,
         skillSearch: options?.skillSearch,
+        bypassCache: options?.bypassCache,
       }),
       this.detector.detect(workspace),
     ])

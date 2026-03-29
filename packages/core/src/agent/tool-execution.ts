@@ -14,6 +14,7 @@ import type {
 import { PLAN_MODE_ALLOWED_WRITE_PATTERN, PLAN_MODE_BLOCKED_EXTENSIONS, READ_ONLY_TOOLS } from "./modes.js"
 import { getMessagesForActiveContext } from "../session/active-context.js"
 import { truncateOutput } from "../context/truncate.js"
+import { splitQuestionOptionListString } from "../tools/user-question-utils.js"
 
 const DOOM_LOOP_THRESHOLD = 3
 const DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND = 5
@@ -24,6 +25,32 @@ export function extractWriteTargetPath(toolName: string, toolInput: Record<strin
   const pathVal = toolInput["file_path"] ?? toolInput["path"]
   if (typeof pathVal === "string" && pathVal) return pathVal
   return undefined
+}
+
+function normalizePathForComparison(cwd: string, rawPath: string): string {
+  const absolute = path.isAbsolute(rawPath) ? rawPath : path.resolve(cwd, rawPath)
+  return path.normalize(absolute).replace(/\\/g, "/")
+}
+
+function countPriorEditsForPathInMessage(
+  session: ISession,
+  messageId: string,
+  cwd: string,
+  targetPath: string,
+): number {
+  const targetNorm = normalizePathForComparison(cwd, targetPath)
+  const msg = session.messages.find((m) => m.id === messageId)
+  if (!msg || !Array.isArray(msg.content)) return 0
+  let count = 0
+  for (const part of msg.content as Array<{ type?: string; tool?: string; status?: string; input?: unknown }>) {
+    if (part.type !== "tool" || part.tool !== "Edit") continue
+    if (part.status !== "running" && part.status !== "completed" && part.status !== "error") continue
+    const input = part.input && typeof part.input === "object" ? (part.input as Record<string, unknown>) : {}
+    const candidatePath = extractWriteTargetPath("Edit", input)
+    if (!candidatePath) continue
+    if (normalizePathForComparison(cwd, candidatePath) === targetNorm) count++
+  }
+  return count
 }
 
 const MAX_TOOL_ARGS_SNIPPET_FOR_LLM = 4000
@@ -44,7 +71,7 @@ function stringifyToolInputForPrompt(input: Record<string, unknown> | undefined)
 
 /**
  * Rich tool outcome for the next LLM turn: tool name, arguments, and error/outcome.
- * Session/UI still store the shorter `output` on ToolPart; this is applied in buildMessagesFromSession only.
+ * Session/UI store the tool `output` string (possibly truncated at execution via `truncateOutput`, KiloCode-style).
  */
 export function formatToolAttemptForLanguageModel(
   toolName: string,
@@ -349,21 +376,14 @@ export function coerceQuestionOptionStrings(val: unknown): string[] {
   if (typeof val === "string") {
     const s = val.trim()
     if (!s) return []
-    // Models often send one CSV string instead of string[] (e.g. "A, B, C, Other").
-    if (/[,;|]/.test(s)) {
-      return s
-        .split(/[,;|]/)
-        .map((x) => x.trim())
-        .filter((x) => x.length > 0)
-    }
-    return [s]
+    return splitQuestionOptionListString(s)
   }
   if (typeof val === "number" || typeof val === "boolean") return [String(val)]
   if (!Array.isArray(val)) return []
   const out: string[] = []
   for (const el of val) {
     if (typeof el === "string") {
-      if (el.trim()) out.push(el.trim())
+      if (el.trim()) out.push(...splitQuestionOptionListString(el))
       continue
     }
     if (typeof el === "number" || typeof el === "boolean") {
@@ -1007,6 +1027,22 @@ export async function executeToolCall(
     for (const pattern of config.permissions.denyPatterns) {
       if (matchesGlob(writePath, pattern)) {
         return { success: false, output: `Access denied: path matches deny pattern "${pattern}"` }
+      }
+    }
+  }
+
+  // Kilo-style edit batching guardrail:
+  // avoid many tiny sequential Edit calls to the same file in one assistant turn.
+  if (resolvedToolName === "Edit" && writePath) {
+    const priorEditsForSameFile = countPriorEditsForPathInMessage(session, messageId, ctx.cwd, writePath)
+    if (priorEditsForSameFile >= 2) {
+      return {
+        success: false,
+        output:
+          `Too many sequential Edit calls for the same file in this turn: ${writePath}.\n` +
+          `You already made ${priorEditsForSameFile} edits to this file.\n\n` +
+          `Stop issuing micro-edits. Re-read the file once and apply the remaining changes in ONE larger Edit call ` +
+          `using a bigger old_string context that covers all pending modifications for this file.`,
       }
     }
   }

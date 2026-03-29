@@ -12,6 +12,7 @@ import type {
   NexusConfig,
   Mode,
 } from "../types.js"
+import { normalizedAppliedReplacementsFromMetadata } from "../tools/applied-replacements.js"
 import * as path from "node:path"
 import { READ_ONLY_TOOLS, MANDATORY_END_TOOL, PLAN_MODE_ALLOWED_WRITE_PATTERN } from "./modes.js"
 import {
@@ -33,6 +34,7 @@ import {
   getDefaultTopK,
   getDefaultTopP,
 } from "../provider/provider-options.js"
+import { findLastOpenReasoningPartIndex } from "./reasoning-segment-utils.js"
 
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
 
@@ -162,18 +164,21 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
     const msg = session.messages.find((m) => m.id === newMessageId)
     const existingParts = msg && Array.isArray(msg.content) ? (msg.content as MessagePart[]) : []
     const parts: MessagePart[] = [...existingParts]
-    const reasoningIdx = parts.findIndex((p) => p.type === "reasoning")
-    if (currentReasoning || sawReasoningSignal) {
-      const reasoningText = currentReasoning || THOUGHT_PLACEHOLDER
-      if (reasoningIdx >= 0) {
-        parts[reasoningIdx] = {
-          ...(parts[reasoningIdx] as ReasoningPart),
+    if (currentReasoning || sawReasoningSignal || currentReasoningDurationMs != null) {
+      const openIdx = findLastOpenReasoningPartIndex(parts, currentReasoningId)
+      const reasoningText =
+        currentReasoning ||
+        (openIdx >= 0 ? ((parts[openIdx] as ReasoningPart).text ?? "") : "") ||
+        THOUGHT_PLACEHOLDER
+      if (openIdx >= 0) {
+        parts[openIdx] = {
+          ...(parts[openIdx] as ReasoningPart),
           text: reasoningText,
           ...(currentReasoningId ? { reasoningId: currentReasoningId } : {}),
           ...(currentReasoningDurationMs != null ? { durationMs: currentReasoningDurationMs } : {}),
           ...(currentReasoningMetadata ? { providerMetadata: currentReasoningMetadata } : {}),
         } as ReasoningPart
-      } else {
+      } else if (currentReasoning || sawReasoningSignal) {
         parts.push({
           type: "reasoning",
           text: reasoningText,
@@ -256,6 +261,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
     partId: string,
     result: { success: boolean; output: string; metadata?: Record<string, unknown> }
   ) => {
+    const appliedReplacements = normalizedAppliedReplacementsFromMetadata(result.metadata)
     await emit({
       type: "tool_end",
       tool: toolName,
@@ -284,6 +290,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
             ...(Array.isArray((result.metadata as { diffHunks?: unknown[] })?.diffHunks)
               ? { diffHunks: (result.metadata as { diffHunks: Array<{ type: string; lineNum: number; line: string }> }).diffHunks }
               : {}),
+            ...(appliedReplacements ? { appliedReplacements } : {}),
           }
         : {}),
     })
@@ -306,6 +313,7 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
       topP: topP ?? getDefaultTopP(config.model),
       topK: topK ?? getDefaultTopK(config.model),
       providerOptions,
+      reasoningHistoryMode: config.model.reasoningHistoryMode ?? "auto",
       maxRetries: retryMaxAttempts,
       initialRetryDelayMs: config.retry?.initialDelayMs,
       maxRetryDelayMs: config.retry?.maxDelayMs,
@@ -371,9 +379,25 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
             reasoningId: currentReasoningId ?? event.reasoningId,
             providerMetadata: event.providerMetadata,
           })
+          currentReasoning = ""
+          currentReasoningDurationMs = undefined
           break
 
         case "tool_call": {
+          if (currentReasoning.trim().length > 0 || currentReasoningStartedAt != null) {
+            if (currentReasoningStartedAt != null) {
+              currentReasoningDurationMs = Math.max(1, Date.now() - currentReasoningStartedAt)
+            }
+            flushAssistantContent()
+            await emit({
+              type: "reasoning_end",
+              messageId: newMessageId,
+              reasoningId: currentReasoningId,
+            })
+            currentReasoning = ""
+            currentReasoningStartedAt = undefined
+            currentReasoningDurationMs = undefined
+          }
           let { toolCallId, toolName, toolInput } = event
           if (!toolCallId || !toolName || !toolInput) break
           sawNativeToolCall = true

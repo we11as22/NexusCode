@@ -1,9 +1,10 @@
 /**
- * Session diff block: "▶ N files" with list of changed files (+additions -deletions).
- * Data comes from session messages (completed Write/Edit tool parts with path + diffStats).
+ * Session diff block: horizontal rule separates chat (agent output) from this summary,
+ * then "▶ N files" and per-file (+/-) lines. Placed directly above the prompt.
  */
 import { Box, Text } from 'ink'
 import React from 'react'
+import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import { getTheme } from '../utils/theme.js'
 
 export type SessionDiffEntry = { file: string; additions: number; deletions: number }
@@ -16,6 +17,8 @@ const SEPARATOR_CHAR = '─'
 
 export function NexusSessionDiffBlock({ entries }: Props): React.ReactNode {
   const theme = getTheme()
+  const { columns } = useTerminalSize()
+  const ruleLen = Math.max(12, Math.min(columns - 2, 80))
 
   if (entries.length === 0) return null
 
@@ -23,7 +26,10 @@ export function NexusSessionDiffBlock({ entries }: Props): React.ReactNode {
   const label = n === 1 ? '1 file' : `${n} files`
 
   return (
-    <Box flexDirection="column" marginTop={0} paddingX={1}>
+    <Box flexDirection="column" marginTop={0} marginBottom={0} paddingX={1}>
+      <Box marginBottom={1}>
+        <Text dimColor>{SEPARATOR_CHAR.repeat(ruleLen)}</Text>
+      </Box>
       <Box>
         <Text dimColor bold>▶ {label}</Text>
       </Box>
@@ -40,7 +46,6 @@ export function NexusSessionDiffBlock({ entries }: Props): React.ReactNode {
           )}
         </Box>
       ))}
-      <Box marginTop={0}><Text dimColor>{SEPARATOR_CHAR.repeat(40)}</Text></Box>
     </Box>
   )
 }

@@ -82,7 +82,21 @@ Only available when vector search is enabled (indexing.vector + vectorDb.enabled
     if (!ctx.indexer) {
       return {
         success: false,
-        output: "Indexer is not ready. Configure embeddings (model + API key) and ensure Qdrant is running, then wait for indexing to complete.",
+        output:
+          "Indexer is not available in this run (host did not attach an indexer, or server/agent startup timed out waiting for Qdrant). " +
+          "In VS Code local mode: wait for indexing after opening the project. In **server** mode: ensure Qdrant and embeddings are reachable from the **server** process. " +
+          "Configure embeddings (model + API key), vectorDb, then retry.",
+      }
+    }
+
+    const semanticOk = ctx.indexer.semanticSearchActive?.() ?? true
+    if (!semanticOk) {
+      return {
+        success: false,
+        output:
+          "Semantic search is off at runtime even though indexing.vector and vectorDb.enabled are true in YAML. " +
+          "The indexer started without Qdrant/embeddings (check host logs for [nexus]: Qdrant unavailable, missing embeddings API key, or embeddings init failed). " +
+          "Fix Qdrant URL/reachability, set embeddings.apiKey (or OPENAI_API_KEY / OPENROUTER_API_KEY), press Sync to re-index.",
       }
     }
 
@@ -90,8 +104,29 @@ Only available when vector search is enabled (indexing.vector + vectorDb.enabled
     if (status.state === "idle") {
       return { success: false, output: "Vector index is not yet built. Wait for indexing to complete or enable vectorDb + embeddings in config." }
     }
+    if (status.state === "stopping") {
+      return {
+        success: false,
+        output: "Indexer is stopping (abort in progress). Wait until the status is idle or ready, then retry CodebaseSearch.",
+      }
+    }
+    /** Default on: allow partial vector search whenever Qdrant already has points. Set `false` in YAML to block until indexing completes. */
+    const searchWhileIndexing = ctx.config.indexing?.searchWhileIndexing !== false
+    if (status.state === "indexing" && !searchWhileIndexing) {
+      const pct =
+        typeof (status as { overallPercent?: number }).overallPercent === "number"
+          ? (status as { overallPercent: number }).overallPercent
+          : undefined
+      return {
+        success: false,
+        output:
+          pct != null
+            ? `Index is still building (~${pct}% on the current step — files or chunks). Retry when finished, or enable “CodebaseSearch while indexing” in Settings → Index (default: on) / set indexing.searchWhileIndexing: true in nexus.yaml.`
+            : "Index is still building. Retry CodebaseSearch after indexing finishes, or enable search-while-indexing in Settings → Index.",
+      }
+    }
     if (status.state === "error") {
-      return { success: false, output: `Index error: ${(status as any).error}` }
+      return { success: false, output: `Index error: ${(status as { error?: string }).error ?? "unknown"}` }
     }
 
     try {
@@ -163,9 +198,13 @@ Only available when vector search is enabled (indexing.vector + vectorDb.enabled
         sections.push(`Query: "${q}"\n${scopedSections.join("\n\n")}`)
       }
 
+      const partialNote =
+        status.state === "indexing" && searchWhileIndexing
+          ? "Results may be incomplete while the index is still building.\n\n"
+          : ""
       return {
         success: true,
-        output: sections.join("\n\n---\n\n"),
+        output: partialNote + sections.join("\n\n---\n\n"),
       }
     } catch (err) {
       return { success: false, output: `Search failed: ${(err as Error).message}` }

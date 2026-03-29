@@ -292,7 +292,9 @@ Two tools to modify files: **Write** and **Edit**.
 - Make targeted exact-string replacements without rewriting the entire file
 - Use for: bug fixes, import updates, focused function changes, small refactors
 - \`old_string\` must match the file exactly — include enough surrounding context to make the match unique
-- If one file needs several independent edits, prefer one larger, well-scoped replacement when practical. Otherwise re-read the file before the next \`Edit\` so you always work from current contents
+- If one file needs several independent edits, prefer one larger, well-scoped replacement when practical. Do NOT issue many tiny Edit calls to the same file in a row
+- After 1-2 edits in the same file, re-read the file and batch remaining changes into one Edit call with larger context
+- For several replacements in one file, use ONE \`Edit\` call with \`blocks: [{ old_string, new_string, replace_all? }, ...]\` and list blocks in file order
 - Tool returns final file state — use it as reference for subsequent edits
 
 ### Write (for new files or major rewrites)
@@ -311,7 +313,8 @@ const MAKING_CODE_CHANGES = `## Making Code Changes
 - **No binary or hash output** — Never output long hashes, binary content, or non-textual code; these are not useful to the user.
 - **Linter limit** — Do not loop more than 3 times fixing linter errors on the same file. On the third failure, stop and explain what is blocking (conflicting rule, ambiguous type, etc.) rather than guessing further.
 - **If you introduced linter errors** — Fix them if the cause is clear. Do not make uneducated guesses. On the third failed attempt, stop and ask the user what to do next.
-- **Re-read before editing** — If you have not read a file in the last few turns, read it again before applying edits. Do not assume the file content is the same as when you last saw it. If you call Edit on the same file more than 3 times consecutively without re-reading, stop and read the file again to re-confirm current contents before continuing.`
+- **Re-read before editing** — If you have not read a file in the last few turns, read it again before applying edits. Do not assume the file content is the same as when you last saw it. If you call Edit on the same file more than 3 times consecutively without re-reading, stop and read the file again to re-confirm current contents before continuing.
+- **Batch file edits (kilo-style)** — For one file, avoid chains of micro-edits. Gather all intended changes first, then apply them in one larger Edit whenever feasible.`
 
 const CODE_STYLE = `## Code Style
 
@@ -421,7 +424,7 @@ Command output is capped (50KB, head+tail). To keep context and progress under c
 - **Long-running commands** (builds, tests, servers, migrations): Use \`run_in_background: true\`; then \`BashOutput\` to read progress (status running/exited) and optionally \`filter\` for errors; \`KillBash\` to stop.
 - **Check progress periodically** — Call \`BashOutput\` with the bash_id every so often; when status is \`exited\`, the command has finished and the log is final.
 - **Bound output** — When you expect a lot of output in blocking mode, pipe to head/tail/grep: e.g. \`ls -la | head -50\`, \`npm test 2>&1 | tail -150\`.
-- **Follow project instructions** — Use the project's own instructions: AGENTS.md, .cursor/rules, docs in the repo.`
+- **Follow project instructions** — Use the project's own instructions: AGENTS.md / \`.nexus/AGENTS.md\`, \`.nexus/rules/**\`, docs in the repo.`
 
 const SCRATCH_SCRIPTS_AND_TESTS = `## Simple one-off scripts — run in terminal; longer scripts — write .py then run
 
@@ -596,8 +599,31 @@ export function buildSystemInfoBlock(ctx: PromptContext): string {
     if (s.state === "ready") {
       lines.push(`  Codebase index: ready — ${(s as any).files ?? 0} files, ${(s as any).symbols ?? 0} symbols indexed`)
       lines.push(`  Tip: Use CodebaseSearch for semantic (vector) queries, Grep for exact patterns`)
+    } else if (s.state === "stopping") {
+      const msg = (s as { message?: string }).message?.trim()
+      lines.push(
+        msg
+          ? `  Codebase index: stopping — ${msg}`
+          : `  Codebase index: stopping — abort in progress`,
+      )
     } else if (s.state === "indexing") {
-      lines.push(`  Codebase index: indexing ${(s as any).progress ?? 0}/${(s as any).total ?? 0} files...`)
+      const ix = s as {
+        progress?: number
+        total?: number
+        overallPercent?: number
+        phase?: string
+        chunksProcessed?: number
+        chunksTotal?: number
+        message?: string
+      }
+      const pct = typeof ix.overallPercent === "number" ? ix.overallPercent : 0
+      const phase = ix.phase === "parsing" ? "parsing" : ix.phase === "embedding" ? "embedding" : "indexing"
+      const detail = ix.message?.trim()
+      lines.push(
+        detail
+          ? `  Codebase index: ${phase} — ~${pct}% — ${detail}`
+          : `  Codebase index: ${phase} — ~${pct}% (${ix.progress ?? 0}/${Math.max(0, ix.total ?? 0)} files; chunks ${ix.chunksProcessed ?? 0}/${Math.max(0, ix.chunksTotal ?? 0)})`,
+      )
     } else {
       lines.push(`  Codebase index: not ready (${s.state})`)
     }
@@ -692,9 +718,7 @@ The user has invoked /create-skill. Your job is to create a new **skill** — a 
 
 **What to do:**
 1. **Understand** — From the user's message, determine what the skill should do (domain, workflows, when to use it, constraints).
-2. **Create** — Write a single file \`SKILL.md\` in one of these locations (choose the one that fits the project):
-   - \`.nexus/skills/<skill-name>/SKILL.md\` (project-local)
-   - \`.cursor/skills/<skill-name>/SKILL.md\` (Cursor-compatible)
+2. **Create** — Write \`SKILL.md\` under \`.nexus/skills/<skill-name>/SKILL.md\` (project) or \`~/.nexus/skills/<skill-name>/SKILL.md\` (global), whichever fits.
    Use a short, kebab-case folder name (e.g. \`safe-change-protocol\`, \`doc-keeper\`).
 3. **Structure** — SKILL.md must include:
    - A clear title (first heading)
@@ -705,7 +729,7 @@ The user has invoked /create-skill. Your job is to create a new **skill** — a 
 4. **Scope** — Create only the SKILL.md file and any subfolder. Do not modify other project files unless the user explicitly asks.
 5. **Finish** — When the skill file is written, reply with a short note (e.g. "Skill created at .nexus/skills/<name>/SKILL.md. Add its path in Settings → MCP & Skills if needed.").
 
-**You have permission** to create and edit files under \`.nexus/skills/\` and \`.cursor/skills/\`. Do not write outside these trees for the skill itself.`
+**You have permission** to create and edit files under \`.nexus/skills/\` (and \`~/.nexus/skills/\` when using global scope). Do not write outside these trees for the skill itself.`
 
 export function buildCreateSkillBlock(): string {
   return CREATE_SKILL_BLOCK

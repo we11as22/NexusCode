@@ -6,6 +6,10 @@ import { Tool } from '../../../Tool.js'
 import { Message, UserMessage } from '../../../query.js'
 import { useGetToolFromMessages } from './utils.js'
 import { FileEditToolUpdatedMessage } from '../../FileEditToolUpdatedMessage.js'
+import {
+  EditAppliedReplacementsPreview,
+  type AppliedReplacement,
+} from './EditAppliedReplacementsPreview.js'
 
 type CoreDiffLine = {
   type: 'add' | 'remove' | 'context'
@@ -35,6 +39,22 @@ function isCoreToolResultData(value: unknown): value is CoreToolResultData {
     return false
   }
   return true
+}
+
+function getEditAppliedReplacements(meta: unknown): AppliedReplacement[] | null {
+  if (!meta || typeof meta !== 'object') return null
+  const raw = (meta as { appliedReplacements?: unknown }).appliedReplacements
+  if (!Array.isArray(raw) || raw.length === 0) return null
+  const out: AppliedReplacement[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') return null
+    const o = item as { oldSnippet?: unknown; newSnippet?: unknown }
+    if (typeof o.oldSnippet !== 'string' || typeof o.newSnippet !== 'string') {
+      return null
+    }
+    out.push({ oldSnippet: o.oldSnippet, newSnippet: o.newSnippet })
+  }
+  return out
 }
 
 function toStructuredPatch(lines: CoreDiffLine[]): Hunk[] {
@@ -156,17 +176,34 @@ export function UserToolSuccessMessage({
 
   if (
     coreData?.path &&
-    Array.isArray(coreData.diffHunks) &&
-    coreData.diffHunks.length > 0 &&
+    coreData.diffStats &&
     (tool.name === 'Edit' || tool.name === 'Write')
   ) {
-    const patch = toStructuredPatch(coreData.diffHunks)
+    if (tool.name === 'Edit') {
+      const applied = getEditAppliedReplacements(coreData.metadata)
+      if (applied && applied.length > 0) {
+        return (
+          <Box flexDirection="column" width={width}>
+            <EditAppliedReplacementsPreview
+              filePath={coreData.path}
+              replacements={applied}
+              verbose={verbose}
+            />
+          </Box>
+        )
+      }
+    }
+
+    const patch = Array.isArray(coreData.diffHunks) && coreData.diffHunks.length > 0
+      ? toStructuredPatch(coreData.diffHunks)
+      : []
     return (
       <Box flexDirection="column" width={width}>
         <FileEditToolUpdatedMessage
           filePath={coreData.path}
           structuredPatch={patch}
           verbose={verbose}
+          diffStats={coreData.diffStats}
         />
       </Box>
     )

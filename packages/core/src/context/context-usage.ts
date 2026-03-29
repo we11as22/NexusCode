@@ -6,9 +6,6 @@ import { estimateTokens } from "./condense.js"
 import { getMessagesForActiveContext } from "../session/active-context.js"
 import type { SessionMessage, MessagePart, ToolPart, ReasoningPart, ImagePart } from "../types.js"
 
-/** Same cap as buildMessagesFromSession in loop.ts — large tool results are truncated in the request. */
-export const MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE = 16_000
-
 /** Heuristic extra tokens per tool for JSON-schema / wire overhead (per tool, on top of name+description). */
 const TOOL_SCHEMA_OVERHEAD_TOKENS = 750
 
@@ -33,7 +30,7 @@ export function getContextWindowLimit(modelId: string, configuredLimit?: number)
 
 /**
  * Token estimate for messages that count toward the next model request (active context only).
- * Includes reasoning and images; tool outputs capped like the LLM message builder.
+ * Includes reasoning and images; tool outputs use stored text (already truncated at execution when huge).
  */
 export function estimateActiveContextSessionTokens(messages: SessionMessage[]): number {
   let total = 0
@@ -66,14 +63,9 @@ export function estimateActiveContextSessionTokens(messages: SessionMessage[]): 
           total += estimateTokens(JSON.stringify(tp.input))
         }
         if (tp.compacted) {
-          total += estimateTokens("[output pruned for context efficiency]")
+          total += estimateTokens("[Old tool result content cleared]")
         } else if (tp.output) {
-          const raw = tp.output
-          const capped =
-            raw.length <= MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE
-              ? raw
-              : raw.slice(0, MAX_TOOL_OUTPUT_CHARS_CONTEXT_ESTIMATE) + "\n\n[... output truncated for context ...]"
-          total += estimateTokens(capped)
+          total += estimateTokens(tp.output)
         }
       }
     }

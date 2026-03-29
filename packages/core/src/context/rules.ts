@@ -30,6 +30,29 @@ export async function loadRules(cwd: string, rulePatterns: string[]): Promise<st
         }
       }
     }
+    for (const file of topLevelFiles) {
+      const candidate = path.join(dir, ".nexus", file)
+      if (!seen.has(candidate)) {
+        const content = await readFileSafe(candidate)
+        if (content) {
+          seen.add(candidate)
+          const rel = path.relative(cwd, candidate)
+          contents.push(`<!-- Rules from ${rel} -->\n${content}`)
+        }
+      }
+    }
+    const nexusRulesDir = path.join(dir, ".nexus", "rules")
+    const nexusRuleFiles = await glob(path.join(nexusRulesDir, "**/*.md")).catch(() => [] as string[])
+    for (const match of nexusRuleFiles.sort()) {
+      if (!seen.has(match)) {
+        const content = await readFileSafe(match)
+        if (content) {
+          seen.add(match)
+          const rel = path.relative(cwd, match)
+          contents.push(`<!-- Rules from ${rel} -->\n${content}`)
+        }
+      }
+    }
     const parent = path.dirname(dir)
     if (parent === dir) break
     dir = parent

@@ -164,8 +164,8 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
 
       {/* Inline diagram block */}
       <div
-        className="group/mermaid"
-        style={{ position: "relative", margin: "10px 0" }}
+        className="group/mermaid nexus-chat-chart-frame"
+        style={{ position: "relative", marginTop: 10, marginBottom: 10 }}
       >
         {isLoading && (
           <div

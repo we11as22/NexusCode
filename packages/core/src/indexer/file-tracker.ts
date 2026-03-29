@@ -2,22 +2,28 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 
 export interface FileRecord {
-  mtime: number
-  hash: string
+  /** Preferred: SHA-256 of full file content (hex). */
+  contentSha256?: string
+  /** Legacy MD5/mtime-based records — treated as stale until reindexed. */
+  mtime?: number
+  hash?: string
   chunks?: number
 }
 
 /**
- * Lightweight file tracker for incremental vector indexing.
- * Tracks path -> mtime/hash/chunk count so unchanged files are skipped.
+ * Lightweight file tracker for incremental vector indexing (Roo-style content hash).
  */
 export class FileTracker {
   private filePath: string
   private data: Record<string, FileRecord> = {}
   private dirty = false
 
-  constructor(indexDir: string) {
-    this.filePath = path.join(indexDir, "file-tracker.json")
+  /**
+   * @param indexDir Default index directory (for `file-tracker.json` when `explicitJsonPath` omitted).
+   * @param explicitJsonPath Roo-style absolute path (e.g. VS Code `globalStorageUri`) for the tracker JSON.
+   */
+  constructor(indexDir: string, explicitJsonPath?: string) {
+    this.filePath = explicitJsonPath ?? path.join(indexDir, "file-tracker.json")
   }
 
   async load(): Promise<void> {
@@ -43,18 +49,24 @@ export class FileTracker {
   getFilesWithHashes(): Map<string, { mtime: number; hash: string; chunks?: number }> {
     const out = new Map<string, { mtime: number; hash: string; chunks?: number }>()
     for (const [p, r] of Object.entries(this.data)) {
-      out.set(p, { mtime: r.mtime, hash: r.hash, chunks: r.chunks })
+      const h = r.contentSha256 ?? r.hash ?? ""
+      const mt = typeof r.mtime === "number" ? r.mtime : 0
+      out.set(p, { mtime: mt, hash: h, chunks: r.chunks })
     }
     return out
   }
 
-  isFileIndexed(filePath: string, mtime: number, hash: string): boolean {
+  /**
+   * True if this path is indexed for the same full-file content (SHA-256).
+   */
+  isFileIndexed(filePath: string, contentSha256: string): boolean {
     const r = this.data[filePath]
-    return r !== undefined && r.hash === hash && r.mtime === mtime
+    if (!r?.contentSha256) return false
+    return r.contentSha256 === contentSha256
   }
 
-  upsertFile(filePath: string, mtime: number, hash: string, chunks?: number): void {
-    this.data[filePath] = { mtime, hash, chunks }
+  upsertFile(filePath: string, contentSha256: string, chunks?: number): void {
+    this.data[filePath] = { contentSha256, chunks }
     this.dirty = true
   }
 
@@ -68,6 +80,34 @@ export class FileTracker {
       delete this.data[filePath]
       this.dirty = true
     }
+  }
+
+  /** Remove tracker entries for `prefix` and any path under `prefix/` (repo-relative, forward slashes). */
+  deleteFilesUnderPrefix(prefix: string): void {
+    const norm = prefix.replace(/\\/g, "/").replace(/\/+$/, "")
+    if (!norm) {
+      this.clear()
+      return
+    }
+    for (const k of Object.keys(this.data)) {
+      if (k === norm || k.startsWith(`${norm}/`)) {
+        delete this.data[k]
+        this.dirty = true
+      }
+    }
+  }
+
+  listPaths(): string[] {
+    return Object.keys(this.data)
+  }
+
+  totalChunkCount(): number {
+    let n = 0
+    for (const r of Object.values(this.data)) {
+      const c = r.chunks
+      if (typeof c === "number" && c > 0) n += c
+    }
+    return n
   }
 
   clear(): void {

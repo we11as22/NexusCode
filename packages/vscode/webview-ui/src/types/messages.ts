@@ -26,6 +26,18 @@ export interface AgentPresetFromCore {
 /** Server connection state for UI indicator and retry. */
 export type ServerConnectionState = "idle" | "connecting" | "streaming" | "error"
 
+export interface AutocompleteExtensionUiState {
+  enableAutoTrigger: boolean
+  useSeparateModel: boolean
+  modelProvider: string
+  modelId: string
+  modelApiKey: string
+  modelBaseUrl: string
+  modelTemperature: string
+  modelReasoningEffort: string
+  modelContextWindow: string
+}
+
 export interface WebviewState {
   messages: SessionMessage[]
   mode: Mode
@@ -61,6 +73,7 @@ export interface WebviewState {
   } | null
   /** Active preset name for chat (per-message). */
   activePresetName?: string
+  autocompleteExtension: AutocompleteExtensionUiState
 }
 
 export type ExtensionMessage =

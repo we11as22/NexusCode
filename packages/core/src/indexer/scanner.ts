@@ -1,10 +1,10 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as crypto from "node:crypto"
-import * as fsSync from "node:fs"
-import { glob } from "glob"
 import ignore from "ignore"
 import { scannerExtensions as rooScannerExtensions } from "./roo/extensions.js"
+import { shouldSkipDirectorySegment } from "./ignore-dirs.js"
+import { INDEX_MAX_FILE_SIZE_BYTES } from "./indexing-capacity.js"
 
 const BASE_EXTENSIONS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
@@ -35,33 +35,56 @@ export interface FileInfo {
   absPath: string
   ext: string
   mtime: number
-  hash: string
+  /** Full-file SHA-256 (hex); used for incremental skip (Roo-style content cache). */
+  contentSha256: string
   size: number
+}
+
+export interface WalkDirOptions {
+  vectorIndexing?: boolean
+  /** Stop after this many files (0 = unlimited). */
+  maxFiles?: number
+}
+
+/**
+ * Full-file SHA-256 for files ≤ {@link INDEX_MAX_FILE_SIZE_BYTES} (walk skips larger files; Roo-Code cap).
+ */
+async function hashFileSha256(filePath: string): Promise<string> {
+  const buf = await fs.readFile(filePath)
+  return crypto.createHash("sha256").update(buf).digest("hex")
+}
+
+/** Same rules as the index walk: defaults, YAML excludes, .gitignore, .nexusignore, .cursorignore. */
+export async function createIndexerIgnore(root: string, excludePatterns: string[] = []): Promise<ReturnType<typeof ignore>> {
+  const ig = ignore()
+  ig.add(DEFAULT_EXCLUDE)
+  ig.add(excludePatterns)
+  try {
+    ig.add(await fs.readFile(path.join(root, ".gitignore"), "utf8"))
+  } catch {}
+  try {
+    ig.add(await fs.readFile(path.join(root, ".nexusignore"), "utf8"))
+  } catch {}
+  try {
+    ig.add(await fs.readFile(path.join(root, ".cursorignore"), "utf8"))
+  } catch {}
+  return ig
 }
 
 export async function* walkDir(
   root: string,
   excludePatterns: string[] = [],
-  opts?: { vectorIndexing?: boolean }
+  opts?: WalkDirOptions,
 ): AsyncIterable<FileInfo> {
   const allowed = getIndexableExtensions(opts?.vectorIndexing ?? false)
-  const ig = ignore()
-  ig.add(DEFAULT_EXCLUDE)
-  ig.add(excludePatterns)
+  const maxFiles = opts?.maxFiles ?? 0
+  let yielded = 0
 
-  // Load .gitignore
-  try {
-    const gitignoreContent = await fs.readFile(path.join(root, ".gitignore"), "utf8")
-    ig.add(gitignoreContent)
-  } catch {}
-
-  // Load .nexusignore if exists
-  try {
-    const nexusignoreContent = await fs.readFile(path.join(root, ".nexusignore"), "utf8")
-    ig.add(nexusignoreContent)
-  } catch {}
+  const ig = await createIndexerIgnore(root, excludePatterns)
 
   async function* walkInternal(dir: string): AsyncIterable<FileInfo> {
+    if (maxFiles > 0 && yielded >= maxFiles) return
+
     let entries: string[]
     try {
       entries = await fs.readdir(dir)
@@ -70,6 +93,10 @@ export async function* walkDir(
     }
 
     for (const entry of entries.sort()) {
+      if (maxFiles > 0 && yielded >= maxFiles) return
+
+      if (shouldSkipDirectorySegment(entry)) continue
+
       const absPath = path.join(dir, entry)
       const relPath = path.relative(root, absPath)
 
@@ -87,17 +114,20 @@ export async function* walkDir(
       if (stat.isDirectory()) {
         yield* walkInternal(absPath)
       } else if (stat.isFile()) {
+        if (maxFiles > 0 && yielded >= maxFiles) return
+
         const ext = path.extname(entry).toLowerCase()
         if (!allowed.has(ext)) continue
-        if (stat.size > 1024 * 1024) continue // Skip files >1MB
+        if (stat.size > INDEX_MAX_FILE_SIZE_BYTES) continue
 
-        const hash = await hashFile(absPath, stat.size)
+        const contentSha256 = await hashFileSha256(absPath)
+        yielded++
         yield {
           path: relPath,
           absPath,
           ext,
           mtime: stat.mtimeMs,
-          hash,
+          contentSha256,
           size: stat.size,
         }
       }
@@ -107,24 +137,85 @@ export async function* walkDir(
   yield* walkInternal(root)
 }
 
-async function hashFile(filePath: string, size: number): Promise<string> {
-  if (size < 8192) {
-    // Small files: hash the full content
-    try {
-      const content = await fs.readFile(filePath)
-      return crypto.createHash("md5").update(content).digest("hex")
-    } catch {
-      return `${size}_0`
-    }
+/**
+ * Collect indexable files with optional hard cap (Roo default list limit is 50,000 — same as schema default for `indexing.maxIndexedFiles`).
+ */
+export async function collectIndexFiles(
+  root: string,
+  excludePatterns: string[],
+  opts?: WalkDirOptions,
+): Promise<{ files: FileInfo[]; truncated: boolean }> {
+  const maxFiles = opts?.maxFiles ?? 0
+  /** Roo: `listFiles(..., 0)` returns no files. */
+  if (maxFiles <= 0) {
+    return { files: [], truncated: false }
   }
-  // Large files: hash first 4KB + mtime
+  const files: FileInfo[] = []
+  for await (const f of walkDir(root, excludePatterns, { ...opts, maxFiles })) {
+    files.push(f)
+  }
+  const truncated = files.length >= maxFiles
+  return { files, truncated }
+}
+
+/** Build {@link FileInfo} from an absolute path (stat, size cap, extension, full-file SHA-256). */
+export async function buildIndexFileInfo(
+  absPath: string,
+  root: string,
+  vectorIndexing: boolean,
+): Promise<FileInfo | null> {
   try {
-    const fd = await fs.open(filePath, "r")
-    const buf = Buffer.alloc(4096)
-    const { bytesRead } = await fd.read(buf, 0, 4096, 0)
-    await fd.close()
-    return crypto.createHash("md5").update(buf.subarray(0, bytesRead)).digest("hex")
+    const s = await fs.stat(absPath)
+    if (!s.isFile()) return null
+    if (s.size > INDEX_MAX_FILE_SIZE_BYTES) return null
+    const relPath = path.relative(root, absPath).replace(/\\/g, "/")
+    if (!relPath || relPath.startsWith("..")) return null
+    const ext = path.extname(absPath).toLowerCase()
+    if (!getIndexableExtensions(vectorIndexing).has(ext)) return null
+    const content = await fs.readFile(absPath)
+    const contentSha256 = crypto.createHash("sha256").update(content).digest("hex")
+    return {
+      path: relPath,
+      absPath,
+      ext,
+      mtime: s.mtimeMs,
+      contentSha256,
+      size: s.size,
+    }
   } catch {
-    return `${size}_error`
+    return null
   }
+}
+
+/**
+ * Turn ripgrep `--files` output (absolute paths) into indexable {@link FileInfo} list
+ * using the same ignore + extension rules as `walkDir`.
+ */
+export async function materializeIndexFileInfos(
+  projectRoot: string,
+  absolutePaths: string[],
+  excludePatterns: string[],
+  vectorIndexing: boolean,
+): Promise<FileInfo[]> {
+  const ig = await createIndexerIgnore(projectRoot, excludePatterns)
+  const out: FileInfo[] = []
+  const seen = new Set<string>()
+  for (const absRaw of absolutePaths) {
+    const absPath = path.resolve(absRaw)
+    if (seen.has(absPath)) continue
+    seen.add(absPath)
+    const relPath = path.relative(projectRoot, absPath).replace(/\\/g, "/")
+    if (!relPath || relPath.startsWith("..")) continue
+    if (ig.ignores(relPath)) continue
+    const fi = await buildIndexFileInfo(absPath, projectRoot, vectorIndexing)
+    if (fi) out.push(fi)
+  }
+  return out
+}
+
+/** VS Code `RelativePattern` glob: all indexable extensions (Roo `scannerExtensions`–style coverage when vector on). */
+export function buildIndexWatcherGlobPattern(vectorIndexing: boolean): string {
+  const exts = [...getIndexableExtensions(vectorIndexing)].map(e => e.replace(/^\./, "")).filter(Boolean).sort()
+  if (exts.length === 0) return "**/*"
+  return `**/*.{${exts.join(",")}}`
 }

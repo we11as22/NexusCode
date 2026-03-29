@@ -58,6 +58,7 @@ WARNING: Write replaces the entire file. Provide complete final content. Creates
     let addedLines: number
     let removedLines: number
     if (oldContent != null) {
+      // Full-file line diff for diffStats / approval — independent of buildDiffHunks (compact UI preview).
       const changes = diff.diffLines(oldContent, content)
       addedLines = 0
       removedLines = 0

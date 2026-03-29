@@ -1,76 +1,61 @@
 import { Hunk } from 'diff'
 import { Box, Text } from 'ink'
 import * as React from 'react'
-import { intersperse } from '../utils/array.js'
 import { getTheme } from '../utils/theme.js'
 import { getCwd } from '../utils/state.js'
 import { relative } from 'path'
+
+const MAX_CHANGED_LINES = 96
 
 type Props = {
   filePath: string
   structuredPatch: Hunk[]
   verbose: boolean
+  /** When the changed-line list is truncated, show total +/− from the tool. */
+  diffStats?: { added: number; removed: number }
 }
 
 export function FileEditToolUpdatedMessage({
   filePath,
   structuredPatch,
   verbose,
+  diffStats,
 }: Props): React.ReactNode {
-  const numAdditions = structuredPatch.reduce(
-    (count, hunk) => count + hunk.lines.filter(_ => _.startsWith('+')).length,
-    0,
+  const changeLines = structuredPatch.flatMap(h =>
+    h.lines.filter(line => line.startsWith('+') || line.startsWith('-')),
   )
-  const numRemovals = structuredPatch.reduce(
-    (count, hunk) => count + hunk.lines.filter(_ => _.startsWith('-')).length,
-    0,
-  )
+  const shown = changeLines.slice(0, MAX_CHANGED_LINES)
+  const omitted = changeLines.length - shown.length
+  const label = verbose ? filePath : relative(getCwd(), filePath)
 
   return (
     <Box flexDirection="column">
       <Text>
         {'  '}⎿ Updated{' '}
-        <Text bold>{verbose ? filePath : relative(getCwd(), filePath)}</Text>
-        {numAdditions > 0 || numRemovals > 0 ? ' with ' : ''}
-        {numAdditions > 0 ? (
-          <>
-            <Text bold>{numAdditions}</Text>{' '}
-            {numAdditions > 1 ? 'additions' : 'addition'}
-          </>
-        ) : null}
-        {numAdditions > 0 && numRemovals > 0 ? ' and ' : null}
-        {numRemovals > 0 ? (
-          <>
-            <Text bold>{numRemovals}</Text>{' '}
-            {numRemovals > 1 ? 'removals' : 'removal'}
-          </>
-        ) : null}
+        <Text bold>{label}</Text>
       </Text>
-      {intersperse(
-        structuredPatch.map(_ => (
-          <Box flexDirection="column" paddingLeft={5} key={_.newStart}>
-            {_.lines
-              .filter(line => line.startsWith('+') || line.startsWith('-'))
-              .map((line, idx) => (
-                <Text
-                  key={`${_.newStart}-${idx}`}
-                  color={
-                    line.startsWith('+')
-                      ? getTheme().diff.added
-                      : getTheme().diff.removed
-                  }
-                >
-                  {line}
-                </Text>
-              ))}
-          </Box>
-        )),
-        i => (
-          <Box paddingLeft={5} key={`ellipsis-${i}`}>
-            <Text color={getTheme().secondaryText}>...</Text>
-          </Box>
-        ),
-      )}
+      <Box flexDirection="column" paddingLeft={5}>
+        {shown.map((line, idx) => (
+          <Text
+            key={`chg-${idx}`}
+            color={
+              line.startsWith('+')
+                ? getTheme().diff.added
+                : getTheme().diff.removed
+            }
+          >
+            {line}
+          </Text>
+        ))}
+        {omitted > 0 ? (
+          <Text color={getTheme().secondaryText}>
+            … {omitted} more changed line{omitted === 1 ? '' : 's'}
+            {diffStats != null
+              ? ` (+${diffStats.added}/−${diffStats.removed} total)`
+              : ''}
+          </Text>
+        ) : null}
+      </Box>
     </Box>
   )
 }
