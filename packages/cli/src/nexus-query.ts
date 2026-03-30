@@ -338,9 +338,38 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
 
   const consumed: MessageType[] = []
 
+  // Best-effort stream idempotency guard: server/transport may replay events on reconnect.
+  // We dedupe only the event types that create new rows or side panels.
+  const seen = new Set<string>()
+  const seenQueue: string[] = []
+  const SEEN_MAX = 1200
+  const seenRecently = (fp: string): boolean => {
+    if (seen.has(fp)) return true
+    seen.add(fp)
+    seenQueue.push(fp)
+    if (seenQueue.length > SEEN_MAX) {
+      const oldest = seenQueue.shift()
+      if (oldest) seen.delete(oldest)
+    }
+    return false
+  }
+
   function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage, boolean, unknown> {
     while (eventQueue.length > 0) {
       const event = eventQueue.shift()!
+      // Coarse fingerprint for duplicate suppression.
+      const et = (event as { type?: string }).type
+      if (typeof et === 'string') {
+        const e: any = event as any
+        let fp: string | null = null
+        if (et === 'assistant_content_complete') fp = `${et}|${String(e.messageId ?? '')}`
+        else if (et === 'tool_start' || et === 'tool_end' || et === 'tool_approval_needed') fp = `${et}|${String(e.messageId ?? '')}|${String(e.partId ?? '')}|${String(e.tool ?? '')}`
+        else if (et === 'question_request') fp = `${et}|${String(e.request?.requestId ?? '')}`
+        else if (et === 'todo_updated') fp = `${et}|${String((e.todo ?? '').length)}`
+        else if (et === 'subagent_start' || et === 'subagent_tool_start' || et === 'subagent_tool_end' || et === 'subagent_done') fp = `${et}|${String(e.subagentId ?? '')}|${String(e.parentPartId ?? '')}|${String(e.tool ?? '')}|${String(e.success ?? '')}`
+        else if (et === 'done' || et === 'error') fp = `${et}|${String(e.error ?? '')}`
+        if (fp && seenRecently(fp)) continue
+      }
       if (event.type === 'todo_updated') {
         yield { type: 'nexus_todo', todo: event.todo ?? '' }
         continue

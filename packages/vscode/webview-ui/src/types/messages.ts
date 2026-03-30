@@ -39,6 +39,8 @@ export interface AutocompleteExtensionUiState {
 }
 
 export interface WebviewState {
+  /** Monotonically increasing sequence number for stateUpdate snapshots (ignore stale seq). */
+  stateUpdateSeq?: number
   messages: SessionMessage[]
   mode: Mode
   isRunning: boolean

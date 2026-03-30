@@ -31,6 +31,22 @@
 
 ---
 
+## Quick launch: VS Code extension (.vsix)
+
+From the **repository root**, after clone and a first-time **`pnpm install`** if you have not installed dependencies yet:
+
+```bash
+nvm use 20
+pnpm build
+pnpm package:vscode
+```
+
+Output: **`packages/vscode/nexuscode-0.1.0.vsix`**. Install in VS Code: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**) → **Extensions: Install from VSIX...** → choose that file. **Node 20** is required (vsce / native tooling).
+
+`pnpm package:vscode` already runs `pnpm build` internally; keeping both steps matches a clear “build, then package” flow and is safe if you ever run `pnpm build` alone first.
+
+---
+
 ## One-command CLI setup (after clone)
 
 Clone the repo, then a **single command** installs everything; `nexus` can be run from anywhere afterward.
@@ -83,7 +99,7 @@ This single command: removes `node_modules` and `.pnpm-store` → installs depen
 pnpm run ready
 ```
 
-Does the same as `pnpm run one`, plus packages the extension and `npm link` for the `nexus` command. Result: **CLI** — `nexus` from any directory; **extension** — install `packages/vscode/nexuscode-0.1.0.vsix` in VS Code (Extensions → "…" → Install from VSIX).
+Does the same as `pnpm run one`, plus packages the extension and `npm link` for the `nexus` command. Result: **CLI** — `nexus` from any directory; **extension** — install `packages/vscode/nexuscode-0.1.0.vsix` via **Ctrl+Shift+P** → **Extensions: Install from VSIX...** (macOS: **Cmd+Shift+P**).
 
 **If `nexus` shows `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`** — you are running under a different Node version than the one used at build time. Use Node 20 (`nvm use 20`), run `pnpm run one` from the repo root, then start `nexus` again.
 
@@ -116,7 +132,7 @@ pnpm run fullbuild
 cd packages/cli && npm link && cd ../..
 ```
 
-Result: **CLI** — `nexus` is available globally; **extension** — `packages/vscode/nexuscode-0.1.0.vsix` (install via **Extensions** → "…" → **Install from VSIX...**). After later full builds, run `cd packages/cli && npm link` again.
+Result: **CLI** — `nexus` is available globally; **extension** — `packages/vscode/nexuscode-0.1.0.vsix` (**Ctrl+Shift+P** / **Cmd+Shift+P** → **Extensions: Install from VSIX...**). After later full builds, run `cd packages/cli && npm link` again.
 
 ### Requirements (versions)
 
@@ -189,7 +205,11 @@ pnpm package
 
 #### 4. Install in VS Code
 
-**Option A — via VS Code UI**
+**Option A — Command Palette (recommended)**
+
+Use **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**), run **Extensions: Install from VSIX...**, then pick the file.
+
+**Option B — via Extensions view**
 
 1. Open VS Code.
 2. Open **Extensions** (Ctrl+Shift+X / Cmd+Shift+X).
@@ -198,7 +218,7 @@ pnpm package
    - Windows: `C:\Users\...\NexusCode\packages\vscode\nexuscode-0.1.0.vsix`
    - Linux/macOS: `/home/user/NexusCode/packages/vscode/nexuscode-0.1.0.vsix`
 
-**Option B — from terminal**
+**Option C — from terminal**
 
 In the terminal (full or relative path to the `.vsix`):
 
@@ -214,7 +234,7 @@ code --install-extension "$(pwd)/packages/vscode/nexuscode-0.1.0.vsix"
 
 **Restart VS Code** after installing. The NexusCode icon appears in the sidebar; open the panel with **Ctrl+Shift+N** (Cmd+Shift+N on Mac).
 
-**Over SSH:** `code --install-extension` may behave differently; it is more reliable to install via **Extensions → … → Install from VSIX...**. The `.vsix` file must be available on **the machine where VS Code Server is running** (if needed, build and package the extension on the server and point to the local path).
+**Over SSH:** `code --install-extension` may behave differently; prefer **Ctrl+Shift+P** / **Cmd+Shift+P** → **Extensions: Install from VSIX...**. The `.vsix` file must be available on **the machine where VS Code Server is running** (if needed, build and package the extension on the server and point to the local path).
 
 #### 5. Extension development (without installing .vsix)
 

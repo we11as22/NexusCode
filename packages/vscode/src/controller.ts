@@ -335,6 +335,12 @@ export interface AutocompleteExtensionUiState {
 }
 
 export interface WebviewState {
+  /**
+   * Monotonically increasing sequence number for stateUpdate snapshots.
+   * Clients should ignore snapshots with seq <= last applied seq to prevent stale snapshots
+   * (captured during async getStateToPostToWebview) from overwriting newer streamed state.
+   */
+  stateUpdateSeq?: number
   messages: SessionMessage[]
   mode: Mode
   isRunning: boolean
@@ -388,6 +394,7 @@ function simpleDiffStats(originalContent: string, newContent: string): { added: 
 export class Controller {
   private session?: Session
   private config?: NexusConfig
+  private stateUpdateSeq = 0
   private defaultModelProfile?: NexusConfig["model"]
   /** Active preset for chat messages (per-message; does not persist to config). */
   private chatPresetName: string = "Default"
@@ -1099,14 +1106,14 @@ export class Controller {
       this.statePostTimer = null
     }
     const state = this.getStateToPostToWebview()
-    this.postMessageToWebview({ type: "stateUpdate", state })
+    this.postMessageToWebview({ type: "stateUpdate", state: { ...state, stateUpdateSeq: ++this.stateUpdateSeq } })
     if (state.planCompleted && this.session) {
       void getPlanContentForFollowup(this.session, this.getCwd()).then((planFollowupText) => {
         const latest = this.getStateToPostToWebview()
         if (!latest.planCompleted || this.mode !== "plan" || this.isRunning) return
         this.postMessageToWebview({
           type: "stateUpdate",
-          state: { ...latest, planFollowupText },
+          state: { ...latest, planFollowupText, stateUpdateSeq: ++this.stateUpdateSeq },
         })
       })
     }

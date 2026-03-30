@@ -5,6 +5,23 @@ import type { ModelsCatalogFromCore, AgentPresetFromCore, AutocompleteExtensionU
 /** Detects a new plan snapshot so the full follow-up panel re-opens. */
 let planFollowupTextFingerprint: string | null = null
 
+// --- Stream idempotency guard ---
+// Some transports can replay events (reconnect, server shadow + snapshot merge). Without stable event ids,
+// we dedupe the most repeat-prone events via a small rolling fingerprint set.
+const RECENT_EVENT_FINGERPRINTS_MAX = 800
+const recentEventFingerprints = new Set<string>()
+const recentEventFingerprintQueue: string[] = []
+function seenRecently(fingerprint: string): boolean {
+  if (recentEventFingerprints.has(fingerprint)) return true
+  recentEventFingerprints.add(fingerprint)
+  recentEventFingerprintQueue.push(fingerprint)
+  if (recentEventFingerprintQueue.length > RECENT_EVENT_FINGERPRINTS_MAX) {
+    const oldest = recentEventFingerprintQueue.shift()
+    if (oldest) recentEventFingerprints.delete(oldest)
+  }
+  return false
+}
+
 export type Mode = "agent" | "plan" | "ask" | "debug" | "review"
 export type AppView = "chat" | "sessions" | "settings"
 
@@ -391,6 +408,8 @@ interface ChatState {
 
   /** True after first stateUpdate received — prevents flash during initial load. */
   isInitialized: boolean
+  /** Last applied stateUpdateSeq (monotonic); used to ignore stale snapshots. */
+  lastStateUpdateSeq: number
 
   /** VS Code nexuscode.autocomplete.* (Editor inline completion). */
   autocompleteExtension: AutocompleteExtensionUiState | null
@@ -524,6 +543,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingApproval: null,
 
   isInitialized: false,
+  lastStateUpdateSeq: 0,
   autocompleteExtension: null,
   initialSettingsTab: null,
   initialSettingsIntegTab: null,
@@ -785,6 +805,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   handleStateUpdate: (state) => {
     set((prev) => {
+      const incomingSeq = (state as { stateUpdateSeq?: unknown }).stateUpdateSeq
+      if (typeof incomingSeq === "number" && Number.isFinite(incomingSeq)) {
+        if (incomingSeq <= (prev.lastStateUpdateSeq ?? 0)) {
+          // Stale snapshot; ignore entirely so it can't overwrite newer streamed state.
+          return { ...prev, isInitialized: true }
+        }
+      }
       let suppressedQuestionRequestId = prev.suppressedQuestionRequestId
       const incomingPending = state.pendingQuestionRequest
 
@@ -796,7 +823,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
 
-      const next = { ...prev, ...state, isInitialized: true, suppressedQuestionRequestId }
+      const next = {
+        ...prev,
+        ...state,
+        isInitialized: true,
+        suppressedQuestionRequestId,
+        lastStateUpdateSeq:
+          typeof incomingSeq === "number" && Number.isFinite(incomingSeq)
+            ? incomingSeq
+            : (prev.lastStateUpdateSeq ?? 0),
+      }
       if (typeof state.sessionId === "string" && state.sessionId !== prev.sessionId && prev.sessionId !== "") {
         next.compactionLog = []
         next.compactionUi = "none"
@@ -849,10 +885,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   handleIndexStatus: (status) => {
-    set({
-      indexStatus: status,
-      indexReady: status.state === "ready",
-      vectorDbProgressMessage: null,
+    set((prev) => {
+      // With vector indexing, core reports overallPercent = indexed / max(foundSoFar, indexed).
+      // The denominator grows during discovery, so overallPercent can briefly go backwards and make the UI bar jump.
+      // Clamp to a monotonic value within a single indexing run.
+      let nextStatus = status
+      if (
+        status.state === "indexing" &&
+        prev.indexStatus?.state === "indexing" &&
+        typeof status.overallPercent === "number" &&
+        Number.isFinite(status.overallPercent) &&
+        typeof (prev.indexStatus as { overallPercent?: number }).overallPercent === "number" &&
+        Number.isFinite((prev.indexStatus as { overallPercent?: number }).overallPercent)
+      ) {
+        const prevPct = (prev.indexStatus as { overallPercent?: number }).overallPercent as number
+        const nextPct = Math.max(prevPct, status.overallPercent)
+        if (nextPct !== status.overallPercent) {
+          nextStatus = { ...(status as any), overallPercent: nextPct }
+        }
+      }
+
+      return {
+        indexStatus: nextStatus,
+        indexReady: nextStatus.state === "ready",
+        vectorDbProgressMessage: null,
+      }
     })
   },
 
@@ -912,6 +969,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   handleAgentEvent: (event) => {
     const { messages } = get()
+
+    // Best-effort deduplication for repeated events (replay/stale merge).
+    // This is intentionally coarse: it targets the event types that create new rows/blocks.
+    const et = (event as { type?: string }).type
+    if (typeof et === "string") {
+      const e = event as any
+      let fp: string | null = null
+      switch (et) {
+        case "assistant_message_started":
+        case "assistant_content_complete":
+          fp = `${et}|${String(e.messageId ?? "")}`
+          break
+        case "text_delta": {
+          const d = typeof e.delta === "string" ? e.delta : ""
+          fp = `${et}|${String(e.messageId ?? "")}|${d.slice(0, 160)}|${d.length}`
+          break
+        }
+        case "reasoning_delta": {
+          const d = typeof e.delta === "string" ? e.delta : ""
+          fp = `${et}|${String(e.messageId ?? "")}|${String(e.reasoningId ?? "")}|${d.slice(0, 160)}|${d.length}`
+          break
+        }
+        case "tool_start":
+        case "tool_end":
+        case "tool_approval_needed":
+          fp = `${et}|${String(e.messageId ?? "")}|${String(e.partId ?? "")}|${String(e.tool ?? "")}`
+          break
+        case "subagent_start":
+        case "subagent_tool_start":
+        case "subagent_tool_end":
+        case "subagent_done":
+          fp = `${et}|${String(e.subagentId ?? "")}|${String(e.parentPartId ?? "")}|${String(e.tool ?? "")}|${String(e.success ?? "")}`
+          break
+        case "question_request":
+          fp = `${et}|${String(e.request?.requestId ?? "")}`
+          break
+        case "todo_updated":
+          fp = `${et}|${String((e.todo ?? "").length)}`
+          break
+        case "error":
+        case "done":
+          fp = `${et}|${String(e.error ?? "")}`
+          break
+        default:
+          fp = null
+      }
+      if (fp && seenRecently(fp)) return
+    }
 
     switch (event.type) {
       case "assistant_message_started": {
@@ -1005,20 +1110,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const parts = Array.isArray(target.content)
           ? [...(target.content as MessagePart[])]
           : [{ type: "text" as const, text: target.content as string }]
+        // Some transports can replay tool_start on reconnect / snapshot merge.
+        // Avoid duplicating the same tool row when partId matches.
+        const existingToolIdx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).id === event.partId)
         const lastPart = parts[parts.length - 1]
         const startTime = get().reasoningStartTime
         if (lastPart?.type === "reasoning" && startTime != null) {
           parts[parts.length - 1] = { ...lastPart, durationMs: Date.now() - startTime } as ReasoningPart
           set((s) => ({ ...s, reasoningStartTime: null, activeReasoning: null }))
         }
-        parts.push({
-          type: "tool",
-          id: event.partId,
-          tool: event.tool,
-          status: "running",
-          input: ev.input,
-          timeStart: Date.now(),
-        } as ToolPart)
+        if (existingToolIdx >= 0) {
+          const existing = parts[existingToolIdx] as ToolPart
+          parts[existingToolIdx] = {
+            ...existing,
+            tool: existing.tool || event.tool,
+            status: existing.status === "completed" || existing.status === "error" ? existing.status : "running",
+            input: existing.input ?? ev.input,
+            timeStart: existing.timeStart ?? Date.now(),
+          } as ToolPart
+        } else {
+          parts.push({
+            type: "tool",
+            id: event.partId,
+            tool: event.tool,
+            status: "running",
+            input: ev.input,
+            timeStart: Date.now(),
+          } as ToolPart)
+        }
         baseList[index] = { ...target, content: parts }
         set({ messages: baseList })
         break
