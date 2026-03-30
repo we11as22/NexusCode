@@ -27,7 +27,7 @@ export function NexusSessionDiffBlock({ entries }: Props): React.ReactNode {
 
   return (
     <Box flexDirection="column" marginTop={0} marginBottom={0} paddingX={1}>
-      <Box marginBottom={1}>
+      <Box>
         <Text dimColor>{SEPARATOR_CHAR.repeat(ruleLen)}</Text>
       </Box>
       <Box>

@@ -80,6 +80,13 @@ export interface ToolContext {
   compactSession?: () => Promise<void>
   /** Current tool call part id (e.g. part_xyz). Set by loop for write/replace so tool can emit tool_approval_needed. */
   partId?: string
+  /** Assistant message id for the in-flight tool call (loop); used e.g. to merge sub-agent file edits when part id lookup fails. */
+  toolExecutionMessageId?: string
+  /**
+   * Set by the Parallel tool around batched executes so concurrent SpawnAgent calls are not
+   * mistaken for duplicate spawns (shared recentSpawnTasks guard).
+   */
+  skipSubagentDuplicateCheck?: boolean
   /** All resolved tools for this run (set by loop). Used e.g. by Parallel to run multiple tools in one call. */
   resolvedTools?: ToolDef[]
 }
@@ -263,6 +270,8 @@ export interface ToolPart {
   /** Set when tool is Write/Edit and completed; used for session diff (e.g. CLI "N files" block). */
   path?: string
   diffStats?: { added: number; removed: number }
+  /** Copied from sub-agent session into parent for diff; omit from chat tool rows (CLI). */
+  mergedFromSubagent?: boolean
 }
 
 export type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart

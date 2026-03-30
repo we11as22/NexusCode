@@ -18,34 +18,6 @@ function modeLabel(mode: string): string {
   return mode.charAt(0).toUpperCase() + mode.slice(1).toLowerCase()
 }
 
-/** Matches `nexus-subagents` toolLabel lines; same list is shown in NexusExploringBlock on ctrl+o. */
-function isExploreStyleHistoryLine(line: string): boolean {
-  const s = line.replace(/^Attempt\s+/i, '').trim()
-  const head = s.split('(')[0]!.trim().toLowerCase().replace(/[^a-z]/g, '')
-  return (
-    head === 'read' ||
-    head === 'list' ||
-    head === 'grep' ||
-    head === 'glob' ||
-    head === 'search' ||
-    head === 'codebasesearch'
-  )
-}
-
-/** Avoid printing the full ⎿ list under SpawnAgent when Nexus timeline already expands it. */
-function shouldSuppressExpandedExploreToolHistory(
-  isNexusToolUse: boolean,
-  expandToolDetails: boolean,
-  history: string[],
-): boolean {
-  return (
-    isNexusToolUse &&
-    expandToolDetails &&
-    history.length > 0 &&
-    history.every(isExploreStyleHistoryLine)
-  )
-}
-
 type Props = {
   param: ToolUseBlockParam
   costUSD: number
@@ -395,11 +367,17 @@ export function AssistantToolUseMessage({
     hasInput &&
     !fileChangeLineStats &&
     shouldShowExpandHint(normalizedToolName, inputRecord, renderedInput)
+  /** Match other tool rows: space above SpawnAgent* even when progress uses addMargin={false}. */
+  const isSpawnFamilyTool =
+    param.name === 'SpawnAgent' ||
+    param.name === 'SpawnAgents' ||
+    param.name === 'SpawnAgentsParallel' ||
+    ((param.name === 'Parallel' || param.name === 'parallel') && subagents.length > 0)
   const mainBlock = (
     <Box
       flexDirection="row"
       justifyContent="space-between"
-      marginTop={addMargin ? 1 : 0}
+      marginTop={addMargin || isSpawnFamilyTool ? 1 : 0}
       width="100%"
     >
       <Box>
@@ -470,207 +448,127 @@ export function AssistantToolUseMessage({
   const completed = subagents.filter((sa) => sa.status === 'completed' || sa.status === 'error')
   const allDone = running.length === 0 && completed.length > 0
 
-  const toolCountFor = (sa: SubAgentState) =>
-    sa.toolUsesCount > 0 ? sa.toolUsesCount : sa.toolHistory.length
+  const orderedSubagents = [...subagents].sort((a, b) => a.startedAt - b.startedAt)
+  const multiAgentsLabel = orderedSubagents.every(
+    (sa) => String(sa.mode).toLowerCase() === 'explore',
+  )
+    ? 'explore agents'
+    : 'agents'
 
-  // Multiple subagents while at least one is still running: list **all** of them so
-  // finished ones stay visible (✓ Done) instead of disappearing when running.length drops to 1.
+  // Multiple subagents while at least one is still running: keep **total** count in the header
+  // (not running.length) so we never show "Running 1 agent…" when 2 were spawned and one finished.
+  // Always show Ask(task) + ⎿ tool/Done per row so a completed agent does not look "gone".
   if (subagents.length > 1 && running.length > 0) {
-    const nDone = completed.length
-    const nRun = running.length
-    const allExploreRunning = running.every(
-      (sa) => String(sa.mode).toLowerCase() === 'explore',
-    )
-    const agentsLabel = allExploreRunning ? 'explore agents' : 'agents'
     const theme = getTheme()
+    const nTotal = orderedSubagents.length
     return (
       <Box flexDirection="column" width="100%">
         {mainBlock}
-        <Box flexDirection="column" marginLeft={2} marginTop={1}>
-          <Box>
-            <Text color={theme.primary}>✽ </Text>
-            <Text bold>
-              {nDone > 0
-                ? `${nRun} running · ${nDone} done`
-                : `Running ${nRun} ${agentsLabel}…`}
-            </Text>
-            {!expandToolDetails ? (
-              <Text dimColor> (ctrl+o to expand)</Text>
-            ) : null}
+        <Box
+          flexDirection="row"
+          alignItems="flex-start"
+          marginTop={1}
+          width="100%"
+        >
+          <Box minWidth={2}>
+            <Text color={theme.primary}>●</Text>
           </Box>
-          {subagents.map((sa, idx) => {
-            const isLast = idx === subagents.length - 1
-            const prefix = isLast ? '└─' : '├─'
-            const contPrefix = isLast ? '   ' : '│  '
-            const nTools = toolCountFor(sa)
-            const doneOrErr =
-              sa.status === 'completed' || sa.status === 'error'
-            if (doneOrErr) {
+          <Box flexDirection="column" flexGrow={1}>
+            <Box flexDirection="row" flexWrap="wrap">
+              <Text bold>
+                Running {nTotal} {multiAgentsLabel}…
+              </Text>
+              {!expandToolDetails ? (
+                <Text dimColor> (ctrl+o to expand)</Text>
+              ) : null}
+            </Box>
+            {orderedSubagents.map((sa, idx) => {
+              const isLast = idx === orderedSubagents.length - 1
+              const prefix = isLast ? '└─' : '├─'
+              const contPrefix = isLast ? '   ' : '│  '
+              const doneOrErr =
+                sa.status === 'completed' || sa.status === 'error'
+              const tailLine = doneOrErr
+                ? null
+                : sa.toolHistory.length > 0
+                  ? sa.toolHistory[sa.toolHistory.length - 1]!
+                  : subagentStatusLine(sa)
               const isErr = sa.status === 'error'
               return (
-                <React.Fragment key={sa.id}>
-                  <Box>
-                    <Text dimColor>  {prefix} </Text>
-                    <Text color={isErr ? theme.error : theme.success}>
-                      {isErr ? '✗ ' : '✓ '}
-                    </Text>
+                <Box key={sa.id} flexDirection="column">
+                  <Box flexDirection="row" flexWrap="wrap">
+                    <Text dimColor>{prefix}</Text>
                     <Text>
                       {modeLabel(sa.mode)}({truncateTask(sa.task, 48)})
                     </Text>
-                    {nTools > 0 ? (
+                  </Box>
+                  <Box flexDirection="row" flexWrap="wrap">
+                    <Text dimColor>{contPrefix}</Text>
+                    <Text color={theme.secondaryText}>⎿ </Text>
+                    {doneOrErr ? (
                       <Text dimColor>
-                        {' '}
-                        · {nTools} tool use{nTools !== 1 ? 's' : ''}
+                        {isErr ? (sa.error ?? 'Failed') : 'Done'}
                       </Text>
-                    ) : null}
-                  </Box>
-                  <Box>
-                    <Text dimColor>  {contPrefix}</Text>
-                    <Text color={theme.primary}>⎿ </Text>
-                    <Text dimColor>
-                      {isErr ? (sa.error ?? 'Failed') : 'Done'}
-                    </Text>
-                  </Box>
-                </React.Fragment>
-              )
-            }
-            const tailLine =
-              sa.toolHistory.length > 0
-                ? sa.toolHistory[sa.toolHistory.length - 1]!
-                : subagentStatusLine(sa)
-            const suppressExploreDup = shouldSuppressExpandedExploreToolHistory(
-              isNexusToolUse,
-              expandToolDetails,
-              sa.toolHistory,
-            )
-            return (
-              <React.Fragment key={sa.id}>
-                <Box>
-                  <Text dimColor>  {prefix} </Text>
-                  <Text>
-                    {modeLabel(sa.mode)}({truncateTask(sa.task, 48)})
-                  </Text>
-                  {nTools > 0 ? (
-                    <Text dimColor>
-                      {' '}
-                      · {nTools} tool use{nTools !== 1 ? 's' : ''}
-                    </Text>
-                  ) : null}
-                </Box>
-                {expandToolDetails ? (
-                  <Box flexDirection="column">
-                    {suppressExploreDup ? (
-                      <Box>
-                        <Text dimColor>  {contPrefix}</Text>
-                        <Text dimColor>
-                          ⎿ {sa.toolHistory.length} explore tool use
-                          {sa.toolHistory.length === 1 ? '' : 's'} — see
-                          exploration block below
-                        </Text>
-                      </Box>
-                    ) : sa.toolHistory.length > 0 ? (
-                      <>
-                        <Box>
-                          <Text dimColor>  {contPrefix}</Text>
-                          <Text color={theme.primary}>⎿ </Text>
-                          <Text color={theme.secondaryText}>
-                            {sa.toolHistory[0]}
-                          </Text>
-                        </Box>
-                        {sa.toolHistory.slice(1).map((entry, hi) => (
-                          <Text
-                            key={`${sa.id}-h-${hi}`}
-                            color={theme.secondaryText}
-                          >
-                            {'  '}
-                            {contPrefix}
-                            {'   '}
-                            {entry}
-                          </Text>
-                        ))}
-                      </>
                     ) : (
-                      <Box>
-                        <Text dimColor>  {contPrefix}</Text>
-                        <Text color={theme.primary}>⎿ </Text>
-                        <Text color={theme.secondaryText}>Starting…</Text>
-                      </Box>
+                      <Text>{tailLine}</Text>
                     )}
                   </Box>
-                ) : (
-                  <Box>
-                    <Text dimColor>  {contPrefix}</Text>
-                    <Text color={theme.primary}>⎿ </Text>
-                    <Text dimColor>{tailLine}</Text>
-                  </Box>
-                )}
-              </React.Fragment>
-            )
-          })}
+                </Box>
+              )
+            })}
+          </Box>
         </Box>
       </Box>
     )
   }
 
-  // All finished, multiple — collapsed: one summary line; expanded: tree
+  // All finished, multiple — same tree as in-flight (Ask + ⎿ Done), header "N agents finished"
   if (allDone && completed.length > 1) {
-    const totalTools = completed.reduce((acc, sa) => acc + toolCountFor(sa), 0)
-    if (!expandToolDetails) {
-      return (
-        <Box flexDirection="column" width="100%">
-          {mainBlock}
-          <Box flexDirection="column" marginLeft={2} marginTop={1}>
-            <Box>
-              <Text color={getTheme().success ?? 'green'}>● </Text>
-              <Text bold>{completed.length} agents finished</Text>
-              <Text dimColor> (ctrl+o to expand)</Text>
-            </Box>
-            <Box>
-              <Text dimColor>
-                {'  ⎿ '}
-                {totalTools} tool use{totalTools !== 1 ? 's' : ''}
-              </Text>
-            </Box>
-          </Box>
-        </Box>
-      )
-    }
+    const theme = getTheme()
+    const finishedOrdered = [...completed].sort((a, b) => a.startedAt - b.startedAt)
     return (
       <Box flexDirection="column" width="100%">
         {mainBlock}
-        <Box flexDirection="column" marginLeft={2} marginTop={1}>
-          <Box>
-            <Text color={getTheme().success ?? 'green'}>● </Text>
-            <Text bold>{completed.length} agents finished</Text>
+        <Box
+          flexDirection="row"
+          alignItems="flex-start"
+          marginTop={1}
+          width="100%"
+        >
+          <Box minWidth={2}>
+            <Text color={theme.success ?? 'green'}>●</Text>
           </Box>
-          {completed.map((sa, idx) => {
-            const isLast = idx === completed.length - 1
-            const prefix = isLast ? '└─' : '├─'
-            const contPrefix = isLast ? '   ' : '│  '
-            const isErr = sa.status === 'error'
-            const nTools = toolCountFor(sa)
-            return (
-              <React.Fragment key={sa.id}>
-                <Box>
-                  <Text dimColor>  {prefix} </Text>
-                  <Text>{modeLabel(sa.mode)}({truncateTask(sa.task, 48)})</Text>
-                  {nTools > 0 ? (
-                    <Text dimColor>
-                      {' '}
-                      · {nTools} tool use{nTools !== 1 ? 's' : ''}
+          <Box flexDirection="column" flexGrow={1}>
+            <Box flexDirection="row" flexWrap="wrap">
+              <Text bold>{finishedOrdered.length} agents finished</Text>
+              {!expandToolDetails ? (
+                <Text dimColor> (ctrl+o to expand)</Text>
+              ) : null}
+            </Box>
+            {finishedOrdered.map((sa, idx) => {
+              const isLast = idx === finishedOrdered.length - 1
+              const prefix = isLast ? '└─' : '├─'
+              const contPrefix = isLast ? '   ' : '│  '
+              const isErr = sa.status === 'error'
+              return (
+                <Box key={sa.id} flexDirection="column">
+                  <Box flexDirection="row" flexWrap="wrap">
+                    <Text dimColor>{prefix}</Text>
+                    <Text>
+                      {modeLabel(sa.mode)}({truncateTask(sa.task, 48)})
                     </Text>
-                  ) : null}
+                  </Box>
+                  <Box flexDirection="row" flexWrap="wrap">
+                    <Text dimColor>{contPrefix}</Text>
+                    <Text color={theme.secondaryText}>⎿ </Text>
+                    <Text dimColor>
+                      {isErr ? (sa.error ?? 'Failed') : 'Done'}
+                    </Text>
+                  </Box>
                 </Box>
-                <Box>
-                  <Text dimColor>  {contPrefix} </Text>
-                  <Text color={getTheme().primary}>⎿ </Text>
-                  <Text dimColor>
-                    {isErr ? (sa.error ?? 'Failed') : 'Done'}
-                  </Text>
-                </Box>
-              </React.Fragment>
-            )
-          })}
+              )
+            })}
+          </Box>
         </Box>
       </Box>
     )
@@ -681,51 +579,41 @@ export function AssistantToolUseMessage({
     running[0] ??
     [...subagents].sort((a, b) => b.startedAt - a.startedAt)[0]
   if (!primary) return mainBlock
-  const suppressExploreDup = shouldSuppressExpandedExploreToolHistory(
-    isNexusToolUse,
-    expandToolDetails,
-    primary.toolHistory,
-  )
-  const visibleHistory =
-    expandToolDetails && !suppressExploreDup
-      ? primary.toolHistory
-      : primary.toolHistory.slice(0, 3)
-  const hiddenUses = Math.max(0, primary.toolHistory.length - visibleHistory.length)
+  const lastToolLine =
+    primary.toolHistory.length > 0
+      ? primary.toolHistory[primary.toolHistory.length - 1]!
+      : subagentStatusLine(primary)
+  const subDone =
+    primary.status === 'completed' || primary.status === 'error'
+  const theme = getTheme()
   return (
     <Box flexDirection="column" width="100%">
       {mainBlock}
-      <Box flexDirection="column" marginLeft={2} marginTop={1}>
-        <Text color={color}>
-          {modeLabel(primary.mode)}({truncateTask(primary.task, 72)})
-        </Text>
-        {primary.status === 'completed' || primary.status === 'error' ? (
-          <Text dimColor>  ⎿ {primary.status === 'error' ? (primary.error ?? 'Failed') : 'Done'}</Text>
-        ) : suppressExploreDup && expandToolDetails ? (
-          <Text dimColor>
-            {'  '}⎿{' '}
-            {primary.toolHistory.length > 0
-              ? `${primary.toolHistory.length} explore tool use${primary.toolHistory.length === 1 ? '' : 's'} — see exploration block below`
-              : 'Starting…'}
+      <Box
+        flexDirection="row"
+        alignItems="flex-start"
+        marginTop={1}
+        width="100%"
+      >
+        {/* Same 2-col gutter as Exploring / parallel multi — aligns with tool ● column */}
+        <Box minWidth={2} />
+        <Box flexDirection="column" flexGrow={1}>
+          <Text color={color}>
+            {modeLabel(primary.mode)}({truncateTask(primary.task, 72)})
           </Text>
-        ) : (
-          <>
-            {visibleHistory.length > 0 ? (
-              <Text color={getTheme().secondaryText}>  ⎿ {visibleHistory[0]}</Text>
-            ) : (
-              <Text color={getTheme().secondaryText}>  ⎿ Starting…</Text>
-            )}
-            {visibleHistory.slice(1).map((entry, idx) => (
-              <Text key={`${primary.id}-history-${idx}`} color={getTheme().secondaryText}>
-                {'     '}{entry}
+          {subDone ? (
+            <Box flexDirection="row" flexWrap="wrap">
+              <Text color={theme.secondaryText}>  ⎿ </Text>
+              <Text dimColor>
+                {primary.status === 'error'
+                  ? (primary.error ?? 'Failed')
+                  : 'Done'}
               </Text>
-            ))}
-            {hiddenUses > 0 ? (
-              <Text color={getTheme().secondaryText}>
-                {'     '}+{hiddenUses} more tool uses (ctrl+o to expand)
-              </Text>
-            ) : null}
-          </>
-        )}
+            </Box>
+          ) : (
+            <Text color={theme.secondaryText}>  ⎿ {lastToolLine}</Text>
+          )}
+        </Box>
       </Box>
     </Box>
   )

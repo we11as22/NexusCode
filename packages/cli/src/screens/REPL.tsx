@@ -69,13 +69,17 @@ import {
   timelineSourceMessages,
 } from '../utils/messages.js'
 import { getSlowAndCapableModel } from '../utils/model.js'
-import { clearTerminal, updateTerminalTitle } from '../utils/terminal.js'
+import {
+  clearTerminal,
+  clearTerminalViewport,
+  updateTerminalTitle,
+} from '../utils/terminal.js'
 import { getTheme } from '../utils/theme.js'
 import { BinaryFeedback } from '../components/binary-feedback/BinaryFeedback.js'
 import { getMaxThinkingTokens } from '../utils/thinking.js'
 import { getOriginalCwd } from '../utils/state.js'
 import type { ConfigSnapshot } from '../nexus-bootstrap.js'
-import { reduceSubagentEvent, truncateTask } from '../nexus-subagents.js'
+import { reduceSubagentEvent } from '../nexus-subagents.js'
 import type { SubAgentState } from '../nexus-subagents.js'
 import { applyCheckpointRestore, type RestoreType } from '../task-restore.js'
 import type { SessionMessage, ToolPart } from '@nexuscode/core'
@@ -99,20 +103,6 @@ const NEXUS_MODES = ['agent', 'plan', 'ask', 'debug'] as const
 function cycleNexusMode(current: string): string {
   const i = NEXUS_MODES.indexOf(current as (typeof NEXUS_MODES)[number])
   return NEXUS_MODES[(i + 1) % NEXUS_MODES.length] ?? 'agent'
-}
-
-function subagentSegmentTitles(
-  map: Record<string, SubAgentState[]>,
-  partId: string,
-): { exploring: string; explored: string } {
-  const list = map[partId]
-  if (!list?.length) return { exploring: 'Subagent', explored: 'Subagent' }
-  const sa = list[list.length - 1]!
-  const modeStr = String(sa.mode)
-  const mode =
-    modeStr.charAt(0).toUpperCase() + modeStr.slice(1).toLowerCase()
-  const label = `${mode}(${truncateTask(sa.task, 56)})`
-  return { exploring: label, explored: label }
 }
 
 type MessageRenderItem = {
@@ -269,6 +259,12 @@ export function REPL({
   const [forkNumber, setForkNumber] = useState(
     getNextAvailableLogForkNumber(messageLogName, initialForkNumber, 0),
   )
+  /** Bumps on terminal resize only — remount header without changing conversation log fork. */
+  const [layoutRemountKey, setLayoutRemountKey] = useState(0)
+  const lastTerminalSizeRef = useRef({
+    columns: process.stdout.columns || 80,
+    rows: process.stdout.rows || 24,
+  })
 
   const [
     forkConvoWithMessagesOnTheNextRender,
@@ -277,6 +273,11 @@ export function REPL({
 
   const [abortController, setAbortController] =
     useState<AbortController | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
+  const assignAbortController = useCallback((ac: AbortController | null) => {
+    abortControllerRef.current = ac
+    setAbortController(ac)
+  }, [])
   const [isLoading, setIsLoading] = useState(false)
   const [autoUpdaterResult, setAutoUpdaterResult] =
     useState<AutoUpdaterResult | null>(null)
@@ -382,9 +383,29 @@ export function REPL({
     [subagentsByPartId],
   )
 
+  const isLoadingRef = useRef(isLoading)
+  const hasRunningSubagentRef = useRef(hasRunningSubagent)
+  const isMessageSelectorVisibleRef = useRef(isMessageSelectorVisible)
+  isLoadingRef.current = isLoading
+  hasRunningSubagentRef.current = hasRunningSubagent
+  isMessageSelectorVisibleRef.current = isMessageSelectorVisible
+
+  const toolUseConfirmRef = useRef(toolUseConfirm)
+  toolUseConfirmRef.current = toolUseConfirm
+
+  const nexusCancelScope = useMemo(
+    () => ({
+      isCancellable: () =>
+        isLoadingRef.current || hasRunningSubagentRef.current,
+      getAbortController: () => abortControllerRef.current,
+    }),
+    [],
+  )
+
   const sessionDiffEntries = useMemo(
     () => getSessionDiffFromMessages(nexusBootstrap?.session?.messages),
-    [nexusBootstrap?.session?.messages, messages.length],
+    // Sub-agent merges Write/Edit into parent session in-place; `messages` updates after tool events.
+    [messages, nexusBootstrap?.session],
   )
 
   const toggleNexusAutoApproveAction = useCallback(
@@ -537,7 +558,7 @@ export function REPL({
       forcedNexusModeForNextRunRef.current = modeOverride
       setNexusModeOverride(modeOverride)
       const abortController = new AbortController()
-      setAbortController(abortController)
+      assignAbortController(abortController)
       setIsLoading(true)
       await onQuery(
         [
@@ -623,28 +644,28 @@ export function REPL({
   }>({})
 
   const { status: apiKeyStatus, reverify } = useApiKeyVerification()
-  function onCancel() {
-    if (!isLoading) {
+  const onCancel = useCallback(() => {
+    if (!isLoadingRef.current && !hasRunningSubagentRef.current) {
       return
     }
     setIsLoading(false)
-    if (toolUseConfirm) {
-      // Tool use confirm handles the abort signal itself
-      toolUseConfirm.onAbort()
+    setSubagentsByPartId({})
+    const confirm = toolUseConfirmRef.current
+    if (confirm) {
+      confirm.onAbort()
     } else {
-      abortController?.abort()
+      abortControllerRef.current?.abort()
     }
-  }
+    assignAbortController(null)
+  }, [assignAbortController])
 
   useCancelRequest(
     setToolJSX,
     setToolUseConfirm,
     setBinaryFeedbackContext,
     onCancel,
-    isLoading,
-    isMessageSelectorVisible,
-    abortController?.signal,
-    !!toolJSX,
+    isMessageSelectorVisibleRef,
+    nexusCancelScope,
   )
 
   useEffect(() => {
@@ -675,7 +696,7 @@ export function REPL({
     setIsLoading(true)
 
     const abortController = new AbortController()
-    setAbortController(abortController)
+    assignAbortController(abortController)
 
     const model = await getSlowAndCapableModel()
     const newMessages = await processUserInput(
@@ -713,7 +734,7 @@ export function REPL({
       // or if the user input was an invalid slash command.
       const lastMessage = newMessages[newMessages.length - 1]!
       if (lastMessage.type === 'assistant') {
-        setAbortController(null)
+        assignAbortController(null)
         setIsLoading(false)
         return
       }
@@ -850,7 +871,7 @@ export function REPL({
       updateTerminalTitle(lastMessage.message.content)
     }
     if (lastMessage.type === 'assistant') {
-      setAbortController(null)
+      assignAbortController(null)
       setIsLoading(false)
       return
     }
@@ -1032,15 +1053,24 @@ export function REPL({
     ])
   }, [nexusSessionId, nexusBootstrap])
 
-  // Re-render on terminal resize to prevent input field duplication
+  // Re-render on terminal resize to prevent input field duplication.
+  // Do not bump forkNumber here — that would switch the message log file path on every resize.
+  // Use viewport-only clear (no ESC 3J) so scrollback is not wiped during agent runs.
   useEffect(() => {
     let timeout: ReturnType<typeof setTimeout> | null = null
     const handleResize = () => {
       if (timeout) clearTimeout(timeout)
       timeout = setTimeout(async () => {
-        await clearTerminal()
-        setForkNumber(n => n + 1)
-      }, 50)
+        const columns = process.stdout.columns || 80
+        const rows = process.stdout.rows || 24
+        const last = lastTerminalSizeRef.current
+        if (columns === last.columns && rows === last.rows) {
+          return
+        }
+        lastTerminalSizeRef.current = { columns, rows }
+        await clearTerminalViewport()
+        setLayoutRemountKey(k => k + 1)
+      }, 100)
     }
     process.stdout.on('resize', handleResize)
     return () => {
@@ -1085,17 +1115,13 @@ export function REPL({
     return timeline
       .map((piece): MessageRenderItem | null => {
         if (piece.kind === 'explore') {
+          // Sub-agent explore waves: tools are shown only under SpawnAgent (AssistantToolUseMessage).
+          // Omit duplicate ● Exploring / ✓ Explored blocks here.
+          if (piece.subagentChild) {
+            return null
+          }
           const exploreKey = piece.messages.map((m) => m.uuid).join('|')
           const rowKey = `explore-${exploreKey}`
-          const segmentTitles =
-            nexusBootstrap &&
-            piece.subagentChild &&
-            piece.parentSpawnPartId
-              ? subagentSegmentTitles(
-                  subagentsByPartId,
-                  piece.parentSpawnPartId,
-                )
-              : undefined
           const type = exploreSegmentShouldBeTransient(
             piece,
             unresolvedToolUseIDs,
@@ -1109,11 +1135,8 @@ export function REPL({
               errorLookupMessages={normalizedMessages}
               inProgressToolUseIDs={inProgressToolUseIDs}
               expandToolDetails={toolDetailsExpanded}
-              segmentTitles={segmentTitles}
               waveFinalized={piece.waveFinalized}
-              variant={
-                piece.subagentChild ? 'subagent_child' : 'host_explore'
-              }
+              variant="host_explore"
             />
           )
           if (debug) {
@@ -1271,7 +1294,10 @@ export function REPL({
     () =>
       <>
         {!shouldHideNexusHeader ? (
-          <Box key={`nexus-header-${forkNumber}`} flexDirection="column">
+          <Box
+            key={`nexus-header-${forkNumber}-${layoutRemountKey}`}
+            flexDirection="column"
+          >
             <Logo
               mcpClients={mcpClients}
               isDefaultModel={isDefaultModel}
@@ -1285,6 +1311,7 @@ export function REPL({
       </>,
     [
       forkNumber,
+      layoutRemountKey,
       messagesJSX,
       mcpClients,
       isDefaultModel,
@@ -1313,7 +1340,7 @@ export function REPL({
           </Box>
         ) : null}
         {!toolJSX && !toolUseConfirm && !binaryFeedbackContext && isLoading && (
-          !(nexusBootstrap && hasRunningSubagent) ? <Spinner /> : null
+          <Spinner />
         )}
         {!toolJSX && binaryFeedbackContext && !isMessageSelectorVisible && (
           <BinaryFeedback
@@ -1455,7 +1482,7 @@ export function REPL({
                 submitCount={submitCount}
                 onSubmitCountChange={setSubmitCount}
                 setIsLoading={setIsLoading}
-                setAbortController={setAbortController}
+                setAbortController={assignAbortController}
                 onShowMessageSelector={() =>
                   setIsMessageSelectorVisible(prev => !prev)
                 }

@@ -12,7 +12,7 @@
  *     ⎿ Done
  *
  * N agents:
- *   Running N subagents…
+ *   ● Running N subagents…
  *     …
  */
 import { Box, Text } from 'ink'
@@ -48,6 +48,8 @@ export function ToolHistorySection({
   agentId,
   theme,
   showBackgroundHint = true,
+  /** If true, show only the most recent tool line (sub-agent UX). */
+  lastOnly = false,
 }: {
   history: string[]
   expandToolDetails: boolean
@@ -55,10 +57,11 @@ export function ToolHistorySection({
   theme: ReturnType<typeof getTheme>
   /** Hide “ctrl+b to run in background” (e.g. host Exploring/Explored block). */
   showBackgroundHint?: boolean
+  lastOnly?: boolean
 }): React.ReactNode {
-  const maxShown = expandToolDetails ? history.length : 3
+  const maxShown = lastOnly ? 1 : expandToolDetails ? history.length : 3
   const visible = history.slice(-maxShown)
-  const hidden = Math.max(0, history.length - maxShown)
+  const hidden = lastOnly ? 0 : Math.max(0, history.length - maxShown)
 
   // "  ⎿ " = 2sp + ⎿ + sp = 4 chars → tool name at col 4.
   // All continuation lines must start at col 4 to align vertically.
@@ -67,7 +70,7 @@ export function ToolHistorySection({
       {visible.length > 0 ? (
         <>
           <Box>
-            <Text color={theme.primary}>  ⎿ </Text>
+            <Text color={theme.secondaryText}>  ⎿ </Text>
             <Text>{visible[0]}</Text>
           </Box>
           {visible.slice(1).map((line, idx) => (
@@ -81,11 +84,11 @@ export function ToolHistorySection({
           <Text dimColor>  ⎿ Starting…</Text>
         </Box>
       )}
-      {hidden > 0 && (
+      {hidden > 0 && !lastOnly ? (
         <Box>
           <Text dimColor>    +{hidden} more tool uses (ctrl+o to expand)</Text>
         </Box>
-      )}
+      ) : null}
       {showBackgroundHint ? (
         <Box>
           <Text dimColor>    ctrl+b to run in background</Text>
@@ -110,24 +113,24 @@ function AgentBlock({
 
   return (
     <Box flexDirection="column">
-      <Box>
-        <Text color={isCompleted ? (isErr ? theme.error : (theme.success ?? 'green')) : theme.primary}>
-          {isCompleted ? (isErr ? '✗ ' : '✓ ') : '● '}
-        </Text>
-        <Text bold>{modeLabel(sa.mode)}({truncateTask(sa.task, 64)})</Text>
-      </Box>
-
       {isCompleted ? (
         <Box>
           <Text dimColor>  ⎿ {isErr ? (sa.error ?? 'Failed') : 'Done'}</Text>
         </Box>
       ) : (
-        <ToolHistorySection
-          history={sa.toolHistory}
-          expandToolDetails={expandToolDetails}
-          agentId={sa.id}
-          theme={theme}
-        />
+        <>
+          <Box>
+            <Text color={theme.primary}>● </Text>
+            <Text bold>{modeLabel(sa.mode)}({truncateTask(sa.task, 64)})</Text>
+          </Box>
+          <ToolHistorySection
+            history={sa.toolHistory}
+            expandToolDetails={expandToolDetails}
+            agentId={sa.id}
+            theme={theme}
+            lastOnly
+          />
+        </>
       )}
     </Box>
   )
@@ -192,7 +195,7 @@ export function NexusSubagentBlock({
     <Box flexDirection="column" paddingX={1}>
       {isMulti && running.length > 0 && (
         <Box>
-          <Text color={theme.primary}>✽ </Text>
+          <Text color={theme.primary}>● </Text>
           <Text bold>
             {running.length === visible.length
               ? `Running ${running.length} subagents…`
@@ -208,8 +211,9 @@ export function NexusSubagentBlock({
       ))}
 
       {!isMulti && running.length === 1 && (
-        <Box>
-          <Text color={theme.secondaryText}>✽ Running subagent…</Text>
+        <Box flexWrap="nowrap">
+          <Text color={theme.primary}>● </Text>
+          <Text color={theme.secondaryText}>Running subagent…</Text>
         </Box>
       )}
     </Box>

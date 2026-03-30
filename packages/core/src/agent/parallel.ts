@@ -1,5 +1,15 @@
+import * as crypto from "node:crypto"
 import { z } from "zod"
-import type { ToolDef, ToolContext, NexusConfig, Mode, AgentEvent } from "../types.js"
+import type {
+  ToolDef,
+  ToolContext,
+  NexusConfig,
+  Mode,
+  AgentEvent,
+  ISession,
+  SessionMessage,
+  ToolPart,
+} from "../types.js"
 import { Session } from "../session/index.js"
 import { loadRules } from "../context/rules.js"
 import { loadSkills } from "../skills/manager.js"
@@ -14,6 +24,69 @@ export interface SubAgentResult {
   success: boolean
   output: string
   error?: string
+  /** Write/Edit tool parts from the sub-agent session (merged into parent for session diff). */
+  fileEditParts?: ToolPart[]
+}
+
+function findAssistantMessageIdWithToolPart(
+  messages: SessionMessage[],
+  toolPartId: string,
+): string | undefined {
+  for (const m of messages) {
+    if (m.role !== "assistant") continue
+    const c = m.content
+    if (!Array.isArray(c)) continue
+    for (const p of c) {
+      if (p.type === "tool" && (p as ToolPart).id === toolPartId) return m.id
+    }
+  }
+  return undefined
+}
+
+function collectCompletedWriteEditParts(messages: SessionMessage[]): ToolPart[] {
+  const out: ToolPart[] = []
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue
+    const c = msg.content
+    if (!Array.isArray(c)) continue
+    for (const p of c) {
+      if (p.type !== "tool") continue
+      const tp = p as ToolPart
+      if (
+        (tp.tool === "Write" || tp.tool === "Edit") &&
+        tp.status === "completed" &&
+        tp.path
+      ) {
+        out.push(tp)
+      }
+    }
+  }
+  return out
+}
+
+function mergeSubagentFileEditsIntoParentSession(
+  parent: ISession,
+  spawnToolPartId: string | undefined,
+  parts: ToolPart[],
+  fallbackAssistantMessageId?: string,
+): void {
+  if (parts.length === 0) return
+  let msgId = spawnToolPartId
+    ? findAssistantMessageIdWithToolPart(parent.messages, spawnToolPartId)
+    : undefined
+  if (!msgId && fallbackAssistantMessageId) {
+    const m = parent.messages.find((x) => x.id === fallbackAssistantMessageId)
+    if (m?.role === "assistant") msgId = m.id
+  }
+  if (!msgId) return
+  for (const tp of parts) {
+    const clone: ToolPart = {
+      ...tp,
+      id: `part_${crypto.randomBytes(8).toString("hex")}`,
+      mergedFromSubagent: true,
+    }
+    parent.addToolPart(msgId, clone)
+  }
 }
 
 type SubAgentStatus = "running" | "completed" | "error"
@@ -83,7 +156,7 @@ export class ParallelAgentManager {
         await Promise.resolve()
       }
 
-      const subagentId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      const subagentId = `subagent_${crypto.randomUUID()}`
       this.rememberId(subagentId)
       this.outputById.set(subagentId, "")
       this.statusById.set(subagentId, "running")
@@ -127,23 +200,26 @@ export class ParallelAgentManager {
     emit?: (event: AgentEvent) => void,
     contextSummary?: string,
     parentPartId?: string,
+    spawnOptions?: { skipDuplicateCheck?: boolean },
   ): Promise<SubAgentResult> {
-    const taskKey = description.trim().slice(0, ParallelAgentManager.TASK_KEY_LEN).toLowerCase()
-    const isDuplicate = this.recentSpawnTasks.some(
-      (t) => t === taskKey || taskKey.startsWith(t) || t.startsWith(taskKey)
-    )
-    if (isDuplicate) {
-      return {
-        subagentId: `skip_${Date.now()}`,
-        sessionId: "",
-        success: true,
-        output:
-          "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call SpawnAgent again for the same task.",
+    if (!spawnOptions?.skipDuplicateCheck) {
+      const taskKey = description.trim().slice(0, ParallelAgentManager.TASK_KEY_LEN).toLowerCase()
+      const isDuplicate = this.recentSpawnTasks.some(
+        (t) => t === taskKey || taskKey.startsWith(t) || t.startsWith(taskKey)
+      )
+      if (isDuplicate) {
+        return {
+          subagentId: `skip_${Date.now()}`,
+          sessionId: "",
+          success: true,
+          output:
+            "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call SpawnAgent again for the same task.",
+        }
       }
-    }
-    this.recentSpawnTasks.push(taskKey)
-    if (this.recentSpawnTasks.length > ParallelAgentManager.RECENT_SPAWN_CAP) {
-      this.recentSpawnTasks.shift()
+      this.recentSpawnTasks.push(taskKey)
+      if (this.recentSpawnTasks.length > ParallelAgentManager.RECENT_SPAWN_CAP) {
+        this.recentSpawnTasks.shift()
+      }
     }
 
     const { task } = await this.startTask(
@@ -331,7 +407,14 @@ export class ParallelAgentManager {
       this.outputById.set(subagentId, output)
       this.statusById.set(subagentId, "completed")
       this.errorById.set(subagentId, undefined)
-      return { subagentId, sessionId: session.id, success: true, output }
+      const fileEditParts = collectCompletedWriteEditParts(session.messages)
+      return {
+        subagentId,
+        sessionId: session.id,
+        success: true,
+        output,
+        fileEditParts,
+      }
     } catch (err) {
       const error = (err as Error).message
       emit?.({
@@ -351,6 +434,7 @@ export class ParallelAgentManager {
         success: false,
         output: output || "",
         error,
+        fileEditParts: collectCompletedWriteEditParts(session.messages),
       }
     }
   }
@@ -436,6 +520,10 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
           emit,
           contextSummary,
           ctx.partId,
+          {
+            skipDuplicateCheck:
+              ctx.skipSubagentDuplicateCheck === true,
+          },
         )
 
       if (args.run_in_background) {
@@ -458,13 +546,21 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
       }
 
       const result = await runOne(args.description, args.context_summary, args.mode)
+      if (result.fileEditParts?.length) {
+        mergeSubagentFileEditsIntoParentSession(
+          ctx.session,
+          ctx.partId,
+          result.fileEditParts,
+          ctx.toolExecutionMessageId,
+        )
+      }
       if (result.error) {
         return {
           success: false,
           output: `Sub-agent ${result.subagentId} failed: ${result.error}\nPartial output: ${result.output}`,
         }
       }
-      return { success: true, output: `Sub-agent ${result.subagentId} completed:\n\n${result.output}` }
+      return { success: true, output: result.output.trimEnd() }
     },
   }
 }
@@ -588,6 +684,7 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
             emit,
             agent.context_summary,
             ctx.partId,
+            { skipDuplicateCheck: true },
           )
         )
       )
@@ -599,6 +696,16 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
       })
 
       const allOk = results.every((r) => !r.error)
+      for (const r of results) {
+        if (r.fileEditParts?.length) {
+          mergeSubagentFileEditsIntoParentSession(
+            ctx.session,
+            ctx.partId,
+            r.fileEditParts,
+            ctx.toolExecutionMessageId,
+          )
+        }
+      }
       return {
         success: allOk,
         output: `Ran ${results.length} sub-agents in parallel.\n\n${parts.join("\n\n")}`,

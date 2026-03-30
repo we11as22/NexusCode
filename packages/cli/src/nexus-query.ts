@@ -113,6 +113,7 @@ function sessionMessageToAssistantContent(msg: SessionMessage): ContentBlockPara
       }
     } else if (p.type === 'tool') {
       const tp = p as ToolPart
+      if (tp.mergedFromSubagent) continue
       if (TODO_TOOL_NAMES.has(tp.tool)) continue
       if (shouldHideSubagentToolDisplay(tp.tool, tp.input)) continue
       blocks.push({

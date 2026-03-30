@@ -48,3 +48,12 @@ export function clearTerminal(): Promise<void> {
     })
   })
 }
+
+/** Clear visible screen and home cursor only; does not erase scrollback (unlike full {@link clearTerminal}). */
+export function clearTerminalViewport(): Promise<void> {
+  return new Promise(resolve => {
+    process.stdout.write('\x1b[2J\x1b[H', () => {
+      resolve()
+    })
+  })
+}

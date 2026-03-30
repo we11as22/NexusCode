@@ -208,6 +208,11 @@ For concurrent sub-agents (simpler):
       }
     }
 
+    const hasSpawnAgentBatch = resolvedToolUses.some(
+      ({ tool }) => tool?.name === "SpawnAgent" || tool?.name === "SpawnAgents",
+    )
+    const prevSkipDup = ctx.skipSubagentDuplicateCheck
+    if (hasSpawnAgentBatch) ctx.skipSubagentDuplicateCheck = true
     const promises = tool_uses.map(async (use): Promise<ParallelResult> => {
       const tool = resolveTool(use, byExactName, byCanonicalName)
       if (!tool) {
@@ -289,7 +294,12 @@ For concurrent sub-agents (simpler):
       }
     })
 
-    const results = await Promise.all(promises)
+    let results: ParallelResult[]
+    try {
+      results = await Promise.all(promises)
+    } finally {
+      if (hasSpawnAgentBatch) ctx.skipSubagentDuplicateCheck = prevSkipDup
+    }
     const successful = results.filter((result) => result.success).length
     const parts = [
       `Executed ${results.length} tool calls in parallel (${successful}/${results.length} successful).`,
