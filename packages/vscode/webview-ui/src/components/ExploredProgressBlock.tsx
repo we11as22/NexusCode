@@ -192,6 +192,27 @@ export type AssistantDisplaySegment =
   | { type: "part"; index: number; part: MessagePart }
   | { type: "explored"; startIndex: number; endIndex: number; prefixItems: ExploredPrefixItem[] }
 
+function explorationPrefixItemSignature(item: ExploredPrefixItem): string {
+  if (item.type === "reasoning") {
+    return `reasoning:${(item.text ?? "").trim()}`
+  }
+  return `tool:${item.part.id}`
+}
+
+function dedupeExplorationPrefixItems(items: ExploredPrefixItem[]): ExploredPrefixItem[] {
+  if (items.length <= 1) return items
+  const seen = new Set<string>()
+  const deduped: ExploredPrefixItem[] = []
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index]!
+    const signature = explorationPrefixItemSignature(item)
+    if (seen.has(signature)) continue
+    seen.add(signature)
+    deduped.push(item)
+  }
+  return deduped.reverse()
+}
+
 /** Split assistant parts into chronological display segments; each explored segment is one contiguous exploration sequence. */
 export function getAssistantDisplaySegments(parts: MessagePart[]): AssistantDisplaySegment[] {
   const segments: AssistantDisplaySegment[] = []
@@ -214,7 +235,7 @@ export function getAssistantDisplaySegments(parts: MessagePart[]): AssistantDisp
         type: "explored",
         startIndex: sequenceStartIndex,
         endIndex: sequenceEndIndex,
-        prefixItems: sequenceItems,
+        prefixItems: dedupeExplorationPrefixItems(sequenceItems),
       })
     } else {
       for (let i = sequenceStartIndex; i <= sequenceEndIndex; i++) {

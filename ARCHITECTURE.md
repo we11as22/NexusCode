@@ -39,6 +39,8 @@ VS Code now consumes part of that control plane directly. `EnterPlanMode` can sw
 
 Prompt memory injection is no longer "latest N records only". The loop fetches a wider candidate set and ranks memories against the latest task/user turn before attaching them to the prompt. This keeps the prompt closer to relevant-memory prefetch instead of blindly replaying stale facts.
 
+The core prompt contract is also stricter now. Besides mode rules and tool guidance, it explicitly treats tool output and external resources as evidence rather than authority, warns against prompt injection coming from files/tool results/hooks/remote messages, and requires truthful reporting of verification status. Tool descriptions were tightened in the same direction so the model gets clearer "use this / do not use this" guidance for file tools, shell, task orchestration, questions, todos, planning handoff, and LSP navigation.
+
 Plan-mode prompt contracts are now more execution-oriented as well. The planning prompt explicitly asks for milestone-structured `.nexus/plans/*` output with findings, file-level changes, risks, validation, and rollback notes, so approved plans can be materialized into runtime tasks or initial todos with less reinterpretation on the next agent-mode turn.
 
 ### Deferred tool surface
@@ -72,11 +74,13 @@ This keeps NexusCode extensible without inheriting OpenClaude's Anthropic-specif
 
 The plugin runtime stays provider-neutral: manifests and hooks extend Nexus behavior without assuming Anthropic SDK semantics.
 
-Team/swarm lifecycle is now tied directly to task execution. When a task has `teamName` and `owner`, the runtime can upsert that owner as a teammate, mark them active on assignment, and mark them idle/offline when the task reaches a terminal state. That keeps `Task*`, `Team*`, plugin hooks, and host UI on a single lifecycle instead of multiple overlapping models.
+Team/swarm lifecycle is now tied directly to task execution. When a task has `teamName` and `owner`, the runtime can upsert that owner as a teammate, mark them active on assignment, and mark them idle/offline when the task reaches a terminal state. `TeamInbox` provides a coordinator-style view of members, active tasks, and recent messages; `TeamAssignTask` tightens assignment by updating both the task owner/team linkage and teammate activity in one operation. That keeps `Task*`, `Team*`, plugin hooks, and host UI on a single lifecycle instead of multiple overlapping models.
 
-Remote sessions remain NDJSON server streams, but they are now treated as explicit runtime objects rather than loose reconnect metadata. `ListRemoteSessions`, `GetRemoteSession`, `ReconnectRemoteSession`, `SendRemoteMessage`, and `InterruptRemoteSession` all operate on the same `RemoteSessionRecord`, and viewer-only sessions are enforced at the tool layer so read-only remote clients cannot accidentally mutate the remote run.
+Remote sessions remain NDJSON server streams, but they are now treated as explicit runtime objects rather than loose reconnect metadata. `ListRemoteSessions`, `GetRemoteSession`, `ReconnectRemoteSession`, `SendRemoteMessage`, and `InterruptRemoteSession` all operate on the same `RemoteSessionRecord`, and viewer-only sessions are enforced at the tool layer so read-only remote clients cannot accidentally mutate the remote run. Client-side reconnect attempts now surface explicit `remote_session_updated` events as the server stream retries, so CLI/VS Code can show reconnecting/connected/error transitions instead of only a terminal fetch error.
 
-Plan workflow remains file-first under `.nexus/plans/`, but now has an execution-audit bridge. `PlanMaterializeTasks` turns plan items into durable runtime tasks, and `PlanVerifyExecution` checks those tasks back against the written plan before final completion.
+Plan workflow remains file-first under `.nexus/plans/`, but it now also has a lightweight stateful engine under `.nexus/plans/.workflow/`. `PlanStartWorkflow` creates an interview/research workflow, `PlanAnswerWorkflow` records the interview answers, `PlanCreateResearchTasks` turns unresolved questions into durable research tasks, `PlanDraftWorkflow` writes a markdown plan file from the interview + research state, and `PlanGetWorkflow` lets later turns recover that planning context. `PlanMaterializeTasks` still turns plan items into durable runtime tasks, and `PlanVerifyExecution` checks those tasks back against the written plan before final completion.
+
+Plugin lifecycle is stricter and more operationally useful. Manifest validation now checks declared command/agent/skill/MCP paths on disk and validates hook declarations (`event:path`). On top of the existing runtime controls, project-scoped plugins can now be installed from a local directory (`PluginInstallLocal`), removed (`PluginRemove`), and validated explicitly (`PluginValidate`) without leaving the agent/runtime surface.
 
 `LSP` is now a first-class built-in tool. The tool contract lives in `packages/core`, but execution is host-provided through `IHost.queryLanguageServer()`. The VS Code host implements:
 - definitions

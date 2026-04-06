@@ -28,6 +28,7 @@ When to use:
 - New files, boilerplate, or full rewrites.
 - When the change affects more than half of the file.
 - When you already know the exact final contents and a targeted Edit would be more complex or fragile than rewriting the whole file.
+- When you need to replace a generated or machine-written file wholesale and preserving tiny local hunks is not important.
 
 When NOT to use:
 - Small or targeted edits: use Edit (faster, less error-prone).
@@ -35,8 +36,9 @@ When NOT to use:
 - **Existing files:** If the file already exists, you MUST use Read first to read its contents. This tool will fail if you attempt to write to an existing file without having read it first. Then use either Edit for targeted changes or Write with the complete final content.
 - NEVER proactively create documentation files (*.md, README). Only create them if the user explicitly requests.
 - Only use emojis in file content if the user explicitly asks.
+- Do not use Write when you have not yet decided the final file contents. Explore first, then write once.
 
-WARNING: Write replaces the entire file. Provide complete final content. Creates parent directories if needed.`,
+WARNING: Write replaces the entire file. Provide complete final content, not a patch or fragment. Creates parent directories if needed.`,
   parameters: schema,
   requiresApproval: true,
 

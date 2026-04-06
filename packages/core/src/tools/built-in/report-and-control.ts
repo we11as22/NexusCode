@@ -96,6 +96,7 @@ export const askFollowupTool: ToolDef<AskFollowupQuestionArgs> = {
 When to use:
 - Genuinely blocked: choice between options, missing config, ambiguous requirement that tools cannot resolve.
 - After doing all non-blocked work; ask one focused question at a time.
+- When there is a real product or design choice the codebase cannot answer for you.
 
 When NOT to use:
 - Information you can get via tools (read config, search codebase, grep).
@@ -161,7 +162,7 @@ When NOT to use:
 - Purely conversational or informational requests
 - NEVER include operational/housekeeping steps in todos: do NOT add items for "run lint", "run tests", "search codebase", "read file X". Todo items must be deliverable milestones (e.g. "Add dark mode toggle", "Fix login validation", "Implement API endpoint").
 
-Task states: pending | in_progress | completed | cancelled. Use merge=true to update existing todos by id; use merge=false to replace the entire list. Mark tasks completed IMMEDIATELY after finishing; do not batch completions. Prefer creating the first todo as in_progress and starting work in the same turn. Do not announce "I'm updating the todo list" — just call the tool.`,
+Task states: pending | in_progress | completed | cancelled. Use merge=true to update existing todos by id; use merge=false to replace the entire list. Mark tasks completed IMMEDIATELY after finishing; do not batch completions. Prefer creating the first todo as in_progress and starting work in the same turn. Keep exactly one item in_progress. Do not announce "I'm updating the todo list" — just call the tool.`,
   parameters: todoSchema,
 
   async execute({ merge, todos }, ctx: ToolContext) {

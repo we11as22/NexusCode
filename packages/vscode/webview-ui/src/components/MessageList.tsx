@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
 import { NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX } from "../constants/questionnaire.js"
-import { ExploredSummaryInline, getExplorationItemsFromToolPart, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
+import { ExploredSummaryInline, getAssistantDisplaySegments, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
 import { ThoughtBlock } from "./ThoughtBlock.js"
 import { MermaidBlock } from "./MermaidBlock.js"
 import { postMessage } from "../vscode.js"
@@ -281,40 +281,11 @@ function assistantPartStableKey(messageId: string, part: MessagePart, partIndex:
 
 function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): ChatRenderItem[] {
   const renderItems: ChatRenderItem[] = []
-  let pendingReasoning: Array<Extract<ChatRenderItem, { type: "assistant_part" }>> = []
-  let activeExploration:
-    | {
-        key: string
-        prefixItems: ExploredPrefixItem[]
-      }
-    | null = null
-
-  const flushPendingReasoning = () => {
-    if (pendingReasoning.length === 0) return
-    renderItems.push(...pendingReasoning)
-    pendingReasoning = []
-  }
-
-  const flushExploration = (running: boolean) => {
-    if (!activeExploration || activeExploration.prefixItems.length === 0) {
-      activeExploration = null
-      return
-    }
-    renderItems.push({
-      type: "explored",
-      key: activeExploration.key,
-      prefixItems: [...activeExploration.prefixItems],
-      isRunning: running,
-    })
-    activeExploration = null
-  }
 
   messages.forEach((message, messageIndex) => {
     const isComplete = !isRunning || messageIndex < messages.length - 1
 
     if (message.role !== "assistant" || typeof message.content === "string" || !Array.isArray(message.content)) {
-      flushExploration(false)
-      flushPendingReasoning()
       renderItems.push({
         type: "message",
         key: message.id,
@@ -327,9 +298,26 @@ function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): C
 
     const parts = message.content as MessagePart[]
     const canonicalReplyIndex = getCanonicalReplyIndex(parts)
+    const segments = getAssistantDisplaySegments(parts)
 
-    parts.forEach((part, partIndex) => {
-      const baseItem: Extract<ChatRenderItem, { type: "assistant_part" }> = {
+    segments.forEach((segment, segmentIndex) => {
+      if (segment.type === "explored") {
+        if (segment.prefixItems.length === 0) return
+        const isTrailingSegment = segmentIndex === segments.length - 1
+        renderItems.push({
+          type: "explored",
+          key: `${message.id}-explored-${segment.startIndex}-${segment.endIndex}`,
+          prefixItems: segment.prefixItems,
+          isRunning: Boolean(isRunning && !isComplete && isTrailingSegment),
+        })
+        return
+      }
+
+      const { part, index: partIndex } = segment
+      if (part.type === "tool" && TODO_TOOL_NAMES.has((part as ToolPart).tool)) return
+      if (part.type === "reasoning" && !isReasoningPartRenderable(part)) return
+      if (part.type === "text" && !hasVisibleTextPart(part)) return
+      renderItems.push({
         type: "assistant_part",
         key: assistantPartStableKey(message.id, part, partIndex),
         message,
@@ -340,75 +328,9 @@ function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): C
         partIndex,
         canonicalReplyIndex,
         isLastPart: partIndex === parts.length - 1,
-      }
-
-      if (part.type === "reasoning") {
-        if (activeExploration) {
-          if (isReasoningPartRenderable(part)) {
-            const reasoning = part as { text: string; durationMs?: number }
-            activeExploration.prefixItems.push({
-              type: "reasoning",
-              text: reasoning.text,
-              durationMs: reasoning.durationMs,
-            })
-          }
-          return
-        }
-        pendingReasoning.push(baseItem)
-        return
-      }
-
-      if (part.type === "tool") {
-        if (TODO_TOOL_NAMES.has((part as ToolPart).tool)) return
-        const explorationItems = getExplorationItemsFromToolPart(part as ToolPart)
-        if (explorationItems.length > 0) {
-          if (!activeExploration) {
-            activeExploration = {
-              // Stable key per tool call — part indices shift when reasoning/tools reorder.
-              key: `${message.id}-explored-tool-${(part as ToolPart).id}`,
-              prefixItems: pendingReasoning
-                .filter((item) => item.part.type === "reasoning" && isReasoningPartRenderable(item.part))
-                .map((item) => {
-                  const reasoning = item.part as { text: string; durationMs?: number }
-                  return {
-                    type: "reasoning" as const,
-                    text: reasoning.text,
-                    durationMs: reasoning.durationMs,
-                  }
-                }),
-            }
-            pendingReasoning = []
-          }
-          activeExploration.prefixItems.push(...explorationItems)
-          return
-        }
-
-        flushExploration(false)
-        flushPendingReasoning()
-        renderItems.push(baseItem)
-        return
-      }
-
-      if (part.type === "text") {
-        if (hasVisibleTextPart(part)) {
-          flushExploration(false)
-          flushPendingReasoning()
-          renderItems.push(baseItem)
-        }
-        return
-      }
-
-      flushExploration(false)
-      flushPendingReasoning()
-      renderItems.push(baseItem)
+      })
     })
   })
-
-  if (activeExploration) {
-    flushExploration(isRunning)
-  } else {
-    flushPendingReasoning()
-  }
 
   return renderItems
 }

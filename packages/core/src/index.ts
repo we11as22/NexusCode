@@ -110,6 +110,7 @@ export {
   type AppliedReplacementSnippet,
 } from "./tools/applied-replacements.js"
 export { getAllBuiltinTools } from "./tools/built-in/index.js"
+export { interpretShellCommandResult } from "./tools/built-in/shell-command-semantics.js"
 export {
   NEXUS_CUSTOM_OPTION_ID,
   NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX,

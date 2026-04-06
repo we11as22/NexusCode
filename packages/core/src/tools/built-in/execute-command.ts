@@ -14,6 +14,7 @@ import {
   detectPreferDedicatedToolMessage,
   isLikelyLongRunningShellCommand,
 } from "./shell-safety.js"
+import { interpretShellCommandResult } from "./shell-command-semantics.js"
 
 const MAX_OUTPUT_BYTES = 50 * 1024 // 50 KB
 /** Max size of saved full output file (OpenCode-style disk protection). */
@@ -171,10 +172,14 @@ export async function startBackgroundShellTask(args: {
   child.on("exit", (code, signalName) => {
     void (async () => {
       const output = await readBackgroundOutput(logPath)
+      const interpretation =
+        typeof code === "number"
+          ? interpretShellCommandResult(args.command, code, output ?? "", "")
+          : { isError: true as const }
       const status =
         signalName === "SIGTERM" || signalName === "SIGKILL"
           ? "killed"
-          : code === 0
+          : !interpretation.isError
             ? "completed"
             : "failed"
       const next = await runtime.setBackgroundTaskStatus(taskId, status, {
@@ -183,6 +188,9 @@ export async function startBackgroundShellTask(args: {
         metadata: {
           tool: args.shellRunner === "powershell" ? "PowerShell" : "Bash",
           shellRunner: args.shellRunner ?? "bash",
+          ...(typeof code === "number" && interpretation.message
+            ? { returnCodeInterpretation: interpretation.message }
+            : {}),
           ...(signalName ? { signal: signalName } : {}),
           ...(args.metadata ?? {}),
         },
@@ -238,6 +246,8 @@ export const bashTool: ToolDef<z.infer<typeof schema>> = {
 
 IMPORTANT: This tool is for terminal operations like git, npm, docker, builds, tests, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) — use the dedicated tools instead.
 
+Prefer the lowest-impact shell command that can answer the question. Inspect before mutating, and prefer dry-run or diff-producing variants when available.
+
 Before executing the command, follow these steps:
 
 1. Directory Verification:
@@ -250,6 +260,8 @@ Before executing the command, follow these steps:
 
 Usage notes:
   - The command argument is required.
+  - Use foreground execution for short diagnostics and commands whose output you need immediately.
+  - Use \`run_in_background: true\` only for commands that are genuinely long-running or when you have real parallel work to do while they run.
   - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Default timeout is 120000ms (2 minutes).
   - Write a clear, concise description of what this command does in active voice. For simple commands keep it brief (5-10 words). For complex piped commands or obscure flags, add enough context so a reader understands at a glance. Never use words like "complex" or "risk" in the description.
     - ls → "List files in current directory"
@@ -403,6 +415,7 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
     }
 
     const fullOutput = sanitizeOutput(result.stdout + (result.stderr ? `\n[stderr]\n${result.stderr}` : ""))
+    const interpretation = interpretShellCommandResult(command, result.exitCode, result.stdout, result.stderr)
     const bytes = Buffer.byteLength(fullOutput, "utf8")
     let outputMessage: string
     if (bytes <= MAX_OUTPUT_BYTES) {
@@ -436,12 +449,19 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
       outputMessage = truncated + hint
     }
 
-    const success = result.exitCode === 0
+    const success = !interpretation.isError
     const header = `$ ${command}\n[exit: ${result.exitCode}]\n`
 
     return {
       success,
-      output: header + (dangerousMessage ? `[warning] ${dangerousMessage}\n` : "") + outputMessage,
+      output:
+        header +
+        (dangerousMessage ? `[warning] ${dangerousMessage}\n` : "") +
+        (interpretation.message ? `[status] ${interpretation.message}\n` : "") +
+        outputMessage,
+      metadata: {
+        ...(interpretation.message ? { returnCodeInterpretation: interpretation.message } : {}),
+      },
     }
   },
 }

@@ -86,13 +86,15 @@ Usage:
 - ALWAYS prefer editing existing files. NEVER create new files unless explicitly required.
 - Only use emojis if the user explicitly requests them.
 - The edit will FAIL if old_string is not unique in the file. Either provide a larger string with more surrounding context to make it unique, or use replace_all to change every occurrence.
+- Prefer one well-scoped replacement over a chain of micro-edits. Re-read first if the file may have drifted after earlier edits.
 - Use replace_all for replacing and renaming strings across the entire file (e.g. renaming a variable).
 - For multiple changes in the same file, prefer ONE Edit call with \`blocks\` (applied in order) instead of many sequential Edit calls.
 - If you need multiple changes in the same file, do not make many tiny Edit calls. Re-read once and apply remaining changes with one larger old_string/new_string replacement when feasible.
 
 When NOT to use:
 - Do not use Edit to create a brand-new file; use Write.
-- Do not use Edit when the whole file is being replaced; use Write with the final content.`,
+- Do not use Edit when the whole file is being replaced; use Write with the final content.
+- Do not use Edit with guessed text. If whitespace, quoting, or line endings are uncertain, re-read the exact range first.`,
   parameters: schema,
   requiresApproval: true,
 

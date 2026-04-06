@@ -47,6 +47,25 @@ const LONG_RUNNING_PREFIXES = [
   "tail -f",
 ]
 
+const LONG_RUNNING_BASE_COMMANDS = new Set([
+  "npm",
+  "pnpm",
+  "yarn",
+  "node",
+  "python",
+  "python3",
+  "go",
+  "cargo",
+  "make",
+  "docker",
+  "docker-compose",
+  "kubectl",
+  "webpack",
+  "vite",
+  "jest",
+  "pytest",
+])
+
 const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
   { pattern: /\brm\s+-rf\s+\/($|\s)/i, message: "Refusing destructive root deletion command." },
   { pattern: /\bgit\s+reset\s+--hard\b/i, message: "Destructive git reset detected." },
@@ -60,6 +79,13 @@ export type ShellRunner = "bash" | "powershell"
 
 export function normalizeShellCommand(command: string): string {
   return command.replace(/\s+/g, " ").trim()
+}
+
+function splitCommandRough(command: string): string[] {
+  return command
+    .split(/[|;&\r\n]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
 }
 
 function firstToken(command: string): string {
@@ -119,5 +145,18 @@ export function isLikelyLongRunningShellCommand(command: string): boolean {
   const normalized = normalizeShellCommand(command).toLowerCase()
   if (!normalized) return false
   if (LONG_RUNNING_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return true
-  return /\b(--watch|-f|follow|serve|server|dev)\b/.test(normalized)
+  const firstSegment = splitCommandRough(command)[0] ?? normalized
+  const tokens = firstSegment.toLowerCase().split(/\s+/).filter(Boolean)
+  if (tokens.length === 0) return false
+  const base = tokens[0] ?? ""
+  if (base === "tail" && tokens.includes("-f")) return true
+  if (base === "kubectl" && tokens.includes("logs") && tokens.includes("-f")) return true
+  if (!LONG_RUNNING_BASE_COMMANDS.has(base)) return false
+  if (tokens.includes("--watch")) return true
+  if (tokens.includes("watch")) return true
+  if (tokens.includes("serve")) return true
+  if (tokens.includes("server")) return true
+  if (tokens.includes("dev")) return true
+  if (base === "node" && tokens.some((token) => /(?:^|\/)(server|dev)(?:\.[a-z0-9]+)?$/i.test(token))) return true
+  return LONG_RUNNING_PREFIXES.some((prefix) => firstSegment.toLowerCase().startsWith(prefix))
 }

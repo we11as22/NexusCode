@@ -79,7 +79,13 @@ function validateRequest(args: z.infer<typeof schema>): string | null {
 
 export const lspTool: ToolDef<z.infer<typeof schema>> = {
   name: "LSP",
-  description: "IDE/LSP-aware code intelligence: definitions, references, hover, symbols, implementations, and call hierarchy when supported by the current host.",
+  description: `IDE/LSP-aware code intelligence: definitions, references, hover, symbols, implementations, and call hierarchy when supported by the current host.
+
+Use this when symbol-accurate navigation is more reliable than text search alone: follow definitions, enumerate references, inspect hover/type info, or explore implementations/call hierarchy.
+
+When NOT to use:
+- Do not use LSP for broad text discovery across the repository; use Grep, CodebaseSearch, Glob, or ListCodeDefinitions first.
+- Do not use workspaceSymbol as a substitute for reading the code once you already know the relevant file and range.`,
   parameters: schema,
   readOnly: true,
   shouldDefer: true,

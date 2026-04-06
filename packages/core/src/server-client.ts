@@ -176,13 +176,61 @@ export class NexusServerClient {
       } catch (error) {
         if (signal?.aborted) return
         if (!runId || reconnectAttempt >= maxReconnects) {
+          yield {
+            type: "remote_session_updated",
+            remoteSession: {
+              id: `remote-${sessionId}`,
+              url: this.url(`/session/${sessionId}`),
+              sessionId,
+              runId,
+              status: "error",
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              reconnectAttempts: reconnectAttempt,
+              reconnectable: false,
+              error: `Server stream failed: ${(error as Error).message}`,
+              metadata: { source: "client-stream" },
+            },
+          }
           yield { type: "error", error: `Server stream failed: ${(error as Error).message}` }
           return
         }
         reconnectAttempt++
+        yield {
+          type: "remote_session_updated",
+          remoteSession: {
+            id: `remote-${sessionId}`,
+            url: this.url(`/session/${sessionId}`),
+            sessionId,
+            runId,
+            status: "reconnecting",
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            reconnectAttempts: reconnectAttempt,
+            reconnectable: true,
+            metadata: { source: "client-stream", lastSeq },
+          },
+        }
         continue
       } finally {
         reader.releaseLock()
+      }
+      if (reconnectAttempt > 0) {
+        yield {
+          type: "remote_session_updated",
+          remoteSession: {
+            id: `remote-${sessionId}`,
+            url: this.url(`/session/${sessionId}`),
+            sessionId,
+            runId,
+            status: "connected",
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            reconnectAttempts: reconnectAttempt,
+            reconnectable: true,
+            metadata: { source: "client-stream", resumedAfterSeq: lastSeq },
+          },
+        }
       }
       if (completedNormally) return
     }

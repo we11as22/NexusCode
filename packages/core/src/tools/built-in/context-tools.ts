@@ -78,6 +78,7 @@ export const planExitTool: ToolDef<z.infer<typeof planExitSchema>> = {
 Call this tool:
 - After you have written a complete plan to a file in \`.nexus/plans/\` (e.g. \`.nexus/plans/plan.md\`). PlanExit is rejected until at least one such file exists.
 - When you are confident the plan is ready for implementation (and any blocking questions have been resolved via AskFollowupQuestion).
+- When your summary for the user is short and high-signal; the detailed plan belongs in the plan file, not in the tool args.
 
 When NOT to use:
 - For research-only tasks (searching, reading, understanding the codebase) — do NOT use PlanExit. Use it only when the task requires planning the implementation steps of code changes.

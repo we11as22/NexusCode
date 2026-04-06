@@ -13,11 +13,20 @@ import { getClaudeCompatibilityOptions } from "../../compat/claude.js"
 import { getParallelAgentManager } from "../../agent/parallel.js"
 import { ensureTeamMemberForTask, handleCompletedTaskSideEffects } from "../../orchestration/task-lifecycle.js"
 import {
+  createPlanWorkflow,
+  getPlanWorkflow,
+  listPlanWorkflows,
+  summarizePlanWorkflow,
+  updatePlanWorkflow,
+} from "../../orchestration/plan-workflow.js"
+import {
   detectBlockedSleepPattern,
   detectDangerousShellPattern,
   detectPreferDedicatedToolMessage,
   isLikelyLongRunningShellCommand,
 } from "./shell-safety.js"
+import { interpretShellCommandResult } from "./shell-command-semantics.js"
+import { validatePluginManifestFile } from "../../plugins/index.js"
 
 function zodPreview(schema: z.ZodTypeAny): unknown {
   const def = (schema as z.ZodTypeAny & { _def?: { typeName?: string; shape?: () => Record<string, z.ZodTypeAny>; innerType?: z.ZodTypeAny; options?: z.ZodTypeAny[]; values?: readonly string[] } })._def
@@ -100,6 +109,25 @@ async function updateProjectPluginConfig(
   await writeProjectConfigDocument(cwd, doc)
 }
 
+function slugifyName(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || `plugin-${Date.now()}`
+}
+
+async function copyDirectoryRecursive(sourceDir: string, targetDir: string): Promise<void> {
+  await fs.mkdir(targetDir, { recursive: true })
+  const entries = await fs.readdir(sourceDir, { withFileTypes: true })
+  for (const entry of entries) {
+    const sourcePath = path.join(sourceDir, entry.name)
+    const targetPath = path.join(targetDir, entry.name)
+    if (entry.isDirectory()) {
+      await copyDirectoryRecursive(sourcePath, targetPath)
+      continue
+    }
+    if (entry.isSymbolicLink()) continue
+    await fs.copyFile(sourcePath, targetPath)
+  }
+}
+
 function isProcessRunning(pid: number | undefined): boolean {
   if (!pid || pid <= 0) return false
   try {
@@ -118,7 +146,7 @@ const sendUserMessageSchema = z.object({
 
 export const sendUserMessageTool: ToolDef<z.infer<typeof sendUserMessageSchema>> = {
   name: "SendUserMessage",
-  description: "Send a structured reply to the user. The message is also returned as the tool output so hosts can surface it.",
+  description: "Send a structured user-facing reply when the host supports explicit message surfacing. Use it for concise, final user communication, not for internal coordination.",
   parameters: sendUserMessageSchema,
   async execute({ message, status }, _ctx) {
     return {
@@ -136,7 +164,7 @@ const toolSearchSchema = z.object({
 
 export const toolSearchTool: ToolDef<z.infer<typeof toolSearchSchema>> = {
   name: "ToolSearch",
-  description: "Search available tools and return compact schema previews for the best matches.",
+  description: "Search available tools and return compact schema previews for the best matches. Use this when a capability is missing from the initial manifest or when you need the exact canonical task/tool name instead of guessing.",
   parameters: toolSearchSchema,
   readOnly: true,
   async execute({ query, max_results }, ctx) {
@@ -225,7 +253,7 @@ async function createWorktreeForTask(
 
 export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
   name: "TaskCreate",
-  description: "Create a unified task. Use kind=agent for delegated agent work, kind=shell for background shell jobs, and kind=tracking for orchestration-only work.",
+  description: "Create a unified task. Use kind=agent for delegated agent work, kind=shell for background shell jobs, and kind=tracking for orchestration-only work. Prefer TaskCreate over inventing ad hoc coordination in prose.",
   parameters: taskCreateSchema,
   async execute(args, ctx) {
     const runtime = await getOrchestrationRuntime(ctx.cwd)
@@ -480,7 +508,7 @@ const taskGetSchema = z.object({
 
 export const taskGetTool: ToolDef<z.infer<typeof taskGetSchema>> = {
   name: "TaskGet",
-  description: "Retrieve one task by id.",
+  description: "Retrieve one task by id when you need its full structured state, metadata, dependencies, or last recorded output fields.",
   parameters: taskGetSchema,
   readOnly: true,
   async execute({ taskId }, ctx) {
@@ -501,7 +529,7 @@ const taskListSchema = z.object({
 
 export const taskListTool: ToolDef<z.infer<typeof taskListSchema>> = {
   name: "TaskList",
-  description: "List tasks from the shared orchestration runtime.",
+  description: "List tasks from the shared orchestration runtime. Use filters to inspect agent tasks, shell tasks, ownership, team state, or incomplete work before creating duplicate tasks.",
   parameters: taskListSchema,
   readOnly: true,
   async execute(args, ctx) {
@@ -532,7 +560,7 @@ const taskUpdateSchema = z.object({
 
 export const taskUpdateTool: ToolDef<z.infer<typeof taskUpdateSchema>> = {
   name: "TaskUpdate",
-  description: "Update an existing task.",
+  description: "Update an existing task. Use this to record status, ownership, blocking relationships, and task metadata as work progresses.",
   parameters: taskUpdateSchema,
   async execute(args, ctx) {
     const runtime = await getOrchestrationRuntime(ctx.cwd)
@@ -584,7 +612,7 @@ async function taskOutputFromBackground(
 
 export const taskOutputTool: ToolDef<z.infer<typeof taskOutputSchema>> = {
   name: "TaskOutput",
-  description: "Read task output. For running agent or shell tasks, block=true waits for completion before returning.",
+  description: "Read task output. For running agent or shell tasks, block=true waits for completion before returning. Prefer one blocking wait over manual polling loops when you do not have other work to do.",
   parameters: taskOutputSchema,
   readOnly: true,
   async execute({ taskId, block }, ctx) {
@@ -609,9 +637,13 @@ export const taskOutputTool: ToolDef<z.infer<typeof taskOutputSchema>> = {
     if (background) {
       const output = await taskOutputFromBackground(background, shouldBlock, runtime, taskId)
       const latest = await runtime.getTask(taskId)
+      const interpretation =
+        typeof latest?.exitCode === "number" && latest.command
+          ? interpretShellCommandResult(latest.command, latest.exitCode, output, "")
+          : null
       return {
-        success: (latest?.status ?? task.status) !== "failed" && (latest?.status ?? task.status) !== "killed",
-        output: `[Task status: ${latest?.status ?? task.status}]\n${output}`,
+        success: interpretation ? !interpretation.isError : (latest?.status ?? task.status) !== "failed" && (latest?.status ?? task.status) !== "killed",
+        output: `[Task status: ${latest?.status ?? task.status}]${interpretation?.message ? `\n[status] ${interpretation.message}` : ""}\n${output}`,
         metadata: { task: latest ?? task, task_id: taskId },
       }
     }
@@ -631,7 +663,7 @@ const taskStopSchema = z.object({
 
 export const taskStopTool: ToolDef<z.infer<typeof taskStopSchema>> = {
   name: "TaskStop",
-  description: "Stop a running task when supported. Agent tasks stop delegated runs; shell tasks stop the background process.",
+  description: "Stop a running task when supported. Agent tasks stop delegated runs; shell tasks stop the background process. Use this when the task is clearly no longer useful, stuck, or superseded.",
   parameters: taskStopSchema,
   async execute({ taskId }, ctx) {
     const runtime = await getOrchestrationRuntime(ctx.cwd)
@@ -756,6 +788,104 @@ export const teamGetTool: ToolDef<z.infer<typeof teamGetSchema>> = {
       success: true,
       output: JSON.stringify(team, null, 2),
       metadata: { team },
+    }
+  },
+}
+
+const teamInboxSchema = z.object({
+  team_name: z.string().min(1).describe("Team name."),
+  include_completed: z.boolean().optional().describe("Include completed terminal tasks in the task list."),
+})
+
+export const teamInboxTool: ToolDef<z.infer<typeof teamInboxSchema>> = {
+  name: "TeamInbox",
+  description: "Show a coordinator-style team inbox with members, assigned tasks, and recent team messages.",
+  parameters: teamInboxSchema,
+  readOnly: true,
+  async execute({ team_name, include_completed }, ctx) {
+    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const team = await runtime.getTeam(team_name)
+    if (!team) return { success: false, output: `Team not found: ${team_name}` }
+    const tasks = await runtime.listTasks({ teamName: team_name, includeDeleted: false })
+    const filteredTasks = include_completed
+      ? tasks
+      : tasks.filter((task) => !["completed", "failed", "killed", "cancelled", "deleted"].includes(task.status))
+    const recentMessages = [...team.messages].sort((a, b) => b.ts - a.ts).slice(0, 8)
+    const memberLines = [...team.members]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((member) => {
+        const owned = filteredTasks.filter((task) => task.owner === member.name)
+        return `- ${member.name} | status=${member.status ?? "unknown"} | owned_tasks=${owned.length}${member.note ? ` | note=${member.note}` : ""}`
+      })
+    const taskLines = filteredTasks
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((task) => `- ${task.id} | ${task.status} | ${task.subject}${task.owner ? ` | owner=${task.owner}` : ""}`)
+    const messageLines = recentMessages.map((message) => `- ${message.from} -> ${message.to}: ${message.message}`)
+    return {
+      success: true,
+      output: [
+        `# Team ${team.name}`,
+        team.description,
+        "",
+        "## Members",
+        ...(memberLines.length ? memberLines : ["- none"]),
+        "",
+        "## Active Tasks",
+        ...(taskLines.length ? taskLines : ["- none"]),
+        "",
+        "## Recent Messages",
+        ...(messageLines.length ? messageLines : ["- none"]),
+      ].join("\n"),
+      metadata: { team, tasks: filteredTasks, messages: recentMessages },
+    }
+  },
+}
+
+const teamAssignTaskSchema = z.object({
+  team_name: z.string().min(1).describe("Team name."),
+  task_id: z.string().min(1).describe("Task id."),
+  member_name: z.string().min(1).describe("Member to own the task."),
+  note: z.string().optional().describe("Optional assignment note."),
+})
+
+export const teamAssignTaskTool: ToolDef<z.infer<typeof teamAssignTaskSchema>> = {
+  name: "TeamAssignTask",
+  description: "Assign a task to a teammate, tighten owner/team linkage, and mark the teammate active.",
+  parameters: teamAssignTaskSchema,
+  async execute({ team_name, task_id, member_name, note }, ctx) {
+    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const team = await runtime.getTeam(team_name)
+    if (!team) return { success: false, output: `Team not found: ${team_name}` }
+    const task = await runtime.updateTask(task_id, {
+      owner: member_name,
+      teamName: team_name,
+      metadata: typeof note === "string" ? { assignmentNote: note } : undefined,
+    })
+    if (!task) return { success: false, output: `Task not found: ${task_id}` }
+    const updatedTeam = await runtime.addTeamMember(team_name, {
+      name: member_name,
+      joinedAt: Date.now(),
+      ...(task.id ? { agentId: task.id } : {}),
+      ...(task.agentType ? { agentType: task.agentType } : {}),
+      status: "active",
+      lastActiveAt: Date.now(),
+      ...(typeof note === "string" ? { note } : {}),
+    })
+    if (updatedTeam) ctx.host.emit({ type: "team_updated", team: updatedTeam })
+    ctx.host.emit({ type: "task_updated", task })
+    const message = await runtime.sendMessage({
+      from: "coordinator",
+      to: member_name,
+      teamName: team_name,
+      message: note?.trim()
+        ? `Assigned task ${task.subject} (${task.id}). ${note.trim()}`
+        : `Assigned task ${task.subject} (${task.id}).`,
+    })
+    ctx.host.emit({ type: "team_message", message })
+    return {
+      success: true,
+      output: `Assigned task ${task.id} to ${member_name} in team ${team_name}.`,
+      metadata: { task, team: updatedTeam ?? team, message },
     }
   },
 }
@@ -1122,6 +1252,7 @@ export const reconnectRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionRec
     const updated = await runtime.updateRemoteSession(remote_session_id, {
       status: "connected",
       reconnectAttempts: (remoteSession.reconnectAttempts ?? 0) + 1,
+      error: undefined,
       metadata: {
         lastReconnectAt: Date.now(),
       },
@@ -1597,6 +1728,290 @@ export const pluginReloadTool: ToolDef<z.infer<typeof pluginReloadSchema>> = {
         ? "No plugins loaded."
         : plugins.map((plugin) => `- ${plugin.name} enabled=${plugin.runtimeEnabled !== false} trusted=${plugin.trusted === true} hooks=${plugin.hooks.length}`).join("\n"),
       metadata: { plugins },
+    }
+  },
+}
+
+const pluginValidateSchema = z.object({
+  manifest_path: z.string().optional().describe("Optional plugin manifest path. When omitted, validate all discovered plugins."),
+})
+
+export const pluginValidateTool: ToolDef<z.infer<typeof pluginValidateSchema>> = {
+  name: "PluginValidate",
+  description: "Validate plugin manifests strictly, including declared file existence and hook declarations.",
+  parameters: pluginValidateSchema,
+  readOnly: true,
+  shouldDefer: true,
+  async execute({ manifest_path }, ctx) {
+    const files = manifest_path
+      ? [path.isAbsolute(manifest_path) ? manifest_path : path.join(ctx.cwd, manifest_path)]
+      : (await loadPluginRuntimeRecords(ctx.cwd, ctx.config)).map((plugin) => plugin.sourcePath)
+    if (files.length === 0) return { success: true, output: "No plugin manifests found." }
+    const results = await Promise.all(files.map((file) => validatePluginManifestFile(file)))
+    const success = results.every((result) => result.success)
+    return {
+      success,
+      output: results.map((result, index) => {
+        const file = files[index]
+        const lines = [`## ${file}`, result.success ? "valid" : "invalid"]
+        if (result.errors.length) lines.push(...result.errors.map((error) => `error: ${error}`))
+        if (result.warnings.length) lines.push(...result.warnings.map((warning) => `warning: ${warning}`))
+        return lines.join("\n")
+      }).join("\n\n"),
+      metadata: { results, files },
+    }
+  },
+}
+
+const pluginInstallLocalSchema = z.object({
+  source_dir: z.string().min(1).describe("Existing local plugin directory to install into .nexus/plugins."),
+  name: z.string().optional().describe("Optional target directory name. Defaults to the source directory name."),
+  overwrite: z.boolean().optional().describe("Overwrite an existing plugin directory with the same target name."),
+})
+
+export const pluginInstallLocalTool: ToolDef<z.infer<typeof pluginInstallLocalSchema>> = {
+  name: "PluginInstallLocal",
+  description: "Install a local plugin directory into the project-scoped .nexus/plugins runtime.",
+  parameters: pluginInstallLocalSchema,
+  shouldDefer: true,
+  async execute({ source_dir, name, overwrite }, ctx) {
+    const sourceDir = path.isAbsolute(source_dir) ? source_dir : path.join(ctx.cwd, source_dir)
+    const targetName = slugifyName(name ?? path.basename(sourceDir))
+    const targetDir = path.join(ctx.cwd, ".nexus", "plugins", targetName)
+    const exists = await fs.stat(targetDir).then(() => true).catch(() => false)
+    if (exists && !overwrite) {
+      return { success: false, output: `Target plugin directory already exists: ${targetDir}` }
+    }
+    const manifestCandidates = [
+      path.join(sourceDir, "plugin.json"),
+      path.join(sourceDir, ".nexus-plugin", "plugin.json"),
+      path.join(sourceDir, ".codex-plugin", "plugin.json"),
+    ]
+    const sourceManifest = (
+      await Promise.all(manifestCandidates.map(async (candidate) => ((await fs.stat(candidate).then(() => true).catch(() => false)) ? candidate : null)))
+    ).find(Boolean)
+    if (!sourceManifest) {
+      return { success: false, output: `No plugin.json found in ${sourceDir}.` }
+    }
+    if (exists) await fs.rm(targetDir, { recursive: true, force: true })
+    await copyDirectoryRecursive(sourceDir, targetDir)
+    const targetManifest = path.join(targetDir, path.relative(sourceDir, sourceManifest))
+    const validation = await validatePluginManifestFile(targetManifest)
+    if (!validation.success) {
+      await fs.rm(targetDir, { recursive: true, force: true }).catch(() => undefined)
+      return { success: false, output: `Installed plugin failed validation:\n${validation.errors.join("\n")}` }
+    }
+    return {
+      success: true,
+      output: `Installed plugin ${validation.plugin?.name ?? targetName} into ${targetDir}.`,
+      metadata: { plugin: validation.plugin, targetDir },
+    }
+  },
+}
+
+const pluginRemoveSchema = z.object({
+  name: z.string().min(1).describe("Plugin name."),
+})
+
+export const pluginRemoveTool: ToolDef<z.infer<typeof pluginRemoveSchema>> = {
+  name: "PluginRemove",
+  description: "Remove a project-scoped installed plugin directory and clear its runtime config entry.",
+  parameters: pluginRemoveSchema,
+  shouldDefer: true,
+  async execute({ name }, ctx) {
+    const plugins = await loadPluginRuntimeRecords(ctx.cwd, ctx.config)
+    const plugin = plugins.find((item) => item.name === name)
+    if (!plugin) return { success: false, output: `Plugin not found: ${name}` }
+    if (plugin.scope !== "project") {
+      return { success: false, output: `Only project-scoped plugins can be removed automatically. ${name} is ${plugin.scope}-scoped.` }
+    }
+    await fs.rm(plugin.rootDir, { recursive: true, force: true })
+    await updateProjectPluginConfig(ctx.cwd, (pluginsConfig) => {
+      const blocked = Array.isArray(pluginsConfig.blocked) ? pluginsConfig.blocked.filter((item) => item !== name) : []
+      const trusted = Array.isArray(pluginsConfig.trusted) ? pluginsConfig.trusted.filter((item) => item !== name) : []
+      const options = asObject(pluginsConfig.options)
+      delete options[name]
+      pluginsConfig.blocked = blocked
+      pluginsConfig.trusted = trusted
+      if (Object.keys(options).length > 0) pluginsConfig.options = options
+      else delete pluginsConfig.options
+    })
+    return {
+      success: true,
+      output: `Removed plugin ${name} from ${plugin.rootDir}.`,
+    }
+  },
+}
+
+const planStartWorkflowSchema = z.object({
+  goal: z.string().min(1).describe("Planning goal or user objective."),
+  questions: z.array(z.string().min(1)).optional().describe("Optional interview questions. Defaults to a standard set."),
+})
+
+export const planStartWorkflowTool: ToolDef<z.infer<typeof planStartWorkflowSchema>> = {
+  name: "PlanStartWorkflow",
+  description: "Start a stateful plan workflow with interview questions before drafting the final plan.",
+  parameters: planStartWorkflowSchema,
+  async execute({ goal, questions }, ctx) {
+    const workflow = await createPlanWorkflow(ctx.cwd, {
+      goal,
+      questions,
+      metadata: { sessionId: ctx.session.id },
+    })
+    return {
+      success: true,
+      output: `${summarizePlanWorkflow(workflow)}\n\nInterview questions:\n${workflow.questions.map((question) => `- ${question.id}: ${question.question}`).join("\n")}`,
+      metadata: { workflow },
+    }
+  },
+}
+
+const planGetWorkflowSchema = z.object({
+  workflow_id: z.string().optional().describe("Workflow id. Defaults to the most recently updated workflow."),
+})
+
+export const planGetWorkflowTool: ToolDef<z.infer<typeof planGetWorkflowSchema>> = {
+  name: "PlanGetWorkflow",
+  description: "Read a plan workflow, including interview questions, research task ids, and plan file linkage.",
+  parameters: planGetWorkflowSchema,
+  readOnly: true,
+  async execute({ workflow_id }, ctx) {
+    const workflow = workflow_id
+      ? await getPlanWorkflow(ctx.cwd, workflow_id)
+      : (await listPlanWorkflows(ctx.cwd))[0] ?? null
+    if (!workflow) return { success: false, output: "Plan workflow not found." }
+    return {
+      success: true,
+      output: JSON.stringify(workflow, null, 2),
+      metadata: { workflow },
+    }
+  },
+}
+
+const planAnswerWorkflowSchema = z.object({
+  workflow_id: z.string().min(1).describe("Workflow id."),
+  question_id: z.string().min(1).describe("Question id."),
+  answer: z.string().min(1).describe("Answer text."),
+})
+
+export const planAnswerWorkflowTool: ToolDef<z.infer<typeof planAnswerWorkflowSchema>> = {
+  name: "PlanAnswerWorkflow",
+  description: "Record an interview answer in the active plan workflow.",
+  parameters: planAnswerWorkflowSchema,
+  async execute({ workflow_id, question_id, answer }, ctx) {
+    const workflow = await updatePlanWorkflow(ctx.cwd, workflow_id, (current) => ({
+      ...current,
+      status: current.status === "interview" ? "research" : current.status,
+      questions: current.questions.map((question) =>
+        question.id === question_id ? { ...question, answer } : question,
+      ),
+    }))
+    if (!workflow) return { success: false, output: `Plan workflow not found: ${workflow_id}` }
+    return {
+      success: true,
+      output: summarizePlanWorkflow(workflow),
+      metadata: { workflow },
+    }
+  },
+}
+
+const planCreateResearchTasksSchema = z.object({
+  workflow_id: z.string().min(1).describe("Workflow id."),
+  owner: z.string().optional().describe("Optional owner for generated research tasks."),
+  team_name: z.string().optional().describe("Optional team name for generated research tasks."),
+})
+
+export const planCreateResearchTasksTool: ToolDef<z.infer<typeof planCreateResearchTasksSchema>> = {
+  name: "PlanCreateResearchTasks",
+  description: "Turn unanswered or partially answered plan workflow questions into durable tracking tasks for research waves.",
+  parameters: planCreateResearchTasksSchema,
+  async execute({ workflow_id, owner, team_name }, ctx) {
+    const workflow = await getPlanWorkflow(ctx.cwd, workflow_id)
+    if (!workflow) return { success: false, output: `Plan workflow not found: ${workflow_id}` }
+    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const unanswered = workflow.questions.filter((question) => !question.answer?.trim())
+    if (unanswered.length === 0) {
+      return { success: true, output: `Workflow ${workflow_id} has no unanswered interview questions.` }
+    }
+    const created: string[] = []
+    for (const question of unanswered) {
+      const task = await runtime.createTask({
+        kind: "tracking",
+        subject: `Research: ${question.question}`,
+        description: question.question,
+        status: "pending",
+        ...(owner ? { owner } : {}),
+        ...(team_name ? { teamName: team_name } : {}),
+        metadata: {
+          planWorkflowId: workflow_id,
+          planQuestionId: question.id,
+          generatedBy: "PlanCreateResearchTasks",
+        },
+      })
+      created.push(task.id)
+      ctx.host.emit({ type: "task_created", task })
+    }
+    const updated = await updatePlanWorkflow(ctx.cwd, workflow_id, (current) => ({
+      ...current,
+      status: "research",
+      researchTaskIds: Array.from(new Set([...current.researchTaskIds, ...created])),
+    }))
+    return {
+      success: true,
+      output: `Created ${created.length} research task(s) for workflow ${workflow_id}.\n${created.map((id) => `- ${id}`).join("\n")}`,
+      metadata: { workflow: updated ?? workflow, taskIds: created },
+    }
+  },
+}
+
+const planDraftWorkflowSchema = z.object({
+  workflow_id: z.string().min(1).describe("Workflow id."),
+  file_name: z.string().optional().describe("Optional plan file name under .nexus/plans/."),
+})
+
+export const planDraftWorkflowTool: ToolDef<z.infer<typeof planDraftWorkflowSchema>> = {
+  name: "PlanDraftWorkflow",
+  description: "Draft a plan markdown file from a plan workflow interview and linked research tasks.",
+  parameters: planDraftWorkflowSchema,
+  async execute({ workflow_id, file_name }, ctx) {
+    const workflow = await getPlanWorkflow(ctx.cwd, workflow_id)
+    if (!workflow) return { success: false, output: `Plan workflow not found: ${workflow_id}` }
+    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const researchTasks = await Promise.all(workflow.researchTaskIds.map((taskId) => runtime.getTask(taskId)))
+    const planDir = path.join(ctx.cwd, ".nexus", "plans")
+    await fs.mkdir(planDir, { recursive: true })
+    const filePath = path.join(planDir, file_name?.trim() || `${workflow.id}.md`)
+    const content = [
+      `# Plan: ${workflow.goal}`,
+      "",
+      "## Interview",
+      ...workflow.questions.map((question) => `- ${question.question}\n  - Answer: ${question.answer?.trim() || "(pending)"}`),
+      "",
+      "## Research Tasks",
+      ...(researchTasks.filter(Boolean).length
+        ? researchTasks.filter(Boolean).map((task) => `- [${task?.status}] ${task?.subject}${task?.id ? ` (${task.id})` : ""}`)
+        : ["- none"]),
+      "",
+      "## Milestones",
+      ...workflow.questions.map((question, index) => `${index + 1}. ${question.answer?.trim() || question.question}`),
+      "",
+      "## Validation",
+      "- Run targeted tests/typechecks for the changed areas.",
+      "- Verify the user-visible objective is satisfied end-to-end.",
+      "",
+      "## Risks",
+      "- Review cross-cutting impacts in the affected code areas before merging.",
+    ].join("\n")
+    await fs.writeFile(filePath, content, "utf8")
+    const updated = await updatePlanWorkflow(ctx.cwd, workflow_id, (current) => ({
+      ...current,
+      status: "ready",
+      planFile: filePath,
+    }))
+    return {
+      success: true,
+      output: `Drafted plan file ${filePath} from workflow ${workflow_id}.`,
+      metadata: { workflow: updated ?? workflow, filePath },
     }
   },
 }

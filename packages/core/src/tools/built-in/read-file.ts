@@ -42,6 +42,7 @@ Assume this tool is able to read all files on the machine. If the User provides 
 
 Usage:
 - Use this after Grep, CodebaseSearch, List, Glob, ListCodeDefinitions, or LSP has already identified the relevant file and roughly the relevant range.
+- Prefer the smallest useful read. If you know the symbol or line range, use \`offset\` and \`limit\` instead of reading from the top.
 - file_path may be absolute or relative to the project root
 - By default, it reads up to ${DEFAULT_LIMIT} lines starting from the beginning of the file
 - Prefer specifying offset and limit for long files or when you already know the relevant range (e.g. from Grep, CodebaseSearch, or ListCodeDefinitions). Use whole-file reads only when the file is small or you genuinely need the entire file
@@ -55,6 +56,7 @@ Usage:
 
 When NOT to use:
 - Do not use Read for broad discovery across many files; use Grep, CodebaseSearch, Glob, List, or LSP first.
+- Do not use Read to "double-check" content you just received from another tool for the exact same path and lines.
 - Do not use Read through Bash (\`cat\`, \`sed\`, \`head\`, \`tail\`). Use this tool directly.`,
   parameters: schema,
   readOnly: true,

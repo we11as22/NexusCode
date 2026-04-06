@@ -54,6 +54,26 @@ function normalizeDeclaredList(value: unknown, field: string, warnings: string[]
   return out
 }
 
+async function validateDeclaredPaths(
+  pluginRootDir: string,
+  values: string[],
+  field: string,
+  errors: string[],
+): Promise<void> {
+  for (const declaredPath of values) {
+    const absPath = path.resolve(pluginRootDir, declaredPath)
+    if (!absPath.startsWith(pluginRootDir)) {
+      errors.push(`${field}: path escapes plugin root: ${declaredPath}`)
+      continue
+    }
+    try {
+      await fs.access(absPath)
+    } catch {
+      errors.push(`${field}: declared path does not exist: ${declaredPath}`)
+    }
+  }
+}
+
 export function resolvePluginDeclaredPath(plugin: PluginManifestRecord, declaredPath: string): string {
   return path.resolve(plugin.rootDir, declaredPath)
 }
@@ -92,6 +112,8 @@ export async function validatePluginManifestFile(filePath: string): Promise<{ su
   }
 
   const warnings: string[] = []
+  const errors: string[] = []
+  const rootDir = getPluginRootDir(absPath)
   const plugin: PluginManifestRecord = {
     name: result.data.name.trim(),
     version: result.data.version?.trim() || undefined,
@@ -103,13 +125,39 @@ export async function validatePluginManifestFile(filePath: string): Promise<{ su
     mcpServers: normalizeDeclaredList(result.data.mcpServers, "mcpServers", warnings),
     enabled: result.data.enabled ?? true,
     settingsSchema: result.data.settingsSchema as Record<string, unknown> | undefined,
-    rootDir: getPluginRootDir(absPath),
+    rootDir,
     sourcePath: absPath,
     scope: absPath.startsWith(path.join(os.homedir(), ".nexus")) ? "global" : "project",
     warnings,
   }
 
-  return { success: true, errors: [], warnings, plugin }
+  await Promise.all([
+    validateDeclaredPaths(rootDir, plugin.commands, "commands", errors),
+    validateDeclaredPaths(rootDir, plugin.agents, "agents", errors),
+    validateDeclaredPaths(rootDir, plugin.skills, "skills", errors),
+    validateDeclaredPaths(rootDir, plugin.mcpServers, "mcpServers", errors),
+  ])
+
+  for (const hook of plugin.hooks) {
+    const idx = hook.indexOf(":")
+    if (idx === -1) {
+      warnings.push(`hooks: expected event:path format, assuming after_tool:${hook}`)
+      continue
+    }
+    const event = hook.slice(0, idx).trim()
+    const declaredPath = hook.slice(idx + 1).trim()
+    if (!event) {
+      errors.push(`hooks: missing hook event for ${hook}`)
+      continue
+    }
+    if (!declaredPath) {
+      errors.push(`hooks: missing hook path for ${hook}`)
+      continue
+    }
+    await validateDeclaredPaths(rootDir, [declaredPath], "hooks", errors)
+  }
+
+  return { success: errors.length === 0, errors, warnings, ...(errors.length === 0 ? { plugin } : {}) }
 }
 
 export async function loadPluginManifests(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<PluginManifestRecord[]> {

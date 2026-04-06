@@ -329,6 +329,8 @@ export function AssistantToolUseMessage({
     normalizedToolName === 'SpawnAgent' || normalizedToolName === 'TaskCreate'
       ? 'Task'
       : tool.userFacingName(param.input as never)
+  const isBashFamilyTool =
+    normalizedToolName === 'Bash' || param.name === 'execute_command'
   const inputRecord =
     typeof param.input === 'object' && param.input != null
       ? (param.input as Record<string, unknown>)
@@ -383,7 +385,7 @@ export function AssistantToolUseMessage({
     <Box
       flexDirection="row"
       justifyContent="space-between"
-      marginTop={addMargin || isSpawnFamilyTool ? 1 : 0}
+      marginTop={addMargin || isSpawnFamilyTool || isBashFamilyTool ? 1 : 0}
       width="100%"
     >
       <Box>
