@@ -7,6 +7,7 @@ import * as path from "node:path"
 import { pathToFileURL } from "node:url"
 import type { NexusConfig, SkillDef } from "../types.js"
 import { loadSkills } from "./manager.js"
+import { getClaudeCompatibilityOptions } from "../compat/claude.js"
 
 export type SkillToolDescriptionRow = { name: string; description: string; location: string }
 
@@ -14,7 +15,7 @@ export type ResolvedSkillBody = { displayName: string; content: string; skillDir
 
 /** Rows for the `Skill` tool description (`<available_skills>`), from the same set as `loadSkills`. */
 export async function loadSkillToolCatalogRows(cwd: string, config: NexusConfig): Promise<SkillToolDescriptionRow[]> {
-  const skills = await loadSkills(config.skills ?? [], cwd, config.skillsUrls).catch(() => [] as SkillDef[])
+  const skills = await loadSkills(config.skills ?? [], cwd, config.skillsUrls, getClaudeCompatibilityOptions(config)).catch(() => [] as SkillDef[])
   return skills
     .map((s) => ({
       name: s.name,
@@ -39,7 +40,7 @@ export async function resolveSkillBody(
   const q = query.trim()
   if (!q) return null
 
-  const loaded = await loadSkills(config.skills ?? [], cwd, config.skillsUrls).catch(() => [] as SkillDef[])
+  const loaded = await loadSkills(config.skills ?? [], cwd, config.skillsUrls, getClaudeCompatibilityOptions(config)).catch(() => [] as SkillDef[])
   const inputNorm = normalizeName(q)
 
   let found = loaded.find((s) => s.name.toLowerCase() === q.toLowerCase())

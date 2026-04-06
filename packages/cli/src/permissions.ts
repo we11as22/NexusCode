@@ -168,7 +168,7 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
 
   // Check if the tool needs permissions
   try {
-    if (!tool.needsPermissions(input as never)) {
+    if (!tool.needsPermissions || !tool.needsPermissions(input as never)) {
       return { result: true }
     }
   } catch (e) {
@@ -198,7 +198,7 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
     case NotebookEditTool: {
       // The types have already been validated by the tool,
       // so we can safely pass this in
-      if (!tool.needsPermissions(input)) {
+      if (!tool.needsPermissions || !tool.needsPermissions(input)) {
         return { result: true }
       }
       return {

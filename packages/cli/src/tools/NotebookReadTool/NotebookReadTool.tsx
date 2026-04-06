@@ -1,8 +1,3 @@
-import type {
-  ImageBlockParam,
-  TextBlockParam,
-} from '@anthropic-ai/sdk/resources/index.mjs'
-
 import { existsSync, readFileSync } from 'fs'
 import { Text } from 'ink'
 import { extname, isAbsolute, relative, resolve } from 'path'
@@ -24,6 +19,10 @@ import { getCwd } from '../../utils/state.js'
 import { findSimilarFile } from '../../utils/file.js'
 import { DESCRIPTION, PROMPT } from './prompt.js'
 import { hasReadPermission } from '../../utils/permissions/filesystem.js'
+import type {
+  ImageBlockParam,
+  TextBlockParam,
+} from '../../provider/message-schema.js'
 
 const inputSchema = z.strictObject({
   notebook_path: z

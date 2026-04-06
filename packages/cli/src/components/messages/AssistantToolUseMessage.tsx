@@ -1,6 +1,5 @@
 import { Box, Text } from 'ink'
 import React from 'react'
-import { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { Tool } from '../../Tool.js'
 import { Cost } from '../Cost.js'
 import { ToolUseLoader } from '../ToolUseLoader.js'
@@ -13,6 +12,7 @@ import { subagentStatusLine, truncateTask } from '../../nexus-subagents.js'
 import { AssistantThinkingMessage } from './AssistantThinkingMessage.js'
 import type { NormalizedMessage } from '../../utils/messages.js'
 import { getDiffStatsForToolUseId } from '../../utils/messages.js'
+import type { ToolUseBlockParam } from '../../provider/message-schema.js'
 
 function modeLabel(mode: string): string {
   return mode.charAt(0).toUpperCase() + mode.slice(1).toLowerCase()

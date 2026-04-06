@@ -23,6 +23,10 @@ const compact = {
       setForkConvoWithMessagesOnTheNextRender,
     },
   ) {
+    if (!slowAndCapableModel) {
+      throw new Error('No slow model configured for /compact')
+    }
+
     // Get existing messages before clearing
     const messages = getMessagesGetter()()
 

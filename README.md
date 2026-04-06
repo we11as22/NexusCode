@@ -9,15 +9,22 @@
 - **AST-based codebase indexing** (classes, functions, methods by language)
 - **Optional semantic vector index** with embeddings + Qdrant auto-start (local binary/docker)
 - **All LLM providers** including any OpenAI-compatible API
+- **Provider-agnostic host/runtime boundaries**: the CLI and VS Code transcript/render pipeline consume local Nexus message types, while provider SDK specifics stay inside adapter layers
 - **Model temperature control**
 - **Parallel tool execution** (read operations run concurrently)
 - **Doom loop detection** — no artificial step limits
 - **Structured output** with JSON schema when supported by provider
 - **Skill & tool classification** — smart context selection from large sets
 - **Parallel sub-agents** for concurrent task execution
+- **Persistent orchestration runtime** for shared tasks, background jobs, team messages, worktrees, agent definitions, and durable memory
+- **Tracked remote sessions and reconnectable server streams** with run ids, buffered NDJSON replay, and runtime-visible reconnect status
+- **Host-aware control-plane transitions**: `EnterPlanMode` and `EnterWorktree` can now update VS Code mode/cwd state instead of only returning handoff text
+- **LSP-aware code intelligence** in the VS Code host: definitions, references, hover, symbols, implementations, and call hierarchy via the `LSP` tool
+- **Local plugin manifests** under `.nexus/plugins/**/plugin.json` (plus `.nexus-plugin` / `.codex-plugin` layouts) with plugin-contributed agents/skills, trusted hooks, and persisted runtime options
+- **Sub-agent run snapshots** with list/resume/fork/snapshot tools so delegated work can be inspected and continued without rediscovery
 - **Shadow git checkpoints** with task/workspace restore
-- **Two-level context compaction** (prune output → LLM summary)
-- **MCP support** with OAuth and tool classification
+- **Multi-stage context compaction** (prune old tool output → microcompact stale reasoning/oversized text → LLM summary when needed)
+- **MCP support** with tool classification plus resource listing/reading hooks
 - **Optional NexusCode Server**: HTTP agent + the **same JSONL session store** as the CLI/extension (canonical project root); connect for shared runs, session list parity, and paginated history (no OOM on long chats)
 - Webview UI: thought progress ("Thought for Xs"), loading states, todo checklist, diff-style tool output
 - CLI TUI: Home + prompt shell, slash command palette, `Vector index` + `/agent-config` in menu
@@ -468,12 +475,52 @@ Agent presets are stored in `.nexus/agent-configs.json` and can be assembled fro
 ### Rules
 Create `.nexus/rules/` with markdown files for project guidelines. These are loaded into every session.
 
-Also supported: `CLAUDE.md`, `AGENTS.md` in project root.
+Native top-level instruction files are also loaded automatically: `NEXUS.md`, `NEXUS.local.md`, `AGENTS.md`.
+
+Optional Claude compatibility can be enabled in config to additionally load `CLAUDE.md`, `CLAUDE.local.md`, `.claude/rules/**`, `.claude/commands/**`, `.claude/skills/**`, `.claude/agents/**`, `.claude/plugins/**`, and `.claude/settings*.json`.
+
+```yaml
+# .nexus/nexus.yaml
+compatibility:
+  claude:
+    enabled: true
+```
+
+Native Nexus paths stay authoritative: when the same command or agent exists in both `.nexus` and `.claude`, Nexus keeps the `.nexus` version.
+
+Recommended project layout:
+
+```text
+your-project/
+├── NEXUS.md
+├── NEXUS.local.md
+├── AGENTS.md
+├── .nexus/
+│   ├── nexus.yaml
+│   ├── settings.json
+│   ├── settings.local.json
+│   ├── commands/
+│   ├── rules/
+│   ├── skills/
+│   ├── agents/
+│   └── plugins/
+└── .claude/                # optional compatibility layer
+    ├── settings.json
+    ├── settings.local.json
+    ├── commands/
+    ├── rules/
+    ├── skills/
+    ├── agents/
+    └── plugins/
+```
 
 ### Skills
 Place skill files in `.nexus/skills/skill-name/SKILL.md`. Skills provide domain-specific knowledge and patterns.
 
 When many skills are configured, NexusCode uses LLM classification to select only relevant ones for the task — keeping the context clean.
+
+### Memory & Context Compaction
+NexusCode keeps explicit reusable memories in the orchestration runtime and prefetches relevant project/session memories into prompts. Manual tools (`MemoryCreate`, `MemoryList`, `MemoryGet`, `MemoryUpdate`, `MemoryDelete`) are available, and structured session compaction now also auto-extracts durable instructions, technical discoveries, stable project facts / reusable commands, delegation state, pending work, and next-step state into memory records.
 
 ---
 
@@ -549,8 +596,13 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for details.
 2. **Built-in tools always active** — Mode permissions gate which tools are available; the classifier filters by **MCP server** (and by skill) when thresholds are exceeded, not by individual tools.
 3. **Parallel reads** — Multiple read-only tools execute concurrently with `Promise.all`
 4. **Cache-aware prompts** — Stable blocks (role, rules, skills) use `cache_control: ephemeral` on Anthropic
-5. **Two-level compaction** — Fast prune (remove old tool outputs) + LLM compact (full summary)
-6. **Multi-project** — Separate vector index and metadata per project hash in `~/.nexus/index/`
+5. **Multi-stage compaction** — Fast prune, microcompact old reasoning/text, then LLM compact only when still needed
+6. **Deferred tools are automatic** — ToolSearch is used when MCP/deferred tool schemas become materially large, not blindly in every small session
+7. **Memory prefetch is relevance-based** — Prompt memory is selected against the current task instead of injecting only the latest records
+8. **Multi-project** — Separate vector index and metadata per project hash in `~/.nexus/index/`
+9. **Provider adapters are isolated** — host UI/query layers do not import provider SDK message types directly; the CLI bridges through `packages/cli/src/provider/message-schema.ts`
+10. **IDE-native code navigation** — when the host exposes language-server operations, the agent uses `LSP` for symbol-accurate lookups before falling back to textual search
+11. **Plugins are runtime extensions, not provider lock-in** — local plugin manifests can contribute agents/skills without coupling the agent loop to a single SDK
 
 ---
 

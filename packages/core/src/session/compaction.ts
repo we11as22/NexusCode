@@ -18,16 +18,25 @@ const COMPACTION_LLM_INPUT_TOKEN_BUDGET = 45_000
 const COMPACTION_MIN_TAIL_MESSAGES = 4
 /** Per-message cap so one huge paste does not dominate the summarizer request. */
 const MAX_COMPACTION_MESSAGE_CHARS = 14_000
+const MICROCOMPACT_MAX_TEXT_CHARS = 4_000
+const MICROCOMPACT_REASONING_PLACEHOLDER = "[Earlier reasoning omitted for compaction]"
 
 export interface SessionCompaction {
   prune(session: ISession): void
-  compact(session: ISession, client: LLMClient, signal?: AbortSignal): Promise<void>
+  microcompact(session: ISession, keepRecentMessages?: number): number
+  compact(
+    session: ISession,
+    client: LLMClient,
+    signal?: AbortSignal,
+    opts?: { keepRecentMessages?: number; force?: boolean },
+  ): Promise<void>
   isOverflow(tokenCount: number, contextLimit: number, threshold: number): boolean
 }
 
 export function createCompaction(): SessionCompaction {
   return {
     prune,
+    microcompact,
     compact,
     isOverflow(tokenCount, contextLimit, threshold) {
       if (contextLimit <= 0) return false
@@ -83,18 +92,76 @@ function prune(session: ISession): void {
 }
 
 /**
+ * Level 1.5 compaction: trim stale reasoning and oversized old text before we pay for a summary.
+ * This preserves the latest user-visible flow while clawing back prompt budget from old scratch work.
+ */
+function microcompact(session: ISession, keepRecentMessages = 8): number {
+  const recentMessages = getActiveMessagesAfterLatestSummary(session.messages)
+  if (recentMessages.length <= keepRecentMessages) return 0
+
+  const candidates = recentMessages.slice(0, Math.max(0, recentMessages.length - keepRecentMessages))
+  let tokensFreed = 0
+
+  for (const msg of candidates) {
+    if (typeof msg.content === "string") {
+      const trimmed = maybeTrimCompactionText(msg.content)
+      if (trimmed && trimmed !== msg.content) {
+        tokensFreed += Math.max(0, estimateTokens(msg.content) - estimateTokens(trimmed))
+        session.updateMessage(msg.id, { content: trimmed })
+      }
+      continue
+    }
+    if (!Array.isArray(msg.content) || msg.content.length === 0) continue
+
+    let changed = false
+    const nextParts = (msg.content as MessagePart[]).map((part) => {
+      if (part.type === "reasoning") {
+        const original = (part.text ?? "").trim()
+        if (!original || original === MICROCOMPACT_REASONING_PLACEHOLDER) return part
+        const nextText = MICROCOMPACT_REASONING_PLACEHOLDER
+        const delta = Math.max(0, estimateTokens(original) - estimateTokens(nextText))
+        if (delta > 0) {
+          tokensFreed += delta
+          changed = true
+          return { ...part, text: nextText }
+        }
+        return part
+      }
+      if (part.type === "text") {
+        const trimmed = maybeTrimCompactionText(part.text)
+        if (trimmed && trimmed !== part.text) {
+          tokensFreed += Math.max(0, estimateTokens(part.text) - estimateTokens(trimmed))
+          changed = true
+          return { ...part, text: trimmed }
+        }
+      }
+      return part
+    })
+
+    if (changed) {
+      session.updateMessage(msg.id, { content: nextParts })
+    }
+  }
+
+  return tokensFreed
+}
+
+/**
  * Level 2 compaction: Full LLM-based summary of the conversation.
  * Adds a summary message that replaces the history in active context.
  */
 async function compact(
   session: ISession,
   client: LLMClient,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  opts?: { keepRecentMessages?: number; force?: boolean },
 ): Promise<void> {
   const previousSummaryMessage = getLatestSummaryMessage(session.messages)
   const recentMessages = getActiveMessagesAfterLatestSummary(session.messages)
-  if (!previousSummaryMessage && recentMessages.length < 4) return
+  if (!opts?.force && !previousSummaryMessage && recentMessages.length < 4) return
   if (recentMessages.length === 0) return
+
+  microcompact(session, opts?.keepRecentMessages ?? 8)
 
   const previousSummaryText =
     previousSummaryMessage && typeof previousSummaryMessage.content === "string"
@@ -124,11 +191,20 @@ Produce a concise but thorough summary using exactly this structure:
 ## Key Technical Discoveries
 [Important architecture, patterns, invariants, commands, or implementation facts learned]
 
+## Stable Project Facts and Reusable Commands
+[Durable repo facts, conventions, successful commands, environment quirks, provider/plugin/MCP setup details worth remembering]
+
 ## Files and Code Areas
 - \`path/to/file.ts\` — why it matters, what was read/changed, and any important functions or sections
 
 ## Errors, Failures, and Fixes
 [Important failures encountered, what caused them, and how they were resolved or why they remain unresolved]
+
+## Delegation and Background State
+[Running or recently finished sub-agents, tasks, worktrees, background commands, and remote/reconnectable sessions that still matter]
+
+## Plugin, MCP, and Auth State
+[Relevant plugin hooks/options/trust changes, MCP auth requirements, connected resources, remote session notes]
 
 ## Pending Work
 [Concrete remaining tasks that are still in scope]
@@ -215,6 +291,11 @@ function capCompactionText(text: string): string {
   return `${text.slice(0, MAX_COMPACTION_MESSAGE_CHARS)}\n...[truncated for compaction input]`
 }
 
+function maybeTrimCompactionText(text: string): string | null {
+  if (text.length <= MICROCOMPACT_MAX_TEXT_CHARS) return null
+  return `${text.slice(0, MICROCOMPACT_MAX_TEXT_CHARS)}\n...[earlier content trimmed for compaction]`
+}
+
 /**
  * Drop oldest turns until estimated tokens are under budget so automatic compaction
  * does not send the full ~100k-token transcript to the summarizer (slow / easy to hit limits).
@@ -280,4 +361,3 @@ function buildLLMMessages(messages: SessionMessage[]) {
   }
   return result
 }
-

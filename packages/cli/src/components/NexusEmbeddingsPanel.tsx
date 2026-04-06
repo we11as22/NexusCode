@@ -5,6 +5,7 @@ import chalk from 'chalk'
 import { getTheme } from '../utils/theme.js'
 import type { NexusConfig, EmbeddingConfig } from '@nexuscode/core'
 import { useFieldInput } from '../hooks/useFieldInput.js'
+import { asExtendedKey } from '../utils/ink.js'
 
 const EMBEDDING_PROVIDERS: Array<{ id: EmbeddingConfig['provider']; label: string }> = [
   { id: 'openai-compatible', label: 'OpenAI-compatible' },
@@ -70,24 +71,25 @@ export function NexusEmbeddingsPanel({
   }
 
   useInput((input, key) => {
+    const extendedKey = asExtendedKey(key)
     // On model field, let field handle input first
     if (focusIndex === 1) {
-      if (modelField.handleInput(input ?? '', key)) return
+      if (modelField.handleInput(input ?? '', extendedKey)) return
     }
 
-    if (key.escape) {
+    if (extendedKey.escape) {
       onClose({ cancelled: true })
       return
     }
-    if (key.tab) {
+    if (extendedKey.tab) {
       setFocusIndex((f) => (f + 1) % 3)
       return
     }
-    if (key.backtab) {
+    if (extendedKey.backtab) {
       setFocusIndex((f) => (f - 1 + 3) % 3)
       return
     }
-    if (key.upArrow) {
+    if (extendedKey.upArrow) {
       if (focusIndex === 0) {
         setProviderIndex((prev) => Math.max(0, prev - 1))
       } else {
@@ -95,7 +97,7 @@ export function NexusEmbeddingsPanel({
       }
       return
     }
-    if (key.downArrow) {
+    if (extendedKey.downArrow) {
       if (focusIndex === 0) {
         setProviderIndex((prev) => Math.min(EMBEDDING_PROVIDERS.length - 1, prev + 1))
       } else {
@@ -103,7 +105,7 @@ export function NexusEmbeddingsPanel({
       }
       return
     }
-    if (key.return) {
+    if (extendedKey.return) {
       if (focusIndex === 2) {
         doSave()
       } else {

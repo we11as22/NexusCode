@@ -22,6 +22,9 @@ import {
   createSpawnAgentOutputTool,
   createSpawnAgentStopTool,
   createSpawnAgentsParallelTool,
+  createListAgentRunsTool,
+  createAgentRunSnapshotTool,
+  createResumeAgentTool,
   listSessions,
   deleteSession as coreDeleteSession,
   readCheckpointEntries,
@@ -34,6 +37,7 @@ import {
   type NexusConfig,
   type IndexStatus,
   canonicalProjectRoot,
+  getClaudeCompatibilityOptions,
 } from '@nexuscode/core'
 import type { CodebaseIndexer } from '@nexuscode/core'
 import { fileURLToPath } from 'node:url'
@@ -224,7 +228,7 @@ export async function bootstrapNexus(opts: {
 
   // Merge .nexus/settings.json + settings.local.json
   try {
-    const settings = loadProjectSettings(cwd)
+    const settings = loadProjectSettings(cwd, { compatibility: getClaudeCompatibilityOptions(config) })
     const perms = settings.permissions
     if (perms) {
       if (Array.isArray(perms.allow)) config.permissions.allowCommandPatterns = perms.allow
@@ -248,7 +252,7 @@ export async function bootstrapNexus(opts: {
         config.model.provider = 'openai-compatible'
         config.model.baseUrl = config.model.baseUrl || OPENROUTER_BASE_URL
       } else {
-        (config.model as Record<string, unknown>).provider = provider
+        ;(config.model as unknown as Record<string, unknown>).provider = provider
       }
       config.model.id = modelId
     } else {
@@ -293,9 +297,13 @@ export async function bootstrapNexus(opts: {
   toolRegistry.register(createSpawnAgentsParallelTool(parallelManager, config))
   toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
   toolRegistry.register(createSpawnAgentStopTool(parallelManager))
+  toolRegistry.register(createListAgentRunsTool(parallelManager))
+  toolRegistry.register(createAgentRunSnapshotTool(parallelManager))
+  toolRegistry.register(createResumeAgentTool(parallelManager, config))
 
-  const rulesContent = await loadRules(cwd, config.rules.files).catch(() => '')
-  const skills = await loadSkills(config.skills, cwd, config.skillsUrls).catch(() => [])
+  const claudeCompatibility = getClaudeCompatibilityOptions(config)
+  const rulesContent = await loadRules(cwd, config.rules.files, claudeCompatibility).catch(() => '')
+  const skills = await loadSkills(config.skills, cwd, config.skillsUrls, claudeCompatibility).catch(() => [])
 
   let session: Session
   if (continueFlag) {

@@ -14,6 +14,9 @@ import {
   createSpawnAgentsAliasTool,
   createSpawnAgentOutputTool,
   createSpawnAgentStopTool,
+  createListAgentRunsTool,
+  createAgentRunSnapshotTool,
+  createResumeAgentTool,
   ParallelAgentManager,
   createCodebaseIndexer,
   McpClient,
@@ -21,6 +24,7 @@ import {
   resolveBundledMcpServers,
   CheckpointTracker,
   NexusConfigSchema,
+  getClaudeCompatibilityOptions,
 } from "@nexuscode/core"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
@@ -93,8 +97,8 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
       : mcpPromise
 
   const rulesAndSkillsPromise = Promise.all([
-    loadRules(cwd, configForRun.rules.files).catch(() => ""),
-    loadSkills(configForRun.skills, cwd, configForRun.skillsUrls).catch(() => []),
+    loadRules(cwd, configForRun.rules.files, getClaudeCompatibilityOptions(configForRun)).catch(() => ""),
+    loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, getClaudeCompatibilityOptions(configForRun)).catch(() => []),
   ]).then(([rulesContent, skills]) => ({ type: "ok" as const, rulesContent, skills }))
   const rulesAndSkillsWithTimeout = Promise.race([
     rulesAndSkillsPromise,
@@ -118,6 +122,9 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, configForRun))
   toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
   toolRegistry.register(createSpawnAgentStopTool(parallelManager))
+  toolRegistry.register(createListAgentRunsTool(parallelManager))
+  toolRegistry.register(createAgentRunSnapshotTool(parallelManager))
+  toolRegistry.register(createResumeAgentTool(parallelManager, configForRun))
   const { builtin: tools, dynamic } = toolRegistry.getForMode(mode)
   const allTools = [...tools, ...dynamic]
   // mode and allTools match; runAgentLoop builds system prompt and tool set from this mode
@@ -163,14 +170,21 @@ async function applyPresetForRun(base: NexusConfig, cwd: string, presetName: str
   if (!trimmed || trimmed === "Default") return base
   const preset = await readPresetFromDisk(cwd, trimmed)
   if (!preset) return base
-  const named = (base.mcp?.servers ?? []).map((s) => ({ name: (s as { name?: string }).name ?? "", server: s }))
-  const selectedServers = named.filter((it) => it.name && preset.mcpServers.includes(it.name)).map((it) => it.server)
+  const named = (base.mcp?.servers ?? []).map((s: unknown) => ({
+    name: (s as { name?: string }).name ?? "",
+    server: s,
+  }))
+  const selectedServers = named
+    .filter((it: { name: string; server: unknown }) =>
+      it.name && preset.mcpServers.includes(it.name),
+    )
+    .map((it: { name: string; server: unknown }) => it.server as NexusConfig["mcp"]["servers"][number])
   const next: NexusConfig = {
     ...base,
     indexing: { ...base.indexing, vector: preset.vector },
     skills: preset.skills,
     mcp: { servers: preset.mcpServers.length === 0 ? [] : selectedServers },
-    rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["AGENTS.md", "CLAUDE.md"] },
+    rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["NEXUS.md", "AGENTS.md", "CLAUDE.md"] },
   }
   if (preset.modelProvider && preset.modelId) {
     const provider =

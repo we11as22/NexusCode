@@ -1,5 +1,6 @@
 import type { Mode, NexusConfig, SkillDef, DiagnosticItem } from "../../../types.js"
 import type { IndexStatus } from "../../../types.js"
+import type { MemoryRecord } from "../../../types.js"
 import * as os from "node:os"
 import * as path from "node:path"
 
@@ -17,10 +18,12 @@ export interface PromptContext {
   gitBranch?: string
   todoList?: string
   diagnostics?: DiagnosticItem[]
-  /** Active background bash jobs (bash_id, status, log path). */
+  /** Active background work summary (bash/subagents/tasks). */
   backgroundJobsSummary?: string
   /** Short project layout (top-level dirs and key files) at start */
   initialProjectContext?: string
+  /** Persistent memories relevant to this run (project/session/team). */
+  memories?: MemoryRecord[]
   /** Context window usage (shown at start of system info so model sees token budget) */
   contextUsedTokens?: number
   contextLimitTokens?: number
@@ -94,13 +97,16 @@ function getModeBlock(mode: Mode): string {
 
 You have complete access: read/write files, run shell commands, search the codebase, browser automation, and MCP tool servers. Autonomously complete software engineering tasks end-to-end.
 
-- **Search first, then read parts** — Do not read whole files to explore. Run Grep, CodebaseSearch, Glob, ListCodeDefinitions (and List for layout) first; then use \`Read\` with \`offset\`/\`limit\` only for the ranges you need.
+- **Search first, then read parts** — Do not read whole files to explore. Run Grep, CodebaseSearch, Glob, ListCodeDefinitions, and \`LSP\` (when symbol-accurate navigation helps) before broad reads; then use \`Read\` with \`offset\`/\`limit\` only for the ranges you need.
 - Read all relevant context before making changes; prefer \`Edit\` over \`Write\` for existing files.
 - **Verify** — After changes, run tests/build; fix failures before marking the task complete.
 - **Latest user message** — If the user’s **newest** message narrows scope (explain something, what failed, stop and answer, clarify only), do **that** first before continuing a long autonomous execution from earlier in the chat.
 - **Flow** — On a new goal, run a brief read-only discovery (multiple grep/CodebaseSearch in parallel, then targeted Read). Before each logical group of tool calls, write one short plain-text progress sentence and then execute the tools. Use parallel tool calls for independent operations.
 - **Todos** — For any multi-step or non-trivial implementation, maintain an up-to-date list via \`TodoWrite\` (see Task Progress). After leaving plan mode with an approved plan, derive your initial todos from that plan.
 - **Sub-agents** — Use \`SpawnAgent\` for broad or clearly separable sub-tasks (e.g. "analyze X", "implement Y"), not for exact file/symbol lookups that direct Grep/Glob/Read can handle faster. **For 2+ concurrent sub-agents prefer \`SpawnAgentsParallel\`** (simplest, blocks until all done). For \`Parallel\` with multiple \`SpawnAgent\` calls: all run concurrently and block until done. If the user explicitly asks for "parallel subagents", you MUST launch them all at once (not sequentially). Use \`run_in_background: true\` only when the main agent has other work to do while the agent runs; in that case use \`SpawnAgentOutput({ subagent_id, block: true })\` to wait (not a poll loop). Do not call sub-agents repeatedly for the same or very similar task.
+- **Orchestration** — When the work benefits from persistent coordination, use \`TaskCreate\` / \`TaskUpdate\` / \`TaskList\` for structured task tracking, \`SendMessage\` for teammate-style coordination, \`ListAgents\` to inspect available agent definitions, \`ListPlugins\` / \`GetPlugin\` / \`PluginTrust\` / \`PluginConfigure\` for local plugin runtime control, and \`EnterWorktree\` for isolated implementation branches. Use \`TaskOutput\` / \`TaskStop\` for background bash or background sub-agent lifecycle, \`ListRemoteSessions\` / \`GetRemoteSession\` when reconnect/debug state matters, and \`AgentRunSnapshot\` / \`ResumeAgent\` to continue prior delegated work without rediscovery.
+- **Memory** — Use \`MemoryList\` / \`MemoryGet\` before rediscovering stable project facts, and \`MemoryCreate\` / \`MemoryUpdate\` to persist reusable knowledge (commands, conventions, architecture facts) when it will help future turns. Keep memories concise and durable.
+- **Deferred tools & MCP** — If a capability is not visible in the initial manifest, use \`ToolSearch\`. Use \`ListMcpResources\` / \`ReadMcpResource\` when an MCP server exposes resources rather than only callable tools. If an MCP server requires sign-in, use \`McpAuthenticate\` instead of guessing manual steps.
 - **Decomposition & parallelization** — When a task is complex or spans multiple areas: (1) Decompose into subtasks and identify which are independent vs dependent. (2) Independent subtasks (different files/areas) → run in parallel via \`Parallel\` + multiple \`SpawnAgent\` entries in one call. (3) Dependent subtasks → different waves; wait for one wave to complete before starting the next. (4) If two agents might touch the same file → run them sequentially (different waves). (5) You can do implementation yourself or delegate to sub-agents; use sub-agents when it saves context or when subtasks are clearly separable.
 - **Always end your turn with a text reply to the user.** After using tools, summarize what you did. Never end with only tool calls.`,
 
@@ -108,7 +114,7 @@ You have complete access: read/write files, run shell commands, search the codeb
 
 **Phase 1 — Study and plan (read-only except plan files):**
 - You are in READ-ONLY planning phase. You MUST NOT modify source code or run shell commands. You may ONLY write to \`.nexus/plans/*.md\` or \`.nexus/plans/*.txt\`.
-- Thoroughly study everything relevant: run multiple grep/CodebaseSearch in parallel first to locate relevant code; then Read only the ranges you need. Do not read whole files to explore. Produce a detailed, step-by-step implementation plan (file paths, function signatures, architecture, risks, dependencies).
+- Thoroughly study everything relevant: run multiple grep/CodebaseSearch/\`LSP\` lookups in parallel first to locate relevant code; then Read only the ranges you need. Do not read whole files to explore. Produce a detailed, step-by-step implementation plan (file paths, function signatures, architecture, risks, dependencies).
 - Write the plan to \`.nexus/plans/\` as markdown. When the plan is complete and ready for the user, call \`PlanExit\` with a short summary.
 - **You MUST write the plan to a file in \`.nexus/plans/\` (e.g. \`.nexus/plans/plan.md\`) before calling \`PlanExit\`. \`PlanExit\` is rejected until at least one such file exists.**
 - Use \`AskFollowupQuestion\` only when a requirement or design choice is genuinely blocking the plan. Do all non-blocked research first. Do NOT ask the user whether the plan is ready or approved via \`AskFollowupQuestion\`; use \`PlanExit\` for plan handoff instead. Do not refer to "the plan" as visible to the user before \`PlanExit\`.
@@ -124,6 +130,7 @@ When the user **implements** after approval: the agent in **agent** mode should 
 
 - Use parallel reads and discovery (grep, CodebaseSearch, ListCodeDefinitions) to explore efficiently.
 - You may use \`SpawnAgent\` for research subtasks (sub-agents run in ask mode). For 2+ concurrent sub-agents use \`SpawnAgentsParallel\` (simplest) or \`Parallel\` with multiple \`SpawnAgent\` calls. Use \`run_in_background: true\` only when you have other work to do concurrently; wait with \`SpawnAgentOutput({ block: true })\` — never poll in a loop. Do not use sub-agents for implementation in plan mode.
+- Use \`TaskCreate\` / \`TaskUpdate\` to materialize the plan into explicit tasks if that helps structure a large implementation program, but do not execute code or background work in plan mode.
 - **Latest message may redirect** — If the user's **newest** message is **only** a question (e.g. what failed, explain the error, what happened, why) and **not** a request to keep planning: answer from the conversation and tool error text **first**. Do **not** call \`PlanExit\`, do **not** start a large discovery pass for an **old** planning goal until they ask to continue the plan.
 - **Always end your turn with a text reply to the user** (or \`PlanExit\` when they want plan handoff). After using tools, summarize what you found. Never end with only tool calls.`,
 
@@ -136,10 +143,11 @@ You are a knowledgeable technical assistant focused on answering questions and e
 - You MUST NOT run shell commands (Bash is disabled). Do not suggest commands for the user to run unless they explicitly ask.
 - You may use SpawnAgent for read-only subtasks (sub-agents run in ask mode). For 2+ concurrent sub-agents use \`SpawnAgentsParallel\` (simplest) or \`Parallel\` with multiple \`SpawnAgent\` calls. Use \`run_in_background: true\` only when you have other work to do concurrently; wait with \`SpawnAgentOutput({ block: true })\` — never poll in a loop. For implementation work, tell the user to switch to agent mode.
 - Use \`AskFollowupQuestion\` only when the answer cannot be discovered from the codebase or context and is needed to answer correctly. Prefer tools over questions.
+- You may consult \`MemoryList\` / \`MemoryGet\` for persisted project facts before re-searching the codebase.
 
 **What you should do:**
 - **Obey the latest user message** — Treat their **most recent** message as the contract for this turn. If they only ask to explain an error, summarize a failure, or describe what went wrong in a **previous** turn or mode: answer **only that** using the visible transcript and tool results. Do **not** resume planning, implementation, or a "single-message flow" from before (e.g. do not implicitly continue plan mode work, do not call tools to advance an old task unless needed to answer the question).
-- Answer questions thoroughly with clear explanations and relevant examples. Use search-first **when the question needs code evidence**: run grep/CodebaseSearch (and ListCodeDefinitions) to locate relevant code; then Read only the ranges you need. For pure meta questions ("what was the error?"), the answer is often already in the chat — respond directly before opening the codebase.
+- Answer questions thoroughly with clear explanations and relevant examples. Use search-first **when the question needs code evidence**: run grep/CodebaseSearch/\`LSP\` (and ListCodeDefinitions) to locate relevant code; then Read only the ranges you need. For pure meta questions ("what was the error?"), the answer is often already in the chat — respond directly before opening the codebase.
 - Analyze code, explain concepts, architecture, and patterns. Support answers with actual code evidence (read only the needed sections). Reference locations as \`path/to/file.ts:42\`.
 - Use Mermaid diagrams when they clarify architecture or flow.
 - **After using any tools, you MUST respond with a concise text summary for the user.** Never end your turn with only tool calls.
@@ -200,6 +208,7 @@ const MODE_TRANSITIONS = `## Mode Transitions & Chat Continuity
 - **Do not blend modes** — Do not carry implementation behavior into ask/review mode, and do not carry read-only restrictions into agent/debug mode unless the current mode says so.
 - **Latest user message wins over inertia** — Older messages provide **context only**. If the newest message conflicts with continuing an earlier workflow, follow the **newest** message (see "Current user turn").
 - **Keep context, reset permissions** — Use prior discoveries from the same chat, but always re-evaluate what tools and actions are allowed in the active mode before proceeding.
+- **Persistent state is available** — Tasks, memories, team messages, and background-job records may outlive one turn. Consult them when continuing long-running work instead of assuming only the chat transcript matters.
 - **Sub-agents must match intent** — When delegating, specify whether the sub-agent is doing read-only research or implementation. Do not ask a read-only sub-agent to make edits.
 - **Plan mode → agent mode (implementation)** — When the user approves a plan or switches to **agent** mode to implement after \`PlanExit\`, read the approved plan under \`.nexus/plans/\` (most recent / referenced file). In your **first or second** turn of implementation, call \`TodoWrite\` with \`merge: false\` and create a todo list whose items are **milestones from that plan** (phases, major features, or ordered steps — not housekeeping like "run grep"). Exactly one item should be \`in_progress\`. Update with \`merge: true\` as you complete each milestone until the plan is fully executed.`
 
@@ -364,8 +373,10 @@ const TOOL_USE_GUIDE = `## Tool Usage
 - **Use \`Parallel\` when needed** — If the provider supports only one tool call per step, use the built-in \`Parallel\` tool with \`tool_uses\` to batch independent calls in one step. Primary use: read-only discovery (Read/Grep/Glob/etc). Special case: you may run multiple \`SpawnAgent\` calls in one Parallel batch for concurrent sub-agents. When the user explicitly requests parallel subagents, this is the required shape. For mutating tools (Write/Edit/Bash), call them directly (not through \`Parallel\`).
 - **Background sub-agents** — For independent long subtasks, call \`SpawnAgent(..., run_in_background: true)\`. It returns \`subagent_id\`. **Always use \`SpawnAgentOutput({ subagent_id, block: true })\` (the default) to wait for completion** — this returns only when the agent is done, no polling needed. Only use \`block: false\` if you have real other work to do while the agent runs (e.g. run another tool, then call \`SpawnAgentOutput(block: true)\` when ready). **NEVER call \`SpawnAgentOutput(block: false)\` in a loop with no other work between calls** — that is a busy-wait polling loop and will waste context. Stop with \`SpawnAgentStop\` if required. For most parallel use cases prefer \`SpawnAgentsParallel\` (blocks until all done, no polling).
 - **AskFollowupQuestion** — Use \`AskFollowupQuestion\` only when you are genuinely blocked and the answer cannot be discovered from the codebase, tool results, or reasonable assumptions. Do all non-blocked work first. Ask one focused question, not a list. Never use it for permission prompts like "Should I run tests?".
+- **Deferred tools** — Some tools may be intentionally omitted from the initial tool manifest. If a capability seems missing, call \`ToolSearch\` before assuming it is unavailable.
 - **Skills** — Relevant skills may already appear under **Active Skills** in this prompt. Additional discoverable skills are listed in the \`Skill\` tool description as \`<available_skills>\` (name, description, file URL). To load full instructions for one of those, call \`Skill\` with \`{ "name": "<exact-name>" }\`. Prefer Active Skills when they already cover the task; use exact names from the catalog — no guessing.
 - **How to prompt sub-agents** — \`SpawnAgent\` invocations are stateless. Give each sub-agent a detailed task, the exact scope/files to inspect or modify, whether it is research-only or may implement, and the exact output you expect back (e.g. findings with file:line references, or a list of code changes). Trust sub-agent outputs by default, but reconcile them with direct evidence if results conflict.
+- **Persistent coordination** — For longer jobs, prefer structured state over ad hoc notes: \`TaskCreate\` / \`TaskUpdate\` / \`TaskList\` for work tracking, \`MemoryCreate\` / \`MemoryList\` for reusable knowledge, \`EnterWorktree\` for isolated git work, and \`ListMcpResources\` / \`ReadMcpResource\` when MCP integrations expose resource documents.
 
 - **Context window** — Check the Environment block for "Context: X / Y tokens (Z%)". When usage is high (e.g. >80%), use the \`Condense\` tool to summarize the conversation and free tokens before continuing.
 - **Explore structure first** — Use \`List\` (root and key dirs), \`Glob\` (find by pattern, e.g. \`**/*.ts\`), \`ListCodeDefinitions\` (file or dir for symbols and line numbers), and \`Grep\` (exact patterns, identifiers, imports) to understand the codebase before opening files. Prefer these over reading whole files when you are discovering layout or locating code.
@@ -484,6 +495,7 @@ Skip for:
 - **Mark complete immediately** — As soon as a task is done, mark it \`completed\`. Do not batch.
 - **Create only when none exists** — If context has no "Current Todo List", create one with \`merge: false\`.
 - **Track background work explicitly** — If you start \`Bash(..., run_in_background: true)\`, immediately add/update a todo item that includes the \`bash_id\` and expected completion condition (e.g. "wait for tests to exit cleanly"). Do not end the task while background jobs that matter are still unchecked.
+- **Prefer structured task state for large programs** — When work spans many milestones, use \`TaskCreate\` / \`TaskUpdate\` alongside \`TodoWrite\`: todos track the current turn's execution plan, while tasks persist shared orchestration state across turns and background runs.
 - **Do not forget sub-agents** — After each \`SpawnAgent\` (or Parallel/SpawnAgentsParallel batch), consume and summarize each sub-agent result before moving on. For background runs, call \`SpawnAgentOutput({ subagent_id, block: true })\` — this waits for completion and returns once done (no polling loop needed). Stop with \`SpawnAgentStop\` if you need to cancel. If results are incomplete or conflicting, run follow-up sub-agents/tasks and resolve before finalizing.
 - **Before final response** — Verify there are no pending critical background checks: poll each active \`bash_id\` with \`BashOutput\` (and \`KillBash\` if needed) or explicitly state why it is safe to leave it running.
 - **Batch with other tool calls** — Prefer creating the first todo as \`in_progress\` and starting work in the same turn.
@@ -632,8 +644,8 @@ export function buildSystemInfoBlock(ctx: PromptContext): string {
 
   if (ctx.backgroundJobsSummary?.trim()) {
     lines.push(``)
-    lines.push(`## Active Background Bash Jobs`)
-    lines.push(`Track these jobs explicitly. Poll with BashOutput until done or stop with KillBash when appropriate:`)
+    lines.push(`## Active Background Work`)
+    lines.push(`Track these jobs explicitly. Use BashOutput / TaskOutput to inspect progress and KillBash / TaskStop when appropriate:`)
     lines.push(ctx.backgroundJobsSummary)
   }
 
@@ -641,6 +653,15 @@ export function buildSystemInfoBlock(ctx: PromptContext): string {
     lines.push(``)
     lines.push(`## Project layout (initial context)`)
     lines.push(ctx.initialProjectContext)
+  }
+
+  if (ctx.memories && ctx.memories.length > 0) {
+    lines.push(``)
+    lines.push(`## Persistent Memory`)
+    lines.push(`Use these as durable project/session facts. Prefer updating them when conventions or commands are learned, rather than re-discovering the same information every turn.`)
+    for (const memory of ctx.memories.slice(0, 10)) {
+      lines.push(`- [${memory.scope}] ${memory.title}: ${memory.content}`)
+    }
   }
 
   if (ctx.todoList?.trim()) {

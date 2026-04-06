@@ -2,6 +2,7 @@ import { z } from "zod"
 import { kill } from "node:process"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { backgroundBashJobs } from "./execute-command.js"
+import { getOrchestrationRuntime } from "../../orchestration/runtime.js"
 
 const schema = z.object({
   shell_id: z.string().describe("The ID of the background shell to kill"),
@@ -17,7 +18,7 @@ export const killBashTool: ToolDef<z.infer<typeof schema>> = {
 - Background shell IDs can be found in the Environment block under "Active Background Bash Jobs", or from the bash_id returned when you started the command with run_in_background: true.`,
   parameters: schema,
 
-  async execute({ shell_id }, _ctx: ToolContext) {
+  async execute({ shell_id }, ctx: ToolContext) {
     const job = backgroundBashJobs.get(shell_id)
     if (!job) {
       return {
@@ -27,7 +28,9 @@ export const killBashTool: ToolDef<z.infer<typeof schema>> = {
     }
     try {
       kill(job.pid, "SIGTERM")
-      backgroundBashJobs.delete(shell_id)
+      const runtime = await getOrchestrationRuntime(ctx.cwd)
+      const task = await runtime.setBackgroundTaskStatus(shell_id, "killed", { processId: job.pid })
+      if (task) ctx.host.emit({ type: "background_task_updated", task })
       return { success: true, output: `Killed process ${job.pid} (shell_id: ${shell_id}).` }
     } catch (err) {
       return {

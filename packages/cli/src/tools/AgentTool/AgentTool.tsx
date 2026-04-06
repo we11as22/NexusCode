@@ -1,4 +1,3 @@
-import { TextBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import chalk from 'chalk'
 import { last, memoize } from 'lodash-es'
 import { EOL } from 'os'
@@ -28,6 +27,7 @@ import { getSlowAndCapableModel } from '../../utils/model.js'
 import { getMaxThinkingTokens } from '../../utils/thinking.js'
 import { getAgentTools, getPrompt } from './prompt.js'
 import { TOOL_NAME } from './constants.js'
+import type { TextBlock } from '../../provider/message-schema.js'
 
 const inputSchema = z.object({
   prompt: z.string().describe('The task for the agent to perform'),
@@ -144,7 +144,8 @@ export const AgentTool = {
 
     if (
       lastMessage.message.content.some(
-        _ => _.type === 'text' && _.text === INTERRUPT_MESSAGE,
+        (block: TextBlock) =>
+          block.type === 'text' && block.text === INTERRUPT_MESSAGE,
       )
     ) {
       yield {
@@ -180,7 +181,9 @@ export const AgentTool = {
 
     // Output is an AssistantMessage, but since AgentTool is a tool, it needs
     // to serialize its response to UserMessage-compatible content.
-    const data = lastMessage.message.content.filter(_ => _.type === 'text')
+    const data = lastMessage.message.content.filter(
+      (block: TextBlock): block is TextBlock => block.type === 'text',
+    )
     yield {
       type: 'result',
       data,

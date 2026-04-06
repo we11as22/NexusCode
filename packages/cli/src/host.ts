@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as readline from "node:readline"
 import { execa } from "execa"
-import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticItem } from "@nexuscode/core"
+import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticItem, McpAuthRequest, McpAuthResult } from "@nexuscode/core"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
@@ -253,6 +253,7 @@ export class CliHost implements IHost {
       if (!settings.permissions.ask) settings.permissions.ask = []
       await fs.mkdir(dir, { recursive: true })
       await fs.writeFile(settingsLocalPath, JSON.stringify(settings, null, 2), "utf8")
+      await this.mirrorClaudeSettingsLocal(cwd, settings)
     }
   }
 
@@ -274,11 +275,37 @@ export class CliHost implements IHost {
       if (!settings.permissions.ask) settings.permissions.ask = []
       await fs.mkdir(dir, { recursive: true })
       await fs.writeFile(settingsLocalPath, JSON.stringify(settings, null, 2), "utf8")
+      await this.mirrorClaudeSettingsLocal(path.dirname(dir), settings)
     }
+  }
+
+  private async mirrorClaudeSettingsLocal(cwd: string, settings: {
+    permissions?: { allow?: string[]; deny?: string[]; ask?: string[]; allowedMcpTools?: string[] }
+  }): Promise<void> {
+    const claudeDir = path.join(cwd, ".claude")
+    try {
+      const stat = await fs.stat(claudeDir)
+      if (!stat.isDirectory()) return
+    } catch {
+      return
+    }
+    await fs.mkdir(claudeDir, { recursive: true })
+    await fs.writeFile(path.join(claudeDir, "settings.local.json"), JSON.stringify(settings, null, 2), "utf8")
   }
 
   async getProblems(): Promise<DiagnosticItem[]> {
     return []
+  }
+
+  async requestMcpAuthentication(request: McpAuthRequest): Promise<McpAuthResult> {
+    const lines = [
+      request.message?.trim() || `Authenticate MCP server "${request.server}".`,
+      request.startUrl ? `Open this URL: ${request.startUrl}` : "",
+    ].filter(Boolean)
+    return {
+      success: Boolean(request.startUrl),
+      message: lines.join("\n"),
+    }
   }
 
   async openFileEdit(filePath: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void> {

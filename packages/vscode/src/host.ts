@@ -1,6 +1,25 @@
 import * as vscode from "vscode"
 import * as path from "path"
-import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticItem, CheckpointEntry, ChangedFile } from "@nexuscode/core"
+import type {
+  IHost,
+  AgentEvent,
+  ApprovalAction,
+  PermissionResult,
+  DiagnosticItem,
+  CheckpointEntry,
+  ChangedFile,
+  LspCallRecord,
+  LspLocation,
+  LspQueryRequest,
+  LspQueryResult,
+  LspRange,
+  LspSymbolRecord,
+  Mode,
+  McpAuthRequest,
+  McpAuthResult,
+  ModeChangeResult,
+  WorkingDirectoryChangeResult,
+} from "@nexuscode/core"
 
 const NEXUS_PREVIEW_SCHEME = "nexuscode-preview"
 const previewDocuments = new Map<string, string>()
@@ -60,7 +79,14 @@ export class VsCodeHost implements IHost {
   constructor(
     cwd: string,
     onEvent: (event: AgentEvent) => void,
-    options?: { useWebviewApproval?: boolean; approvalResolveRef?: { current: ((r: PermissionResult) => void) | null }; onCheckpointEntriesUpdated?: () => void; onSessionEditSaved?: (path: string, originalContent: string, newContent: string, isNewFile: boolean) => void }
+    options?: {
+      useWebviewApproval?: boolean
+      approvalResolveRef?: { current: ((r: PermissionResult) => void) | null }
+      onCheckpointEntriesUpdated?: () => void
+      onSessionEditSaved?: (path: string, originalContent: string, newContent: string, isNewFile: boolean) => void
+      onModeChangeRequested?: (mode: Mode, reason?: string) => Promise<void> | void
+      onWorkingDirectoryChangeRequested?: (cwd: string, reason?: string) => Promise<void> | void
+    }
   ) {
     this.cwd = cwd
     this.eventEmitter = onEvent
@@ -68,7 +94,12 @@ export class VsCodeHost implements IHost {
     this.approvalResolveRef = options?.approvalResolveRef ?? null
     this.onCheckpointEntriesUpdated = options?.onCheckpointEntriesUpdated
     this.onSessionEditSaved = options?.onSessionEditSaved
+    this.onModeChangeRequested = options?.onModeChangeRequested
+    this.onWorkingDirectoryChangeRequested = options?.onWorkingDirectoryChangeRequested
   }
+
+  private onModeChangeRequested?: (mode: Mode, reason?: string) => Promise<void> | void
+  private onWorkingDirectoryChangeRequested?: (cwd: string, reason?: string) => Promise<void> | void
 
   setCheckpoint(tracker: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> } | undefined): void {
     this.checkpointTracker = tracker
@@ -174,6 +205,27 @@ export class VsCodeHost implements IHost {
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? "",
       exitCode: result.exitCode ?? 0,
+    }
+  }
+
+  async requestMcpAuthentication(request: McpAuthRequest): Promise<McpAuthResult> {
+    if (request.startUrl) {
+      try {
+        await vscode.env.openExternal(vscode.Uri.parse(request.startUrl))
+        return {
+          success: true,
+          message: request.message?.trim() || `Opened authentication URL for ${request.server}.`,
+        }
+      } catch (error) {
+        return {
+          success: false,
+          message: `Failed to open authentication URL for ${request.server}: ${(error as Error).message}`,
+        }
+      }
+    }
+    return {
+      success: false,
+      message: request.message?.trim() || `No authentication URL available for ${request.server}.`,
     }
   }
 
@@ -324,6 +376,7 @@ export class VsCodeHost implements IHost {
       vscode.Uri.file(path.join(dir, "settings.local.json")),
       new TextEncoder().encode(JSON.stringify(settings, null, 2))
     )
+    await this.mirrorClaudeSettingsLocal(cwd, settings)
   }
 
   private async readSettingsLocal(cwd: string): Promise<{
@@ -356,6 +409,24 @@ export class VsCodeHost implements IHost {
       vscode.Uri.file(path.join(dir, "settings.local.json")),
       new TextEncoder().encode(JSON.stringify(settings, null, 2))
     )
+    await this.mirrorClaudeSettingsLocal(cwd, settings)
+  }
+
+  private async mirrorClaudeSettingsLocal(cwd: string, settings: {
+    permissions?: { allow?: string[]; deny?: string[]; ask?: string[]; allowedMcpTools?: string[] }
+  }): Promise<void> {
+    const claudeDir = path.join(cwd, ".claude")
+    try {
+      const stat = await vscode.workspace.fs.stat(vscode.Uri.file(claudeDir))
+      if (stat.type !== vscode.FileType.Directory) return
+    } catch {
+      return
+    }
+    await vscode.workspace.fs.createDirectory(vscode.Uri.file(claudeDir))
+    await vscode.workspace.fs.writeFile(
+      vscode.Uri.file(path.join(claudeDir, "settings.local.json")),
+      new TextEncoder().encode(JSON.stringify(settings, null, 2)),
+    )
   }
 
   async getProblems(): Promise<DiagnosticItem[]> {
@@ -381,6 +452,161 @@ export class VsCodeHost implements IHost {
     }
 
     return diagnostics.slice(0, 100)
+  }
+
+  async requestModeChange(mode: Mode, reason?: string): Promise<ModeChangeResult> {
+    await this.onModeChangeRequested?.(mode, reason)
+    return {
+      success: true,
+      mode,
+      message: `Host mode switched to ${mode}.${reason ? ` Reason: ${reason}` : ""}`,
+    }
+  }
+
+  async setWorkingDirectory(cwd: string, reason?: string): Promise<WorkingDirectoryChangeResult> {
+    await this.onWorkingDirectoryChangeRequested?.(cwd, reason)
+    return {
+      success: true,
+      cwd,
+      message: `Host working directory switched to ${cwd}.${reason ? ` ${reason}` : ""}`,
+    }
+  }
+
+  async queryLanguageServer(request: LspQueryRequest): Promise<LspQueryResult> {
+    if (request.operation === "workspaceSymbol") {
+      const symbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+        "vscode.executeWorkspaceSymbolProvider",
+        request.query ?? "",
+      )
+      const normalized = (symbols ?? []).map((symbol) => workspaceSymbolToCore(symbol))
+      return {
+        operation: request.operation,
+        summary: normalized.length > 0 ? `Found ${normalized.length} workspace symbol(s).` : "No workspace symbols found.",
+        symbols: normalized,
+      }
+    }
+
+    const absolutePath = request.filePath
+      ? (path.isAbsolute(request.filePath) ? request.filePath : path.join(this.cwd, request.filePath))
+      : this.cwd
+    const uri = resolveWorkspaceFileUri(this.cwd, absolutePath)
+    const doc = await vscode.workspace.openTextDocument(uri)
+    const position = new vscode.Position(Math.max(0, (request.line ?? 1) - 1), Math.max(0, (request.character ?? 1) - 1))
+
+    if (request.operation === "documentSymbol") {
+      const symbols = await vscode.commands.executeCommand<(vscode.DocumentSymbol | vscode.SymbolInformation)[]>(
+        "vscode.executeDocumentSymbolProvider",
+        uri,
+      )
+      const normalized = flattenDocumentSymbols(symbols ?? [], absolutePath)
+      return {
+        operation: request.operation,
+        summary: normalized.length > 0 ? `Found ${normalized.length} document symbol(s).` : "No document symbols found.",
+        symbols: normalized,
+      }
+    }
+
+    if (request.operation === "hover") {
+      const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        uri,
+        position,
+      )
+      const hover = (hovers ?? []).map(hoverToText).filter(Boolean).join("\n\n").trim()
+      return {
+        operation: request.operation,
+        summary: hover ? "Hover information retrieved." : "No hover information found.",
+        hover,
+      }
+    }
+
+    if (request.operation === "goToDefinition") {
+      const definitions = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
+        "vscode.executeDefinitionProvider",
+        uri,
+        position,
+      )
+      const locations = (definitions ?? []).map(locationLikeToCore).filter((item): item is LspLocation => Boolean(item))
+      return {
+        operation: request.operation,
+        summary: locations.length > 0 ? `Found ${locations.length} definition location(s).` : "No definitions found.",
+        locations,
+      }
+    }
+
+    if (request.operation === "goToImplementation") {
+      const implementations = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
+        "vscode.executeImplementationProvider",
+        uri,
+        position,
+      )
+      const locations = (implementations ?? []).map(locationLikeToCore).filter((item): item is LspLocation => Boolean(item))
+      return {
+        operation: request.operation,
+        summary: locations.length > 0 ? `Found ${locations.length} implementation location(s).` : "No implementations found.",
+        locations,
+      }
+    }
+
+    if (request.operation === "findReferences") {
+      const references = await vscode.commands.executeCommand<vscode.Location[]>(
+        "vscode.executeReferenceProvider",
+        uri,
+        position,
+      )
+      const locations = (references ?? []).map(locationLikeToCore).filter((item): item is LspLocation => Boolean(item))
+      return {
+        operation: request.operation,
+        summary: locations.length > 0 ? `Found ${locations.length} reference location(s).` : "No references found.",
+        locations,
+      }
+    }
+
+    const items = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
+      "vscode.prepareCallHierarchy",
+      uri,
+      position,
+    )
+    const seed = (items ?? [])[0]
+    if (!seed) {
+      return {
+        operation: request.operation,
+        summary: "No call hierarchy available at this symbol.",
+      }
+    }
+    if (request.operation === "prepareCallHierarchy") {
+      return {
+        operation: request.operation,
+        summary: `Prepared call hierarchy for ${seed.name}.`,
+        calls: [callHierarchyItemToCore(seed)],
+      }
+    }
+    if (request.operation === "incomingCalls") {
+      const calls = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[]>(
+        "vscode.provideIncomingCalls",
+        seed,
+      )
+      return {
+        operation: request.operation,
+        summary: (calls ?? []).length > 0 ? `Found ${(calls ?? []).length} incoming call(s).` : "No incoming calls found.",
+        calls: (calls ?? []).map((call) => ({
+          ...callHierarchyItemToCore(call.from),
+          fromRanges: call.fromRanges.map(rangeToCore),
+        })),
+      }
+    }
+    const calls = await vscode.commands.executeCommand<vscode.CallHierarchyOutgoingCall[]>(
+      "vscode.provideOutgoingCalls",
+      seed,
+    )
+    return {
+      operation: request.operation,
+      summary: (calls ?? []).length > 0 ? `Found ${(calls ?? []).length} outgoing call(s).` : "No outgoing calls found.",
+      calls: (calls ?? []).map((call) => ({
+        ...callHierarchyItemToCore(call.to),
+        fromRanges: call.fromRanges.map(rangeToCore),
+      })),
+    }
   }
 
   async openFileEdit(filePath: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void> {
@@ -425,6 +651,94 @@ function getLanguageFromExtension(ext: string): string {
     ".md": "markdown",
   }
   return map[ext] ?? "plaintext"
+}
+
+function rangeToCore(range: vscode.Range): LspRange {
+  return {
+    start: { line: range.start.line + 1, character: range.start.character + 1 },
+    end: { line: range.end.line + 1, character: range.end.character + 1 },
+  }
+}
+
+function locationLikeToCore(location: vscode.Location | vscode.LocationLink | undefined): LspLocation | null {
+  if (!location) return null
+  if ("targetUri" in location) {
+      return {
+        path: location.targetUri.fsPath,
+        range: rangeToCore(location.targetRange),
+        ...(location.targetSelectionRange ? { targetSelectionRange: rangeToCore(location.targetSelectionRange) } : {}),
+      }
+  }
+  return {
+    path: location.uri.fsPath,
+    range: rangeToCore(location.range),
+  }
+}
+
+function hoverPartToText(part: vscode.MarkdownString | vscode.MarkedString): string {
+  if (typeof part === "string") return part
+  if ("value" in part && typeof part.value === "string") return part.value
+  if ("language" in part && typeof part.value === "string") {
+    return `\`\`\`${part.language}\n${part.value}\n\`\`\``
+  }
+  return String(part)
+}
+
+function hoverToText(hover: vscode.Hover): string {
+  return hover.contents.map(hoverPartToText).filter(Boolean).join("\n\n").trim()
+}
+
+function symbolKindLabel(kind: vscode.SymbolKind): string {
+  return vscode.SymbolKind[kind] ?? String(kind)
+}
+
+function symbolToCore(symbol: vscode.DocumentSymbol | vscode.SymbolInformation, fallbackPath: string): LspSymbolRecord[] {
+  if ("children" in symbol) {
+    const current: LspSymbolRecord = {
+      name: symbol.name,
+      kind: symbolKindLabel(symbol.kind),
+      detail: symbol.detail || undefined,
+      path: fallbackPath,
+      range: rangeToCore(symbol.selectionRange),
+    }
+    return [current, ...symbol.children.flatMap((child) => symbolToCore(child, fallbackPath))]
+  }
+  return [{
+    name: symbol.name,
+    kind: symbolKindLabel(symbol.kind),
+    path: symbol.location.uri.fsPath,
+    range: rangeToCore(symbol.location.range),
+  }]
+}
+
+function flattenDocumentSymbols(symbols: Array<vscode.DocumentSymbol | vscode.SymbolInformation>, fallbackPath: string): LspSymbolRecord[] {
+  return symbols.flatMap((symbol) => symbolToCore(symbol, fallbackPath))
+}
+
+function workspaceSymbolToCore(symbol: vscode.SymbolInformation): LspSymbolRecord {
+  if ("location" in symbol && symbol.location) {
+    const location = symbol.location
+    return {
+      name: symbol.name,
+      kind: symbolKindLabel(symbol.kind),
+      path: location.uri.fsPath,
+      range: rangeToCore(location.range),
+    }
+  }
+  return {
+    name: symbol.name,
+    kind: symbolKindLabel(symbol.kind),
+  }
+}
+
+function callHierarchyItemToCore(item: vscode.CallHierarchyItem): LspCallRecord {
+  return {
+    name: item.name,
+    kind: symbolKindLabel(item.kind),
+    path: item.uri.fsPath,
+    range: rangeToCore(item.range),
+    selectionRange: rangeToCore(item.selectionRange),
+  }
 }
 
 /**

@@ -2,10 +2,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
-  CallToolResultSchema,
   ListToolsRequestSchema,
-  ListToolsResultSchema,
-  ToolSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { zodToJsonSchema } from 'zod-to-json-schema'
@@ -26,7 +23,17 @@ import { Command } from '../commands.js'
 import review from '../commands/review.js'
 import { lastX } from '../utils/generators.js'
 
-type ToolInput = z.infer<typeof ToolSchema.shape.inputSchema>
+type ToolInput = Record<string, unknown>
+type MCPFriendlyTool = {
+  name: string
+  description: string
+  inputSchema: {
+    type: 'object'
+    properties?: Record<string, object>
+    required?: string[]
+    [key: string]: unknown
+  }
+}
 
 const state: {
   readFileTimestamps: Record<string, number>
@@ -63,12 +70,12 @@ export async function startMCPServer(cwd: string): Promise<void> {
 
   server.setRequestHandler(
     ListToolsRequestSchema,
-    async (): Promise<Zod.infer<typeof ListToolsResultSchema>> => {
-      const tools = await Promise.all(
+    async () => {
+      const tools: MCPFriendlyTool[] = await Promise.all(
         MCP_TOOLS.map(async tool => ({
-          ...tool,
+          name: tool.name,
           description: await tool.description(z.object({})),
-          inputSchema: zodToJsonSchema(tool.inputSchema) as ToolInput,
+          inputSchema: zodToJsonSchema(tool.inputSchema) as MCPFriendlyTool['inputSchema'],
         })),
       )
 
@@ -80,7 +87,7 @@ export async function startMCPServer(cwd: string): Promise<void> {
 
   server.setRequestHandler(
     CallToolRequestSchema,
-    async (request): Promise<Zod.infer<typeof CallToolResultSchema>> => {
+    async (request) => {
       const { name, arguments: args } = request.params
       const tool = MCP_TOOLS.find(_ => _.name === name)
       if (!tool) {

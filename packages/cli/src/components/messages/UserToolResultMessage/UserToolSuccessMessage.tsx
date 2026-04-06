@@ -1,4 +1,3 @@
-import { ToolResultBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { Hunk } from 'diff'
 import { Box, Text } from 'ink'
 import * as React from 'react'
@@ -10,6 +9,7 @@ import {
   EditAppliedReplacementsPreview,
   type AppliedReplacement,
 } from './EditAppliedReplacementsPreview.js'
+import type { ToolResultBlockParam } from '../../../provider/message-schema.js'
 
 type CoreDiffLine = {
   type: 'add' | 'remove' | 'context'

@@ -138,7 +138,7 @@ export const FileWriteTool = {
                     : contentWithFallback
                         .split('\n')
                         .slice(0, MAX_LINES_TO_RENDER)
-                        .filter(_ => _.trim() !== '')
+                        .filter((line: string) => line.trim() !== '')
                         .join('\n')
                 }
                 language={extname(filePath).slice(1)}
@@ -157,12 +157,13 @@ export const FileWriteTool = {
           <FileEditToolUpdatedMessage
             filePath={filePath}
             structuredPatch={structuredPatch}
-            verbose={verbose}
+            verbose={Boolean(verbose)}
           />
         )
     }
   },
-  async validateInput({ file_path }, { readFileTimestamps }) {
+  async validateInput({ file_path }, context) {
+    const readFileTimestamps = context?.readFileTimestamps ?? {}
     const fullFilePath = isAbsolute(file_path)
       ? file_path
       : resolve(getCwd(), file_path)

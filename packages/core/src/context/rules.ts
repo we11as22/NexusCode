@@ -2,17 +2,22 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
 import { glob } from "glob"
+import type { ClaudeCompatibilityOptions } from "../compat/claude.js"
 
 /**
- * Load rules from CLAUDE.md, AGENTS.md, .nexus/rules/** etc.
+ * Load rules from NEXUS.md, CLAUDE.md, AGENTS.md, .nexus/rules/** etc.
  * Walks up from cwd to find all applicable rule files.
  */
-export async function loadRules(cwd: string, rulePatterns: string[]): Promise<string> {
+export async function loadRules(cwd: string, rulePatterns: string[], compatibility?: ClaudeCompatibilityOptions): Promise<string> {
   const contents: string[] = []
   const seen = new Set<string>()
 
-  // Walk up from cwd to find files like CLAUDE.md, AGENTS.md
-  const topLevelFiles = rulePatterns.filter(p => !p.includes("**") && !p.includes("*"))
+  // Walk up from cwd to find files like NEXUS.md, CLAUDE.md, AGENTS.md
+  const topLevelFiles = [
+    ...rulePatterns.filter(p => !p.includes("**") && !p.includes("*")),
+    "NEXUS.local.md",
+    ...(compatibility?.includeLocalInstructions ? ["CLAUDE.local.md"] : []),
+  ]
   const globPatterns = rulePatterns.filter(p => p.includes("**") || p.includes("*"))
 
   // Walk up for top-level files
@@ -53,6 +58,20 @@ export async function loadRules(cwd: string, rulePatterns: string[]): Promise<st
         }
       }
     }
+    if (compatibility?.includeProjectDir && compatibility?.includeRules) {
+      const claudeRulesDir = path.join(dir, ".claude", "rules")
+      const claudeRuleFiles = await glob(path.join(claudeRulesDir, "**/*.md")).catch(() => [] as string[])
+      for (const match of claudeRuleFiles.sort()) {
+        if (!seen.has(match)) {
+          const content = await readFileSafe(match)
+          if (content) {
+            seen.add(match)
+            const rel = path.relative(cwd, match)
+            contents.push(`<!-- Claude-compatible rules from ${rel} -->\n${content}`)
+          }
+        }
+      }
+    }
     const parent = path.dirname(dir)
     if (parent === dir) break
     dir = parent
@@ -86,6 +105,19 @@ export async function loadRules(cwd: string, rulePatterns: string[]): Promise<st
       if (content) {
         seen.add(match)
         contents.push(`<!-- Global rule: ${path.basename(match)} -->\n${content}`)
+      }
+    }
+  }
+  if (compatibility?.includeGlobalDir && compatibility?.includeRules) {
+    const globalClaudeRulesDir = path.join(os.homedir(), ".claude", "rules")
+    const globalClaudeRules = await glob(path.join(globalClaudeRulesDir, "**/*.md")).catch(() => [] as string[])
+    for (const match of globalClaudeRules.sort()) {
+      if (!seen.has(match)) {
+        const content = await readFileSafe(match)
+        if (content) {
+          seen.add(match)
+          contents.push(`<!-- Claude-compatible global rule: ${path.basename(match)} -->\n${content}`)
+        }
       }
     }
   }

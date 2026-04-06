@@ -1,4 +1,4 @@
-import { TextBlock, ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
+import { TextBlock, ToolUseBlock } from '../../provider/message-schema.js'
 import { AssistantMessage, BinaryFeedbackResult } from '../../query.js'
 import { MAIN_QUERY_TEMPERATURE } from '../../services/claude.js'
 import { getDynamicConfig, logEvent } from '../../services/statsig.js'
@@ -115,7 +115,10 @@ function allContentBlocksEqual(
   if (content1.length !== content2.length) {
     return false
   }
-  return zip(content1, content2).every(([cb1, cb2]) =>
+  return zip(content1, content2).every(([cb1, cb2]: [
+    TextBlock | ToolUseBlock | undefined,
+    TextBlock | ToolUseBlock | undefined,
+  ]) =>
     contentBlocksEqual(cb1!, cb2!),
   )
 }

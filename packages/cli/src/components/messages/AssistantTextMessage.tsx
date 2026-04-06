@@ -1,4 +1,3 @@
-import { TextBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import React from 'react'
 import { AssistantBashOutputMessage } from './AssistantBashOutputMessage.js'
 import { AssistantLocalCommandOutputMessage } from './AssistantLocalCommandOutputMessage.js'
@@ -21,6 +20,7 @@ import {
 import { BLACK_CIRCLE } from '../../constants/figures.js'
 import { applyMarkdown } from '../../utils/markdown.js'
 import { useTerminalSize } from '../../hooks/useTerminalSize.js'
+import type { TextBlockParam } from '../../provider/message-schema.js'
 
 type Props = {
   param: TextBlockParam

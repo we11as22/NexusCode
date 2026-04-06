@@ -1,7 +1,7 @@
-import { ToolResultBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { Box, Text } from 'ink'
 import * as React from 'react'
 import { getTheme } from '../../../utils/theme.js'
+import type { ToolResultBlockParam } from '../../../provider/message-schema.js'
 
 const MAX_RENDERED_LINES = 10
 

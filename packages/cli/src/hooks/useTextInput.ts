@@ -7,6 +7,7 @@ import {
   CLIPBOARD_ERROR_MESSAGE,
 } from '../utils/imagePaste.js'
 import { getClipboardText, setClipboardText } from '../utils/clipboard.js'
+import { asExtendedKey, type ExtendedKey } from '../utils/ink.js'
 
 const IMAGE_PLACEHOLDER = '[Image pasted]'
 
@@ -195,7 +196,6 @@ export function useTextInput({
       onMessage?.(true, CLIPBOARD_ERROR_MESSAGE)
       maybeClearImagePasteErrorTimeout()
       setImagePasteErrorTimeout(
-        // @ts-expect-error: Bun is overloading types here, but we're using the NodeJS runtime
         setTimeout(() => {
           onMessage?.(false)
         }, 4000),
@@ -251,7 +251,7 @@ export function useTextInput({
     return cursorDown
   }
 
-  const handleCtrl = (k: Key) =>
+  const handleCtrl = (k: ExtendedKey) =>
     mapInput([
       ['a', () => (k.shift ? currentCursorRef.current.startOfLine().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset) : currentCursorRef.current.startOfLine().collapseSelection())],
       ['b', () => (k.shift ? currentCursorRef.current.left().withAnchor(currentCursorRef.current.hasSelection() ? currentCursorRef.current.selection : currentCursorRef.current.offset) : currentCursorRef.current.left().collapseSelection())],
@@ -270,7 +270,7 @@ export function useTextInput({
       ['x', () => (currentCursorRef.current.hasSelection() ? (setClipboardText(currentCursorRef.current.getSelectedText()), currentCursorRef.current.replaceSelected('')) : currentCursorRef.current)],
     ])
 
-  function mapKey(key: Key): InputMapper {
+  function mapKey(key: ExtendedKey): InputMapper {
     switch (true) {
       case key.escape:
         return handleEscape
@@ -357,6 +357,7 @@ export function useTextInput({
    * META+DELETE: key.delete + key.meta → mapKey → cursor.deleteToLineEnd().
    */
   function onInput(input: string, key: Key): void {
+    const extendedKey = asExtendedKey(key)
     // Rebuild cursor from refs so we have the latest value when multiple keystrokes
     // are processed before React re-renders (fixes "only last character shown").
     const cursor = Cursor.fromText(
@@ -426,13 +427,13 @@ export function useTextInput({
       return
     }
     // Ink on Linux/Mac reports Backspace as key.delete + input '' (issue #634). Use raw stdin flag to treat as backspace.
-    if (key.delete && input === '' && lastRawWasBackspaceRef.current) {
+    if (extendedKey.delete && input === '' && lastRawWasBackspaceRef.current) {
       lastRawWasBackspaceRef.current = false
       const next = cursor.backspace()
       if (!cursor.equals(next)) applyCursor(next)
       return
     }
-    const nextCursor = mapKey(key)(input)
+    const nextCursor = mapKey(extendedKey)(input)
     if (nextCursor && !cursor.equals(nextCursor)) applyCursor(nextCursor)
   }
 

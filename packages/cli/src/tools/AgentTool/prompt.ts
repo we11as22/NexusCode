@@ -12,7 +12,7 @@ export async function getAgentTools(
   // No recursive agents, yet..
   return (
     await (dangerouslySkipPermissions ? getTools() : getReadOnlyTools())
-  ).filter(_ => _.name !== AgentTool.name)
+  ).filter((tool: Tool) => tool.name !== AgentTool.name)
 }
 
 export async function getPrompt(

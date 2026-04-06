@@ -1,4 +1,3 @@
-import type { TextBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import { Box } from 'ink'
 import * as React from 'react'
 import { z } from 'zod'
@@ -16,6 +15,7 @@ import { GlobTool } from '../GlobTool/GlobTool.js'
 import { GrepTool } from '../GrepTool/GrepTool.js'
 import { LSTool } from '../lsTool/lsTool.js'
 import { ARCHITECT_SYSTEM_PROMPT, DESCRIPTION } from './prompt.js'
+import type { TextBlock } from '../../provider/message-schema.js'
 
 const FS_EXPLORATION_TOOLS: Tool[] = [
   BashTool,
@@ -73,7 +73,7 @@ export const ArchitectTool = {
         messages,
         [ARCHITECT_SYSTEM_PROMPT],
         await getContext(),
-        canUseTool,
+        canUseTool ?? (async () => ({ result: true as const })),
         {
           ...toolUseContext,
           options: { ...toolUseContext.options, tools: allowedTools },
@@ -85,7 +85,9 @@ export const ArchitectTool = {
       throw new Error('Invalid response from API')
     }
 
-    const data = lastResponse.message.content.filter(_ => _.type === 'text')
+    const data = lastResponse.message.content.filter(
+      (block): block is TextBlock => block.type === 'text',
+    )
     yield {
       type: 'result',
       data,
@@ -107,7 +109,7 @@ export const ArchitectTool = {
     return (
       <Box flexDirection="column" gap={1}>
         <HighlightedCode
-          code={content.map(_ => _.text).join('\n')}
+          code={content.map((block: TextBlock) => block.text).join('\n')}
           language="markdown"
         />
       </Box>

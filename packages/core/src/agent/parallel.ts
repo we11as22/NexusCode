@@ -1,4 +1,6 @@
 import * as crypto from "node:crypto"
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
 import { z } from "zod"
 import type {
   ToolDef,
@@ -13,10 +15,12 @@ import type {
 import { Session } from "../session/index.js"
 import { loadRules } from "../context/rules.js"
 import { loadSkills } from "../skills/manager.js"
+import { getClaudeCompatibilityOptions } from "../compat/claude.js"
 import { ToolRegistry } from "../tools/registry.js"
 import { createCompaction } from "../session/compaction.js"
 import { createLLMClient } from "../provider/index.js"
 import { runAgentLoop } from "./loop.js"
+import { getOrchestrationRuntime, getRuntimeDir } from "../orchestration/runtime.js"
 
 export interface SubAgentResult {
   subagentId: string
@@ -26,6 +30,12 @@ export interface SubAgentResult {
   error?: string
   /** Write/Edit tool parts from the sub-agent session (merged into parent for session diff). */
   fileEditParts?: ToolPart[]
+}
+
+interface ResumeAgentOptions {
+  followupInstruction?: string
+  fork?: boolean
+  runInBackground?: boolean
 }
 
 function findAssistantMessageIdWithToolPart(
@@ -97,6 +107,46 @@ interface SubAgentSnapshot {
   status: SubAgentStatus
   output: string
   error?: string
+}
+
+async function writeSubagentSnapshot(args: {
+  cwd: string
+  subagentId: string
+  sessionId: string
+  description: string
+  mode: Mode
+  contextSummary?: string
+  parentPartId?: string
+  success: boolean
+  output: string
+  error?: string
+  messages: SessionMessage[]
+}): Promise<string> {
+  const dir = path.join(getRuntimeDir(args.cwd), "agent-runs")
+  await fs.mkdir(dir, { recursive: true })
+  const snapshotPath = path.join(dir, `${args.subagentId}.json`)
+  await fs.writeFile(
+    snapshotPath,
+    JSON.stringify(
+      {
+        subagentId: args.subagentId,
+        sessionId: args.sessionId,
+        description: args.description,
+        mode: args.mode,
+        contextSummary: args.contextSummary,
+        parentPartId: args.parentPartId,
+        success: args.success,
+        output: args.output,
+        error: args.error,
+        messageCount: args.messages.length,
+        messages: args.messages,
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  )
+  return snapshotPath
 }
 
 /**
@@ -261,6 +311,19 @@ export class ParallelAgentManager {
       )
       this.statusById.set(subagentId, "completed")
       this.errorById.set(subagentId, undefined)
+      const runtime = await getOrchestrationRuntime(cwd)
+      await runtime.registerBackgroundTask({
+        id: subagentId,
+        kind: "subagent",
+        description,
+        status: "completed",
+        output: this.outputById.get(subagentId),
+        metadata: { duplicate: true, mode },
+      })
+      emit?.({
+        type: "background_task_updated",
+        task: (await runtime.getBackgroundTask(subagentId))!,
+      })
       return { subagentId }
     }
     this.recentSpawnTasks.push(taskKey)
@@ -279,6 +342,22 @@ export class ParallelAgentManager {
       contextSummary,
       parentPartId,
     )
+    const runtime = await getOrchestrationRuntime(cwd)
+    await runtime.registerBackgroundTask({
+      id: subagentId,
+      kind: "subagent",
+      description,
+      status: "running",
+      metadata: {
+        mode,
+        ...(contextSummary ? { contextSummary } : {}),
+        ...(parentPartId ? { parentPartId } : {}),
+      },
+    })
+    emit?.({
+      type: "background_task_updated",
+      task: (await runtime.getBackgroundTask(subagentId))!,
+    })
     return { subagentId }
   }
 
@@ -313,6 +392,78 @@ export class ParallelAgentManager {
     return true
   }
 
+  async listRuns(cwd: string) {
+    const runtime = await getOrchestrationRuntime(cwd)
+    return (await runtime.listBackgroundTasks())
+      .filter((task) => task.kind === "subagent")
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+
+  async resume(
+    subagentId: string,
+    options: ResumeAgentOptions,
+    config: NexusConfig,
+    cwd: string,
+    signal: AbortSignal,
+    maxParallel: number,
+    emit?: (event: AgentEvent) => void,
+    parentPartId?: string,
+  ): Promise<SubAgentResult | { subagentId: string; background: true }> {
+    const runtime = await getOrchestrationRuntime(cwd)
+    const existing = await runtime.getBackgroundTask(subagentId)
+    if (!existing || existing.kind !== "subagent") {
+      throw new Error(`Sub-agent run not found: ${subagentId}`)
+    }
+    const mode = ((existing.metadata?.mode as Mode | undefined) ?? "agent")
+    const originalDescription = String(existing.description || existing.metadata?.description || "").trim()
+    const previousOutput = String(existing.output || "").trim()
+    const contextSummary = typeof existing.metadata?.contextSummary === "string"
+      ? existing.metadata.contextSummary
+      : undefined
+    const resumeDescription = [
+      options.fork ? "Fork from the following earlier sub-agent run." : "Continue the following earlier sub-agent run.",
+      originalDescription ? `Original task:\n${originalDescription}` : "",
+      previousOutput ? `Previous output:\n${previousOutput.slice(0, 5000)}` : "",
+      options.followupInstruction?.trim()
+        ? `New instruction:\n${options.followupInstruction.trim()}`
+        : "New instruction:\nReview the previous result, continue from it, and finish the task cleanly.",
+    ].filter(Boolean).join("\n\n")
+
+    if (options.runInBackground) {
+      const started = await this.spawnInBackground(
+        resumeDescription,
+        mode,
+        config,
+        cwd,
+        signal,
+        maxParallel,
+        emit,
+        contextSummary,
+        parentPartId,
+      )
+      await runtime.updateBackgroundTask(started.subagentId, {
+        metadata: {
+          ...(await runtime.getBackgroundTask(started.subagentId))?.metadata,
+          ...(options.fork ? { forkOf: subagentId } : { resumeOf: subagentId }),
+        },
+      }).catch(() => null)
+      return { subagentId: started.subagentId, background: true }
+    }
+
+    const result = await this.spawn(
+      resumeDescription,
+      mode,
+      config,
+      cwd,
+      signal,
+      maxParallel,
+      emit,
+      contextSummary,
+      parentPartId,
+    )
+    return result
+  }
+
   private async runSubAgent(
     subagentId: string,
     description: string,
@@ -326,6 +477,31 @@ export class ParallelAgentManager {
   ): Promise<SubAgentResult> {
     const session = Session.createEphemeral(cwd)
     this.sessions.set(subagentId, session.id)
+    const runtime = await getOrchestrationRuntime(cwd)
+    const existingRuntimeTask = await runtime.getBackgroundTask(subagentId)
+    if (!existingRuntimeTask) {
+      await runtime.registerBackgroundTask({
+        id: subagentId,
+        kind: "subagent",
+        description,
+        status: "running",
+        metadata: {
+          mode,
+          description,
+          ...(contextSummary ? { contextSummary } : {}),
+          ...(parentPartId ? { parentPartId } : {}),
+        },
+      })
+    }
+    await runtime.updateBackgroundTask(subagentId, {
+      sessionId: session.id,
+      metadata: {
+        mode,
+        description,
+        ...(contextSummary ? { contextSummary } : {}),
+        ...(parentPartId ? { parentPartId } : {}),
+      },
+    }).catch(() => null)
     const userContent = contextSummary?.trim()
       ? `${contextSummary}\n\n---\n\nTask: ${description}`
       : description
@@ -336,8 +512,9 @@ export class ParallelAgentManager {
     const toolRegistry = new ToolRegistry()
     const { builtin: tools } = toolRegistry.getForMode(mode)
 
-    const rulesContent = await loadRules(cwd, config.rules.files).catch(() => "")
-    const skills = await loadSkills(config.skills, cwd, config.skillsUrls).catch(() => [])
+    const claudeCompatibility = getClaudeCompatibilityOptions(config)
+    const rulesContent = await loadRules(cwd, config.rules.files, claudeCompatibility).catch(() => "")
+    const skills = await loadSkills(config.skills, cwd, config.skillsUrls, claudeCompatibility).catch(() => [])
     const compaction = createCompaction()
 
     let output = ""
@@ -407,6 +584,31 @@ export class ParallelAgentManager {
       this.outputById.set(subagentId, output)
       this.statusById.set(subagentId, "completed")
       this.errorById.set(subagentId, undefined)
+      const snapshotFile = await writeSubagentSnapshot({
+        cwd,
+        subagentId,
+        sessionId: session.id,
+        description,
+        mode,
+        contextSummary,
+        parentPartId,
+        success: true,
+        output,
+        messages: session.messages,
+      })
+      const runtimeTask = await runtime.setBackgroundTaskStatus(subagentId, "completed", {
+        sessionId: session.id,
+        output,
+        metadata: {
+          ...(existingRuntimeTask?.metadata ?? {}),
+          mode,
+          description,
+          ...(contextSummary ? { contextSummary } : {}),
+          ...(parentPartId ? { parentPartId } : {}),
+          snapshotFile,
+        },
+      }).catch(() => null)
+      if (runtimeTask) emit?.({ type: "background_task_updated", task: runtimeTask })
       const fileEditParts = collectCompletedWriteEditParts(session.messages)
       return {
         subagentId,
@@ -428,6 +630,33 @@ export class ParallelAgentManager {
       this.outputById.set(subagentId, output || "")
       this.statusById.set(subagentId, "error")
       this.errorById.set(subagentId, error)
+      const snapshotFile = await writeSubagentSnapshot({
+        cwd,
+        subagentId,
+        sessionId: session.id,
+        description,
+        mode,
+        contextSummary,
+        parentPartId,
+        success: false,
+        output: output || "",
+        error,
+        messages: session.messages,
+      })
+      const runtimeTask = await runtime.setBackgroundTaskStatus(subagentId, "failed", {
+        sessionId: session.id,
+        output: output || "",
+        error,
+        metadata: {
+          ...(existingRuntimeTask?.metadata ?? {}),
+          mode,
+          description,
+          ...(contextSummary ? { contextSummary } : {}),
+          ...(parentPartId ? { parentPartId } : {}),
+          snapshotFile,
+        },
+      }).catch(() => null)
+      if (runtimeTask) emit?.({ type: "background_task_updated", task: runtimeTask })
       return {
         subagentId,
         sessionId: session.id,
@@ -467,6 +696,22 @@ const spawnStopSchema = z
     subagent_id: z.string().min(1).describe("Background sub-agent ID to stop."),
   })
   .strict()
+
+const listAgentRunsSchema = z.object({
+  limit: z.number().int().positive().max(50).optional().describe("Maximum number of runs to show."),
+})
+
+const agentRunSnapshotSchema = z.object({
+  subagent_id: z.string().min(1).describe("Existing sub-agent id."),
+  format: z.enum(["summary", "json"]).optional().describe("Response format. summary is the default."),
+})
+
+const resumeAgentSchema = z.object({
+  subagent_id: z.string().min(1).describe("Existing sub-agent id to resume or fork."),
+  instruction: z.string().optional().describe("Optional follow-up instruction for the resumed agent."),
+  fork: z.boolean().optional().describe("When true, fork from the prior run instead of continuing it."),
+  run_in_background: z.boolean().optional().describe("Resume in background and return immediately."),
+})
 
 export function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef {
   const schema = spawnSchema
@@ -575,26 +820,37 @@ export function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolD
 - Returns status, output (partial if still running, final if done), and error if any.`,
     parameters: spawnOutputSchema,
     readOnly: true,
-    async execute({ subagent_id, block }, _ctx: ToolContext) {
+    async execute({ subagent_id, block }, ctx: ToolContext) {
       const shouldBlock = block ?? true
       const snapshot = shouldBlock ? await manager.waitFor(subagent_id) : manager.getSnapshot(subagent_id)
-      if (!snapshot) {
+      const runtime = await getOrchestrationRuntime(ctx.cwd)
+      const runtimeTask = await runtime.getBackgroundTask(subagent_id)
+      if (!snapshot && !runtimeTask) {
         return {
           success: false,
           output: `Unknown sub-agent id: ${subagent_id}.`,
         }
       }
-      const statusLine = `[Sub-agent status: ${snapshot.status}]`
-      const body = snapshot.output?.trim() ? snapshot.output : "(no output yet)"
-      const errLine = snapshot.error ? `\nError: ${snapshot.error}` : ""
+      const status = snapshot?.status ?? (
+        runtimeTask?.status === "running"
+          ? "running"
+          : runtimeTask?.status === "completed"
+            ? "completed"
+            : "error"
+      )
+      const body = snapshot?.output?.trim() || runtimeTask?.output?.trim() || "(no output yet)"
+      const error = snapshot?.error ?? runtimeTask?.error
+      const sessionId = snapshot?.sessionId ?? runtimeTask?.sessionId ?? ""
+      const statusLine = `[Sub-agent status: ${status}]`
+      const errLine = error ? `\nError: ${error}` : ""
       return {
-        success: snapshot.status !== "error",
+        success: status !== "error",
         output: `${statusLine}\n${body}${errLine}`,
         metadata: {
-          subagent_id: snapshot.subagentId,
-          status: snapshot.status,
-          session_id: snapshot.sessionId,
-          ...(snapshot.error ? { error: snapshot.error } : {}),
+          subagent_id,
+          status,
+          session_id: sessionId,
+          ...(error ? { error } : {}),
         },
       }
     },
@@ -606,12 +862,146 @@ export function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef
     name: "SpawnAgentStop",
     description: "Stop a running background sub-agent started via SpawnAgent(run_in_background: true).",
     parameters: spawnStopSchema,
-    async execute({ subagent_id }, _ctx: ToolContext) {
+    async execute({ subagent_id }, ctx: ToolContext) {
       const stopped = manager.stop(subagent_id)
       if (!stopped) {
         return { success: false, output: `No active background sub-agent with id ${subagent_id}.` }
       }
+      const runtime = await getOrchestrationRuntime(ctx.cwd)
+      const task = await runtime.setBackgroundTaskStatus(subagent_id, "killed").catch(() => null)
+      if (task) ctx.host.emit({ type: "background_task_updated", task })
       return { success: true, output: `Stop signal sent to ${subagent_id}.` }
+    },
+  }
+}
+
+export function createListAgentRunsTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof listAgentRunsSchema>> {
+  return {
+    name: "ListAgentRuns",
+    description: "List recent sub-agent runs with status, original task, and resume/fork lineage.",
+    parameters: listAgentRunsSchema,
+    readOnly: true,
+    async execute({ limit }, ctx: ToolContext) {
+      const runs = await manager.listRuns(ctx.cwd)
+      const sliced = runs.slice(0, limit ?? 20)
+      if (sliced.length === 0) return { success: true, output: "No sub-agent runs found." }
+      return {
+        success: true,
+        output: sliced.map((run) => {
+          const lineage = run.metadata?.resumeOf
+            ? ` | resumeOf=${String(run.metadata.resumeOf)}`
+            : run.metadata?.forkOf
+              ? ` | forkOf=${String(run.metadata.forkOf)}`
+              : ""
+          return `- ${run.id} | ${run.status} | ${run.description}${lineage}`
+        }).join("\n"),
+        metadata: { runs: sliced },
+      }
+    },
+  }
+}
+
+export function createAgentRunSnapshotTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof agentRunSnapshotSchema>> {
+  return {
+    name: "AgentRunSnapshot",
+    description: "Read the stored snapshot for a prior sub-agent run, including transcript metadata and final output.",
+    parameters: agentRunSnapshotSchema,
+    readOnly: true,
+    async execute({ subagent_id, format }, ctx: ToolContext) {
+      const runtime = await getOrchestrationRuntime(ctx.cwd)
+      const task = await runtime.getBackgroundTask(subagent_id)
+      const live = manager.getSnapshot(subagent_id)
+      const snapshotFile = typeof task?.metadata?.snapshotFile === "string" ? task.metadata.snapshotFile : ""
+      let parsed: Record<string, unknown> | null = null
+      if (snapshotFile) {
+        try {
+          parsed = JSON.parse(await fs.readFile(snapshotFile, "utf8")) as Record<string, unknown>
+        } catch {
+          parsed = null
+        }
+      }
+      if (!task && !live && !parsed) {
+        return { success: false, output: `Sub-agent run not found: ${subagent_id}` }
+      }
+      if (format === "json") {
+        return {
+          success: true,
+          output: JSON.stringify({ task, live, snapshot: parsed }, null, 2),
+        }
+      }
+      const description = String(parsed?.description ?? task?.description ?? "(unknown task)")
+      const status = String(live?.status ?? task?.status ?? (parsed?.success === false ? "error" : "completed"))
+      const lineage = task?.metadata?.resumeOf
+        ? `resumeOf=${String(task.metadata.resumeOf)}`
+        : task?.metadata?.forkOf
+          ? `forkOf=${String(task.metadata.forkOf)}`
+          : ""
+      const sessionId = String(parsed?.sessionId ?? live?.sessionId ?? task?.sessionId ?? "")
+      const messageCount = typeof parsed?.messageCount === "number" ? parsed.messageCount : undefined
+      const output = String(parsed?.output ?? live?.output ?? task?.output ?? "").trim() || "(no output captured)"
+      const error = String(parsed?.error ?? live?.error ?? task?.error ?? "").trim()
+      return {
+        success: status !== "error" && status !== "failed",
+        output: [
+          `Sub-agent: ${subagent_id}`,
+          `Status: ${status}`,
+          `Task: ${description}`,
+          sessionId ? `Session: ${sessionId}` : "",
+          messageCount != null ? `Messages: ${messageCount}` : "",
+          lineage ? `Lineage: ${lineage}` : "",
+          snapshotFile ? `Snapshot: ${snapshotFile}` : "",
+          error ? `Error: ${error}` : "",
+          "",
+          output,
+        ].filter(Boolean).join("\n"),
+      }
+    },
+  }
+}
+
+export function createResumeAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof resumeAgentSchema>> {
+  return {
+    name: "ResumeAgent",
+    description: "Resume or fork from a previous sub-agent run using its stored task and output context.",
+    parameters: resumeAgentSchema,
+    async execute({ subagent_id, instruction, fork, run_in_background }, ctx: ToolContext) {
+      const emit = (event: AgentEvent) => ctx.host.emit(event)
+      const resumed = await manager.resume(
+        subagent_id,
+        {
+          ...(instruction ? { followupInstruction: instruction } : {}),
+          ...(typeof fork === "boolean" ? { fork } : {}),
+          ...(typeof run_in_background === "boolean" ? { runInBackground: run_in_background } : {}),
+        },
+        config,
+        ctx.cwd,
+        ctx.signal,
+        ctx.config.parallelAgents.maxParallel,
+        emit,
+        ctx.partId,
+      )
+      if ("background" in resumed) {
+        return {
+          success: true,
+          output: `Resumed sub-agent ${subagent_id} in background as ${resumed.subagentId}.`,
+          metadata: { subagent_id: resumed.subagentId, background: true },
+        }
+      }
+      if (resumed.fileEditParts?.length) {
+        mergeSubagentFileEditsIntoParentSession(
+          ctx.session,
+          ctx.partId,
+          resumed.fileEditParts,
+          ctx.toolExecutionMessageId,
+        )
+      }
+      return {
+        success: resumed.success,
+        output: resumed.error
+          ? `Resumed sub-agent ${subagent_id} failed: ${resumed.error}\n${resumed.output}`
+          : resumed.output,
+        metadata: { subagent_id: resumed.subagentId, resumedFrom: subagent_id },
+      }
     },
   }
 }

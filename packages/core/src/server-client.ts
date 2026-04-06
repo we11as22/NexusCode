@@ -100,54 +100,91 @@ export class NexusServerClient {
     presetName?: string,
     signal?: AbortSignal
   ): AsyncGenerator<AgentEvent> {
-    const res = await fetch(this.url(`/session/${sessionId}/message`, { directory: this.directory }), {
-      method: "POST",
-      headers: this.headers(),
-      body: JSON.stringify({ content, mode, presetName }),
-      signal,
-    })
-    if (!res.ok) {
-      const text = await res.text()
-      yield { type: "error", error: `Server: ${res.status} ${text}` }
-      return
-    }
-    const reader = res.body?.getReader()
-    if (!reader) {
-      yield { type: "error", error: "No response body" }
-      return
-    }
-    const decoder = new TextDecoder()
-    let buffer = ""
-    const parseLine = (line: string): AgentEvent | null => {
+    const maxReconnects = 3
+    let reconnectAttempt = 0
+    let runId = ""
+    let lastSeq = 0
+
+    const parseLine = (line: string): { event: AgentEvent | null; seq: number | null } => {
       const t = line.trim()
-      if (!t) return null
+      if (!t) return { event: null, seq: null }
       try {
-        const parsed = JSON.parse(t) as { type?: string; ts?: number }
-        if (parsed?.type === "heartbeat") return null
-        return parsed as AgentEvent
+        const parsed = JSON.parse(t) as { type?: string; ts?: number; seq?: number; event?: AgentEvent }
+        if (parsed?.type === "heartbeat") return { event: null, seq: null }
+        if (typeof parsed.seq === "number" && parsed.event) {
+          return { event: parsed.event, seq: parsed.seq }
+        }
+        return { event: parsed as AgentEvent, seq: null }
       } catch {
         const preview = t.length > 80 ? `${t.slice(0, 80)}…` : t
-        return { type: "error", error: `Invalid stream line: ${preview}` }
+        return { event: { type: "error", error: `Invalid stream line: ${preview}` }, seq: null }
       }
     }
-    try {
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split("\n")
-        buffer = lines.pop() ?? ""
-        for (const line of lines) {
-          const event = parseLine(line)
-          if (event) yield event
+
+    while (true) {
+      const res = await fetch(this.url(`/session/${sessionId}/message`, { directory: this.directory }), {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(
+          runId
+            ? { runId, afterSeq: lastSeq }
+            : { content, mode, presetName },
+        ),
+        signal,
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        yield { type: "error", error: `Server: ${res.status} ${text}` }
+        return
+      }
+      runId = res.headers.get("x-nexus-run-id") ?? runId
+      const reader = res.body?.getReader()
+      if (!reader) {
+        yield { type: "error", error: "No response body" }
+        return
+      }
+      const decoder = new TextDecoder()
+      let buffer = ""
+      let completedNormally = false
+      try {
+        while (true) {
+          const chunk = await Promise.race([
+            reader.read(),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("heartbeat timeout")), DEFAULT_HEARTBEAT_TIMEOUT_MS),
+            ),
+          ])
+          const { value, done } = chunk
+          if (done) {
+            completedNormally = true
+            break
+          }
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split("\n")
+          buffer = lines.pop() ?? ""
+          for (const line of lines) {
+            const parsed = parseLine(line)
+            if (typeof parsed.seq === "number") lastSeq = parsed.seq
+            if (parsed.event) yield parsed.event
+          }
         }
+        for (const line of buffer.split("\n")) {
+          const parsed = parseLine(line)
+          if (typeof parsed.seq === "number") lastSeq = parsed.seq
+          if (parsed.event) yield parsed.event
+        }
+      } catch (error) {
+        if (signal?.aborted) return
+        if (!runId || reconnectAttempt >= maxReconnects) {
+          yield { type: "error", error: `Server stream failed: ${(error as Error).message}` }
+          return
+        }
+        reconnectAttempt++
+        continue
+      } finally {
+        reader.releaseLock()
       }
-      for (const line of buffer.split("\n")) {
-        const event = parseLine(line)
-        if (event) yield event
-      }
-    } finally {
-      reader.releaseLock()
+      if (completedNormally) return
     }
   }
 }

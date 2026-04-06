@@ -1,6 +1,7 @@
 import type * as React from 'react'
 import type { z } from 'zod'
 import type { Command } from './commands.js'
+import type { CanUseToolFn } from './hooks/useCanUseTool.js'
 
 export type ValidationResult =
   | { result: true }
@@ -61,7 +62,7 @@ export interface Tool<TSchema extends z.ZodTypeAny = z.ZodTypeAny, TOut = any> {
     input: any,
     options: Record<string, unknown>,
   ) => string
-  renderToolResultMessage: (
+  renderToolResultMessage?: (
     output: any,
     options: Record<string, unknown>,
   ) => React.ReactNode

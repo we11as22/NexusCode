@@ -64,10 +64,12 @@ export function EditAppliedReplacementsPreview({
         )
       })}
       {restBlocks > 0 ? (
-        <Text color={theme.secondaryText} marginLeft={5}>
-          … {restBlocks} more replacement
-          {restBlocks === 1 ? '' : 's'}
-        </Text>
+        <Box marginLeft={5}>
+          <Text color={theme.secondaryText}>
+            … {restBlocks} more replacement
+            {restBlocks === 1 ? '' : 's'}
+          </Text>
+        </Box>
       ) : null}
     </Box>
   )

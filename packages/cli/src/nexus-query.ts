@@ -27,8 +27,8 @@ import type {
   AssistantMessage,
 } from './query.js'
 import type { Tool } from './Tool.js'
-import type { Message as APIAssistantMessage } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { ApprovalAction } from '@nexuscode/core'
+import type { AssistantAPIMessage as APIAssistantMessage } from './provider/message-schema.js'
 
 export type NexusApprovalMessage = { type: 'nexus_approval'; action: ApprovalAction; partId: string }
 /** Shown above input (e.g. Compacting…). text empty clears. clearAfterMs auto-clears success lines. */
@@ -44,10 +44,7 @@ export type NexusContextMessage = {
 }
 
 type ContentBlockParam = APIAssistantMessage['content'][number]
-type UsageWithCache = APIAssistantMessage['usage'] & {
-  cache_creation_input_tokens?: number
-  cache_read_input_tokens?: number
-}
+type UsageWithCache = APIAssistantMessage['usage']
 
 const TODO_TOOL_NAMES = new Set(['TodoWrite', 'update_todo_list'])
 const SPAWN_AGENT_TOOL_NAMES = new Set(['SpawnAgent', 'SpawnAgents', 'SpawnAgentsParallel'])
@@ -368,6 +365,10 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         else if (et === 'question_request') fp = `${et}|${String(e.request?.requestId ?? '')}`
         else if (et === 'todo_updated') fp = `${et}|${String((e.todo ?? '').length)}`
         else if (et === 'subagent_start' || et === 'subagent_tool_start' || et === 'subagent_tool_end' || et === 'subagent_done') fp = `${et}|${String(e.subagentId ?? '')}|${String(e.parentPartId ?? '')}|${String(e.tool ?? '')}|${String(e.success ?? '')}`
+        else if (et === 'task_updated') fp = `${et}|${String(e.task?.id ?? '')}|${String(e.task?.status ?? '')}`
+        else if (et === 'team_updated') fp = `${et}|${String(e.team?.name ?? '')}`
+        else if (et === 'team_message') fp = `${et}|${String(e.message?.id ?? '')}`
+        else if (et === 'background_task_updated') fp = `${et}|${String(e.task?.id ?? '')}|${String(e.task?.status ?? '')}`
         else if (et === 'done' || et === 'error') fp = `${et}|${String(e.error ?? '')}`
         if (fp && seenRecently(fp)) continue
       }
@@ -405,6 +406,38 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           usedTokens: event.usedTokens,
           limitTokens: event.limitTokens,
           percent: event.percent,
+        }
+        continue
+      }
+      if (event.type === 'task_updated') {
+        yield {
+          type: 'nexus_banner',
+          text: `Task ${event.task.id}: ${event.task.status} — ${event.task.subject}`,
+          clearAfterMs: 3500,
+        }
+        continue
+      }
+      if (event.type === 'team_updated') {
+        yield {
+          type: 'nexus_banner',
+          text: `Team updated: ${event.team.name}`,
+          clearAfterMs: 3000,
+        }
+        continue
+      }
+      if (event.type === 'team_message') {
+        yield {
+          type: 'nexus_banner',
+          text: `Message ${event.message.from} → ${event.message.to}`,
+          clearAfterMs: 3000,
+        }
+        continue
+      }
+      if (event.type === 'background_task_updated') {
+        yield {
+          type: 'nexus_banner',
+          text: `Background task ${event.task.id}: ${event.task.status}`,
+          clearAfterMs: 3000,
         }
         continue
       }
@@ -450,7 +483,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           event.partId,
           new Set(),
           progressAssistantMessage,
-          consumed.slice(),
+          consumed.slice() as import('./utils/messages.js').NormalizedMessage[],
           repoTools,
         )
         consumed.push(pm)
@@ -527,7 +560,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     if (result.value === true) break
 
     if (runError) {
-      yield createAssistantAPIErrorMessage(runError.message)
+      yield createAssistantAPIErrorMessage((runError as Error).message)
       break
     }
 

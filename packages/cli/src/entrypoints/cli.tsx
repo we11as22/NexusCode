@@ -91,6 +91,8 @@ import { createNexusMcpCommand } from '../commands/nexusMcp.js'
 import { createNexusSessionsCommand } from '../commands/nexusSessions.js'
 import { queryNexus } from '../nexus-query.js'
 import { Session } from '@nexuscode/core'
+import type { RenderOptionsWithFlicker } from '../utils/ink.js'
+import type { Command as SlashCommand } from '../commands.js'
 
 export function completeOnboarding(): void {
   const config = getGlobalConfig()
@@ -292,7 +294,7 @@ async function main() {
   }
 
   let inputPrompt = ''
-  let renderContext: RenderOptions | undefined = {
+  let renderContext: RenderOptionsWithFlicker | undefined = {
     exitOnCtrlC: false,
     onFlicker() {
       logEvent('tengu_flicker', {})
@@ -330,12 +332,12 @@ async function parseArgs(
   }
 
   // Get the initial list of commands filtering based on user type
-  const commands = await getCommands()
+  const commands: SlashCommand[] = await getCommands()
 
   // Format command list for help text (using same filter as in help.ts)
   const commandList = commands
-    .filter(cmd => !cmd.isHidden)
-    .map(cmd => `/${cmd.name} - ${cmd.description}`)
+    .filter((cmd: SlashCommand) => !cmd.isHidden)
+    .map((cmd: SlashCommand) => `/${cmd.name} - ${cmd.description}`)
     .join('\n')
 
   program
@@ -503,7 +505,7 @@ ${commandList}`,
             ...replProps
           }: {
             nexus: Awaited<ReturnType<typeof bootstrapNexus>>
-            baseCommands: Command[]
+            baseCommands: SlashCommand[]
             effectiveCwd: string
           } & Omit<
             React.ComponentProps<typeof REPL>,
@@ -538,7 +540,7 @@ ${commandList}`,
               [n],
             )
 
-            const commandsToUse = React.useMemo(
+            const commandsToUse = React.useMemo<SlashCommand[]>(
               () => [
                 ...baseCommands,
                 createNexusConfigCommand(n),
@@ -548,7 +550,7 @@ ${commandList}`,
                 createNexusEmbeddingsCommand(n),
                 createNexusSkillsCommand(n),
                 createNexusMcpCommand(n),
-                createNexusSessionsCommand(n, id => {
+                createNexusSessionsCommand(n, (id: string) => {
                   void handleSwitchSession(id)
                 }),
               ],

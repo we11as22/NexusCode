@@ -50,6 +50,9 @@ import {
   createSpawnAgentOutputTool,
   createSpawnAgentStopTool,
   createSpawnAgentsParallelTool,
+  createListAgentRunsTool,
+  createAgentRunSnapshotTool,
+  createResumeAgentTool,
   runAgentLoop,
   CheckpointTracker,
   CodebaseIndexer,
@@ -67,6 +70,9 @@ import {
   computeContextUsageMetrics,
   estimateToolsDefinitionsTokens,
   getAllBuiltinTools,
+  getClaudeCompatibilityOptions,
+  loadSlashCommands,
+  renderSlashCommandPrompt,
 } from "@nexuscode/core"
 import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
 import { MarketplaceService, type MarketplaceItem } from "./services/marketplace/index.js"
@@ -453,6 +459,7 @@ export class Controller {
   private localSessionWindowed = false
   /** Pending structured questionnaire requested by AskFollowupQuestion. */
   private pendingQuestionRequest: UserQuestionRequest | null = null
+  private cwdOverride: string | null = null
 
   private normalizePathKey(filePath: string, cwd: string): string {
     const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
@@ -584,6 +591,10 @@ export class Controller {
       case "subagent_tool_start":
       case "subagent_tool_end":
       case "subagent_done":
+      case "task_updated":
+      case "team_updated":
+      case "team_message":
+      case "background_task_updated":
       case "done":
       case "error":
         return true
@@ -929,11 +940,28 @@ export class Controller {
   }
 
   getCwd(): string {
+    if (this.cwdOverride) return canonicalProjectRoot(this.cwdOverride)
     const folders = vscode.workspace.workspaceFolders
     if (folders && folders.length > 0) {
       return canonicalProjectRoot(folders[0]!.uri.fsPath)
     }
     return canonicalProjectRoot(process.cwd())
+  }
+
+  private async applyHostWorkingDirectoryChange(cwd: string, _reason?: string): Promise<void> {
+    this.cwdOverride = canonicalProjectRoot(cwd)
+    this.checkpoint = undefined
+    this.indexer = undefined
+    this.sendIndexStatus()
+    this.postStateToWebview()
+    void this.reconnectMcpServers().catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err)
+      this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
+    })
+    void this.initializeIndexer(this.cwdOverride).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err)
+      this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[indexer] ${message}` } })
+    })
   }
 
   getServerUrl(): string {
@@ -1129,7 +1157,7 @@ export class Controller {
   private loadAndSendSkillDefinitions(): void {
     const cwd = this.getCwd()
     const paths = this.config?.skills ?? []
-    loadSkills(paths, cwd, this.config?.skillsUrls)
+    loadSkills(paths, cwd, this.config?.skillsUrls, this.config ? getClaudeCompatibilityOptions(this.config) : undefined)
       .then((skills) => {
         this.postMessageToWebview({
           type: "skillDefinitions",
@@ -1219,7 +1247,7 @@ export class Controller {
         // No file or invalid — keep default
       }
       try {
-        const settings = loadProjectSettings(cwd)
+        const settings = loadProjectSettings(cwd, this.config ? { compatibility: getClaudeCompatibilityOptions(this.config) } : undefined)
         const perms = settings.permissions
         if (perms) {
           if (!this.config.permissions.allowCommandPatterns) this.config.permissions.allowCommandPatterns = []
@@ -1926,7 +1954,10 @@ export class Controller {
         const command = typeof msg.command === "string" ? msg.command.trim() : ""
         if (!command) break
         const cwd = this.getCwd()
-        switch (command) {
+        const raw = command.replace(/^\//, "").trim()
+        const [name, ...rest] = raw.split(/\s+/)
+        const args = rest.join(" ")
+        switch (name) {
           case "compact":
             await this.compactHistory()
             break
@@ -2018,9 +2049,20 @@ export class Controller {
             this.sessionUnacceptedEdits = []
             this.postStateToWebview()
             break
-          default:
+          default: {
+            const compat = this.config ? getClaudeCompatibilityOptions(this.config) : undefined
+            const loaded = await loadSlashCommands(cwd, compat)
+            const resolved =
+              loaded.find((item) => item.command === name) ??
+              loaded.find((item) => item.command === `project:${name}`) ??
+              loaded.find((item) => item.command === `user:${name}`)
+            if (resolved) {
+              await this.runAgent(renderSlashCommandPrompt(resolved, args), this.mode)
+              break
+            }
             // Unknown slash command — switch to settings view as fallback
             this.postMessageToWebview({ type: "action", action: "switchView", view: "settings" })
+          }
         }
         break
       }
@@ -2170,7 +2212,7 @@ export class Controller {
         indexing: { ...base.indexing, ...snap.indexing },
         skills: snap.skills,
         mcp: { servers: [...snap.mcp.servers] },
-        rules: { files: snap.rules.files.length > 0 ? [...snap.rules.files] : ["AGENTS.md", "CLAUDE.md"] },
+        rules: { files: snap.rules.files.length > 0 ? [...snap.rules.files] : ["NEXUS.md", "AGENTS.md", "CLAUDE.md"] },
       }
     }
     // NOTE: preset lookup is async; this function expects caller to already resolve selected preset if needed.
@@ -2188,7 +2230,7 @@ export class Controller {
       indexing: { ...current.indexing, vector: preset.vector },
       skills: preset.skills,
       mcp: { servers: preset.mcpServers.length === 0 ? [] : selectedServers },
-      rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["AGENTS.md", "CLAUDE.md"] },
+      rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["NEXUS.md", "AGENTS.md", "CLAUDE.md"] },
     }
     if (preset.modelProvider && preset.modelId) {
       const provider =
@@ -2203,14 +2245,19 @@ export class Controller {
   /** Discover available skills, MCP server names, and rules files for preset builder. Uses same source as Skills tab (loadSkills) so ~/.nexus and all .md are included. */
   private async getAgentPresetOptions(): Promise<{ skills: string[]; mcpServers: string[]; rulesFiles: string[] }> {
     const cwd = this.getCwd()
-    const skillDefs = await loadSkills(this.config?.skills ?? [], cwd, this.config?.skillsUrls).catch(() => [])
+    const skillDefs = await loadSkills(
+      this.config?.skills ?? [],
+      cwd,
+      this.config?.skillsUrls,
+      this.config ? getClaudeCompatibilityOptions(this.config) : undefined,
+    ).catch(() => [])
     const skills = dedupeStringList(skillDefs.map((s) => s.path))
     const fromConfig = (this.config?.mcp?.servers ?? []).map((s) => (s as McpServerConfig).name).filter((n): n is string => Boolean(n?.trim()))
     const discoveredMcp = await discoverMcpServerNamesForExtension(cwd)
     const mcpServers = dedupeStringList([...fromConfig, ...discoveredMcp])
     const rulesFiles = await discoverRuleFilesForExtension(cwd)
     const fromRulesConfig = this.config?.rules?.files ?? []
-    const rulesMerged = dedupeStringList([...fromRulesConfig, ...rulesFiles, "AGENTS.md", "CLAUDE.md"])
+    const rulesMerged = dedupeStringList([...fromRulesConfig, ...rulesFiles, "NEXUS.md", "AGENTS.md", "CLAUDE.md"])
     return { skills, mcpServers, rulesFiles: rulesMerged }
   }
 
@@ -2264,7 +2311,7 @@ export class Controller {
         indexing: { ...this.config.indexing, ...snap.indexing },
         skills: snap.skills,
         mcp: { servers: [...snap.mcp.servers] },
-        rules: { files: snap.rules.files.length > 0 ? [...snap.rules.files] : ["AGENTS.md", "CLAUDE.md"] },
+        rules: { files: snap.rules.files.length > 0 ? [...snap.rules.files] : ["NEXUS.md", "AGENTS.md", "CLAUDE.md"] },
       }
       await this.handleSaveConfig(updates)
       vscode.window.showInformationMessage("NexusCode: Applied preset \"Default\" (all skills, MCP, rules).", { modal: false })
@@ -2288,7 +2335,7 @@ export class Controller {
       },
       skills: preset.skills,
       mcp: { servers: preset.mcpServers.length === 0 ? [] : selectedServers },
-      rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["AGENTS.md", "CLAUDE.md"] },
+      rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["NEXUS.md", "AGENTS.md", "CLAUDE.md"] },
     }
     if (preset.modelProvider && preset.modelId) {
       const provider =
@@ -2649,7 +2696,12 @@ Return in this format:
           }
         }
       }
-    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onSessionEditSaved: (filePath, originalContent, newContent, isNewFile) => {
+    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onModeChangeRequested: async (nextMode) => {
+      this.mode = nextMode
+      this.postStateToWebview()
+    }, onWorkingDirectoryChangeRequested: async (nextCwd) => {
+      await this.applyHostWorkingDirectoryChange(nextCwd)
+    }, onSessionEditSaved: (filePath, originalContent, newContent, isNewFile) => {
       const norm = filePath.replace(/\\/g, "/")
       if (norm.includes(".nexus/plans")) {
         this.postStateToWebview()
@@ -2680,8 +2732,9 @@ Return in this format:
             new Promise<void>((r) => setTimeout(r, MCP_FIRST_MESSAGE_TIMEOUT_MS)),
           ])
         : Promise.resolve()
-      const rulesP = loadRules(cwd, configForRun.rules.files).catch(() => "")
-      const skillsP = loadSkills(configForRun.skills, cwd, configForRun.skillsUrls).catch(() => [])
+      const claudeCompatibility = getClaudeCompatibilityOptions(configForRun)
+      const rulesP = loadRules(cwd, configForRun.rules.files, claudeCompatibility).catch(() => "")
+      const skillsP = loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, claudeCompatibility).catch(() => [])
       const RULES_SKILLS_TIMEOUT_MS = 2000
       const rulesAndSkillsP = Promise.race([
         Promise.all([rulesP, skillsP]).then(([rulesContent, skills]) => ({ type: "ok" as const, rulesContent, skills })),
@@ -2709,6 +2762,9 @@ Return in this format:
       toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
       toolRegistry.register(createSpawnAgentStopTool(parallelManager))
       toolRegistry.register(createSpawnAgentsParallelTool(parallelManager, configForRun))
+      toolRegistry.register(createListAgentRunsTool(parallelManager))
+      toolRegistry.register(createAgentRunSnapshotTool(parallelManager))
+      toolRegistry.register(createResumeAgentTool(parallelManager, configForRun))
       const { builtin: tools, dynamic } = toolRegistry.getForMode(runMode)
       const allTools = [...tools, ...dynamic]
       const compaction = createCompaction()
@@ -3392,7 +3448,7 @@ async function discoverSkillPathsForExtension(projectDir: string): Promise<strin
 }
 
 async function discoverRuleFilesForExtension(projectDir: string): Promise<string[]> {
-  const names = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]
+  const names = ["NEXUS.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"]
   const out: string[] = []
   const visited = new Set<string>()
   let current = path.resolve(projectDir)

@@ -58,6 +58,10 @@ import {
   getDefaultTopK,
   getDefaultTopP,
 } from "../provider/provider-options.js"
+import { getOrchestrationRuntime } from "../orchestration/runtime.js"
+import { selectRelevantMemories } from "../orchestration/memory-selection.js"
+import { extractMemoriesFromCompactionSummary } from "../orchestration/memory-extraction.js"
+import { runPluginHooks } from "../plugins/runtime.js"
 
 /** Generous tool budgets so multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
@@ -202,6 +206,26 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     ? lastMessage.content
     : (lastMessage?.content as Array<{ type: string; text?: string }>)?.find(p => p.type === "text")?.text ?? ""
 
+  const promptSubmitHookResults = await runPluginHooks(
+    host.cwd,
+    host,
+    config,
+    "user_prompt_submit",
+    {
+      mode,
+      sessionId: session.id,
+      latestUserText: taskDesc,
+    },
+  ).catch(() => [])
+  if (promptSubmitHookResults.length > 0) {
+    session.addMessage({
+      role: "user",
+      content: promptSubmitHookResults
+        .map((result) => `<user-prompt-submit-hook plugin="${result.pluginName}">\n${result.output}`)
+        .join("\n\n"),
+    })
+  }
+
   // Build MCP server list from dynamic tools (name format: "serverName__toolName"). Custom tools have no "__".
   const serverToTools = new Map<string, ToolDef[]>()
   const customDynamicTools: ToolDef[] = []
@@ -285,8 +309,26 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const mcpToolNames = new Set(resolvedDynamicTools.filter(t => t.name.includes("__")).map(t => t.name))
 
   const skillToolDescription = await buildSkillToolDescriptionMerged(host.cwd, config).catch(() => useSkillTool.description)
-  const resolvedToolsForLlm = resolvedTools.map((t) =>
-    t.name === "Skill" ? { ...t, description: skillToolDescription } : t,
+  const deferredTools = resolvedTools.filter((tool) => tool.shouldDefer && !tool.alwaysLoad)
+  const deferredLoadingEnabled = shouldUseDeferredLoading(
+    deferredTools,
+    activeClient.modelId,
+    config,
+  )
+  const promptVisibleTools = resolvedTools.filter((tool) => {
+    if (tool.name === "ToolSearch") return true
+    if (!deferredLoadingEnabled) return true
+    return !tool.shouldDefer || tool.alwaysLoad
+  })
+  const resolvedToolsForLlm = promptVisibleTools.map((t) =>
+    t.name === "Skill"
+      ? { ...t, description: skillToolDescription }
+      : t.name === "ToolSearch" && deferredTools.length > 0
+        ? {
+            ...t,
+            description: `${t.description}\nUse this to discover deferred tools not listed in the initial tool manifest. ${deferredTools.length} tools are currently deferred.`,
+          }
+        : t,
   )
 
   // Tool context
@@ -413,6 +455,44 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     const limitTokens = rollingCtx.limitTokens
     const usedTokens = rollingCtx.usedTokens
     const contextPercent = rollingCtx.percent
+    const runtime = await getOrchestrationRuntime(host.cwd)
+    const latestUserTaskText = getLatestUserTextForPrompt(session)
+    const memoryQuery = [taskDesc, latestUserTaskText, mentionsContext ?? ""]
+      .filter((item) => item.trim().length > 0)
+      .join("\n")
+    const projectMemories = await runtime.listMemories({ scope: "project", limit: 24 }).catch(() => [])
+    const sessionMemories = await runtime.listMemories({
+      scope: "session",
+      limit: 16,
+      metadataMatch: { sessionId: session.id },
+    }).catch(() => [])
+    const memories = selectRelevantMemories(
+      [...sessionMemories, ...projectMemories],
+      memoryQuery,
+      8,
+    )
+    const backgroundTaskSummary = await runtime.listBackgroundTasks()
+      .then((tasks) =>
+        tasks
+          .filter((task) => task.status === "running" || task.status === "pending")
+          .map((task) => {
+            const parts = [
+              `- ${task.id}`,
+              `kind=${task.kind}`,
+              `status=${task.status}`,
+            ]
+            if (task.processId) parts.push(`pid=${task.processId}`)
+            if (task.sessionId) parts.push(`session=${task.sessionId}`)
+            if (task.logPath) parts.push(`log=${task.logPath}`)
+            if (task.description) parts.push(`desc=${task.description}`)
+            return parts.join(" | ")
+          })
+          .join("\n"),
+      )
+      .catch(() => "")
+    const mergedBackgroundSummary = [getBackgroundBashJobsForPrompt(host.cwd), backgroundTaskSummary]
+      .filter((item) => item.trim().length > 0)
+      .join("\n")
     const promptCtx: PromptContext = {
       mode, // same mode used for tool resolution above; system prompt block and Environment "Current mode" come from this
       config,
@@ -427,11 +507,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       compactionSummary: undefined,
       mentionsContext,
       initialProjectContext,
+      memories,
       diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
       contextUsedTokens: usedTokens,
       contextLimitTokens: limitTokens > 0 ? limitTokens : undefined,
       contextPercent: limitTokens > 0 ? contextPercent : undefined,
-      backgroundJobsSummary: getBackgroundBashJobsForPrompt(host.cwd),
+      backgroundJobsSummary: mergedBackgroundSummary || undefined,
       createSkillMode: createSkillMode === true,
       supportsStructuredOutput: activeClient.supportsStructuredOutput(),
     }
@@ -913,6 +994,38 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode, mcpToolNames
               )
 
+              const afterToolHookResults = await runPluginHooks(
+                host.cwd,
+                host,
+                config,
+                "after_tool",
+                {
+                  mode,
+                  sessionId: session.id,
+                  toolName,
+                  toolInput,
+                  success: result.success,
+                  output: result.output,
+                },
+              ).catch(() => [])
+              if (afterToolHookResults.length > 0) {
+                session.addMessage({
+                  role: "user",
+                  content: afterToolHookResults
+                    .map((hookResult) => `<after-tool-hook plugin="${hookResult.pluginName}" tool="${toolName}">\n${hookResult.output}`)
+                    .join("\n\n"),
+                })
+                for (const hookResult of afterToolHookResults) {
+                  host.emit({
+                    type: "plugin_hook",
+                    pluginName: hookResult.pluginName,
+                    hookEvent: hookResult.hookEvent,
+                    output: hookResult.output,
+                    success: hookResult.success,
+                  })
+                }
+              }
+
               session.updateToolPart(newMessageId, partId, {
                 status: result.success ? "completed" : "error",
                 output: result.output,
@@ -1044,6 +1157,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         await handleCompaction(session, activeClient, config, host, compaction, signal, {
           systemPromptText: lastBuiltSystemPrompt,
           toolsDefinitionTokens,
+          aggressive: true,
         })
         host.emit({ type: "compaction_end" })
         continue
@@ -1605,6 +1719,8 @@ type HandleCompactionOpts = {
   /** Full next-request size (session + system + tools); required for accurate overflow vs UI/API limits. */
   systemPromptText?: string
   toolsDefinitionTokens?: number
+  /** When true, force a full summary pass after prune/microcompact even if our local estimate is slightly under. */
+  aggressive?: boolean
 }
 
 async function handleCompaction(
@@ -1617,8 +1733,11 @@ async function handleCompaction(
   opts?: HandleCompactionOpts,
 ) {
   try {
+    const previousSummaryCount = session.messages.filter((message) => message.summary).length
+
     // First try prune (no LLM call needed)
     compaction.prune(session)
+    compaction.microcompact(session, config.summarization?.keepRecentMessages ?? 8)
 
     const contextLimit = getContextWindowLimit(client.modelId, config.model.contextWindow)
     const threshold = config.summarization?.threshold ?? 0.8
@@ -1629,8 +1748,28 @@ async function handleCompaction(
       modelId: client.modelId,
       configuredContextWindow: config.model.contextWindow,
     })
-    if (contextLimit > 0 && compaction.isOverflow(metrics.usedTokens, contextLimit, threshold)) {
-      await compaction.compact(session, client, signal)
+    const shouldForceSummary =
+      opts?.aggressive === true ||
+      (contextLimit > 0 && compaction.isOverflow(metrics.usedTokens, contextLimit, threshold))
+    if (shouldForceSummary) {
+      await compaction.compact(session, client, signal, {
+        keepRecentMessages: config.summarization?.keepRecentMessages ?? 8,
+        force: opts?.aggressive === true,
+      })
+
+      const nextSummaryCount = session.messages.filter((message) => message.summary).length
+      if (nextSummaryCount > previousSummaryCount) {
+        const latestSummary = [...session.messages]
+          .reverse()
+          .find((message) => message.summary && typeof message.content === "string")
+        if (latestSummary && typeof latestSummary.content === "string") {
+          const runtime = await getOrchestrationRuntime(host.cwd)
+          const extracted = extractMemoriesFromCompactionSummary(latestSummary.content, session.id)
+          for (const memory of extracted) {
+            await runtime.upsertMemoryByTitle(memory).catch(() => null)
+          }
+        }
+      }
     }
   } catch (err) {
     console.warn("[nexus] Compaction failed:", err)
@@ -1658,6 +1797,51 @@ function reasoningPartRawForLlm(part: ReasoningPart): string | null {
   const t = part.text?.trim() ?? ""
   if (!t || t === THOUGHT_PLACEHOLDER) return null
   return part.text
+}
+
+function getLatestUserTextForPrompt(session: ISession): string {
+  for (let index = session.messages.length - 1; index >= 0; index--) {
+    const message = session.messages[index]
+    if (!message || message.role !== "user") continue
+    if (typeof message.content === "string") return message.content
+    if (!Array.isArray(message.content)) continue
+    const text = (message.content as MessagePart[])
+      .filter((part): part is TextPart => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim()
+    if (text) return text
+  }
+  return ""
+}
+
+function shouldUseDeferredLoading(
+  deferredTools: ToolDef[],
+  modelId: string,
+  config: NexusConfig,
+): boolean {
+  if (deferredTools.length === 0) return false
+  const mode = config.tools.deferredLoadingMode ?? "auto"
+  if (mode === "always") return true
+  if (mode === "never") return false
+
+  const minimumTools = Math.max(1, config.tools.deferredLoadingMinimumTools ?? 8)
+  if (deferredTools.length >= minimumTools) return true
+
+  const contextLimit = getContextWindowLimit(modelId, config.model.contextWindow)
+  if (contextLimit <= 0) return deferredTools.length >= minimumTools
+
+  const thresholdPercent = Math.min(
+    1,
+    Math.max(0.01, config.tools.deferredLoadingThresholdPercent ?? 0.10),
+  )
+  const deferredTokens = estimateToolsDefinitionsTokens(
+    deferredTools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+    })),
+  )
+  return deferredTokens >= Math.floor(contextLimit * thresholdPercent)
 }
 
 function formatAssistantTextPartForLlm(p: TextPart): string {
@@ -2113,7 +2297,13 @@ function isContextOverflowError(message: string): boolean {
   return (
     lower.includes("context length") ||
     lower.includes("context window") ||
+    lower.includes("maximum context length") ||
+    lower.includes("prompt is too long") ||
+    lower.includes("prompt too long") ||
+    lower.includes("request too large") ||
+    lower.includes("too many tokens") ||
     lower.includes("max tokens") ||
+    lower.includes("413") ||
     lower.includes("too long") ||
     lower.includes("token limit")
   )
@@ -2124,4 +2314,3 @@ function extractWriteTargetPath(toolName: string, toolInput: Record<string, unkn
   if (typeof pathVal === "string" && pathVal) return pathVal
   return undefined
 }
-

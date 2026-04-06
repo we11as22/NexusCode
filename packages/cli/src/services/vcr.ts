@@ -7,7 +7,7 @@ import { env } from '../utils/env.js'
 import { getCwd } from '../utils/state.js'
 import * as path from 'path'
 import { mapValues } from 'lodash-es'
-import type { ContentBlock } from '@anthropic-ai/sdk/resources/index.mjs'
+import type { ContentBlock } from '../provider/message-schema.js'
 
 export async function withVCR(
   messages: (UserMessage | AssistantMessage)[],

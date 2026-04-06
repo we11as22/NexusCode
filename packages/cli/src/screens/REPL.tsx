@@ -1,7 +1,6 @@
 import * as path from 'node:path'
 import * as fs from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { Box, Newline, Text } from 'ink'
 import ProjectOnboarding, {
   markProjectOnboardingComplete,
@@ -41,6 +40,7 @@ import {
   ProgressMessage,
   query,
 } from '../query.js'
+import type { ToolUseBlockParam } from '../provider/message-schema.js'
 import { queryNexus, replMessagesFromSession } from '../nexus-query.js'
 import type { NexusApprovalMessage, NexusBannerMessage, NexusTodoMessage, NexusQuestionMessage, NexusContextMessage } from '../nexus-query.js'
 import type { AutoApprovePermissions } from '../nexus-query.js'

@@ -1,4 +1,3 @@
-import { ImageBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { existsSync, readFileSync, statSync } from 'fs'
 import { Box, Text } from 'ink'
 import * as path from 'path'
@@ -19,6 +18,7 @@ import { logError } from '../../utils/log.js'
 import { getTheme } from '../../utils/theme.js'
 import { DESCRIPTION, PROMPT } from './prompt.js'
 import { hasReadPermission } from '../../utils/permissions/filesystem.js'
+import type { ImageMediaType } from '../../provider/message-schema.js'
 
 const MAX_LINES_TO_RENDER = 3
 const MAX_OUTPUT_SIZE = 0.25 * 1024 * 1024 // 0.25MB in bytes
@@ -112,7 +112,7 @@ export const FileReadTool = {
                       : contentWithFallback
                           .split('\n')
                           .slice(0, MAX_LINES_TO_RENDER)
-                          .filter(_ => _.trim() !== '')
+                          .filter((line: string) => line.trim() !== '')
                           .join('\n')
                   }
                   language={extname(filePath).slice(1)}
@@ -252,7 +252,7 @@ export const FileReadTool = {
     }
   | {
       type: 'image'
-      file: { base64: string; type: ImageBlockParam.Source['media_type'] }
+      file: { base64: string; type: ImageMediaType }
     }
 >
 
@@ -264,13 +264,13 @@ function createImageResponse(
   ext: string,
 ): {
   type: 'image'
-  file: { base64: string; type: ImageBlockParam.Source['media_type'] }
+  file: { base64: string; type: ImageMediaType }
 } {
   return {
     type: 'image',
     file: {
       base64: buffer.toString('base64'),
-      type: `image/${ext.slice(1)}` as ImageBlockParam.Source['media_type'],
+      type: `image/${ext.slice(1)}` as ImageMediaType,
     },
   }
 }
@@ -280,7 +280,7 @@ async function readImage(
   ext: string,
 ): Promise<{
   type: 'image'
-  file: { base64: string; type: ImageBlockParam.Source['media_type'] }
+  file: { base64: string; type: ImageMediaType }
 }> {
   try {
     const stats = statSync(filePath)

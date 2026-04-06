@@ -17,7 +17,7 @@ import {
   ImageBlockParam,
   MessageParam,
   ToolResultBlockParam,
-} from '@anthropic-ai/sdk/resources/index.mjs'
+} from '../provider/message-schema.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
@@ -39,6 +39,23 @@ import { Command } from '../commands.js'
 import { logEvent } from '../services/statsig.js'
 
 type McpName = string
+type AnthropicImageMediaType =
+  | 'image/jpeg'
+  | 'image/png'
+  | 'image/gif'
+  | 'image/webp'
+
+function toAnthropicImageMediaType(mimeType: string): AnthropicImageMediaType {
+  switch (mimeType) {
+    case 'image/jpeg':
+    case 'image/png':
+    case 'image/gif':
+    case 'image/webp':
+      return mimeType
+    default:
+      return 'image/png'
+  }
+}
 
 export function parseEnvVars(
   rawEnvArgs: string[] | undefined,
@@ -318,7 +335,8 @@ export const getClients = memoize(async (): Promise<WrappedClient[]> => {
   // Filter mcprc servers to only include approved ones
   const approvedMcprcServers = pickBy(
     mcprcServers,
-    (_, name) => getMcprcServerStatus(name) === 'approved',
+    (_server: McpServerConfig, name: string) =>
+      getMcprcServerStatus(name) === 'approved',
   )
 
   const allServers = {
@@ -330,7 +348,7 @@ export const getClients = memoize(async (): Promise<WrappedClient[]> => {
   return await Promise.all(
     Object.entries(allServers).map(async ([name, serverRef]) => {
       try {
-        const client = await connectToServer(name, serverRef)
+        const client = await connectToServer(name, serverRef as McpServerConfig)
         logEvent('tengu_mcp_server_connection_succeeded', {})
         return { name, client, type: 'connected' as const }
       } catch (error) {
@@ -355,7 +373,7 @@ async function requestAll<
 ): Promise<{ client: ConnectedClient; result: ResultT }[]> {
   const clients = await getClients()
   const results = await Promise.allSettled(
-    clients.map(async client => {
+    clients.map(async (client: Awaited<ReturnType<typeof getClients>>[number]) => {
       if (client.type === 'failed') return null
 
       try {
@@ -418,7 +436,11 @@ export const getMCPTools = memoize(async (): Promise<Tool[]> => {
         async prompt() {
           return tool.description ?? ''
         },
-        inputJSONSchema: tool.inputSchema as Tool['inputJSONSchema'],
+        ...(tool.inputSchema
+          ? {
+              inputJSONSchema: tool.inputSchema as Record<string, unknown>,
+            }
+          : {}),
         async *call(args: Record<string, unknown>) {
           const data = await callMCPTool({ client, tool: tool.name, args })
           yield {
@@ -472,11 +494,32 @@ async function callMCPTool({
           source: {
             type: 'base64',
             data: String(item.data),
-            media_type: item.mimeType as ImageBlockParam.Source['media_type'],
+            media_type: toAnthropicImageMediaType(String(item.mimeType)),
           },
         }
       }
-      return item
+      if (item.type === 'text') {
+        return {
+          type: 'text',
+          text: item.text,
+        }
+      }
+      if (item.type === 'audio') {
+        return {
+          type: 'text',
+          text: `[Audio: ${item.mimeType}]`,
+        }
+      }
+      if (item.type === 'resource') {
+        return {
+          type: 'text',
+          text: `[Resource: ${item.resource.uri}]`,
+        }
+      }
+      return {
+        type: 'text',
+        text: JSON.stringify(item),
+      }
     })
   }
 
@@ -537,15 +580,21 @@ export async function runCommand(
                 type: 'text',
                 text: message.content.text,
               }
-            : {
-                type: 'image',
-                source: {
-                  data: String(message.content.data),
-                  media_type: message.content
-                    .mimeType as ImageBlockParam.Source['media_type'],
-                  type: 'base64',
-                },
-              },
+	              : {
+	                  type: 'image',
+	                  source: {
+	                    data:
+                        'data' in message.content
+                          ? String(message.content.data)
+                          : '',
+	                    media_type: toAnthropicImageMediaType(
+                        'mimeType' in message.content
+                          ? String(message.content.mimeType)
+                          : 'image/png',
+                      ),
+	                    type: 'base64',
+	                  },
+	                },
         ],
       }),
     )

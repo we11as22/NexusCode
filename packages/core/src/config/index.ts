@@ -3,6 +3,7 @@ import * as path from "node:path"
 import * as os from "node:os"
 import { NexusConfigSchema, type NexusConfigInput } from "./schema.js"
 import type { NexusConfig } from "../types.js"
+import type { ClaudeCompatibilityOptions } from "../compat/claude.js"
 import {
   applySecretsToConfig,
   stripSecretsFromConfig,
@@ -489,6 +490,10 @@ export interface ProjectSettings {
   }
 }
 
+function shouldLoadClaudeCompatibility(opts?: { compatibility?: ClaudeCompatibilityOptions }): boolean {
+  return opts?.compatibility?.enabled === true && opts.compatibility.includeSettings
+}
+
 function uniqueNonEmpty(values: string[]): string[] {
   return [...new Set(values.map(v => v.trim()).filter(Boolean))]
 }
@@ -529,22 +534,43 @@ function mergeSettings(...layers: ProjectSettings[]): ProjectSettings {
  * Load global ~/.nexus/settings.json and ~/.nexus/settings.local.json.
  * Same structure as .claude: permissions.allow, permissions.deny, permissions.ask.
  */
-export function loadGlobalSettings(): ProjectSettings {
+export function loadGlobalSettings(options?: { compatibility?: ClaudeCompatibilityOptions }): ProjectSettings {
   const globalBase = readSettingsFile(path.join(GLOBAL_CONFIG_DIR, "settings.json"))
   const globalLocal = readSettingsFile(path.join(GLOBAL_CONFIG_DIR, "settings.local.json"))
-  return mergeSettings(globalBase, globalLocal)
+  if (!shouldLoadClaudeCompatibility(options)) {
+    return mergeSettings(globalBase, globalLocal)
+  }
+  const claudeBase = readSettingsFile(path.join(os.homedir(), ".claude", "settings.json"))
+  const claudeLocal = readSettingsFile(path.join(os.homedir(), ".claude", "settings.local.json"))
+  return mergeSettings(globalBase, globalLocal, claudeBase, claudeLocal)
 }
 
 /**
  * Load .nexus/settings.json and .nexus/settings.local.json (local overrides), merge with global settings.
  * Layer order: global base → global local → project base → project local (later overrides earlier).
  */
-export function loadProjectSettings(cwd: string): ProjectSettings {
+export function loadProjectSettings(cwd: string, options?: { compatibility?: ClaudeCompatibilityOptions }): ProjectSettings {
   const globalBase = readSettingsFile(path.join(GLOBAL_CONFIG_DIR, "settings.json"))
   const globalLocal = readSettingsFile(path.join(GLOBAL_CONFIG_DIR, "settings.local.json"))
   const projectBase = readSettingsFile(path.join(cwd, ".nexus", "settings.json"))
   const projectLocal = readSettingsFile(path.join(cwd, ".nexus", "settings.local.json"))
-  return mergeSettings(globalBase, globalLocal, projectBase, projectLocal)
+  if (!shouldLoadClaudeCompatibility(options)) {
+    return mergeSettings(globalBase, globalLocal, projectBase, projectLocal)
+  }
+  const claudeGlobalBase = readSettingsFile(path.join(os.homedir(), ".claude", "settings.json"))
+  const claudeGlobalLocal = readSettingsFile(path.join(os.homedir(), ".claude", "settings.local.json"))
+  const claudeProjectBase = readSettingsFile(path.join(cwd, ".claude", "settings.json"))
+  const claudeProjectLocal = readSettingsFile(path.join(cwd, ".claude", "settings.local.json"))
+  return mergeSettings(
+    globalBase,
+    globalLocal,
+    claudeGlobalBase,
+    claudeGlobalLocal,
+    projectBase,
+    projectLocal,
+    claudeProjectBase,
+    claudeProjectLocal,
+  )
 }
 
 /**

@@ -22,11 +22,11 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
  * Ask: read-only + no plan work — no write, no execute, no plan_exit (SpawnAgent allowed with ask permissions).
  */
 export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
-  agent: ["PlanExit"],
-  plan:  ["Bash"],
-  ask:   ["Write", "Edit", "Bash", "PlanExit"],
-  debug: ["PlanExit"],
-  review: ["Write", "Edit", "PlanExit"],
+  agent: ["PlanExit", "ExitPlanMode"],
+  plan:  ["Bash", "PowerShell"],
+  ask:   ["Write", "Edit", "Bash", "PowerShell", "PlanExit", "ExitPlanMode"],
+  debug: ["PlanExit", "ExitPlanMode"],
+  review: ["Write", "Edit", "PlanExit", "ExitPlanMode"],
 }
 
 /**
@@ -46,16 +46,46 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
  * Tools in "always" group are available in every mode.
  */
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
-  always:  ["AskFollowupQuestion", "TodoWrite", "Parallel"],
-  read:    ["Read", "List", "ListCodeDefinitions", "ReadLints"],
+  always:  ["AskFollowupQuestion", "TodoWrite", "Parallel", "SendUserMessage", "ToolSearch", "EnterPlanMode"],
+  read:    ["Read", "List", "ListCodeDefinitions", "LSP", "ReadLints"],
   write:   ["Write", "Edit"],
-  execute: ["Bash"],
+  execute: ["Bash", "PowerShell", "EnterWorktree", "ExitWorktree"],
   search:  ["Grep", "CodebaseSearch", "WebFetch", "WebSearch", "Glob"],
-  mcp:     [],
+  mcp:     ["ListMcpResources", "ReadMcpResource", "McpAuthenticate"],
   skills:  ["Skill"],
-  agents:  ["SpawnAgent", "SpawnAgentsParallel"],
+  agents:  [
+    "SpawnAgent",
+    "SpawnAgentsParallel",
+    "ListAgentRuns",
+    "AgentRunSnapshot",
+    "ResumeAgent",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskUpdate",
+    "TaskOutput",
+    "TaskStop",
+    "TeamCreate",
+    "TeamDelete",
+    "SendMessage",
+    "ListRemoteSessions",
+    "GetRemoteSession",
+    "UpdateRemoteSession",
+    "ListAgents",
+    "ListPlugins",
+    "GetPlugin",
+    "RunPluginHook",
+    "PluginTrust",
+    "PluginConfigure",
+    "PlanMaterializeTasks",
+    "MemoryCreate",
+    "MemoryList",
+    "MemoryGet",
+    "MemoryUpdate",
+    "MemoryDelete",
+  ],
   context: ["Condense"],
-  plan_exit: ["PlanExit"],
+  plan_exit: ["PlanExit", "ExitPlanMode"],
 }
 
 /**
@@ -71,6 +101,7 @@ export const READ_ONLY_TOOLS = new Set([
   "Read",
   "List",
   "ListCodeDefinitions",
+  "LSP",
   "ReadLints",
   "Grep",
   "CodebaseSearch",
@@ -80,6 +111,22 @@ export const READ_ONLY_TOOLS = new Set([
   "Skill",
   "Condense",
   "BashOutput",
+  "ToolSearch",
+  "TaskGet",
+  "TaskList",
+  "TaskOutput",
+  "ListAgentRuns",
+  "AgentRunSnapshot",
+  "ListAgents",
+  "ListRemoteSessions",
+  "GetRemoteSession",
+  "ListPlugins",
+  "GetPlugin",
+  "RunPluginHook",
+  "MemoryList",
+  "MemoryGet",
+  "ListMcpResources",
+  "ReadMcpResource",
 ])
 
 /**
@@ -102,7 +149,6 @@ export function getBuiltinToolsForMode(mode: Mode): string[] {
   const groups = MODE_TOOL_GROUPS[mode]
   const tools = new Set<string>()
   for (const group of groups) {
-    if (group === "mcp") continue // MCP tools are dynamic
     for (const tool of TOOL_GROUP_MEMBERS[group]) {
       tools.add(tool)
     }

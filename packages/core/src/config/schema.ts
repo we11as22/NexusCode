@@ -58,6 +58,11 @@ const mcpServerSchema = z.object({
   enabled: z.boolean().optional().default(true),
   /** Bundled server id (e.g. "context-mode"); resolved by host to command/args/env */
   bundle: z.string().optional(),
+  auth: z.object({
+    type: z.enum(["oauth", "url", "manual"]).optional(),
+    startUrl: z.string().optional(),
+    message: z.string().optional(),
+  }).optional(),
 })
 
 export const NexusConfigSchema = z.object({
@@ -204,6 +209,12 @@ export const NexusConfigSchema = z.object({
     classifyThreshold: z.number().int().positive().default(20),
     parallelReads: z.boolean().default(true),
     maxParallelReads: z.number().int().positive().default(5),
+    /** Deferred tool loading strategy for MCP/custom heavy tools. */
+    deferredLoadingMode: z.enum(["auto", "always", "never"]).default("auto"),
+    /** In auto mode, switch to ToolSearch when deferred tools exceed this fraction of context. */
+    deferredLoadingThresholdPercent: z.number().min(0.01).max(1).default(0.10),
+    /** In auto mode, always defer once this many tools are marked shouldDefer. */
+    deferredLoadingMinimumTools: z.number().int().positive().default(8),
   }).default({}),
 
   /** When true, use LLM to filter skills by task when count > skillClassifyThreshold. Default off. */
@@ -226,6 +237,30 @@ export const NexusConfigSchema = z.object({
     maxTasksPerCall: z.number().int().positive().default(12),
   }).default({}),
 
+  compatibility: z.object({
+    claude: z.object({
+      enabled: z.boolean().default(false),
+      includeGlobalDir: z.boolean().default(true),
+      includeProjectDir: z.boolean().default(true),
+      includeLocalInstructions: z.boolean().default(true),
+      includeRules: z.boolean().default(true),
+      includeSettings: z.boolean().default(true),
+      includeCommands: z.boolean().default(true),
+      includeSkills: z.boolean().default(true),
+      includeAgents: z.boolean().default(true),
+      includePlugins: z.boolean().default(true),
+    }).default({}),
+  }).default({}),
+
+  plugins: z.object({
+    enabled: z.boolean().default(true),
+    trusted: z.array(z.string()).default([]),
+    blocked: z.array(z.string()).default([]),
+    enableHooks: z.boolean().default(true),
+    hookTimeoutMs: z.number().int().positive().max(300000).default(15000),
+    options: z.record(z.record(z.unknown())).default({}),
+  }).default({}),
+
   /** Optional overrides for agent loop limits (OpenCode-style: allow enough tools/iterations to finish). */
   agentLoop: z.object({
     toolCallBudget: z.object({
@@ -245,7 +280,7 @@ export const NexusConfigSchema = z.object({
   }).default({}),
 
   rules: z.object({
-    files: z.array(z.string()).default(["CLAUDE.md", "AGENTS.md", ".nexus/rules/**"]),
+    files: z.array(z.string()).default(["NEXUS.md", "AGENTS.md", "CLAUDE.md", ".nexus/rules/**"]),
   }).default({}),
 
   profiles: z.record(providerSchema.partial()).default({}),

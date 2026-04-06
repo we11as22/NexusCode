@@ -3,6 +3,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { backgroundBashJobs } from "./execute-command.js"
+import { getOrchestrationRuntime } from "../../orchestration/runtime.js"
 
 const schema = z.object({
   bash_id: z.string().describe("The ID of the background shell to retrieve output from"),
@@ -39,7 +40,13 @@ Example flow:
   readOnly: true,
 
   async execute({ bash_id, filter }, ctx: ToolContext) {
-    const job = backgroundBashJobs.get(bash_id)
+    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const backgroundTask = await runtime.getBackgroundTask(bash_id)
+    const job = backgroundBashJobs.get(bash_id) ?? (
+      backgroundTask?.processId && backgroundTask.logPath
+        ? { pid: backgroundTask.processId, logPath: backgroundTask.logPath }
+        : undefined
+    )
     if (!job) {
       return {
         success: false,
@@ -82,7 +89,12 @@ Example flow:
     return {
       success: true,
       output: statusLine + (output || "(no output yet)"),
-      metadata: { pid: job.pid, lineCount: lines.length, status: running ? "running" : "exited" },
+      metadata: {
+        pid: job.pid,
+        lineCount: lines.length,
+        status: running ? "running" : "exited",
+        task: backgroundTask ?? null,
+      },
     }
   },
 }

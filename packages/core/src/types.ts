@@ -37,6 +37,12 @@ export interface ToolDef<TArgs = Record<string, unknown>> {
   name: string
   description: string
   parameters: z.ZodType<TArgs>
+  /** Short searchable hint used by ToolSearch / deferred-tool discovery. */
+  searchHint?: string
+  /** When true, the tool may be omitted from the initial prompt and loaded later via ToolSearch. */
+  shouldDefer?: boolean
+  /** When true, the tool is always included in the initial prompt even if deferred-tool mode is active. */
+  alwaysLoad?: boolean
   /** If true, can be executed in parallel with other read-only tools */
   readOnly?: boolean
   /** Which modes this tool is available in. undefined = all modes */
@@ -134,6 +140,90 @@ export interface UserQuestionAnswer {
   customText?: string
 }
 
+export type LspOperation =
+  | "goToDefinition"
+  | "findReferences"
+  | "hover"
+  | "documentSymbol"
+  | "workspaceSymbol"
+  | "goToImplementation"
+  | "prepareCallHierarchy"
+  | "incomingCalls"
+  | "outgoingCalls"
+
+export interface LspPosition {
+  line: number
+  character: number
+}
+
+export interface LspRange {
+  start: LspPosition
+  end: LspPosition
+}
+
+export interface LspLocation {
+  path: string
+  range: LspRange
+  targetSelectionRange?: LspRange
+}
+
+export interface LspSymbolRecord {
+  name: string
+  kind: string
+  detail?: string
+  path?: string
+  range?: LspRange
+}
+
+export interface LspCallRecord {
+  name: string
+  kind?: string
+  path: string
+  range: LspRange
+  selectionRange?: LspRange
+  fromRanges?: LspRange[]
+}
+
+export interface LspQueryRequest {
+  operation: LspOperation
+  filePath?: string
+  line?: number
+  character?: number
+  query?: string
+}
+
+export interface LspQueryResult {
+  operation: LspOperation
+  summary: string
+  locations?: LspLocation[]
+  symbols?: LspSymbolRecord[]
+  hover?: string
+  calls?: LspCallRecord[]
+}
+
+export interface ModeChangeResult {
+  success: boolean
+  mode: Mode
+  message?: string
+}
+
+export interface WorkingDirectoryChangeResult {
+  success: boolean
+  cwd: string
+  message?: string
+}
+
+export interface McpAuthRequest {
+  server: string
+  message?: string
+  startUrl?: string
+}
+
+export interface McpAuthResult {
+  success: boolean
+  message: string
+}
+
 export interface IHost {
   readonly cwd: string
   readFile(path: string): Promise<string>
@@ -164,6 +254,14 @@ export interface IHost {
   getCheckpointDiff?(fromHash: string, toHash?: string): Promise<ChangedFile[]>
   /** Called by the loop after a checkpoint is committed so the host can push updated entries to the UI. */
   notifyCheckpointEntriesUpdated?(): void
+  /** Host-side mode transition for the next turn/UI state. */
+  requestModeChange?(mode: Mode, reason?: string): Promise<ModeChangeResult>
+  /** Host-side cwd/worktree transition for subsequent turns. */
+  setWorkingDirectory?(cwd: string, reason?: string): Promise<WorkingDirectoryChangeResult>
+  /** Rich language-server operations when the current host can provide them (VS Code, IDE bridge, etc.). */
+  queryLanguageServer?(request: LspQueryRequest): Promise<LspQueryResult>
+  /** Generic MCP auth handoff (open browser / show instructions / complete login). */
+  requestMcpAuthentication?(request: McpAuthRequest): Promise<McpAuthResult>
 
   /**
    * File edit flow: open → [approval] → save or revert.
@@ -275,6 +373,152 @@ export interface ToolPart {
 }
 
 export type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart
+
+// ─── Orchestration Types ─────────────────────────────────────────────────────
+
+export type TaskStatus =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "killed"
+  | "cancelled"
+  | "deleted"
+
+export interface TaskRecord {
+  id: string
+  subject: string
+  description: string
+  status: TaskStatus
+  createdAt: number
+  updatedAt: number
+  activeForm?: string
+  owner?: string
+  teamName?: string
+  metadata?: Record<string, unknown>
+  blocks?: string[]
+  blockedBy?: string[]
+  outputFile?: string
+  toolUseId?: string
+}
+
+export interface TeamMessageRecord {
+  id: string
+  ts: number
+  from: string
+  to: string
+  message: string
+  teamName?: string
+}
+
+export interface TeamMemberRecord {
+  name: string
+  agentId?: string
+  agentType?: string
+  joinedAt: number
+}
+
+export interface TeamRecord {
+  name: string
+  description: string
+  createdAt: number
+  members: TeamMemberRecord[]
+  messages: TeamMessageRecord[]
+}
+
+export interface AgentDefinition {
+  agentType: string
+  whenToUse: string
+  systemPrompt?: string
+  tools?: string[]
+  disallowedTools?: string[]
+  sourcePath?: string
+  builtin?: boolean
+}
+
+export type BackgroundTaskKind = "bash" | "subagent" | "workflow" | "external"
+export type BackgroundTaskStatus = "pending" | "running" | "completed" | "failed" | "killed"
+
+export interface BackgroundTaskRecord {
+  id: string
+  kind: BackgroundTaskKind
+  description: string
+  createdAt: number
+  updatedAt: number
+  status: BackgroundTaskStatus
+  command?: string
+  cwd?: string
+  processId?: number
+  exitCode?: number
+  logPath?: string
+  outputFile?: string
+  output?: string
+  error?: string
+  sessionId?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface RemoteSessionRecord {
+  id: string
+  url: string
+  sessionId?: string
+  runId?: string
+  status: "connecting" | "connected" | "reconnecting" | "disconnected" | "completed" | "error"
+  createdAt: number
+  updatedAt: number
+  lastEventSeq?: number
+  reconnectAttempts?: number
+  reconnectable?: boolean
+  error?: string
+  viewerOnly?: boolean
+  metadata?: Record<string, unknown>
+}
+
+export interface WorktreeSession {
+  id: string
+  originalCwd: string
+  worktreePath: string
+  branch: string
+  createdAt: number
+  status: "active" | "kept" | "removed" | "error"
+  metadata?: Record<string, unknown>
+}
+
+export interface DeferredToolDef {
+  name: string
+  description: string
+  searchHint?: string
+}
+
+export interface MemoryRecord {
+  id: string
+  scope: "session" | "project" | "team"
+  title: string
+  content: string
+  createdAt: number
+  updatedAt: number
+  metadata?: Record<string, unknown>
+}
+
+export interface PluginManifestRecord {
+  name: string
+  version?: string
+  description: string
+  commands: string[]
+  agents: string[]
+  skills: string[]
+  hooks: string[]
+  mcpServers: string[]
+  enabled: boolean
+  rootDir: string
+  sourcePath: string
+  scope: "project" | "global"
+  settingsSchema?: Record<string, unknown>
+  warnings?: string[]
+  trusted?: boolean
+  runtimeEnabled?: boolean
+  options?: Record<string, unknown>
+}
 
 // ─── Indexer Interface ────────────────────────────────────────────────────────
 
@@ -396,6 +640,12 @@ export type AgentEvent =
   | { type: "todo_updated"; todo: string }
   | { type: "doom_loop_detected"; tool: string }
   | { type: "plan_followup_ask"; planText: string }
+  | { type: "task_updated"; task: TaskRecord }
+  | { type: "team_updated"; team: TeamRecord }
+  | { type: "team_message"; message: TeamMessageRecord }
+  | { type: "background_task_updated"; task: BackgroundTaskRecord }
+  | { type: "remote_session_updated"; remoteSession: RemoteSessionRecord }
+  | { type: "plugin_hook"; pluginName: string; hookEvent: string; output: string; success: boolean }
 
 // ─── Config Types ─────────────────────────────────────────────────────────────
 
@@ -544,6 +794,12 @@ export interface NexusConfig {
     classifyThreshold: number
     parallelReads: boolean
     maxParallelReads: number
+    /** Deferred tool loading strategy. auto = use ToolSearch only when deferred tools are materially large. */
+    deferredLoadingMode?: "auto" | "always" | "never"
+    /** In auto mode, defer tool schemas once deferred tools exceed this fraction of model context. */
+    deferredLoadingThresholdPercent?: number
+    /** In auto mode, always defer once at least this many tools are marked shouldDefer. */
+    deferredLoadingMinimumTools?: number
   }
   skillClassifyEnabled: boolean
   skillClassifyThreshold: number
@@ -557,6 +813,28 @@ export interface NexusConfig {
   parallelAgents: {
     maxParallel: number
     maxTasksPerCall?: number
+  }
+  compatibility?: {
+    claude?: {
+      enabled?: boolean
+      includeGlobalDir?: boolean
+      includeProjectDir?: boolean
+      includeLocalInstructions?: boolean
+      includeRules?: boolean
+      includeSettings?: boolean
+      includeCommands?: boolean
+      includeSkills?: boolean
+      includeAgents?: boolean
+      includePlugins?: boolean
+    }
+  }
+  plugins?: {
+    enabled?: boolean
+    trusted?: string[]
+    blocked?: string[]
+    enableHooks?: boolean
+    hookTimeoutMs?: number
+    options?: Record<string, Record<string, unknown>>
   }
   /** Optional overrides for agent loop limits (tool budget and max iterations per mode). */
   agentLoop?: {
@@ -623,6 +901,11 @@ export interface McpServerConfig {
   enabled?: boolean
   /** Resolve to a bundled MCP server (e.g. "context-mode") when nexusRoot is set by host */
   bundle?: string
+  auth?: {
+    type?: "oauth" | "url" | "manual"
+    startUrl?: string
+    message?: string
+  }
 }
 
 // ─── Skill Types ───────────────────────────────────────────────────────────────

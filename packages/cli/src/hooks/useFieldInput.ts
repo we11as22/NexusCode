@@ -6,6 +6,7 @@ import { useState, useCallback, useEffect } from 'react'
 import type { Key } from 'ink'
 import { Cursor } from '../utils/Cursor.js'
 import { getClipboardText, setClipboardText } from '../utils/clipboard.js'
+import { asExtendedKey } from '../utils/ink.js'
 
 const FIELD_COLUMNS = 120
 
@@ -45,33 +46,34 @@ export function useFieldInput(
 
   const handleInput = useCallback(
     (input: string, key: Key): boolean => {
-      if (key.escape || key.tab || key.backtab) return false
+      const extendedKey = asExtendedKey(key)
+      if (extendedKey.escape || extendedKey.tab || extendedKey.backtab) return false
 
-      if (key.backspace || input === '\x7f' || input === '\b') {
+      if (extendedKey.backspace || input === '\x7f' || input === '\b') {
         applyCursor(cursor.backspace())
         return true
       }
-      if (key.delete || input === '\x1b[3~') {
+      if (extendedKey.delete || input === '\x1b[3~') {
         applyCursor(cursor.del())
         return true
       }
-      if (key.leftArrow) {
-        applyCursor(key.shift ? cursor.left().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.left().collapseSelection())
+      if (extendedKey.leftArrow) {
+        applyCursor(extendedKey.shift ? cursor.left().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.left().collapseSelection())
         return true
       }
-      if (key.rightArrow) {
-        applyCursor(key.shift ? cursor.right().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.right().collapseSelection())
+      if (extendedKey.rightArrow) {
+        applyCursor(extendedKey.shift ? cursor.right().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.right().collapseSelection())
         return true
       }
-      if (key.home) {
-        applyCursor(key.shift ? cursor.startOfLine().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.startOfLine().collapseSelection())
+      if (extendedKey.home) {
+        applyCursor(extendedKey.shift ? cursor.startOfLine().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.startOfLine().collapseSelection())
         return true
       }
-      if (key.end) {
-        applyCursor(key.shift ? cursor.endOfLine().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.endOfLine().collapseSelection())
+      if (extendedKey.end) {
+        applyCursor(extendedKey.shift ? cursor.endOfLine().withAnchor(cursor.hasSelection() ? cursor.selection : cursor.offset) : cursor.endOfLine().collapseSelection())
         return true
       }
-      if (key.ctrl) {
+      if (extendedKey.ctrl) {
         const c = (input ?? '').toLowerCase()
         if (c === 'a') {
           applyCursor(cursor.startOfLine().withAnchor(cursor.endOfLine().offset))
@@ -104,7 +106,7 @@ export function useFieldInput(
           return true
         }
       }
-      if (key.meta) {
+      if (extendedKey.meta) {
         const m = (input ?? '').toLowerCase()
         if (m === 'b') {
           applyCursor(cursor.prevWord().collapseSelection())

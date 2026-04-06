@@ -9,7 +9,7 @@ import type {
   ThinkingBlockParam,
   ToolResultBlockParam,
   ToolUseBlockParam,
-} from '@anthropic-ai/sdk/resources/index.mjs'
+} from '../provider/message-schema.js'
 import { Tool } from '../Tool.js'
 import { logError } from '../utils/log.js'
 import { UserToolResultMessage } from './messages/UserToolResultMessage/UserToolResultMessage.js'

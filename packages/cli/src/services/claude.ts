@@ -23,10 +23,11 @@ import { logEvent } from './statsig.js'
 import { withVCR } from './vcr.js'
 import { zodToJsonSchema } from 'zod-to-json-schema'
 import type {
-  Message as APIMessage,
+  AssistantAPIMessage as APIMessage,
   MessageParam,
+  RequestMessageParam,
   TextBlockParam,
-} from '@anthropic-ai/sdk/resources/index.mjs'
+} from '../provider/message-schema.js'
 import { SMALL_FAST_MODEL, USE_BEDROCK, USE_VERTEX } from '../utils/model.js'
 import { getCLISyspromptPrefix } from '../constants/prompts.js'
 import { getVertexRegionForModel } from '../utils/model.js'
@@ -203,8 +204,15 @@ export async function verifyApiKey(apiKey: string): Promise<boolean> {
 }
 
 type StreamLike = AsyncIterable<unknown> & {
-  finalMessage: () => Promise<APIMessage>
+  finalMessage: () => Promise<unknown>
   request_id?: string
+}
+
+type AnthropicLike = {
+  messages: {
+    create: (...args: any[]) => Promise<unknown>
+    stream: (...args: any[]) => any
+  }
 }
 
 async function handleMessageStream(
@@ -215,24 +223,33 @@ async function handleMessageStream(
 
   // TODO(ben): Consider showing an incremental progress indicator.
   for await (const part of stream) {
-    if (part.type === 'message_start') {
+    if (
+      part != null &&
+      typeof part === 'object' &&
+      'type' in part &&
+      (part as { type?: string }).type === 'message_start'
+    ) {
       ttftMs = Date.now() - streamStartTime
     }
   }
 
-  const finalResponse = await stream.finalMessage()
+  const finalResponse = (await stream.finalMessage()) as APIMessage
   return {
     ...finalResponse,
     ttftMs,
   }
 }
 
-let anthropicClient: Anthropic | null = null
+let anthropicClient: AnthropicLike | null = null
+
+function getStreamRequestId(stream?: StreamLike): string | undefined {
+  return stream?.request_id
+}
 
 /**
  * Get the Anthropic client, creating it if it doesn't exist
  */
-export function getAnthropicClient(model?: string): Anthropic {
+export function getAnthropicClient(model?: string): AnthropicLike {
   if (anthropicClient) {
     return anthropicClient
   }
@@ -358,7 +375,7 @@ export function userMessageToMessageParam(
 export function assistantMessageToMessageParam(
   message: AssistantMessage,
   addCache = false,
-): MessageParam {
+): RequestMessageParam {
   if (addCache) {
     if (typeof message.message.content === 'string') {
       return {
@@ -385,13 +402,13 @@ export function assistantMessageToMessageParam(
               ? { cache_control: { type: 'ephemeral' } }
               : {}
             : {}),
-        })),
+        })) as unknown as RequestMessageParam['content'],
       }
     }
   }
   return {
     role: 'assistant',
-    content: message.message.content,
+    content: message.message.content as unknown as RequestMessageParam['content'],
   }
 }
 
@@ -524,7 +541,7 @@ async function querySonnetWithPromptCaching(
             maxThinkingTokens + 1,
             getMaxTokensForModel(options.model),
           ),
-          messages: addCacheBreakpoints(messages),
+          messages: addCacheBreakpoints(messages) as unknown as MessageParam[],
           temperature: MAIN_QUERY_TEMPERATURE,
           system,
           tools: toolSchemas,
@@ -556,8 +573,7 @@ async function querySonnetWithPromptCaching(
       durationMsIncludingRetries: String(Date.now() - startIncludingRetries),
       attempt: String(attemptNumber),
       provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
-      requestId:
-        stream?.request_id ?? undefined,
+      requestId: getStreamRequestId(stream),
     })
     return getAssistantMessageFromError(error)
   }
@@ -580,8 +596,7 @@ async function querySonnetWithPromptCaching(
     attempt: String(attemptNumber),
     ttftMs: String(response.ttftMs),
     provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
-    requestId:
-      stream?.request_id ?? undefined,
+    requestId: getStreamRequestId(stream),
     stop_reason: response.stop_reason ?? undefined,
   })
 
@@ -607,9 +622,10 @@ async function querySonnetWithPromptCaching(
       content: normalizeContentFromAPI(response.content),
       usage: {
         ...response.usage,
-        cache_read_input_tokens: response.usage.cache_read_input_tokens ?? 0,
+        cache_read_input_tokens:
+          (response.usage as BetaUsage).cache_read_input_tokens ?? 0,
         cache_creation_input_tokens:
-          response.usage.cache_creation_input_tokens ?? 0,
+          (response.usage as BetaUsage).cache_creation_input_tokens ?? 0,
       },
     },
     costUSD,
@@ -645,7 +661,7 @@ function getAssistantMessageFromError(error: unknown): AssistantMessage {
 
 function addCacheBreakpoints(
   messages: (UserMessage | AssistantMessage)[],
-): MessageParam[] {
+): RequestMessageParam[] {
   return messages.map((msg, index) => {
     return msg.type === 'user'
       ? userMessageToMessageParam(msg, index > messages.length - 3)
@@ -726,17 +742,17 @@ async function queryHaikuWithPromptCaching({
       durationMsIncludingRetries: String(Date.now() - startIncludingRetries),
       attempt: String(attemptNumber),
       provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
-      requestId:
-        stream?.request_id ?? undefined,
+      requestId: getStreamRequestId(stream),
     })
     return getAssistantMessageFromError(error)
   }
 
   const inputTokens = response.usage.input_tokens
   const outputTokens = response.usage.output_tokens
-  const cacheReadInputTokens = response.usage.cache_read_input_tokens ?? 0
+  const cacheReadInputTokens =
+    (response.usage as BetaUsage).cache_read_input_tokens ?? 0
   const cacheCreationInputTokens =
-    response.usage.cache_creation_input_tokens ?? 0
+    (response.usage as BetaUsage).cache_creation_input_tokens ?? 0
   const costUSD =
     (inputTokens / 1_000_000) * HAIKU_COST_PER_MILLION_INPUT_TOKENS +
     (outputTokens / 1_000_000) * HAIKU_COST_PER_MILLION_OUTPUT_TOKENS +
@@ -765,16 +781,17 @@ async function queryHaikuWithPromptCaching({
     messageCount: String(assistantPrompt ? 2 : 1),
     inputTokens: String(inputTokens),
     outputTokens: String(response.usage.output_tokens),
-    cachedInputTokens: String(response.usage.cache_read_input_tokens ?? 0),
+    cachedInputTokens: String(
+      (response.usage as BetaUsage).cache_read_input_tokens ?? 0,
+    ),
     uncachedInputTokens: String(
-      response.usage.cache_creation_input_tokens ?? 0,
+      (response.usage as BetaUsage).cache_creation_input_tokens ?? 0,
     ),
     durationMs: String(durationMs),
     durationMsIncludingRetries: String(durationMsIncludingRetries),
     ttftMs: String(response.ttftMs),
     provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
-    requestId:
-      stream?.request_id ?? undefined,
+    requestId: getStreamRequestId(stream),
     stop_reason: response.stop_reason ?? undefined,
   })
 
@@ -846,8 +863,7 @@ async function queryHaikuWithoutPromptCaching({
       durationMsIncludingRetries: String(Date.now() - startIncludingRetries),
       attempt: String(attemptNumber),
       provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
-      requestId:
-        stream?.request_id ?? undefined,
+      requestId: getStreamRequestId(stream),
     })
     return getAssistantMessageFromError(error)
   }
@@ -862,8 +878,7 @@ async function queryHaikuWithoutPromptCaching({
     durationMsIncludingRetries: String(durationMsIncludingRetries),
     attempt: String(attemptNumber),
     provider: USE_BEDROCK ? 'bedrock' : USE_VERTEX ? 'vertex' : '1p',
-    requestId:
-      stream?.request_id ?? undefined,
+    requestId: getStreamRequestId(stream),
     stop_reason: response.stop_reason ?? undefined,
   })
 

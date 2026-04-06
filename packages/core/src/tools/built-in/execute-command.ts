@@ -6,6 +6,7 @@ import * as os from "node:os"
 import stripAnsi from "strip-ansi"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { getRunLogsDir, getToolOutputDir } from "../../data-dir.js"
+import { getOrchestrationRuntime } from "../../orchestration/runtime.js"
 
 const MAX_OUTPUT_BYTES = 50 * 1024 // 50 KB
 /** Max size of saved full output file (OpenCode-style disk protection). */
@@ -64,6 +65,14 @@ async function cleanupOldToolOutputs(toolOutputDir: string): Promise<void> {
 
 /** Registry of background bash jobs: bash_id -> { pid, logPath } for BashOutput and KillBash. */
 export const backgroundBashJobs = new Map<string, { pid: number; logPath: string }>()
+
+async function readBackgroundOutput(logPath: string): Promise<string | undefined> {
+  try {
+    return await fs.promises.readFile(logPath, "utf8")
+  } catch {
+    return undefined
+  }
+}
 
 function isProcessRunning(pid: number): boolean {
   if (pid <= 0) return false
@@ -222,12 +231,58 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
       child.unref()
       const pid = child.pid ?? 0
       backgroundBashJobs.set(bashId, { pid, logPath })
+      const runtime = await getOrchestrationRuntime(workingDir)
+      const task = await runtime.registerBackgroundTask({
+        id: bashId,
+        kind: "bash",
+        description: command,
+        status: "running",
+        command,
+        cwd: workingDir,
+        processId: pid,
+        logPath,
+        outputFile: logPath,
+        metadata: { tool: "Bash" },
+      })
+      ctx.host.emit({ type: "background_task_updated", task })
+
+      child.on("error", (error) => {
+        void (async () => {
+          const output = await readBackgroundOutput(logPath)
+          const next = await runtime.setBackgroundTaskStatus(bashId, "failed", {
+            output,
+            metadata: { tool: "Bash", error: error.message },
+          })
+          if (next) ctx.host.emit({ type: "background_task_updated", task: next })
+        })()
+      })
+
+      child.on("exit", (code, signalName) => {
+        void (async () => {
+          const output = await readBackgroundOutput(logPath)
+          const status =
+            signalName === "SIGTERM" || signalName === "SIGKILL"
+              ? "killed"
+              : code === 0
+                ? "completed"
+                : "failed"
+          const next = await runtime.setBackgroundTaskStatus(bashId, status, {
+            output,
+            exitCode: typeof code === "number" ? code : undefined,
+            metadata: {
+              tool: "Bash",
+              ...(signalName ? { signal: signalName } : {}),
+            },
+          })
+          if (next) ctx.host.emit({ type: "background_task_updated", task: next })
+        })()
+      })
 
       const logDisplay = shortDataPath(logPath)
       return {
         success: true,
         output: `[background] bash_id: ${bashId}\nPID: ${pid}\nLog: ${logDisplay}\n\nOutput is written to the log file in real time. Use BashOutput(bash_id: "${bashId}") to read progress; the response includes [Process status: running | exited]. Use KillBash(shell_id: "${bashId}") to stop the process.`,
-        metadata: { bash_id: bashId, pid, logPath },
+        metadata: { bash_id: bashId, pid, logPath, task_id: bashId },
       }
     }
 

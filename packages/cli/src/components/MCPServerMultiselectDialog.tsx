@@ -32,7 +32,7 @@ export function MCPServerMultiselectDialog({
     }
 
     // Use partition to separate approved and rejected servers
-    const [approvedServers, rejectedServers] = partition(serverNames, server =>
+    const [approvedServers, rejectedServers] = partition(serverNames, (server: string) =>
       selectedServers.includes(server),
     )
 

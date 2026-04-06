@@ -41,6 +41,10 @@ export type {
   IndexSearchResult, IndexSearchOptions, IndexStatus, SymbolKind,
   CheckpointEntry, ChangedFile,
   DiagnosticItem, ApprovalAction, PermissionResult, UserQuestionRequest, UserQuestionItem, UserQuestionOption, UserQuestionAnswer,
+  TaskStatus, TaskRecord, TeamRecord, AgentDefinition, BackgroundTaskRecord,
+  RemoteSessionRecord, WorktreeSession, DeferredToolDef, MemoryRecord, PluginManifestRecord,
+  LspOperation, LspPosition, LspRange, LspLocation, LspSymbolRecord, LspCallRecord, LspQueryRequest, LspQueryResult,
+  ModeChangeResult, WorkingDirectoryChangeResult, McpAuthRequest, McpAuthResult,
 } from "./types.js"
 
 // Provider
@@ -80,7 +84,18 @@ export {
   createSpawnAgentOutputTool,
   createSpawnAgentStopTool,
   createSpawnAgentsParallelTool,
+  createListAgentRunsTool,
+  createAgentRunSnapshotTool,
+  createResumeAgentTool,
 } from "./agent/parallel.js"
+export { getOrchestrationRuntime, OrchestrationRuntime, getRuntimeDir } from "./orchestration/runtime.js"
+export { loadAgentDefinitions } from "./orchestration/agents.js"
+export { extractMemoriesFromCompactionSummary } from "./orchestration/memory-extraction.js"
+export { loadPluginManifests, validatePluginManifestFile, resolvePluginDeclaredPath } from "./plugins/index.js"
+export { loadPluginRuntimeRecords, applyPluginRuntimeSettings, runPluginHooks } from "./plugins/runtime.js"
+export { getClaudeCompatibilityOptions } from "./compat/claude.js"
+export { loadSlashCommands, renderSlashCommandPrompt } from "./commands/loader.js"
+export type { LoadedSlashCommand } from "./commands/loader.js"
 
 // Tools
 export { ToolRegistry } from "./tools/registry.js"
@@ -137,7 +152,13 @@ export type { SkillToolDescriptionRow, ResolvedSkillBody } from "./skills/skill-
 export { fetchSkillUrlRegistryRoots } from "./skills/url-registry.js"
 
 // MCP
-export { McpClient, setMcpClientInstance, testMcpServers } from "./mcp/client.js"
+export {
+  McpClient,
+  setMcpClientInstance,
+  getMcpClientInstance,
+  testMcpServers,
+} from "./mcp/client.js"
+export type { McpResourceRef, McpResourceContent } from "./mcp/client.js"
 export { createMcpTransport, effectiveUrlTransport } from "./mcp/transport-factory.js"
 export { resolveBundledMcpServers } from "./mcp/resolve-bundled.js"
 export type { ResolveBundledOptions } from "./mcp/resolve-bundled.js"

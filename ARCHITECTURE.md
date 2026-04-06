@@ -10,6 +10,78 @@ NexusCode has three runtime layers:
 
 Both hosts call the same `runAgentLoop()` in core, so behavior is consistent across VS Code and CLI. The CLI uses a **Nexus query bridge** (`nexus-query.ts`): REPL and `--print` both call `queryNexus()` (no legacy Anthropic-only print path). The bridge runs `runAgentLoop()` with a `CliHost` that queues `AgentEvent`s and maps them to the REPL’s `Message` types (AssistantMessage, ProgressMessage, UserMessage) so the existing Ink UI renders tool progress and responses. Model, mode, index, session, checkpoints, and profile are passed via CLI options and bootstrap; task checkpoints and restore are available as `nexus task checkpoints` and `nexus task restore <id>`.
 
+The CLI host boundary is now explicitly provider-agnostic. Transcript/render code consumes local message contracts from `packages/cli/src/provider/message-schema.ts`; Anthropic-specific request/stream/client contracts are confined to `packages/cli/src/services/claude.ts`. This keeps the host UI/query pipeline aligned with the core multi-provider model instead of leaking one provider SDK across the application surface.
+
+### Orchestration runtime
+
+`packages/core` now contains a persistent orchestration substrate under `src/orchestration/` backed by `~/.nexus/runtime/<project-hash>/state.json`. It is intentionally separate from chat session JSONL: sessions store conversational history, while orchestration state stores cross-turn control-plane records.
+
+Current records:
+- `TaskRecord`: shared task list with lifecycle, owners, dependencies, metadata, and optional output file.
+- `TeamRecord`: team/swarm namespace with members and persisted teammate messages.
+- `BackgroundTaskRecord`: long-running work items for background `Bash` and background `SpawnAgent`, including status, log/output paths, process/session ids, and final output.
+- `RemoteSessionRecord`: reconnectable server/client stream records keyed by run/session, with last delivered event sequence and reconnect state.
+- `WorktreeSession`: isolated git worktree lifecycle (`active` / `kept` / `removed`) so future hosts can switch context safely.
+- `MemoryRecord`: durable project/session/team memory that can be injected back into later prompts.
+- `AgentDefinition`: built-in and markdown-loaded agent profiles from project/global `.nexus/agents/**/*.md`.
+- `PluginManifestRecord`: local plugin manifests loaded from `.nexus/plugins/**/plugin.json` (including `.nexus-plugin` / `.codex-plugin` layouts), with project-overrides-global precedence.
+
+This is the basis for OpenClaude-class orchestration. The first integration surface is tool-driven rather than host-driven: `Task*`, `Team*`, `SendMessage`, `EnterWorktree` / `ExitWorktree`, `ListAgents`, `ListRemoteSessions` / `GetRemoteSession` / `UpdateRemoteSession`, and `TaskOutput` / `TaskStop` all talk to the same runtime. Background bash and background sub-agents now register into the same store so status and output can be inspected through one contract instead of separate ad hoc maps.
+
+Sub-agent lifecycle is now richer than "fire and forget". Each completed or failed delegated run writes a runtime snapshot file under `~/.nexus/runtime/<project-hash>/agent-runs/`, and the runtime stores that path on the corresponding background task. `ListAgentRuns`, `AgentRunSnapshot`, and `ResumeAgent` use that substrate for inspect/resume/fork flows.
+
+VS Code now consumes part of that control plane directly. `EnterPlanMode` can switch the controller into `plan` mode for the next turn, and `EnterWorktree` / `ExitWorktree` can update the controller cwd override so subsequent runs operate inside the active worktree instead of merely printing a handoff message.
+
+Prompt memory injection is no longer "latest N records only". The loop fetches a wider candidate set and ranks memories against the latest task/user turn before attaching them to the prompt. This keeps the prompt closer to relevant-memory prefetch instead of blindly replaying stale facts.
+
+### Deferred tool surface
+
+Tool definitions now support:
+- `searchHint`
+- `shouldDefer`
+- `alwaysLoad`
+
+The loop uses these flags to keep deferred tools out of the initial LLM tool manifest while still making them executable at runtime. `ToolSearch` is always prompt-visible and acts as the discovery bridge for deferred tools. The first consumer is MCP: connected MCP tools are marked deferred by default so prompt growth no longer scales linearly with every external integration.
+
+Deferred loading now has an explicit strategy layer in config: `tools.deferredLoadingMode = auto | always | never`, with auto mode using both tool count and estimated schema-token share of the model context window. This avoids hiding tools behind `ToolSearch` in small sessions while still protecting large MCP-heavy runs from prompt bloat.
+
+Deferred tools are no longer only MCP-oriented. `LSP`, `ListPlugins`, and `GetPlugin` also opt into deferred loading so the default manifest stays compact while still exposing richer IDE/runtime surfaces on demand.
+
+### Plugin and LSP surfaces
+
+`packages/core/src/plugins/index.ts` introduces a provider-agnostic plugin foundation. It validates and loads local plugin manifests, resolves declared relative paths safely, and lets project plugins override global ones by name. Today that surface is wired into two runtime extension points:
+- plugin-declared **agents** are loaded into `loadAgentDefinitions()`
+- plugin-declared **skills** are fed into `loadSkills()`
+
+This keeps NexusCode extensible without inheriting OpenClaude's Anthropic-specific plugin runtime contracts.
+
+`packages/core/src/plugins/runtime.ts` adds runtime-facing plugin state on top of manifests:
+- trust gating (`PluginTrust`)
+- persisted plugin options in `.nexus/nexus.yaml` (`PluginConfigure`)
+- trusted hook execution (`RunPluginHook`, plus automatic `user_prompt_submit` / `after_tool` hook invocation in the main loop)
+
+The plugin runtime stays provider-neutral: manifests and hooks extend Nexus behavior without assuming Anthropic SDK semantics.
+
+`LSP` is now a first-class built-in tool. The tool contract lives in `packages/core`, but execution is host-provided through `IHost.queryLanguageServer()`. The VS Code host implements:
+- definitions
+- references
+- hover
+- document/workspace symbols
+- implementations
+- call hierarchy preparation, incoming calls, and outgoing calls
+
+CLI and server remain provider-agnostic and simply report that LSP is unavailable when no IDE host is present.
+
+### MCP as integration surface
+
+The core MCP client no longer exposes only `callTool()`. It now also provides:
+- singleton access via `getMcpClientInstance()`
+- `listResources()`
+- `readResource()`
+- `authenticate()` status reporting
+
+Built-in tools `ListMcpResources`, `ReadMcpResource`, and `McpAuthenticate` expose that surface to the agent loop. Authentication now has a host-driven handoff contract through `IHost.requestMcpAuthentication()`: CLI/VS Code/server hosts can open a browser or present auth instructions when MCP config declares `auth`. Full token exchange still depends on the specific MCP server flow, but the runtime no longer stops at a static text-only description.
+
 **Tool-call validation is two-phase:** `BaseLLMClient` passes each tool’s **real** Zod schema to the Vercel AI SDK so the provider JSON Schema lists correct types (booleans, arrays, etc.). The SDK may still emit `AI_InvalidToolArgumentsError` on hard mismatches; `runAgentLoop` then treats that as **recoverable** (user message + continue) via `tool-sdk-recovery.ts`. Before strict parse in `executeToolCall`, `normalizeToolInputForParse` fixes common drift: `paths`→`path` (List); string/JSON list→`string[]` for **ReadLints**, **CodebaseSearch** `target_directories`, **List/Grep** `ignore` (ignore is never comma-split — commas may be inside a glob); **Glob** `path` placeholders (`"undefined"`, `"null"`); **Bash** `timeout`, **WebFetch** `max_length`, **WebSearch** `max_results`, **Exa** numeric fields as strings; **Grep** `output_mode` / **CodebaseSearch** `kind` case and light aliases; **TodoWrite** `todos` as JSON string; string CSV / loose JSON→`options[]` for AskFollowupQuestion; **`"False"`/`"true"`→boolean** on known boolean keys. **Parallel** already re-runs this normalizer per nested tool. Remaining failures return `formatToolValidationError` (with extra tips for boolean/number/array mismatches) so the model can retry.
 `bootstrapNexus` is an object-argument API; CLI must call it as `bootstrapNexus({ cwd, ... })` so host/tool paths resolve against the real project root.
 
@@ -37,6 +109,13 @@ Optional **`packages/server`** runs the agent and persists sessions/messages via
 
 **Context usage bar (CLI + VS Code):** The “used / limit” indicator is driven by a single formula in `packages/core/src/context/context-usage.ts`: **active session messages** (same window as the next request; tool text is whatever is stored after execution-time truncation / compaction, with no extra per-request cap in `buildMessagesFromSession`), plus **last built system prompt** tokens, plus a **heuristic for tool definitions** (name + description + fixed schema overhead per tool). The agent loop calls `emitContextUsage` after each system build and records `contextUsage` on the session (persisted in JSONL meta). The snapshot is **cleared only on a new user message**, not on every assistant/tool mutation, so idle UIs can still show the last full estimate after a run. When no snapshot exists yet, hosts show **session + tools** (and optional MCP server count fudge), not system — until the next loop iteration emits.
 
+**Compaction v2:** NexusCode no longer relies only on "prune then summarize". The compaction path is now staged:
+- `prune()` clears old completed tool output first.
+- `microcompact()` trims stale assistant reasoning and oversized old text outside the recent active window.
+- Full summary compaction runs only when the request is still too large, or reactively after a provider context-overflow error.
+
+This keeps more recent granular context intact while still recovering from provider-side prompt limits that local token estimates may miss.
+
 **Terminal output (Kilo-style):** Bash run logs and large tool output are written to the **global data dir** (`~/.nexus/data` or `$NEXUS_DATA_HOME`), not in the project. So `run_*.log` and `tool-output/*.out` never appear in the project tree, in git status, or in the extension/CLI "N Files" / session-edits list (those lists only include paths from Write/Edit tool results). The agent can read these files via `Read("~/.nexus/data/run/run_<id>.log")` or `Read("~/.nexus/data/tool-output/...")`; the Read tool expands `~` to the home directory, and `autoApproveReadPatterns` includes `**/.nexus/data/run/**` and `**/.nexus/data/tool-output/**` so no approval is required.
 
 #### Connection modes and server stream contract
@@ -49,6 +128,8 @@ Optional **`packages/server`** runs the agent and persists sessions/messages via
 | **CLI + server** | Server process | Same JSONL as local (per canonical `directory`) | CLI `--server <url>` (or `NEXUS_SERVER_URL`); `queryNexus` reuses the bootstrap session id with `streamMessage` (no per-message session fork); REPL consumes identically |
 
 Server stream (POST `/session/:id/message`) returns **NDJSON** (`Content-Type: application/x-ndjson`, chunked): one JSON object per line. Each object is an `AgentEvent` or a **heartbeat** line `{"type":"heartbeat","ts":<ms>}` sent every 10s so proxies and clients can detect dead connections. Clients skip heartbeat lines; if no event (including heartbeat) is received for `DEFAULT_HEARTBEAT_TIMEOUT_MS` (20s), the client treats the stream as dead and surfaces an error (extension: connection state "error" + retry by sending again). Malformed lines yield an `AgentEvent` `{ type: "error", error: "Invalid stream line: ..." }`. Abort is via client closing the request (`AbortController.signal`); the server forwards `c.req.raw.signal` to `runSession` so the run stops when the client disconnects.
+
+Streaming is now reconnectable. The server assigns each live run an `X-Nexus-Run-Id`, buffers recent `{ seq, event }` envelopes in `packages/server/src/active-runs.ts`, and accepts resume requests with `{ runId, afterSeq }`. `NexusServerClient.streamMessage()` tracks the last delivered sequence, retries up to three times on dead streams, and requests replay from the last confirmed sequence instead of restarting the whole run. The server also mirrors these connections into `RemoteSessionRecord`s so reconnect/disconnect/completion state is visible to the runtime.
 
 **Health:** GET `/health` returns `{ ok: true, ts }` for liveness checks.
 
@@ -192,7 +273,9 @@ The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can 
 - **Prompt and tool contracts must match runtime exactly.** System prompts, mode descriptions, sub-agent prompts, and tool descriptions must use the real tool names and parameter shapes: `PlanExit`, `SpawnAgent`, `Parallel`, `Read(file_path, offset, limit)`, and the exact-string `Edit` contract.
 - **Mode switching is live within one chat.** When the mode changes, the current mode's permissions and end-of-turn rules override any earlier assumptions from the same conversation; prompts must make that explicit so the agent does not blend plan/ask/review/agent behaviors.
 - **Built-in tools** are always available per mode; filtering applies only to dynamic (MCP/custom) tools, and by **MCP server** count (not individual tool count) when classification is enabled.
+- **Deferred tools** remain executable even when omitted from the initial prompt-visible tool list. Discovery of deferred tools must go through `ToolSearch`; execution still resolves against the full runtime registry.
 - **MCP config**: enable/disable is per **server** (all tools of that server). The classifier selects servers, not individual tools.
+- **Background work** must register in the orchestration runtime if it is expected to outlive one synchronous tool call. `Bash(run_in_background: true)` and `SpawnAgent(run_in_background: true)` now share this rule.
 - If vector prerequisites are invalid, **`CodebaseSearch` is unavailable**; use **Grep** / **ListCodeDefinitions** for discovery until vector indexing is configured.
 - Host UI must not change `runAgentLoop` contracts (options, events, tool results).
 - **`Write`** and **`Edit`** skip explicit approval when `autoApproveWrite` (or mode `autoApprove` includes `write`) is enabled; otherwise they emit `tool_approval_needed` and wait for the host.
@@ -257,11 +340,15 @@ Static registry (`getAllBuiltinTools` in `packages/core/src/tools/built-in/index
 - **write:** `Write`, `Edit`
 - **execute:** `Bash`, `BashOutput`, `KillBash` (background jobs log under the global data dir; see `execute-command.ts`)
 - **search:** `Grep`, `CodebaseSearch`, `WebFetch`, `WebSearch`, `Glob`
-- **skills:** `Skill` — catalog in the tool description (`<available_skills>`) from `loadSkills` (configured paths, `skillsUrls` → cache under `~/.nexus/cache/skills`, **`~/.nexus/skills`**, walk-up **`.nexus/skills`** from cwd ancestors). Marketplace installs use **`<project>/.nexus/skills/<id>`** or **`~/.nexus/skills/<id>`**. `permissions.autoApproveSkillLoad` defaults to **true**; when approval is required, `Skill` must not run inside `Parallel`. **Integrations → Marketplace:** SkillNet skills index; MCP tab appends servers to **`.nexus/mcp-servers.json`** (project) or **`~/.nexus/mcp-servers.json`** (global). **Rules:** configured patterns plus walk-up **`AGENTS.md` / `CLAUDE.md`**, same filenames under **`.nexus/`**, **`.nexus/rules/**/*.md`**, **`~/.nexus/rules/**`**.
+- **skills:** `Skill` — catalog in the tool description (`<available_skills>`) from `loadSkills` (configured paths, `skillsUrls` → cache under `~/.nexus/cache/skills`, **`~/.nexus/skills`**, walk-up **`.nexus/skills`** from cwd ancestors). Marketplace installs use **`<project>/.nexus/skills/<id>`** or **`~/.nexus/skills/<id>`**. `permissions.autoApproveSkillLoad` defaults to **true**; when approval is required, `Skill` must not run inside `Parallel`. **Integrations → Marketplace:** SkillNet skills index; MCP tab appends servers to **`.nexus/mcp-servers.json`** (project) or **`~/.nexus/mcp-servers.json`** (global). **Rules:** configured patterns plus walk-up **`NEXUS.md` / `NEXUS.local.md` / `AGENTS.md`**, same filenames under **`.nexus/`**, **`.nexus/rules/**/*.md`**, **`~/.nexus/rules/**`**. If `compatibility.claude.enabled` is on, the same loader also reads **`CLAUDE.md` / `CLAUDE.local.md`**, **`.claude/rules/**`**, **`.claude/skills/**`**, **`.claude/agents/**`**, **`.claude/plugins/**`**, and **`.claude/settings*.json`** without letting those override native `.nexus` entries of the same name.
 - **context:** `Condense`
 - **plan_exit:** `PlanExit` (plan mode only)
 
+Compaction is multi-stage: first old tool outputs are pruned, then stale reasoning / oversized historical text are micro-compacted, and only then a structured summary is generated if context pressure still requires it. The summary template now explicitly carries stable project facts/reusable commands, delegation/background state, and plugin/MCP/auth state. When a new compaction summary is created, Nexus also extracts a small set of durable project memories and session memories (instructions, discoveries, stable facts, pending work, current work, next step, delegation state) into the orchestration runtime so future turns can prefetch relevant memory without manually calling `MemoryCreate` for every stable fact.
+
 Host registration (after `ToolRegistry` + MCP): **`packages/cli/src/nexus-bootstrap.ts`** and **`packages/vscode/src/controller.ts`** register `SpawnAgent`, `SpawnAgentsParallel`, `SpawnAgentOutput`, `SpawnAgentStop`. **`packages/server/src/run-session.ts`** registers `SpawnAgent`, the deprecated alias **`SpawnAgents`**, `SpawnAgentOutput`, and `SpawnAgentStop` — it does **not** call `createSpawnAgentsParallelTool`, so on the HTTP server the model must use **`Parallel` with multiple `SpawnAgent` calls** (or sequential `SpawnAgent` / `SpawnAgents`) instead of `SpawnAgentsParallel`.
+
+Custom slash commands are loaded from **`.nexus/commands/**`** and **`~/.nexus/commands/**`**. When Claude compatibility is enabled, **`.claude/commands/**`** and **`~/.claude/commands/**`** are also loaded with lower precedence than native Nexus commands. VS Code resolves unknown slash commands through this loader and turns the markdown body into the next agent prompt (`{{args}}` substitution is supported).
 
 `CodebaseSearch` is included in the loop only when **`indexing.vector`** and **`vectorDb.enabled`** (see `runAgentLoop`); otherwise the tool name is removed from the per-mode builtin set.
 

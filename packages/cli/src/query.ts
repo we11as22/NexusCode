@@ -1,8 +1,10 @@
 import {
-  Message as APIAssistantMessage,
   MessageParam,
   ToolUseBlock,
-} from '@anthropic-ai/sdk/resources/index.mjs'
+  AssistantAPIMessage as APIAssistantMessage,
+  TextBlockParam,
+  ImageBlockParam,
+} from './provider/message-schema.js'
 import { UUID } from 'crypto'
 import type { Tool, ToolUseContext } from './Tool.js'
 import {
@@ -135,6 +137,9 @@ export async function* query(
   const fullSystemPrompt = formatSystemPromptWithContext(systemPrompt, context)
 
   function getAssistantResponse() {
+    if (!toolUseContext.options.slowAndCapableModel) {
+      throw new Error('No slow model configured for assistant query')
+    }
     return querySonnet(
       normalizeMessagesForAPI(messages),
       fullSystemPrompt,
@@ -446,17 +451,26 @@ async function* checkPermissionsAndCallTool(
             messageID: assistantMessage.message.id,
             toolName: tool.name,
           })
+          const resultForAssistant =
+            typeof result.resultForAssistant === 'string' ||
+            Array.isArray(result.resultForAssistant)
+              ? result.resultForAssistant
+              : String(result.resultForAssistant ?? '')
           yield createUserMessage(
             [
               {
                 type: 'tool_result',
-                content: result.resultForAssistant,
+                content: resultForAssistant as
+                  | string
+                  | (TextBlockParam | ImageBlockParam)[],
                 tool_use_id: toolUseID,
               },
             ],
             {
               data: result.data,
-              resultForAssistant: result.resultForAssistant,
+              resultForAssistant: resultForAssistant as
+                | string
+                | (TextBlockParam | ImageBlockParam)[],
             },
           )
           return
@@ -468,8 +482,8 @@ async function* checkPermissionsAndCallTool(
           yield createProgressMessage(
             toolUseID,
             siblingToolUseIDs,
-            result.content,
-            result.normalizedMessages,
+            result.content as AssistantMessage,
+            result.normalizedMessages as NormalizedMessage[],
             result.tools,
           )
       }

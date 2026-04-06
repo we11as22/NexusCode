@@ -549,6 +549,19 @@ declare const NexusConfigSchema: z.ZodObject<{
             enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
             /** Bundled server id (e.g. "context-mode"); resolved by host to command/args/env */
             bundle: z.ZodOptional<z.ZodString>;
+            auth: z.ZodOptional<z.ZodObject<{
+                type: z.ZodOptional<z.ZodEnum<["oauth", "url", "manual"]>>;
+                startUrl: z.ZodOptional<z.ZodString>;
+                message: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            }, {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            }>>;
         }, "strip", z.ZodTypeAny, {
             name: string;
             enabled: boolean;
@@ -561,6 +574,11 @@ declare const NexusConfigSchema: z.ZodObject<{
             transport?: "stdio" | "http" | "sse" | undefined;
             headers?: Record<string, string> | undefined;
             bundle?: string | undefined;
+            auth?: {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
         }, {
             name: string;
             type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
@@ -573,6 +591,11 @@ declare const NexusConfigSchema: z.ZodObject<{
             headers?: Record<string, string> | undefined;
             enabled?: boolean | undefined;
             bundle?: string | undefined;
+            auth?: {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
         }>, "many">>;
     }, "strip", z.ZodTypeAny, {
         servers: {
@@ -587,6 +610,11 @@ declare const NexusConfigSchema: z.ZodObject<{
             transport?: "stdio" | "http" | "sse" | undefined;
             headers?: Record<string, string> | undefined;
             bundle?: string | undefined;
+            auth?: {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
         }[];
     }, {
         servers?: {
@@ -601,6 +629,11 @@ declare const NexusConfigSchema: z.ZodObject<{
             headers?: Record<string, string> | undefined;
             enabled?: boolean | undefined;
             bundle?: string | undefined;
+            auth?: {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
         }[] | undefined;
     }>>;
     skills: z.ZodDefault<z.ZodArray<z.ZodUnion<[z.ZodString, z.ZodObject<{
@@ -623,18 +656,30 @@ declare const NexusConfigSchema: z.ZodObject<{
         classifyThreshold: z.ZodDefault<z.ZodNumber>;
         parallelReads: z.ZodDefault<z.ZodBoolean>;
         maxParallelReads: z.ZodDefault<z.ZodNumber>;
+        /** Deferred tool loading strategy for MCP/custom heavy tools. */
+        deferredLoadingMode: z.ZodDefault<z.ZodEnum<["auto", "always", "never"]>>;
+        /** In auto mode, switch to ToolSearch when deferred tools exceed this fraction of context. */
+        deferredLoadingThresholdPercent: z.ZodDefault<z.ZodNumber>;
+        /** In auto mode, always defer once this many tools are marked shouldDefer. */
+        deferredLoadingMinimumTools: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
         custom: string[];
         classifyToolsEnabled: boolean;
         classifyThreshold: number;
         parallelReads: boolean;
         maxParallelReads: number;
+        deferredLoadingMode: "never" | "auto" | "always";
+        deferredLoadingThresholdPercent: number;
+        deferredLoadingMinimumTools: number;
     }, {
         custom?: string[] | undefined;
         classifyToolsEnabled?: boolean | undefined;
         classifyThreshold?: number | undefined;
         parallelReads?: boolean | undefined;
         maxParallelReads?: number | undefined;
+        deferredLoadingMode?: "never" | "auto" | "always" | undefined;
+        deferredLoadingThresholdPercent?: number | undefined;
+        deferredLoadingMinimumTools?: number | undefined;
     }>>;
     /** When true, use LLM to filter skills by task when count > skillClassifyThreshold. Default off. */
     skillClassifyEnabled: z.ZodDefault<z.ZodBoolean>;
@@ -667,6 +712,90 @@ declare const NexusConfigSchema: z.ZodObject<{
     }, {
         maxParallel?: number | undefined;
         maxTasksPerCall?: number | undefined;
+    }>>;
+    compatibility: z.ZodDefault<z.ZodObject<{
+        claude: z.ZodDefault<z.ZodObject<{
+            enabled: z.ZodDefault<z.ZodBoolean>;
+            includeGlobalDir: z.ZodDefault<z.ZodBoolean>;
+            includeProjectDir: z.ZodDefault<z.ZodBoolean>;
+            includeLocalInstructions: z.ZodDefault<z.ZodBoolean>;
+            includeRules: z.ZodDefault<z.ZodBoolean>;
+            includeSettings: z.ZodDefault<z.ZodBoolean>;
+            includeCommands: z.ZodDefault<z.ZodBoolean>;
+            includeSkills: z.ZodDefault<z.ZodBoolean>;
+            includeAgents: z.ZodDefault<z.ZodBoolean>;
+            includePlugins: z.ZodDefault<z.ZodBoolean>;
+        }, "strip", z.ZodTypeAny, {
+            enabled: boolean;
+            includeGlobalDir: boolean;
+            includeProjectDir: boolean;
+            includeLocalInstructions: boolean;
+            includeRules: boolean;
+            includeSettings: boolean;
+            includeCommands: boolean;
+            includeSkills: boolean;
+            includeAgents: boolean;
+            includePlugins: boolean;
+        }, {
+            enabled?: boolean | undefined;
+            includeGlobalDir?: boolean | undefined;
+            includeProjectDir?: boolean | undefined;
+            includeLocalInstructions?: boolean | undefined;
+            includeRules?: boolean | undefined;
+            includeSettings?: boolean | undefined;
+            includeCommands?: boolean | undefined;
+            includeSkills?: boolean | undefined;
+            includeAgents?: boolean | undefined;
+            includePlugins?: boolean | undefined;
+        }>>;
+    }, "strip", z.ZodTypeAny, {
+        claude: {
+            enabled: boolean;
+            includeGlobalDir: boolean;
+            includeProjectDir: boolean;
+            includeLocalInstructions: boolean;
+            includeRules: boolean;
+            includeSettings: boolean;
+            includeCommands: boolean;
+            includeSkills: boolean;
+            includeAgents: boolean;
+            includePlugins: boolean;
+        };
+    }, {
+        claude?: {
+            enabled?: boolean | undefined;
+            includeGlobalDir?: boolean | undefined;
+            includeProjectDir?: boolean | undefined;
+            includeLocalInstructions?: boolean | undefined;
+            includeRules?: boolean | undefined;
+            includeSettings?: boolean | undefined;
+            includeCommands?: boolean | undefined;
+            includeSkills?: boolean | undefined;
+            includeAgents?: boolean | undefined;
+            includePlugins?: boolean | undefined;
+        } | undefined;
+    }>>;
+    plugins: z.ZodDefault<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        trusted: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        blocked: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        enableHooks: z.ZodDefault<z.ZodBoolean>;
+        hookTimeoutMs: z.ZodDefault<z.ZodNumber>;
+        options: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
+    }, "strip", z.ZodTypeAny, {
+        options: Record<string, Record<string, unknown>>;
+        enabled: boolean;
+        trusted: string[];
+        blocked: string[];
+        enableHooks: boolean;
+        hookTimeoutMs: number;
+    }, {
+        options?: Record<string, Record<string, unknown>> | undefined;
+        enabled?: boolean | undefined;
+        trusted?: string[] | undefined;
+        blocked?: string[] | undefined;
+        enableHooks?: boolean | undefined;
+        hookTimeoutMs?: number | undefined;
     }>>;
     /** Optional overrides for agent loop limits (OpenCode-style: allow enough tools/iterations to finish). */
     agentLoop: z.ZodDefault<z.ZodObject<{
@@ -814,6 +943,11 @@ declare const NexusConfigSchema: z.ZodObject<{
             transport?: "stdio" | "http" | "sse" | undefined;
             headers?: Record<string, string> | undefined;
             bundle?: string | undefined;
+            auth?: {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
         }[];
     };
     modes: {
@@ -916,6 +1050,9 @@ declare const NexusConfigSchema: z.ZodObject<{
         classifyThreshold: number;
         parallelReads: boolean;
         maxParallelReads: number;
+        deferredLoadingMode: "never" | "auto" | "always";
+        deferredLoadingThresholdPercent: number;
+        deferredLoadingMinimumTools: number;
     };
     skillClassifyEnabled: boolean;
     skillClassifyThreshold: number;
@@ -929,6 +1066,28 @@ declare const NexusConfigSchema: z.ZodObject<{
     parallelAgents: {
         maxParallel: number;
         maxTasksPerCall: number;
+    };
+    compatibility: {
+        claude: {
+            enabled: boolean;
+            includeGlobalDir: boolean;
+            includeProjectDir: boolean;
+            includeLocalInstructions: boolean;
+            includeRules: boolean;
+            includeSettings: boolean;
+            includeCommands: boolean;
+            includeSkills: boolean;
+            includeAgents: boolean;
+            includePlugins: boolean;
+        };
+    };
+    plugins: {
+        options: Record<string, Record<string, unknown>>;
+        enabled: boolean;
+        trusted: string[];
+        blocked: string[];
+        enableHooks: boolean;
+        hookTimeoutMs: number;
     };
     agentLoop: {
         toolCallBudget?: {
@@ -1008,6 +1167,11 @@ declare const NexusConfigSchema: z.ZodObject<{
             headers?: Record<string, string> | undefined;
             enabled?: boolean | undefined;
             bundle?: string | undefined;
+            auth?: {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
         }[] | undefined;
     } | undefined;
     embeddings?: {
@@ -1176,6 +1340,9 @@ declare const NexusConfigSchema: z.ZodObject<{
         classifyThreshold?: number | undefined;
         parallelReads?: boolean | undefined;
         maxParallelReads?: number | undefined;
+        deferredLoadingMode?: "never" | "auto" | "always" | undefined;
+        deferredLoadingThresholdPercent?: number | undefined;
+        deferredLoadingMinimumTools?: number | undefined;
     } | undefined;
     skillClassifyEnabled?: boolean | undefined;
     skillClassifyThreshold?: number | undefined;
@@ -1189,6 +1356,28 @@ declare const NexusConfigSchema: z.ZodObject<{
     parallelAgents?: {
         maxParallel?: number | undefined;
         maxTasksPerCall?: number | undefined;
+    } | undefined;
+    compatibility?: {
+        claude?: {
+            enabled?: boolean | undefined;
+            includeGlobalDir?: boolean | undefined;
+            includeProjectDir?: boolean | undefined;
+            includeLocalInstructions?: boolean | undefined;
+            includeRules?: boolean | undefined;
+            includeSettings?: boolean | undefined;
+            includeCommands?: boolean | undefined;
+            includeSkills?: boolean | undefined;
+            includeAgents?: boolean | undefined;
+            includePlugins?: boolean | undefined;
+        } | undefined;
+    } | undefined;
+    plugins?: {
+        options?: Record<string, Record<string, unknown>> | undefined;
+        enabled?: boolean | undefined;
+        trusted?: string[] | undefined;
+        blocked?: string[] | undefined;
+        enableHooks?: boolean | undefined;
+        hookTimeoutMs?: number | undefined;
     } | undefined;
     agentLoop?: {
         toolCallBudget?: {
@@ -1243,6 +1432,12 @@ interface ToolDef<TArgs = Record<string, unknown>> {
     name: string;
     description: string;
     parameters: z.ZodType<TArgs>;
+    /** Short searchable hint used by ToolSearch / deferred-tool discovery. */
+    searchHint?: string;
+    /** When true, the tool may be omitted from the initial prompt and loaded later via ToolSearch. */
+    shouldDefer?: boolean;
+    /** When true, the tool is always included in the initial prompt even if deferred-tool mode is active. */
+    alwaysLoad?: boolean;
     /** If true, can be executed in parallel with other read-only tools */
     readOnly?: boolean;
     /** Which modes this tool is available in. undefined = all modes */
@@ -1332,6 +1527,69 @@ interface UserQuestionAnswer {
     optionLabel?: string;
     customText?: string;
 }
+type LspOperation = "goToDefinition" | "findReferences" | "hover" | "documentSymbol" | "workspaceSymbol" | "goToImplementation" | "prepareCallHierarchy" | "incomingCalls" | "outgoingCalls";
+interface LspPosition {
+    line: number;
+    character: number;
+}
+interface LspRange {
+    start: LspPosition;
+    end: LspPosition;
+}
+interface LspLocation {
+    path: string;
+    range: LspRange;
+    targetSelectionRange?: LspRange;
+}
+interface LspSymbolRecord {
+    name: string;
+    kind: string;
+    detail?: string;
+    path?: string;
+    range?: LspRange;
+}
+interface LspCallRecord {
+    name: string;
+    kind?: string;
+    path: string;
+    range: LspRange;
+    selectionRange?: LspRange;
+    fromRanges?: LspRange[];
+}
+interface LspQueryRequest {
+    operation: LspOperation;
+    filePath?: string;
+    line?: number;
+    character?: number;
+    query?: string;
+}
+interface LspQueryResult {
+    operation: LspOperation;
+    summary: string;
+    locations?: LspLocation[];
+    symbols?: LspSymbolRecord[];
+    hover?: string;
+    calls?: LspCallRecord[];
+}
+interface ModeChangeResult {
+    success: boolean;
+    mode: Mode;
+    message?: string;
+}
+interface WorkingDirectoryChangeResult {
+    success: boolean;
+    cwd: string;
+    message?: string;
+}
+interface McpAuthRequest {
+    server: string;
+    message?: string;
+    startUrl?: string;
+}
+interface McpAuthResult {
+    success: boolean;
+    message: string;
+}
 interface IHost {
     readonly cwd: string;
     readFile(path: string): Promise<string>;
@@ -1362,6 +1620,14 @@ interface IHost {
     getCheckpointDiff?(fromHash: string, toHash?: string): Promise<ChangedFile[]>;
     /** Called by the loop after a checkpoint is committed so the host can push updated entries to the UI. */
     notifyCheckpointEntriesUpdated?(): void;
+    /** Host-side mode transition for the next turn/UI state. */
+    requestModeChange?(mode: Mode, reason?: string): Promise<ModeChangeResult>;
+    /** Host-side cwd/worktree transition for subsequent turns. */
+    setWorkingDirectory?(cwd: string, reason?: string): Promise<WorkingDirectoryChangeResult>;
+    /** Rich language-server operations when the current host can provide them (VS Code, IDE bridge, etc.). */
+    queryLanguageServer?(request: LspQueryRequest): Promise<LspQueryResult>;
+    /** Generic MCP auth handoff (open browser / show instructions / complete login). */
+    requestMcpAuthentication?(request: McpAuthRequest): Promise<McpAuthResult>;
     /**
      * File edit flow: open → [approval] → save or revert.
      * openFileEdit: open diff view (extension) or store pending edit (CLI). Do not write to disk yet.
@@ -1481,6 +1747,130 @@ interface ToolPart {
     mergedFromSubagent?: boolean;
 }
 type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart;
+type TaskStatus = "pending" | "in_progress" | "completed" | "failed" | "killed" | "cancelled" | "deleted";
+interface TaskRecord {
+    id: string;
+    subject: string;
+    description: string;
+    status: TaskStatus;
+    createdAt: number;
+    updatedAt: number;
+    activeForm?: string;
+    owner?: string;
+    teamName?: string;
+    metadata?: Record<string, unknown>;
+    blocks?: string[];
+    blockedBy?: string[];
+    outputFile?: string;
+    toolUseId?: string;
+}
+interface TeamMessageRecord {
+    id: string;
+    ts: number;
+    from: string;
+    to: string;
+    message: string;
+    teamName?: string;
+}
+interface TeamMemberRecord {
+    name: string;
+    agentId?: string;
+    agentType?: string;
+    joinedAt: number;
+}
+interface TeamRecord {
+    name: string;
+    description: string;
+    createdAt: number;
+    members: TeamMemberRecord[];
+    messages: TeamMessageRecord[];
+}
+interface AgentDefinition {
+    agentType: string;
+    whenToUse: string;
+    systemPrompt?: string;
+    tools?: string[];
+    disallowedTools?: string[];
+    sourcePath?: string;
+    builtin?: boolean;
+}
+type BackgroundTaskKind = "bash" | "subagent" | "workflow" | "external";
+type BackgroundTaskStatus = "pending" | "running" | "completed" | "failed" | "killed";
+interface BackgroundTaskRecord {
+    id: string;
+    kind: BackgroundTaskKind;
+    description: string;
+    createdAt: number;
+    updatedAt: number;
+    status: BackgroundTaskStatus;
+    command?: string;
+    cwd?: string;
+    processId?: number;
+    exitCode?: number;
+    logPath?: string;
+    outputFile?: string;
+    output?: string;
+    error?: string;
+    sessionId?: string;
+    metadata?: Record<string, unknown>;
+}
+interface RemoteSessionRecord {
+    id: string;
+    url: string;
+    sessionId?: string;
+    runId?: string;
+    status: "connecting" | "connected" | "reconnecting" | "disconnected" | "completed" | "error";
+    createdAt: number;
+    updatedAt: number;
+    lastEventSeq?: number;
+    reconnectAttempts?: number;
+    reconnectable?: boolean;
+    error?: string;
+    viewerOnly?: boolean;
+    metadata?: Record<string, unknown>;
+}
+interface WorktreeSession {
+    id: string;
+    originalCwd: string;
+    worktreePath: string;
+    branch: string;
+    createdAt: number;
+    status: "active" | "kept" | "removed" | "error";
+    metadata?: Record<string, unknown>;
+}
+interface DeferredToolDef {
+    name: string;
+    description: string;
+    searchHint?: string;
+}
+interface MemoryRecord {
+    id: string;
+    scope: "session" | "project" | "team";
+    title: string;
+    content: string;
+    createdAt: number;
+    updatedAt: number;
+    metadata?: Record<string, unknown>;
+}
+interface PluginManifestRecord {
+    name: string;
+    version?: string;
+    description: string;
+    commands: string[];
+    agents: string[];
+    skills: string[];
+    hooks: string[];
+    mcpServers: string[];
+    enabled: boolean;
+    rootDir: string;
+    sourcePath: string;
+    scope: "project" | "global";
+    settingsSchema?: Record<string, unknown>;
+    warnings?: string[];
+    trusted?: boolean;
+    runtimeEnabled?: boolean;
+    options?: Record<string, unknown>;
+}
 interface IIndexer {
     search(query: string, opts?: IndexSearchOptions): Promise<IndexSearchResult[]>;
     status(): IndexStatus;
@@ -1677,6 +2067,27 @@ type AgentEvent = {
 } | {
     type: "plan_followup_ask";
     planText: string;
+} | {
+    type: "task_updated";
+    task: TaskRecord;
+} | {
+    type: "team_updated";
+    team: TeamRecord;
+} | {
+    type: "team_message";
+    message: TeamMessageRecord;
+} | {
+    type: "background_task_updated";
+    task: BackgroundTaskRecord;
+} | {
+    type: "remote_session_updated";
+    remoteSession: RemoteSessionRecord;
+} | {
+    type: "plugin_hook";
+    pluginName: string;
+    hookEvent: string;
+    output: string;
+    success: boolean;
 };
 interface ProviderConfig {
     provider: ProviderName;
@@ -1807,6 +2218,12 @@ interface NexusConfig {
         classifyThreshold: number;
         parallelReads: boolean;
         maxParallelReads: number;
+        /** Deferred tool loading strategy. auto = use ToolSearch only when deferred tools are materially large. */
+        deferredLoadingMode?: "auto" | "always" | "never";
+        /** In auto mode, defer tool schemas once deferred tools exceed this fraction of model context. */
+        deferredLoadingThresholdPercent?: number;
+        /** In auto mode, always defer once at least this many tools are marked shouldDefer. */
+        deferredLoadingMinimumTools?: number;
     };
     skillClassifyEnabled: boolean;
     skillClassifyThreshold: number;
@@ -1820,6 +2237,28 @@ interface NexusConfig {
     parallelAgents: {
         maxParallel: number;
         maxTasksPerCall?: number;
+    };
+    compatibility?: {
+        claude?: {
+            enabled?: boolean;
+            includeGlobalDir?: boolean;
+            includeProjectDir?: boolean;
+            includeLocalInstructions?: boolean;
+            includeRules?: boolean;
+            includeSettings?: boolean;
+            includeCommands?: boolean;
+            includeSkills?: boolean;
+            includeAgents?: boolean;
+            includePlugins?: boolean;
+        };
+    };
+    plugins?: {
+        enabled?: boolean;
+        trusted?: string[];
+        blocked?: string[];
+        enableHooks?: boolean;
+        hookTimeoutMs?: number;
+        options?: Record<string, Record<string, unknown>>;
     };
     /** Optional overrides for agent loop limits (tool budget and max iterations per mode). */
     agentLoop?: {
@@ -1877,6 +2316,11 @@ interface McpServerConfig {
     enabled?: boolean;
     /** Resolve to a bundled MCP server (e.g. "context-mode") when nexusRoot is set by host */
     bundle?: string;
+    auth?: {
+        type?: "oauth" | "url" | "manual";
+        startUrl?: string;
+        message?: string;
+    };
 }
 interface SkillDef {
     name: string;
@@ -1897,6 +2341,20 @@ interface ChangedFile {
     after: string;
     status: "added" | "modified" | "deleted";
 }
+
+interface ClaudeCompatibilityOptions {
+    enabled: boolean;
+    includeGlobalDir: boolean;
+    includeProjectDir: boolean;
+    includeLocalInstructions: boolean;
+    includeRules: boolean;
+    includeSettings: boolean;
+    includeCommands: boolean;
+    includeSkills: boolean;
+    includeAgents: boolean;
+    includePlugins: boolean;
+}
+declare function getClaudeCompatibilityOptions(config?: Pick<NexusConfig, "compatibility"> | null): ClaudeCompatibilityOptions;
 
 /**
  * Secrets store abstraction for hosts that support it.
@@ -1989,12 +2447,16 @@ interface ProjectSettings {
  * Load global ~/.nexus/settings.json and ~/.nexus/settings.local.json.
  * Same structure as .claude: permissions.allow, permissions.deny, permissions.ask.
  */
-declare function loadGlobalSettings(): ProjectSettings;
+declare function loadGlobalSettings(options?: {
+    compatibility?: ClaudeCompatibilityOptions;
+}): ProjectSettings;
 /**
  * Load .nexus/settings.json and .nexus/settings.local.json (local overrides), merge with global settings.
  * Layer order: global base → global local → project base → project local (later overrides earlier).
  */
-declare function loadProjectSettings(cwd: string): ProjectSettings;
+declare function loadProjectSettings(cwd: string, options?: {
+    compatibility?: ClaudeCompatibilityOptions;
+}): ProjectSettings;
 /**
  * Write project settings to .nexus/settings.json.
  */
@@ -2218,7 +2680,11 @@ declare function getPlanContentForFollowup(session: ISession, cwd: string): Prom
 
 interface SessionCompaction {
     prune(session: ISession): void;
-    compact(session: ISession, client: LLMClient, signal?: AbortSignal): Promise<void>;
+    microcompact(session: ISession, keepRecentMessages?: number): number;
+    compact(session: ISession, client: LLMClient, signal?: AbortSignal, opts?: {
+        keepRecentMessages?: number;
+        force?: boolean;
+    }): Promise<void>;
     isOverflow(tokenCount: number, contextLimit: number, threshold: number): boolean;
 }
 declare function createCompaction(): SessionCompaction;
@@ -2341,10 +2807,12 @@ interface PromptContext {
     gitBranch?: string;
     todoList?: string;
     diagnostics?: DiagnosticItem[];
-    /** Active background bash jobs (bash_id, status, log path). */
+    /** Active background work summary (bash/subagents/tasks). */
     backgroundJobsSummary?: string;
     /** Short project layout (top-level dirs and key files) at start */
     initialProjectContext?: string;
+    /** Persistent memories relevant to this run (project/session/team). */
+    memories?: MemoryRecord[];
     /** Context window usage (shown at start of system info so model sees token budget) */
     contextUsedTokens?: number;
     contextLimitTokens?: number;
@@ -2381,6 +2849,11 @@ interface SubAgentResult {
     error?: string;
     /** Write/Edit tool parts from the sub-agent session (merged into parent for session diff). */
     fileEditParts?: ToolPart[];
+}
+interface ResumeAgentOptions {
+    followupInstruction?: string;
+    fork?: boolean;
+    runInBackground?: boolean;
 }
 type SubAgentStatus = "running" | "completed" | "error";
 interface SubAgentSnapshot {
@@ -2423,6 +2896,11 @@ declare class ParallelAgentManager {
     getSnapshot(subagentId: string): SubAgentSnapshot | null;
     waitFor(subagentId: string): Promise<SubAgentSnapshot | null>;
     stop(subagentId: string): boolean;
+    listRuns(cwd: string): Promise<BackgroundTaskRecord[]>;
+    resume(subagentId: string, options: ResumeAgentOptions, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, parentPartId?: string): Promise<SubAgentResult | {
+        subagentId: string;
+        background: true;
+    }>;
     private runSubAgent;
     /** How many agents are currently running */
     get activeCount(): number;
@@ -2444,9 +2922,45 @@ declare const spawnStopSchema: z.ZodObject<{
 }, {
     subagent_id: string;
 }>;
+declare const listAgentRunsSchema: z.ZodObject<{
+    limit: z.ZodOptional<z.ZodNumber>;
+}, "strip", z.ZodTypeAny, {
+    limit?: number | undefined;
+}, {
+    limit?: number | undefined;
+}>;
+declare const agentRunSnapshotSchema: z.ZodObject<{
+    subagent_id: z.ZodString;
+    format: z.ZodOptional<z.ZodEnum<["summary", "json"]>>;
+}, "strip", z.ZodTypeAny, {
+    subagent_id: string;
+    format?: "summary" | "json" | undefined;
+}, {
+    subagent_id: string;
+    format?: "summary" | "json" | undefined;
+}>;
+declare const resumeAgentSchema: z.ZodObject<{
+    subagent_id: z.ZodString;
+    instruction: z.ZodOptional<z.ZodString>;
+    fork: z.ZodOptional<z.ZodBoolean>;
+    run_in_background: z.ZodOptional<z.ZodBoolean>;
+}, "strip", z.ZodTypeAny, {
+    subagent_id: string;
+    run_in_background?: boolean | undefined;
+    instruction?: string | undefined;
+    fork?: boolean | undefined;
+}, {
+    subagent_id: string;
+    run_in_background?: boolean | undefined;
+    instruction?: string | undefined;
+    fork?: boolean | undefined;
+}>;
 declare function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
 declare function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnOutputSchema>>;
 declare function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnStopSchema>>;
+declare function createListAgentRunsTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof listAgentRunsSchema>>;
+declare function createAgentRunSnapshotTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof agentRunSnapshotSchema>>;
+declare function createResumeAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof resumeAgentSchema>>;
 /**
  * SpawnAgentsParallel — simple alternative to Parallel+SpawnAgent for concurrent sub-agent launch.
  * Flat schema: no recipient_name/parameters wrapping needed.
@@ -2457,6 +2971,155 @@ declare function createSpawnAgentsParallelTool(manager: ParallelAgentManager, co
  * Runtime behavior is identical to SpawnAgent (single sub-agent per call).
  */
 declare function createSpawnAgentsAliasTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
+
+declare function getRuntimeDir(cwd: string): string;
+declare class OrchestrationRuntime {
+    readonly cwd: string;
+    private readonly root;
+    private readonly stateFile;
+    private loaded;
+    private tasks;
+    private teams;
+    private worktrees;
+    private backgroundTasks;
+    private memories;
+    private remoteSessions;
+    constructor(cwd: string);
+    private ensureLoaded;
+    private persist;
+    createTask(input: {
+        subject: string;
+        description: string;
+        activeForm?: string;
+        owner?: string;
+        teamName?: string;
+        metadata?: Record<string, unknown>;
+        blocks?: string[];
+        blockedBy?: string[];
+        outputFile?: string;
+        toolUseId?: string;
+    }): Promise<TaskRecord>;
+    getTask(taskId: string): Promise<TaskRecord | null>;
+    listTasks(filters?: {
+        teamName?: string;
+        owner?: string;
+        status?: TaskStatus | TaskStatus[];
+        includeDeleted?: boolean;
+    }): Promise<TaskRecord[]>;
+    updateTask(taskId: string, updates: Partial<Pick<TaskRecord, "status" | "subject" | "description" | "activeForm" | "owner">> & {
+        metadata?: Record<string, unknown | null>;
+        addBlocks?: string[];
+        addBlockedBy?: string[];
+    }): Promise<TaskRecord | null>;
+    createTeam(input: {
+        teamName: string;
+        description: string;
+        members?: TeamMemberRecord[];
+    }): Promise<TeamRecord>;
+    getTeam(teamName: string): Promise<TeamRecord | null>;
+    listTeams(): Promise<TeamRecord[]>;
+    deleteTeam(teamName: string): Promise<boolean>;
+    addTeamMember(teamName: string, member: TeamMemberRecord): Promise<TeamRecord | null>;
+    sendMessage(input: {
+        from: string;
+        to: string;
+        message: string;
+        teamName?: string;
+    }): Promise<TeamMessageRecord>;
+    registerBackgroundTask(task: Omit<BackgroundTaskRecord, "createdAt" | "updatedAt">): Promise<BackgroundTaskRecord>;
+    updateBackgroundTask(taskId: string, updates: Partial<Omit<BackgroundTaskRecord, "id" | "kind" | "createdAt">>): Promise<BackgroundTaskRecord | null>;
+    setBackgroundTaskStatus(taskId: string, status: BackgroundTaskStatus, extra?: Partial<BackgroundTaskRecord>): Promise<BackgroundTaskRecord | null>;
+    getBackgroundTask(taskId: string): Promise<BackgroundTaskRecord | null>;
+    listBackgroundTasks(): Promise<BackgroundTaskRecord[]>;
+    createWorktreeSession(input: {
+        originalCwd: string;
+        worktreePath: string;
+        branch: string;
+        metadata?: Record<string, unknown>;
+    }): Promise<WorktreeSession>;
+    findActiveWorktree(worktreePath?: string): Promise<WorktreeSession | null>;
+    updateWorktreeSession(worktreeId: string, updates: Partial<Pick<WorktreeSession, "status" | "metadata">>): Promise<WorktreeSession | null>;
+    createMemory(input: {
+        scope: MemoryRecord["scope"];
+        title: string;
+        content: string;
+        metadata?: Record<string, unknown>;
+    }): Promise<MemoryRecord>;
+    getMemory(memoryId: string): Promise<MemoryRecord | null>;
+    listMemories(filters?: {
+        scope?: MemoryRecord["scope"] | MemoryRecord["scope"][];
+        limit?: number;
+        metadataMatch?: Record<string, string | number | boolean>;
+    }): Promise<MemoryRecord[]>;
+    updateMemory(memoryId: string, updates: Partial<Pick<MemoryRecord, "title" | "content">> & {
+        metadata?: Record<string, unknown | null>;
+    }): Promise<MemoryRecord | null>;
+    upsertMemoryByTitle(input: {
+        scope: MemoryRecord["scope"];
+        title: string;
+        content: string;
+        metadata?: Record<string, unknown>;
+    }): Promise<MemoryRecord>;
+    deleteMemory(memoryId: string): Promise<boolean>;
+    createRemoteSession(input: {
+        url: string;
+        sessionId?: string;
+        runId?: string;
+        status?: RemoteSessionRecord["status"];
+        viewerOnly?: boolean;
+        reconnectable?: boolean;
+        metadata?: Record<string, unknown>;
+    }): Promise<RemoteSessionRecord>;
+    getRemoteSession(remoteSessionId: string): Promise<RemoteSessionRecord | null>;
+    listRemoteSessions(filters?: {
+        sessionId?: string;
+        runId?: string;
+        status?: RemoteSessionRecord["status"] | RemoteSessionRecord["status"][];
+    }): Promise<RemoteSessionRecord[]>;
+    updateRemoteSession(remoteSessionId: string, updates: Partial<Omit<RemoteSessionRecord, "id" | "createdAt" | "url">> & {
+        metadata?: Record<string, unknown | null>;
+    }): Promise<RemoteSessionRecord | null>;
+}
+declare function getOrchestrationRuntime(cwd: string): Promise<OrchestrationRuntime>;
+
+declare function loadAgentDefinitions(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<AgentDefinition[]>;
+
+interface ExtractedMemoryInput {
+    scope: MemoryRecord["scope"];
+    title: string;
+    content: string;
+    metadata?: Record<string, unknown>;
+}
+declare function extractMemoriesFromCompactionSummary(summary: string, sessionId: string): ExtractedMemoryInput[];
+
+declare function resolvePluginDeclaredPath(plugin: PluginManifestRecord, declaredPath: string): string;
+declare function validatePluginManifestFile(filePath: string): Promise<{
+    success: boolean;
+    errors: string[];
+    warnings: string[];
+    plugin?: PluginManifestRecord;
+}>;
+declare function loadPluginManifests(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<PluginManifestRecord[]>;
+
+interface PluginHookExecution {
+    pluginName: string;
+    hookEvent: string;
+    success: boolean;
+    output: string;
+}
+declare function applyPluginRuntimeSettings(plugin: PluginManifestRecord, config: NexusConfig): PluginManifestRecord;
+declare function loadPluginRuntimeRecords(cwd: string, config: NexusConfig): Promise<PluginManifestRecord[]>;
+declare function runPluginHooks(cwd: string, host: IHost, config: NexusConfig, hookEvent: "user_prompt_submit" | "before_tool" | "after_tool", payload: Record<string, unknown>): Promise<PluginHookExecution[]>;
+
+interface LoadedSlashCommand {
+    command: string;
+    scope: "project" | "user";
+    sourcePath: string;
+    description: string;
+    prompt: string;
+}
+declare function loadSlashCommands(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<LoadedSlashCommand[]>;
+declare function renderSlashCommandPrompt(command: LoadedSlashCommand, args: string): string;
 
 /**
  * Tool registry — manages built-in, MCP, and custom tools.
@@ -2660,10 +3323,10 @@ declare function parseMentions(text: string, cwd: string, host?: IHost): Promise
 }>;
 
 /**
- * Load rules from CLAUDE.md, AGENTS.md, .nexus/rules/** etc.
+ * Load rules from NEXUS.md, CLAUDE.md, AGENTS.md, .nexus/rules/** etc.
  * Walks up from cwd to find all applicable rule files.
  */
-declare function loadRules(cwd: string, rulePatterns: string[]): Promise<string>;
+declare function loadRules(cwd: string, rulePatterns: string[], compatibility?: ClaudeCompatibilityOptions): Promise<string>;
 
 /**
  * Token estimation utilities.
@@ -2716,7 +3379,7 @@ declare function computeContextUsageMetrics(opts: {
  *
  * Optional `skillsUrls`: remote registries (each base URL must serve `index.json` + skill files); cached under `~/.nexus/cache/skills/`.
  */
-declare function loadSkills(skillPaths: string[], cwd: string, skillsUrls?: string[]): Promise<SkillDef[]>;
+declare function loadSkills(skillPaths: string[], cwd: string, skillsUrls?: string[], compatibility?: ClaudeCompatibilityOptions): Promise<SkillDef[]>;
 
 type SkillToolDescriptionRow = {
     name: string;
@@ -2744,12 +3407,27 @@ declare function sampleSkillSiblingFiles(skillDir: string, signal?: AbortSignal)
  */
 declare function fetchSkillUrlRegistryRoots(baseUrl: string): Promise<string[]>;
 
+interface McpResourceRef {
+    serverName: string;
+    uri: string;
+    name: string;
+    description?: string;
+    mimeType?: string;
+}
+interface McpResourceContent {
+    serverName: string;
+    uri: string;
+    mimeType?: string;
+    text?: string;
+    blob?: string;
+}
 /**
  * MCP client that connects to MCP servers and exposes their tools.
  */
 declare class McpClient {
     private clients;
     private tools;
+    private configs;
     connect(config: McpServerConfig): Promise<void>;
     connectAll(configs: McpServerConfig[]): Promise<void>;
     /** Test each server and return status (ok or error message). Does not keep connections. */
@@ -2761,8 +3439,15 @@ declare class McpClient {
     getTools(): ToolDef[];
     getStatus(): Record<string, "connected" | "disconnected">;
     disconnectAll(): Promise<void>;
+    listResources(serverName?: string): Promise<McpResourceRef[]>;
+    readResource(serverName: string, uri: string): Promise<McpResourceContent[]>;
+    authenticate(serverName: string, host?: IHost): Promise<{
+        success: boolean;
+        message: string;
+    }>;
 }
 declare function setMcpClientInstance(client: McpClient): void;
+declare function getMcpClientInstance(): McpClient | null;
 /** Standalone test of MCP server configs (does not keep connections). */
 declare function testMcpServers(configs: McpServerConfig[]): Promise<Array<{
     name: string;
@@ -2932,4 +3617,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentEvent, type AppliedReplacementSnippet, type ApprovalAction, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type ContextUsageSnapshot, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, type ListIndexAbsolutePathsFn, MODES, MODE_TOOL_GROUPS, McpClient, type McpServerConfig, type MessagePart, type Mode, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, ParallelAgentManager, type PermissionResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, type ProviderName, READ_ONLY_TOOLS, type ResolveBundledOptions, type ResolvedSkillBody, Session, type SessionMessage, type SkillDef, type SkillToolDescriptionRow, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, applySecretsToConfig, buildIndexWatcherGlobPattern, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createMcpTransport, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getPlanContentForFollowup, getRunLogsDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadConfig, loadGlobalSettings, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, normalizedAppliedReplacementsFromMetadata, parseMentions, persistSecretsFromConfig, readCheckpointEntries, resolveBundledMcpServers, resolveSkillBody, runAgentLoop, sampleSkillSiblingFiles, saveSession, setIndexTelemetrySink, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AgentDefinition, type AgentEvent, type AppliedReplacementSnippet, type ApprovalAction, type BackgroundTaskRecord, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type ContextUsageSnapshot, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, type DeferredToolDef, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MODES, MODE_TOOL_GROUPS, type McpAuthRequest, type McpAuthResult, McpClient, type McpResourceContent, type McpResourceRef, type McpServerConfig, type MemoryRecord, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationRuntime, ParallelAgentManager, type PermissionResult, type PluginManifestRecord, ProjectRegistry, type ProjectSettings, type ProviderConfig, type ProviderName, READ_ONLY_TOOLS, type RemoteSessionRecord, type ResolveBundledOptions, type ResolvedSkillBody, Session, type SessionMessage, type SkillDef, type SkillToolDescriptionRow, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, type WorkingDirectoryChangeResult, type WorktreeSession, applyPluginRuntimeSettings, applySecretsToConfig, buildIndexWatcherGlobPattern, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpTransport, createResumeAgentTool, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getMcpClientInstance, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getOrchestrationRuntime, getPlanContentForFollowup, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadAgentDefinitions, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, normalizedAppliedReplacementsFromMetadata, parseMentions, persistSecretsFromConfig, readCheckpointEntries, renderSlashCommandPrompt, resolveBundledMcpServers, resolvePluginDeclaredPath, resolveSkillBody, runAgentLoop, runPluginHooks, sampleSkillSiblingFiles, saveSession, setIndexTelemetrySink, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, validatePluginManifestFile, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

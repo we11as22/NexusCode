@@ -7,6 +7,7 @@ import type { NexusConfig, ProviderConfig } from '@nexuscode/core'
 import { catalogSelectionToModel } from '@nexuscode/core'
 import type { ModelsCatalog } from '@nexuscode/core'
 import { useFieldInput } from '../hooks/useFieldInput.js'
+import { asExtendedKey, type ExtendedKey } from '../utils/ink.js'
 
 const NEXUS_GATEWAY = 'https://api.kilo.ai/api/openrouter'
 const VISIBLE_ROWS = 12
@@ -126,26 +127,27 @@ export function NexusModelPanel({
     }
   }
 
-  const isEnter = (key: { return?: boolean }, input: string) =>
+  const isEnter = (key: Pick<ExtendedKey, 'return'>, input: string) =>
     key.return || input === '\r' || input === '\n'
 
   useInput((input, key) => {
-    if (key.escape) {
+    const extendedKey = asExtendedKey(key)
+    if (extendedKey.escape) {
       goBack()
       return
     }
 
     if (screen === 'providers') {
       const list = providerOptions
-      if (key.upArrow) {
+      if (extendedKey.upArrow) {
         setProviderIndex((i) => Math.max(0, i - 1))
         return
       }
-      if (key.downArrow) {
+      if (extendedKey.downArrow) {
         setProviderIndex((i) => Math.min(list.length - 1, i + 1))
         return
       }
-      if (isEnter(key, input ?? '')) {
+      if (isEnter(extendedKey, input ?? '')) {
         const item = list[providerIndexRef.current]
         if (!item) return
         if (item.id === '__custom__') {
@@ -161,15 +163,15 @@ export function NexusModelPanel({
 
     if (screen === 'models') {
       const list = modelOptions
-      if (key.upArrow) {
+      if (extendedKey.upArrow) {
         setModelIndex((i) => Math.max(0, i - 1))
         return
       }
-      if (key.downArrow) {
+      if (extendedKey.downArrow) {
         setModelIndex((i) => Math.min(list.length - 1, i + 1))
         return
       }
-      if (isEnter(key, input ?? '')) {
+      if (isEnter(extendedKey, input ?? '')) {
         const item = list[modelIndexRef.current]
         if (!item || !catalog || !selectedProviderId) return
         setSaving(true)
@@ -204,18 +206,18 @@ export function NexusModelPanel({
           temperatureField.handleInput,
           reasoningEffortField.handleInput,
         ]
-        if (handlers[ownFieldIndex - 1]!(input ?? '', key)) return
+        if (handlers[ownFieldIndex - 1]!(input ?? '', extendedKey)) return
       }
 
-      if (key.tab) {
+      if (extendedKey.tab) {
         setOwnFieldIndex((i) => (i + 1) % fieldCount)
         return
       }
-      if (key.backtab) {
+      if (extendedKey.backtab) {
         setOwnFieldIndex((i) => (i - 1 + fieldCount) % fieldCount)
         return
       }
-      if (key.upArrow) {
+      if (extendedKey.upArrow) {
         if (ownFieldIndex === 0) {
           const idx = PROVIDER_OPTIONS.findIndex((p) => p.id === ownProvider)
           setOwnProvider(PROVIDER_OPTIONS[(idx - 1 + PROVIDER_OPTIONS.length) % PROVIDER_OPTIONS.length]!.id)
@@ -224,7 +226,7 @@ export function NexusModelPanel({
         }
         return
       }
-      if (key.downArrow) {
+      if (extendedKey.downArrow) {
         if (ownFieldIndex === 0) {
           const idx = PROVIDER_OPTIONS.findIndex((p) => p.id === ownProvider)
           setOwnProvider(PROVIDER_OPTIONS[(idx + 1) % PROVIDER_OPTIONS.length]!.id)
@@ -233,7 +235,7 @@ export function NexusModelPanel({
         }
         return
       }
-      if (isEnter(key, input ?? '')) {
+      if (isEnter(extendedKey, input ?? '')) {
         if (ownFieldIndex < fieldCount - 1) {
           // Enter on a field moves to next field
           setOwnFieldIndex((i) => Math.min(fieldCount - 1, i + 1))

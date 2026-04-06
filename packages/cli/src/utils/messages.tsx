@@ -20,10 +20,11 @@ import {
   TextBlockParam,
   ToolResultBlockParam,
   ToolUseBlockParam,
-  Message as APIMessage,
   MessageParam,
   ContentBlock,
-} from '@anthropic-ai/sdk/resources/index.mjs'
+  AssistantAPIMessage as APIMessage,
+  ToolUseBlock,
+} from '../provider/message-schema.js'
 import { setCwd } from './state.js'
 import { getCwd } from './state.js'
 import chalk from 'chalk'
@@ -31,7 +32,6 @@ import * as React from 'react'
 import { UserBashInputMessage } from '../components/messages/UserBashInputMessage.js'
 import { Spinner } from '../components/Spinner.js'
 import { BashTool } from '../tools/BashTool/BashTool.js'
-import { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 
 export const INTERRUPT_MESSAGE = '[Request interrupted by user]'
 export const INTERRUPT_MESSAGE_FOR_TOOL_USE =
@@ -107,10 +107,7 @@ export type FullToolUseResult = {
 }
 
 type ContentBlockParam = Exclude<MessageParam['content'], string>[number]
-type UsageWithCache = APIMessage['usage'] & {
-  cache_creation_input_tokens?: number
-  cache_read_input_tokens?: number
-}
+type UsageWithCache = APIMessage['usage']
 
 export function createUserMessage(
   content: string | ContentBlockParam[],

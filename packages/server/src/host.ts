@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { execa } from "execa"
-import type { IHost, AgentEvent, ApprovalAction, PermissionResult } from "@nexuscode/core"
+import type { IHost, AgentEvent, ApprovalAction, PermissionResult, McpAuthRequest, McpAuthResult } from "@nexuscode/core"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
@@ -86,5 +86,14 @@ export class ServerHost implements IHost {
 
   emit(event: AgentEvent): void {
     this.onEvent(event)
+  }
+
+  async requestMcpAuthentication(request: McpAuthRequest): Promise<McpAuthResult> {
+    return {
+      success: Boolean(request.startUrl),
+      message: request.message?.trim() || (request.startUrl
+        ? `Authenticate MCP server "${request.server}" at ${request.startUrl}`
+        : `MCP server "${request.server}" requires manual authentication.`),
+    }
   }
 }

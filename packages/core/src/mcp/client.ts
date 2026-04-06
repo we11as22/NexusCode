@@ -1,5 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
-import type { McpServerConfig, ToolDef } from "../types.js"
+import type { IHost, McpServerConfig, ToolDef } from "../types.js"
 import { createMcpTransport } from "./transport-factory.js"
 import { normalizeToolSchema } from "../provider/tool-schema.js"
 import { z } from "zod"
@@ -11,12 +11,29 @@ export interface McpTool {
   serverName: string
 }
 
+export interface McpResourceRef {
+  serverName: string
+  uri: string
+  name: string
+  description?: string
+  mimeType?: string
+}
+
+export interface McpResourceContent {
+  serverName: string
+  uri: string
+  mimeType?: string
+  text?: string
+  blob?: string
+}
+
 /**
  * MCP client that connects to MCP servers and exposes their tools.
  */
 export class McpClient {
   private clients = new Map<string, Client>()
   private tools = new Map<string, McpTool>()
+  private configs = new Map<string, McpServerConfig>()
 
   async connect(config: McpServerConfig): Promise<void> {
     try {
@@ -39,6 +56,7 @@ export class McpClient {
       }
 
       this.clients.set(config.name, client)
+      this.configs.set(config.name, config)
     } catch (err) {
       console.warn(`[nexus] Failed to connect MCP server "${config.name}":`, err)
     }
@@ -88,6 +106,8 @@ export class McpClient {
         name: mcpTool.name,
         description: `[MCP: ${serverName}] ${mcpTool.description}`,
         parameters: schema,
+        searchHint: `${serverName} MCP tool`,
+        shouldDefer: true,
         readOnly: false,
 
         async execute(args: Record<string, unknown>, _ctx) {
@@ -141,6 +161,77 @@ export class McpClient {
     }
     this.clients.clear()
     this.tools.clear()
+    this.configs.clear()
+  }
+
+  async listResources(serverName?: string): Promise<McpResourceRef[]> {
+    const entries = serverName
+      ? Array.from(this.clients.entries()).filter(([name]) => name === serverName)
+      : Array.from(this.clients.entries())
+    const all: McpResourceRef[] = []
+    for (const [name, client] of entries) {
+      try {
+        const response = await client.listResources()
+        for (const resource of response.resources ?? []) {
+          all.push({
+            serverName: name,
+            uri: resource.uri,
+            name: resource.name,
+            ...(resource.description ? { description: resource.description } : {}),
+            ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
+          })
+        }
+      } catch {
+        // Ignore per-server failures and return what is available.
+      }
+    }
+    return all
+  }
+
+  async readResource(serverName: string, uri: string): Promise<McpResourceContent[]> {
+    const client = this.clients.get(serverName)
+    if (!client) {
+      throw new Error(`MCP server "${serverName}" not connected`)
+    }
+    const response = await client.readResource({ uri })
+    return (response.contents ?? []).map((item) => ({
+      serverName,
+      uri: item.uri,
+      ...(item.mimeType ? { mimeType: item.mimeType } : {}),
+      ...("text" in item ? { text: item.text } : {}),
+      ...("blob" in item ? { blob: item.blob } : {}),
+    }))
+  }
+
+  async authenticate(serverName: string, host?: IHost): Promise<{ success: boolean; message: string }> {
+    const config = this.configs.get(serverName)
+    if (!this.clients.has(serverName) && !config) {
+      return { success: false, message: `MCP server "${serverName}" not connected` }
+    }
+    const auth = config?.auth
+    if (!auth) {
+      return {
+        success: false,
+        message: `MCP server "${serverName}" does not declare an auth handoff in NexusCode config.`,
+      }
+    }
+    if (host?.requestMcpAuthentication) {
+      return host.requestMcpAuthentication({
+        server: serverName,
+        ...(auth.message ? { message: auth.message } : {}),
+        ...(auth.startUrl ? { startUrl: auth.startUrl } : {}),
+      })
+    }
+    if (auth.startUrl) {
+      return {
+        success: true,
+        message: `${auth.message?.trim() || `Open the following URL to authenticate ${serverName}:`}\n${auth.startUrl}`,
+      }
+    }
+    return {
+      success: false,
+      message: auth.message?.trim() || `MCP server "${serverName}" requires manual authentication.`,
+    }
   }
 }
 
@@ -152,6 +243,10 @@ const McpClientRegistry = new McpClientRegistryClass()
 
 export function setMcpClientInstance(client: McpClient): void {
   McpClientRegistry.instance = client
+}
+
+export function getMcpClientInstance(): McpClient | null {
+  return McpClientRegistry.instance
 }
 
 /** Standalone test of MCP server configs (does not keep connections). */

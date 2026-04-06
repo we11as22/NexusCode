@@ -66,7 +66,7 @@ export const FileEditTool = {
       <FileEditToolUpdatedMessage
         filePath={filePath}
         structuredPatch={structuredPatch}
-        verbose={verbose}
+        verbose={Boolean(verbose)}
       />
     )
   },
@@ -114,8 +114,9 @@ export const FileEditTool = {
   },
   async validateInput(
     { file_path, old_string, new_string },
-    { readFileTimestamps },
+    context,
   ) {
+    const readFileTimestamps = context?.readFileTimestamps ?? {}
     if (old_string === new_string) {
       return {
         result: false,

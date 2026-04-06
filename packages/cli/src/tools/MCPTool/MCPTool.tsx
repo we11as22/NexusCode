@@ -75,7 +75,7 @@ export const MCPTool = {
                 key={i}
                 content={item.text}
                 lines={lines}
-                verbose={verbose}
+                verbose={Boolean(verbose)}
               />
             )
           })}
@@ -95,7 +95,7 @@ export const MCPTool = {
     }
 
     const lines = output.split('\n').length
-    return <OutputLine content={output} lines={lines} verbose={verbose} />
+    return <OutputLine content={output} lines={lines} verbose={Boolean(verbose)} />
   },
   renderResultForAssistant(content) {
     return content

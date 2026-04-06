@@ -3,8 +3,11 @@
  * Waves include Read/Grep/Glob/List/CodebaseSearch, pure-explore Parallel, and optional
  * glue rows (TodoWrite) + their tool_results so a list→todo→grep chain stays one block.
  */
-import type { ToolResultBlockParam, ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { ProgressMessage } from '../query.js'
+import type {
+  ToolResultBlockParam,
+  ToolUseBlockParam,
+} from '../provider/message-schema.js'
 import type { NormalizedMessage } from './messages.js'
 import { getUnresolvedToolUseIDs, SYNTHETIC_ASSISTANT_MESSAGES } from './messages.js'
 import {

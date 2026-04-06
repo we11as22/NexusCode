@@ -5,7 +5,7 @@ import { applyMarkdown } from '../../utils/markdown.js'
 import {
   ThinkingBlock,
   ThinkingBlockParam,
-} from '@anthropic-ai/sdk/resources/index.mjs'
+} from '../../provider/message-schema.js'
 
 type Props = {
   param: ThinkingBlock | ThinkingBlockParam

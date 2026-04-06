@@ -1,9 +1,9 @@
-import { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { Message } from '../../../query.js'
 import { useMemo } from 'react'
 import { Tool } from '../../../Tool.js'
 import { getGenericToolForCoreName } from '../../../tools/GenericCoreTool.js'
 import { logEvent } from '../../../services/statsig.js'
+import type { ToolUseBlockParam } from '../../../provider/message-schema.js'
 
 function getToolUseFromMessages(
   toolUseID: string,
