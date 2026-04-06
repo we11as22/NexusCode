@@ -83,28 +83,22 @@ function resolveTool(
 
 export const parallelTool: ToolDef<z.infer<typeof schema>> = {
   name: "Parallel",
-  description: `Run multiple independent tools in a single call. Use to batch read-only discovery (e.g. several Read, Grep, CodebaseSearch, Glob, ListCodeDefinitions) and to run multiple SpawnAgent tasks concurrently.
+  description: `Run multiple independent tools in a single call. Use to batch read-only discovery (e.g. several Read, Grep, CodebaseSearch, Glob, ListCodeDefinitions).
 
 - tool_uses: ARRAY of { recipient_name, parameters } — not a string. Each object is one tool call.
 - recipient_name: tool name — canonical (Read, Grep), alias (read_file), or namespaced (functions.read_file).
 - parameters: object with the tool's arguments (same as calling the tool directly).
 - Maximum 25 tool calls per batch.
-- Allowed in Parallel: read-only tools, and SpawnAgent.
+- Allowed in Parallel: read-only tools only.
 - Write/Edit/Bash and other mutating tools must be called directly (not through Parallel).
 - All tools run in parallel; results are combined and returned in order.
-- For multiple SpawnAgent calls, prefer SpawnAgentsParallel (simpler, no wrapping needed).
 
 CORRECT format:
   Parallel({tool_uses: [
     {recipient_name: "Read", parameters: {file_path: "src/foo.ts"}},
     {recipient_name: "Grep", parameters: {pattern: "class Foo", path: "src/"}}
   ]})
-
-For concurrent sub-agents (simpler):
-  SpawnAgentsParallel({agents: [
-    {description: "Explore API routes"},
-    {description: "Explore data store"}
-  ]})`,
+`,
   parameters: schema,
   readOnly: true,
 
@@ -116,11 +110,7 @@ For concurrent sub-agents (simpler):
       `    {recipient_name: "Read", parameters: {file_path: "path/to/file.ts"}},\n` +
       `    {recipient_name: "Grep", parameters: {pattern: "myFunc", path: "src/"}}\n` +
       `  ]})\n\n` +
-      `For concurrent sub-agents use SpawnAgentsParallel instead:\n` +
-      `  SpawnAgentsParallel({agents: [\n` +
-      `    {description: "Task 1 description"},\n` +
-      `    {description: "Task 2 description"}\n` +
-      `  ]})`
+      `For task concurrency use the dedicated TaskCreateBatch tool instead.`
   },
 
   async execute({ tool_uses }, ctx: ToolContext) {

@@ -17,22 +17,29 @@ The CLI host boundary is now explicitly provider-agnostic. Transcript/render cod
 `packages/core` now contains a persistent orchestration substrate under `src/orchestration/` backed by `~/.nexus/runtime/<project-hash>/state.json`. It is intentionally separate from chat session JSONL: sessions store conversational history, while orchestration state stores cross-turn control-plane records.
 
 Current records:
-- `TaskRecord`: shared task list with lifecycle, owners, dependencies, metadata, and optional output file.
+- `TaskRecord`: the single public orchestration/runtime record for tracking tasks, delegated agent runs, and shell/background jobs.
 - `TeamRecord`: team/swarm namespace with members and persisted teammate messages.
-- `BackgroundTaskRecord`: long-running work items for background `Bash` and background `SpawnAgent`, including status, log/output paths, process/session ids, and final output.
+- `TeamMemberRecord`: teammate identity/status (`active` / `idle` / `offline`) updated by explicit team tools and task lifecycle.
+- `BackgroundTaskRecord`: internal compatibility/storage layer for long-running jobs; mirrored into `TaskRecord` so public tooling stays task-first.
 - `RemoteSessionRecord`: reconnectable server/client stream records keyed by run/session, with last delivered event sequence and reconnect state.
 - `WorktreeSession`: isolated git worktree lifecycle (`active` / `kept` / `removed`) so future hosts can switch context safely.
 - `MemoryRecord`: durable project/session/team memory that can be injected back into later prompts.
 - `AgentDefinition`: built-in and markdown-loaded agent profiles from project/global `.nexus/agents/**/*.md`.
 - `PluginManifestRecord`: local plugin manifests loaded from `.nexus/plugins/**/plugin.json` (including `.nexus-plugin` / `.codex-plugin` layouts), with project-overrides-global precedence.
 
-This is the basis for OpenClaude-class orchestration. The first integration surface is tool-driven rather than host-driven: `Task*`, `Team*`, `SendMessage`, `EnterWorktree` / `ExitWorktree`, `ListAgents`, `ListRemoteSessions` / `GetRemoteSession` / `UpdateRemoteSession`, and `TaskOutput` / `TaskStop` all talk to the same runtime. Background bash and background sub-agents now register into the same store so status and output can be inspected through one contract instead of separate ad hoc maps.
+This is the basis for OpenClaude-class orchestration. The first integration surface is tool-driven rather than host-driven: `Task*`, `Team*`, `SendMessage`, `EnterWorktree` / `ExitWorktree`, `ListAgents`, `ListRemoteSessions` / `GetRemoteSession` / `UpdateRemoteSession` / `SendRemoteMessage` / `InterruptRemoteSession` all talk to the same runtime. Public orchestration is now task-first: delegated agent work uses `TaskCreate(kind="agent")`, shell/background jobs use `TaskCreate(kind="shell")`, and durable coordination items use `TaskCreate(kind="tracking")`. Background bash and delegated runs still reuse internal compatibility layers, but they are mirrored into the same task store so status, output, snapshot, stop, and resume all flow through one public task contract.
 
-Sub-agent lifecycle is now richer than "fire and forget". Each completed or failed delegated run writes a runtime snapshot file under `~/.nexus/runtime/<project-hash>/agent-runs/`, and the runtime stores that path on the corresponding background task. `ListAgentRuns`, `AgentRunSnapshot`, and `ResumeAgent` use that substrate for inspect/resume/fork flows.
+Delegated agent task lifecycle is now richer than "fire and forget". Each completed or failed delegated run writes a runtime snapshot file under `~/.nexus/runtime/<project-hash>/agent-runs/`, and the runtime stores that path on the corresponding task. `TaskSnapshot` and `TaskResume` use that substrate for inspect/resume/fork flows. Named agent definitions can also carry `preferredMode`, tool allow/deny policy, and hook declarations; `TaskCreate(kind="agent", agent_type=...)` applies those policies inside the delegated run. Legacy `SpawnAgent*` tools remain only as hidden compatibility wrappers and are no longer part of the public agent surface.
+
+Delegated agent tasks now also accept a richer spawn contract closer to OpenClaude's operational model: `TaskCreate(kind="agent")` can carry `name`, `model`, `cwd`, and `isolation="worktree"`. The runtime forwards those into delegated execution, stores them on the unified task metadata, and emits both compatibility `subagent_*` events and canonical task telemetry (`task_progress`, `task_tool_start`, `task_tool_end`, `task_completed`) so hosts can render either task-centric or subagent-centric views from the same underlying run.
+
+Shell execution moved closer to the same task-first model. Background `Bash` and `PowerShell` runs both register as `Task(kind="shell")` and are monitored/stopped through `TaskOutput` / `TaskStop`. `BashOutput` and `KillBash` remain only as hidden compatibility tools for old transcripts. The shell layer now applies shared safety heuristics before execution: obvious file-read/search/edit commands are redirected to dedicated tools, destructive commands are flagged, and backgrounded sleep-style commands are refused.
 
 VS Code now consumes part of that control plane directly. `EnterPlanMode` can switch the controller into `plan` mode for the next turn, and `EnterWorktree` / `ExitWorktree` can update the controller cwd override so subsequent runs operate inside the active worktree instead of merely printing a handoff message.
 
 Prompt memory injection is no longer "latest N records only". The loop fetches a wider candidate set and ranks memories against the latest task/user turn before attaching them to the prompt. This keeps the prompt closer to relevant-memory prefetch instead of blindly replaying stale facts.
+
+Plan-mode prompt contracts are now more execution-oriented as well. The planning prompt explicitly asks for milestone-structured `.nexus/plans/*` output with findings, file-level changes, risks, validation, and rollback notes, so approved plans can be materialized into runtime tasks or initial todos with less reinterpretation on the next agent-mode turn.
 
 ### Deferred tool surface
 
@@ -57,10 +64,19 @@ This keeps NexusCode extensible without inheriting OpenClaude's Anthropic-specif
 
 `packages/core/src/plugins/runtime.ts` adds runtime-facing plugin state on top of manifests:
 - trust gating (`PluginTrust`)
+- enable/disable state in `.nexus/nexus.yaml` (`PluginEnable`)
 - persisted plugin options in `.nexus/nexus.yaml` (`PluginConfigure`)
-- trusted hook execution (`RunPluginHook`, plus automatic `user_prompt_submit` / `after_tool` hook invocation in the main loop)
+- trusted hook execution (`RunPluginHook`, plus automatic `user_prompt_submit`, `before_tool`, `after_tool`, `turn_complete`, `task_completed`, and `teammate_idle` hook invocation in the main loop/runtime)
+- scoped hook execution for agent definitions, currently used for `subagent_start` / `subagent_stop` lifecycle hooks
+- enforced per-hook timeout using `plugins.hookTimeoutMs`
 
 The plugin runtime stays provider-neutral: manifests and hooks extend Nexus behavior without assuming Anthropic SDK semantics.
+
+Team/swarm lifecycle is now tied directly to task execution. When a task has `teamName` and `owner`, the runtime can upsert that owner as a teammate, mark them active on assignment, and mark them idle/offline when the task reaches a terminal state. That keeps `Task*`, `Team*`, plugin hooks, and host UI on a single lifecycle instead of multiple overlapping models.
+
+Remote sessions remain NDJSON server streams, but they are now treated as explicit runtime objects rather than loose reconnect metadata. `ListRemoteSessions`, `GetRemoteSession`, `ReconnectRemoteSession`, `SendRemoteMessage`, and `InterruptRemoteSession` all operate on the same `RemoteSessionRecord`, and viewer-only sessions are enforced at the tool layer so read-only remote clients cannot accidentally mutate the remote run.
+
+Plan workflow remains file-first under `.nexus/plans/`, but now has an execution-audit bridge. `PlanMaterializeTasks` turns plan items into durable runtime tasks, and `PlanVerifyExecution` checks those tasks back against the written plan before final completion.
 
 `LSP` is now a first-class built-in tool. The tool contract lives in `packages/core`, but execution is host-provided through `IHost.queryLanguageServer()`. The VS Code host implements:
 - definitions

@@ -23,6 +23,7 @@ function isProcessRunning(pid: number): boolean {
 
 export const bashOutputTool: ToolDef<z.infer<typeof schema>> = {
   name: "BashOutput",
+  hiddenFromAgent: true,
   description: `Retrieve output from a running or completed background bash shell started with Bash(..., run_in_background: true).
 
 - Takes bash_id (returned by Bash when run_in_background is true).

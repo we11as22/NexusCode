@@ -19,7 +19,7 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
  * Tools that are explicitly BLOCKED per mode (even if passed as dynamic tools).
  * Enforced in the agent loop: blocked tools are never included in resolvedTools and never sent to the LLM.
  * Plan: only write to .nexus/plans/*.md|.txt; no execute.
- * Ask: read-only + no plan work — no write, no execute, no plan_exit (SpawnAgent allowed with ask permissions).
+ * Ask: read-only + no plan work — no write, no execute, no plan_exit (delegated agent tasks still run with ask permissions).
  */
 export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   agent: ["PlanExit", "ExitPlanMode"],
@@ -54,30 +54,38 @@ export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   mcp:     ["ListMcpResources", "ReadMcpResource", "McpAuthenticate"],
   skills:  ["Skill"],
   agents:  [
-    "SpawnAgent",
-    "SpawnAgentsParallel",
-    "ListAgentRuns",
-    "AgentRunSnapshot",
-    "ResumeAgent",
     "TaskCreate",
+    "TaskCreateBatch",
     "TaskGet",
     "TaskList",
     "TaskUpdate",
     "TaskOutput",
     "TaskStop",
+    "TaskResume",
+    "TaskSnapshot",
     "TeamCreate",
+    "TeamList",
+    "TeamGet",
+    "TeamAddMember",
+    "TeamSetMemberStatus",
     "TeamDelete",
     "SendMessage",
     "ListRemoteSessions",
     "GetRemoteSession",
     "UpdateRemoteSession",
+    "SendRemoteMessage",
+    "InterruptRemoteSession",
+    "ReconnectRemoteSession",
     "ListAgents",
     "ListPlugins",
     "GetPlugin",
     "RunPluginHook",
     "PluginTrust",
+    "PluginEnable",
     "PluginConfigure",
+    "PluginReload",
     "PlanMaterializeTasks",
+    "PlanVerifyExecution",
     "MemoryCreate",
     "MemoryList",
     "MemoryGet",
@@ -115,18 +123,19 @@ export const READ_ONLY_TOOLS = new Set([
   "TaskGet",
   "TaskList",
   "TaskOutput",
-  "ListAgentRuns",
-  "AgentRunSnapshot",
+  "TaskSnapshot",
+  "TeamList",
+  "TeamGet",
   "ListAgents",
   "ListRemoteSessions",
   "GetRemoteSession",
   "ListPlugins",
   "GetPlugin",
-  "RunPluginHook",
   "MemoryList",
   "MemoryGet",
   "ListMcpResources",
   "ReadMcpResource",
+  "PlanVerifyExecution",
 ])
 
 /**
@@ -191,9 +200,9 @@ export function getAutoApproveActions(mode: Mode, modeConfig?: ModeConfig): Set<
  * Mode descriptions for system prompt.
  */
 export const MODE_DESCRIPTIONS: Record<Mode, string> = {
-  agent: "AGENT mode: full access — read/write files, run commands, search, browser, MCP, skills, spawn sub-agents (with full agent permissions). Execute tasks end-to-end. After plan approval, run with the approved plan and a detailed todo (fuller task descriptions).",
-  plan:  "PLAN mode: (1) Study the task thoroughly — read codebase, search, browser, MCP, skills; write only the plan to .nexus/plans/*.md or .txt. (2) If the user's latest message is only a question (e.g. explain an error), answer that first; do not resume planning/PlanExit until they ask to continue the plan. (3) You may use SpawnAgent for focused research subtasks (sub-agents run in ask mode). For parallel sub-agents, call Parallel with multiple SpawnAgent entries. (4) Call PlanExit only after at least one plan file exists in .nexus/plans/; user may then approve (execution continues in agent mode), revise, or abandon.",
-  ask:   "ASK mode: read-only. Answer questions, explain code, analyze — prioritize the latest user message; meta questions (what failed, why, explain the error) get a direct answer from context, not continuation of an old plan/agent flow. Use read, search, browser, MCP, skills when evidence is needed. SpawnAgent for focused read-only subtasks. Do NOT modify files, run commands, or use PlanExit.",
+  agent: "AGENT mode: full access — read/write files, run commands, search, browser, MCP, skills, and create delegated agent/shell tasks. Execute tasks end-to-end. Use teams/plugins/remote tools when orchestration needs shared state. After plan approval, run with the approved plan and a detailed todo.",
+  plan:  "PLAN mode: (1) Study the task thoroughly — read codebase, search, browser, MCP, skills; write only the plan to .nexus/plans/*.md or .txt. (2) If the user's latest message is only a question (e.g. explain an error), answer that first; do not resume planning/PlanExit until they ask to continue the plan. (3) You may use TaskCreate(kind=agent) or TaskCreateBatch for focused research tasks; they run with ask permissions here. (4) Call PlanExit only after at least one plan file exists in .nexus/plans/; user may then approve (execution continues in agent mode), revise, or abandon. Use PlanMaterializeTasks and PlanVerifyExecution when a large plan needs a durable task graph and execution audit.",
+  ask:   "ASK mode: read-only. Answer questions, explain code, analyze — prioritize the latest user message; meta questions (what failed, why, explain the error) get a direct answer from context, not continuation of an old plan/agent flow. Use read, search, browser, MCP, skills when evidence is needed. TaskCreate(kind=agent) may be used for focused read-only delegated work. Do NOT modify files, run commands, or use PlanExit.",
   debug: "DEBUG mode: diagnose first, then fix. Use read/search/execute/write with strict discipline: list likely root causes, validate with evidence (logs/tests/repro), then apply minimal targeted fixes and re-verify.",
   review: "REVIEW mode: audit-only review of changes. Use read/search/execute (git diff/log/blame) to produce findings and recommendations. Do NOT modify files or call PlanExit.",
 }

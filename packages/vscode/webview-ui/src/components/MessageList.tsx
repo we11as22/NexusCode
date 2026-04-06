@@ -15,7 +15,7 @@ import { useChatStore } from "../stores/chat.js"
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file", "Edit", "Write"])
 const BASH_OUTPUT_TAIL_LINES = 80
 const TODO_TOOL_NAMES = new Set(["TodoWrite", "update_todo_list"])
-const SPAWN_AGENT_TOOL_NAMES = new Set(["SpawnAgent", "SpawnAgents"])
+const DELEGATED_TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskCreateBatch", "SpawnAgent", "SpawnAgents"])
 const HIDDEN_SUBAGENT_ORCHESTRATION_TOOLS = new Set(["SpawnAgentOutput", "SpawnAgentStop"])
 
 function isDeniedFileEdit(part: ToolPart): boolean {
@@ -1086,11 +1086,20 @@ function isPureSubagentParallelTool(part: ToolPart): boolean {
   })
 }
 
+function isDelegatedAgentToolPart(part: ToolPart): boolean {
+  if (part.tool === "TaskCreateBatch") return true
+  if (part.tool === "TaskCreate") {
+    const kind = typeof part.input?.kind === "string" ? part.input.kind : "tracking"
+    return kind === "agent"
+  }
+  return DELEGATED_TASK_TOOL_NAMES.has(part.tool)
+}
+
 function getSubagentDisplayItems(part: ToolPart): SubagentDisplayItem[] {
   const liveSubagents = part.subagents ?? []
-  const isParallelBatch = part.tool === "SpawnAgentsParallel"
+  const isParallelBatch = part.tool === "TaskCreateBatch" || part.tool === "SpawnAgentsParallel"
   const declaredTasks =
-    SPAWN_AGENT_TOOL_NAMES.has(part.tool)
+    isDelegatedAgentToolPart(part) && part.tool !== "TaskCreateBatch"
       ? (() => {
           const task = typeof part.input?.description === "string" ? part.input.description.trim() : ""
           return task ? [task] : []
@@ -1118,7 +1127,7 @@ function getSubagentDisplayItems(part: ToolPart): SubagentDisplayItem[] {
       })
       return
     }
-    const isSingleSpawnAgent = SPAWN_AGENT_TOOL_NAMES.has(part.tool) && declaredTasks.length === 1
+    const isSingleSpawnAgent = isDelegatedAgentToolPart(part) && part.tool !== "TaskCreateBatch" && declaredTasks.length === 1
     items.push({
       key: `${part.id}-pending-${index}`,
       task,
@@ -1325,7 +1334,7 @@ function AssistantPartRow({
     if (TODO_TOOL_NAMES.has(toolPart.tool)) return null
     if (HIDDEN_SUBAGENT_ORCHESTRATION_TOOLS.has(toolPart.tool)) return null
     if (isDeniedFileEdit(toolPart)) return null
-    if (SPAWN_AGENT_TOOL_NAMES.has(toolPart.tool) || isPureSubagentParallelTool(toolPart)) {
+    if (isDelegatedAgentToolPart(toolPart) || isPureSubagentParallelTool(toolPart)) {
       return <SubagentInlineList items={getSubagentDisplayItems(toolPart)} />
     }
     if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file" || toolPart.tool === "Edit" || toolPart.tool === "Write") {
@@ -1345,7 +1354,8 @@ function AssistantPartRow({
     if (
       toolPart.tool === "Parallel" ||
       toolPart.tool === "parallel" ||
-      toolPart.tool === "SpawnAgentsParallel"
+      toolPart.tool === "SpawnAgentsParallel" ||
+      toolPart.tool === "TaskCreateBatch"
     ) {
       const displayItems = getSubagentDisplayItems(toolPart)
       const approval =
@@ -1353,7 +1363,7 @@ function AssistantPartRow({
           <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
         ) : undefined
       // SpawnAgentsParallel: hide the tool wrapper entirely, only show cards
-      if (toolPart.tool === "SpawnAgentsParallel") {
+      if (toolPart.tool === "SpawnAgentsParallel" || toolPart.tool === "TaskCreateBatch") {
         return (
           <>
             {displayItems.length > 0

@@ -331,7 +331,7 @@ interface ChatState {
   /** Completed compaction rows (chronological, like collapsed Thought). */
   compactionLog: Array<{ id: string; durationSec: number }>
   subagents: SubAgentState[]
-  /** partId of the last tool_start(SpawnAgent); used to attach subagent_start to that part */
+  /** partId of the last tool_start for delegated agent tasks; used to attach subagent_start to that part */
   lastSpawnAgentPartId: string | null
   selectedProfile: string
   projectDir: string
@@ -1093,7 +1093,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "tool_start": {
         const ev = event as { input?: Record<string, unknown>; tool?: string }
-        if (ev.tool === "SpawnAgent" || ev.tool === "SpawnAgents" || ev.tool === "SpawnAgentsParallel") {
+        if (ev.tool && isDelegatedAgentTool(ev.tool, ev.input)) {
           set({ lastSpawnAgentPartId: event.partId })
         } else if (ev.tool === "Parallel" || ev.tool === "parallel") {
           // Track Parallel as spawn parent when all tool_uses are SpawnAgent calls
@@ -1153,7 +1153,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           diffHunks?: Array<{ type: string; lineNum: number; line: string }>
           appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>
         }
-        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") set({ lastSpawnAgentPartId: null })
+        if (isDelegatedAgentTool(event.tool, (event as { input?: Record<string, unknown> }).input)) set({ lastSpawnAgentPartId: null })
         set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
         const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg
@@ -2026,4 +2026,12 @@ function sanitizeAssistantText(value: string): string {
     })
     .join("\n")
     .trim()
+}
+function isDelegatedAgentTool(tool: string, input?: Record<string, unknown>): boolean {
+  if (tool === "TaskCreateBatch" || tool === "SpawnAgent" || tool === "SpawnAgents" || tool === "SpawnAgentsParallel") return true
+  if (tool === "TaskCreate") {
+    const kind = typeof input?.kind === "string" ? input.kind : "tracking"
+    return kind === "agent"
+  }
+  return false
 }

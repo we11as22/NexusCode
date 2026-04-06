@@ -25,6 +25,10 @@ import {
   createListAgentRunsTool,
   createAgentRunSnapshotTool,
   createResumeAgentTool,
+  createTaskCreateBatchTool,
+  createTaskResumeTool,
+  createTaskSnapshotTool,
+  setParallelAgentManager,
   listSessions,
   deleteSession as coreDeleteSession,
   readCheckpointEntries,
@@ -293,6 +297,7 @@ export async function bootstrapNexus(opts: {
   }
 
   const parallelManager = new ParallelAgentManager()
+  setParallelAgentManager(parallelManager)
   toolRegistry.register(createSpawnAgentTool(parallelManager, config))
   toolRegistry.register(createSpawnAgentsParallelTool(parallelManager, config))
   toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
@@ -300,6 +305,9 @@ export async function bootstrapNexus(opts: {
   toolRegistry.register(createListAgentRunsTool(parallelManager))
   toolRegistry.register(createAgentRunSnapshotTool(parallelManager))
   toolRegistry.register(createResumeAgentTool(parallelManager, config))
+  toolRegistry.register(createTaskCreateBatchTool(parallelManager, config))
+  toolRegistry.register(createTaskSnapshotTool(parallelManager))
+  toolRegistry.register(createTaskResumeTool(parallelManager, config))
 
   const claudeCompatibility = getClaudeCompatibilityOptions(config)
   const rulesContent = await loadRules(cwd, config.rules.files, claudeCompatibility).catch(() => '')

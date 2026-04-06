@@ -53,6 +53,10 @@ import {
   createListAgentRunsTool,
   createAgentRunSnapshotTool,
   createResumeAgentTool,
+  createTaskCreateBatchTool,
+  createTaskResumeTool,
+  createTaskSnapshotTool,
+  setParallelAgentManager,
   runAgentLoop,
   CheckpointTracker,
   CodebaseIndexer,
@@ -80,6 +84,15 @@ import { listAbsolutePathsRipgrep } from "./services/indexing/list-absolute-path
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
+
+function isDelegatedAgentToolEvent(tool: string, input?: Record<string, unknown>): boolean {
+  if (tool === "TaskCreateBatch" || tool === "SpawnAgent" || tool === "SpawnAgents" || tool === "SpawnAgentsParallel") return true
+  if (tool === "TaskCreate") {
+    const kind = typeof input?.kind === "string" ? input.kind : "tracking"
+    return kind === "agent"
+  }
+  return false
+}
 
 function findOpenReasoningReverseIndexShadow(parts: MessagePart[], reasoningId: string): number {
   return [...parts].reverse().findIndex(
@@ -591,10 +604,17 @@ export class Controller {
       case "subagent_tool_start":
       case "subagent_tool_end":
       case "subagent_done":
+      case "task_created":
+      case "task_progress":
       case "task_updated":
+      case "task_tool_start":
+      case "task_tool_end":
+      case "task_completed":
       case "team_updated":
       case "team_message":
       case "background_task_updated":
+      case "remote_session_updated":
+      case "plugin_hook":
       case "done":
       case "error":
         return true
@@ -730,7 +750,7 @@ export class Controller {
         } else {
           parts.push(nextPart)
         }
-        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") {
+        if (isDelegatedAgentToolEvent(event.tool, event.input)) {
           this.streamLastSpawnAgentPartId = event.partId
         }
         return
@@ -757,7 +777,7 @@ export class Controller {
             timeEnd: Date.now(),
           } as ToolPart
         }
-        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") {
+        if (isDelegatedAgentToolEvent(event.tool, (event as { input?: Record<string, unknown> }).input)) {
           this.streamLastSpawnAgentPartId = null
         }
         return
@@ -2644,11 +2664,11 @@ Return in this format:
       }
       // Track spawn agent partId for subagent event routing (local mode doesn't go through applyAgentEventToSessionShadow for non-subagent events)
       if (event.type === "tool_start") {
-        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") {
+        if (isDelegatedAgentToolEvent(event.tool, event.input)) {
           this.streamLastSpawnAgentPartId = event.partId
         }
       } else if (event.type === "tool_end") {
-        if (event.tool === "SpawnAgent" || event.tool === "SpawnAgents" || event.tool === "SpawnAgentsParallel") {
+        if (isDelegatedAgentToolEvent(event.tool, (event as { input?: Record<string, unknown> }).input)) {
           this.streamLastSpawnAgentPartId = null
         }
       } else if (
@@ -2758,6 +2778,7 @@ Return in this format:
         }
       }
       const parallelManager = new ParallelAgentManager()
+      setParallelAgentManager(parallelManager)
       toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
       toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
       toolRegistry.register(createSpawnAgentStopTool(parallelManager))
@@ -2765,6 +2786,9 @@ Return in this format:
       toolRegistry.register(createListAgentRunsTool(parallelManager))
       toolRegistry.register(createAgentRunSnapshotTool(parallelManager))
       toolRegistry.register(createResumeAgentTool(parallelManager, configForRun))
+      toolRegistry.register(createTaskCreateBatchTool(parallelManager, configForRun))
+      toolRegistry.register(createTaskSnapshotTool(parallelManager))
+      toolRegistry.register(createTaskResumeTool(parallelManager, configForRun))
       const { builtin: tools, dynamic } = toolRegistry.getForMode(runMode)
       const allTools = [...tools, ...dynamic]
       const compaction = createCompaction()

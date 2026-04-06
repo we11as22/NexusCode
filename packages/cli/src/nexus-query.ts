@@ -47,7 +47,16 @@ type ContentBlockParam = APIAssistantMessage['content'][number]
 type UsageWithCache = APIAssistantMessage['usage']
 
 const TODO_TOOL_NAMES = new Set(['TodoWrite', 'update_todo_list'])
-const SPAWN_AGENT_TOOL_NAMES = new Set(['SpawnAgent', 'SpawnAgents', 'SpawnAgentsParallel'])
+const DELEGATED_TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskCreateBatch', 'SpawnAgent', 'SpawnAgents', 'SpawnAgentsParallel'])
+
+function isAgentTaskInput(toolName: string, input: unknown): boolean {
+  if (toolName === 'TaskCreateBatch') return true
+  if (toolName === 'TaskCreate') {
+    const kind = typeof (input as { kind?: unknown })?.kind === 'string' ? String((input as { kind?: unknown }).kind) : 'tracking'
+    return kind === 'agent'
+  }
+  return DELEGATED_TASK_TOOL_NAMES.has(toolName)
+}
 
 function isSpawnAgentRecipientName(raw: string): boolean {
   const normalized = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -417,6 +426,22 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         }
         continue
       }
+      if (event.type === 'task_progress') {
+        yield {
+          type: 'nexus_banner',
+          text: `Task ${event.task.id}: ${event.task.status} — ${event.task.subject}`,
+          clearAfterMs: 2500,
+        }
+        continue
+      }
+      if (event.type === 'task_completed') {
+        yield {
+          type: 'nexus_banner',
+          text: `Task ${event.task.id}: ${event.task.status} — ${event.task.subject}`,
+          clearAfterMs: 3500,
+        }
+        continue
+      }
       if (event.type === 'team_updated') {
         yield {
           type: 'nexus_banner',
@@ -429,6 +454,22 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         yield {
           type: 'nexus_banner',
           text: `Message ${event.message.from} → ${event.message.to}`,
+          clearAfterMs: 3000,
+        }
+        continue
+      }
+      if (event.type === 'remote_session_updated') {
+        yield {
+          type: 'nexus_banner',
+          text: `Remote ${event.remoteSession.id}: ${event.remoteSession.status}`,
+          clearAfterMs: 3000,
+        }
+        continue
+      }
+      if (event.type === 'plugin_hook') {
+        yield {
+          type: 'nexus_banner',
+          text: `Plugin hook ${event.pluginName}: ${event.success ? 'ok' : 'failed'}`,
           clearAfterMs: 3000,
         }
         continue
@@ -450,7 +491,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         }
       } else if (event.type === 'tool_start') {
         if (TODO_TOOL_NAMES.has(event.tool)) continue
-        if (SPAWN_AGENT_TOOL_NAMES.has(event.tool)) {
+        if (isAgentTaskInput(event.tool, event.input)) {
           lastSpawnAgentPartId = event.partId
         } else if ((event.tool === 'Parallel' || event.tool === 'parallel') && isPureSubagentParallelInput(event.input)) {
           lastSpawnAgentPartId = event.partId

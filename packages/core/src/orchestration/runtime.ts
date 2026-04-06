@@ -7,6 +7,7 @@ import {
   type BackgroundTaskStatus,
   type MemoryRecord,
   type RemoteSessionRecord,
+  type TaskKind,
   type TaskRecord,
   type TaskStatus,
   type TeamMemberRecord,
@@ -37,6 +38,34 @@ function newId(prefix: string): string {
   return `${prefix}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`
 }
 
+function mapBackgroundKindToTaskKind(kind: BackgroundTaskRecord["kind"]): TaskKind {
+  switch (kind) {
+    case "subagent":
+      return "agent"
+    case "bash":
+      return "shell"
+    case "workflow":
+      return "workflow"
+    default:
+      return "external"
+  }
+}
+
+function mapBackgroundStatusToTaskStatus(status: BackgroundTaskStatus): TaskStatus {
+  switch (status) {
+    case "running":
+      return "in_progress"
+    case "failed":
+      return "failed"
+    case "killed":
+      return "killed"
+    case "completed":
+      return "completed"
+    default:
+      return "pending"
+  }
+}
+
 export class OrchestrationRuntime {
   private readonly root: string
   private readonly stateFile: string
@@ -59,12 +88,41 @@ export class OrchestrationRuntime {
     try {
       const raw = await fs.readFile(this.stateFile, "utf8")
       const parsed = JSON.parse(raw) as Partial<StoredRuntimeState>
-      for (const task of parsed.tasks ?? []) this.tasks.set(task.id, task)
+      for (const task of parsed.tasks ?? []) {
+        this.tasks.set(task.id, {
+          ...task,
+          kind: task.kind ?? "tracking",
+        })
+      }
       for (const team of parsed.teams ?? []) this.teams.set(team.name, team)
       for (const worktree of parsed.worktrees ?? []) this.worktrees.set(worktree.id, worktree)
       for (const backgroundTask of parsed.backgroundTasks ?? []) this.backgroundTasks.set(backgroundTask.id, backgroundTask)
       for (const memory of parsed.memories ?? []) this.memories.set(memory.id, memory)
       for (const remoteSession of parsed.remoteSessions ?? []) this.remoteSessions.set(remoteSession.id, remoteSession)
+      for (const backgroundTask of this.backgroundTasks.values()) {
+        if (this.tasks.has(backgroundTask.id)) continue
+        this.tasks.set(backgroundTask.id, {
+          id: backgroundTask.id,
+          kind: mapBackgroundKindToTaskKind(backgroundTask.kind),
+          subject: backgroundTask.description,
+          description: backgroundTask.description,
+          status: mapBackgroundStatusToTaskStatus(backgroundTask.status),
+          createdAt: backgroundTask.createdAt,
+          updatedAt: backgroundTask.updatedAt,
+          ...(backgroundTask.command ? { command: backgroundTask.command } : {}),
+          ...(typeof backgroundTask.processId === "number" ? { processId: backgroundTask.processId } : {}),
+          ...(typeof backgroundTask.exitCode === "number" ? { exitCode: backgroundTask.exitCode } : {}),
+          ...(backgroundTask.sessionId ? { sessionId: backgroundTask.sessionId } : {}),
+          ...(typeof backgroundTask.output === "string" ? { output: backgroundTask.output } : {}),
+          ...(backgroundTask.outputFile ? { outputFile: backgroundTask.outputFile } : {}),
+          ...(typeof backgroundTask.metadata?.snapshotFile === "string" ? { snapshotFile: backgroundTask.metadata.snapshotFile } : {}),
+          ...(backgroundTask.error ? { error: backgroundTask.error } : {}),
+          ...(typeof backgroundTask.metadata?.resumeOf === "string" ? { resumeOf: backgroundTask.metadata.resumeOf } : {}),
+          ...(typeof backgroundTask.metadata?.forkOf === "string" ? { forkOf: backgroundTask.metadata.forkOf } : {}),
+          ...(typeof backgroundTask.metadata?.agentType === "string" ? { agentType: backgroundTask.metadata.agentType } : {}),
+          ...(backgroundTask.metadata ? { metadata: backgroundTask.metadata } : {}),
+        })
+      }
     } catch {
       // Fresh runtime state.
     }
@@ -85,24 +143,40 @@ export class OrchestrationRuntime {
   }
 
   async createTask(input: {
+    id?: string
+    kind?: TaskKind
     subject: string
     description: string
+    status?: TaskStatus
     activeForm?: string
     owner?: string
     teamName?: string
     metadata?: Record<string, unknown>
     blocks?: string[]
     blockedBy?: string[]
+    command?: string
+    shellRunner?: "bash" | "powershell"
+    processId?: number
+    exitCode?: number
+    sessionId?: string
+    output?: string
     outputFile?: string
+    snapshotFile?: string
+    error?: string
+    parentTaskId?: string
+    resumeOf?: string
+    forkOf?: string
+    agentType?: string
     toolUseId?: string
   }): Promise<TaskRecord> {
     await this.ensureLoaded()
     const now = Date.now()
     const task: TaskRecord = {
-      id: newId("task"),
+      id: input.id ?? newId("task"),
+      kind: input.kind ?? "tracking",
       subject: input.subject,
       description: input.description,
-      status: "pending",
+      status: input.status ?? "pending",
       createdAt: now,
       updatedAt: now,
       ...(input.activeForm ? { activeForm: input.activeForm } : {}),
@@ -111,7 +185,19 @@ export class OrchestrationRuntime {
       ...(input.metadata ? { metadata: input.metadata } : {}),
       ...(input.blocks?.length ? { blocks: [...input.blocks] } : {}),
       ...(input.blockedBy?.length ? { blockedBy: [...input.blockedBy] } : {}),
+      ...(input.command ? { command: input.command } : {}),
+      ...(input.shellRunner ? { shellRunner: input.shellRunner } : {}),
+      ...(typeof input.processId === "number" ? { processId: input.processId } : {}),
+      ...(typeof input.exitCode === "number" ? { exitCode: input.exitCode } : {}),
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(typeof input.output === "string" ? { output: input.output } : {}),
       ...(input.outputFile ? { outputFile: input.outputFile } : {}),
+      ...(input.snapshotFile ? { snapshotFile: input.snapshotFile } : {}),
+      ...(input.error ? { error: input.error } : {}),
+      ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
+      ...(input.resumeOf ? { resumeOf: input.resumeOf } : {}),
+      ...(input.forkOf ? { forkOf: input.forkOf } : {}),
+      ...(input.agentType ? { agentType: input.agentType } : {}),
       ...(input.toolUseId ? { toolUseId: input.toolUseId } : {}),
     }
     this.tasks.set(task.id, task)
@@ -125,6 +211,7 @@ export class OrchestrationRuntime {
   }
 
   async listTasks(filters?: {
+    kind?: TaskKind | TaskKind[]
     teamName?: string
     owner?: string
     status?: TaskStatus | TaskStatus[]
@@ -136,8 +223,14 @@ export class OrchestrationRuntime {
       : filters?.status
         ? new Set([filters.status])
         : null
+    const kinds = Array.isArray(filters?.kind)
+      ? new Set(filters.kind)
+      : filters?.kind
+        ? new Set([filters.kind])
+        : null
     return Array.from(this.tasks.values())
       .filter((task) => (filters?.includeDeleted ? true : task.status !== "deleted"))
+      .filter((task) => (kinds ? kinds.has(task.kind) : true))
       .filter((task) => (filters?.teamName ? task.teamName === filters.teamName : true))
       .filter((task) => (filters?.owner ? task.owner === filters.owner : true))
       .filter((task) => (statuses ? statuses.has(task.status) : true))
@@ -146,7 +239,7 @@ export class OrchestrationRuntime {
 
   async updateTask(
     taskId: string,
-    updates: Partial<Pick<TaskRecord, "status" | "subject" | "description" | "activeForm" | "owner">> & {
+    updates: Partial<Pick<TaskRecord, "status" | "subject" | "description" | "activeForm" | "owner" | "teamName" | "command" | "shellRunner" | "processId" | "exitCode" | "sessionId" | "output" | "outputFile" | "snapshotFile" | "error" | "parentTaskId" | "resumeOf" | "forkOf" | "agentType">> & {
       metadata?: Record<string, unknown | null>
       addBlocks?: string[]
       addBlockedBy?: string[]
@@ -167,6 +260,20 @@ export class OrchestrationRuntime {
       ...(typeof updates.description === "string" ? { description: updates.description } : {}),
       ...(typeof updates.activeForm === "string" ? { activeForm: updates.activeForm } : {}),
       ...(typeof updates.owner === "string" ? { owner: updates.owner } : {}),
+      ...(typeof updates.teamName === "string" ? { teamName: updates.teamName } : {}),
+      ...(typeof updates.command === "string" ? { command: updates.command } : {}),
+      ...(updates.shellRunner ? { shellRunner: updates.shellRunner } : {}),
+      ...(typeof updates.processId === "number" ? { processId: updates.processId } : {}),
+      ...(typeof updates.exitCode === "number" ? { exitCode: updates.exitCode } : {}),
+      ...(typeof updates.sessionId === "string" ? { sessionId: updates.sessionId } : {}),
+      ...(typeof updates.output === "string" ? { output: updates.output } : {}),
+      ...(typeof updates.outputFile === "string" ? { outputFile: updates.outputFile } : {}),
+      ...(typeof updates.snapshotFile === "string" ? { snapshotFile: updates.snapshotFile } : {}),
+      ...(typeof updates.error === "string" ? { error: updates.error } : {}),
+      ...(typeof updates.parentTaskId === "string" ? { parentTaskId: updates.parentTaskId } : {}),
+      ...(typeof updates.resumeOf === "string" ? { resumeOf: updates.resumeOf } : {}),
+      ...(typeof updates.forkOf === "string" ? { forkOf: updates.forkOf } : {}),
+      ...(typeof updates.agentType === "string" ? { agentType: updates.agentType } : {}),
       ...(updates.metadata ? { metadata: nextMetadata } : {}),
       ...(updates.addBlocks?.length
         ? { blocks: Array.from(new Set([...(existing.blocks ?? []), ...updates.addBlocks])) }
@@ -222,9 +329,49 @@ export class OrchestrationRuntime {
     await this.ensureLoaded()
     const team = this.teams.get(teamName)
     if (!team) return null
+    const existing = team.members.find((item) => item.name === member.name)
     const next: TeamRecord = {
       ...team,
-      members: [...team.members.filter((item) => item.name !== member.name), member],
+      members: [
+        ...team.members.filter((item) => item.name !== member.name),
+        {
+          ...(existing ?? {}),
+          ...member,
+          joinedAt: existing?.joinedAt ?? member.joinedAt,
+        },
+      ],
+    }
+    this.teams.set(teamName, next)
+    await this.persist()
+    return next
+  }
+
+  async updateTeamMember(
+    teamName: string,
+    memberName: string,
+    updates: Partial<Omit<TeamMemberRecord, "name" | "joinedAt" | "note">> & { note?: string | null },
+  ): Promise<TeamRecord | null> {
+    await this.ensureLoaded()
+    const team = this.teams.get(teamName)
+    if (!team) return null
+    const existing = team.members.find((item) => item.name === memberName)
+    if (!existing) return null
+    const nextMember: TeamMemberRecord = {
+      ...existing,
+      ...(typeof updates.agentId === "string" ? { agentId: updates.agentId } : {}),
+      ...(typeof updates.agentType === "string" ? { agentType: updates.agentType } : {}),
+      ...(typeof updates.status === "string" ? { status: updates.status } : {}),
+      ...(typeof updates.lastActiveAt === "number" ? { lastActiveAt: updates.lastActiveAt } : {}),
+      ...(typeof updates.lastIdleAt === "number" ? { lastIdleAt: updates.lastIdleAt } : {}),
+      ...(updates.note === null ? {} : typeof updates.note === "string" ? { note: updates.note } : {}),
+    }
+    if (updates.note === null) delete nextMember.note
+    const next: TeamRecord = {
+      ...team,
+      members: [
+        ...team.members.filter((item) => item.name !== memberName),
+        nextMember,
+      ],
     }
     this.teams.set(teamName, next)
     await this.persist()
@@ -268,6 +415,40 @@ export class OrchestrationRuntime {
       updatedAt: now,
     }
     this.backgroundTasks.set(record.id, record)
+    const existingTask = this.tasks.get(record.id)
+    const mirrored: TaskRecord = {
+      id: record.id,
+      kind: mapBackgroundKindToTaskKind(record.kind),
+      subject: existingTask?.subject ?? record.description,
+      description: record.description,
+      status: mapBackgroundStatusToTaskStatus(record.status),
+      createdAt: existingTask?.createdAt ?? now,
+      updatedAt: now,
+      ...(existingTask?.activeForm ? { activeForm: existingTask.activeForm } : {}),
+      ...(existingTask?.owner ? { owner: existingTask.owner } : {}),
+      ...(existingTask?.teamName ? { teamName: existingTask.teamName } : {}),
+      metadata: {
+        ...(existingTask?.metadata ?? {}),
+        ...(record.metadata ?? {}),
+      },
+      ...(existingTask?.blocks?.length ? { blocks: existingTask.blocks } : {}),
+      ...(existingTask?.blockedBy?.length ? { blockedBy: existingTask.blockedBy } : {}),
+      ...(record.command ? { command: record.command } : {}),
+      ...(record.metadata?.shellRunner === "powershell" ? { shellRunner: "powershell" as const } : record.kind === "bash" ? { shellRunner: "bash" as const } : {}),
+      ...(typeof record.processId === "number" ? { processId: record.processId } : {}),
+      ...(typeof record.exitCode === "number" ? { exitCode: record.exitCode } : {}),
+      ...(record.sessionId ? { sessionId: record.sessionId } : {}),
+      ...(typeof record.output === "string" ? { output: record.output } : {}),
+      ...(record.outputFile ? { outputFile: record.outputFile } : {}),
+      ...(typeof record.metadata?.snapshotFile === "string" ? { snapshotFile: record.metadata.snapshotFile } : {}),
+      ...(record.error ? { error: record.error } : {}),
+      ...(typeof record.metadata?.parentTaskId === "string" ? { parentTaskId: record.metadata.parentTaskId } : {}),
+      ...(typeof record.metadata?.resumeOf === "string" ? { resumeOf: record.metadata.resumeOf } : {}),
+      ...(typeof record.metadata?.forkOf === "string" ? { forkOf: record.metadata.forkOf } : {}),
+      ...(typeof record.metadata?.agentType === "string" ? { agentType: record.metadata.agentType } : {}),
+      ...(existingTask?.toolUseId ? { toolUseId: existingTask.toolUseId } : {}),
+    }
+    this.tasks.set(record.id, mirrored)
     await this.persist()
     return record
   }
@@ -285,6 +466,31 @@ export class OrchestrationRuntime {
       updatedAt: Date.now(),
     }
     this.backgroundTasks.set(taskId, next)
+    const mirrored = this.tasks.get(taskId)
+    if (mirrored) {
+      this.tasks.set(taskId, {
+        ...mirrored,
+        kind: mapBackgroundKindToTaskKind(next.kind),
+        description: next.description,
+        status: mapBackgroundStatusToTaskStatus(next.status),
+        updatedAt: next.updatedAt,
+        ...(next.command ? { command: next.command } : {}),
+        ...(typeof next.processId === "number" ? { processId: next.processId } : {}),
+        ...(typeof next.exitCode === "number" ? { exitCode: next.exitCode } : {}),
+        ...(next.sessionId ? { sessionId: next.sessionId } : {}),
+        ...(typeof next.output === "string" ? { output: next.output } : {}),
+        ...(next.outputFile ? { outputFile: next.outputFile } : {}),
+        ...(typeof next.metadata?.snapshotFile === "string" ? { snapshotFile: next.metadata.snapshotFile } : {}),
+        ...(next.error ? { error: next.error } : {}),
+        ...(typeof next.metadata?.resumeOf === "string" ? { resumeOf: next.metadata.resumeOf } : {}),
+        ...(typeof next.metadata?.forkOf === "string" ? { forkOf: next.metadata.forkOf } : {}),
+        ...(typeof next.metadata?.agentType === "string" ? { agentType: next.metadata.agentType } : {}),
+        metadata: {
+          ...(mirrored.metadata ?? {}),
+          ...(next.metadata ?? {}),
+        },
+      })
+    }
     await this.persist()
     return next
   }

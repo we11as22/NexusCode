@@ -55,6 +55,28 @@ const TOOL_ICONS: Record<string, string> = {
   glob: "📋",
   Glob: "📋",
   browser_action: "🖥️",
+  TaskCreate: "🤖",
+  TaskCreateBatch: "🤖",
+  TaskResume: "🔁",
+  TaskSnapshot: "🧵",
+  TeamCreate: "👥",
+  TeamList: "👥",
+  TeamGet: "👥",
+  TeamAddMember: "👤",
+  TeamSetMemberStatus: "🟢",
+  SendMessage: "✉️",
+  PlanVerifyExecution: "✅",
+  ListPlugins: "🧩",
+  GetPlugin: "🧩",
+  PluginEnable: "🧩",
+  PluginTrust: "🧩",
+  PluginConfigure: "🧩",
+  PluginReload: "🧩",
+  ListRemoteSessions: "📡",
+  GetRemoteSession: "📡",
+  ReconnectRemoteSession: "📡",
+  SendRemoteMessage: "📨",
+  InterruptRemoteSession: "🛑",
   SpawnAgent: "🤖",
   spawn_agents: "🤖",
   SpawnAgents: "🤖",
@@ -85,6 +107,28 @@ function toolDisplayName(tool: string): string {
     read_lints: "ReadLints", ReadLints: "ReadLints",
     glob: "Glob", Glob: "Glob",
     update_todo_list: "TodoWrite", TodoWrite: "TodoWrite",
+    TaskCreate: "TaskCreate",
+    TaskCreateBatch: "TaskCreateBatch",
+    TaskResume: "TaskResume",
+    TaskSnapshot: "TaskSnapshot",
+    TeamCreate: "TeamCreate",
+    TeamList: "TeamList",
+    TeamGet: "TeamGet",
+    TeamAddMember: "TeamAddMember",
+    TeamSetMemberStatus: "TeamSetMemberStatus",
+    SendMessage: "SendMessage",
+    PlanVerifyExecution: "PlanVerifyExecution",
+    ListPlugins: "ListPlugins",
+    GetPlugin: "GetPlugin",
+    PluginEnable: "PluginEnable",
+    PluginTrust: "PluginTrust",
+    PluginConfigure: "PluginConfigure",
+    PluginReload: "PluginReload",
+    ListRemoteSessions: "ListRemoteSessions",
+    GetRemoteSession: "GetRemoteSession",
+    ReconnectRemoteSession: "ReconnectRemoteSession",
+    SendRemoteMessage: "SendRemoteMessage",
+    InterruptRemoteSession: "InterruptRemoteSession",
     SpawnAgentOutput: "SpawnAgentOutput",
     SpawnAgentStop: "SpawnAgentStop",
     Parallel: "Parallel", parallel: "Parallel",
@@ -586,12 +630,15 @@ function formatToolInputPreview(part: ToolPart): string {
       }
       return `${uses.length} parallel ${uses.length === 1 ? "tool" : "tools"}`
     }
+    case "TaskCreate":
     case "spawn_agents":
     case "SpawnAgent":
     case "SpawnAgents": {
       const desc = inp["description"]
       return desc && typeof desc === "string" ? short(desc.replace(/\s+/g, " "), 48) : "subtask"
     }
+    case "TaskCreateBatch":
+      return Array.isArray(inp["tasks"]) ? `${(inp["tasks"] as unknown[]).length} tasks` : "task batch"
     case "ask_followup_question":
     case "AskFollowupQuestion": {
       const qs = inp["questions"]

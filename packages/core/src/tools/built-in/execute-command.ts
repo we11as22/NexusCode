@@ -7,6 +7,13 @@ import stripAnsi from "strip-ansi"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { getRunLogsDir, getToolOutputDir } from "../../data-dir.js"
 import { getOrchestrationRuntime } from "../../orchestration/runtime.js"
+import { handleCompletedTaskSideEffects } from "../../orchestration/task-lifecycle.js"
+import {
+  detectBlockedSleepPattern,
+  detectDangerousShellPattern,
+  detectPreferDedicatedToolMessage,
+  isLikelyLongRunningShellCommand,
+} from "./shell-safety.js"
 
 const MAX_OUTPUT_BYTES = 50 * 1024 // 50 KB
 /** Max size of saved full output file (OpenCode-style disk protection). */
@@ -84,6 +91,125 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
+export async function startBackgroundShellTask(args: {
+  command: string
+  cwd: string
+  shellRunner?: "bash" | "powershell"
+  host: ToolContext["host"]
+  config?: ToolContext["config"]
+  metadata?: Record<string, unknown>
+}): Promise<{ taskId: string; pid: number; logPath: string }> {
+  const runDir = getRunLogsDir()
+  try { fs.mkdirSync(runDir, { recursive: true }) } catch { /* ignore */ }
+  await cleanupOldRunLogs(runDir)
+  const taskId = `run_${Date.now()}`
+  const logPath = path.join(runDir, `${taskId}.log`)
+  const logStream = fs.createWriteStream(logPath, { flags: "a" })
+  const child = spawn(args.command, [], {
+    shell: true,
+    cwd: args.cwd,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+  child.stdout?.pipe(logStream)
+  child.stderr?.pipe(logStream)
+  child.unref()
+  const pid = child.pid ?? 0
+  backgroundBashJobs.set(taskId, { pid, logPath })
+  const runtime = await getOrchestrationRuntime(args.cwd)
+  const task = await runtime.registerBackgroundTask({
+    id: taskId,
+    kind: "bash",
+    description: args.command,
+    status: "running",
+    command: args.command,
+    cwd: args.cwd,
+    processId: pid,
+    logPath,
+    outputFile: logPath,
+    metadata: {
+      tool: args.shellRunner === "powershell" ? "PowerShell" : "Bash",
+      shellRunner: args.shellRunner ?? "bash",
+      ...(args.metadata ?? {}),
+    },
+  })
+  args.host.emit({ type: "background_task_updated", task })
+  const unified = await runtime.getTask(taskId)
+  if (unified) args.host.emit({ type: "task_created", task: unified })
+
+  child.on("error", (error) => {
+    void (async () => {
+      const output = await readBackgroundOutput(logPath)
+      const next = await runtime.setBackgroundTaskStatus(taskId, "failed", {
+        output,
+        metadata: {
+          tool: args.shellRunner === "powershell" ? "PowerShell" : "Bash",
+          shellRunner: args.shellRunner ?? "bash",
+          error: error.message,
+          ...(args.metadata ?? {}),
+        },
+      })
+      if (next) {
+        args.host.emit({ type: "background_task_updated", task: next })
+        const unified = await runtime.getTask(taskId)
+        if (unified) {
+          args.host.emit({ type: "task_updated", task: unified })
+          if (args.config) {
+            await handleCompletedTaskSideEffects({
+              cwd: args.cwd,
+              host: args.host,
+              config: args.config,
+              task: unified,
+              outputPreview: unified.output?.slice(0, 500),
+            })
+          }
+        }
+      }
+    })()
+  })
+
+  child.on("exit", (code, signalName) => {
+    void (async () => {
+      const output = await readBackgroundOutput(logPath)
+      const status =
+        signalName === "SIGTERM" || signalName === "SIGKILL"
+          ? "killed"
+          : code === 0
+            ? "completed"
+            : "failed"
+      const next = await runtime.setBackgroundTaskStatus(taskId, status, {
+        output,
+        exitCode: typeof code === "number" ? code : undefined,
+        metadata: {
+          tool: args.shellRunner === "powershell" ? "PowerShell" : "Bash",
+          shellRunner: args.shellRunner ?? "bash",
+          ...(signalName ? { signal: signalName } : {}),
+          ...(args.metadata ?? {}),
+        },
+      })
+      if (next) {
+        args.host.emit({ type: "background_task_updated", task: next })
+        const unified = await runtime.getTask(taskId)
+        if (unified) {
+          args.host.emit({ type: "task_updated", task: unified })
+          args.host.emit({ type: "task_completed", task: unified, outputPreview: unified.output?.slice(0, 500) })
+          if (args.config) {
+            await handleCompletedTaskSideEffects({
+              cwd: args.cwd,
+              host: args.host,
+              config: args.config,
+              task: unified,
+              outputPreview: unified.output?.slice(0, 500),
+            })
+          }
+        }
+      }
+    })()
+  })
+
+  return { taskId, pid, logPath }
+}
+
 /** Compact background job summary for prompt context so the agent can keep tracking long-running commands. */
 export function getBackgroundBashJobsForPrompt(_cwd: string): string {
   if (backgroundBashJobs.size === 0) return ""
@@ -101,12 +227,13 @@ const schema = z.object({
   command: z.string().describe("The command to execute"),
   timeout: z.number().int().positive().max(600000).optional().describe("Optional timeout in milliseconds (max 600000). If not specified, commands will timeout after 120000ms (2 minutes)."),
   description: z.string().optional().describe("Clear, concise description of what this command does in active voice. For simple commands keep it brief (5-10 words). For complex commands add enough context to clarify what it does."),
-  run_in_background: z.boolean().optional().describe("Set to true to run this command in the background. Use BashOutput to read the output later."),
+  run_in_background: z.boolean().optional().describe("Set to true to run this command in the background. Use TaskOutput to read the output later."),
   dangerouslyDisableSandbox: z.boolean().optional().describe("Set this to true to dangerously override sandbox mode and run commands without sandboxing."),
 })
 
 export const bashTool: ToolDef<z.infer<typeof schema>> = {
   name: "Bash",
+  searchHint: "run shell command, execute tests, build project, git command, install dependencies, long-running process",
   description: `Executes a given bash command with optional timeout. Working directory persists between commands; shell state (everything else) does not. The shell environment is initialized from the user's profile (bash or zsh).
 
 IMPORTANT: This tool is for terminal operations like git, npm, docker, builds, tests, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) — use the dedicated tools instead.
@@ -131,7 +258,7 @@ Usage notes:
     - mkdir foo → "Create directory 'foo'"
     - find . -name "*.tmp" -exec rm {} \\; → "Find and delete all .tmp files recursively"
   - If output exceeds 50KB, it will be truncated (head+tail shown); full output is saved to the global data dir (~/.nexus/data/tool-output/) for further inspection. Use Grep or Read with offset/limit on that file if needed.
-  - **Blocking vs background:** Use blocking (default) for short commands where you need the result immediately (e.g. git status, npm run lint, short scripts). Use run_in_background: true for long-running commands (builds, servers, tests, migrations). With background: Bash returns immediately with bash_id; output is written to the global data dir (~/.nexus/data/run/<bash_id>.log) in real time. Use BashOutput(bash_id) to read progress — the response includes [Process status: running | exited]. Poll until exited or use KillBash(shell_id) to stop. Do NOT use '&' at the end of the command when using run_in_background. Never use run_in_background for 'sleep' — it returns immediately and is useless.
+  - **Blocking vs background:** Use blocking (default) for short commands where you need the result immediately (e.g. git status, npm run lint, short scripts). Use run_in_background: true for long-running commands (builds, servers, tests, migrations). With background: Bash returns immediately with a task id; output is written to the global data dir (~/.nexus/data/run/<task_id>.log) in real time. Use TaskOutput(taskId) to read progress — the response includes the current task status — or TaskStop(taskId) to stop. Do NOT use '&' at the end of the command when using run_in_background. Never use run_in_background for 'sleep' — it returns immediately and is useless.
   - **CRITICAL — Use dedicated tools instead of shell commands:** You MUST avoid using Bash for file search, content search, reading, editing, or writing. Use the dedicated tools instead. Do NOT run find, grep, cat, head, tail, sed, awk, or echo in Bash for those purposes. Use:
     - File search: Glob (NOT find or ls)
     - Content search: Grep (NOT grep or rg)
@@ -139,6 +266,7 @@ Usage notes:
     - Edit files: Edit (NOT sed/awk)
     - Write files: Write (NOT echo >/cat <<EOF)
     - Communication: output text directly (NOT echo/printf)
+  - Use Bash when you need a real process execution side effect or runtime observation: test suites, builds, package managers, servers, git, Docker, migrations, code generators, formatters, or project scripts.
   - **Non-interactive commands** — For any command that would prompt for user input (confirmations, passwords, selections), assume the user is NOT available. Pass non-interactive flags: \`--yes\` / \`-y\` for package managers, \`--force\` / \`-f\` when appropriate, \`--non-interactive\` for CLIs that support it. Never run a command that will block waiting for input.
   - When issuing multiple commands: if they are independent, make multiple Bash calls in a single response (parallel). If they depend on each other, use '&&' to chain them (e.g. git add . && git commit -m "..." && git status). Use ';' only when you don't care if earlier commands fail. DO NOT use newlines to separate commands (newlines are ok inside quoted strings).
   - Maintain current working directory: prefer absolute paths and avoid unnecessary \`cd\`. Use \`cd\` only when the command genuinely depends on that working directory. Good: \`pytest /foo/bar/tests\`. Bad: \`cd /foo/bar && pytest tests\`.
@@ -211,78 +339,40 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
 
   async execute({ command, timeout: timeoutMs, run_in_background: background }, ctx: ToolContext) {
     const workingDir = ctx.cwd
+    const dedicatedToolMessage = detectPreferDedicatedToolMessage(command)
+    if (dedicatedToolMessage) {
+      return {
+        success: false,
+        output: dedicatedToolMessage,
+      }
+    }
+    const sleepWarning = detectBlockedSleepPattern(command, "bash")
+    if (background && sleepWarning) {
+      return {
+        success: false,
+        output: `${sleepWarning} Run it in the foreground if you really need it, but do not background it.`,
+      }
+    }
+    const dangerousMessage = detectDangerousShellPattern(command)
+    const autoBackgrounded = !background && isLikelyLongRunningShellCommand(command)
 
-    if (background) {
-      const runDir = getRunLogsDir()
-      try { fs.mkdirSync(runDir, { recursive: true }) } catch { /* ignore */ }
-      await cleanupOldRunLogs(runDir)
-      const bashId = `run_${Date.now()}`
-      const logPath = path.join(runDir, `${bashId}.log`)
-      const logStream = fs.createWriteStream(logPath, { flags: "a" })
-
-      const child = spawn(command, [], {
-        shell: true,
-        cwd: workingDir,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      })
-      child.stdout?.pipe(logStream)
-      child.stderr?.pipe(logStream)
-      child.unref()
-      const pid = child.pid ?? 0
-      backgroundBashJobs.set(bashId, { pid, logPath })
-      const runtime = await getOrchestrationRuntime(workingDir)
-      const task = await runtime.registerBackgroundTask({
-        id: bashId,
-        kind: "bash",
-        description: command,
-        status: "running",
+    if (background || autoBackgrounded) {
+      const { taskId: bashId, pid, logPath } = await startBackgroundShellTask({
         command,
         cwd: workingDir,
-        processId: pid,
-        logPath,
-        outputFile: logPath,
-        metadata: { tool: "Bash" },
+        shellRunner: "bash",
+        host: ctx.host,
+        config: ctx.config,
+        metadata: {
+          assistantAutoBackgrounded: autoBackgrounded,
+          ...(dangerousMessage ? { dangerousWarning: dangerousMessage } : {}),
+        },
       })
-      ctx.host.emit({ type: "background_task_updated", task })
-
-      child.on("error", (error) => {
-        void (async () => {
-          const output = await readBackgroundOutput(logPath)
-          const next = await runtime.setBackgroundTaskStatus(bashId, "failed", {
-            output,
-            metadata: { tool: "Bash", error: error.message },
-          })
-          if (next) ctx.host.emit({ type: "background_task_updated", task: next })
-        })()
-      })
-
-      child.on("exit", (code, signalName) => {
-        void (async () => {
-          const output = await readBackgroundOutput(logPath)
-          const status =
-            signalName === "SIGTERM" || signalName === "SIGKILL"
-              ? "killed"
-              : code === 0
-                ? "completed"
-                : "failed"
-          const next = await runtime.setBackgroundTaskStatus(bashId, status, {
-            output,
-            exitCode: typeof code === "number" ? code : undefined,
-            metadata: {
-              tool: "Bash",
-              ...(signalName ? { signal: signalName } : {}),
-            },
-          })
-          if (next) ctx.host.emit({ type: "background_task_updated", task: next })
-        })()
-      })
-
       const logDisplay = shortDataPath(logPath)
       return {
         success: true,
-        output: `[background] bash_id: ${bashId}\nPID: ${pid}\nLog: ${logDisplay}\n\nOutput is written to the log file in real time. Use BashOutput(bash_id: "${bashId}") to read progress; the response includes [Process status: running | exited]. Use KillBash(shell_id: "${bashId}") to stop the process.`,
-        metadata: { bash_id: bashId, pid, logPath, task_id: bashId },
+        output: `${autoBackgrounded ? "[auto-backgrounded]" : "[background]"} bash_id: ${bashId}\nPID: ${pid}\nLog: ${logDisplay}${dangerousMessage ? `\nWarning: ${dangerousMessage}` : ""}\n\nOutput is written to the log file in real time. Use TaskOutput(taskId: "${bashId}") to read progress or wait; use TaskStop(taskId: "${bashId}") to stop the process.`,
+        metadata: { bash_id: bashId, pid, logPath, task_id: bashId, assistantAutoBackgrounded: autoBackgrounded },
       }
     }
 
@@ -351,7 +441,7 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
 
     return {
       success,
-      output: header + outputMessage,
+      output: header + (dangerousMessage ? `[warning] ${dangerousMessage}\n` : "") + outputMessage,
     }
   },
 }

@@ -17,6 +17,10 @@ import {
   createListAgentRunsTool,
   createAgentRunSnapshotTool,
   createResumeAgentTool,
+  createTaskCreateBatchTool,
+  createTaskResumeTool,
+  createTaskSnapshotTool,
+  setParallelAgentManager,
   ParallelAgentManager,
   createCodebaseIndexer,
   McpClient,
@@ -118,6 +122,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   }
 
   const parallelManager = new ParallelAgentManager()
+  setParallelAgentManager(parallelManager)
   toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
   toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, configForRun))
   toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
@@ -125,6 +130,9 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   toolRegistry.register(createListAgentRunsTool(parallelManager))
   toolRegistry.register(createAgentRunSnapshotTool(parallelManager))
   toolRegistry.register(createResumeAgentTool(parallelManager, configForRun))
+  toolRegistry.register(createTaskCreateBatchTool(parallelManager, configForRun))
+  toolRegistry.register(createTaskSnapshotTool(parallelManager))
+  toolRegistry.register(createTaskResumeTool(parallelManager, configForRun))
   const { builtin: tools, dynamic } = toolRegistry.getForMode(mode)
   const allTools = [...tools, ...dynamic]
   // mode and allTools match; runAgentLoop builds system prompt and tool set from this mode

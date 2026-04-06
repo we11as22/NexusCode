@@ -1431,6 +1431,8 @@ interface PermissionResult {
 interface ToolDef<TArgs = Record<string, unknown>> {
     name: string;
     description: string;
+    /** When true, keep the tool callable for compatibility/internal flows but do not expose it to the agent manifest/prompt. */
+    hiddenFromAgent?: boolean;
     parameters: z.ZodType<TArgs>;
     /** Short searchable hint used by ToolSearch / deferred-tool discovery. */
     searchHint?: string;
@@ -1748,8 +1750,10 @@ interface ToolPart {
 }
 type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart;
 type TaskStatus = "pending" | "in_progress" | "completed" | "failed" | "killed" | "cancelled" | "deleted";
+type TaskKind = "agent" | "shell" | "tracking" | "workflow" | "external";
 interface TaskRecord {
     id: string;
+    kind: TaskKind;
     subject: string;
     description: string;
     status: TaskStatus;
@@ -1761,7 +1765,19 @@ interface TaskRecord {
     metadata?: Record<string, unknown>;
     blocks?: string[];
     blockedBy?: string[];
+    command?: string;
+    shellRunner?: "bash" | "powershell";
+    processId?: number;
+    exitCode?: number;
+    sessionId?: string;
+    output?: string;
     outputFile?: string;
+    snapshotFile?: string;
+    error?: string;
+    parentTaskId?: string;
+    resumeOf?: string;
+    forkOf?: string;
+    agentType?: string;
     toolUseId?: string;
 }
 interface TeamMessageRecord {
@@ -1777,6 +1793,10 @@ interface TeamMemberRecord {
     agentId?: string;
     agentType?: string;
     joinedAt: number;
+    status?: "active" | "idle" | "offline";
+    lastActiveAt?: number;
+    lastIdleAt?: number;
+    note?: string;
 }
 interface TeamRecord {
     name: string;
@@ -1789,8 +1809,10 @@ interface AgentDefinition {
     agentType: string;
     whenToUse: string;
     systemPrompt?: string;
+    preferredMode?: Mode;
     tools?: string[];
     disallowedTools?: string[];
+    hooks?: string[];
     sourcePath?: string;
     builtin?: boolean;
 }
@@ -2068,8 +2090,33 @@ type AgentEvent = {
     type: "plan_followup_ask";
     planText: string;
 } | {
+    type: "task_created";
+    task: TaskRecord;
+} | {
     type: "task_updated";
     task: TaskRecord;
+} | {
+    type: "task_progress";
+    task: TaskRecord;
+    outputPreview?: string;
+} | {
+    type: "task_tool_start";
+    taskId: string;
+    taskKind: TaskKind;
+    tool: string;
+    input?: Record<string, unknown>;
+    parentPartId?: string;
+} | {
+    type: "task_tool_end";
+    taskId: string;
+    taskKind: TaskKind;
+    tool: string;
+    success: boolean;
+    parentPartId?: string;
+} | {
+    type: "task_completed";
+    task: TaskRecord;
+    outputPreview?: string;
 } | {
     type: "team_updated";
     team: TeamRecord;
@@ -2855,6 +2902,11 @@ interface ResumeAgentOptions {
     fork?: boolean;
     runInBackground?: boolean;
 }
+interface AgentSpawnOptions {
+    skipDuplicateCheck?: boolean;
+    modelOverride?: string;
+    taskName?: string;
+}
 type SubAgentStatus = "running" | "completed" | "error";
 interface SubAgentSnapshot {
     subagentId: string;
@@ -2887,10 +2939,8 @@ declare class ParallelAgentManager {
     private static readonly TASK_KEY_LEN;
     private rememberId;
     private startTask;
-    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string, spawnOptions?: {
-        skipDuplicateCheck?: boolean;
-    }): Promise<SubAgentResult>;
-    spawnInBackground(description: string, mode: Mode, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string): Promise<{
+    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string, agentType?: string, spawnOptions?: AgentSpawnOptions): Promise<SubAgentResult>;
+    spawnInBackground(description: string, mode: Mode, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string, agentType?: string, spawnOptions?: AgentSpawnOptions): Promise<{
         subagentId: string;
     }>;
     getSnapshot(subagentId: string): SubAgentSnapshot | null;
@@ -2905,6 +2955,8 @@ declare class ParallelAgentManager {
     /** How many agents are currently running */
     get activeCount(): number;
 }
+declare function setParallelAgentManager(manager: ParallelAgentManager | undefined): void;
+declare function getParallelAgentManager(): ParallelAgentManager | undefined;
 declare const spawnOutputSchema: z.ZodObject<{
     subagent_id: z.ZodString;
     block: z.ZodOptional<z.ZodBoolean>;
@@ -2955,12 +3007,76 @@ declare const resumeAgentSchema: z.ZodObject<{
     instruction?: string | undefined;
     fork?: boolean | undefined;
 }>;
+declare const taskResumeSchema: z.ZodObject<{
+    task_id: z.ZodString;
+    instruction: z.ZodOptional<z.ZodString>;
+    fork: z.ZodOptional<z.ZodBoolean>;
+    block: z.ZodOptional<z.ZodBoolean>;
+}, "strip", z.ZodTypeAny, {
+    task_id: string;
+    block?: boolean | undefined;
+    instruction?: string | undefined;
+    fork?: boolean | undefined;
+}, {
+    task_id: string;
+    block?: boolean | undefined;
+    instruction?: string | undefined;
+    fork?: boolean | undefined;
+}>;
+declare const taskSnapshotSchema: z.ZodObject<{
+    task_id: z.ZodString;
+    format: z.ZodOptional<z.ZodEnum<["summary", "json"]>>;
+}, "strip", z.ZodTypeAny, {
+    task_id: string;
+    format?: "summary" | "json" | undefined;
+}, {
+    task_id: string;
+    format?: "summary" | "json" | undefined;
+}>;
+declare const taskCreateBatchSchema: z.ZodObject<{
+    tasks: z.ZodArray<z.ZodObject<{
+        description: z.ZodString;
+        agent_type: z.ZodOptional<z.ZodString>;
+        context_summary: z.ZodOptional<z.ZodString>;
+        mode: z.ZodOptional<z.ZodEnum<["agent", "plan", "ask", "debug", "review", "search", "explore"]>>;
+    }, "strip", z.ZodTypeAny, {
+        description: string;
+        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
+        agent_type?: string | undefined;
+        context_summary?: string | undefined;
+    }, {
+        description: string;
+        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
+        agent_type?: string | undefined;
+        context_summary?: string | undefined;
+    }>, "many">;
+    block: z.ZodOptional<z.ZodBoolean>;
+}, "strip", z.ZodTypeAny, {
+    tasks: {
+        description: string;
+        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
+        agent_type?: string | undefined;
+        context_summary?: string | undefined;
+    }[];
+    block?: boolean | undefined;
+}, {
+    tasks: {
+        description: string;
+        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
+        agent_type?: string | undefined;
+        context_summary?: string | undefined;
+    }[];
+    block?: boolean | undefined;
+}>;
 declare function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
 declare function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnOutputSchema>>;
 declare function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnStopSchema>>;
 declare function createListAgentRunsTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof listAgentRunsSchema>>;
 declare function createAgentRunSnapshotTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof agentRunSnapshotSchema>>;
 declare function createResumeAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof resumeAgentSchema>>;
+declare function createTaskResumeTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof taskResumeSchema>>;
+declare function createTaskSnapshotTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof taskSnapshotSchema>>;
+declare function createTaskCreateBatchTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof taskCreateBatchSchema>>;
 /**
  * SpawnAgentsParallel — simple alternative to Parallel+SpawnAgent for concurrent sub-agent launch.
  * Flat schema: no recipient_name/parameters wrapping needed.
@@ -2988,25 +3104,41 @@ declare class OrchestrationRuntime {
     private ensureLoaded;
     private persist;
     createTask(input: {
+        id?: string;
+        kind?: TaskKind;
         subject: string;
         description: string;
+        status?: TaskStatus;
         activeForm?: string;
         owner?: string;
         teamName?: string;
         metadata?: Record<string, unknown>;
         blocks?: string[];
         blockedBy?: string[];
+        command?: string;
+        shellRunner?: "bash" | "powershell";
+        processId?: number;
+        exitCode?: number;
+        sessionId?: string;
+        output?: string;
         outputFile?: string;
+        snapshotFile?: string;
+        error?: string;
+        parentTaskId?: string;
+        resumeOf?: string;
+        forkOf?: string;
+        agentType?: string;
         toolUseId?: string;
     }): Promise<TaskRecord>;
     getTask(taskId: string): Promise<TaskRecord | null>;
     listTasks(filters?: {
+        kind?: TaskKind | TaskKind[];
         teamName?: string;
         owner?: string;
         status?: TaskStatus | TaskStatus[];
         includeDeleted?: boolean;
     }): Promise<TaskRecord[]>;
-    updateTask(taskId: string, updates: Partial<Pick<TaskRecord, "status" | "subject" | "description" | "activeForm" | "owner">> & {
+    updateTask(taskId: string, updates: Partial<Pick<TaskRecord, "status" | "subject" | "description" | "activeForm" | "owner" | "teamName" | "command" | "shellRunner" | "processId" | "exitCode" | "sessionId" | "output" | "outputFile" | "snapshotFile" | "error" | "parentTaskId" | "resumeOf" | "forkOf" | "agentType">> & {
         metadata?: Record<string, unknown | null>;
         addBlocks?: string[];
         addBlockedBy?: string[];
@@ -3020,6 +3152,9 @@ declare class OrchestrationRuntime {
     listTeams(): Promise<TeamRecord[]>;
     deleteTeam(teamName: string): Promise<boolean>;
     addTeamMember(teamName: string, member: TeamMemberRecord): Promise<TeamRecord | null>;
+    updateTeamMember(teamName: string, memberName: string, updates: Partial<Omit<TeamMemberRecord, "name" | "joinedAt" | "note">> & {
+        note?: string | null;
+    }): Promise<TeamRecord | null>;
     sendMessage(input: {
         from: string;
         to: string;
@@ -3084,6 +3219,21 @@ declare function getOrchestrationRuntime(cwd: string): Promise<OrchestrationRunt
 
 declare function loadAgentDefinitions(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<AgentDefinition[]>;
 
+declare function ensureTeamMemberForTask(args: {
+    cwd: string;
+    host: IHost;
+    task: TaskRecord;
+    agentId?: string;
+    agentType?: string;
+}): Promise<void>;
+declare function handleCompletedTaskSideEffects(args: {
+    cwd: string;
+    host: IHost;
+    config: NexusConfig;
+    task: TaskRecord;
+    outputPreview?: string;
+}): Promise<void>;
+
 interface ExtractedMemoryInput {
     scope: MemoryRecord["scope"];
     title: string;
@@ -3106,10 +3256,19 @@ interface PluginHookExecution {
     hookEvent: string;
     success: boolean;
     output: string;
+    preventContinuation?: boolean;
+    stopReason?: string;
+    additionalContext?: string;
 }
+type PluginHookEvent = "user_prompt_submit" | "before_tool" | "after_tool" | "turn_complete" | "task_completed" | "subagent_start" | "subagent_stop" | "teammate_idle";
 declare function applyPluginRuntimeSettings(plugin: PluginManifestRecord, config: NexusConfig): PluginManifestRecord;
 declare function loadPluginRuntimeRecords(cwd: string, config: NexusConfig): Promise<PluginManifestRecord[]>;
-declare function runPluginHooks(cwd: string, host: IHost, config: NexusConfig, hookEvent: "user_prompt_submit" | "before_tool" | "after_tool", payload: Record<string, unknown>): Promise<PluginHookExecution[]>;
+declare function runPluginHooks(cwd: string, host: IHost, config: NexusConfig, hookEvent: PluginHookEvent, payload: Record<string, unknown>): Promise<PluginHookExecution[]>;
+declare function runScopedHooks(cwd: string, host: IHost, hookEvent: PluginHookEvent, payload: Record<string, unknown>, items: Array<{
+    name: string;
+    rootDir: string;
+    hooks: string[];
+}>): Promise<PluginHookExecution[]>;
 
 interface LoadedSlashCommand {
     command: string;
@@ -3617,4 +3776,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentDefinition, type AgentEvent, type AppliedReplacementSnippet, type ApprovalAction, type BackgroundTaskRecord, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type ContextUsageSnapshot, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, type DeferredToolDef, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MODES, MODE_TOOL_GROUPS, type McpAuthRequest, type McpAuthResult, McpClient, type McpResourceContent, type McpResourceRef, type McpServerConfig, type MemoryRecord, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationRuntime, ParallelAgentManager, type PermissionResult, type PluginManifestRecord, ProjectRegistry, type ProjectSettings, type ProviderConfig, type ProviderName, READ_ONLY_TOOLS, type RemoteSessionRecord, type ResolveBundledOptions, type ResolvedSkillBody, Session, type SessionMessage, type SkillDef, type SkillToolDescriptionRow, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, type WorkingDirectoryChangeResult, type WorktreeSession, applyPluginRuntimeSettings, applySecretsToConfig, buildIndexWatcherGlobPattern, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpTransport, createResumeAgentTool, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, deleteSession, deriveSessionTitle, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getMcpClientInstance, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getOrchestrationRuntime, getPlanContentForFollowup, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, listSessions, loadAgentDefinitions, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, normalizedAppliedReplacementsFromMetadata, parseMentions, persistSecretsFromConfig, readCheckpointEntries, renderSlashCommandPrompt, resolveBundledMcpServers, resolvePluginDeclaredPath, resolveSkillBody, runAgentLoop, runPluginHooks, sampleSkillSiblingFiles, saveSession, setIndexTelemetrySink, setMcpClientInstance, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, validatePluginManifestFile, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AgentDefinition, type AgentEvent, type AppliedReplacementSnippet, type ApprovalAction, type BackgroundTaskRecord, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type ContextUsageSnapshot, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, type DeferredToolDef, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MODES, MODE_TOOL_GROUPS, type McpAuthRequest, type McpAuthResult, McpClient, type McpResourceContent, type McpResourceRef, type McpServerConfig, type MemoryRecord, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationRuntime, ParallelAgentManager, type PermissionResult, type PluginManifestRecord, ProjectRegistry, type ProjectSettings, type ProviderConfig, type ProviderName, READ_ONLY_TOOLS, type RemoteSessionRecord, type ResolveBundledOptions, type ResolvedSkillBody, Session, type SessionMessage, type SkillDef, type SkillToolDescriptionRow, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskKind, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, type WorkingDirectoryChangeResult, type WorktreeSession, applyPluginRuntimeSettings, applySecretsToConfig, buildIndexWatcherGlobPattern, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpTransport, createResumeAgentTool, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, createTaskCreateBatchTool, createTaskResumeTool, createTaskSnapshotTool, deleteSession, deriveSessionTitle, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, ensureTeamMemberForTask, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getMcpClientInstance, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getOrchestrationRuntime, getParallelAgentManager, getPlanContentForFollowup, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, handleCompletedTaskSideEffects, listSessions, loadAgentDefinitions, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, normalizedAppliedReplacementsFromMetadata, parseMentions, persistSecretsFromConfig, readCheckpointEntries, renderSlashCommandPrompt, resolveBundledMcpServers, resolvePluginDeclaredPath, resolveSkillBody, runAgentLoop, runPluginHooks, runScopedHooks, sampleSkillSiblingFiles, saveSession, setIndexTelemetrySink, setMcpClientInstance, setParallelAgentManager, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, validatePluginManifestFile, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

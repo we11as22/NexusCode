@@ -10,6 +10,7 @@ const schema = z.object({
 
 export const killBashTool: ToolDef<z.infer<typeof schema>> = {
   name: "KillBash",
+  hiddenFromAgent: true,
   description: `Kill a running background bash shell by its ID.
 
 - Takes shell_id (same value as bash_id returned by Bash when run_in_background: true).

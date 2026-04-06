@@ -74,6 +74,60 @@ const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
 
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
 
+async function recordPluginHookOutputs(
+  session: ISession,
+  host: IHost,
+  tagName: string,
+  hookResults: Array<{
+    pluginName: string
+    hookEvent: string
+    output: string
+    success: boolean
+    preventContinuation?: boolean
+    stopReason?: string
+    additionalContext?: string
+  }>,
+  attributes: Record<string, string> = {},
+): Promise<void> {
+  if (hookResults.length === 0) return
+  const attrText = Object.entries(attributes)
+    .map(([key, value]) => ` ${key}="${value.replace(/"/g, "&quot;")}"`)
+    .join("")
+  const messageBody = hookResults
+    .map((result) => {
+      const bodyParts = [
+        result.output,
+        result.additionalContext ? `<additional-context>\n${result.additionalContext}` : "",
+        result.preventContinuation
+          ? `<stop-continuation>\n${result.stopReason?.trim() || "Hook requested that the agent stop the current continuation."}`
+          : "",
+      ].filter(Boolean)
+      return `<${tagName} plugin="${result.pluginName}"${attrText}>\n${bodyParts.join("\n\n")}`
+    })
+    .join("\n\n")
+  session.addMessage({
+    role: "user",
+    content: messageBody,
+  })
+  for (const hookResult of hookResults) {
+    host.emit({
+      type: "plugin_hook",
+      pluginName: hookResult.pluginName,
+      hookEvent: hookResult.hookEvent,
+      output: hookResult.output,
+      success: hookResult.success,
+    })
+  }
+}
+
+function getPreventContinuationReason(
+  hookResults: Array<{ preventContinuation?: boolean; stopReason?: string; pluginName: string }>,
+): string | null {
+  const blocked = hookResults.find((result) => result.preventContinuation)
+  if (!blocked) return null
+  return blocked.stopReason?.trim() || `${blocked.pluginName} requested that the agent stop the current continuation.`
+}
+
 /** When a mandatory end tool (e.g. PlanExit) completes, set its output as user_message on the last text part of the message (so UI and context see it). */
 function setReportToUserMessage(session: ISession, messageId: string, userMessage: string): void {
   const msg = session.messages.find((m) => m.id === messageId)
@@ -217,14 +271,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       latestUserText: taskDesc,
     },
   ).catch(() => [])
-  if (promptSubmitHookResults.length > 0) {
-    session.addMessage({
-      role: "user",
-      content: promptSubmitHookResults
-        .map((result) => `<user-prompt-submit-hook plugin="${result.pluginName}">\n${result.output}`)
-        .join("\n\n"),
-    })
-  }
+  await recordPluginHookOutputs(session, host, "user-prompt-submit-hook", promptSubmitHookResults)
 
   // Build MCP server list from dynamic tools (name format: "serverName__toolName"). Custom tools have no "__".
   const serverToTools = new Map<string, ToolDef[]>()
@@ -989,6 +1036,43 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 }
               }
 
+              const beforeToolHookResults = await runPluginHooks(
+                host.cwd,
+                host,
+                config,
+                "before_tool",
+                {
+                  mode,
+                  sessionId: session.id,
+                  toolName,
+                  toolInput,
+                },
+              ).catch(() => [])
+              await recordPluginHookOutputs(session, host, "before-tool-hook", beforeToolHookResults, {
+                tool: toolName,
+              })
+              const beforeToolStopReason = getPreventContinuationReason(beforeToolHookResults)
+              if (beforeToolStopReason) {
+                session.updateToolPart(newMessageId, partId, {
+                  status: "error",
+                  output: beforeToolStopReason,
+                  timeEnd: Date.now(),
+                })
+                host.emit({
+                  type: "tool_end",
+                  tool: toolName,
+                  partId,
+                  messageId: newMessageId,
+                  success: false,
+                  output: beforeToolStopReason,
+                })
+                attemptedCompletionThisIteration = true
+                lastToolName = toolName
+                executedToolThisIteration = true
+                executedToolCallsTotal++
+                break
+              }
+
               const result = await executeToolCall(
                 toolCallId, toolName, toolInput,
                 resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode, mcpToolNames
@@ -1008,23 +1092,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                   output: result.output,
                 },
               ).catch(() => [])
-              if (afterToolHookResults.length > 0) {
-                session.addMessage({
-                  role: "user",
-                  content: afterToolHookResults
-                    .map((hookResult) => `<after-tool-hook plugin="${hookResult.pluginName}" tool="${toolName}">\n${hookResult.output}`)
-                    .join("\n\n"),
-                })
-                for (const hookResult of afterToolHookResults) {
-                  host.emit({
-                    type: "plugin_hook",
-                    pluginName: hookResult.pluginName,
-                    hookEvent: hookResult.hookEvent,
-                    output: hookResult.output,
-                    success: hookResult.success,
-                  })
-                }
-              }
+              await recordPluginHookOutputs(session, host, "after-tool-hook", afterToolHookResults, {
+                tool: toolName,
+              })
+              const afterToolStopReason = getPreventContinuationReason(afterToolHookResults)
 
               session.updateToolPart(newMessageId, partId, {
                 status: result.success ? "completed" : "error",
@@ -1078,6 +1149,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               lastToolName = toolName
               executedToolThisIteration = true
               executedToolCallsTotal++
+              if (afterToolStopReason) {
+                attemptedCompletionThisIteration = true
+                break
+              }
               if ((result.metadata as { questionRequest?: boolean } | undefined)?.questionRequest) {
                 attemptedCompletionThisIteration = true
                 await flushPendingReads()
@@ -1456,6 +1531,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
 
   if (!signal.aborted && lastAssistantMessageId && !doneEmitted) {
+    const turnCompleteHookResults = await runPluginHooks(
+      host.cwd,
+      host,
+      config,
+      "turn_complete",
+      {
+        mode,
+        sessionId: session.id,
+        messageId: lastAssistantMessageId,
+        completed: attemptedCompletionThisIteration || lastToolName === MANDATORY_END_TOOL[mode],
+        lastToolName,
+      },
+    ).catch(() => [])
+    await recordPluginHookOutputs(session, host, "turn-complete-hook", turnCompleteHookResults, {
+      mode,
+    })
     doneEmitted = true
     // When mandatory end tool was executed, clear todo so it's removed from session.
     if (attemptedCompletionThisIteration || lastToolName === MANDATORY_END_TOOL[mode]) {

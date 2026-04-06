@@ -320,10 +320,14 @@ export function AssistantToolUseMessage({
   }
 
   const normalizedToolName =
-    param.name === 'SpawnAgents' || param.name === 'SpawnAgentsParallel' ? 'SpawnAgent' : param.name
-  const userFacingToolName =
-    normalizedToolName === 'SpawnAgent'
+    param.name === 'SpawnAgents' || param.name === 'SpawnAgentsParallel'
       ? 'SpawnAgent'
+      : param.name === 'TaskCreateBatch'
+        ? 'TaskCreate'
+        : param.name
+  const userFacingToolName =
+    normalizedToolName === 'SpawnAgent' || normalizedToolName === 'TaskCreate'
+      ? 'Task'
       : tool.userFacingName(param.input as never)
   const inputRecord =
     typeof param.input === 'object' && param.input != null
@@ -369,6 +373,8 @@ export function AssistantToolUseMessage({
     shouldShowExpandHint(normalizedToolName, inputRecord, renderedInput)
   /** Match other tool rows: space above SpawnAgent* even when progress uses addMargin={false}. */
   const isSpawnFamilyTool =
+    param.name === 'TaskCreate' ||
+    param.name === 'TaskCreateBatch' ||
     param.name === 'SpawnAgent' ||
     param.name === 'SpawnAgents' ||
     param.name === 'SpawnAgentsParallel' ||
@@ -439,6 +445,7 @@ export function AssistantToolUseMessage({
   )
   const showSubagents =
     (normalizedToolName === 'SpawnAgent' ||
+      normalizedToolName === 'TaskCreate' ||
       normalizedToolName === 'Parallel' ||
       normalizedToolName === 'parallel') &&
     subagents.length > 0

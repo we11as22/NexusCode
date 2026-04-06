@@ -36,10 +36,12 @@ const schema = z.object({
 
 export const readFileTool: ToolDef<z.infer<typeof schema>> = {
   name: "Read",
+  searchHint: "read file lines by path, inspect file contents with offset and limit, line-numbered file viewer",
   description: `Reads a file from the local filesystem. You can access any file directly by using this tool.
 Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
+- Use this after Grep, CodebaseSearch, List, Glob, ListCodeDefinitions, or LSP has already identified the relevant file and roughly the relevant range.
 - file_path may be absolute or relative to the project root
 - By default, it reads up to ${DEFAULT_LIMIT} lines starting from the beginning of the file
 - Prefer specifying offset and limit for long files or when you already know the relevant range (e.g. from Grep, CodebaseSearch, or ListCodeDefinitions). Use whole-file reads only when the file is small or you genuinely need the entire file
@@ -49,7 +51,11 @@ Usage:
 - Results are returned with line numbers in the format \`LINE_NUMBER|LINE_CONTENT\`. Treat the \`LINE_NUMBER|\` prefix as metadata — never include it in old_string/new_string when editing
 - You can call multiple tools in a single response. Prefer reading multiple potentially useful files in parallel; do not drip one-at-a-time
 - If you read a file that exists but has empty contents you will receive 'File is empty.'
-- Binary files are not decoded. For binary content this tool returns file metadata and states that the file cannot be read as text.`,
+- Binary files are not decoded. For binary content this tool returns file metadata and states that the file cannot be read as text.
+
+When NOT to use:
+- Do not use Read for broad discovery across many files; use Grep, CodebaseSearch, Glob, List, or LSP first.
+- Do not use Read through Bash (\`cat\`, \`sed\`, \`head\`, \`tail\`). Use this tool directly.`,
   parameters: schema,
   readOnly: true,
 

@@ -21,11 +21,13 @@ const schema = z.object({
 
 export const writeFileTool: ToolDef<z.infer<typeof schema>> = {
   name: "Write",
+  searchHint: "create file, overwrite whole file, new file scaffold, full file rewrite",
   description: `Create a new file or overwrite an existing file entirely.
 
 When to use:
 - New files, boilerplate, or full rewrites.
 - When the change affects more than half of the file.
+- When you already know the exact final contents and a targeted Edit would be more complex or fragile than rewriting the whole file.
 
 When NOT to use:
 - Small or targeted edits: use Edit (faster, less error-prone).

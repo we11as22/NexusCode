@@ -15,15 +15,25 @@
 - **Doom loop detection** — no artificial step limits
 - **Structured output** with JSON schema when supported by provider
 - **Skill & tool classification** — smart context selection from large sets
-- **Parallel sub-agents** for concurrent task execution
-- **Persistent orchestration runtime** for shared tasks, background jobs, team messages, worktrees, agent definitions, and durable memory
+- **Unified task-first orchestration** for delegated agent work, shell jobs, and durable coordination
+- **OpenClaude-class delegated agent lifecycle** on top of the task runtime: delegated tasks can now carry named agent roles, model overrides, cwd/worktree isolation, snapshots, resume/fork, and richer live task telemetry
+- **Safer shell runtime** for both `Bash` and `PowerShell`: dedicated-tool guardrails for read/search/edit misuse, destructive-command warnings, blocked background sleep patterns, task-native background monitoring, and symmetric shell/background behavior in CLI, VS Code, and server
+- **Persistent orchestration runtime** for shared tasks, delegated agent runs, shell jobs, team messages, worktrees, agent definitions, and durable memory
+- **Team/swarm coordination tools**: `TeamList`, `TeamGet`, `TeamAddMember`, `TeamSetMemberStatus`, and `SendMessage` share the same runtime as tasks, so task owners can become visible teammates instead of ad-hoc labels
 - **Tracked remote sessions and reconnectable server streams** with run ids, buffered NDJSON replay, and runtime-visible reconnect status
+- **Remote reconnect and viewer-only enforcement**: `ReconnectRemoteSession` can probe tracked remotes, while viewer-only sessions are blocked from sending messages or interrupts
 - **Host-aware control-plane transitions**: `EnterPlanMode` and `EnterWorktree` can now update VS Code mode/cwd state instead of only returning handoff text
 - **LSP-aware code intelligence** in the VS Code host: definitions, references, hover, symbols, implementations, and call hierarchy via the `LSP` tool
 - **Local plugin manifests** under `.nexus/plugins/**/plugin.json` (plus `.nexus-plugin` / `.codex-plugin` layouts) with plugin-contributed agents/skills, trusted hooks, and persisted runtime options
-- **Sub-agent run snapshots** with list/resume/fork/snapshot tools so delegated work can be inspected and continued without rediscovery
+- **Lifecycle-aware plugin hooks**: prompt-submit, before/after-tool, turn-complete, and task-completed events for provider-agnostic local automation
+- **Plugin runtime control**: `PluginEnable`, `PluginTrust`, `PluginConfigure`, and `PluginReload`, plus enforced hook timeouts from config
+- **Agent-scoped delegated-task roles**: markdown agent definitions can carry preferred mode, tool allow/deny policy, and delegated-run hooks, applied through `TaskCreate(kind="agent", agent_type=...)`
+- **Delegated task snapshots and resume** with `TaskSnapshot` / `TaskResume` so prior agent work can be inspected and continued without rediscovery
+- **Remote control-plane tools**: tracked remote sessions can now receive new messages or interrupt signals through `SendRemoteMessage` and `InterruptRemoteSession`
 - **Shadow git checkpoints** with task/workspace restore
 - **Multi-stage context compaction** (prune old tool output → microcompact stale reasoning/oversized text → LLM summary when needed)
+- **Execution-ready planning guidance**: plan prompts now bias toward milestone-oriented `.nexus/plans/*` output that can be turned into `TodoWrite` or `PlanMaterializeTasks` without re-analysis
+- **Plan execution audit**: `PlanVerifyExecution` compares the written plan against task records before final completion
 - **MCP support** with tool classification plus resource listing/reading hooks
 - **Optional NexusCode Server**: HTTP agent + the **same JSONL session store** as the CLI/extension (canonical project root); connect for shared runs, session list parity, and paginated history (no OOM on long chats)
 - Webview UI: thought progress ("Thought for Xs"), loading states, todo checklist, diff-style tool output

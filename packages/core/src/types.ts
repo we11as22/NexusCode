@@ -36,6 +36,8 @@ export interface PermissionResult {
 export interface ToolDef<TArgs = Record<string, unknown>> {
   name: string
   description: string
+  /** When true, keep the tool callable for compatibility/internal flows but do not expose it to the agent manifest/prompt. */
+  hiddenFromAgent?: boolean
   parameters: z.ZodType<TArgs>
   /** Short searchable hint used by ToolSearch / deferred-tool discovery. */
   searchHint?: string
@@ -385,8 +387,11 @@ export type TaskStatus =
   | "cancelled"
   | "deleted"
 
+export type TaskKind = "agent" | "shell" | "tracking" | "workflow" | "external"
+
 export interface TaskRecord {
   id: string
+  kind: TaskKind
   subject: string
   description: string
   status: TaskStatus
@@ -398,7 +403,19 @@ export interface TaskRecord {
   metadata?: Record<string, unknown>
   blocks?: string[]
   blockedBy?: string[]
+  command?: string
+  shellRunner?: "bash" | "powershell"
+  processId?: number
+  exitCode?: number
+  sessionId?: string
+  output?: string
   outputFile?: string
+  snapshotFile?: string
+  error?: string
+  parentTaskId?: string
+  resumeOf?: string
+  forkOf?: string
+  agentType?: string
   toolUseId?: string
 }
 
@@ -416,6 +433,10 @@ export interface TeamMemberRecord {
   agentId?: string
   agentType?: string
   joinedAt: number
+  status?: "active" | "idle" | "offline"
+  lastActiveAt?: number
+  lastIdleAt?: number
+  note?: string
 }
 
 export interface TeamRecord {
@@ -430,8 +451,10 @@ export interface AgentDefinition {
   agentType: string
   whenToUse: string
   systemPrompt?: string
+  preferredMode?: Mode
   tools?: string[]
   disallowedTools?: string[]
+  hooks?: string[]
   sourcePath?: string
   builtin?: boolean
 }
@@ -640,7 +663,12 @@ export type AgentEvent =
   | { type: "todo_updated"; todo: string }
   | { type: "doom_loop_detected"; tool: string }
   | { type: "plan_followup_ask"; planText: string }
+  | { type: "task_created"; task: TaskRecord }
   | { type: "task_updated"; task: TaskRecord }
+  | { type: "task_progress"; task: TaskRecord; outputPreview?: string }
+  | { type: "task_tool_start"; taskId: string; taskKind: TaskKind; tool: string; input?: Record<string, unknown>; parentPartId?: string }
+  | { type: "task_tool_end"; taskId: string; taskKind: TaskKind; tool: string; success: boolean; parentPartId?: string }
+  | { type: "task_completed"; task: TaskRecord; outputPreview?: string }
   | { type: "team_updated"; team: TeamRecord }
   | { type: "team_message"; message: TeamMessageRecord }
   | { type: "background_task_updated"; task: BackgroundTaskRecord }

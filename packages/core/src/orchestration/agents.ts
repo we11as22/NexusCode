@@ -67,12 +67,31 @@ async function loadOne(filePath: string): Promise<AgentDefinition | null> {
       : Array.isArray(frontmatter.disallowedTools)
         ? frontmatter.disallowedTools.filter((item): item is string => typeof item === "string")
         : undefined
+    const hooks = Array.isArray(frontmatter.hooks)
+      ? frontmatter.hooks.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : undefined
+    const preferredModeRaw =
+      typeof frontmatter.preferred_mode === "string"
+        ? frontmatter.preferred_mode
+        : typeof frontmatter.preferredMode === "string"
+          ? frontmatter.preferredMode
+          : ""
+    const preferredMode =
+      preferredModeRaw === "agent" ||
+      preferredModeRaw === "plan" ||
+      preferredModeRaw === "ask" ||
+      preferredModeRaw === "debug" ||
+      preferredModeRaw === "review"
+        ? preferredModeRaw
+        : undefined
     return {
       agentType,
       whenToUse,
       systemPrompt: body.trim() || undefined,
+      ...(preferredMode ? { preferredMode } : {}),
       tools,
       disallowedTools,
+      ...(hooks?.length ? { hooks } : {}),
       sourcePath: filePath,
       builtin: false,
     }

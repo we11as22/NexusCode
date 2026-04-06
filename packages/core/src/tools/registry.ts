@@ -1,4 +1,4 @@
-import type { ToolDef, Mode, NexusConfig } from "../types.js"
+import { MODES, type ToolDef, Mode, NexusConfig } from "../types.js"
 import { getBuiltinToolsForMode } from "../agent/modes.js"
 import { getAllBuiltinTools } from "./built-in/index.js"
 
@@ -8,7 +8,10 @@ import { getAllBuiltinTools } from "./built-in/index.js"
  */
 export class ToolRegistry {
   private tools: Map<string, ToolDef> = new Map()
-  private static readonly BUILTIN_NAMES = new Set(getAllBuiltinTools().map((t) => t.name))
+  private static readonly BUILTIN_NAMES = new Set([
+    ...getAllBuiltinTools().map((t) => t.name),
+    ...MODES.flatMap((mode) => getBuiltinToolsForMode(mode)),
+  ])
 
   constructor() {
     for (const tool of getAllBuiltinTools()) {
@@ -47,6 +50,7 @@ export class ToolRegistry {
     const dynamic: ToolDef[] = []
 
     for (const tool of this.tools.values()) {
+      if (tool.hiddenFromAgent) continue
       if (builtinNames.has(tool.name)) {
         builtin.push(tool)
       } else {

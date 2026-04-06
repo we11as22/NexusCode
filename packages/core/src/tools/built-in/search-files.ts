@@ -32,6 +32,7 @@ const searchSchema = z.object({
 
 export const grepTool: ToolDef<z.infer<typeof searchSchema>> = {
   name: "Grep",
+  searchHint: "exact text search, regex search, find symbol, find string usage, ripgrep content search",
   description: `**ALWAYS use Grep for exact text/symbol/pattern searches.** Grep is your primary tool for finding known identifiers, imports, strings, and patterns.
 
 A powerful search tool built on ripgrep
@@ -160,6 +161,7 @@ const listSchema = z
 
 export const listTool: ToolDef<z.infer<typeof listSchema>> = {
   name: "List",
+  searchHint: "list directory contents, inspect folder layout, verify directory exists, find nearby file names",
   description: `Lists files and directories in a given path.
 
 **Input: exactly one parameter \`path\` (string).** Do not use \`paths\` (array). Use \`path\` only (e.g. \".\", \"src\", \"packages\").

@@ -10,7 +10,20 @@ export interface PluginHookExecution {
   hookEvent: string
   success: boolean
   output: string
+  preventContinuation?: boolean
+  stopReason?: string
+  additionalContext?: string
 }
+
+export type PluginHookEvent =
+  | "user_prompt_submit"
+  | "before_tool"
+  | "after_tool"
+  | "turn_complete"
+  | "task_completed"
+  | "subagent_start"
+  | "subagent_stop"
+  | "teammate_idle"
 
 export function applyPluginRuntimeSettings(
   plugin: PluginManifestRecord,
@@ -56,18 +69,51 @@ function splitHookDeclaration(value: string): { hookEvent: string; relativePath:
   }
 }
 
-export async function runPluginHooks(
+function parseHookResponse(stdout: string, stderr: string): {
+  output: string
+  preventContinuation?: boolean
+  stopReason?: string
+  additionalContext?: string
+} {
+  const trimmedStdout = stdout.trim()
+  const trimmedStderr = stderr.trim()
+  if (trimmedStdout) {
+    try {
+      const parsed = JSON.parse(trimmedStdout) as Record<string, unknown>
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const output =
+          typeof parsed.output === "string" ? parsed.output :
+          typeof parsed.message === "string" ? parsed.message :
+          typeof parsed.text === "string" ? parsed.text :
+          trimmedStderr
+        return {
+          output: output.trim(),
+          ...(typeof parsed.preventContinuation === "boolean" ? { preventContinuation: parsed.preventContinuation } : {}),
+          ...(typeof parsed.stopReason === "string" && parsed.stopReason.trim() ? { stopReason: parsed.stopReason.trim() } : {}),
+          ...(typeof parsed.additionalContext === "string" && parsed.additionalContext.trim()
+            ? { additionalContext: parsed.additionalContext.trim() }
+            : {}),
+        }
+      }
+    } catch {
+      // Plain-text hook output.
+    }
+  }
+  return {
+    output: [trimmedStdout, trimmedStderr].filter(Boolean).join("\n").trim(),
+  }
+}
+
+async function runHookDeclarations(
   cwd: string,
   host: IHost,
-  config: NexusConfig,
-  hookEvent: "user_prompt_submit" | "before_tool" | "after_tool",
+  timeoutMs: number,
+  hookEvent: PluginHookEvent,
   payload: Record<string, unknown>,
+  items: Array<{ name: string; hooks: string[] }>,
+  resolveHookPath: (item: { name: string; hooks: string[] }, relativePath: string) => string,
 ): Promise<PluginHookExecution[]> {
-  if (config.plugins?.enableHooks === false) return []
-  const plugins = await loadPluginRuntimeRecords(cwd, config)
-  const trusted = plugins.filter((plugin) => plugin.runtimeEnabled !== false && plugin.trusted === true)
-  if (trusted.length === 0) return []
-
+  if (items.length === 0) return []
   const payloadDir = path.join(getRuntimeDir(cwd), "hooks")
   await fs.mkdir(payloadDir, { recursive: true })
   const payloadPath = path.join(payloadDir, `hook-payload-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -75,23 +121,89 @@ export async function runPluginHooks(
 
   const executions: PluginHookExecution[] = []
   try {
-    for (const plugin of trusted) {
-      for (const declared of plugin.hooks) {
+    for (const item of items) {
+      for (const declared of item.hooks) {
         const parsed = splitHookDeclaration(declared)
         if (parsed.hookEvent !== hookEvent || !parsed.relativePath) continue
-        const hookPath = resolvePluginDeclaredPath(plugin, parsed.relativePath)
+        const hookPath = resolveHookPath(item, parsed.relativePath)
         const command = getHookRunnerCommand(hookPath, payloadPath)
-        const result = await host.runCommand(command, cwd)
+        const abortController = new AbortController()
+        const timeout = setTimeout(() => abortController.abort(), timeoutMs)
+        const result = await host.runCommand(command, cwd, abortController.signal).catch((error: Error) => ({
+          stdout: "",
+          stderr: error.name === "AbortError"
+            ? `Hook timed out after ${timeoutMs}ms.`
+            : error.message,
+          exitCode: 1,
+        }))
+        clearTimeout(timeout)
+        const parsedResult = parseHookResponse(result.stdout, result.stderr)
         executions.push({
-          pluginName: plugin.name,
+          pluginName: item.name,
           hookEvent,
           success: result.exitCode === 0,
-          output: [result.stdout, result.stderr].filter(Boolean).join("\n").trim(),
+          output: parsedResult.output,
+          ...(typeof parsedResult.preventContinuation === "boolean"
+            ? { preventContinuation: parsedResult.preventContinuation }
+            : {}),
+          ...(parsedResult.stopReason ? { stopReason: parsedResult.stopReason } : {}),
+          ...(parsedResult.additionalContext ? { additionalContext: parsedResult.additionalContext } : {}),
         })
       }
     }
   } finally {
     await fs.rm(payloadPath, { force: true }).catch(() => undefined)
   }
-  return executions.filter((execution) => execution.output.trim().length > 0 || execution.success === false)
+  return executions.filter(
+    (execution) =>
+      execution.output.trim().length > 0 ||
+      execution.success === false ||
+      execution.preventContinuation === true ||
+      Boolean(execution.additionalContext),
+  )
+}
+
+export async function runPluginHooks(
+  cwd: string,
+  host: IHost,
+  config: NexusConfig,
+  hookEvent: PluginHookEvent,
+  payload: Record<string, unknown>,
+): Promise<PluginHookExecution[]> {
+  if (config.plugins?.enableHooks === false) return []
+  const plugins = await loadPluginRuntimeRecords(cwd, config)
+  const trusted = plugins.filter((plugin) => plugin.runtimeEnabled !== false && plugin.trusted === true)
+  return runHookDeclarations(
+    cwd,
+    host,
+    config.plugins?.hookTimeoutMs ?? 15_000,
+    hookEvent,
+    payload,
+    trusted.map((plugin) => ({ name: plugin.name, hooks: plugin.hooks })),
+    (item, relativePath) => {
+      const plugin = trusted.find((candidate) => candidate.name === item.name)!
+      return resolvePluginDeclaredPath(plugin, relativePath)
+    },
+  )
+}
+
+export async function runScopedHooks(
+  cwd: string,
+  host: IHost,
+  hookEvent: PluginHookEvent,
+  payload: Record<string, unknown>,
+  items: Array<{ name: string; rootDir: string; hooks: string[] }>,
+): Promise<PluginHookExecution[]> {
+  return runHookDeclarations(
+    cwd,
+    host,
+    15_000,
+    hookEvent,
+    payload,
+    items.map((item) => ({ name: item.name, hooks: item.hooks })),
+    (item, relativePath) => {
+      const source = items.find((candidate) => candidate.name === item.name)!
+      return path.resolve(source.rootDir, relativePath)
+    },
+  )
 }
