@@ -4,10 +4,12 @@ interface Props {
   reasoningText: string
   startTime: number | null
   isRunning: boolean
+  /** After expand/collapse; parent may re-pin virtualized chat when user follows the tail. */
+  onLayoutHint?: () => void
 }
 
 /** Live thinking block: shows "Thinking…" with shimmer wave while model is reasoning. Expandable on click. */
-export function ThoughtBlock({ reasoningText, isRunning }: Props) {
+export function ThoughtBlock({ reasoningText, isRunning, onLayoutHint }: Props) {
   const [expanded, setExpanded] = useState(false)
 
   if (!isRunning) return null
@@ -16,7 +18,10 @@ export function ThoughtBlock({ reasoningText, isRunning }: Props) {
     <div className="nexus-thought-block flex-shrink-0">
       <button
         type="button"
-        onClick={() => setExpanded((e) => !e)}
+        onClick={() => {
+          setExpanded((e) => !e)
+          onLayoutHint?.()
+        }}
         className="w-full flex items-center gap-1.5 px-0 py-1 text-left text-xs hover:text-[var(--vscode-foreground)]"
       >
         <span className="flex-shrink-0 transition-transform text-[10px] text-[var(--vscode-descriptionForeground)]" style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>

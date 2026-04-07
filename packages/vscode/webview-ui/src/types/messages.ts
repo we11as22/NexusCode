@@ -78,7 +78,7 @@ export interface WebviewState {
   autocompleteExtension: AutocompleteExtensionUiState
 }
 
-export type ExtensionMessage =
+export type ExtensionMessage = (
   | { type: "stateUpdate"; state: WebviewState }
   | { type: "agentEvent"; event: Record<string, unknown> }
   | { type: "sessionList"; sessions: Array<{ id: string; ts: number; title?: string; messageCount: number }> }
@@ -103,3 +103,4 @@ export type ExtensionMessage =
     }
   | { type: "marketplaceInstallResult"; slug: string; success: boolean; error?: string }
   | { type: "marketplaceRemoveResult"; slug: string; success: boolean; error?: string }
+) & { seq?: number }

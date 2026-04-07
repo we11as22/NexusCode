@@ -2808,7 +2808,9 @@ interface AgentLoopOptions {
  */
 declare function runAgentLoop(opts: AgentLoopOptions): Promise<void>;
 
-type ToolGroup = "read" | "write" | "execute" | "search" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit";
+type ToolGroup = "read" | "write" | "execute" | "search" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit"
+/** Switch UI/session to plan mode (only where planning is not already the focus). */
+ | "plan_enter";
 /**
  * Core built-in tool groups per mode.
  * Access control is enforced in the backend (getBuiltinToolsForMode + getBlockedToolsForMode in loop);
@@ -2817,7 +2819,7 @@ type ToolGroup = "read" | "write" | "execute" | "search" | "mcp" | "skills" | "a
 declare const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]>;
 /**
  * Built-in tool names per group.
- * Tools in "always" group are available in every mode.
+ * Tools in "always" are mode-agnostic utilities; mode-specific entries use plan_enter, plan_exit, etc.
  */
 declare const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]>;
 /**

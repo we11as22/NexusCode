@@ -1,6 +1,17 @@
 import { create } from "zustand"
 import { postMessage } from "../vscode.js"
 import type { ModelsCatalogFromCore, AgentPresetFromCore, AutocompleteExtensionUiState } from "../types/messages.js"
+import {
+  ensureAssistantMessage as ensureAssistantMessageFromHelpers,
+  findOpenReasoningReverseIndex as findOpenReasoningReverseIndexFromHelpers,
+  findToolPartIndexForSubagent as findToolPartIndexForSubagentFromHelpers,
+  isDelegatedAgentParentTool as isDelegatedAgentParentToolFromHelpers,
+  isDelegatedAgentParentToolEndClear as isDelegatedAgentParentToolEndClearFromHelpers,
+  mergeStateMessagesForStream as mergeStateMessagesForStreamFromHelpers,
+  reduceSubagentState as reduceSubagentStateFromHelpers,
+  sanitizeAssistantText as sanitizeAssistantTextFromHelpers,
+  seenRecently as seenRecentlyFromHelpers,
+} from "../transcript/helpers.js"
 
 /** Detects a new plan snapshot so the full follow-up panel re-opens. */
 let planFollowupTextFingerprint: string | null = null
@@ -8,18 +19,8 @@ let planFollowupTextFingerprint: string | null = null
 // --- Stream idempotency guard ---
 // Some transports can replay events (reconnect, server shadow + snapshot merge). Without stable event ids,
 // we dedupe the most repeat-prone events via a small rolling fingerprint set.
-const RECENT_EVENT_FINGERPRINTS_MAX = 800
-const recentEventFingerprints = new Set<string>()
-const recentEventFingerprintQueue: string[] = []
 function seenRecently(fingerprint: string): boolean {
-  if (recentEventFingerprints.has(fingerprint)) return true
-  recentEventFingerprints.add(fingerprint)
-  recentEventFingerprintQueue.push(fingerprint)
-  if (recentEventFingerprintQueue.length > RECENT_EVENT_FINGERPRINTS_MAX) {
-    const oldest = recentEventFingerprintQueue.shift()
-    if (oldest) recentEventFingerprints.delete(oldest)
-  }
-  return false
+  return seenRecentlyFromHelpers(fingerprint)
 }
 
 export type Mode = "agent" | "plan" | "ask" | "debug" | "review"
@@ -366,7 +367,14 @@ interface ChatState {
     title?: string
     submitLabel?: string
     customOptionLabel?: string
-    questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }>
+    questions: Array<{
+      id: string
+      question: string
+      header?: string
+      multiSelect?: boolean
+      options: Array<{ id: string; label: string; description?: string; preview?: string }>
+      allowCustom?: boolean
+    }>
   } | null
   /**
    * Request id the user just dismissed/submitted locally; ignore same id in following stateUpdate
@@ -480,7 +488,7 @@ export type AgentEvent =
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
   | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string; parentPartId?: string }
   | { type: "tool_approval_needed"; action: ApprovalAction; partId: string }
-  | { type: "question_request"; request: { requestId: string; title?: string; submitLabel?: string; customOptionLabel?: string; questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }> }; partId?: string }
+  | { type: "question_request"; request: { requestId: string; title?: string; submitLabel?: string; customOptionLabel?: string; questions: Array<{ id: string; question: string; header?: string; multiSelect?: boolean; options: Array<{ id: string; label: string; description?: string; preview?: string }>; allowCustom?: boolean }> }; partId?: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
   | { type: "index_update"; status: IndexStatusKind }
@@ -855,7 +863,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           state.sessionId == null
         )
       ) {
-        next.messages = mergeStateMessagesForStream(prev.messages, state.messages)
+        next.messages = mergeStateMessagesForStreamFromHelpers(prev.messages, state.messages)
       }
       const effectivePlanDone = state.planCompleted !== undefined ? state.planCompleted : prev.planCompleted
       const effectivePlanText =
@@ -1020,19 +1028,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     switch (event.type) {
       case "assistant_message_started": {
-        const { list, index } = ensureAssistantMessage(messages, event.messageId)
+        const { list, index } = ensureAssistantMessageFromHelpers(messages, event.messageId)
         set({ messages: list })
         break
       }
 
       case "text_delta": {
-        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const { list: baseList, index } = ensureAssistantMessageFromHelpers(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
         const updated = { ...target }
         const umDelta = (event as { user_message_delta?: string }).user_message_delta
         if (typeof updated.content === "string") {
-          const newText = sanitizeAssistantText(updated.content + event.delta)
+          const newText = sanitizeAssistantTextFromHelpers(updated.content + event.delta)
           if (umDelta != null) {
             updated.content = [{ type: "text", text: newText, user_message: umDelta }]
           } else {
@@ -1044,11 +1052,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (lastPart?.type === "text") {
             parts[parts.length - 1] = {
               ...lastPart,
-              text: sanitizeAssistantText(lastPart.text + event.delta),
+              text: sanitizeAssistantTextFromHelpers(lastPart.text + event.delta),
               ...(umDelta != null ? { user_message: umDelta } : {}),
             } as TextPart
           } else {
-            const cleaned = sanitizeAssistantText(event.delta)
+            const cleaned = sanitizeAssistantTextFromHelpers(event.delta)
             if (cleaned) {
               const startTime = get().reasoningStartTime
               if (lastPart?.type === "reasoning" && startTime != null) {
@@ -1071,7 +1079,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "assistant_content_complete": {
-        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const { list: baseList, index } = ensureAssistantMessageFromHelpers(messages, event.messageId)
         const target = baseList[index]
         if (!target || !Array.isArray(target.content)) break
         const parts = [...(target.content as MessagePart[])]
@@ -1093,18 +1101,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "tool_start": {
         const ev = event as { input?: Record<string, unknown>; tool?: string }
-        if (ev.tool && isDelegatedAgentTool(ev.tool, ev.input)) {
+        if (ev.tool && isDelegatedAgentParentToolFromHelpers(ev.tool, ev.input)) {
           set({ lastSpawnAgentPartId: event.partId })
-        } else if (ev.tool === "Parallel" || ev.tool === "parallel") {
-          // Track Parallel as spawn parent when all tool_uses are SpawnAgent calls
-          const toolUses = (ev.input?.tool_uses as Array<{ recipient_name?: string }> | undefined) ?? []
-          const allSpawn = toolUses.length > 0 && toolUses.every((u) => {
-            const name = (u.recipient_name ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "")
-            return name === "spawnagent" || name === "spawnagents"
-          })
-          if (allSpawn) set({ lastSpawnAgentPartId: event.partId })
         }
-        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const { list: baseList, index } = ensureAssistantMessageFromHelpers(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
         const parts = Array.isArray(target.content)
@@ -1153,7 +1153,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           diffHunks?: Array<{ type: string; lineNum: number; line: string }>
           appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>
         }
-        if (isDelegatedAgentTool(event.tool, (event as { input?: Record<string, unknown> }).input)) set({ lastSpawnAgentPartId: null })
+        if (isDelegatedAgentParentToolEndClearFromHelpers(event.tool, (event as { input?: Record<string, unknown> }).input)) set({ lastSpawnAgentPartId: null })
         set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
         const msgs = messages.map((msg) => {
           if (!Array.isArray(msg.content)) return msg
@@ -1201,7 +1201,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const idx = parts.findIndex((p) => p.type === "tool" && (p as ToolPart).id === partId)
           if (idx === -1) continue
           const part = parts[idx] as ToolPart
-          const nextSubagents = reduceSubagentState(part.subagents ?? [], {
+          const nextSubagents = reduceSubagentStateFromHelpers(part.subagents ?? [], {
             type: "subagent_start",
             subagentId: event.subagentId,
             mode: event.mode,
@@ -1222,19 +1222,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const msg = msgs[i]
           if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
           const parts = msg.content as MessagePart[]
-          const partIdx = findToolPartIndexForSubagent(parts, event.subagentId, fallbackPartId)
+          const partIdx = findToolPartIndexForSubagentFromHelpers(parts, event.subagentId, fallbackPartId)
           if (partIdx === -1) continue
           const part = parts[partIdx] as ToolPart
           let subagents = part.subagents ?? []
           if (!subagents.some((item) => item.id === event.subagentId) && typeof part.input?.description === "string") {
-            subagents = reduceSubagentState(subagents, {
+            subagents = reduceSubagentStateFromHelpers(subagents, {
               type: "subagent_start",
               subagentId: event.subagentId,
               mode: "ask",
               task: part.input.description.trim(),
             })
           }
-          subagents = reduceSubagentState(subagents, {
+          subagents = reduceSubagentStateFromHelpers(subagents, {
             type: "subagent_tool_start",
             subagentId: event.subagentId,
             tool: event.tool,
@@ -1255,19 +1255,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const msg = msgs[i]
           if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
           const parts = msg.content as MessagePart[]
-          const partIdx = findToolPartIndexForSubagent(parts, event.subagentId, fallbackPartId)
+          const partIdx = findToolPartIndexForSubagentFromHelpers(parts, event.subagentId, fallbackPartId)
           if (partIdx === -1) continue
           const part = parts[partIdx] as ToolPart
           let subagents = part.subagents ?? []
           if (!subagents.some((item) => item.id === event.subagentId) && typeof part.input?.description === "string") {
-            subagents = reduceSubagentState(subagents, {
+            subagents = reduceSubagentStateFromHelpers(subagents, {
               type: "subagent_start",
               subagentId: event.subagentId,
               mode: "ask",
               task: part.input.description.trim(),
             })
           }
-          subagents = reduceSubagentState(subagents, {
+          subagents = reduceSubagentStateFromHelpers(subagents, {
             type: "subagent_tool_end",
             subagentId: event.subagentId,
             tool: event.tool,
@@ -1288,19 +1288,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const msg = msgs[i]
           if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue
           const parts = msg.content as MessagePart[]
-          const partIdx = findToolPartIndexForSubagent(parts, event.subagentId, fallbackPartId)
+          const partIdx = findToolPartIndexForSubagentFromHelpers(parts, event.subagentId, fallbackPartId)
           if (partIdx === -1) continue
           const part = parts[partIdx] as ToolPart
           let subagents = part.subagents ?? []
           if (!subagents.some((item) => item.id === event.subagentId) && typeof part.input?.description === "string") {
-            subagents = reduceSubagentState(subagents, {
+            subagents = reduceSubagentStateFromHelpers(subagents, {
               type: "subagent_start",
               subagentId: event.subagentId,
               mode: "ask",
               task: part.input.description.trim(),
             })
           }
-          subagents = reduceSubagentState(subagents, {
+          subagents = reduceSubagentStateFromHelpers(subagents, {
             type: "subagent_done",
             subagentId: event.subagentId,
             success: event.success,
@@ -1316,7 +1316,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "reasoning_delta": {
         // Built-in agent-loop reflection: provider streams reasoning between tool calls; no tool, stored as type "reasoning" and shown as Thought block.
-        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const { list: baseList, index } = ensureAssistantMessageFromHelpers(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
         const reasoningId = typeof event.reasoningId === "string" && event.reasoningId.trim().length > 0 ? event.reasoningId : "reasoning-0"
@@ -1330,7 +1330,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const parts = Array.isArray(updated.content)
           ? [...(updated.content as MessagePart[])]
           : (typeof updated.content === "string" && updated.content.length > 0 ? [{ type: "text" as const, text: updated.content }] : [])
-        const revIdx = findOpenReasoningReverseIndex(parts, reasoningId)
+        const revIdx = findOpenReasoningReverseIndexFromHelpers(parts, reasoningId)
         const partIndex = revIdx >= 0 ? parts.length - 1 - revIdx : -1
         if (partIndex >= 0) {
           const reasoningPart = parts[partIndex] as ReasoningPart
@@ -1361,7 +1361,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "reasoning_start": {
-        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const { list: baseList, index } = ensureAssistantMessageFromHelpers(messages, event.messageId)
         const target = baseList[index]
         if (!target) break
         const reasoningId = typeof event.reasoningId === "string" && event.reasoningId.trim().length > 0 ? event.reasoningId : "reasoning-0"
@@ -1369,7 +1369,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const parts = Array.isArray(updated.content)
           ? [...(updated.content as MessagePart[])]
           : (typeof updated.content === "string" && updated.content.length > 0 ? [{ type: "text" as const, text: updated.content }] : [])
-        const revIdx = findOpenReasoningReverseIndex(parts, reasoningId)
+        const revIdx = findOpenReasoningReverseIndexFromHelpers(parts, reasoningId)
         if (revIdx < 0) {
           parts.push({
             type: "reasoning",
@@ -1389,7 +1389,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case "reasoning_end": {
-        const { list: baseList, index } = ensureAssistantMessage(messages, event.messageId)
+        const { list: baseList, index } = ensureAssistantMessageFromHelpers(messages, event.messageId)
         const target = baseList[index]
         const startTime = get().reasoningStartTime
         const reasoningId = typeof event.reasoningId === "string" && event.reasoningId.trim().length > 0 ? event.reasoningId : undefined
@@ -1473,7 +1473,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
               title?: string
               submitLabel?: string
               customOptionLabel?: string
-              questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }>
+              questions: Array<{
+                id: string
+                question: string
+                header?: string
+                multiSelect?: boolean
+                options: Array<{ id: string; label: string; description?: string; preview?: string }>
+                allowCustom?: boolean
+              }>
             }
           }).request,
           suppressedQuestionRequestId: null,
@@ -2026,12 +2033,4 @@ function sanitizeAssistantText(value: string): string {
     })
     .join("\n")
     .trim()
-}
-function isDelegatedAgentTool(tool: string, input?: Record<string, unknown>): boolean {
-  if (tool === "TaskCreateBatch" || tool === "SpawnAgent" || tool === "SpawnAgents" || tool === "SpawnAgentsParallel") return true
-  if (tool === "TaskCreate") {
-    const kind = typeof input?.kind === "string" ? input.kind : "tracking"
-    return kind === "agent"
-  }
-  return false
 }

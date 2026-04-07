@@ -34,35 +34,6 @@ When NOT to use:
 }
 
 /**
- * Summarize task — brief summary of the current task state.
- */
-const summarizeTaskSchema = z.object({
-  task_progress: z.string().optional(),
-})
-
-export const summarizeTaskTool: ToolDef<z.infer<typeof summarizeTaskSchema>> = {
-  name: "summarize_task",
-  description: `Request a summary of the current task and conversation state. Triggers compaction and adds a summary to context.
-
-When to use:
-- Long conversation and you need a refreshed view of goal and progress.
-- Before a long chain of tool calls to keep context manageable.
-
-When NOT to use:
-- Short sessions or when you have clear recent context.`,
-  parameters: summarizeTaskSchema,
-  readOnly: true,
-
-  async execute(_args, ctx: ToolContext) {
-    if (!ctx.compactSession) {
-      return { success: false, output: "Summarization is not available in this session." }
-    }
-    await ctx.compactSession()
-    return { success: true, output: "Task summary has been generated and added to the conversation context." }
-  },
-}
-
-/**
  * Plan exit — signal that planning is complete (Kilocode/OpenCode-style).
  * Only available in plan mode. Ends the agent loop; host may show "Ready to implement?" (New session / Continue here).
  */
@@ -76,7 +47,7 @@ export const planExitTool: ToolDef<z.infer<typeof planExitSchema>> = {
   description: `Signal that planning is complete (plan mode only). Call once you have finalized the plan file and are ready for user approval. This ends your planning turn and hands control to the user.
 
 Call this tool:
-- After you have written a complete plan to a file in \`.nexus/plans/\` (e.g. \`.nexus/plans/plan.md\`). PlanExit is rejected until at least one such file exists.
+- After you have written or updated the plan via \`Write\` / \`Edit\` under \`.nexus/plans/*.md\` or \`.txt\`. PlanExit is rejected until this **session** has at least one **completed** plan-file \`Write\` or \`Edit\` (same turn as PlanExit is OK). Files present only on disk from before your tool calls do **not** satisfy the gate.
 - When you are confident the plan is ready for implementation (and any blocking questions have been resolved via AskFollowupQuestion).
 - When your summary for the user is short and high-signal; the detailed plan belongs in the plan file, not in the tool args.
 

@@ -24,6 +24,8 @@ export type PluginHookEvent =
   | "subagent_start"
   | "subagent_stop"
   | "teammate_idle"
+  /** Fired once per agent run when the instruction bundle is active (observability; OpenClaude instructions_loaded parity). */
+  | "instructions_loaded"
 
 export function applyPluginRuntimeSettings(
   plugin: PluginManifestRecord,

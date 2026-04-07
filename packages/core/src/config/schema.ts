@@ -283,6 +283,31 @@ export const NexusConfigSchema = z.object({
     files: z.array(z.string()).default(["NEXUS.md", "AGENTS.md", "CLAUDE.md", ".nexus/rules/**"]),
   }).default({}),
 
+  /**
+   * OpenClaude-class memory: auto-memory dir, session scrolling notes file, tool spill hints.
+   * Session file lives next to JSONL under .nexus/sessions (per project hash).
+   */
+  memory: z.object({
+    /** Load project auto-memory markdown into the rules block (OpenClaude auto-memory parity). */
+    autoMemoryEnabled: z.boolean().default(true),
+    /** Override directory; tilde expanded for home. When unset, uses default project memory dir. */
+    autoMemoryDirectory: z.string().optional(),
+    /** Maintain session-memory.md next to JSONL and inject into system prompt. */
+    sessionMemoryEnabled: z.boolean().default(true),
+    /** Background LLM refresh after this many tool results in the outer loop (approximate). */
+    sessionMemoryMinToolCallsBetweenUpdates: z.number().int().positive().default(8),
+    /** Max stored characters for the session memory file. */
+    sessionMemoryMaxChars: z.number().int().positive().default(48_000),
+    /** When compacting tool results, keep spill path in model-facing text (stronger OpenClaude parity). */
+    emphasizeToolSpillPaths: z.boolean().default(true),
+    /** Load team markdown from ~/.nexus/teams/{encoded name}/memory/ for runtime teams. */
+    teamMemoryEnabled: z.boolean().default(true),
+    /** Periodically consolidate auto-memory dir into _nexus_consolidated_memory.md via LLM. */
+    autoDreamEnabled: z.boolean().default(false),
+    /** Min milliseconds between auto-dream runs. */
+    autoDreamMinIntervalMs: z.number().int().positive().default(3600000),
+  }).default({}),
+
   profiles: z.record(providerSchema.partial()).default({}),
 })
 

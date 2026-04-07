@@ -229,7 +229,7 @@ model:
 |-----|------------|
 | **AskFollowupQuestion** | Структурированные вопросы пользователю |
 | **TodoWrite** | Чеклист задач |
-| **Parallel** | Пакет read-only инструментов и/или несколько **SpawnAgent** |
+| **Parallel** | Пакет read-only инструментов и/или несколько делегированных агентов (**`TaskCreate(kind: "agent")`** внутри; legacy **SpawnAgent**) |
 | **Read** | Чтение файла (`file_path`, `offset`, `limit`); `~` → домашний каталог |
 | **List** | Один каталог — параметр **`path`** (не массив `paths`) |
 | **ListCodeDefinitions** | Символы в файле/каталоге |
@@ -252,9 +252,7 @@ model:
 | Имя | Примечание |
 |-----|------------|
 | **SpawnAgent**, **SpawnAgentsParallel**, **SpawnAgentOutput**, **SpawnAgentStop** | CLI и VS Code (`nexus-bootstrap` / `controller`) |
-| **SpawnAgent**, **SpawnAgents** (алиас), **SpawnAgentOutput**, **SpawnAgentStop** | HTTP-сервер (`run-session.ts`) — **`SpawnAgentsParallel` на сервере не регистрируется**; для параллельных сабагентов используйте **`Parallel`** с несколькими `SpawnAgent` |
-
-**Не зарегистрировано в типичном рантайме:** `create_rule` (файл `report-and-control.ts`), инструменты **exa_*** из `exa-search.ts` — в реестр не попадают.
+| **SpawnAgent**, **SpawnAgentsParallel**, **SpawnAgents** (алиас), **SpawnAgentOutput**, **SpawnAgentStop** | HTTP-сервер (`run-session.ts`), тот же набор, что в CLI / VS Code |
 
 ---
 
@@ -321,9 +319,9 @@ Enter — отправить; Shift+Enter — новая строка; Shift+Tab
 
 ## Мультиагентность и сабагенты
 
-- Параллельные независимые вызовы: инструмент **`Parallel`** (только read-only + **SpawnAgent** внутри по правилам).
-- Несколько сабагентов одним вызовом: **`SpawnAgentsParallel`** — в **CLI и VS Code**; на **HTTP-сервере** этот инструмент не подключается к реестру, там — **`Parallel`** с несколькими **`SpawnAgent`** (или последовательные вызовы).
-- Фон: **`SpawnAgent`** с `run_in_background`, ожидание через **`SpawnAgentOutput`** (`block: true` по умолчанию), отмена — **`SpawnAgentStop`**.
+- Параллельные независимые вызовы: инструмент **`Parallel`** (read-only и/или **`TaskCreate(kind: "agent")`** внутри; legacy **SpawnAgent** — только скрытое исполнение старых сессий).
+- Несколько сабагентов одним вызовом: предпочтительно **`TaskCreateBatch`**; legacy **`SpawnAgentsParallel`** и **`Parallel`** с несколькими внутренними вызовами — в **CLI, VS Code и HTTP-сервере**.
+- Фон и ожидание: публичный контракт **`TaskCreate` / `TaskOutput` / `TaskStop`**; legacy **`SpawnAgentOutput` / `SpawnAgentStop`** остаются для совместимости.
 - Лимит параллельности: **`parallelAgents.maxParallel`** (по умолчанию 4).
 
 ---

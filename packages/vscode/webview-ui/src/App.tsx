@@ -20,6 +20,7 @@ import type { AutocompleteExtensionUiState, ExtensionMessage } from "./types/mes
 import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
 import { NEXUS_CUSTOM_OPTION_ID } from "./constants/questionnaire.js"
 import { MarketplacePanel } from "./components/marketplace/MarketplacePanel.js"
+import { createExtensionMessageBuffer } from "./bridge/message-buffer.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
@@ -61,92 +62,39 @@ const REASONING_EFFORT_OPTIONS: Array<{ value: string; label: string }> = [
 
 export function App() {
   const store = useChatStore()
-  const pendingAgentEventsRef = useRef<AgentEvent[]>([])
-  const agentEventFrameRef = useRef<number | null>(null)
+  const messageBufferRef = useRef<ReturnType<typeof createExtensionMessageBuffer> | null>(null)
 
   useEffect(() => {
-    const flushAgentEvents = () => {
-      agentEventFrameRef.current = null
-      const queued = pendingAgentEventsRef.current
-      if (queued.length === 0) return
-      pendingAgentEventsRef.current = []
-      for (const queuedEvent of queued) {
-        store.handleAgentEvent(queuedEvent)
-      }
-    }
-
-    const scheduleAgentEventFlush = () => {
-      if (agentEventFrameRef.current != null) return
-      agentEventFrameRef.current = window.requestAnimationFrame(flushAgentEvents)
-    }
+    const messageBuffer = createExtensionMessageBuffer(store)
+    messageBufferRef.current = messageBuffer
 
     const handler = (event: MessageEvent) => {
       const msg = event.data as ExtensionMessage
       if (!msg?.type) return
 
       switch (msg.type) {
-        case "stateUpdate":
-          flushAgentEvents()
-          store.handleStateUpdate(msg.state)
-          break
         case "agentEvent": {
           const ev = msg.event as AgentEvent
-          // Apply index status immediately — same payload used to be duplicated as `indexStatus` + deferred
-          // `index_update`, which could reorder and clear `paused` after Pause was applied.
           if (ev.type === "index_update" && ev && typeof (ev as { status?: unknown }).status === "object") {
-            flushAgentEvents()
-            store.handleIndexStatus((ev as { status: IndexStatusKind }).status)
-            break
+            messageBuffer.enqueue({
+              ...(msg as ExtensionMessage),
+              type: "indexStatus",
+              status: (ev as { status: IndexStatusKind }).status,
+            } as ExtensionMessage)
+            return
           }
-          pendingAgentEventsRef.current.push(ev)
-          scheduleAgentEventFlush()
           break
         }
-        case "indexStatus":
-          store.handleIndexStatus(msg.status as any)
-          break
-        case "sessionList":
-          store.handleSessionList(msg.sessions)
-          break
-        case "sessionListLoading":
-          store.handleSessionListLoading(msg.loading)
-          break
-        case "configLoaded":
-          store.handleConfigLoaded(msg.config)
-          break
-        case "mcpServerStatus":
-          if ("results" in msg) store.handleMcpServerStatus(msg.results)
-          break
         case "pendingApproval":
           if ("partId" in msg && "action" in msg) store.handlePendingApproval(msg.partId, msg.action)
-          break
+          return
         case "confirmResult":
           if ("id" in msg && "ok" in msg) resolveConfirm(msg.id, msg.ok)
-          break
-        case "addToChatContent":
-          store.appendToInput(msg.content)
-          break
-        case "modelsCatalog":
-          if ("catalog" in msg) store.handleModelsCatalog(msg.catalog as import("./types/messages.js").ModelsCatalogFromCore)
-          break
-        case "agentPresets":
-          if ("presets" in msg) store.handleAgentPresets(msg.presets as import("./types/messages.js").AgentPresetFromCore[])
-          break
-        case "agentPresetOptions":
-          if ("options" in msg) store.handleAgentPresetOptions(msg.options as { skills: string[]; mcpServers: string[]; rulesFiles: string[] })
-          break
-        case "skillDefinitions":
-          if ("definitions" in msg) store.handleSkillDefinitions(msg.definitions as Array<{ name: string; path: string; summary: string }>)
-          break
-        case "action":
-          if (msg.action === "switchView" && msg.view) {
-            store.setView(msg.view, {
-              ...(msg.settingsTab && { settingsTab: msg.settingsTab }),
-              ...(msg.settingsIntegTab && { settingsIntegTab: msg.settingsIntegTab }),
-            })
-          }
+          return
+        default:
           break
       }
+      messageBuffer.enqueue(msg)
     }
 
     window.addEventListener("message", handler)
@@ -154,11 +102,8 @@ export function App() {
     postMessage({ type: "webviewDidLaunch" })
     return () => {
       window.removeEventListener("message", handler)
-      if (agentEventFrameRef.current != null) {
-        window.cancelAnimationFrame(agentEventFrameRef.current)
-        agentEventFrameRef.current = null
-      }
-      pendingAgentEventsRef.current = []
+      messageBuffer.dispose()
+      messageBufferRef.current = null
     }
   }, [])
 
@@ -289,6 +234,38 @@ function ChatView() {
   )
 }
 
+type QuestionnaireOption = {
+  id: string
+  label: string
+  description?: string
+  preview?: string
+  isCustom: boolean
+}
+
+type QuestionnaireQuestion = {
+  id: string
+  question: string
+  header?: string
+  multiSelect?: boolean
+  options: Array<{ id: string; label: string; description?: string; preview?: string }>
+  allowCustom?: boolean
+}
+
+type QuestionnaireAnswer = {
+  optionId?: string
+  optionIds?: string[]
+  optionLabel?: string
+  optionLabels?: string[]
+  customText?: string
+}
+
+function questionnaireQuestionAnswered(item: QuestionnaireQuestion, answer?: QuestionnaireAnswer): boolean {
+  if (!answer) return false
+  if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
+  if (item.multiSelect) return Array.isArray(answer.optionIds) && answer.optionIds.length > 0
+  return Boolean(answer.optionId)
+}
+
 function QuestionnaireBar({
   request,
   onDismiss,
@@ -299,55 +276,99 @@ function QuestionnaireBar({
     title?: string
     submitLabel?: string
     customOptionLabel?: string
-    questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string }>; allowCustom?: boolean }>
+    questions: QuestionnaireQuestion[]
   }
   onDismiss: () => void
-  onSubmit: (answers: Array<{ questionId: string; optionId?: string; optionLabel?: string; customText?: string }>) => void
+  onSubmit: (answers: Array<{
+    questionId: string
+    optionId?: string
+    optionIds?: string[]
+    optionLabel?: string
+    optionLabels?: string[]
+    customText?: string
+  }>) => void
 }) {
   const [questionIndex, setQuestionIndex] = useState(0)
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const [answers, setAnswers] = useState<Record<string, { optionId?: string; optionLabel?: string; customText?: string }>>({})
+  const [answers, setAnswers] = useState<Record<string, QuestionnaireAnswer>>({})
   const question = request.questions[questionIndex]
 
   const customLabel = request.customOptionLabel?.trim() || "Other"
-  const options = question
+  const options: QuestionnaireOption[] = question
     ? [
-        ...question.options.map((option) => ({ ...option, isCustom: false as const })),
+        ...question.options.map((option) => ({
+          ...option,
+          isCustom: false as const,
+        })),
         { id: NEXUS_CUSTOM_OPTION_ID, label: customLabel, isCustom: true as const },
       ]
     : []
-  const answeredCount = request.questions.filter((item) => {
-    const answer = answers[item.id]
-    if (!answer) return false
-    if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
-    return Boolean(answer.optionId)
-  }).length
+  const answeredCount = request.questions.filter((item) =>
+    questionnaireQuestionAnswered(item, answers[item.id]),
+  ).length
   const allAnswered = answeredCount === request.questions.length && request.questions.length > 0
   const activeAnswer = question ? answers[question.id] : undefined
   const customMode = activeAnswer?.optionId === NEXUS_CUSTOM_OPTION_ID
   const showKicker = Boolean(request.title && request.title.trim() && request.title !== "Asking questions")
+  const isMulti = Boolean(question?.multiSelect)
+  const focusedOption = options[selectedIndex]
+  const showPreview =
+    !isMulti &&
+    focusedOption &&
+    !focusedOption.isCustom &&
+    typeof focusedOption.preview === "string" &&
+    focusedOption.preview.trim().length > 0
+
+  const buildPayload = React.useCallback(
+    (nextAnswers: Record<string, QuestionnaireAnswer>) =>
+      request.questions.map((item) => {
+        const a = nextAnswers[item.id]
+        if (item.multiSelect) {
+          if (a?.optionId === NEXUS_CUSTOM_OPTION_ID) {
+            return {
+              questionId: item.id,
+              optionId: a.optionId,
+              optionLabel: a.optionLabel,
+              customText: a.customText,
+            }
+          }
+          const ids = a?.optionIds ?? []
+          const labels = ids
+            .map((id) => item.options.find((o) => o.id === id)?.label)
+            .filter((x): x is string => Boolean(x?.trim()))
+          return { questionId: item.id, optionIds: ids, optionLabels: labels }
+        }
+        return {
+          questionId: item.id,
+          optionId: a?.optionId,
+          optionLabel: a?.optionLabel,
+          customText: a?.customText,
+        }
+      }),
+    [request.questions],
+  )
 
   const submitAnswers = React.useCallback(
-    (nextAnswers: typeof answers) =>
-      onSubmit(
-        request.questions.map((item) => ({
-          questionId: item.id,
-          optionId: nextAnswers[item.id]?.optionId,
-          optionLabel: nextAnswers[item.id]?.optionLabel,
-          customText: nextAnswers[item.id]?.customText,
-        })),
-      ),
-    [onSubmit, request.questions],
+    (nextAnswers: typeof answers) => onSubmit(buildPayload(nextAnswers)),
+    [buildPayload, onSubmit],
   )
 
   React.useEffect(() => {
     if (!question) return
     const current = answers[question.id]
-    const idx = current?.optionId ? options.findIndex((option) => option.id === current.optionId) : -1
+    let idx = -1
+    if (question.multiSelect && current?.optionIds && current.optionIds.length > 0) {
+      idx = options.findIndex((option) => option.id === current.optionIds![0])
+    } else if (current?.optionId) {
+      idx = options.findIndex((option) => option.id === current.optionId)
+    }
     setSelectedIndex(idx >= 0 ? idx : 0)
   }, [answers, options, question])
 
   React.useEffect(() => {
+    const everyAnswered = (next: Record<string, QuestionnaireAnswer>) =>
+      request.questions.every((item) => questionnaireQuestionAnswered(item, next[item.id]))
+
     const onKey = (e: KeyboardEvent) => {
       if (!question) return
       if (e.key === "Escape") {
@@ -355,7 +376,13 @@ function QuestionnaireBar({
         if (customMode) {
           setAnswers((prev) => ({
             ...prev,
-            [question.id]: { optionId: undefined, optionLabel: undefined, customText: "" },
+            [question.id]: {
+              optionId: undefined,
+              optionLabel: undefined,
+              optionIds: undefined,
+              optionLabels: undefined,
+              customText: "",
+            },
           }))
           return
         }
@@ -378,12 +405,7 @@ function QuestionnaireBar({
             setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))
             return
           }
-          if (request.questions.every((item) => {
-            const answer = nextAnswers[item.id]
-            if (!answer) return false
-            if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
-            return Boolean(answer.optionId)
-          })) {
+          if (everyAnswered(nextAnswers)) {
             submitAnswers(nextAnswers)
           }
         }
@@ -417,7 +439,42 @@ function QuestionnaireBar({
         }
         return
       }
-      if (e.key === "Enter") {
+      if (isMulti && (e.key === " " || e.key === "Enter") && !e.shiftKey) {
+        e.preventDefault()
+        const selected = options[selectedIndex]
+        if (!selected) return
+        if (selected.isCustom) {
+          setAnswers((prev) => ({
+            ...prev,
+            [question.id]: {
+              optionId: NEXUS_CUSTOM_OPTION_ID,
+              optionLabel: customLabel,
+              customText: prev[question.id]?.customText ?? "",
+              optionIds: undefined,
+              optionLabels: undefined,
+            },
+          }))
+          return
+        }
+        setAnswers((prev) => {
+          const cur = prev[question.id] ?? {}
+          const ids = new Set(cur.optionIds ?? [])
+          if (ids.has(selected.id)) ids.delete(selected.id)
+          else ids.add(selected.id)
+          return {
+            ...prev,
+            [question.id]: {
+              optionIds: [...ids],
+              optionId: undefined,
+              optionLabel: undefined,
+              optionLabels: undefined,
+              customText: undefined,
+            },
+          }
+        })
+        return
+      }
+      if (!isMulti && e.key === "Enter") {
         e.preventDefault()
         const selected = options[selectedIndex]
         if (!selected) return
@@ -435,20 +492,26 @@ function QuestionnaireBar({
           setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))
           return
         }
-        if (request.questions.every((item) => {
-          const answer = nextAnswers[item.id]
-          if (!answer) return false
-          if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
-          return Boolean(answer.optionId)
-        })) {
+        if (everyAnswered(nextAnswers)) {
           submitAnswers(nextAnswers)
         }
       }
     }
-    // Capture so ArrowLeft/ArrowRight reach us before focused buttons/inputs handle them.
     window.addEventListener("keydown", onKey, true)
     return () => window.removeEventListener("keydown", onKey, true)
-  }, [answers, customLabel, customMode, onDismiss, options, question, questionIndex, request.questions, selectedIndex, submitAnswers])
+  }, [
+    answers,
+    customLabel,
+    customMode,
+    isMulti,
+    onDismiss,
+    options,
+    question,
+    questionIndex,
+    request.questions,
+    selectedIndex,
+    submitAnswers,
+  ])
 
   return (
     <div className="nexus-questionnaire-wrap nexus-questionnaire-wrap--input-slot">
@@ -456,7 +519,12 @@ function QuestionnaireBar({
         <div className="nexus-questionnaire-header">
           <div className="nexus-questionnaire-header-text min-w-0">
             {showKicker ? <div className="nexus-questionnaire-kicker">{request.title}</div> : null}
-            <div className="nexus-questionnaire-question-inline">{question?.question ?? ""}</div>
+            <div className="nexus-questionnaire-question-inline flex flex-wrap items-center gap-2 min-w-0">
+              {question?.header?.trim() ? (
+                <span className="nexus-questionnaire-header-chip">{question.header.trim()}</span>
+              ) : null}
+              <span className="min-w-0">{question?.question ?? ""}</span>
+            </div>
           </div>
           <div className="nexus-questionnaire-pager">
             <button
@@ -483,56 +551,114 @@ function QuestionnaireBar({
           </div>
         </div>
         <div className="nexus-questionnaire-body">
-          <div className="nexus-questionnaire-options">
-            {options.map((option, index) => {
-              const active = activeAnswer?.optionId === option.id
-              const isCustomRow = option.isCustom
-              return (
-                <button
-                  key={option.id}
-                  type="button"
-                  className={`nexus-questionnaire-option ${(active || index === selectedIndex) ? "nexus-questionnaire-option-active" : ""} ${isCustomRow ? "nexus-questionnaire-option--custom" : ""}`}
-                  onClick={() =>
-                    question &&
-                    (() => {
-                      setSelectedIndex(index)
-                      setAnswers((prev) => ({
-                        ...prev,
-                        [question.id]: {
-                          optionId: option.id,
-                          optionLabel: isCustomRow ? customLabel : option.label,
-                          customText: isCustomRow ? (prev[question.id]?.customText ?? "") : undefined,
-                        },
-                      }))
-                    })()
+          <div
+            className={`nexus-questionnaire-body-inner ${showPreview ? "nexus-questionnaire-body-inner--split" : ""}`}
+          >
+            <div className="nexus-questionnaire-options-col min-w-0">
+              <div className="nexus-questionnaire-options">
+                {options.map((option, index) => {
+                  const active = isMulti
+                    ? Boolean(activeAnswer?.optionIds?.includes(option.id))
+                    : activeAnswer?.optionId === option.id
+                  const isCustomRow = option.isCustom
+                  const focused = index === selectedIndex
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`nexus-questionnaire-option ${(active || focused) ? "nexus-questionnaire-option-active" : ""} ${isCustomRow ? "nexus-questionnaire-option--custom" : ""}`}
+                      onClick={() => {
+                        if (!question) return
+                        setSelectedIndex(index)
+                        if (isMulti) {
+                          if (isCustomRow) {
+                            setAnswers((prev) => ({
+                              ...prev,
+                              [question.id]: {
+                                optionId: NEXUS_CUSTOM_OPTION_ID,
+                                optionLabel: customLabel,
+                                customText: prev[question.id]?.customText ?? "",
+                                optionIds: undefined,
+                                optionLabels: undefined,
+                              },
+                            }))
+                            return
+                          }
+                          setAnswers((prev) => {
+                            const cur = prev[question.id] ?? {}
+                            const ids = new Set(cur.optionIds ?? [])
+                            if (ids.has(option.id)) ids.delete(option.id)
+                            else ids.add(option.id)
+                            return {
+                              ...prev,
+                              [question.id]: {
+                                optionIds: [...ids],
+                                optionId: undefined,
+                                optionLabel: undefined,
+                                optionLabels: undefined,
+                                customText: undefined,
+                              },
+                            }
+                          })
+                          return
+                        }
+                        setAnswers((prev) => ({
+                          ...prev,
+                          [question.id]: {
+                            optionId: option.id,
+                            optionLabel: isCustomRow ? customLabel : option.label,
+                            customText: isCustomRow ? (prev[question.id]?.customText ?? "") : undefined,
+                          },
+                        }))
+                      }}
+                    >
+                      <span className="nexus-questionnaire-option-num">
+                        {isMulti && !isCustomRow ? (active ? "☑" : "☐") : `${index + 1}.`}
+                      </span>
+                      <span className="nexus-questionnaire-option-label flex flex-col items-start gap-0.5 min-w-0">
+                        {isCustomRow ? (
+                          <span className="nexus-questionnaire-custom-placeholder" />
+                        ) : (
+                          <>
+                            <span>{option.label}</span>
+                            {option.description?.trim() ? (
+                              <span className="nexus-questionnaire-option-desc">{option.description.trim()}</span>
+                            ) : null}
+                          </>
+                        )}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+              {activeAnswer?.optionId === NEXUS_CUSTOM_OPTION_ID && question ? (
+                <textarea
+                  className="nexus-questionnaire-custom-input"
+                  value={activeAnswer.customText ?? ""}
+                  onChange={(e) =>
+                    setAnswers((prev) => ({
+                      ...prev,
+                      [question.id]: {
+                        optionId: NEXUS_CUSTOM_OPTION_ID,
+                        optionLabel: customLabel,
+                        customText: e.target.value,
+                        ...(isMulti
+                          ? { optionIds: undefined, optionLabels: undefined }
+                          : {}),
+                      },
+                    }))
                   }
-                >
-                  <span className="nexus-questionnaire-option-num">{index + 1}.</span>
-                  <span className="nexus-questionnaire-option-label">
-                    {isCustomRow ? <span className="nexus-questionnaire-custom-placeholder" /> : option.label}
-                  </span>
-                </button>
-              )
-            })}
+                  placeholder="Your answer"
+                  rows={2}
+                />
+              ) : null}
+            </div>
+            {showPreview && focusedOption?.preview ? (
+              <div className="nexus-questionnaire-preview">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{focusedOption.preview}</ReactMarkdown>
+              </div>
+            ) : null}
           </div>
-          {activeAnswer?.optionId === NEXUS_CUSTOM_OPTION_ID && question ? (
-            <textarea
-              className="nexus-questionnaire-custom-input"
-              value={activeAnswer.customText ?? ""}
-              onChange={(e) =>
-                setAnswers((prev) => ({
-                  ...prev,
-                  [question.id]: {
-                    optionId: NEXUS_CUSTOM_OPTION_ID,
-                    optionLabel: customLabel,
-                    customText: e.target.value,
-                  },
-                }))
-              }
-              placeholder="Your answer"
-              rows={2}
-            />
-          ) : null}
         </div>
         <div className="nexus-questionnaire-card-footer">
           <button type="button" className="nexus-questionnaire-dismiss" onClick={onDismiss}>
@@ -541,16 +667,7 @@ function QuestionnaireBar({
           <button
             type="button"
             className="nexus-questionnaire-continue"
-            onClick={() =>
-              onSubmit(
-                request.questions.map((item) => ({
-                  questionId: item.id,
-                  optionId: answers[item.id]?.optionId,
-                  optionLabel: answers[item.id]?.optionLabel,
-                  customText: answers[item.id]?.customText,
-                })),
-              )
-            }
+            onClick={() => onSubmit(buildPayload(answers))}
             disabled={!allAnswered}
           >
             {request.submitLabel ?? "Continue"} <kbd className="nexus-kbd">⏎</kbd>

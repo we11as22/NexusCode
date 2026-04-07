@@ -39,7 +39,7 @@ import {
   createLLMClient,
   ToolRegistry,
   loadSkills,
-  loadRules,
+  loadAgentInstructionBundle,
   McpClient,
   setMcpClientInstance,
   resolveBundledMcpServers,
@@ -75,6 +75,8 @@ import {
   estimateToolsDefinitionsTokens,
   getAllBuiltinTools,
   getClaudeCompatibilityOptions,
+  isDelegatedAgentParentTool,
+  isDelegatedAgentParentToolEndClear,
   loadSlashCommands,
   renderSlashCommandPrompt,
 } from "@nexuscode/core"
@@ -84,15 +86,6 @@ import { listAbsolutePathsRipgrep } from "./services/indexing/list-absolute-path
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
-
-function isDelegatedAgentToolEvent(tool: string, input?: Record<string, unknown>): boolean {
-  if (tool === "TaskCreateBatch" || tool === "SpawnAgent" || tool === "SpawnAgents" || tool === "SpawnAgentsParallel") return true
-  if (tool === "TaskCreate") {
-    const kind = typeof input?.kind === "string" ? input.kind : "tracking"
-    return kind === "agent"
-  }
-  return false
-}
 
 function findOpenReasoningReverseIndexShadow(parts: MessagePart[], reasoningId: string): number {
   return [...parts].reverse().findIndex(
@@ -312,7 +305,7 @@ export type WebviewMessage =
       }>
     }
 
-export type ExtensionMessage =
+export type ExtensionMessage = (
   | { type: "stateUpdate"; state: WebviewState }
   | { type: "agentEvent"; event: AgentEvent }
   | { type: "sessionList"; sessions: Array<{ id: string; ts: number; title?: string; messageCount: number }> }
@@ -337,6 +330,7 @@ export type ExtensionMessage =
     }
   | { type: "marketplaceInstallResult"; slug: string; success: boolean; error?: string }
   | { type: "marketplaceRemoveResult"; slug: string; success: boolean; error?: string }
+) & { seq?: number }
 
 export type ServerConnectionState = "idle" | "connecting" | "streaming" | "error"
 
@@ -750,7 +744,7 @@ export class Controller {
         } else {
           parts.push(nextPart)
         }
-        if (isDelegatedAgentToolEvent(event.tool, event.input)) {
+        if (isDelegatedAgentParentTool(event.tool, event.input)) {
           this.streamLastSpawnAgentPartId = event.partId
         }
         return
@@ -777,7 +771,7 @@ export class Controller {
             timeEnd: Date.now(),
           } as ToolPart
         }
-        if (isDelegatedAgentToolEvent(event.tool, (event as { input?: Record<string, unknown> }).input)) {
+        if (isDelegatedAgentParentToolEndClear(event.tool, (event as { input?: Record<string, unknown> }).input)) {
           this.streamLastSpawnAgentPartId = null
         }
         return
@@ -2664,11 +2658,11 @@ Return in this format:
       }
       // Track spawn agent partId for subagent event routing (local mode doesn't go through applyAgentEventToSessionShadow for non-subagent events)
       if (event.type === "tool_start") {
-        if (isDelegatedAgentToolEvent(event.tool, event.input)) {
+        if (isDelegatedAgentParentTool(event.tool, event.input)) {
           this.streamLastSpawnAgentPartId = event.partId
         }
       } else if (event.type === "tool_end") {
-        if (isDelegatedAgentToolEvent(event.tool, (event as { input?: Record<string, unknown> }).input)) {
+        if (isDelegatedAgentParentToolEndClear(event.tool, (event as { input?: Record<string, unknown> }).input)) {
           this.streamLastSpawnAgentPartId = null
         }
       } else if (
@@ -2753,7 +2747,7 @@ Return in this format:
           ])
         : Promise.resolve()
       const claudeCompatibility = getClaudeCompatibilityOptions(configForRun)
-      const rulesP = loadRules(cwd, configForRun.rules.files, claudeCompatibility).catch(() => "")
+      const rulesP = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, claudeCompatibility).catch(() => "")
       const skillsP = loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, claudeCompatibility).catch(() => [])
       const RULES_SKILLS_TIMEOUT_MS = 2000
       const rulesAndSkillsP = Promise.race([
@@ -2789,8 +2783,8 @@ Return in this format:
       toolRegistry.register(createTaskCreateBatchTool(parallelManager, configForRun))
       toolRegistry.register(createTaskSnapshotTool(parallelManager))
       toolRegistry.register(createTaskResumeTool(parallelManager, configForRun))
-      const { builtin: tools, dynamic } = toolRegistry.getForMode(runMode)
-      const allTools = [...tools, ...dynamic]
+      const { builtin, dynamic } = toolRegistry.getForMode(runMode)
+      const allTools = toolRegistry.mergeWithHiddenExecutionTools([...builtin, ...dynamic])
       const compaction = createCompaction()
       if (configForRun.checkpoint.enabled && !this.checkpoint) {
         this.checkpoint = new CheckpointTracker(this.session.id, cwd)

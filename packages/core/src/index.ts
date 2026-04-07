@@ -115,7 +115,17 @@ export {
   NEXUS_CUSTOM_OPTION_ID,
   NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX,
   formatQuestionnaireAnswersForAgent,
+  type QuestionOptionRow,
 } from "./tools/user-question-utils.js"
+export {
+  canonParallelInnerRecipient,
+  parallelInnerUseIsDelegatedAgent,
+  isPureSubagentParallelInput,
+  delegatedAgentDescriptionFromParallelInnerParams,
+  getParallelDelegatedAgentTaskDescriptions,
+  isDelegatedAgentParentTool,
+  isDelegatedAgentParentToolEndClear,
+} from "./subagent-parent-ui.js"
 
 // Indexer
 export { CodebaseIndexer } from "./indexer/index.js"
@@ -138,6 +148,24 @@ export { ensureQdrantRunning } from "./indexer/qdrant-manager.js"
 // Context
 export { parseMentions } from "./context/mentions.js"
 export { loadRules } from "./context/rules.js"
+export { loadAgentInstructionBundle } from "./context/agent-instructions.js"
+export { getDefaultAutoMemoryDir, resolveAutoMemoryDirectory, loadAutoMemoryMarkdown } from "./context/auto-memory.js"
+export {
+  readSessionMemoryFile,
+  getSessionMemoryFilePath,
+  refreshSessionMemoryFile,
+  appendCompactionSnippetToSessionMemory,
+} from "./session/session-memory.js"
+export {
+  registerToolOutputSpill,
+  getToolOutputSpill,
+  listToolSpillsForSession,
+  clearToolSpillsForSession,
+  inheritSpillRegistryForMergedToolPart,
+} from "./context/tool-output-registry.js"
+export type { ToolSpillRegistryEntry } from "./context/tool-output-registry.js"
+export { loadTeamMemoryMarkdown } from "./context/team-memory.js"
+export { runAutoMemoryDreamIfDue } from "./context/auto-dream.js"
 export { estimateTokens } from "./context/condense.js"
 export {
   computeContextUsageMetrics,

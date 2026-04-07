@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect, useMemo } from "react"
+import React, { useState, useRef, useEffect, useMemo, useLayoutEffect } from "react"
+import { NEXUS_CHAT_LAYOUT_EVENT } from "../constants/chatLayoutEvent.js"
 
 export interface TodoItem {
   id: number
@@ -154,6 +155,10 @@ export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
       list.scrollTop = Math.max(0, targetTop - (listHeight / 2 - targetHeight / 2))
     }
   }, [open, items, scrollIndex])
+
+  useLayoutEffect(() => {
+    window.dispatchEvent(new CustomEvent(NEXUS_CHAT_LAYOUT_EVENT))
+  }, [open, items.length])
 
   if (items.length === 0) return null
 

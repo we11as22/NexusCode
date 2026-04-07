@@ -2,37 +2,36 @@ import { Box, Text, useInput } from 'ink'
 import React, { useMemo, useState } from 'react'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import { getTheme } from '../utils/theme.js'
-import { NEXUS_CUSTOM_OPTION_ID } from '@nexuscode/core'
-
-type QuestionRequest = {
-  requestId: string
-  title?: string
-  submitLabel?: string
-  customOptionLabel?: string
-  questions: Array<{
-    id: string
-    question: string
-    options: Array<{ id: string; label: string }>
-    allowCustom?: boolean
-  }>
-}
+import { NEXUS_CUSTOM_OPTION_ID, type UserQuestionRequest, type UserQuestionAnswer } from '@nexuscode/core'
 
 type AnswerState = {
   optionId?: string
+  optionIds?: string[]
   optionLabel?: string
+  optionLabels?: string[]
   customText?: string
 }
 
+function questionAnswered(
+  item: UserQuestionRequest['questions'][number],
+  answer?: AnswerState,
+): boolean {
+  if (!answer) return false
+  if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
+  if (item.multiSelect) return Array.isArray(answer.optionIds) && answer.optionIds.length > 0
+  return Boolean(answer.optionId)
+}
+
 type Props = {
-  request: QuestionRequest
+  request: UserQuestionRequest
   onDismiss: () => void
-  onSubmit: (answers: Array<{ questionId: string; optionId?: string; optionLabel?: string; customText?: string }>) => void | Promise<void>
+  onSubmit: (answers: UserQuestionAnswer[]) => void | Promise<void>
 }
 
 const SEPARATOR_CHAR = '─'
 
 function stepLabel(
-  item: QuestionRequest['questions'][number],
+  item: UserQuestionRequest['questions'][number],
   index: number,
 ): string {
   const rawId = item.id?.trim() ?? ''
@@ -82,23 +81,22 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
     [request.questions],
   )
 
-  const answeredCount = request.questions.filter((item) => {
-    const answer = answers[item.id]
-    if (!answer) return false
-    if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
-    return Boolean(answer.optionId)
-  }).length
+  const answeredCount = request.questions.filter((item) => questionAnswered(item, answers[item.id])).length
   const allAnswered = answeredCount === request.questions.length && request.questions.length > 0
   const activeAnswer = question ? answers[question.id] : undefined
   const customMode =
     question != null && activeAnswer?.optionId === NEXUS_CUSTOM_OPTION_ID
+  const isMulti = Boolean(question?.multiSelect)
 
   React.useEffect(() => {
     if (!question) return
     const current = answers[question.id]
-    const idx = current?.optionId
-      ? options.findIndex((option) => option.id === current.optionId)
-      : -1
+    let idx = -1
+    if (question.multiSelect && current?.optionIds && current.optionIds.length > 0) {
+      idx = options.findIndex((option) => option.id === current.optionIds![0])
+    } else if (current?.optionId) {
+      idx = options.findIndex((option) => option.id === current.optionId)
+    }
     setSelectedIndex(idx >= 0 ? idx : 0)
   }, [answers, options, question])
 
@@ -120,12 +118,30 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
 
   const submitAllAnswers = () =>
     onSubmit(
-      request.questions.map((item) => ({
-        questionId: item.id,
-        optionId: answers[item.id]?.optionId,
-        optionLabel: answers[item.id]?.optionLabel,
-        customText: answers[item.id]?.customText,
-      })),
+      request.questions.map((item) => {
+        const a = answers[item.id]
+        if (item.multiSelect) {
+          if (a?.optionId === NEXUS_CUSTOM_OPTION_ID) {
+            return {
+              questionId: item.id,
+              optionId: a.optionId,
+              optionLabel: a.optionLabel,
+              customText: a.customText,
+            }
+          }
+          const ids = a?.optionIds ?? []
+          const labels = ids
+            .map((id) => item.options.find((o) => o.id === id)?.label)
+            .filter((x): x is string => Boolean(x?.trim()))
+          return { questionId: item.id, optionIds: ids, optionLabels: labels }
+        }
+        return {
+          questionId: item.id,
+          optionId: a?.optionId,
+          optionLabel: a?.optionLabel,
+          customText: a?.customText,
+        }
+      }),
     )
 
   useInput((input, key) => {
@@ -172,7 +188,13 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
       if (key.escape) {
         setAnswers((prev) => ({
           ...prev,
-          [question.id]: { optionId: undefined, optionLabel: undefined, customText: '' },
+          [question.id]: {
+            optionId: undefined,
+            optionLabel: undefined,
+            optionIds: undefined,
+            optionLabels: undefined,
+            customText: '',
+          },
         }))
         return
       }
@@ -228,11 +250,46 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
       setSelectedIndex((i) => (i + 1) % options.length)
       return
     }
+    if (isMulti && (input === ' ' || key.return)) {
+      const selected = options[selectedIndex]
+      if (!selected) return
+      if (selected.isCustom) {
+        setAnswers((prev) => ({
+          ...prev,
+          [question.id]: {
+            optionId: NEXUS_CUSTOM_OPTION_ID,
+            optionLabel: request.customOptionLabel ?? 'Other',
+            customText: prev[question.id]?.customText ?? '',
+            optionIds: undefined,
+            optionLabels: undefined,
+          },
+        }))
+        return
+      }
+      setAnswers((prev) => {
+        const cur = prev[question.id] ?? {}
+        const ids = new Set(cur.optionIds ?? [])
+        if (ids.has(selected.id)) ids.delete(selected.id)
+        else ids.add(selected.id)
+        return {
+          ...prev,
+          [question.id]: {
+            optionIds: [...ids],
+            optionId: undefined,
+            optionLabel: undefined,
+            optionLabels: undefined,
+            customText: undefined,
+          },
+        }
+      })
+      return
+    }
     if (input >= '1' && input <= '9') {
       const idx = Number(input) - 1
       if (idx >= 0 && idx < options.length) {
         setSelectedIndex(idx)
-        const selected = options[idx]
+        if (isMulti) return
+        const selected = options[idx]!
         setAnswers((prev) => ({
           ...prev,
           [question.id]: {
@@ -245,7 +302,7 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
       }
       return
     }
-    if (key.return) {
+    if (!isMulti && key.return) {
       const selected = options[selectedIndex]
       if (!selected) return
       setAnswers((prev) => ({
@@ -271,13 +328,8 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
         <Text>
           ←{' '}
           {stepLabels.map((label, index) => {
-            const answered = request.questions[index]
-              ? Boolean(
-                  answers[request.questions[index]!.id]?.optionId &&
-                    (answers[request.questions[index]!.id]?.optionId !== NEXUS_CUSTOM_OPTION_ID ||
-                      answers[request.questions[index]!.id]?.customText?.trim()),
-                )
-              : false
+            const qItem = request.questions[index]
+            const answered = qItem ? questionAnswered(qItem, answers[qItem.id]) : false
             const active = questionIndex === index
             const marker = active ? '▣' : answered ? '☒' : '☐'
             const color = active ? theme.primary : undefined
@@ -297,21 +349,52 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
       </Box>
       {question ? (
         <>
-          <Box marginTop={1}>
+          <Box marginTop={1} flexDirection="column">
+            {question.header?.trim() ? (
+              <Text dimColor bold>
+                [{question.header.trim()}]
+              </Text>
+            ) : null}
             <Text bold>{question.question}</Text>
           </Box>
           <Box marginTop={1} flexDirection="column">
             {options.map((option, index) => {
-              const isSelected = activeAnswer?.optionId === option.id
+              const isSelected = isMulti
+                ? Boolean(activeAnswer?.optionIds?.includes(option.id))
+                : activeAnswer?.optionId === option.id
               const isFocused = index === selectedIndex
               return (
-                <Text key={option.id} color={isFocused || isSelected ? theme.primary : undefined}>
-                  {isFocused ? '› ' : '  '}
-                  {index + 1}. {option.label}
-                </Text>
+                <Box key={option.id} flexDirection="column" marginBottom={0}>
+                  <Text color={isFocused || isSelected ? theme.primary : undefined}>
+                    {isFocused ? '› ' : '  '}
+                    {isMulti && !option.isCustom ? (isSelected ? '☑ ' : '☐ ') : ''}
+                    {index + 1}. {option.label}
+                  </Text>
+                  {!option.isCustom && option.description?.trim() ? (
+                    <Text dimColor>
+                      {'    '}
+                      {option.description.trim()}
+                    </Text>
+                  ) : null}
+                </Box>
               )
             })}
           </Box>
+          {!isMulti &&
+          options[selectedIndex] &&
+          !options[selectedIndex]!.isCustom &&
+          options[selectedIndex]!.preview?.trim() ? (
+            <Box
+              marginTop={1}
+              flexDirection="column"
+              borderStyle="single"
+              borderColor={theme.secondaryBorder}
+              paddingX={1}
+            >
+              <Text dimColor>Preview</Text>
+              <Text>{options[selectedIndex]!.preview!.trim()}</Text>
+            </Box>
+          ) : null}
           {customMode ? (
             <Box marginTop={1} borderStyle="single" borderColor={theme.secondaryBorder} paddingX={1}>
               <Text>{activeAnswer?.customText || ' '}</Text>
@@ -319,7 +402,9 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
           ) : null}
           <Box marginTop={1} justifyContent="space-between">
             <Text dimColor>
-              ←/→ switch question · ↑/↓ choose · Enter select
+              {isMulti
+                ? '←/→ questions · ↑/↓ focus · Space/Enter toggle'
+                : '←/→ switch question · ↑/↓ choose · Enter select'}
             </Text>
             <Text dimColor>
               {answeredCount}/{request.questions.length} answered
@@ -341,10 +426,21 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
           <Box marginTop={1} flexDirection="column">
             {request.questions.map((item) => {
               const answer = answers[item.id]
-              const value =
-                answer?.customText?.trim() ||
-                answer?.optionLabel?.trim() ||
-                '—'
+              let value = '—'
+              if (answer?.customText?.trim()) {
+                value = answer.customText.trim()
+              } else if (item.multiSelect && answer?.optionIds && answer.optionIds.length > 0) {
+                const from = answer.optionLabels?.filter((x) => x.trim()).join(', ')
+                value =
+                  from ||
+                  answer.optionIds
+                    .map((id) => item.options.find((o) => o.id === id)?.label)
+                    .filter((x): x is string => Boolean(x?.trim()))
+                    .join(', ') ||
+                  '—'
+              } else {
+                value = answer?.optionLabel?.trim() || '—'
+              }
               return (
                 <Box key={item.id} flexDirection="column" marginBottom={1}>
                   <Text>● {item.question}</Text>

@@ -1,4 +1,5 @@
 import type { Mode, NexusConfig, SkillDef, DiagnosticItem } from "../../../types.js"
+import { getModeToolPolicySummary } from "../../modes.js"
 import type { IndexStatus } from "../../../types.js"
 import type { MemoryRecord } from "../../../types.js"
 import * as os from "node:os"
@@ -24,6 +25,10 @@ export interface PromptContext {
   initialProjectContext?: string
   /** Persistent memories relevant to this run (project/session/team). */
   memories?: MemoryRecord[]
+  /** OpenClaude-class session scrolling notes (`<id>.session-memory.md`), re-read each loop iteration. */
+  sessionMemoryContent?: string
+  /** After compaction in plan mode: inject short OpenClaude-style workflow reminder (once per compaction). */
+  planModeSparseReminder?: boolean
   /** Context window usage (shown at start of system info so model sees token budget) */
   contextUsedTokens?: number
   contextLimitTokens?: number
@@ -35,8 +40,19 @@ export interface PromptContext {
 }
 
 // ─── BLOCK 1: Identity + Capabilities (CACHEABLE) ────────────────────────────
-// Mode block and Environment "Current mode" must stay in sync with agent/modes.ts
-// (MODE_TOOL_GROUPS, MODE_BLOCKED_TOOLS) so prompt and tool set match.
+// Mode block and Environment "Current mode" / tool policy must stay in sync with agent/modes.ts
+// (MODE_TOOL_GROUPS, MODE_BLOCKED_TOOLS, getModeToolPolicySummary) so prompt and tool set match.
+
+const PROMPT_CONTRACT_READ_ONLY = `> **Mode overrides generic sections:** In **ASK** / **REVIEW**, ignore instructions elsewhere that tell you to edit files, run arbitrary shell, commit, or drive implementation — the mode block and Environment "Tool policy" line define your real permissions.`
+
+const PROMPT_CONTRACT_PLAN = `> **Mode overrides generic sections:** In **PLAN**, ignore advice to run tests/builds via shell or execute arbitrary commands; Bash and PowerShell are disabled in this mode.`
+
+/** OpenClaude \`getPlanModeV2SparseInstructions\`-style nudge after context compaction. */
+const PLAN_MODE_SPARSE_REMINDER = `## Plan mode — compact reminder
+
+Plan mode is still active. You are read-only except **\`.nexus/plans/*.md\` and \`.nexus/plans/*.txt\`** — that directory is the only place you may Write or Edit.
+
+Follow the full **PLAN** section above (five-phase workflow and optional interview loop). End each assistant turn with **\`AskFollowupQuestion\`** (only for real requirement/tradeoff gaps) or **\`PlanExit\`** (plan ready for UI approval). Do **not** ask for plan approval in plain text or in follow-up questions — use **\`PlanExit\`** for handoff. Keep updating the plan file incrementally until handoff.`
 
 export function buildRoleBlock(ctx: PromptContext): string {
   const lines: string[] = []
@@ -44,6 +60,13 @@ export function buildRoleBlock(ctx: PromptContext): string {
   lines.push(IDENTITY_BLOCK)
   lines.push("")
   lines.push(getModeBlock(ctx.mode))
+  if (ctx.mode === "ask" || ctx.mode === "review") {
+    lines.push("")
+    lines.push(PROMPT_CONTRACT_READ_ONLY)
+  } else if (ctx.mode === "plan") {
+    lines.push("")
+    lines.push(PROMPT_CONTRACT_PLAN)
+  }
   lines.push("")
 
   lines.push(CORE_PRINCIPLES)
@@ -106,42 +129,70 @@ You have complete access: read/write files, run shell commands, search the codeb
 - **Flow** — On a new goal, run a brief read-only discovery (multiple grep/CodebaseSearch in parallel, then targeted Read). Before each logical group of tool calls, write one short plain-text progress sentence and then execute the tools. Use parallel tool calls for independent operations.
 - **Todos** — For any multi-step or non-trivial implementation, maintain an up-to-date list via \`TodoWrite\` (see Task Progress). After leaving plan mode with an approved plan, derive your initial todos from that plan.
 - **Delegated tasks** — Use \`TaskCreate(kind: "agent")\` for broad or clearly separable delegated work (e.g. "analyze X", "implement Y"), not for exact file/symbol lookups that direct Grep/Glob/Read can handle faster. For 2+ concurrent delegated agent tasks, use \`TaskCreateBatch\`. If you need asynchronous work, create the task without blocking and use \`TaskOutput({ taskId, block: true })\` to wait later. Do not create repeated delegated tasks for the same or very similar work.
-- **Orchestration** — When the work benefits from persistent coordination, use \`TaskCreate\` / \`TaskUpdate\` / \`TaskList\` as the single shared task runtime, \`TaskResume\` / \`TaskSnapshot\` to continue prior delegated agent work, \`TeamCreate\` / \`TeamList\` / \`TeamGet\` / \`TeamInbox\` / \`TeamAddMember\` / \`TeamAssignTask\` / \`TeamSetMemberStatus\` / \`SendMessage\` for teammate-style coordination, \`ListAgents\` to inspect available agent definitions, \`ListPlugins\` / \`GetPlugin\` / \`PluginValidate\` / \`PluginTrust\` / \`PluginEnable\` / \`PluginConfigure\` / \`PluginInstallLocal\` / \`PluginRemove\` / \`PluginReload\` for local plugin runtime control, and \`EnterWorktree\` for isolated implementation branches. Use \`TaskOutput\` / \`TaskStop\` for agent and shell task lifecycle, and \`ListRemoteSessions\` / \`GetRemoteSession\` / \`ReconnectRemoteSession\` / \`SendRemoteMessage\` / \`InterruptRemoteSession\` when reconnect/debug/remote-control state matters.
-- **Memory** — Use \`MemoryList\` / \`MemoryGet\` before rediscovering stable project facts, and \`MemoryCreate\` / \`MemoryUpdate\` to persist reusable knowledge (commands, conventions, architecture facts) when it will help future turns. Keep memories concise and durable.
+- **Orchestration** — When the work benefits from persistent coordination, use \`TaskCreate\` / \`TaskUpdate\` / \`TaskList\` as the single shared task runtime, \`TaskResume\` / \`TaskSnapshot\` to continue prior delegated agent work, \`TeamCreate\` / \`TeamList\` / \`TeamGet\` / \`TeamInbox\` / \`TeamAddMember\` / \`TeamAssignTask\` / \`TeamSetMemberStatus\` / \`SendMessage\` for teammate-style coordination, \`ListAgents\` to inspect available agent definitions, \`ListPlugins\` / \`GetPlugin\` / \`PluginValidate\` / \`PluginTrust\` / \`PluginEnable\` / \`PluginConfigure\` / \`PluginInstallLocal\` / \`PluginRemove\` / \`PluginReload\` for local plugin runtime control, and \`EnterWorktree\` for isolated implementation branches. Use \`TaskOutput\` / \`TaskStop\` for agent and shell task lifecycle, and \`ListRemoteSessions\` / \`GetRemoteSession\` / \`ReconnectRemoteSession\` / \`SendRemoteMessage\` / \`InterruptRemoteSession\` when reconnect/debug/remote-control state matters. (In **ASK** / **REVIEW** / **PLAN**, only the subset allowed in that mode is available — see Environment "Tool policy".)
+- **Memory** — Use \`MemoryList\` / \`MemoryGet\` before rediscovering stable project facts, and \`MemoryCreate\` / \`MemoryUpdate\` to persist reusable knowledge (commands, conventions, architecture facts) when it will help future turns. Keep memories concise and durable. (\`MemoryCreate\`/\`Update\`/\`Delete\` are not available in **ASK** or **REVIEW**.)
 - **Deferred tools & MCP** — If a capability is not visible in the initial manifest, use \`ToolSearch\`. Use \`ListMcpResources\` / \`ReadMcpResource\` when an MCP server exposes resources rather than only callable tools. If an MCP server requires sign-in, use \`McpAuthenticate\` instead of guessing manual steps.
 - **Decomposition & parallelization** — When a task is complex or spans multiple areas: (1) Decompose into subtasks and identify which are independent vs dependent. (2) Independent delegated agent subtasks → run them with \`TaskCreateBatch\`. (3) Dependent subtasks → different waves; wait for one wave to complete before starting the next. (4) If two delegated tasks might touch the same file → run them sequentially. (5) You can do implementation yourself or delegate via agent tasks when it saves context or isolates a clear subproblem.
 - **Always end your turn with a text reply to the user.** After using tools, summarize what you did. Never end with only tool calls.`,
 
-    plan: `## PLAN Mode — Research & Planning (Kilo-style)
+    plan: `## PLAN Mode — OpenClaude-aligned planning (Nexus)
 
-**Phase 1 — Study and plan (read-only except plan files):**
-- You are in READ-ONLY planning phase. You MUST NOT modify source code or run shell commands. You may ONLY write to \`.nexus/plans/*.md\` or \`.nexus/plans/*.txt\`.
-- Thoroughly study everything relevant: run multiple grep/CodebaseSearch/\`LSP\` lookups in parallel first to locate relevant code; then Read only the ranges you need. Do not read whole files to explore. Produce a detailed, step-by-step implementation plan (file paths, function signatures, architecture, risks, dependencies).
-- Write the plan to \`.nexus/plans/\` as markdown. When the plan is complete and ready for the user, call \`PlanExit\` with a short summary.
-- **You MUST write the plan to a file in \`.nexus/plans/\` (e.g. \`.nexus/plans/plan.md\`) before calling \`PlanExit\`. \`PlanExit\` is rejected until at least one such file exists.**
-- Preferred plan structure:
-  1. Goal and current state
-  2. Findings from codebase study
-  3. Implementation phases / milestones
-  4. File-by-file changes
-  5. Risks, migrations, validation, and rollback notes
-- For larger efforts, make the plan execution-ready rather than narrative-only: include ordered milestones and explicit validation steps so the next agent-mode run can turn them into todos or \`PlanMaterializeTasks\` without re-interpreting the plan.
-- Use \`AskFollowupQuestion\` only when a requirement or design choice is genuinely blocking the plan. Do all non-blocked research first. Do NOT ask the user whether the plan is ready or approved via \`AskFollowupQuestion\`; use \`PlanExit\` for plan handoff instead. Do not refer to "the plan" as visible to the user before \`PlanExit\`.
-- Ask clarifying questions only when strictly necessary. Do not repeatedly ask to switch to implementation.
+The user asked you **not** to execute implementation yet. You MUST NOT modify source code outside the plan directory, run shell commands, change configs, or mutate the project — except writing plan documentation under \`.nexus/plans/\` as below. This **supersedes** generic instructions that tell you to run tests, edit app files, or ship code.
 
-**Phase 2 — After PlanExit:**
-The user will choose one of:
-- **Approve** — they switch to agent mode and you (or the next run) will execute the plan.
-- **Revise** — they send a message; continue in plan mode and update the plan accordingly.
-- **Abandon** — they leave plan mode; no execution.
+### Plan file (only files you may write)
+- **Editable paths only:** \`.nexus/plans/*.md\` and \`.nexus/plans/*.txt\`. Use \`Write\` / \`Edit\` there; everything else is read-only (including the rest of the repo).
+- **Incremental updates:** Build and refine the plan in that directory as you learn; do not wait until the last turn to write everything.
+- **\`PlanExit\` gate (OpenClaude-style):** The host rejects \`PlanExit\` until this **session** contains at least one **completed** \`Write\` or \`Edit\` targeting \`.nexus/plans/*.md\` or \`.txt\`. You may \`Write\` then \`PlanExit\` in the **same** assistant turn. A file that existed on disk before you used tools is **not** enough — you must record the plan via tools in-session.
 
-When the user **implements** after approval: the agent in **agent** mode should read \`.nexus/plans/*\` and immediately materialize a \`TodoWrite\` checklist aligned with the plan (high-level milestones only).
+### Five-phase workflow (canonical; map to Nexus tools)
 
-- Use parallel reads and discovery (grep, CodebaseSearch, ListCodeDefinitions) to explore efficiently.
-- You may use \`TaskCreate(kind: "agent")\` for research subtasks (delegated agent tasks run in ask mode here). For 2+ concurrent research tasks use \`TaskCreateBatch\`. Use non-blocking execution only when you have other work to do concurrently; wait with \`TaskOutput({ taskId, block: true })\` — never poll in a loop. Do not use delegated agent tasks for implementation in plan mode.
-- Use \`PlanStartWorkflow\` / \`PlanAnswerWorkflow\` / \`PlanCreateResearchTasks\` / \`PlanDraftWorkflow\` when the plan benefits from an interview-and-research workflow before the final markdown file exists. Use \`TaskCreate\` / \`TaskUpdate\` or \`PlanMaterializeTasks\` to materialize the plan into explicit tasks if that helps structure a large implementation program, but do not execute code or background work in plan mode. For large multi-phase plans, use \`PlanVerifyExecution\` later in agent mode to audit which plan items still lack completed tasks.
-- **Latest message may redirect** — If the user's **newest** message is **only** a question (e.g. what failed, explain the error, what happened, why) and **not** a request to keep planning: answer from the conversation and tool error text **first**. Do **not** call \`PlanExit\`, do **not** start a large discovery pass for an **old** planning goal until they ask to continue the plan.
-- **Always end your turn with a text reply to the user** (or \`PlanExit\` when they want plan handoff). After using tools, summarize what you found. Never end with only tool calls.`,
+**Phase 1 — Initial understanding:** Understand the request and the code using read-only discovery (Grep, CodebaseSearch, ListCodeDefinitions, \`LSP\`, targeted \`Read\` with \`offset\`/\`limit\`). Run **multiple independent searches in parallel**. When scope is large or unclear, launch several \`TaskCreate(kind: "agent")\` research agents in **one** \`TaskCreateBatch\`, each with a distinct focus (existing implementations vs tests vs boundaries). For tiny, file-local tasks, use one agent or direct tools only.
+
+**Phase 2 — Design:** Shape the approach in the **plan file**. Optionally delegate exploration via \`TaskCreate(kind: "agent")\` (read-only in plan mode) and merge results into markdown. Default to at least one real design pass for non-trivial work; skip only for trivial edits (typo, single-line change).
+
+**Phase 3 — Review:** Re-read critical paths; align with the user's **stated** goals. Use \`AskFollowupQuestion\` only for requirements or mutually exclusive approaches you **cannot** infer from the codebase. Never use it for plan approval or to discuss whether the user can "see" the plan.
+
+**Phase 4 — Final plan (structure — OpenClaude Phase 4 “control” arm):** Write the final plan into \`.nexus/plans/\`. The plan file should be scannable but executable:
+- Begin with a **Context** section: why the change is needed, the problem or trigger, intended outcome.
+- Include **only your recommended approach**, not every alternative you discarded.
+- List **paths of critical files** to modify; reference **existing functions/utilities to reuse** with file paths.
+- Add **Verification**: how to validate end-to-end (run tests, run the app, MCP checks, etc.).
+- Prefer ordered milestones and explicit validation so the next **agent**-mode run can turn them into \`TodoWrite\` or \`PlanMaterializeTasks\` without re-interpreting prose.
+
+**Phase 5 — Handoff:** When the plan file is ready, call \`PlanExit\` with a short high-signal summary; details stay in the plan file.
+
+### Interview-style workflow (OpenClaude “iterative planning” — optional)
+Use this pattern when requirements are ambiguous or you need tight user coupling (same spirit as OpenClaude \`getPlanModeInterviewInstructions\`):
+
+1. **Explore** — Read/search the codebase (and \`TaskCreate\` agents when parallel research helps).
+2. **Update the plan file** — After meaningful discovery, capture findings in \`.nexus/plans/*\` immediately; grow skeleton → full plan.
+3. **Ask the user** — When blocked on a decision only the user can make, \`AskFollowupQuestion\`; then return to step 1.
+
+**First turn habit:** Skim key files, write a **skeleton** plan (headers + rough notes), then ask your first focused questions — do not exhaust exploration before engaging the user when the task is broad.
+
+**Good questions:** Never ask what tools could answer. Batch related questions. Focus on requirements, preferences, tradeoffs, edge-case priority.
+
+**When to converge:** The plan is ready when ambiguities are resolved and it states what to change, which files, what to reuse (with paths), and how to verify — then \`PlanExit\`.
+
+**Durable workflow state:** When you need persisted interview/research scaffolding across turns, use \`PlanStartWorkflow\` / \`PlanAnswerWorkflow\` / \`PlanCreateResearchTasks\` / \`PlanDraftWorkflow\` in addition to the markdown plan file.
+
+### Ending your turn (OpenClaude rule)
+End each planning turn with **either** \`AskFollowupQuestion\` **or** \`PlanExit\` — not with idle text alone and no blocking tool. After \`AskFollowupQuestion\`, **stop**; do not call other tools until the user answers. If you only emit text without tools, the host may synthesize \`PlanExit\` as recovery — **still prefer an explicit tool call**.
+
+Do **not** ask for plan approval in chat or via \`AskFollowupQuestion\`; phrases like "Is this plan okay?", "Should I proceed?", "How does this plan look?" belong in \`PlanExit\` handoff only. The user does not see the plan document in the UI until \`PlanExit\`.
+
+**After PlanExit — user choice:**
+- **Approve** — user switches to agent mode; execute against \`.nexus/plans/*\`.
+- **Revise** — user sends feedback; stay in plan mode, edit the plan file, \`PlanExit\` again when ready.
+- **Abandon** — user leaves plan mode.
+
+**Implementation after approval:** Read \`.nexus/plans/*\`; if a \`PlanStartWorkflow\` flow was used, \`PlanGetWorkflow\` first. In the first or second agent turn, \`TodoWrite\` (\`merge: false\`) from plan milestones; consider \`PlanMaterializeTasks\` for large programs.
+
+**Execution notes:** Parallel discovery; \`TaskCreateBatch\` for concurrent research; \`TaskOutput({ taskId, block: true })\` instead of polling. No shell, no plugin install/trust, no team mutations, no \`RunPluginHook\` in plan mode.
+
+**Latest message may redirect** — If the newest user message is only an explanation request about a past error (not "continue planning"), answer from the transcript first; do not call \`PlanExit\` or restart a full discovery pass for an old planning goal until they ask to continue.
+
+**After tools, add a brief text summary for the user** when you still have turn budget (unless you ended on \`AskFollowupQuestion\` or \`PlanExit\`, which already pause or hand off).`,
 
     ask: `## ASK Mode — Read-only Q&A and Explanations
 
@@ -150,9 +201,12 @@ You are a knowledgeable technical assistant focused on answering questions and e
 **Strict constraints:**
 - You MUST NOT edit, create, or delete any files. Do not use Write or Edit.
 - You MUST NOT run shell commands (Bash is disabled). Do not suggest commands for the user to run unless they explicitly ask.
-- You may use \`TaskCreate(kind: "agent")\` for read-only delegated subtasks (they run in ask mode here). For 2+ concurrent delegated tasks use \`TaskCreateBatch\`. Use non-blocking execution only when you have other work to do concurrently; wait with \`TaskOutput({ taskId, block: true })\` — never poll in a loop. For implementation work, tell the user to switch to agent mode.
+- You may use \`TaskCreate(kind: "agent")\` for read-only delegated subtasks (they run in ask mode here). For 2+ concurrent delegated tasks use \`TaskCreateBatch\`. Use \`TaskOutput\` / \`TaskStop\` / \`TaskResume\` / \`TaskSnapshot\` / \`TaskGet\` / \`TaskList\` as needed; \`TaskUpdate\` is disabled. For implementation work, tell the user to switch to agent mode.
+- You may \`TeamList\` / \`TeamGet\` / \`TeamInbox\` and \`ListRemoteSessions\` / \`GetRemoteSession\` / \`ReconnectRemoteSession\` for read-only context; you cannot create teams, assign work, or send remote control messages.
+- You may \`ListPlugins\` / \`GetPlugin\` / \`PluginValidate\` only — no \`RunPluginHook\`, trust, install, or configure.
+- You may \`PlanGetWorkflow\` to read plan workflow state; other plan workflow mutators are disabled. \`EnterPlanMode\` and \`PlanExit\` are disabled — the user switches modes in the UI.
 - Use \`AskFollowupQuestion\` only when the answer cannot be discovered from the codebase or context and is needed to answer correctly. Prefer tools over questions.
-- You may consult \`MemoryList\` / \`MemoryGet\` for persisted project facts before re-searching the codebase.
+- You may consult \`MemoryList\` / \`MemoryGet\` only; do not create, update, or delete memories in this mode.
 
 **What you should do:**
 - **Obey the latest user message** — Treat their **most recent** message as the contract for this turn. If they only ask to explain an error, summarize a failure, or describe what went wrong in a **previous** turn or mode: answer **only that** using the visible transcript and tool results. Do **not** resume planning, implementation, or a "single-message flow" from before (e.g. do not implicitly continue plan mode work, do not call tools to advance an old task unless needed to answer the question).
@@ -181,7 +235,8 @@ You are in audit mode for code changes. Your task is to review and report findin
 
 **Strict constraints:**
 - You MUST NOT edit, create, or delete files.
-- You MAY run read/search tools and Bash for git inspection (\`git diff\`, \`git log\`, \`git blame\`).
+- You MAY run read/search tools and Bash/PowerShell for git inspection (\`git diff\`, \`git log\`, \`git blame\`).
+- You MAY inspect existing tasks, teams, remotes, plugins, and plan workflow state with list/get/output tools only — do not create tasks, resume agents, stop tasks, mutate teams, install plugins, control remotes, or run \`RunPluginHook\`.
 - Focus on changed code and nearby required context only; avoid style-only nitpicks.
 
 **Review output requirements:**
@@ -392,7 +447,7 @@ const TOOL_USE_GUIDE = `## Tool Usage
 
 - **Use \`Parallel\` when needed** — If the provider supports only one tool call per step, use the built-in \`Parallel\` tool with \`tool_uses\` to batch independent calls in one step. Primary use: read-only discovery (Read/Grep/Glob/etc). For mutating tools (Write/Edit/Bash/TaskCreate), call them directly.
 - **Background delegated tasks** — For independent long subtasks, call \`TaskCreate(kind: "agent", block: false)\`. It returns a \`taskId\`. **Always use \`TaskOutput({ taskId, block: true })\` to wait for completion** — this returns only when the task is done, no polling needed. Only use \`block: false\` if you have real other work to do while the task runs. **NEVER call \`TaskOutput(block: false)\` in a loop with no other work between calls**. Stop with \`TaskStop\` if required. For most parallel delegated work prefer \`TaskCreateBatch\`.
-- **AskFollowupQuestion** — Use \`AskFollowupQuestion\` only when you are genuinely blocked and the answer cannot be discovered from the codebase, tool results, or reasonable assumptions. Do all non-blocked work first. Ask one focused question, not a list. Never use it for permission prompts like "Should I run tests?".
+- **AskFollowupQuestion** — Use only when genuinely blocked and the answer cannot be discovered from tools or reasonable assumptions. Do all non-blocked work first. Ask one focused question (or one merged questionnaire via \`questions\` / Parallel merge). Never use for permission prompts ("Should I run tests?"). In **plan** mode, never ask for plan approval or refer to "the plan" as if the user sees it — use \`PlanExit\` for handoff. **After calling it, stop your turn** — no more tools until the user answers (OpenClaude \`AskUserQuestion\`-style pause).
 - **Use the narrowest tool that fits** — Prefer the most specific tool that directly matches the job: \`Read\` for file contents, \`Edit\` for targeted existing-file changes, \`Write\` for new files or full rewrites, \`LSP\` for symbol-accurate navigation, \`Task*\` for delegated/background/orchestration work, and \`Bash\` only for actual shell operations.
 - **Deferred tools** — Some tools may be intentionally omitted from the initial tool manifest. If a capability seems missing, call \`ToolSearch\` before assuming it is unavailable.
 - **Skills** — Relevant skills may already appear under **Active Skills** in this prompt. Additional discoverable skills are listed in the \`Skill\` tool description as \`<available_skills>\` (name, description, file URL). To load full instructions for one of those, call \`Skill\` with \`{ "name": "<exact-name>" }\`. Prefer Active Skills when they already cover the task; use exact names from the catalog — no guessing.
@@ -519,7 +574,7 @@ Skip for:
 - **Only one \`in_progress\` at a time** — Complete the current item before starting the next.
 - **Mark complete immediately** — As soon as a task is done, mark it \`completed\`. Do not batch.
 - **Create only when none exists** — If context has no "Current Todo List", create one with \`merge: false\`.
-- **Track background work explicitly** — If you start \`Bash(..., run_in_background: true)\`, immediately add/update a todo item that includes the \`bash_id\` and expected completion condition (e.g. "wait for tests to exit cleanly"). Do not end the task while background jobs that matter are still unchecked.
+- **Track background work explicitly** — If you start \`Bash(..., run_in_background: true)\` or a non-blocking \`TaskCreate\`/\`TaskCreateBatch\`, add/update a todo that names the returned task id and the completion condition (e.g. "wait for tests — TaskOutput(taskId)"). Do not end the task while background jobs that matter are still unchecked.
 - **Prefer structured task state for large programs** — When work spans many milestones, use \`TaskCreate\` / \`TaskUpdate\` alongside \`TodoWrite\`: todos track the current turn's execution plan, while tasks persist shared orchestration state across turns and background runs.
 - **Do not forget delegated tasks** — After each \`TaskCreate(kind: "agent")\` or \`TaskCreateBatch\`, consume and summarize each task result before moving on. For background runs, call \`TaskOutput({ taskId, block: true })\` — this waits for completion and returns once done. Stop with \`TaskStop\` if you need to cancel. If results are incomplete or conflicting, run follow-up tasks and resolve before finalizing.
 - **Before final response** — Verify there are no pending critical background checks: inspect each active shell task with \`TaskOutput\` (and \`TaskStop\` if needed) or explicitly state why it is safe to leave it running.
@@ -576,6 +631,13 @@ export function buildRulesBlock(rulesContent: string): string {
   return `## Project Rules & Guidelines\n\nThe following rules apply to this project. Follow them strictly:\n\n${rulesContent}`
 }
 
+export function buildSessionMemoryBlock(sessionMemoryMarkdown: string): string {
+  const t = sessionMemoryMarkdown.trim()
+  if (!t) return ""
+  return `## Session memory (persistent notes for this chat)\n\n` +
+    `Scrolling session notes (OpenClaude \`session-memory\` pattern): re-injected each loop. Keep them info-dense and current — especially **what is in progress now** and **next steps**. Typical sections to maintain in the file (adapt headings to your project): Current state / Task or goal / Key files & symbols / Commands & workflow / Errors & corrections / Learnings / Key results (verbatim user-requested outputs) / Worklog. Prefer \`MemoryCreate\`/\`MemoryUpdate\` for facts that should survive across future sessions.\n\n${t}`
+}
+
 // ─── BLOCK 3: Skills (CACHEABLE) ─────────────────────────────────────────────
 
 export function buildSkillsBlock(skills: SkillDef[]): string {
@@ -621,6 +683,7 @@ export function buildSystemInfoBlock(ctx: PromptContext): string {
     lines.push(`  Context: ${used.toLocaleString()} / ${limit.toLocaleString()} tokens (${pct}%) — manage length by using Condense when the conversation is long.`)
   }
   lines.push(`  Current mode: ${getCurrentModeLabel(ctx.mode)}`)
+  lines.push(`  Tool policy: ${getModeToolPolicySummary(ctx.mode)}`)
   lines.push(`  Latest user message: treat the most recent user turn in the conversation as the primary instruction for this run (see system prompt "Current user turn").`)
   lines.push(`  Working directory: ${ctx.cwd}`)
   lines.push(`  Platform: ${os.platform()} ${os.arch()}`)
@@ -882,6 +945,12 @@ export function buildSystemPrompt(ctx: PromptContext): { blocks: string[]; cache
 
   // DYNAMIC BLOCKS
   blocks.push(buildSystemInfoBlock(ctx))
+  if (ctx.mode === "plan" && ctx.planModeSparseReminder) {
+    blocks.push(PLAN_MODE_SPARSE_REMINDER)
+  }
+  if (ctx.sessionMemoryContent?.trim()) {
+    blocks.push(buildSessionMemoryBlock(ctx.sessionMemoryContent))
+  }
   if (ctx.mentionsContext?.trim()) {
     blocks.push(buildMentionsBlock(ctx.mentionsContext))
   }

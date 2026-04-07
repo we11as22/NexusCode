@@ -1,11 +1,11 @@
 import { z } from "zod"
-import {
-  coerceQuestionOptionStrings,
-  formatToolValidationError,
-  normalizeToolInputForParse,
-} from "../../agent/tool-execution.js"
+import { formatToolValidationError, normalizeToolInputForParse } from "../../agent/tool-execution.js"
 import type { ToolDef, ToolContext, UserQuestionRequest, UserQuestionItem } from "../../types.js"
-import { buildUserQuestionOptions, normalizeCustomOptionLabel } from "../user-question-utils.js"
+import {
+  buildUserQuestionOptionsFromRows,
+  coerceQuestionOptionRows,
+  normalizeCustomOptionLabel,
+} from "../user-question-utils.js"
 
 const MAX_BATCH_TOOLS = 25
 
@@ -19,6 +19,24 @@ const schema = z.object({
 }).passthrough()  // Allow extra top-level fields (e.g. recipient_name) without failing
 
 type ParallelToolUse = z.infer<typeof schema>["tool_uses"][number]
+
+function parallelInnerParamsObject(use: ParallelToolUse): Record<string, unknown> {
+  let raw: unknown = use.parameters
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw)
+    } catch {
+      raw = {}
+    }
+  }
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? { ...(raw as object) } as Record<string, unknown> : {}
+}
+
+function isParallelDelegatedAgentTaskCreate(tool: ToolDef | undefined, use: ParallelToolUse): boolean {
+  if (tool?.name !== "TaskCreate") return false
+  const normalized = normalizeToolInputForParse("TaskCreate", parallelInnerParamsObject(use)) as Record<string, unknown>
+  return normalized.kind === "agent"
+}
 
 type ParallelResult = {
   recipient_name: string
@@ -51,6 +69,8 @@ const ALIAS_TO_TOOL: Record<string, string> = {
   spawnagents: "SpawnAgent",
   spawnagentoutput: "SpawnAgentOutput",
   spawnagentstop: "SpawnAgentStop",
+  taskcreate: "TaskCreate",
+  taskcreatebatch: "TaskCreateBatch",
 }
 
 function canonicalizeToolName(name: string): string {
@@ -83,15 +103,13 @@ function resolveTool(
 
 export const parallelTool: ToolDef<z.infer<typeof schema>> = {
   name: "Parallel",
-  description: `Run multiple independent tools in a single call. Use to batch read-only discovery (e.g. several Read, Grep, CodebaseSearch, Glob, ListCodeDefinitions).
+  description: `Run multiple independent tools in a single call. Primary use: read-only discovery (Read, Grep, CodebaseSearch, Glob, ListCodeDefinitions, WebSearch, …).
 
-- tool_uses: ARRAY of { recipient_name, parameters } — not a string. Each object is one tool call.
-- recipient_name: tool name — canonical (Read, Grep), alias (read_file), or namespaced (functions.read_file).
-- parameters: object with the tool's arguments (same as calling the tool directly).
-- Maximum 25 tool calls per batch.
-- Allowed in Parallel: read-only tools only.
-- Write/Edit/Bash and other mutating tools must be called directly (not through Parallel).
-- All tools run in parallel; results are combined and returned in order.
+- tool_uses: ARRAY of { recipient_name, parameters } — not a string.
+- Maximum 25 calls per batch.
+- **Read-only tools** — always allowed.
+- **Delegated agents** — you may include \`TaskCreate\` only when \`kind\` is **exactly** \`"agent"\` (same as batching several read-only calls). Use \`TaskCreateBatch\` instead when you want the flat multi-task API.
+- **Not allowed inside Parallel:** \`TaskCreate\` with other kinds, \`TaskCreateBatch\`, Write/Edit/Bash/PowerShell, or any other mutating tool — call those directly.
 
 CORRECT format:
   Parallel({tool_uses: [
@@ -159,23 +177,44 @@ CORRECT format:
         if (Array.isArray(normalized.questions)) {
           normalized.questions.forEach((item) => {
             const q = item as Record<string, unknown>
-            const options = coerceQuestionOptionStrings(q.options ?? q.choices ?? q.answers ?? q.values)
+            const rows = coerceQuestionOptionRows(q.options ?? q.choices ?? q.answers ?? q.values)
             if (typeof q.question !== "string" || q.question.trim().length === 0) return
             const idx = questions.length
+            const multiSelect = Boolean(q.multi_select ?? q.multiSelect)
+            const header = typeof q.header === "string" && q.header.trim() ? q.header.trim() : undefined
             questions.push({
               id: typeof q.id === "string" && q.id.trim() ? q.id.trim() : `parallel_question_${idx + 1}`,
               question: q.question.trim(),
-              options: buildUserQuestionOptions(options, normalizeCustomOptionLabel(customOptionLabel), idx),
+              header,
+              multiSelect: multiSelect || undefined,
+              options: buildUserQuestionOptionsFromRows(
+                rows,
+                multiSelect,
+                normalizeCustomOptionLabel(customOptionLabel),
+                idx,
+              ),
               allowCustom: true,
             })
           })
         } else if (typeof normalized.question === "string" && normalized.question.trim()) {
-          const options = coerceQuestionOptionStrings(normalized.options ?? normalized.choices ?? normalized.answers)
+          const rows = coerceQuestionOptionRows(normalized.options ?? normalized.choices ?? normalized.answers)
           const idx = questions.length
+          const multiSelect = Boolean(normalized.multi_select ?? normalized.multiSelect)
+          const header =
+            typeof normalized.header === "string" && normalized.header.trim()
+              ? normalized.header.trim()
+              : undefined
           questions.push({
             id: `parallel_question_${idx + 1}`,
             question: normalized.question.trim(),
-            options: buildUserQuestionOptions(options, normalizeCustomOptionLabel(customOptionLabel), idx),
+            header,
+            multiSelect: multiSelect || undefined,
+            options: buildUserQuestionOptionsFromRows(
+              rows,
+              multiSelect,
+              normalizeCustomOptionLabel(customOptionLabel),
+              idx,
+            ),
             allowCustom: true,
           })
         }
@@ -198,11 +237,14 @@ CORRECT format:
       }
     }
 
-    const hasSpawnAgentBatch = resolvedToolUses.some(
-      ({ tool }) => tool?.name === "SpawnAgent" || tool?.name === "SpawnAgents",
+    const hasDelegatedAgentParallelBatch = resolvedToolUses.some(
+      ({ use, tool }) =>
+        tool?.name === "SpawnAgent" ||
+        tool?.name === "SpawnAgents" ||
+        isParallelDelegatedAgentTaskCreate(tool, use),
     )
     const prevSkipDup = ctx.skipSubagentDuplicateCheck
-    if (hasSpawnAgentBatch) ctx.skipSubagentDuplicateCheck = true
+    if (hasDelegatedAgentParallelBatch) ctx.skipSubagentDuplicateCheck = true
     const promises = tool_uses.map(async (use): Promise<ParallelResult> => {
       const tool = resolveTool(use, byExactName, byCanonicalName)
       if (!tool) {
@@ -220,8 +262,25 @@ CORRECT format:
           output: "Nested Parallel calls are not allowed. Put all independent tools in one Parallel.tool_uses array.",
         }
       }
-      const isSpawnAgent = tool.name === "SpawnAgent" || tool.name === "SpawnAgents"
-      if (!tool.readOnly && !isSpawnAgent) {
+      const isLegacySpawn = tool.name === "SpawnAgent" || tool.name === "SpawnAgents"
+      const isAgentTaskCreate = isParallelDelegatedAgentTaskCreate(tool, use)
+      if (tool.name === "TaskCreate" && !isAgentTaskCreate) {
+        return {
+          recipient_name: use.recipient_name,
+          resolved_name: tool.name,
+          success: false,
+          output: `TaskCreate inside Parallel requires kind: "agent". For other kinds or TaskCreateBatch, call the tool directly (not via Parallel).`,
+        }
+      }
+      if (tool.name === "TaskCreateBatch") {
+        return {
+          recipient_name: use.recipient_name,
+          resolved_name: tool.name,
+          success: false,
+          output: "TaskCreateBatch cannot run inside Parallel — call it directly.",
+        }
+      }
+      if (!tool.readOnly && !isLegacySpawn && !isAgentTaskCreate) {
         return {
           recipient_name: use.recipient_name,
           resolved_name: tool.name,
@@ -288,7 +347,7 @@ CORRECT format:
     try {
       results = await Promise.all(promises)
     } finally {
-      if (hasSpawnAgentBatch) ctx.skipSubagentDuplicateCheck = prevSkipDup
+      if (hasDelegatedAgentParallelBatch) ctx.skipSubagentDuplicateCheck = prevSkipDup
     }
     const successful = results.filter((result) => result.success).length
     const parts = [

@@ -1,5 +1,76 @@
 import type { UserQuestionAnswer, UserQuestionItem, UserQuestionOption, UserQuestionRequest } from "../types.js"
 
+/** One row from the model before padding / id assignment (OpenClaude-style). */
+export type QuestionOptionRow = { label: string; description?: string; preview?: string }
+
+function optionKey(label: string): string {
+  return label.toLowerCase().replace(/\s+/g, " ").trim()
+}
+
+function pickExplicitOptionLabel(row: Record<string, unknown>): string | undefined {
+  for (const k of ["label", "text", "value", "title", "name", "option", "answer"] as const) {
+    const v = row[k]
+    if (typeof v === "string" && v.trim()) return v.trim()
+  }
+  return undefined
+}
+
+/**
+ * Coerce model-supplied options into structured rows (strings, CSV, or { label, description, preview }).
+ */
+export function coerceQuestionOptionRows(val: unknown): QuestionOptionRow[] {
+  if (val === undefined || val === null) return []
+  if (typeof val === "string") {
+    const s = val.trim()
+    if (!s) return []
+    return splitQuestionOptionListString(s).map((label) => ({ label }))
+  }
+  if (typeof val === "number" || typeof val === "boolean") return [{ label: String(val) }]
+  if (!Array.isArray(val)) return []
+  const out: QuestionOptionRow[] = []
+  for (const el of val) {
+    if (typeof el === "string") {
+      if (el.trim()) out.push(...splitQuestionOptionListString(el.trim()).map((label) => ({ label })))
+      continue
+    }
+    if (typeof el === "number" || typeof el === "boolean") {
+      out.push({ label: String(el) })
+      continue
+    }
+    if (el != null && typeof el === "object") {
+      const row = el as Record<string, unknown>
+      const explicit = pickExplicitOptionLabel(row)
+      const descField = typeof row.description === "string" && row.description.trim() ? row.description.trim() : undefined
+      const contentField = typeof row.content === "string" && row.content.trim() ? row.content.trim() : undefined
+      const label = explicit || descField || contentField
+      if (!label) continue
+      const description =
+        descField && descField !== label ? descField : undefined
+      const preview = typeof row.preview === "string" && row.preview.trim() ? row.preview.trim() : undefined
+      out.push({ label, description, preview })
+    }
+  }
+  return out
+}
+
+export function dedupeQuestionOptionRows(rows: QuestionOptionRow[]): QuestionOptionRow[] {
+  const seen = new Set<string>()
+  const out: QuestionOptionRow[] = []
+  for (const r of rows) {
+    const lab = r.label.trim()
+    if (!lab) continue
+    const key = optionKey(lab)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      label: lab,
+      description: r.description?.trim() || undefined,
+      preview: r.preview?.trim() || undefined,
+    })
+  }
+  return out
+}
+
 /**
  * Split model-supplied options (one string or CSV) into separate choices.
  * - Commas/semicolons/pipes inside `()`, `[]`, `{}` do not split (fixes "API (req, err)").
@@ -148,11 +219,25 @@ export function formatQuestionnaireAnswersForAgent(request: UserQuestionRequest,
   const byId = new Map(answers.map((answer) => [answer.questionId, answer]))
   const lines = request.questions.map((question) => {
     const answer = byId.get(question.id)
-    const value =
-      answer?.customText?.trim() ||
-      answer?.optionLabel?.trim() ||
-      question.options.find((option) => option.id === answer?.optionId)?.label ||
-      "—"
+    let value = "—"
+    if (answer?.customText?.trim()) {
+      value = answer.customText.trim()
+    } else if (question.multiSelect && answer?.optionIds && answer.optionIds.length > 0) {
+      const fromAnswer = answer.optionLabels?.filter((x) => x.trim())
+      if (fromAnswer && fromAnswer.length > 0) {
+        value = fromAnswer.join(", ")
+      } else {
+        const labs = answer.optionIds
+          .map((id) => question.options.find((o) => o.id === id)?.label)
+          .filter((x): x is string => Boolean(x?.trim()))
+        value = labs.length > 0 ? labs.join(", ") : "—"
+      }
+    } else if (answer?.optionId) {
+      value =
+        answer.optionLabel?.trim() ||
+        question.options.find((option) => option.id === answer.optionId)?.label ||
+        "—"
+    }
     return `${question.question} → ${value}`
   })
   return `${NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX}${lines.join("\n")}`
@@ -173,10 +258,6 @@ const DEFAULT_OPTION_PAD_ROTATIONS: string[][] = [
   ["Concise", "Comprehensive"],
   ["Simple option", "Detailed option"],
 ]
-
-function optionKey(label: string): string {
-  return label.toLowerCase().replace(/\s+/g, " ").trim()
-}
 
 /**
  * Ensure at least two concrete choices after sanitization (Zod no longer hard-fails on <2).
@@ -210,14 +291,47 @@ export function padQuestionOptionsToMinTwo(
   return out
 }
 
+/**
+ * Build stable ids, sanitize, pad to ≥2 choices, and attach description/preview metadata (preview stripped when multiSelect).
+ */
+export function buildUserQuestionOptionsFromRows(
+  rows: QuestionOptionRow[],
+  multiSelect: boolean,
+  customOptionLabel: string,
+  questionIndex: number,
+): UserQuestionOption[] {
+  const deduped = dedupeQuestionOptionRows(rows).map((r) => ({
+    ...r,
+    preview: multiSelect ? undefined : r.preview,
+  }))
+  const labels = deduped.map((r) => r.label)
+  const sanitizedLabels = sanitizeAgentQuestionOptions(labels, customOptionLabel)
+  const padded = padQuestionOptionsToMinTwo(sanitizedLabels, customOptionLabel, questionIndex)
+  const metaByKey = new Map<string, QuestionOptionRow>()
+  for (const r of deduped) {
+    const k = optionKey(r.label)
+    if (!metaByKey.has(k)) metaByKey.set(k, r)
+  }
+  return padded.map((lab, i) => {
+    const meta = metaByKey.get(optionKey(lab))
+    return {
+      id: `opt_${questionIndex + 1}_${i + 1}`,
+      label: lab,
+      description: meta?.description,
+      preview: multiSelect ? undefined : meta?.preview,
+    }
+  })
+}
+
 export function buildUserQuestionOptions(
   agentLabels: string[],
   customOptionLabel: string,
   questionIndex: number,
 ): UserQuestionOption[] {
-  const cleaned = padQuestionOptionsToMinTwo(agentLabels, customOptionLabel, questionIndex)
-  return cleaned.map((lab, i) => ({
-    id: `opt_${questionIndex + 1}_${i + 1}`,
-    label: lab,
-  }))
+  return buildUserQuestionOptionsFromRows(
+    agentLabels.map((label) => ({ label })),
+    false,
+    customOptionLabel,
+    questionIndex,
+  )
 }

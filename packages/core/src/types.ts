@@ -84,7 +84,7 @@ export interface ToolContext {
   mode?: Mode
   indexer?: IIndexer
   signal: AbortSignal
-  /** Optional: trigger context compaction (condense/summarize_task tools). */
+  /** Optional: trigger context compaction (e.g. Condense tool). */
   compactSession?: () => Promise<void>
   /** Current tool call part id (e.g. part_xyz). Set by loop for write/replace so tool can emit tool_approval_needed. */
   partId?: string
@@ -118,13 +118,21 @@ export interface ApprovalAction {
 export interface UserQuestionOption {
   id: string
   label: string
+  /** Longer explanation (OpenClaude-style option description). */
+  description?: string
+  /** Markdown preview when focused; hosts must hide for multi-select (OpenClaude rule). */
+  preview?: string
 }
 
 export interface UserQuestionItem {
   id: string
   question: string
+  /** Short chip / section label (OpenClaude `header`). */
+  header?: string
   options: UserQuestionOption[]
   allowCustom?: boolean
+  /** When true, user may pick several options; answers use `optionIds` / `optionLabels`. */
+  multiSelect?: boolean
 }
 
 export interface UserQuestionRequest {
@@ -137,8 +145,12 @@ export interface UserQuestionRequest {
 
 export interface UserQuestionAnswer {
   questionId: string
+  /** Single-select */
   optionId?: string
   optionLabel?: string
+  /** Multi-select (mutually exclusive with optionId for a given question). */
+  optionIds?: string[]
+  optionLabels?: string[]
   customText?: string
 }
 
@@ -367,6 +379,11 @@ export interface ToolPart {
   timeEnd?: number
   /** If true, output has been pruned for compaction */
   compacted?: boolean
+  /**
+   * Absolute path to full tool output when truncated to disk (~/.nexus/data/tool-output/).
+   * Preserved for model hints after prune/compaction (OpenClaude-style spill registry).
+   */
+  outputSpillPath?: string
   /** Set when tool is Write/Edit and completed; used for session diff (e.g. CLI "N files" block). */
   path?: string
   diffStats?: { added: number; removed: number }
@@ -868,6 +885,18 @@ export interface NexusConfig {
   agentLoop?: {
     toolCallBudget?: Partial<Record<Mode, number>>
     maxIterations?: Partial<Record<Mode, number>>
+  }
+  /** OpenClaude-class: auto-memory dir, session memory file, tool spill hints. */
+  memory?: {
+    autoMemoryEnabled?: boolean
+    autoMemoryDirectory?: string
+    sessionMemoryEnabled?: boolean
+    sessionMemoryMinToolCallsBetweenUpdates?: number
+    sessionMemoryMaxChars?: number
+    emphasizeToolSpillPaths?: boolean
+    teamMemoryEnabled?: boolean
+    autoDreamEnabled?: boolean
+    autoDreamMinIntervalMs?: number
   }
   rules: {
     files: string[]

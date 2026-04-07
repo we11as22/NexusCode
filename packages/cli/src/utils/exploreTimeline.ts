@@ -1,8 +1,12 @@
 /**
  * Split reordered messages into chronological pieces: plain rows vs one "code explore" wave.
- * Waves include Read/Grep/Glob/List/CodebaseSearch, pure-explore Parallel, and optional
- * glue rows (TodoWrite) + their tool_results so a list→todo→grep chain stays one block.
+ * Waves include read-only discovery tools (Read, Grep, Glob, List, CodebaseSearch,
+ * ListCodeDefinitions, ReadLints, LSP, WebFetch, WebSearch), Parallel batches where every
+ * inner call is explore or explore-glue (at least one explore), plus glue rows (todo, task
+ * poll/output, BashOutput, worktree, ToolSearch, MCP/memory/agent-run reads, …) and their
+ * tool_results so mixed auxiliary→discovery chains stay one block.
  */
+import { isDelegatedAgentParentTool } from '@nexuscode/core'
 import type { ProgressMessage } from '../query.js'
 import type {
   ToolResultBlockParam,
@@ -329,36 +333,13 @@ export function exploreSegmentShouldBeTransient(
   return true
 }
 
-function isSpawnAgentRecipientName(raw: string): boolean {
-  const normalized = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
-  return normalized === 'spawnagent' || normalized === 'spawnagents'
-}
-
-/** Parallel whose inner calls are only SpawnAgent-style (matches nexus-query). */
-function isPureSubagentParallelInput(input: unknown): boolean {
-  if (input == null || typeof input !== 'object') return false
-  const toolUses = (input as { tool_uses?: unknown }).tool_uses
-  if (!Array.isArray(toolUses) || toolUses.length === 0) return false
-  return toolUses.every((item) => {
-    if (item == null || typeof item !== 'object') return false
-    const recipientName = (item as { recipient_name?: unknown }).recipient_name
-    return typeof recipientName === 'string' && isSpawnAgentRecipientName(recipientName)
-  })
-}
-
 function isSubagentParentToolUse(block: ToolUseBlockParam): boolean {
-  const c = canonToolName(block.name ?? '')
-  if (c === 'spawnagent' || c === 'spawnagents' || c === 'spawnagentsparallel') {
-    return true
-  }
-  if (c === 'parallel') {
-    const input =
-      typeof block.input === 'object' && block.input != null
-        ? (block.input as Record<string, unknown>)
-        : {}
-    return isPureSubagentParallelInput(input)
-  }
-  return false
+  const name = typeof block.name === 'string' ? block.name : ''
+  const input =
+    typeof block.input === 'object' && block.input != null
+      ? (block.input as Record<string, unknown>)
+      : undefined
+  return isDelegatedAgentParentTool(name, input)
 }
 
 function firstToolUseFromProgress(m: NormalizedMessage): ToolUseBlockParam | undefined {

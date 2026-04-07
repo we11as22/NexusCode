@@ -12,7 +12,7 @@ import {
   createLLMClient,
   ToolRegistry,
   loadSkills,
-  loadRules,
+  loadAgentInstructionBundle,
   McpClient,
   setMcpClientInstance,
   resolveBundledMcpServers,
@@ -310,7 +310,7 @@ export async function bootstrapNexus(opts: {
   toolRegistry.register(createTaskResumeTool(parallelManager, config))
 
   const claudeCompatibility = getClaudeCompatibilityOptions(config)
-  const rulesContent = await loadRules(cwd, config.rules.files, claudeCompatibility).catch(() => '')
+  const rulesContent = await loadAgentInstructionBundle(cwd, config.rules.files, config, claudeCompatibility).catch(() => '')
   const skills = await loadSkills(config.skills, cwd, config.skillsUrls, claudeCompatibility).catch(() => [])
 
   let session: Session

@@ -9,6 +9,7 @@ import {
   createLLMClient,
   loadConfig,
   Session,
+  isDelegatedAgentParentTool,
   type AgentEvent,
   type ToolDef,
 } from '@nexuscode/core'
@@ -47,32 +48,6 @@ type ContentBlockParam = APIAssistantMessage['content'][number]
 type UsageWithCache = APIAssistantMessage['usage']
 
 const TODO_TOOL_NAMES = new Set(['TodoWrite', 'update_todo_list'])
-const DELEGATED_TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskCreateBatch', 'SpawnAgent', 'SpawnAgents', 'SpawnAgentsParallel'])
-
-function isAgentTaskInput(toolName: string, input: unknown): boolean {
-  if (toolName === 'TaskCreateBatch') return true
-  if (toolName === 'TaskCreate') {
-    const kind = typeof (input as { kind?: unknown })?.kind === 'string' ? String((input as { kind?: unknown }).kind) : 'tracking'
-    return kind === 'agent'
-  }
-  return DELEGATED_TASK_TOOL_NAMES.has(toolName)
-}
-
-function isSpawnAgentRecipientName(raw: string): boolean {
-  const normalized = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
-  return normalized === 'spawnagent' || normalized === 'spawnagents'
-}
-
-function isPureSubagentParallelInput(input: unknown): boolean {
-  if (input == null || typeof input !== 'object') return false
-  const toolUses = (input as { tool_uses?: unknown }).tool_uses
-  if (!Array.isArray(toolUses) || toolUses.length === 0) return false
-  return toolUses.every((item) => {
-    if (item == null || typeof item !== 'object') return false
-    const recipientName = (item as { recipient_name?: unknown }).recipient_name
-    return typeof recipientName === 'string' && isSpawnAgentRecipientName(recipientName)
-  })
-}
 
 /**
  * Only hide *auxiliary* spawn tools from the timeline. The parent SpawnAgent / Parallel
@@ -295,7 +270,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
 
   const client = createLLMClient(config.model)
   const { builtin, dynamic } = toolRegistry.getForMode(mode)
-  const tools: ToolDef[] = [...builtin, ...dynamic]
+  const tools: ToolDef[] = toolRegistry.mergeWithHiddenExecutionTools([...builtin, ...dynamic])
 
   let runPromise: Promise<void>
   if (serverUrl) {
@@ -491,9 +466,11 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         }
       } else if (event.type === 'tool_start') {
         if (TODO_TOOL_NAMES.has(event.tool)) continue
-        if (isAgentTaskInput(event.tool, event.input)) {
-          lastSpawnAgentPartId = event.partId
-        } else if ((event.tool === 'Parallel' || event.tool === 'parallel') && isPureSubagentParallelInput(event.input)) {
+        const startInput =
+          event.input != null && typeof event.input === 'object'
+            ? (event.input as Record<string, unknown>)
+            : undefined
+        if (isDelegatedAgentParentTool(event.tool, startInput)) {
           lastSpawnAgentPartId = event.partId
         }
         if (shouldHideSubagentToolDisplay(event.tool, event.input)) continue

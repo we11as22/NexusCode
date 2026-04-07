@@ -11,9 +11,12 @@ import type { NormalizedMessage } from '../utils/messages.js'
 import { getToolUseResultErrorMap } from '../utils/messages.js'
 import {
   canonToolName,
+  exploreGlueDisplayLabel,
   exploreLabelFromRecipientAndParams,
   getParallelToolUsesFromInput,
+  isExploreGlueToolName,
   isExploreToolName,
+  normalizeRecipientName,
   parallelInputIsPureExplore,
 } from '../utils/exploreTools.js'
 
@@ -51,6 +54,15 @@ function toolNameToExploreBucket(name: string): ExploreBucket | null {
   if (c === 'glob' || c === 'filesearch' || c === 'globfilesearch') return 'glob'
   if (c === 'list' || c === 'listdir' || c === 'listdirectory') return 'list'
   if (c === 'codebasesearch') return 'codebase'
+  if (
+    c === 'readlints' ||
+    c === 'lsp' ||
+    c === 'listcodedefinitions' ||
+    c === 'listdefinitions' ||
+    c === 'webfetch' ||
+    c === 'websearch'
+  )
+    return 'codebase'
   return null
 }
 
@@ -136,16 +148,28 @@ export function NexusExploringBlock({
               typeof u.parameters === 'object' && u.parameters != null
                 ? (u.parameters as Record<string, unknown>)
                 : {}
-            const base = exploreLabelFromRecipientAndParams(
-              u.recipient_name,
-              params,
-            )
+            const rec = normalizeRecipientName(u.recipient_name)
+            const base = isExploreGlueToolName(rec)
+              ? exploreGlueDisplayLabel(rec, params)
+              : exploreLabelFromRecipientAndParams(u.recipient_name, params)
             progressEntries.push({
               id: sid,
               label: parallelFailed ? `Attempt ${base}` : base,
-              toolName: u.recipient_name,
+              toolName: rec,
               done: parallelDone,
             })
+          })
+          continue
+        }
+        if (isExploreGlueToolName(block.name)) {
+          if (seenIds.has(block.id)) continue
+          seenIds.add(block.id)
+          const gl = exploreGlueDisplayLabel(block.name, input)
+          progressEntries.push({
+            id: block.id,
+            label: toolErr[block.id] === true ? `Attempt ${gl}` : gl,
+            toolName: block.name,
+            done: !inProgressToolUseIDs.has(block.id),
           })
           continue
         }
@@ -187,18 +211,29 @@ export function NexusExploringBlock({
               typeof u.parameters === 'object' && u.parameters != null
                 ? (u.parameters as Record<string, unknown>)
                 : {}
-            const base = exploreLabelFromRecipientAndParams(
-              u.recipient_name,
-              params,
-            )
+            const rec = normalizeRecipientName(u.recipient_name)
+            const base = isExploreGlueToolName(rec)
+              ? exploreGlueDisplayLabel(rec, params)
+              : exploreLabelFromRecipientAndParams(u.recipient_name, params)
             entries.unshift({
               id: `${block.id}#${ui}`,
               label: parallelFailed ? `Attempt ${base}` : base,
-              toolName: u.recipient_name,
+              toolName: rec,
               done: parallelDone,
             })
             addedAny = true
           }
+          continue
+        }
+        if (isExploreGlueToolName(block.name)) {
+          const gl = exploreGlueDisplayLabel(block.name, input)
+          entries.unshift({
+            id: block.id,
+            label: toolErr[block.id] === true ? `Attempt ${gl}` : gl,
+            toolName: block.name,
+            done: !inProgressToolUseIDs.has(block.id),
+          })
+          addedAny = true
           continue
         }
         if (!isExploreToolName(block.name)) continue

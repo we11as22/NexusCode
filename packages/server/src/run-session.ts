@@ -7,7 +7,7 @@ import {
   createFileSecretsStore,
   createLLMClient,
   ToolRegistry,
-  loadRules,
+  loadAgentInstructionBundle,
   loadSkills,
   createCompaction,
   createSpawnAgentTool,
@@ -20,6 +20,7 @@ import {
   createTaskCreateBatchTool,
   createTaskResumeTool,
   createTaskSnapshotTool,
+  createSpawnAgentsParallelTool,
   setParallelAgentManager,
   ParallelAgentManager,
   createCodebaseIndexer,
@@ -101,7 +102,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
       : mcpPromise
 
   const rulesAndSkillsPromise = Promise.all([
-    loadRules(cwd, configForRun.rules.files, getClaudeCompatibilityOptions(configForRun)).catch(() => ""),
+    loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, getClaudeCompatibilityOptions(configForRun)).catch(() => ""),
     loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, getClaudeCompatibilityOptions(configForRun)).catch(() => []),
   ]).then(([rulesContent, skills]) => ({ type: "ok" as const, rulesContent, skills }))
   const rulesAndSkillsWithTimeout = Promise.race([
@@ -133,8 +134,9 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   toolRegistry.register(createTaskCreateBatchTool(parallelManager, configForRun))
   toolRegistry.register(createTaskSnapshotTool(parallelManager))
   toolRegistry.register(createTaskResumeTool(parallelManager, configForRun))
-  const { builtin: tools, dynamic } = toolRegistry.getForMode(mode)
-  const allTools = [...tools, ...dynamic]
+  toolRegistry.register(createSpawnAgentsParallelTool(parallelManager, configForRun))
+  const { builtin, dynamic } = toolRegistry.getForMode(mode)
+  const allTools = toolRegistry.mergeWithHiddenExecutionTools([...builtin, ...dynamic])
   // mode and allTools match; runAgentLoop builds system prompt and tool set from this mode
 
   const compaction = createCompaction()

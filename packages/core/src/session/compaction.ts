@@ -83,9 +83,20 @@ function prune(session: ISession): void {
 
   if (pruned > PRUNE_MINIMUM) {
     for (const part of toPrune) {
+      const msg = session.messages.find((m) => m.id === part.messageId)
+      let spill: string | undefined
+      if (msg && Array.isArray(msg.content)) {
+        const tp = (msg.content as MessagePart[]).find(
+          (x) => x.type === "tool" && (x as ToolPart).id === part.partId,
+        ) as ToolPart | undefined
+        spill = tp?.outputSpillPath
+      }
+      const cleared = spill
+        ? `[Old tool result content cleared. Full output on disk: ${spill}]`
+        : "[Old tool result content cleared]"
       session.updateToolPart(part.messageId, part.partId, {
         compacted: true,
-        output: "[Old tool result content cleared]",
+        output: cleared,
       })
     }
   }

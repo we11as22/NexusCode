@@ -21,6 +21,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   private readonly readyWebviews = new WeakMap<vscode.Webview, boolean>()
   private readonly pendingMessages = new WeakMap<vscode.Webview, ExtensionMessage[]>()
   private latestMessages = new Map<ExtensionMessage["type"], ExtensionMessage>()
+  private outboundSeq = 0
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.writeDebugFileLog("NexusProvider.constructor")
@@ -103,6 +104,11 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     } catch {
       return JSON.parse(JSON.stringify(msg)) as T
     }
+  }
+
+  private stampMessage(msg: ExtensionMessage): ExtensionMessage {
+    if (typeof msg.seq === "number" && Number.isFinite(msg.seq)) return msg
+    return { ...msg, seq: ++this.outboundSeq }
   }
 
   private queueMessageForWebview(webview: vscode.Webview, msg: ExtensionMessage): void {
@@ -246,12 +252,13 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 
   private postMessage(msg: ExtensionMessage): void {
-    this.rememberLatestMessage(msg)
+    const stamped = this.stampMessage(msg)
+    this.rememberLatestMessage(stamped)
     const targets: vscode.Webview[] = []
     if (this.view?.webview) targets.push(this.view.webview)
     if (this.panel?.webview && this.panel.webview !== this.view?.webview) targets.push(this.panel.webview)
     for (const webview of targets) {
-      void this.postMessageToTarget(webview, msg)
+      void this.postMessageToTarget(webview, stamped)
     }
   }
 

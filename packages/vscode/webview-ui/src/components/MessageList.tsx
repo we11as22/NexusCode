@@ -3,6 +3,7 @@ import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
+import { NEXUS_CHAT_LAYOUT_EVENT } from "../constants/chatLayoutEvent.js"
 import { NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX } from "../constants/questionnaire.js"
 import { ExploredSummaryInline, getAssistantDisplaySegments, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
 import { ThoughtBlock } from "./ThoughtBlock.js"
@@ -11,6 +12,11 @@ import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart, ReasoningPart } from "../stores/chat.js"
 import type { SubAgentState } from "../stores/chat.js"
 import { useChatStore } from "../stores/chat.js"
+import { buildChatRenderItems as buildProjectedChatRenderItems } from "../transcript/renderProjection.js"
+import {
+  getParallelDelegatedAgentTaskDescriptions,
+  isPureSubagentParallelInput,
+} from "../transcript/helpers.js"
 
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file", "Edit", "Write"])
 const BASH_OUTPUT_TAIL_LINES = 80
@@ -161,7 +167,10 @@ function BashCommandBlock({
     <div className="nexus-bash-command-block my-2 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => {
+          setExpanded(!expanded)
+          onListLayoutHint?.()
+        }}
         className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]"
       >
         <span className="flex-shrink-0" title="bash">⌨️</span>
@@ -337,6 +346,7 @@ function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): C
 
 export function MessageList({ messages, isRunning = false, hasOlderMessages = false, loadingOlderMessages = false }: Props) {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const virtuosoViewportWrapRef = useRef<HTMLDivElement>(null)
   const initialTopMostItemIndexRef = useRef<number | undefined>(undefined)
   const [stickToBottom, setStickToBottom] = useState(true)
   const stickToBottomRef = useRef(true)
@@ -347,7 +357,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
   const compactionUi = useChatStore((s) => s.compactionUi)
   const compactionLog = useChatStore((s) => s.compactionLog)
   const renderedMessages = useMemo(() => {
-    const base = buildChatRenderItems(messages, isRunning)
+    const base = buildProjectedChatRenderItems(messages, isRunning)
     const extra: ChatRenderItem[] = compactionLog.map((e) => ({
       type: "compaction_done" as const,
       key: e.id,
@@ -365,21 +375,56 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
     stickToBottomRef.current = stickToBottom
   }, [stickToBottom])
 
+  /** Virtuoso: scroll range + internal state after resize or dynamic row height must stay consistent or the viewport goes blank. */
+  const flushPinToBottom = useCallback(() => {
+    if (!stickToBottomRef.current) return
+    const n = renderLenRef.current
+    if (n <= 0) return
+    virtuosoRef.current?.scrollToIndex({
+      index: n - 1,
+      align: "end",
+      behavior: "auto",
+    })
+    virtuosoRef.current?.autoscrollToBottom()
+  }, [])
+
+  const schedulePinToBottom = useCallback(() => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        flushPinToBottom()
+      })
+    })
+  }, [flushPinToBottom])
+
+  useLayoutEffect(() => {
+    const el = virtuosoViewportWrapRef.current
+    if (!el || typeof ResizeObserver === "undefined") return
+    const ro = new ResizeObserver(() => schedulePinToBottom())
+    ro.observe(el)
+    schedulePinToBottom()
+    return () => ro.disconnect()
+  }, [schedulePinToBottom])
+
+  useEffect(() => {
+    const onExternalLayout = () => schedulePinToBottom()
+    window.addEventListener(NEXUS_CHAT_LAYOUT_EVENT, onExternalLayout)
+    return () => window.removeEventListener(NEXUS_CHAT_LAYOUT_EVENT, onExternalLayout)
+  }, [schedulePinToBottom])
+
+  const onTotalListHeightChanged = useCallback(() => {
+    schedulePinToBottom()
+  }, [schedulePinToBottom])
+
   const onListLayoutHint = useCallback(() => {
     if (!stickToBottomRef.current) return
     if (scrollBottomRafRef.current != null) return
     scrollBottomRafRef.current = requestAnimationFrame(() => {
-      scrollBottomRafRef.current = null
-      if (!stickToBottomRef.current) return
-      const n = renderLenRef.current
-      if (n <= 0) return
-      virtuosoRef.current?.scrollToIndex({
-        index: n - 1,
-        align: "end",
-        behavior: "auto",
+      scrollBottomRafRef.current = requestAnimationFrame(() => {
+        scrollBottomRafRef.current = null
+        flushPinToBottom()
       })
     })
-  }, [])
+  }, [flushPinToBottom])
 
   useEffect(() => {
     const last = messages[messages.length - 1]
@@ -400,6 +445,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
         align: "end",
         behavior: "auto",
       })
+      virtuosoRef.current?.autoscrollToBottom()
     })
   }, [messages])
 
@@ -409,10 +455,14 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
 
   const jumpToLatest = useCallback(() => {
     setStickToBottom(true)
-    virtuosoRef.current?.scrollToIndex({
-      index: renderedMessages.length - 1,
-      behavior: "smooth",
-      align: "end",
+    stickToBottomRef.current = true
+    requestAnimationFrame(() => {
+      virtuosoRef.current?.scrollToIndex({
+        index: renderedMessages.length - 1,
+        behavior: "smooth",
+        align: "end",
+      })
+      virtuosoRef.current?.autoscrollToBottom()
     })
   }, [renderedMessages.length])
 
@@ -440,7 +490,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
         </div>
       )}
       <div className="message-list-virtuoso">
-        <div className="message-list-virtuoso-wrap">
+        <div ref={virtuosoViewportWrapRef} className="message-list-virtuoso-wrap">
         <Virtuoso
           ref={virtuosoRef}
           data={renderedMessages}
@@ -449,6 +499,7 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
           atBottomStateChange={setStickToBottom}
           atBottomThreshold={120}
           increaseViewportBy={{ top: 200, bottom: 480 }}
+          totalListHeightChanged={onTotalListHeightChanged}
           computeItemKey={(_, item) => (item as ChatRenderItem).key}
           itemContent={(idx, item) => (
             <div className="message-list-item">
@@ -499,7 +550,7 @@ function RenderItemRow({
   if (item.type === "compaction_live") {
     return (
       <div className="w-full min-w-0">
-        <CompactionLiveBlock />
+        <CompactionLiveBlock onLayoutHint={onListLayoutHint} />
       </div>
     )
   }
@@ -507,7 +558,7 @@ function RenderItemRow({
   if (item.type === "compaction_done") {
     return (
       <div className="w-full min-w-0">
-        <CompactionDoneBlock durationSec={item.durationSec} />
+        <CompactionDoneBlock durationSec={item.durationSec} onLayoutHint={onListLayoutHint} />
       </div>
     )
   }
@@ -521,6 +572,7 @@ function RenderItemRow({
           onOpenFile={(path, line, endLine) =>
             postMessage({ type: "openFileAtLocation", path, line, endLine })
           }
+          onLayoutHint={onListLayoutHint}
         />
       </div>
     )
@@ -965,11 +1017,6 @@ type SubagentDisplayItem = {
   error?: string
 }
 
-function isSpawnAgentRecipientName(raw: string): boolean {
-  const normalized = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, "")
-  return normalized === "spawnagent" || normalized === "spawnagents"
-}
-
 function getSpawnAgentsParallelDescriptions(input?: Record<string, unknown>): string[] {
   const agents = input?.agents
   if (!Array.isArray(agents)) return []
@@ -982,30 +1029,9 @@ function getSpawnAgentsParallelDescriptions(input?: Record<string, unknown>): st
     .filter((value): value is string => value != null)
 }
 
-function getParallelSpawnAgentDescriptions(input?: Record<string, unknown>): string[] {
-  const uses = input?.tool_uses
-  if (!Array.isArray(uses)) return []
-  return uses
-    .map((item) => {
-      if (item == null || typeof item !== "object") return null
-      const use = item as { recipient_name?: unknown; parameters?: unknown }
-      if (typeof use.recipient_name !== "string" || !isSpawnAgentRecipientName(use.recipient_name)) return null
-      if (use.parameters == null || typeof use.parameters !== "object") return null
-      const description = (use.parameters as Record<string, unknown>).description
-      return typeof description === "string" && description.trim().length > 0 ? description.trim() : null
-    })
-    .filter((value): value is string => value != null)
-}
-
 function isPureSubagentParallelTool(part: ToolPart): boolean {
   if (part.tool !== "Parallel" && part.tool !== "parallel") return false
-  const uses = part.input?.tool_uses
-  if (!Array.isArray(uses) || uses.length === 0) return false
-  return uses.every((item) => {
-    if (item == null || typeof item !== "object") return false
-    const recipientName = (item as { recipient_name?: unknown }).recipient_name
-    return typeof recipientName === "string" && isSpawnAgentRecipientName(recipientName)
-  })
+  return isPureSubagentParallelInput(part.input ?? {})
 }
 
 function isDelegatedAgentToolPart(part: ToolPart): boolean {
@@ -1029,7 +1055,7 @@ function getSubagentDisplayItems(part: ToolPart): SubagentDisplayItem[] {
       : isParallelBatch
         ? getSpawnAgentsParallelDescriptions(part.input)
         : isPureSubagentParallelTool(part)
-          ? getParallelSpawnAgentDescriptions(part.input)
+          ? getParallelDelegatedAgentTaskDescriptions(part.input)
           : []
 
   const items: SubagentDisplayItem[] = []
@@ -1221,12 +1247,13 @@ function AssistantPartRow({
           reasoningText={reasoningText}
           startTime={reasoningStartTime}
           isRunning={true}
+          onLayoutHint={onListLayoutHint}
         />
       )
     }
 
     if (!r.text?.trim() || r.text === PLACEHOLDER_TEXT) return null
-    return <ThoughtInlineBlock text={r.text} durationMs={r.durationMs} />
+    return <ThoughtInlineBlock text={r.text} durationMs={r.durationMs} onLayoutHint={onListLayoutHint} />
   }
 
   if (part.type === "text") {
@@ -1264,7 +1291,7 @@ function AssistantPartRow({
         pendingApproval?.partId === toolPart.id ? (
           <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
         ) : undefined
-      return <InlineFileEditBlock part={toolPart} approval={approval} />
+      return <InlineFileEditBlock part={toolPart} approval={approval} onLayoutHint={onListLayoutHint} />
     }
     if (toolPart.tool === "execute_command" || toolPart.tool === "Bash") {
       const approval =
@@ -1290,13 +1317,13 @@ function AssistantPartRow({
           <>
             {displayItems.length > 0
               ? <SubagentInlineList items={displayItems} />
-              : <ToolCallCard part={toolPart} approval={approval} />}
+              : <ToolCallCard part={toolPart} approval={approval} onLayoutHint={onListLayoutHint} />}
           </>
         )
       }
       return (
         <>
-          <ToolCallCard part={toolPart} approval={approval} />
+          <ToolCallCard part={toolPart} approval={approval} onLayoutHint={onListLayoutHint} />
           {displayItems.length > 0 ? (
             <SubagentInlineList items={displayItems} />
           ) : null}
@@ -1307,20 +1334,23 @@ function AssistantPartRow({
       pendingApproval?.partId === toolPart.id ? (
         <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
       ) : undefined
-    return <ToolCallCard part={toolPart} approval={approval} />
+    return <ToolCallCard part={toolPart} approval={approval} onLayoutHint={onListLayoutHint} />
   }
 
   return null
 }
 
 /** Live compaction row — same interaction pattern as ThoughtBlock (shimmer label, expandable). */
-function CompactionLiveBlock() {
+function CompactionLiveBlock({ onLayoutHint }: { onLayoutHint?: () => void }) {
   const [expanded, setExpanded] = useState(false)
   return (
     <div className="nexus-thought-block flex-shrink-0">
       <button
         type="button"
-        onClick={() => setExpanded((e) => !e)}
+        onClick={() => {
+          setExpanded((e) => !e)
+          onLayoutHint?.()
+        }}
         className="w-full flex items-center gap-1.5 px-0 py-1 text-left text-xs hover:text-[var(--vscode-foreground)]"
       >
         <span
@@ -1343,7 +1373,7 @@ function CompactionLiveBlock() {
 }
 
 /** Finished compaction — ThoughtInlineBlock-style header with duration. */
-function CompactionDoneBlock({ durationSec }: { durationSec: number }) {
+function CompactionDoneBlock({ durationSec, onLayoutHint }: { durationSec: number; onLayoutHint?: () => void }) {
   const [open, setOpen] = useState(false)
   const label = `Compacted · ${durationSec}s`
 
@@ -1351,7 +1381,10 @@ function CompactionDoneBlock({ durationSec }: { durationSec: number }) {
     <div className="nexus-thought-inline-block">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          setOpen((o) => !o)
+          onLayoutHint?.()
+        }}
         className="w-full flex items-center gap-1.5 px-0 py-1 text-left text-xs text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
       >
         <span className="flex-shrink-0 text-[10px] transition-transform" style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}>
@@ -1371,7 +1404,15 @@ function CompactionDoneBlock({ durationSec }: { durationSec: number }) {
 }
 
 /** Thought inline: one reasoning part, tool-like (header + optional duration, expandable body). Always shown chronologically. */
-function ThoughtInlineBlock({ text, durationMs }: { text: string; durationMs?: number }) {
+function ThoughtInlineBlock({
+  text,
+  durationMs,
+  onLayoutHint,
+}: {
+  text: string
+  durationMs?: number
+  onLayoutHint?: () => void
+}) {
   const [open, setOpen] = useState(false)
   const seconds = durationMs != null ? Math.max(1, Math.round(durationMs / 1000)) : undefined
   const label = seconds != null ? `Thought for ${seconds}s` : text.trim().length < 80 ? "Thought briefly" : "Thought"
@@ -1380,7 +1421,10 @@ function ThoughtInlineBlock({ text, durationMs }: { text: string; durationMs?: n
     <div className="nexus-thought-inline-block">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          setOpen((o) => !o)
+          onLayoutHint?.()
+        }}
         className="w-full flex items-center gap-1.5 px-0 py-1 text-left text-xs text-[var(--vscode-descriptionForeground)] hover:text-[var(--vscode-foreground)]"
       >
         <span className="flex-shrink-0 text-[10px] transition-transform" style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>

@@ -33,7 +33,10 @@ export interface TruncateResult {
 export interface TruncateResultTruncated {
   content: string
   truncated: true
+  /** Display path (may use `~`). */
   outputPath: string
+  /** Absolute filesystem path to the spilled `.out` file. */
+  absolutePath: string
 }
 
 export type TruncateOutputResult = TruncateResult | TruncateResultTruncated
@@ -139,6 +142,7 @@ export async function truncateOutput(
     content,
     truncated: true,
     outputPath: displayPath,
+    absolutePath: filePath,
   }
 }
 

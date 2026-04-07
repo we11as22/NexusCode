@@ -1,5 +1,5 @@
 /**
- * Shared helpers for "code exploration" tools (Read, Grep, Glob, List, CodebaseSearch)
+ * Shared helpers for "code exploration" tools (read/search/structure/lints/LSP/web discovery)
  * and Parallel batches that contain only those tools.
  */
 
@@ -15,6 +15,12 @@ export const EXPLORE_CANONICAL = new Set([
   'listdir',
   'listdirectory',
   'codebasesearch',
+  'listcodedefinitions',
+  'listdefinitions',
+  'readlints',
+  'lsp',
+  'webfetch',
+  'websearch',
 ])
 
 export function canonToolName(name: string): string {
@@ -25,8 +31,32 @@ export function isExploreToolName(name: string): boolean {
   return EXPLORE_CANONICAL.has(canonToolName(name))
 }
 
-/** TodoWrite / update_todo_list — may sit between Read/Grep without closing the explore wave. */
-const EXPLORE_GLUE_CANONICAL = new Set(['todowrite', 'updatetodolist'])
+/**
+ * Auxiliary tools: do not close an explore wave (same segment as Read/Grep/…).
+ * Mutating / orchestration “real work” (Write, Bash run, TaskCreate, plan exit, Condense, …) is NOT glue.
+ */
+const EXPLORE_GLUE_CANONICAL = new Set([
+  'todowrite',
+  'updatetodolist',
+  'spawnagentoutput',
+  'spawnagentstop',
+  'bashoutput',
+  'killbash',
+  'enterworktree',
+  'exitworktree',
+  'toolsearch',
+  'taskoutput',
+  'tasksnapshot',
+  'taskget',
+  'tasklist',
+  'listmcresources',
+  'readmcpresource',
+  'mcpauthenticate',
+  'memorylist',
+  'memoryget',
+  'listagentruns',
+  'agentrunsnapshot',
+])
 
 export function isExploreGlueToolName(name: string): boolean {
   return EXPLORE_GLUE_CANONICAL.has(canonToolName(name))
@@ -68,17 +98,27 @@ export function getParallelToolUsesFromInput(
   )
 }
 
-/** Every inner call is a read-only explore tool (Read, Grep, …). */
+/**
+ * Parallel batch is an explore wave when every inner call is explore or explore-glue,
+ * and at least one inner is a real explore tool (glue-only Parallel is not a wave).
+ */
 export function parallelInputIsPureExplore(
   input: Record<string, unknown>,
 ): boolean {
   const uses = getParallelToolUsesFromInput(input)
   if (uses.length === 0) return false
-  return uses.every(
-    u =>
-      typeof u.recipient_name === 'string' &&
-      isExploreRecipientName(u.recipient_name),
-  )
+  let sawExplore = false
+  for (const u of uses) {
+    if (typeof u.recipient_name !== 'string') return false
+    const rec = normalizeRecipientName(u.recipient_name)
+    if (isExploreToolName(rec)) {
+      sawExplore = true
+      continue
+    }
+    if (isExploreGlueToolName(rec)) continue
+    return false
+  }
+  return sawExplore
 }
 
 export function shortArg(v: unknown, max = 50): string {
@@ -106,12 +146,63 @@ export function exploreLabelFromRecipientAndParams(
   else if (c === 'list' || c === 'listdir' || c === 'listdirectory')
     type = 'List'
   else if (c === 'codebasesearch') type = 'Search'
+  else if (c === 'listcodedefinitions' || c === 'listdefinitions') type = 'ListCodeDefinitions'
+  else if (c === 'readlints') type = 'ReadLints'
+  else if (c === 'lsp') type = 'LSP'
+  else if (c === 'webfetch') type = 'WebFetch'
+  else if (c === 'websearch') type = 'WebSearch'
   const arg = shortArg(
     parameters.file_path ??
       parameters.path ??
+      parameters.filePath ??
       parameters.pattern ??
       parameters.query ??
-      parameters.glob,
+      parameters.glob ??
+      parameters.q,
   )
   return arg ? `${type}(${arg})` : type
+}
+
+/** Short line for auxiliary tools inside an explore wave (CLI ⎿ history). */
+export function exploreGlueDisplayLabel(
+  name: string,
+  parameters: Record<string, unknown>,
+): string {
+  const c = canonToolName(name)
+  const s = (k: string) => shortArg(parameters[k], 36)
+  if (c === 'todowrite' || c === 'updatetodolist') return 'TodoWrite'
+  if (c === 'toolsearch') return 'ToolSearch'
+  if (c === 'enterworktree') {
+    const p = s('path')
+    return p ? `EnterWorktree(${p})` : 'EnterWorktree'
+  }
+  if (c === 'exitworktree') return 'ExitWorktree'
+  if (c === 'bashoutput') return 'BashOutput'
+  if (c === 'killbash') return 'KillBash'
+  if (c === 'spawnagentoutput') return 'SpawnAgentOutput'
+  if (c === 'spawnagentstop') return 'SpawnAgentStop'
+  if (c === 'taskoutput') {
+    const tid = s('task_id') || s('taskId')
+    return tid ? `TaskOutput(${tid})` : 'TaskOutput'
+  }
+  if (c === 'tasksnapshot') {
+    const tid = s('task_id') || s('taskId')
+    return tid ? `TaskSnapshot(${tid})` : 'TaskSnapshot'
+  }
+  if (c === 'taskget') {
+    const tid = s('task_id') || s('taskId')
+    return tid ? `TaskGet(${tid})` : 'TaskGet'
+  }
+  if (c === 'tasklist') return 'TaskList'
+  if (c === 'listmcresources') return 'ListMcpResources'
+  if (c === 'readmcpresource') return 'ReadMcpResource'
+  if (c === 'mcpauthenticate') return 'MCPAuthenticate'
+  if (c === 'memorylist') return 'MemoryList'
+  if (c === 'memoryget') {
+    const k = s('key')
+    return k ? `MemoryGet(${k})` : 'MemoryGet'
+  }
+  if (c === 'listagentruns') return 'ListAgentRuns'
+  if (c === 'agentrunsnapshot') return 'AgentRunSnapshot'
+  return normalizeRecipientName(name) || name
 }

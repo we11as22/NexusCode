@@ -14,7 +14,8 @@ import type {
 import { PLAN_MODE_ALLOWED_WRITE_PATTERN, PLAN_MODE_BLOCKED_EXTENSIONS, READ_ONLY_TOOLS } from "./modes.js"
 import { getMessagesForActiveContext } from "../session/active-context.js"
 import { truncateOutput } from "../context/truncate.js"
-import { splitQuestionOptionListString } from "../tools/user-question-utils.js"
+import { registerToolOutputSpill } from "../context/tool-output-registry.js"
+import { coerceQuestionOptionRows, splitQuestionOptionListString } from "../tools/user-question-utils.js"
 
 const DOOM_LOOP_THRESHOLD = 3
 const DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND = 5
@@ -204,7 +205,6 @@ const TOOL_BOOLEAN_ARG_KEYS: Record<string, readonly string[]> = {
   Bash: ["run_in_background", "dangerouslyDisableSandbox"],
   TodoWrite: ["merge", "allow_custom"],
   Edit: ["replace_all"],
-  create_rule: ["global"],
   AskFollowupQuestion: ["allow_custom"],
 }
 
@@ -372,41 +372,7 @@ function pickFirstStringField(obj: Record<string, unknown>, keys: string[]): str
  * Handles string[], mixed arrays, and { label | text | value | ... } rows.
  */
 export function coerceQuestionOptionStrings(val: unknown): string[] {
-  if (val === undefined || val === null) return []
-  if (typeof val === "string") {
-    const s = val.trim()
-    if (!s) return []
-    return splitQuestionOptionListString(s)
-  }
-  if (typeof val === "number" || typeof val === "boolean") return [String(val)]
-  if (!Array.isArray(val)) return []
-  const out: string[] = []
-  for (const el of val) {
-    if (typeof el === "string") {
-      if (el.trim()) out.push(...splitQuestionOptionListString(el))
-      continue
-    }
-    if (typeof el === "number" || typeof el === "boolean") {
-      out.push(String(el))
-      continue
-    }
-    if (el != null && typeof el === "object") {
-      const row = el as Record<string, unknown>
-      const s = pickFirstStringField(row, [
-        "label",
-        "text",
-        "value",
-        "title",
-        "name",
-        "option",
-        "answer",
-        "description",
-        "content",
-      ])
-      if (s) out.push(s)
-    }
-  }
-  return out
+  return coerceQuestionOptionRows(val).map((r) => r.label)
 }
 
 /**
@@ -447,37 +413,54 @@ function normalizeAskFollowupQuestionInput(raw: Record<string, unknown>): Record
         ? pickFirstStringField(raw, [...QUESTION_ALIASES])
         : undefined
 
-  const fromCoerceTop = coerceQuestionOptionStrings(raw.options ?? raw.choices ?? raw.answers)
-  const fromStringsTop = normalizeOptionalStringArray(raw.options) ?? []
-  const mergedTopOptions = fromCoerceTop.length > 0 ? fromCoerceTop : fromStringsTop
+  let mergedTopRows = coerceQuestionOptionRows(raw.options ?? raw.choices ?? raw.answers)
+  if (mergedTopRows.length === 0) {
+    const fromStringsTop = normalizeOptionalStringArray(raw.options) ?? []
+    if (fromStringsTop.length > 0) mergedTopRows = fromStringsTop.map((s) => ({ label: s }))
+  }
 
   let nextQuestions: unknown = questionsEarly
   if (Array.isArray(questionsEarly)) {
     nextQuestions = questionsEarly.map((item: unknown) => {
       if (typeof item !== "object" || item === null) return item
       const q = item as Record<string, unknown>
+      const qNorm = { ...q }
+      if (qNorm.multiSelect != null && qNorm.multi_select == null) {
+        qNorm.multi_select = qNorm.multiSelect
+      }
+      if (typeof qNorm.header !== "string" && typeof qNorm.Header === "string") {
+        qNorm.header = qNorm.Header
+      }
       const qText =
-        typeof q.question === "string" && q.question.trim().length > 0
-          ? q.question.trim()
-          : pickFirstStringField(q, [...QUESTION_ALIASES]) ??
-            (typeof q.q === "string" && q.q.trim() ? q.q.trim() : undefined)
-      const opts = coerceQuestionOptionStrings(q.options ?? q.choices ?? q.answers ?? q.values)
+        typeof qNorm.question === "string" && qNorm.question.trim().length > 0
+          ? qNorm.question.trim()
+          : pickFirstStringField(qNorm, [...QUESTION_ALIASES]) ??
+            (typeof qNorm.q === "string" && qNorm.q.trim() ? qNorm.q.trim() : undefined)
+      const optRows = coerceQuestionOptionRows(
+        qNorm.options ?? qNorm.choices ?? qNorm.answers ?? qNorm.values,
+      )
       return {
-        ...q,
+        ...qNorm,
         ...(qText ? { question: qText } : {}),
-        ...(opts.length > 0 ? { options: opts } : {}),
+        ...(optRows.length > 0 ? { options: optRows } : {}),
       }
     })
   }
 
   const out: Record<string, unknown> = { ...raw }
+  if (out.multiSelect != null && out.multi_select == null) {
+    out.multi_select = out.multiSelect
+  }
+  if (typeof out.header !== "string" && typeof out.Header === "string") {
+    out.header = out.Header
+  }
   if (Array.isArray(nextQuestions)) {
     out.questions = nextQuestions
   }
   if (topQuestion) {
     out.question = topQuestion
   }
-  out.options = mergedTopOptions.length > 0 ? mergedTopOptions : undefined
+  out.options = mergedTopRows.length > 0 ? mergedTopRows : undefined
   return out
 }
 
@@ -605,27 +588,6 @@ export function normalizeToolInputForParse(
   }
   if (name === "WebSearch") {
     return coerceNumericFields(raw, [{ key: "max_results", min: 1, max: 10 }])
-  }
-  // Exa tools (optional MCP): numeric args as strings
-  if (name === "exa_web_search") {
-    let n = coerceNumericFields(raw, [
-      { key: "numResults", min: 1, max: 20 },
-      { key: "contextMaxCharacters", min: 1, max: 500_000 },
-    ])
-    const liveSet = new Set(["fallback", "preferred"])
-    if (typeof n.livecrawl === "string") {
-      const s = n.livecrawl.trim().toLowerCase()
-      if (liveSet.has(s)) n = { ...n, livecrawl: s }
-    }
-    const typeSet = new Set(["auto", "fast", "deep"])
-    if (typeof n.type === "string") {
-      const s = n.type.trim().toLowerCase()
-      if (typeSet.has(s)) n = { ...n, type: s }
-    }
-    return n
-  }
-  if (name === "exa_code_search") {
-    return coerceNumericFields(raw, [{ key: "tokensNum", min: 1000, max: 50_000 }])
   }
   // Glob: model sometimes literally sends path: "undefined"
   if (name === "Glob") {
@@ -1151,6 +1113,13 @@ export async function executeToolCall(
     ) {
       const truncated = await truncateOutput(result.output, { cwd: ctx.cwd })
       if (truncated.truncated) {
+        const partId = `part_${toolCallId}`
+        registerToolOutputSpill({
+          sessionId: session.id,
+          partId,
+          absolutePath: truncated.absolutePath,
+          toolName: resolvedToolName,
+        })
         return {
           success: result.success,
           output: truncated.content,
@@ -1158,6 +1127,7 @@ export async function executeToolCall(
             ...result.metadata,
             truncated: true,
             outputPath: truncated.outputPath,
+            outputSpillAbsolutePath: truncated.absolutePath,
           },
         }
       }

@@ -25,7 +25,7 @@ interface SlashCommandItem {
 
 const SLASH_COMMANDS: SlashCommandItem[] = [
   // SETTINGS section
-  { name: "mode",       description: "Switch agent mode (agent / plan / ask / debug)",  section: "SETTINGS", icon: "⚙", isAction: true },
+  { name: "mode",       description: "Switch agent mode (agent / plan / ask / debug / review)",  section: "SETTINGS", icon: "⚙", isAction: true },
   { name: "llm",        description: "LLM model & provider settings",                   section: "SETTINGS", icon: "🤖", isAction: true },
   { name: "embeddings", description: "Embeddings model settings",                       section: "SETTINGS", icon: "🔍", isAction: true },
   { name: "index",      description: "Codebase indexer status and controls",            section: "SETTINGS", icon: "📑", isAction: true },

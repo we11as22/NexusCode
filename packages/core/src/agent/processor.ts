@@ -14,7 +14,8 @@ import type {
 } from "../types.js"
 import { normalizedAppliedReplacementsFromMetadata } from "../tools/applied-replacements.js"
 import * as path from "node:path"
-import { READ_ONLY_TOOLS, MANDATORY_END_TOOL, PLAN_MODE_ALLOWED_WRITE_PATTERN } from "./modes.js"
+import { READ_ONLY_TOOLS, MANDATORY_END_TOOL } from "./modes.js"
+import { planExitWriteGateSatisfied } from "../session/plan-write-gate.js"
 import {
   buildUserMessageForInvalidSdkToolArgs,
   isAiSdkInvalidToolArgumentsError,
@@ -27,6 +28,7 @@ import {
   DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND,
   type CompletionState,
 } from "./tool-execution.js"
+import { spillPathFromToolMetadata } from "./tool-spill.js"
 import type { ApprovalAction, PermissionResult } from "../types.js"
 import {
   buildReasoningProviderOptions,
@@ -37,23 +39,6 @@ import {
 import { findLastOpenReasoningPartIndex } from "./reasoning-segment-utils.js"
 
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
-
-function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: string): boolean {
-  const msg = session.messages.find((m) => m.id === messageId)
-  if (!msg || !Array.isArray(msg.content)) return false
-  const parts = msg.content as MessagePart[]
-  for (const p of parts) {
-    if (p.type !== "tool") continue
-    const tp = p as ToolPart
-    if (tp.tool !== "Write" && tp.tool !== "Edit") continue
-    const raw = (tp.input?.file_path ?? tp.input?.path) as string | undefined
-    if (!raw || typeof raw !== "string") continue
-    const rel = path.isAbsolute(raw) ? path.relative(cwd, raw) : raw
-    const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
-    if (PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) return true
-  }
-  return false
-}
 
 export interface ProcessStreamStepOptions {
   client: LLMClient
@@ -229,10 +214,12 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
       const result = results[i]!
       const partId = `part_${tc.toolCallId}`
 
+      const spillP = "metadata" in result ? spillPathFromToolMetadata(result.metadata) : undefined
       session.updateToolPart(newMessageId, partId, {
         status: result.success ? "completed" : "error",
         output: result.output,
         timeEnd: Date.now(),
+        ...(spillP ? { outputSpillPath: spillP } : {}),
       })
 
       await emit({
@@ -502,11 +489,11 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
           } else {
             await flushPendingReads()
 
-            // Plan mode: force writing the plan to .nexus/plans/ before PlanExit
+            // Plan mode: OpenClaude-style plan write in-session before PlanExit
             if (toolName === "PlanExit" && mode === "plan") {
-              if (!messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd)) {
+              if (!planExitWriteGateSatisfied(session, newMessageId, toolCtx.cwd)) {
                 const errMsg =
-                  "You must write the plan to a file in .nexus/plans/ (e.g. .nexus/plans/plan.md) before calling PlanExit. Create or update the plan file now, then call PlanExit again."
+                  "PlanExit requires at least one completed Write or Edit to `.nexus/plans/*.md` or `.txt` in this session (you may Write then PlanExit in the same turn). Pre-existing files on disk alone are not enough."
                 session.updateToolPart(newMessageId, partId, {
                   status: "error",
                   output: errMsg,
@@ -543,20 +530,22 @@ export async function processStreamStep(opts: ProcessStreamStepOptions): Promise
               mcpToolNames
             )
 
-            session.updateToolPart(newMessageId, partId, {
-              status: result.success ? "completed" : "error",
-              output: result.output,
-              timeEnd: Date.now(),
-              ...(result.success && (toolName === "Write" || toolName === "Edit")
-                ? {
-                    path: extractWriteTargetPath(toolName, normalizedToolInput),
-                    ...(typeof (result.metadata as { addedLines?: number; removedLines?: number })?.addedLines === "number" &&
-                    typeof (result.metadata as { addedLines?: number; removedLines?: number })?.removedLines === "number"
-                      ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
-                      : {}),
-                  }
-                : {}),
-            })
+              const spillMain = spillPathFromToolMetadata(result.metadata)
+              session.updateToolPart(newMessageId, partId, {
+                status: result.success ? "completed" : "error",
+                output: result.output,
+                timeEnd: Date.now(),
+                ...(spillMain ? { outputSpillPath: spillMain } : {}),
+                ...(result.success && (toolName === "Write" || toolName === "Edit")
+                  ? {
+                      path: extractWriteTargetPath(toolName, normalizedToolInput),
+                      ...(typeof (result.metadata as { addedLines?: number; removedLines?: number })?.addedLines === "number" &&
+                      typeof (result.metadata as { addedLines?: number; removedLines?: number })?.removedLines === "number"
+                        ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
+                        : {}),
+                    }
+                  : {}),
+              })
 
             await emitToolEndPayload(toolName, normalizedToolInput, partId, result)
 

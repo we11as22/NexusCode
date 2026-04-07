@@ -2,10 +2,11 @@ import React from "react"
 import { useChatStore, type Mode } from "../stores/chat.js"
 
 const MODES: Array<{ id: Mode; label: string; icon: string; description: string }> = [
-  { id: "agent", label: "Agent", icon: "A", description: "Full autonomous coding agent" },
-  { id: "plan",  label: "Plan",  icon: "P", description: "Plan without modifying code" },
-  { id: "ask",   label: "Ask",   icon: "Q", description: "Q&A without modifications" },
-  { id: "debug", label: "Debug", icon: "D", description: "Root-cause debugging mode" },
+  { id: "agent", label: "Agent", icon: "A", description: "Full execution: files, shell, orchestration" },
+  { id: "plan", label: "Plan", icon: "P", description: "Plan files only under .nexus/plans; no shell" },
+  { id: "ask", label: "Ask", icon: "Q", description: "Read-only Q&A + safe delegation" },
+  { id: "debug", label: "Debug", icon: "D", description: "Like agent; diagnose then fix" },
+  { id: "review", label: "Review", icon: "R", description: "Audit via git/read; no edits" },
 ]
 
 export function ModeSelector() {

@@ -16,6 +16,8 @@ const FILE_TOOLS = new Set(["read_file", "list_dir", "Read", "List"])
 const SEARCH_TOOLS = new Set([
   "grep", "codebase_search", "search_files", "list_code_definitions", "glob",
   "Grep", "CodebaseSearch", "Glob", "ListCodeDefinitions",
+  "read_lints", "ReadLints", "lsp", "LSP",
+  "web_fetch", "WebFetch", "web_search", "WebSearch",
 ])
 /** Only these increase "N files" in Explored label. */
 const FILE_COUNT_TOOLS = new Set(["read_file", "Read"])
@@ -23,6 +25,35 @@ const FILE_COUNT_TOOLS = new Set(["read_file", "Read"])
 const LIST_COUNT_TOOLS = new Set(["list_dir", "List"])
 function canonicalToolName(raw: string): string {
   return raw.trim().toLowerCase().replace(/[^a-z0-9]/g, "")
+}
+
+/** Same idea as CLI `EXPLORE_GLUE_CANONICAL`: auxiliary tools that must not end an exploration segment. */
+const EXPLORATION_GLUE_CANONICAL = new Set([
+  "todowrite",
+  "updatetodolist",
+  "spawnagentoutput",
+  "spawnagentstop",
+  "bashoutput",
+  "killbash",
+  "enterworktree",
+  "exitworktree",
+  "toolsearch",
+  "taskoutput",
+  "tasksnapshot",
+  "taskget",
+  "tasklist",
+  "listmcresources",
+  "readmcpresource",
+  "mcpauthenticate",
+  "memorylist",
+  "memoryget",
+  "listagentruns",
+  "agentrunsnapshot",
+])
+
+/** Hide these tool rows in the main transcript when they sit inside an Explored segment (shown as aux lines). */
+export function isExplorationSegmentGlueTool(tool: string): boolean {
+  return EXPLORATION_GLUE_CANONICAL.has(canonicalToolName(tool))
 }
 
 function normalizeNestedToolName(rawRecipientName: string): string {
@@ -56,7 +87,19 @@ function normalizeNestedToolName(rawRecipientName: string): string {
       return "CodebaseSearch"
     case "listcodedefinitions":
     case "listdefinitions":
+    case "list_code_definitions":
       return "ListCodeDefinitions"
+    case "readlints":
+    case "read_lints":
+      return "ReadLints"
+    case "lsp":
+      return "LSP"
+    case "webfetch":
+    case "web_fetch":
+      return "WebFetch"
+    case "websearch":
+    case "web_search":
+      return "WebSearch"
     default:
       return normalized
   }
@@ -83,11 +126,17 @@ function expandExplorationToolParts(part: ToolPart): ToolPart[] {
   if (part.tool === "Parallel" || part.tool === "parallel") {
     const uses = asObjectArray(part.input?.tool_uses)
     if (uses.length === 0) return []
-    const expanded = uses.map((use, index) => {
+    let sawExplore = false
+    const out: ToolPart[] = []
+    for (let index = 0; index < uses.length; index++) {
+      const use = uses[index]!
       const recipient = typeof use.recipient_name === "string" ? use.recipient_name : ""
       const tool = normalizeNestedToolName(recipient)
+      if (isExplorationSegmentGlueTool(tool)) continue
+      if (!isDirectExplorationToolName(tool)) return []
+      sawExplore = true
       const input = asObject(use.parameters) ?? {}
-      return {
+      out.push({
         type: "tool" as const,
         id: `${part.id}-parallel-${index + 1}`,
         tool,
@@ -95,9 +144,9 @@ function expandExplorationToolParts(part: ToolPart): ToolPart[] {
         input,
         timeStart: part.timeStart,
         timeEnd: part.timeEnd,
-      } satisfies ToolPart
-    })
-    return expanded.filter((item) => isDirectExplorationToolName(item.tool))
+      } satisfies ToolPart)
+    }
+    return sawExplore ? out : []
   }
 
   if (part.tool === "batch" || part.tool === "Batch") {
@@ -153,21 +202,112 @@ export function isExplorationTool(tool: string): boolean {
   return isDirectExplorationToolName(tool)
 }
 
-/** One item in the explored block: either a thought (reasoning without user_message) or an exploration tool. */
+function shortArg(v: unknown, max = 36): string {
+  if (typeof v !== "string") return ""
+  const s = v.replace(/\s+/g, " ").trim()
+  return s.length <= max ? s : s.slice(0, max - 1) + "…"
+}
+
+/** One-line label for glue tools inside the Explored block (matches CLI exploreGlueDisplayLabel). */
+function webviewGlueAuxLabel(tool: string, input: Record<string, unknown>): string {
+  const c = canonicalToolName(tool)
+  const s = (k: string) => shortArg(input[k], 36)
+  if (c === "todowrite" || c === "updatetodolist") return "TodoWrite"
+  if (c === "toolsearch") return "ToolSearch"
+  if (c === "enterworktree") {
+    const p = s("path")
+    return p ? `EnterWorktree(${p})` : "EnterWorktree"
+  }
+  if (c === "exitworktree") return "ExitWorktree"
+  if (c === "bashoutput") return "BashOutput"
+  if (c === "killbash") return "KillBash"
+  if (c === "spawnagentoutput") return "SpawnAgentOutput"
+  if (c === "spawnagentstop") return "SpawnAgentStop"
+  if (c === "taskoutput") {
+    const tid = s("task_id") || s("taskId")
+    return tid ? `TaskOutput(${tid})` : "TaskOutput"
+  }
+  if (c === "tasksnapshot") {
+    const tid = s("task_id") || s("taskId")
+    return tid ? `TaskSnapshot(${tid})` : "TaskSnapshot"
+  }
+  if (c === "taskget") {
+    const tid = s("task_id") || s("taskId")
+    return tid ? `TaskGet(${tid})` : "TaskGet"
+  }
+  if (c === "tasklist") return "TaskList"
+  if (c === "listmcresources") return "ListMcpResources"
+  if (c === "readmcpresource") return "ReadMcpResource"
+  if (c === "mcpauthenticate") return "MCPAuthenticate"
+  if (c === "memorylist") return "MemoryList"
+  if (c === "memoryget") {
+    const k = s("key")
+    return k ? `MemoryGet(${k})` : "MemoryGet"
+  }
+  if (c === "listagentruns") return "ListAgentRuns"
+  if (c === "agentrunsnapshot") return "AgentRunSnapshot"
+  return tool.trim() || "Tool"
+}
+
+function buildExplorationPrefixItemsFromToolPart(
+  part: ToolPart,
+  nextPartIndex: () => number
+): ExploredPrefixItem[] {
+  if (part.tool === "Parallel" || part.tool === "parallel") {
+    const uses = asObjectArray(part.input?.tool_uses)
+    if (uses.length === 0) return []
+    let sawExplore = false
+    const items: ExploredPrefixItem[] = []
+    for (let index = 0; index < uses.length; index++) {
+      const use = uses[index]!
+      const recipient = typeof use.recipient_name === "string" ? use.recipient_name : ""
+      const tool = normalizeNestedToolName(recipient)
+      const input = asObject(use.parameters) ?? {}
+      if (isExplorationSegmentGlueTool(tool)) {
+        items.push({
+          type: "aux",
+          id: `${part.id}-p-${index}`,
+          label: webviewGlueAuxLabel(tool, input),
+        })
+        continue
+      }
+      if (!isDirectExplorationToolName(tool)) return []
+      sawExplore = true
+      const synthetic: ToolPart = {
+        type: "tool",
+        id: `${part.id}-parallel-${index + 1}`,
+        tool,
+        status: part.status,
+        input,
+        timeStart: part.timeStart,
+        timeEnd: part.timeEnd,
+      }
+      const entry = getToolEntry(synthetic, nextPartIndex())
+      if (entry) items.push({ type: "tool", part: synthetic, entry })
+    }
+    return sawExplore ? items : []
+  }
+
+  const expanded = expandExplorationToolParts(part)
+  const items: ExploredPrefixItem[] = []
+  for (const expandedPart of expanded) {
+    const entry = getToolEntry(expandedPart, nextPartIndex())
+    if (entry) items.push({ type: "tool", part: expandedPart, entry })
+  }
+  return items
+}
+
+/** One item in the explored block: thought, exploration tool, or auxiliary glue line. */
 export type ExploredPrefixItem =
   | { type: "reasoning"; text: string; durationMs?: number }
   | { type: "tool"; part: ToolPart; entry: ExploredEntry }
+  | { type: "aux"; id: string; label: string }
 
 export function getExplorationItemsFromToolPart(part: ToolPart): ExploredPrefixItem[] {
-  const expanded = expandExplorationToolParts(part)
-  const items: ExploredPrefixItem[] = []
-  for (let index = 0; index < expanded.length; index++) {
-    const expandedPart = expanded[index]!
-    const entry = getToolEntry(expandedPart, index)
-    if (!entry) continue
-    items.push({ type: "tool", part: expandedPart, entry })
-  }
-  return items
+  let idx = 0
+  return buildExplorationPrefixItemsFromToolPart(part, () => idx++).filter(
+    (it): it is ExploredPrefixItem & { type: "tool" } => it.type === "tool"
+  )
 }
 
 export function countExplorationMetricsFromItems(prefixItems: ExploredPrefixItem[]): {
@@ -196,6 +336,9 @@ function explorationPrefixItemSignature(item: ExploredPrefixItem): string {
   if (item.type === "reasoning") {
     return `reasoning:${(item.text ?? "").trim()}`
   }
+  if (item.type === "aux") {
+    return `aux:${item.id}`
+  }
   return `tool:${item.part.id}`
 }
 
@@ -221,6 +364,7 @@ export function getAssistantDisplaySegments(parts: MessagePart[]): AssistantDisp
   let sequenceItems: ExploredPrefixItem[] = []
   let sequenceHasExplorationTool = false
   let partIndex = 0
+  const nextExploredPartIndex = () => partIndex++
 
   const flushSequence = () => {
     if (sequenceItems.length === 0 || sequenceStartIndex == null || sequenceEndIndex == null) {
@@ -271,14 +415,25 @@ export function getAssistantDisplaySegments(parts: MessagePart[]): AssistantDisp
 
     if (part.type === "tool") {
       const toolPart = part as ToolPart
-      const expanded = expandExplorationToolParts(toolPart)
-      if (expanded.length > 0) {
+      if (isExplorationSegmentGlueTool(toolPart.tool)) {
+        if (sequenceStartIndex != null && sequenceHasExplorationTool) {
+          beginSequenceIfNeeded(i)
+          sequenceItems.push({
+            type: "aux",
+            id: toolPart.id,
+            label: webviewGlueAuxLabel(
+              toolPart.tool,
+              asObject(toolPart.input) ?? {}
+            ),
+          })
+        }
+        continue
+      }
+      const prefixItems = buildExplorationPrefixItemsFromToolPart(toolPart, nextExploredPartIndex)
+      if (prefixItems.length > 0 && prefixItems.some((it) => it.type === "tool")) {
         beginSequenceIfNeeded(i)
         sequenceHasExplorationTool = true
-        for (const expandedPart of expanded) {
-          const entry = getToolEntry(expandedPart, partIndex++)
-          if (entry) sequenceItems.push({ type: "tool", part: expandedPart, entry })
-        }
+        for (const pi of prefixItems) sequenceItems.push(pi)
         continue
       }
       flushSequence()
@@ -408,6 +563,52 @@ function getToolEntry(part: ToolPart, index: number): ExploredEntry | null {
         durationSec,
       }
     }
+    case "read_lints":
+    case "ReadLints": {
+      const paths = part.input?.paths
+      const n = Array.isArray(paths) ? paths.length : 0
+      const hint = n > 0 ? ` (${n} path${n === 1 ? "" : "s"})` : ""
+      return {
+        id,
+        kind: "search",
+        label: explorationEntryLabel(part, `Read lints${hint}${dur}`),
+        durationSec,
+      }
+    }
+    case "lsp":
+    case "LSP": {
+      const op = (part.input?.operation as string) ?? "query"
+      const fp = (part.input?.filePath ?? part.input?.file_path) as string | undefined
+      const shortFp = fp && fp.length > 36 ? fp.slice(0, 33) + "…" : fp
+      const tail = shortFp ? ` ${shortFp}` : ""
+      return {
+        id,
+        kind: "search",
+        label: explorationEntryLabel(part, `LSP ${op}${tail}${dur}`),
+        path: fp,
+        durationSec,
+      }
+    }
+    case "WebFetch": {
+      const url = (part.input?.url as string) ?? "…"
+      const short = url.length > 45 ? url.slice(0, 42) + "…" : url
+      return {
+        id,
+        kind: "search",
+        label: explorationEntryLabel(part, `WebFetch ${short}${dur}`),
+        durationSec,
+      }
+    }
+    case "WebSearch": {
+      const q = (part.input?.query as string) ?? "…"
+      const short = q.length > 50 ? q.slice(0, 47) + "…" : q
+      return {
+        id,
+        kind: "search",
+        label: explorationEntryLabel(part, `Web search: ${short}${dur}`),
+        durationSec,
+      }
+    }
     case "execute_command":
     case "Bash":
     case "Parallel":
@@ -432,7 +633,8 @@ function formatToolName(tool: string): string {
     replace_in_file: "Edit", write_to_file: "Write",
     grep: "Grep", search_files: "Grep",
     codebase_search: "CodebaseSearch", list_code_definitions: "ListCodeDefinitions",
-    glob: "Glob", read_lints: "ReadLints", update_todo_list: "TodoWrite",
+    glob: "Glob", read_lints: "ReadLints", lsp: "LSP", update_todo_list: "TodoWrite",
+    web_fetch: "WebFetch", web_search: "WebSearch",
   }
   return core[tool] ?? tool
 }
@@ -470,19 +672,22 @@ export function ExploredSummaryInline({
   prefixItems,
   isRunning,
   onOpenFile,
+  onLayoutHint,
 }: {
   prefixItems: ExploredPrefixItem[]
   isRunning: boolean
   onOpenFile?: (path: string, line?: number, endLine?: number) => void
+  onLayoutHint?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const previousRunningRef = useRef(isRunning)
   useEffect(() => {
     if (previousRunningRef.current && !isRunning) {
       setOpen(false)
+      onLayoutHint?.()
     }
     previousRunningRef.current = isRunning
-  }, [isRunning])
+  }, [isRunning, onLayoutHint])
   const { filesCount, listCount, searchesCount } = countExplorationMetricsFromItems(prefixItems)
   const labelParts: string[] = []
   if (filesCount > 0) labelParts.push(`${filesCount} file${filesCount === 1 ? "" : "s"}`)
@@ -503,7 +708,20 @@ export function ExploredSummaryInline({
           text={item.text}
           durationMs={item.durationMs}
           compact={compact}
+          onLayoutHint={onLayoutHint}
         />
+      )
+    }
+    if (item.type === "aux") {
+      return (
+        <div
+          key={`aux-${item.id}`}
+          className={`nexus-explored-entry${compact ? " nexus-explored-entry-compact" : ""}`}
+        >
+          <span className="nexus-explored-entry-text opacity-85 text-[var(--vscode-descriptionForeground)] text-xs">
+            {item.label}
+          </span>
+        </div>
       )
     }
     const e = item.entry
@@ -532,7 +750,10 @@ export function ExploredSummaryInline({
     >
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          setOpen((o) => !o)
+          onLayoutHint?.()
+        }}
         className="nexus-explored-header w-full flex items-center gap-2 text-left cursor-pointer select-none"
       >
         <span className="flex-1 min-w-0 truncate text-[var(--vscode-foreground)] text-xs">
@@ -567,7 +788,17 @@ export function ExploredSummaryInline({
 }
 
 /** One thought row inside Explored block — one line "Thought for Xs" / "Thought briefly", expandable on click for full text. */
-function ExploredThoughtRow({ text, durationMs, compact = false }: { text: string; durationMs?: number; compact?: boolean }) {
+function ExploredThoughtRow({
+  text,
+  durationMs,
+  compact = false,
+  onLayoutHint,
+}: {
+  text: string
+  durationMs?: number
+  compact?: boolean
+  onLayoutHint?: () => void
+}) {
   const [expanded, setExpanded] = useState(false)
   const label =
     durationMs != null
@@ -581,7 +812,9 @@ function ExploredThoughtRow({ text, durationMs, compact = false }: { text: strin
       <button
         type="button"
         onClick={() => {
-          if (!compact) setExpanded((e) => !e)
+          if (compact) return
+          setExpanded((e) => !e)
+          onLayoutHint?.()
         }}
         className="nexus-explored-entry-btn w-full text-left"
       >

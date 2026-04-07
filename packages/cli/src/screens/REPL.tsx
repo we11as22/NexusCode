@@ -69,11 +69,7 @@ import {
   timelineSourceMessages,
 } from '../utils/messages.js'
 import { getSlowAndCapableModel } from '../utils/model.js'
-import {
-  clearTerminal,
-  clearTerminalViewport,
-  updateTerminalTitle,
-} from '../utils/terminal.js'
+import { clearTerminal, updateTerminalTitle } from '../utils/terminal.js'
 import { getTheme } from '../utils/theme.js'
 import { BinaryFeedback } from '../components/binary-feedback/BinaryFeedback.js'
 import { getMaxThinkingTokens } from '../utils/thinking.js'
@@ -1053,14 +1049,15 @@ export function REPL({
     ])
   }, [nexusSessionId, nexusBootstrap])
 
-  // Re-render on terminal resize to prevent input field duplication.
-  // Do not bump forkNumber here — that would switch the message log file path on every resize.
-  // Use viewport-only clear (no ESC 3J) so scrollback is not wiped during agent runs.
+  // Remount header on real dimension changes so layout matches the new width. Do not clear the
+  // viewport: ESC 2J wipes the screen while Ink still tracks prior output, which desyncs the TUI
+  // and can leave a blank screen until restart. Width-driven components already re-render via
+  // useTerminalSize(). Do not bump forkNumber — that would switch the message log path on resize.
   useEffect(() => {
     let timeout: ReturnType<typeof setTimeout> | null = null
     const handleResize = () => {
       if (timeout) clearTimeout(timeout)
-      timeout = setTimeout(async () => {
+      timeout = setTimeout(() => {
         const columns = process.stdout.columns || 80
         const rows = process.stdout.rows || 24
         const last = lastTerminalSizeRef.current
@@ -1068,7 +1065,6 @@ export function REPL({
           return
         }
         lastTerminalSizeRef.current = { columns, rows }
-        await clearTerminalViewport()
         setLayoutRemountKey(k => k + 1)
       }, 100)
     }

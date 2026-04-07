@@ -1,9 +1,22 @@
 import { z } from "zod"
 import type { ToolDef, ToolContext } from "../../types.js"
 import TurndownService from "turndown"
+import {
+  BROWSER_LIKE_FETCH_UA,
+  PRIMARY_FETCH_UA,
+  formatSearchHits,
+  getFirecrawlApiKey,
+  isWebSearchLocalOnly,
+  scrapeFirecrawlMarkdown,
+  searchDuckDuckGoHtml,
+  searchFirecrawl,
+  skipFirecrawl,
+  type WebSearchHit,
+} from "./web-remote.js"
 
 const MAX_CONTENT_BYTES = 100 * 1024 // 100 KB
 const FETCH_TIMEOUT = 30_000
+const FALLBACK_MAX_BYTES = 5 * 1024 * 1024
 
 const schema = z.object({
   url: z.string().url().describe("URL to fetch"),
@@ -11,71 +24,121 @@ const schema = z.object({
   task_progress: z.string().optional(),
 })
 
+async function fetchTextOnce(
+  url: string,
+  maxLen: number,
+  userAgent: string,
+  timeoutMs: number,
+): Promise<
+  | { ok: true; finalUrl: string; contentType: string; text: string }
+  | { ok: false; status?: number; message: string }
+> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal as AbortSignal,
+      redirect: "follow",
+      headers: {
+        "User-Agent": userAgent,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+      },
+    })
+    if (!response.ok) {
+      return { ok: false, status: response.status, message: `HTTP ${response.status} ${response.statusText}` }
+    }
+    const contentType = response.headers.get("content-type") ?? ""
+    const buf = await response.arrayBuffer()
+    if (buf.byteLength > FALLBACK_MAX_BYTES && userAgent === BROWSER_LIKE_FETCH_UA) {
+      return { ok: false, message: `Response too large (${buf.byteLength} bytes)` }
+    }
+    const dec = new TextDecoder("utf8", { fatal: false })
+    let text = dec.decode(buf)
+    if (text.length > maxLen) {
+      text = text.slice(0, maxLen) + `\n\n[... content truncated at ${maxLen} chars ...]`
+    }
+    return { ok: true, finalUrl: response.url, contentType, text }
+  } catch (err: unknown) {
+    const msg = (err as Error).message
+    if (msg.includes("aborted") || msg.includes("timeout")) {
+      return { ok: false, message: "Request timed out" }
+    }
+    return { ok: false, message: msg }
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 export const webFetchTool: ToolDef<z.infer<typeof schema>> = {
   name: "WebFetch",
-  description: `Fetch content from a URL via HTTP. HTML is converted to markdown; JSON/text returned as-is. Read-only.
+  description: `Fetch content from a URL. HTML is converted to markdown; JSON/text returned as-is. Read-only.
+
+**Backends (OpenClaude-style):** If \`FIRECRAWL_API_KEY\` is set, the tool tries Firecrawl scrape first (better for JS-heavy pages). Otherwise it uses plain HTTP. If that fails, a browser-like User-Agent fallback is tried. Set \`NEXUS_SKIP_FIRECRAWL=1\` to force plain HTTP only even with a Firecrawl key.
 
 When to use:
 - Documentation, API specs, or URLs the user provided.
-- Extracting text from public pages, reading static content, or checking external references.
+- Extracting text from public pages or checking external references.
 
 When NOT to use:
-- Do not guess or fabricate URLs; use only user-provided or tool-discovered URLs.
-- Authenticated or private URLs (e.g. Google Docs, Confluence, Jira) — WebFetch will fail; use a specialized authenticated tool if available.
-- Large binaries or non-text content; tool is text-oriented and caps response size.
+- Do not guess URLs; use only user-provided or tool-discovered URLs.
+- Authenticated or private URLs may fail; use a specialized MCP tool if available.
+- Large binaries; this tool is text-oriented.
 
-Usage: URL must be fully-formed and valid. Timeout ~30s. When the response indicates a redirect to a different host, make a new WebFetch request with the redirect URL provided in the response. If an MCP-provided web fetch tool is available (e.g. mcp_web_fetch), prefer it when it may have fewer restrictions.`,
+When the response is a redirect to a **different host**, make a new WebFetch with the redirect URL from the message.`,
   parameters: schema,
   readOnly: true,
 
   async execute({ url, max_length }, _ctx: ToolContext) {
     const maxLen = max_length ?? MAX_CONTENT_BYTES
+    const fcKey = getFirecrawlApiKey()
+    if (fcKey && !skipFirecrawl()) {
+      const scraped = await scrapeFirecrawlMarkdown(url, maxLen, fcKey)
+      if (scraped) {
+        return {
+          success: true,
+          output: `URL: ${url}\nContent-Type: ${scraped.contentType} (via Firecrawl)\n\n${scraped.text}`,
+        }
+      }
+    }
 
-    try {
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
-
-      const response = await fetch(url, {
-        signal: controller.signal as any,
-        headers: {
-          "User-Agent": "NexusCode/1.0 (AI coding assistant)",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8",
-        },
-      })
-      clearTimeout(timeoutId)
-
-      if (!response.ok) {
+    let primary = await fetchTextOnce(url, maxLen, PRIMARY_FETCH_UA, FETCH_TIMEOUT)
+    if (!primary.ok) {
+      const fb = await fetchTextOnce(url, maxLen, BROWSER_LIKE_FETCH_UA, FETCH_TIMEOUT)
+      if (!fb.ok) {
         return {
           success: false,
-          output: `HTTP ${response.status} ${response.statusText}: ${url}`,
+          output: `Failed to fetch ${url}: ${primary.message}${primary.status != null ? ` (primary HTTP ${primary.status})` : ""}. Fallback: ${fb.message}`,
         }
       }
+      primary = fb
+    }
 
-      const contentType = response.headers.get("content-type") ?? ""
-      let text = await response.text()
-
-      if (text.length > maxLen) {
-        text = text.slice(0, maxLen) + `\n\n[... content truncated at ${maxLen} chars ...]`
+    const { finalUrl, contentType, text } = primary
+    let body = text
+    if (contentType.includes("text/html")) {
+      body = htmlToMarkdown(body)
+      if (body.length > maxLen) {
+        body = body.slice(0, maxLen) + `\n\n[... truncated ...]`
       }
+    }
 
-      // Convert HTML to markdown
-      if (contentType.includes("text/html")) {
-        text = htmlToMarkdown(text)
-        if (text.length > maxLen) {
-          text = text.slice(0, maxLen) + `\n\n[... truncated ...]`
+    const hostMismatch =
+      (() => {
+        try {
+          return new URL(finalUrl).hostname !== new URL(url).hostname
+        } catch {
+          return false
         }
-      }
+      })()
 
-      return {
-        success: true,
-        output: `URL: ${url}\nContent-Type: ${contentType}\n\n${text}`,
-      }
-    } catch (err: unknown) {
-      const msg = (err as Error).message
-      if (msg.includes("aborted") || msg.includes("timeout")) {
-        return { success: false, output: `Request timed out for: ${url}` }
-      }
-      return { success: false, output: `Failed to fetch ${url}: ${msg}` }
+    const prefix =
+      hostMismatch
+        ? `URL: ${url}\nFetched after redirect: ${finalUrl}\nContent-Type: ${contentType}\n\n`
+        : `URL: ${finalUrl}\nContent-Type: ${contentType}\n\n`
+
+    return {
+      success: true,
+      output: `${prefix}${body}`,
     }
   },
 }
@@ -89,7 +152,6 @@ function htmlToMarkdown(html: string): string {
     })
     return td.turndown(html)
   } catch {
-    // Fallback: basic HTML stripping
     return html
       .replace(/<script[\s\S]*?<\/script>/gi, "")
       .replace(/<style[\s\S]*?<\/style>/gi, "")
@@ -107,74 +169,111 @@ const webSearchSchema = z.object({
 
 export const webSearchTool: ToolDef<z.infer<typeof webSearchSchema>> = {
   name: "WebSearch",
-  description: `Search the web for real-time information (Brave or Serper). Returns titles, URLs, and snippets. Use WebFetch to read full pages. Requires BRAVE_API_KEY or SERPER_API_KEY.
+  description: `Search the web for real-time information. Read-only.
 
-When to use:
-- Current docs, versions, or information beyond training data.
-- Verifying APIs, dependencies, or recent changes.
-- Questions about current events, technology updates, or topics that require recent information.
+**Provider order (OpenClaude / ClaudeCodeFree-style):**
+1. **Local-only mode** — \`NEXUS_WEB_SEARCH_MODE=local\`: DuckDuckGo HTML only (free; may be rate-limited).
+2. Otherwise: **Firecrawl** if \`FIRECRAWL_API_KEY\` is set (set \`NEXUS_SKIP_FIRECRAWL=1\` to skip), then **Brave** (\`BRAVE_API_KEY\`), then **Serper** (\`SERPER_API_KEY\`), then **DuckDuckGo** as free fallback when APIs are missing or return nothing.
 
-When NOT to use:
-- Codebase questions: use CodebaseSearch or Grep.
-- When the user already gave a URL: use WebFetch directly.
-
-Usage: Be specific in the query; include version numbers or dates for technical queries. Account for "Today's date" in the Environment block — e.g. when searching for "latest docs", use the current year in the query. After using search results in your answer, include a "Sources:" section with markdown links to the relevant URLs (e.g. [Title](URL)).`,
+Use \`WebFetch\` to read full pages. Include a "Sources:" section with markdown links when you cite results.`,
   parameters: webSearchSchema,
   readOnly: true,
 
   async execute({ query, max_results }, _ctx: ToolContext) {
-    const braveKey = process.env["BRAVE_API_KEY"]
-    const serperKey = process.env["SERPER_API_KEY"]
+    const limit = max_results ?? 5
 
-    if (!braveKey && !serperKey) {
+    if (isWebSearchLocalOnly()) {
+      const hits = await searchDuckDuckGoHtml(query, limit)
       return {
-        success: false,
-        output: "Web search requires BRAVE_API_KEY or SERPER_API_KEY environment variable.",
+        success: true,
+        output: formatSearchHits(query, hits, "DuckDuckGo HTML, local-only mode"),
       }
     }
 
-    const limit = max_results ?? 5
-
-    if (braveKey) {
-      return searchWithBrave(query, limit, braveKey)
+    const fcKey = getFirecrawlApiKey()
+    if (fcKey && !skipFirecrawl()) {
+      try {
+        const hits = await searchFirecrawl(query, limit, fcKey)
+        if (hits.length > 0) {
+          return { success: true, output: formatSearchHits(query, hits, "Firecrawl") }
+        }
+      } catch {
+        // fall through
+      }
     }
-    return searchWithSerper(query, limit, serperKey!)
+
+    const braveKey = process.env["BRAVE_API_KEY"]?.trim()
+    if (braveKey) {
+      const r = await searchWithBrave(query, limit, braveKey)
+      if (r.success && r.hits && r.hits.length > 0) {
+        return { success: true, output: formatSearchHits(query, r.hits, "Brave Search API") }
+      }
+      if (!r.success && r.errorText) {
+        // Brave misconfigured — still try other backends
+      }
+    }
+
+    const serperKey = process.env["SERPER_API_KEY"]?.trim()
+    if (serperKey) {
+      const r = await searchWithSerper(query, limit, serperKey)
+      if (r.success && r.hits && r.hits.length > 0) {
+        return { success: true, output: formatSearchHits(query, r.hits, "Serper") }
+      }
+    }
+
+    const ddg = await searchDuckDuckGoHtml(query, limit)
+    if (ddg.length > 0) {
+      return {
+        success: true,
+        output: formatSearchHits(query, ddg, "DuckDuckGo HTML (free fallback)"),
+      }
+    }
+
+    return {
+      success: true,
+      output: `No results for "${query}". Optional APIs: FIRECRAWL_API_KEY, BRAVE_API_KEY, or SERPER_API_KEY. Free DuckDuckGo path returned no parseable hits (site may have changed or rate-limited).`,
+    }
   },
 }
 
-async function searchWithBrave(query: string, limit: number, apiKey: string) {
+async function searchWithBrave(
+  query: string,
+  limit: number,
+  apiKey: string,
+): Promise<{ success: boolean; hits?: WebSearchHit[]; errorText?: string }> {
   try {
     const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}`
     const response = await fetch(url, {
       headers: {
-        "Accept": "application/json",
+        Accept: "application/json",
         "X-Subscription-Token": apiKey,
       },
     })
 
     if (!response.ok) {
-      return { success: false, output: `Brave Search error: ${response.status}` }
+      return { success: false, errorText: `Brave HTTP ${response.status}` }
     }
 
-    const data = await response.json() as { web?: { results?: Array<{ title: string; url: string; description: string }> } }
+    const data = (await response.json()) as {
+      web?: { results?: Array<{ title: string; url: string; description: string }> }
+    }
     const results = data.web?.results ?? []
-
-    if (results.length === 0) {
-      return { success: true, output: `No results found for: "${query}"` }
-    }
-
-    const formatted = results
-      .slice(0, limit)
-      .map((r, i) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description ?? ""}`)
-      .join("\n\n")
-
-    return { success: true, output: `Search results for "${query}":\n\n${formatted}` }
+    const hits: WebSearchHit[] = results.slice(0, limit).map((r) => ({
+      title: r.title,
+      url: r.url,
+      snippet: r.description,
+    }))
+    return { success: true, hits }
   } catch (err) {
-    return { success: false, output: `Brave search error: ${(err as Error).message}` }
+    return { success: false, errorText: (err as Error).message }
   }
 }
 
-async function searchWithSerper(query: string, limit: number, apiKey: string) {
+async function searchWithSerper(
+  query: string,
+  limit: number,
+  apiKey: string,
+): Promise<{ success: boolean; hits?: WebSearchHit[]; errorText?: string }> {
   try {
     const response = await fetch("https://google.serper.dev/search", {
       method: "POST",
@@ -186,23 +285,18 @@ async function searchWithSerper(query: string, limit: number, apiKey: string) {
     })
 
     if (!response.ok) {
-      return { success: false, output: `Serper error: ${response.status}` }
+      return { success: false, errorText: `Serper HTTP ${response.status}` }
     }
 
-    const data = await response.json() as { organic?: Array<{ title: string; link: string; snippet: string }> }
+    const data = (await response.json()) as { organic?: Array<{ title: string; link: string; snippet: string }> }
     const results = data.organic ?? []
-
-    if (results.length === 0) {
-      return { success: true, output: `No results found for: "${query}"` }
-    }
-
-    const formatted = results
-      .slice(0, limit)
-      .map((r, i) => `${i + 1}. **${r.title}**\n   ${r.link}\n   ${r.snippet ?? ""}`)
-      .join("\n\n")
-
-    return { success: true, output: `Search results for "${query}":\n\n${formatted}` }
+    const hits: WebSearchHit[] = results.slice(0, limit).map((r) => ({
+      title: r.title,
+      url: r.link,
+      snippet: r.snippet,
+    }))
+    return { success: true, hits }
   } catch (err) {
-    return { success: false, output: `Serper search error: ${(err as Error).message}` }
+    return { success: false, errorText: (err as Error).message }
   }
 }

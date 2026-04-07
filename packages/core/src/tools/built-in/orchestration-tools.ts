@@ -253,7 +253,8 @@ async function createWorktreeForTask(
 
 export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
   name: "TaskCreate",
-  description: "Create a unified task. Use kind=agent for delegated agent work, kind=shell for background shell jobs, and kind=tracking for orchestration-only work. Prefer TaskCreate over inventing ad hoc coordination in prose.",
+  description:
+    "Create a unified task in the orchestration runtime. kind=agent: delegated agent work; kind=shell: background shell jobs; kind=tracking (default): durable coordination items. Prefer TaskCreate over ad hoc coordination in prose. OpenClaude-class habits: use TaskList first to avoid duplicate subjects; for tracking work, move status forward with TaskUpdate (e.g. in_progress before you start, completed when done); give a clear imperative subject and a detailed description others can act on.",
   parameters: taskCreateSchema,
   async execute(args, ctx) {
     const runtime = await getOrchestrationRuntime(ctx.cwd)
@@ -318,6 +319,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
           {
             modelOverride: args.model,
             taskName: args.name,
+            skipDuplicateCheck: ctx.skipSubagentDuplicateCheck === true,
           },
         )
         const task = await runtime.updateTask(started.subagentId, {
@@ -361,6 +363,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
         {
           modelOverride: args.model,
           taskName: args.name,
+          skipDuplicateCheck: ctx.skipSubagentDuplicateCheck === true,
         },
       )
       const task = await runtime.updateTask(result.subagentId, {
@@ -1594,7 +1597,17 @@ export const getPluginTool: ToolDef<z.infer<typeof getPluginSchema>> = {
 }
 
 const runPluginHookSchema = z.object({
-  hook_event: z.enum(["user_prompt_submit", "before_tool", "after_tool", "turn_complete", "task_completed", "subagent_start", "subagent_stop", "teammate_idle"]).describe("Hook event to execute."),
+  hook_event: z.enum([
+    "user_prompt_submit",
+    "before_tool",
+    "after_tool",
+    "turn_complete",
+    "task_completed",
+    "subagent_start",
+    "subagent_stop",
+    "teammate_idle",
+    "instructions_loaded",
+  ]).describe("Hook event to execute."),
   payload: z.record(z.unknown()).optional().describe("Optional payload object passed to the hook runner."),
 })
 

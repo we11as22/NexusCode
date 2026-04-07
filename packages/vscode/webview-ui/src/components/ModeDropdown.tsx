@@ -16,7 +16,7 @@ const MODES: Array<{
         <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83M19.07 4.93l-2.83 2.83M7.76 16.24l-2.83 2.83" />
       </svg>
     ),
-    description: "Full autonomous coding agent",
+    description: "Read/write, shell, search, web, MCP, tasks, teams, plugins — full execution",
   },
   {
     id: "plan",
@@ -31,17 +31,7 @@ const MODES: Array<{
         <line x1="3" y1="18" x2="3.01" y2="18" />
       </svg>
     ),
-    description: "Plan without modifying code",
-  },
-  {
-    id: "debug",
-    label: "Debug",
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 2v4M8 6a4 4 0 108 0M5 10v6a3 3 0 003 3h8a3 3 0 003-3v-6M9 14h6" />
-      </svg>
-    ),
-    description: "Root-cause debugging mode",
+    description: "Research + plan files in .nexus/plans only; no shell; PlanExit when ready",
   },
   {
     id: "ask",
@@ -51,7 +41,28 @@ const MODES: Array<{
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
       </svg>
     ),
-    description: "Q&A without modifications",
+    description: "Read/search/MCP + read-only delegation; no files, shell, or memory writes",
+  },
+  {
+    id: "debug",
+    label: "Debug",
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2v4M8 6a4 4 0 108 0M5 10v6a3 3 0 003 3h8a3 3 0 003-3v-6M9 14h6" />
+      </svg>
+    ),
+    description: "Same tools as agent; diagnose first, then minimal fixes",
+  },
+  {
+    id: "review",
+    label: "Review",
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
+      </svg>
+    ),
+    description: "Audit changes (git + read); no edits or new tasks",
   },
 ]
 

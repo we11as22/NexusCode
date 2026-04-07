@@ -62,6 +62,21 @@ export class ToolRegistry {
   }
 
   /**
+   * Append tools with `hiddenFromAgent` (e.g. legacy Spawn*, BashOutput) so old transcript tool
+   * names still execute, while {@link getForMode} keeps them out of the LLM manifest.
+   */
+  mergeWithHiddenExecutionTools(visibleTools: ToolDef[]): ToolDef[] {
+    const seen = new Set(visibleTools.map((t) => t.name))
+    const out = [...visibleTools]
+    for (const tool of this.tools.values()) {
+      if (!tool.hiddenFromAgent || seen.has(tool.name)) continue
+      out.push(tool)
+      seen.add(tool.name)
+    }
+    return out
+  }
+
+  /**
    * Load custom tools from JS/TS files.
    * Custom tools export a default ToolDef or array of ToolDef.
    */

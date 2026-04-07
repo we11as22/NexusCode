@@ -13,7 +13,7 @@ import type {
   ToolPart,
 } from "../types.js"
 import { Session } from "../session/index.js"
-import { loadRules } from "../context/rules.js"
+import { loadAgentInstructionBundle } from "../context/agent-instructions.js"
 import { loadSkills } from "../skills/manager.js"
 import { getClaudeCompatibilityOptions } from "../compat/claude.js"
 import { ToolRegistry } from "../tools/registry.js"
@@ -24,6 +24,7 @@ import { getOrchestrationRuntime, getRuntimeDir } from "../orchestration/runtime
 import { loadAgentDefinitions } from "../orchestration/agents.js"
 import { runScopedHooks } from "../plugins/runtime.js"
 import { ensureTeamMemberForTask, handleCompletedTaskSideEffects } from "../orchestration/task-lifecycle.js"
+import { inheritSpillRegistryForMergedToolPart, registerToolOutputSpill } from "../context/tool-output-registry.js"
 
 export interface SubAgentResult {
   subagentId: string
@@ -88,6 +89,8 @@ function mergeSubagentFileEditsIntoParentSession(
   spawnToolPartId: string | undefined,
   parts: ToolPart[],
   fallbackAssistantMessageId?: string,
+  /** Ephemeral subagent session id — used to inherit spill registry keys onto cloned part ids. */
+  subagentSessionId?: string,
 ): void {
   if (parts.length === 0) return
   let msgId = spawnToolPartId
@@ -103,6 +106,24 @@ function mergeSubagentFileEditsIntoParentSession(
       ...tp,
       id: `part_${crypto.randomBytes(8).toString("hex")}`,
       mergedFromSubagent: true,
+    }
+    if (subagentSessionId?.trim()) {
+      const spill = inheritSpillRegistryForMergedToolPart({
+        parentSessionId: parent.id,
+        newPartId: clone.id,
+        subagentSessionId: subagentSessionId.trim(),
+        sourcePartId: tp.id,
+        toolName: clone.tool,
+        outputSpillPath: clone.outputSpillPath,
+      })
+      if (spill) clone.outputSpillPath = spill
+    } else if (clone.outputSpillPath?.trim()) {
+      registerToolOutputSpill({
+        sessionId: parent.id,
+        partId: clone.id,
+        absolutePath: clone.outputSpillPath.trim(),
+        toolName: clone.tool,
+      })
     }
     parent.addToolPart(msgId, clone)
   }
@@ -277,7 +298,7 @@ export class ParallelAgentManager {
           sessionId: "",
           success: true,
           output:
-            "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call SpawnAgent again for the same task.",
+            "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not create another delegated agent task for the same work.",
         }
       }
       this.recentSpawnTasks.push(taskKey)
@@ -315,38 +336,40 @@ export class ParallelAgentManager {
     agentType?: string,
     spawnOptions?: AgentSpawnOptions,
   ): Promise<{ subagentId: string }> {
-    const taskKey = description.trim().slice(0, ParallelAgentManager.TASK_KEY_LEN).toLowerCase()
-    const isDuplicate = this.recentSpawnTasks.some(
-      (t) => t === taskKey || taskKey.startsWith(t) || t.startsWith(taskKey)
-    )
-    if (isDuplicate) {
-      const subagentId = `skip_${Date.now()}`
-      this.rememberId(subagentId)
-      this.sessions.set(subagentId, "")
-      this.outputById.set(
-        subagentId,
-        "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not call SpawnAgent again for the same task.",
+    if (!spawnOptions?.skipDuplicateCheck) {
+      const taskKey = description.trim().slice(0, ParallelAgentManager.TASK_KEY_LEN).toLowerCase()
+      const isDuplicate = this.recentSpawnTasks.some(
+        (t) => t === taskKey || taskKey.startsWith(t) || t.startsWith(taskKey)
       )
-      this.statusById.set(subagentId, "completed")
-      this.errorById.set(subagentId, undefined)
-      const runtime = await getOrchestrationRuntime(cwd)
-      await runtime.registerBackgroundTask({
-        id: subagentId,
-        kind: "subagent",
-        description,
-        status: "completed",
-        output: this.outputById.get(subagentId),
-        metadata: { duplicate: true, mode },
-      })
-      emit?.({
-        type: "background_task_updated",
-        task: (await runtime.getBackgroundTask(subagentId))!,
-      })
-      return { subagentId }
-    }
-    this.recentSpawnTasks.push(taskKey)
-    if (this.recentSpawnTasks.length > ParallelAgentManager.RECENT_SPAWN_CAP) {
-      this.recentSpawnTasks.shift()
+      if (isDuplicate) {
+        const subagentId = `skip_${Date.now()}`
+        this.rememberId(subagentId)
+        this.sessions.set(subagentId, "")
+        this.outputById.set(
+          subagentId,
+          "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not create another delegated agent task for the same work.",
+        )
+        this.statusById.set(subagentId, "completed")
+        this.errorById.set(subagentId, undefined)
+        const runtime = await getOrchestrationRuntime(cwd)
+        await runtime.registerBackgroundTask({
+          id: subagentId,
+          kind: "subagent",
+          description,
+          status: "completed",
+          output: this.outputById.get(subagentId),
+          metadata: { duplicate: true, mode },
+        })
+        emit?.({
+          type: "background_task_updated",
+          task: (await runtime.getBackgroundTask(subagentId))!,
+        })
+        return { subagentId }
+      }
+      this.recentSpawnTasks.push(taskKey)
+      if (this.recentSpawnTasks.length > ParallelAgentManager.RECENT_SPAWN_CAP) {
+        this.recentSpawnTasks.shift()
+      }
     }
 
     const { subagentId } = await this.startTask(
@@ -578,7 +601,8 @@ export class ParallelAgentManager {
     }
     session.addMessage({ role: "user", content: userContent })
 
-    let { builtin: tools } = toolRegistry.getForMode(mode)
+    let { builtin: b, dynamic: d } = toolRegistry.getForMode(mode)
+    let tools = toolRegistry.mergeWithHiddenExecutionTools([...b, ...d])
     if (agentDefinition?.tools?.length) {
       const allow = new Set(agentDefinition.tools)
       tools = tools.filter((tool) => allow.has(tool.name))
@@ -588,7 +612,7 @@ export class ParallelAgentManager {
       tools = tools.filter((tool) => !deny.has(tool.name))
     }
 
-    const rulesContent = await loadRules(cwd, taskConfig.rules.files, claudeCompatibility).catch(() => "")
+    const rulesContent = await loadAgentInstructionBundle(cwd, taskConfig.rules.files, taskConfig, claudeCompatibility).catch(() => "")
     const skills = await loadSkills(taskConfig.skills, cwd, taskConfig.skillsUrls, claudeCompatibility).catch(() => [])
     const compaction = createCompaction()
 
@@ -981,19 +1005,15 @@ export function createSpawnAgentTool(manager: ParallelAgentManager, config: Nexu
   return {
     name: "SpawnAgent",
     hiddenFromAgent: true,
-    description: `Launch exactly one sub-agent for a focused task.
+    description: `Legacy execution only — hidden from the model. Prefer \`TaskCreate(kind: "agent")\` / \`TaskCreateBatch\` in new work.
 
-⚡ PARALLEL EXECUTION: To run multiple sub-agents CONCURRENTLY use SpawnAgentsParallel (simpler) or Parallel+SpawnAgent:
-  SpawnAgentsParallel({agents: [{description: "task1"}, {description: "task2"}]})
-Calling SpawnAgent multiple times in a row is SEQUENTIAL (slow). Use SpawnAgentsParallel for concurrent execution.
-NEVER call SpawnAgent multiple times in a row when parallel execution is desired.
+Launch one delegated sub-agent (same engine as task runtime).
 
-**When the main agent is in plan, ask, or review mode**, sub-agents always run with ask (read-only) permissions.
-**When the main agent is in agent/debug mode**, sub-agents can run in agent/plan/ask/debug/review per \`mode\`.
-Use \`agent_type\` to apply a named agent definition from \`.nexus/agents/\` or compatible plugin/claude-agent directories, including its preferred mode, tool allow/deny policy, and subagent hooks.
-Set \`run_in_background: true\` for non-blocking execution and poll with \`SpawnAgentOutput\`.
-Each sub-agent must end with a clear text summary.
-Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
+**When the main agent is in plan, ask, or review mode**, sub-agents run with ask (read-only) permissions.
+**When the main agent is in agent/debug mode**, sub-agents follow \`mode\` / agent definition.
+\`agent_type\` applies named definitions from \`.nexus/agents/\` or compatible paths.
+Background: \`run_in_background: true\` → wait with \`TaskOutput({ taskId, block: true })\` (id matches sub-agent task id).
+Max ${config.parallelAgents.maxParallel} concurrent agents (${manager.activeCount} active).`,
     parameters: schema,
     // Available in all modes; sub-agent permissions follow parent (plan/ask/review → ask, agent/debug → requested mode)
 
@@ -1065,7 +1085,7 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
         )
         return {
           success: true,
-          output: `Sub-agent ${started.subagentId} started in background. Use SpawnAgentOutput with subagent_id=${started.subagentId} to monitor.`,
+          output: `Delegated agent task ${started.subagentId} started in background. Use TaskOutput({ taskId: "${started.subagentId}", block: true }) to wait for completion.`,
           metadata: { subagent_id: started.subagentId, status: "running", background: true },
         }
       }
@@ -1077,6 +1097,7 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
           ctx.partId,
           result.fileEditParts,
           ctx.toolExecutionMessageId,
+          result.sessionId,
         )
       }
       if (result.error) {
@@ -1278,6 +1299,7 @@ export function createResumeAgentTool(manager: ParallelAgentManager, config: Nex
           ctx.partId,
           resumed.fileEditParts,
           ctx.toolExecutionMessageId,
+          resumed.sessionId,
         )
       }
       return {
@@ -1326,7 +1348,13 @@ export function createTaskResumeTool(manager: ParallelAgentManager, config: Nexu
         }
       }
       if (resumed.fileEditParts?.length) {
-        mergeSubagentFileEditsIntoParentSession(ctx.session, ctx.partId, resumed.fileEditParts, ctx.toolExecutionMessageId)
+        mergeSubagentFileEditsIntoParentSession(
+          ctx.session,
+          ctx.partId,
+          resumed.fileEditParts,
+          ctx.toolExecutionMessageId,
+          resumed.sessionId,
+        )
       }
       const runtime = await getOrchestrationRuntime(ctx.cwd)
       const task = await runtime.getTask(resumed.subagentId)
@@ -1469,7 +1497,13 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
 
       for (const result of results) {
         if (result.fileEditParts?.length) {
-          mergeSubagentFileEditsIntoParentSession(ctx.session, ctx.partId, result.fileEditParts, ctx.toolExecutionMessageId)
+          mergeSubagentFileEditsIntoParentSession(
+            ctx.session,
+            ctx.partId,
+            result.fileEditParts,
+            ctx.toolExecutionMessageId,
+            result.sessionId,
+          )
         }
       }
       const allOk = results.every((result) => !result.error)
@@ -1513,19 +1547,11 @@ export function createSpawnAgentsParallelTool(manager: ParallelAgentManager, con
   return {
     name: "SpawnAgentsParallel",
     hiddenFromAgent: true,
-    description: `Launch multiple sub-agents CONCURRENTLY in a single call. Simpler alternative to Parallel(SpawnAgent).
+    description: `Legacy — hidden from the model. Use \`TaskCreateBatch\` for concurrent delegated agents.
 
-Use this whenever you need 2+ sub-agents running at the same time.
-Each agent in the \`agents\` array starts immediately and runs in parallel.
-Results are returned only after ALL agents finish.
+Runs multiple sub-agents in parallel; results after all finish.
 
-Example:
-  SpawnAgentsParallel({agents: [
-    {description: "Explore API routes and middleware"},
-    {description: "Explore data store and types"}
-  ]})
-
-Max ${config.parallelAgents.maxParallel} agents running simultaneously (currently ${manager.activeCount} active).`,
+Max ${config.parallelAgents.maxParallel} agents (${manager.activeCount} active).`,
     parameters: spawnParallelSchema,
 
     async execute(
@@ -1552,13 +1578,13 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
             ctx.cwd,
             ctx.signal,
             maxParallel,
-          emit,
-          agent.context_summary,
-          ctx.partId,
-          undefined,
-          { skipDuplicateCheck: true },
-        )
-      )
+            emit,
+            agent.context_summary,
+            ctx.partId,
+            undefined,
+            { skipDuplicateCheck: true },
+          ),
+        ),
       )
 
       const parts = results.map((r, i) => {
@@ -1575,6 +1601,7 @@ Max ${config.parallelAgents.maxParallel} agents running simultaneously (currentl
             ctx.partId,
             r.fileEditParts,
             ctx.toolExecutionMessageId,
+            r.sessionId,
           )
         }
       }
@@ -1597,6 +1624,6 @@ export function createSpawnAgentsAliasTool(manager: ParallelAgentManager, config
     name: "SpawnAgents",
     hiddenFromAgent: true,
     description:
-      `${base.description}\n\n[Deprecated alias] Use SpawnAgent instead.`,
+      `${base.description}\n\n[Deprecated alias] Use TaskCreate(kind: "agent") instead.`,
   }
 }

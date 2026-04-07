@@ -42,6 +42,7 @@ import { buildSkillToolDescriptionMerged, useSkillTool } from "../tools/built-in
 import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
 import type { SessionCompaction } from "../session/compaction.js"
+import { planExitWriteGateSatisfied } from "../session/plan-write-gate.js"
 import { getMessagesForActiveContext } from "../session/active-context.js"
 import {
   computeContextUsageMetrics,
@@ -50,7 +51,6 @@ import {
 } from "../context/context-usage.js"
 import { findLastOpenReasoningPartIndex } from "./reasoning-segment-utils.js"
 import * as path from "node:path"
-import * as fs from "node:fs"
 import { normalizedAppliedReplacementsFromMetadata } from "../tools/applied-replacements.js"
 import {
   buildReasoningProviderOptions,
@@ -62,6 +62,14 @@ import { getOrchestrationRuntime } from "../orchestration/runtime.js"
 import { selectRelevantMemories } from "../orchestration/memory-selection.js"
 import { extractMemoriesFromCompactionSummary } from "../orchestration/memory-extraction.js"
 import { runPluginHooks } from "../plugins/runtime.js"
+import {
+  readSessionMemoryFile,
+  refreshSessionMemoryFile,
+  appendCompactionSnippetToSessionMemory,
+} from "../session/session-memory.js"
+import { spillPathFromToolMetadata } from "./tool-spill.js"
+import { getToolOutputSpill } from "../context/tool-output-registry.js"
+import { runAutoMemoryDreamIfDue } from "../context/auto-dream.js"
 
 /** Generous tool budgets so multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
@@ -144,39 +152,6 @@ function setReportToUserMessage(session: ISession, messageId: string, userMessag
     parts.push({ type: "text", text: "", user_message: userMessage.trim() })
   }
   session.updateMessage(messageId, { content: parts })
-}
-
-/** Returns true if the given message contains a Write or Edit to .nexus/plans/ (for PlanExit gate). */
-function messageHasPlanFileWrite(session: ISession, messageId: string, cwd: string): boolean {
-  const msg = session.messages.find((m) => m.id === messageId)
-  if (!msg || !Array.isArray(msg.content)) return false
-  const parts = msg.content as MessagePart[]
-  for (const p of parts) {
-    if (p.type !== "tool") continue
-    const tp = p as ToolPart
-    if (tp.tool !== "Write" && tp.tool !== "Edit") continue
-    const raw = (tp.input?.file_path ?? tp.input?.path) as string | undefined
-    if (!raw || typeof raw !== "string") continue
-    const rel = path.isAbsolute(raw) ? path.relative(cwd, raw) : raw
-    const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
-    if (PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) return true
-  }
-  return false
-}
-
-/** Returns true when at least one plan file exists on disk in .nexus/plans (*.md|*.txt). */
-function hasPlanFileOnDisk(cwd: string): boolean {
-  try {
-    const plansDir = path.join(cwd, ".nexus", "plans")
-    const entries = fs.readdirSync(plansDir, { withFileTypes: true })
-    return entries.some(
-      (entry) =>
-        entry.isFile() &&
-        (entry.name.toLowerCase().endsWith(".md") || entry.name.toLowerCase().endsWith(".txt"))
-    )
-  } catch {
-    return false
-  }
 }
 
 /** Returns true if the message already contains a call to the mode's mandatory end tool. */
@@ -363,6 +338,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     config,
   )
   const promptVisibleTools = resolvedTools.filter((tool) => {
+    if (tool.hiddenFromAgent) return false
     if (tool.name === "ToolSearch") return true
     if (!deferredLoadingEnabled) return true
     return !tool.shouldDefer || tool.alwaysLoad
@@ -377,6 +353,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           }
         : t,
   )
+
+  /** After compaction, inject OpenClaude-style sparse plan reminder on the next system prompt (plan mode only). */
+  let planSparseReminderAfterCompaction = false
 
   // Tool context
   const toolCtx: ToolContext = {
@@ -394,6 +373,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         systemPromptText: lastBuiltSystemPrompt,
         toolsDefinitionTokens,
       })
+      if (mode === "plan") planSparseReminderAfterCompaction = true
       host.emit({ type: "compaction_end" })
     },
   }
@@ -428,6 +408,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const maxIterations = effectiveMaxIterations[mode] ?? baseMaxIterationsByMode[mode]
   const toolCallBudget = Math.max(8, effectiveToolBudget[mode] ?? BASE_TOOL_CALL_BUDGET_BY_MODE[mode])
   let executedToolCallsTotal = 0
+  let sessionMemoryToolCallDebt = 0
+  let sessionMemoryRefreshBusy = false
   let forceFinalAnswerNext = false
   let forceEmptyResponseRecoveryPromptNext = false
   let consecutiveEmptyFinalResponses = 0
@@ -471,6 +453,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   let doneEmitted = false
   while (!signal.aborted) {
     loopIterations++
+    const toolCallsAtStartOfIteration = executedToolCallsTotal
+
+    if (loopIterations === 1) {
+      void runPluginHooks(host.cwd, host, config, "instructions_loaded", {
+        sessionId: session.id,
+        mode,
+        rulesCharCount: rulesContent.length,
+        cwd: host.cwd,
+      }).catch(() => undefined)
+    }
 
     if (loopIterations > maxIterations) {
       if (!forceFinalAnswerNext) {
@@ -540,6 +532,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     const mergedBackgroundSummary = [getBackgroundBashJobsForPrompt(host.cwd), backgroundTaskSummary]
       .filter((item) => item.trim().length > 0)
       .join("\n")
+    const sessionMemoryText =
+      config.memory?.sessionMemoryEnabled !== false
+        ? await readSessionMemoryFile(session.id, host.cwd).catch(() => "")
+        : ""
     const promptCtx: PromptContext = {
       mode, // same mode used for tool resolution above; system prompt block and Environment "Current mode" come from this
       config,
@@ -562,9 +558,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       backgroundJobsSummary: mergedBackgroundSummary || undefined,
       createSkillMode: createSkillMode === true,
       supportsStructuredOutput: activeClient.supportsStructuredOutput(),
+      sessionMemoryContent: sessionMemoryText || undefined,
+      planModeSparseReminder: mode === "plan" && planSparseReminderAfterCompaction ? true : undefined,
     }
 
     const { blocks, cacheableCount } = buildSystemPrompt(promptCtx)
+    if (planSparseReminderAfterCompaction) planSparseReminderAfterCompaction = false
     if (isFinalIteration) {
       blocks.push(
         "CRITICAL — MAXIMUM STEPS REACHED\n\n" +
@@ -616,6 +615,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             systemPromptText: systemPrompt,
             toolsDefinitionTokens,
           })
+          if (mode === "plan") planSparseReminderAfterCompaction = true
           host.emit({ type: "compaction_end" })
           loopIterations--
           continue
@@ -631,7 +631,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }))
 
     // 5. Build messages from session
-    const messages = buildMessagesFromSession(session)
+    const messages = buildMessagesFromSession(session, {
+      sessionId: session.id,
+      emphasizeToolSpillPaths: config.memory?.emphasizeToolSpillPaths !== false,
+    })
 
     // On the very first iteration of a new agent invocation that has prior history, inject a brief
     // context annotation (Codex-style: environment context as a message event, not just system prompt).
@@ -763,10 +766,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
         // CRITICAL: update the tool part in the session with the result
         // This is what buildMessagesFromSession reads to include in the next LLM call
+        const spillFlush = spillPathFromToolMetadata(result.metadata)
         session.updateToolPart(newMessageId, partId, {
           status: result.success ? "completed" : "error",
           output: result.output,
           timeEnd: Date.now(),
+          ...(spillFlush ? { outputSpillPath: spillFlush } : {}),
         })
 
         host.emit({
@@ -1008,14 +1013,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               // Sequential: flush pending reads first
               await flushPendingReads()
 
-              // Plan mode: force writing the plan to .nexus/plans/ before PlanExit
+              // Plan mode: OpenClaude-style — plan must come from completed Write/Edit in this session (or same-turn write part).
               if (toolName === "PlanExit" && mode === "plan") {
-                const hasPlanFile =
-                  messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd) ||
-                  hasPlanFileOnDisk(toolCtx.cwd)
-                if (!hasPlanFile) {
+                if (!planExitWriteGateSatisfied(session, newMessageId, toolCtx.cwd)) {
                   const errMsg =
-                    "You must write the plan to a file in .nexus/plans/ (e.g. .nexus/plans/plan.md) before calling PlanExit. Create or update the plan file now, then call PlanExit again."
+                    "PlanExit requires at least one completed Write or Edit to `.nexus/plans/*.md` or `.txt` in this session (you may Write then PlanExit in the same turn). Pre-existing files on disk alone are not enough."
                   session.updateToolPart(newMessageId, partId, {
                     status: "error",
                     output: errMsg,
@@ -1097,10 +1099,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               })
               const afterToolStopReason = getPreventContinuationReason(afterToolHookResults)
 
+              const spillLoop = spillPathFromToolMetadata(result.metadata)
               session.updateToolPart(newMessageId, partId, {
                 status: result.success ? "completed" : "error",
                 output: result.output,
                 timeEnd: Date.now(),
+                ...(spillLoop ? { outputSpillPath: spillLoop } : {}),
                 ...(result.success && (toolName === "Write" || toolName === "Edit")
                   ? {
                       path: extractWriteTargetPath(toolName, toolInput),
@@ -1234,6 +1238,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           toolsDefinitionTokens,
           aggressive: true,
         })
+        if (mode === "plan") planSparseReminderAfterCompaction = true
         host.emit({ type: "compaction_end" })
         continue
       }
@@ -1311,10 +1316,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             mcpToolNames
           )
 
+          const spillTextual = spillPathFromToolMetadata(result.metadata)
           session.updateToolPart(newMessageId, partId, {
             status: result.success ? "completed" : "error",
             output: result.output,
             timeEnd: Date.now(),
+            ...(spillTextual ? { outputSpillPath: spillTextual } : {}),
             ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
               ? {
                   path: extractWriteTargetPath(call.toolName, call.toolInput),
@@ -1440,10 +1447,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       }
       const alreadyCalled = messageHasMandatoryEndTool(session, newMessageId, mode)
       if (mandatoryTool && !alreadyCalled && resolvedTools.some((t) => t.name === mandatoryTool)) {
-        // Plan mode: if no plan file was written, still force plan_exit so user gets a message
-        if (mode === "plan" && mandatoryTool === "PlanExit" && !messageHasPlanFileWrite(session, newMessageId, toolCtx.cwd)) {
-          // Keep plan_exit; pass summary that plan file is missing
-        }
         if (!resolvedTools.some((t) => t.name === mandatoryTool)) {
           break
         }
@@ -1453,7 +1456,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         const summary = (currentText || "").trim().slice(0, 2000) || "Work completed."
         let toolInput: Record<string, unknown>
         if (mandatoryTool === "PlanExit") {
-          toolInput = { summary: (currentText || "").trim().slice(0, 500) || "Plan ready." }
+          const gateOk = planExitWriteGateSatisfied(session, newMessageId, toolCtx.cwd)
+          const trimmed = (currentText || "").trim().slice(0, 500)
+          toolInput = {
+            summary: gateOk
+              ? (trimmed || "Plan ready.")
+              : (trimmed ||
+                "Planning stopped without a plan file write in this session. Write to .nexus/plans/*.md or .txt, then call PlanExit."),
+          }
         } else {
           toolInput = { message: summary }
         }
@@ -1522,12 +1532,35 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         systemPromptText: lastBuiltSystemPrompt,
         toolsDefinitionTokens,
       })
+      if (mode === "plan") planSparseReminderAfterCompaction = true
       host.emit({ type: "compaction_end" })
     }
 
     contextOverflowRetries = 0
     await session.save()
     emitContextUsage()
+
+    const toolDeltaThisIteration = executedToolCallsTotal - toolCallsAtStartOfIteration
+    sessionMemoryToolCallDebt += toolDeltaThisIteration
+    const memMin = config.memory?.sessionMemoryMinToolCallsBetweenUpdates ?? 8
+    if (
+      config.memory?.sessionMemoryEnabled !== false &&
+      sessionMemoryToolCallDebt >= memMin &&
+      !sessionMemoryRefreshBusy &&
+      toolDeltaThisIteration > 0
+    ) {
+      sessionMemoryToolCallDebt = 0
+      sessionMemoryRefreshBusy = true
+      void refreshSessionMemoryFile({
+        session,
+        client: activeClient,
+        cwd: host.cwd,
+        config,
+        signal,
+      }).finally(() => {
+        sessionMemoryRefreshBusy = false
+      })
+    }
   }
 
   if (!signal.aborted && lastAssistantMessageId && !doneEmitted) {
@@ -1547,6 +1580,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     await recordPluginHookOutputs(session, host, "turn-complete-hook", turnCompleteHookResults, {
       mode,
     })
+    void runAutoMemoryDreamIfDue({
+      cwd: host.cwd,
+      config,
+      client: activeClient,
+      signal,
+    }).catch(() => undefined)
     doneEmitted = true
     // When mandatory end tool was executed, clear todo so it's removed from session.
     if (attemptedCompletionThisIteration || lastToolName === MANDATORY_END_TOOL[mode]) {
@@ -1859,6 +1898,12 @@ async function handleCompaction(
           for (const memory of extracted) {
             await runtime.upsertMemoryByTitle(memory).catch(() => null)
           }
+          await appendCompactionSnippetToSessionMemory(
+            session.id,
+            host.cwd,
+            latestSummary.content,
+            config.memory?.sessionMemoryMaxChars ?? 48_000,
+          ).catch(() => null)
         }
       }
     }
@@ -1944,6 +1989,12 @@ type AssistantLlmBlock =
   | { type: "reasoning"; text: string }
   | { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> }
 
+/** Options for mapping session tool parts to LLM tool-result strings (spill path emphasis). */
+type BuildSessionLlmOptions = {
+  sessionId: string
+  emphasizeToolSpillPaths?: boolean
+}
+
 function assistantBlocksToLlmContent(blocks: AssistantLlmBlock[]): LLMMessage["content"] | null {
   if (blocks.length === 0) return null
   const hasReasoning = blocks.some(b => b.type === "reasoning")
@@ -1988,7 +2039,10 @@ function assistantBlocksToLlmContent(blocks: AssistantLlmBlock[]): LLMMessage["c
   return content.length > 0 ? (content as LLMMessage["content"]) : null
 }
 
-function toolPartToLlmResult(tp: ToolPart): {
+function toolPartToLlmResult(
+  tp: ToolPart,
+  opts?: BuildSessionLlmOptions,
+): {
   type: "tool-result"
   toolCallId: string
   toolName: string
@@ -1997,12 +2051,24 @@ function toolPartToLlmResult(tp: ToolPart): {
 } {
   let result: string
   if (tp.compacted) {
-    result = "[Old tool result content cleared]"
+    result = (tp.output ?? "").trim() || "[Old tool result content cleared]"
   } else {
     result = tp.output ?? ""
   }
   if (tp.status === "error") {
     result = formatToolAttemptForLanguageModel(tp.tool, tp.input, result)
+  } else if (
+    opts?.emphasizeToolSpillPaths !== false &&
+    tp.status === "completed" &&
+    !tp.compacted
+  ) {
+    let spill = tp.outputSpillPath
+    if (!spill && opts?.sessionId) {
+      spill = getToolOutputSpill(opts.sessionId, tp.id)?.absolutePath
+    }
+    if (spill && !result.includes(spill)) {
+      result = `${result}\n\n[Full tool output on disk: ${spill}]`
+    }
   }
   return {
     type: "tool-result",
@@ -2017,7 +2083,7 @@ function toolPartToLlmResult(tp: ToolPart): {
  * Walk assistant `parts` in array order (same chronology as the UI) and emit
  * interleaved [assistant] / [tool] LLM messages with native `reasoning` parts (KiloCode-style).
  */
-function buildAssistantLlmMessagesFromParts(parts: MessagePart[]): LLMMessage[] {
+function buildAssistantLlmMessagesFromParts(parts: MessagePart[], llmOpts?: BuildSessionLlmOptions): LLMMessage[] {
   const out: LLMMessage[] = []
   let i = 0
 
@@ -2072,7 +2138,7 @@ function buildAssistantLlmMessagesFromParts(parts: MessagePart[]): LLMMessage[] 
       for (const tp of tools) {
         if (tp.input == null) continue
         if (tp.status === "completed" || tp.status === "error") {
-          toolResultParts.push(toolPartToLlmResult(tp))
+          toolResultParts.push(toolPartToLlmResult(tp, llmOpts))
         } else {
           toolResultParts.push({
             type: "tool-result",
@@ -2097,7 +2163,7 @@ function buildAssistantLlmMessagesFromParts(parts: MessagePart[]): LLMMessage[] 
   return out
 }
 
-function buildMessagesFromSession(session: ISession): LLMMessage[] {
+function buildMessagesFromSession(session: ISession, llmOpts?: BuildSessionLlmOptions): LLMMessage[] {
   const messages: LLMMessage[] = []
 
   for (const msg of getMessagesForActiveContext(session.messages)) {
@@ -2149,7 +2215,7 @@ function buildMessagesFromSession(session: ISession): LLMMessage[] {
 
     if (msg.role !== "assistant") continue
 
-    messages.push(...buildAssistantLlmMessagesFromParts(parts))
+    messages.push(...buildAssistantLlmMessagesFromParts(parts, llmOpts))
   }
 
   return messages

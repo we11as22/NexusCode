@@ -1,6 +1,12 @@
 import React, { useState } from "react"
 import { postMessage } from "../vscode.js"
 import type { ToolPart, SubAgentState } from "../stores/chat.js"
+import {
+  TOOL_ICONS as TOOL_ICONS_META,
+  getParallelUses as getParallelUsesMeta,
+  normalizeParallelRecipientName as normalizeParallelRecipientNameMeta,
+  toolDisplayName as toolDisplayNameMeta,
+} from "../transcript/toolMeta.js"
 
 /** Extract path:line pairs from search/codebase output for "Open in editor" links */
 function extractPathLinePairs(output: string): Array<{ path: string; line: number }> {
@@ -27,6 +33,8 @@ interface Props {
   part: ToolPart
   /** When set, render approval UI inline inside the card (same field as tool). */
   approval?: React.ReactNode
+  /** After expand/collapse so virtualized chat can re-pin to bottom when appropriate. */
+  onLayoutHint?: () => void
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -98,7 +106,6 @@ const TOOL_ICONS: Record<string, string> = {
   AskFollowupQuestion: "❓",
   update_todo_list: "📝",
   TodoWrite: "📝",
-  create_rule: "📏",
   batch: "📦",
   Parallel: "🧩",
   parallel: "🧩",
@@ -325,7 +332,15 @@ function getEditStatLabel(part: ToolPart): string {
 }
 
 /** Inline file-edit block in chat: one block per replace_in_file/write_to_file, chronological. Collapsible, hover chevron, click filename opens diff in VS Code. When diffHunks present, shows line-by-line diff (red/green). */
-export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approval?: React.ReactNode }) {
+export function InlineFileEditBlock({
+  part,
+  approval,
+  onLayoutHint,
+}: {
+  part: ToolPart
+  approval?: React.ReactNode
+  onLayoutHint?: () => void
+}) {
   const path = getFileEditPath(part)
   const output = part.output ?? ""
   const [expanded, setExpanded] = useState(true)
@@ -362,8 +377,16 @@ export function InlineFileEditBlock({ part, approval }: { part: ToolPart; approv
         className="nexus-file-edit-header flex items-center gap-2"
         role="button"
         tabIndex={0}
-        onClick={() => setExpanded((prev) => !prev)}
-        onKeyDown={(e) => e.key === "Enter" && setExpanded((prev) => !prev)}
+        onClick={() => {
+          setExpanded((prev) => !prev)
+          onLayoutHint?.()
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            setExpanded((prev) => !prev)
+            onLayoutHint?.()
+          }
+        }}
       >
         <span className="nexus-file-edit-badge flex-shrink-0">{lang}</span>
         <div className="nexus-file-edit-title-cluster">
@@ -635,10 +658,10 @@ function formatToolInputPreview(part: ToolPart): string {
     }
     case "Parallel":
     case "parallel": {
-      const uses = getParallelUses(inp)
+      const uses = getParallelUsesMeta(inp)
       if (uses.length === 0) return "parallel"
       const names = uses
-        .map((u) => (typeof u.recipient_name === "string" ? normalizeParallelRecipientName(u.recipient_name) : ""))
+        .map((u) => (typeof u.recipient_name === "string" ? normalizeParallelRecipientNameMeta(u.recipient_name) : ""))
         .filter(Boolean)
       const unique = [...new Set(names)]
       if (unique.length === 1) {
@@ -724,13 +747,13 @@ function SubAgentDisplay({ subagents }: { subagents?: SubAgentState[] }) {
   )
 }
 
-export function ToolCallCard({ part, approval }: Props) {
+export function ToolCallCard({ part, approval, onLayoutHint }: Props) {
   const [expanded, setExpanded] = useState(false)
-  const icon = TOOL_ICONS[part.tool] ?? "🔧"
+  const icon = TOOL_ICONS_META[part.tool] ?? "🔧"
   const toolTitle =
     part.status === "error" && part.timeEnd != null
-      ? `Attempt ${toolDisplayName(part.tool)}`
-      : toolDisplayName(part.tool)
+      ? `Attempt ${toolDisplayNameMeta(part.tool)}`
+      : toolDisplayNameMeta(part.tool)
   const isMcp = part.tool.includes("__")
   const isAskFollowup = part.tool === "AskFollowupQuestion" || part.tool === "ask_followup_question"
   const hideGenericQuestionOutput =
@@ -754,7 +777,10 @@ export function ToolCallCard({ part, approval }: Props) {
   return (
     <div className={`nexus-tool-call-card my-1 text-xs min-w-0 overflow-x-hidden ${STATUS_STYLES[part.status]}${isAskFollowup ? " nexus-tool-row--askfollowup" : ""}`}>
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => {
+          setExpanded(!expanded)
+          onLayoutHint?.()
+        }}
         className="w-full flex items-center gap-2 px-1 py-0.5 text-left hover:opacity-80 transition-opacity"
       >
         <span className="flex-shrink-0">{icon}</span>
