@@ -586,6 +586,7 @@ export interface PluginManifestRecord {
   agents: string[]
   skills: string[]
   hooks: string[]
+  inlineHookConfigs?: Record<string, unknown>[]
   mcpServers: string[]
   inlineMcpServers?: Record<string, unknown>
   enabled: boolean

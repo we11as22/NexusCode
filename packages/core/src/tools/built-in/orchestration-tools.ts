@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
+import { randomUUID } from "node:crypto"
 import { kill } from "node:process"
 import * as yaml from "js-yaml"
 import { z } from "zod"
@@ -108,6 +109,35 @@ async function updateProjectPluginConfig(
   await writeProjectConfigDocument(cwd, doc)
 }
 
+async function refreshProjectPluginConfig(ctx: ToolContext): Promise<void> {
+  const doc = await readProjectConfigDocument(ctx.cwd)
+  const raw = asObject(doc.plugins)
+  if (Object.keys(raw).length === 0) return
+  const current = ctx.config.plugins ?? {}
+  const options = asObject(raw.options)
+  ctx.config.plugins = {
+    ...current,
+    ...(typeof raw.enabled === "boolean" ? { enabled: raw.enabled } : {}),
+    ...(Array.isArray(raw.trusted)
+      ? { trusted: raw.trusted.filter((item): item is string => typeof item === "string") }
+      : {}),
+    ...(Array.isArray(raw.blocked)
+      ? { blocked: raw.blocked.filter((item): item is string => typeof item === "string") }
+      : {}),
+    ...(typeof raw.enableHooks === "boolean" ? { enableHooks: raw.enableHooks } : {}),
+    ...(typeof raw.hookTimeoutMs === "number" && raw.hookTimeoutMs > 0
+      ? { hookTimeoutMs: raw.hookTimeoutMs }
+      : {}),
+    ...(Object.keys(options).length > 0
+      ? {
+          options: Object.fromEntries(
+            Object.entries(options).map(([name, value]) => [name, asObject(value)]),
+          ),
+        }
+      : {}),
+  }
+}
+
 function slugifyName(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || `plugin-${Date.now()}`
 }
@@ -123,7 +153,12 @@ async function copyDirectoryRecursive(sourceDir: string, targetDir: string): Pro
       continue
     }
     if (entry.isSymbolicLink()) continue
+    if (!entry.isFile()) {
+      throw new Error(`Unsupported plugin filesystem entry: ${sourcePath}`)
+    }
     await fs.copyFile(sourcePath, targetPath)
+    const sourceMode = (await fs.stat(sourcePath)).mode & 0o777
+    await fs.chmod(targetPath, sourceMode)
   }
 }
 
@@ -1587,6 +1622,7 @@ export const listPluginsTool: ToolDef<z.infer<typeof listPluginsSchema>> = {
   readOnly: true,
   shouldDefer: true,
   async execute(_args, ctx) {
+    await refreshProjectPluginConfig(ctx)
     const plugins = await loadPluginRuntimeRecords(ctx.cwd, ctx.config)
     if (plugins.length === 0) return { success: true, output: "No local plugins found." }
     return {
@@ -1612,6 +1648,7 @@ export const getPluginTool: ToolDef<z.infer<typeof getPluginSchema>> = {
   readOnly: true,
   shouldDefer: true,
   async execute({ name }, ctx) {
+    await refreshProjectPluginConfig(ctx)
     const plugins = await loadPluginRuntimeRecords(ctx.cwd, ctx.config)
     const plugin = plugins.find((item) => item.name === name)
     if (!plugin) return { success: false, output: `Plugin not found: ${name}` }
@@ -1644,6 +1681,7 @@ export const runPluginHookTool: ToolDef<z.infer<typeof runPluginHookSchema>> = {
   parameters: runPluginHookSchema,
   shouldDefer: true,
   async execute({ hook_event, payload }, ctx) {
+    await refreshProjectPluginConfig(ctx)
     const results = await runPluginHooks(ctx.cwd, ctx.host, ctx.config, hook_event, payload ?? {})
     if (results.length === 0) return { success: true, output: `No trusted plugin hooks handled ${hook_event}.` }
     for (const result of results) {
@@ -1676,6 +1714,7 @@ export const pluginTrustTool: ToolDef<z.infer<typeof pluginTrustSchema>> = {
   parameters: pluginTrustSchema,
   shouldDefer: true,
   async execute({ name, trusted }, ctx) {
+    let nextTrusted: string[] = []
     await updateProjectPluginConfig(ctx.cwd, (plugins) => {
       const trustedList = new Set(
         Array.isArray(plugins.trusted)
@@ -1684,8 +1723,10 @@ export const pluginTrustTool: ToolDef<z.infer<typeof pluginTrustSchema>> = {
       )
       if (trusted) trustedList.add(name)
       else trustedList.delete(name)
-      plugins.trusted = Array.from(trustedList).sort()
+      nextTrusted = Array.from(trustedList).sort()
+      plugins.trusted = nextTrusted
     })
+    ctx.config.plugins = { ...ctx.config.plugins, trusted: nextTrusted }
     return {
       success: true,
       output: trusted ? `Plugin ${name} marked as trusted.` : `Plugin ${name} removed from trusted plugin list.`,
@@ -1704,6 +1745,7 @@ export const pluginEnableTool: ToolDef<z.infer<typeof pluginEnableSchema>> = {
   parameters: pluginEnableSchema,
   shouldDefer: true,
   async execute({ name, enabled }, ctx) {
+    let nextBlocked: string[] = []
     await updateProjectPluginConfig(ctx.cwd, (plugins) => {
       const blocked = new Set(
         Array.isArray(plugins.blocked)
@@ -1712,8 +1754,10 @@ export const pluginEnableTool: ToolDef<z.infer<typeof pluginEnableSchema>> = {
       )
       if (enabled) blocked.delete(name)
       else blocked.add(name)
-      plugins.blocked = Array.from(blocked).sort()
+      nextBlocked = Array.from(blocked).sort()
+      plugins.blocked = nextBlocked
     })
+    ctx.config.plugins = { ...ctx.config.plugins, blocked: nextBlocked }
     return {
       success: true,
       output: enabled ? `Plugin ${name} enabled.` : `Plugin ${name} disabled.`,
@@ -1734,6 +1778,7 @@ export const pluginConfigureTool: ToolDef<z.infer<typeof pluginConfigureSchema>>
   parameters: pluginConfigureSchema,
   shouldDefer: true,
   async execute({ name, key, value, unset }, ctx) {
+    let nextOptions: Record<string, Record<string, unknown>> = {}
     await updateProjectPluginConfig(ctx.cwd, (plugins) => {
       const options = asObject(plugins.options)
       const pluginOptions = asObject(options[name])
@@ -1743,7 +1788,14 @@ export const pluginConfigureTool: ToolDef<z.infer<typeof pluginConfigureSchema>>
       else delete options[name]
       if (Object.keys(options).length > 0) plugins.options = options
       else delete plugins.options
+      nextOptions = Object.fromEntries(
+        Object.entries(options).map(([pluginName, pluginValue]) => [
+          pluginName,
+          asObject(pluginValue),
+        ]),
+      )
     })
+    ctx.config.plugins = { ...ctx.config.plugins, options: nextOptions }
     return {
       success: true,
       output: unset
@@ -1761,6 +1813,7 @@ export const pluginReloadTool: ToolDef<z.infer<typeof pluginReloadSchema>> = {
   parameters: pluginReloadSchema,
   shouldDefer: true,
   async execute(_args, ctx) {
+    await refreshProjectPluginConfig(ctx)
     const plugins = await loadPluginRuntimeRecords(ctx.cwd, ctx.config)
     return {
       success: true,
@@ -1815,7 +1868,12 @@ export const pluginInstallLocalTool: ToolDef<z.infer<typeof pluginInstallLocalSc
   parameters: pluginInstallLocalSchema,
   shouldDefer: true,
   async execute({ source_dir, name, overwrite }, ctx) {
-    const sourceDir = path.isAbsolute(source_dir) ? source_dir : path.join(ctx.cwd, source_dir)
+    const sourceDirInput = path.isAbsolute(source_dir) ? source_dir : path.join(ctx.cwd, source_dir)
+    const sourceDir = await fs.realpath(sourceDirInput).catch(() => sourceDirInput)
+    const sourceStats = await fs.stat(sourceDir).catch(() => null)
+    if (!sourceStats?.isDirectory()) {
+      return { success: false, output: `Plugin source is not a directory: ${sourceDirInput}` }
+    }
     const targetName = slugifyName(name ?? path.basename(sourceDir))
     const targetDir = path.join(ctx.cwd, ".nexus", "plugins", targetName)
     const exists = await fs.stat(targetDir).then(() => true).catch(() => false)
@@ -1826,6 +1884,7 @@ export const pluginInstallLocalTool: ToolDef<z.infer<typeof pluginInstallLocalSc
       path.join(sourceDir, "plugin.json"),
       path.join(sourceDir, ".nexus-plugin", "plugin.json"),
       path.join(sourceDir, ".codex-plugin", "plugin.json"),
+      path.join(sourceDir, ".claude-plugin", "plugin.json"),
     ]
     const sourceManifest = (
       await Promise.all(manifestCandidates.map(async (candidate) => ((await fs.stat(candidate).then(() => true).catch(() => false)) ? candidate : null)))
@@ -1833,18 +1892,59 @@ export const pluginInstallLocalTool: ToolDef<z.infer<typeof pluginInstallLocalSc
     if (!sourceManifest) {
       return { success: false, output: `No plugin.json found in ${sourceDir}.` }
     }
-    if (exists) await fs.rm(targetDir, { recursive: true, force: true })
-    await copyDirectoryRecursive(sourceDir, targetDir)
-    const targetManifest = path.join(targetDir, path.relative(sourceDir, sourceManifest))
-    const validation = await validatePluginManifestFile(targetManifest)
-    if (!validation.success) {
-      await fs.rm(targetDir, { recursive: true, force: true }).catch(() => undefined)
-      return { success: false, output: `Installed plugin failed validation:\n${validation.errors.join("\n")}` }
+    const sourceValidation = await validatePluginManifestFile(sourceManifest)
+    if (!sourceValidation.success) {
+      return { success: false, output: `Plugin source failed validation:\n${sourceValidation.errors.join("\n")}` }
     }
-    return {
-      success: true,
-      output: `Installed plugin ${validation.plugin?.name ?? targetName} into ${targetDir}.`,
-      metadata: { plugin: validation.plugin, targetDir },
+
+    const pluginDir = path.dirname(targetDir)
+    await fs.mkdir(pluginDir, { recursive: true })
+    const operationId = randomUUID()
+    const stagingDir = path.join(pluginDir, `.${targetName}.install-${operationId}`)
+    const backupDir = path.join(pluginDir, `.${targetName}.backup-${operationId}`)
+    let previousMoved = false
+    let installed = false
+    try {
+      await copyDirectoryRecursive(sourceDir, stagingDir)
+      const stagedManifest = path.join(stagingDir, path.relative(sourceDir, sourceManifest))
+      const validation = await validatePluginManifestFile(stagedManifest)
+      if (!validation.success) {
+        return { success: false, output: `Installed plugin failed validation:\n${validation.errors.join("\n")}` }
+      }
+      if (exists) {
+        await fs.rename(targetDir, backupDir)
+        previousMoved = true
+      }
+      await fs.rename(stagingDir, targetDir)
+      installed = true
+      if (previousMoved) {
+        await fs.rm(backupDir, { recursive: true, force: true })
+        previousMoved = false
+      }
+      const targetManifest = path.join(targetDir, path.relative(sourceDir, sourceManifest))
+      const finalValidation = await validatePluginManifestFile(targetManifest)
+      return {
+        success: true,
+        output: `Installed plugin ${finalValidation.plugin?.name ?? targetName} into ${targetDir}.`,
+        metadata: { plugin: finalValidation.plugin, targetDir },
+      }
+    } catch (error) {
+      if (installed) {
+        await fs.rm(targetDir, { recursive: true, force: true }).catch(() => undefined)
+      }
+      if (previousMoved) {
+        await fs.rename(backupDir, targetDir).catch(() => undefined)
+        previousMoved = false
+      }
+      return {
+        success: false,
+        output: `Plugin installation failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    } finally {
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
+      if (!previousMoved) {
+        await fs.rm(backupDir, { recursive: true, force: true }).catch(() => undefined)
+      }
     }
   },
 }
@@ -1876,6 +1976,14 @@ export const pluginRemoveTool: ToolDef<z.infer<typeof pluginRemoveSchema>> = {
       if (Object.keys(options).length > 0) pluginsConfig.options = options
       else delete pluginsConfig.options
     })
+    ctx.config.plugins = {
+      ...ctx.config.plugins,
+      blocked: (ctx.config.plugins?.blocked ?? []).filter((item) => item !== name),
+      trusted: (ctx.config.plugins?.trusted ?? []).filter((item) => item !== name),
+      options: Object.fromEntries(
+        Object.entries(ctx.config.plugins?.options ?? {}).filter(([pluginName]) => pluginName !== name),
+      ),
+    }
     return {
       success: true,
       output: `Removed plugin ${name} from ${plugin.rootDir}.`,

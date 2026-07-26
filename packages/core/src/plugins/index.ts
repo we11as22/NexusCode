@@ -109,6 +109,14 @@ function normalizeInlineMcpServers(value: unknown): Record<string, unknown> | un
   return value as Record<string, unknown>
 }
 
+function normalizeInlineHookConfigs(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => normalizeInlineHookConfigs(item))
+  }
+  if (!value || typeof value !== "object") return []
+  return [value as Record<string, unknown>]
+}
+
 async function addDefaultPath(
   pluginRootDir: string,
   values: string[],
@@ -192,6 +200,7 @@ export async function validatePluginManifestFile(filePath: string): Promise<{ su
     .map((entry) => entry.source)
     .filter((entry): entry is string => Boolean(entry))
   const inlineMcpServers = normalizeInlineMcpServers(result.data.mcpServers)
+  const inlineHookConfigs = normalizeInlineHookConfigs(result.data.hooks)
   const plugin: PluginManifestRecord = {
     name: result.data.name.trim(),
     version: result.data.version?.trim() || undefined,
@@ -204,6 +213,7 @@ export async function validatePluginManifestFile(filePath: string): Promise<{ su
     agents: normalizeDeclaredList(result.data.agents, "agents", warnings),
     skills: normalizeDeclaredList(result.data.skills, "skills", warnings),
     hooks: normalizeDeclaredList(result.data.hooks, "hooks", warnings),
+    ...(inlineHookConfigs.length ? { inlineHookConfigs } : {}),
     mcpServers: normalizeDeclaredList(result.data.mcpServers, "mcpServers", warnings),
     ...(inlineMcpServers ? { inlineMcpServers } : {}),
     enabled: result.data.enabled ?? true,
@@ -221,6 +231,10 @@ export async function validatePluginManifestFile(filePath: string): Promise<{ su
   plugin.commands = await addDefaultPath(rootDir, plugin.commands, "commands")
   plugin.agents = await addDefaultPath(rootDir, plugin.agents, "agents")
   plugin.skills = await addDefaultPath(rootDir, plugin.skills, "skills")
+  const defaultHooks = await fs.stat(path.join(rootDir, "hooks", "hooks.json")).catch(() => null)
+  if (defaultHooks?.isFile() && !plugin.hooks.includes("hooks/hooks.json")) {
+    plugin.hooks.unshift("hooks/hooks.json")
+  }
   const defaultMcp = await fs.stat(path.join(rootDir, ".mcp.json")).catch(() => null)
   if (defaultMcp?.isFile() && !plugin.mcpServers.includes(".mcp.json")) {
     plugin.mcpServers.unshift(".mcp.json")
@@ -234,6 +248,10 @@ export async function validatePluginManifestFile(filePath: string): Promise<{ su
   ])
 
   for (const hook of plugin.hooks) {
+    if (hook.toLowerCase().endsWith(".json")) {
+      await validateDeclaredPaths(rootDir, [hook], "hooks", errors)
+      continue
+    }
     const idx = hook.indexOf(":")
     if (idx === -1) {
       warnings.push(`hooks: expected event:path format, assuming after_tool:${hook}`)
