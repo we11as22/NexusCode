@@ -80,6 +80,7 @@ import {
   isDelegatedAgentParentToolEndClear,
   loadSlashCommands,
   renderSlashCommandPrompt,
+  resolveSlashCommand,
 } from "@nexuscode/core"
 import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
 import { MarketplaceService, type MarketplaceItem } from "./services/marketplace/index.js"
@@ -2116,13 +2117,15 @@ export class Controller {
           default: {
             const compat = this.config ? getClaudeCompatibilityOptions(this.config) : undefined
             const loaded = await loadSlashCommands(cwd, compat, this.config)
-            const resolved =
-              loaded.find((item) => item.command === name) ??
-              loaded.find((item) => item.command === `project:${name}`) ??
-              loaded.find((item) => item.command === `user:${name}`) ??
-              loaded.find((item) => item.scope === "plugin" && item.command.endsWith(`:${name}`))
-            if (resolved) {
-              await this.runAgent(renderSlashCommandPrompt(resolved, args), this.mode)
+            const resolved = resolveSlashCommand(loaded, name)
+            if (resolved.status === "resolved") {
+              await this.runAgent(renderSlashCommandPrompt(resolved.command, args), this.mode)
+              break
+            }
+            if (resolved.status === "ambiguous") {
+              vscode.window.showWarningMessage(
+                `NexusCode: /${name} is ambiguous. Use ${resolved.candidates.map((candidate) => `/${candidate}`).join(" or ")}.`,
+              )
               break
             }
             // Unknown slash command — switch to settings view as fallback

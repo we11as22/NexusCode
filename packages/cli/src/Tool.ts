@@ -23,6 +23,14 @@ export type ToolUseContext = {
     maxThinkingTokens: number
     verbose?: boolean
     dangerouslySkipPermissions?: boolean
+    resolvePromptCommand?: (
+      name: string,
+      args: string,
+    ) => Promise<
+      | { status: 'resolved'; prompt: string }
+      | { status: 'ambiguous'; candidates: string[] }
+      | { status: 'not-found' }
+    >
   }
   messageId?: string
   readFileTimestamps: Record<string, number>

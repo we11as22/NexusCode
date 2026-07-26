@@ -14,7 +14,7 @@ import { SentryErrorBoundary } from './SentryErrorBoundary.js'
 import { AutoUpdater } from './AutoUpdater.js'
 import { AutoUpdaterResult } from '../utils/autoUpdater.js'
 import type { Command } from '../commands.js'
-import type { SetToolJSXFn, Tool } from '../Tool.js'
+import type { SetToolJSXFn, Tool, ToolUseContext } from '../Tool.js'
 import { TokenWarning, WARNING_THRESHOLD, MAX_TOKENS } from './TokenWarning.js'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import { getTheme } from '../utils/theme.js'
@@ -115,6 +115,8 @@ type Props = {
   onSetNexusMode?: (mode: string) => void
   /** Open a file in the user's $EDITOR (used by /skills, /mcp, /create-skill, /create-rule). */
   onOpenInEditor?: (filePath: string) => Promise<void>
+  /** Resolve project/user/plugin prompt commands through the Nexus core loader. */
+  resolveNexusPromptCommand?: ToolUseContext['options']['resolvePromptCommand']
 }
 
 function getPastedTextPrompt(text: string): string {
@@ -178,6 +180,7 @@ function PromptInput({
   onToggleToolOutputs,
   toolOutputsVisible = true,
   onSetNexusMode,
+  resolveNexusPromptCommand,
   onOpenInEditor,
 }: Props): React.ReactNode {
   const [isAutoUpdating, setIsAutoUpdating] = useState(false)
@@ -508,6 +511,7 @@ function PromptInput({
           verbose,
           slowAndCapableModel: model,
           maxThinkingTokens: 0,
+          resolvePromptCommand: resolveNexusPromptCommand,
         },
         messageId: undefined,
         abortController,

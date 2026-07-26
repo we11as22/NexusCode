@@ -184,8 +184,15 @@ export {
   type PluginMcpCapabilityResult,
 } from "./plugins/capabilities.js"
 export { getClaudeCompatibilityOptions } from "./compat/claude.js"
-export { loadSlashCommands, renderSlashCommandPrompt } from "./commands/loader.js"
-export type { LoadedSlashCommand } from "./commands/loader.js"
+export {
+  loadSlashCommands,
+  renderSlashCommandPrompt,
+  resolveSlashCommand,
+} from "./commands/loader.js"
+export type {
+  LoadedSlashCommand,
+  SlashCommandResolution,
+} from "./commands/loader.js"
 
 // Tools
 export { ToolRegistry, type RegistrationResult } from "./tools/registry.js"

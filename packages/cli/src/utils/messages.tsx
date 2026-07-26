@@ -247,6 +247,24 @@ export async function processUserInput(
 
     // Check if it's a real command before processing
     if (!hasCommand(commandName, context.options.commands)) {
+      const custom = await context.options.resolvePromptCommand?.(
+        commandName,
+        input.slice(commandName.length + 2),
+      )
+      if (custom?.status === 'resolved') {
+        logEvent('tengu_input_command', { input })
+        return [createUserMessage(custom.prompt)]
+      }
+      if (custom?.status === 'ambiguous') {
+        logEvent('tengu_input_slash_invalid', { input })
+        return [
+          createAssistantMessage(
+            `Ambiguous slash command /${commandName}. Use one of:\n${custom.candidates
+              .map(candidate => `- /${candidate}`)
+              .join('\n')}`,
+          ),
+        ]
+      }
       // If not a real command, treat it as a regular user input
       logEvent('tengu_input_prompt', {})
       return [createUserMessage(input)]

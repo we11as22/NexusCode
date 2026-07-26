@@ -709,6 +709,7 @@ export function REPL({
           verbose,
           slowAndCapableModel: model,
           maxThinkingTokens: 0,
+          resolvePromptCommand: nexusBootstrap?.resolvePromptCommand,
         },
         messageId: getLastAssistantMessageId(messages),
         setForkConvoWithMessagesOnTheNextRender,
@@ -1527,6 +1528,9 @@ export function REPL({
                 sessionDiffPanelVisible={sessionDiffExpanded}
                 onSetNexusMode={nexusBootstrap ? onSetNexusMode : undefined}
                 onOpenInEditor={nexusBootstrap ? onOpenInEditor : undefined}
+                resolveNexusPromptCommand={
+                  nexusBootstrap?.resolvePromptCommand
+                }
               />
               ) : null}
             </>

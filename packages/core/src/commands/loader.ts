@@ -16,6 +16,11 @@ export interface LoadedSlashCommand {
   pluginName?: string
 }
 
+export type SlashCommandResolution =
+  | { status: "resolved"; command: LoadedSlashCommand }
+  | { status: "ambiguous"; candidates: string[] }
+  | { status: "not-found" }
+
 function buildCommandName(scope: "project" | "user", sourcePath: string, baseDir: string): string {
   const rel = path.relative(baseDir, sourcePath).replace(/\\/g, "/").replace(/\.md$/i, "")
   return `${scope}:${rel}`
@@ -137,11 +142,99 @@ export async function loadSlashCommands(
     .sort((a, b) => a.command.localeCompare(b.command))
 }
 
+/**
+ * Resolve a slash command consistently across CLI and editor surfaces.
+ * Canonical names always win. Project commands shadow user commands, while a
+ * plugin basename is accepted only when exactly one plugin contributes it.
+ */
+export function resolveSlashCommand(
+  commands: LoadedSlashCommand[],
+  requestedName: string,
+): SlashCommandResolution {
+  const name = requestedName.replace(/^\//, "").trim()
+  if (!name) return { status: "not-found" }
+
+  const exact = commands.find((item) => item.command === name)
+  if (exact) return { status: "resolved", command: exact }
+
+  for (const scopedName of [`project:${name}`, `user:${name}`]) {
+    const scoped = commands.find((item) => item.command === scopedName)
+    if (scoped) return { status: "resolved", command: scoped }
+  }
+
+  const pluginMatches = commands.filter(
+    (item) => item.scope === "plugin" && item.command.endsWith(`:${name}`),
+  )
+  if (pluginMatches.length === 1) {
+    return { status: "resolved", command: pluginMatches[0]! }
+  }
+  if (pluginMatches.length > 1) {
+    return {
+      status: "ambiguous",
+      candidates: pluginMatches.map((item) => item.command).sort(),
+    }
+  }
+  return { status: "not-found" }
+}
+
+function parseCommandArguments(args: string): string[] {
+  const values: string[] = []
+  let current = ""
+  let quote: "'" | '"' | null = null
+  let escaped = false
+  let started = false
+  for (const char of args) {
+    if (escaped) {
+      current += char
+      escaped = false
+      started = true
+      continue
+    }
+    if (char === "\\" && quote !== "'") {
+      escaped = true
+      started = true
+      continue
+    }
+    if (quote) {
+      if (char === quote) quote = null
+      else current += char
+      started = true
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      started = true
+      continue
+    }
+    if (/\s/.test(char)) {
+      if (started) {
+        values.push(current)
+        current = ""
+        started = false
+      }
+      continue
+    }
+    current += char
+    started = true
+  }
+  if (escaped) current += "\\"
+  if (started) values.push(current)
+  return values
+}
+
 export function renderSlashCommandPrompt(command: LoadedSlashCommand, args: string): string {
   const trimmedArgs = args.trim()
-  if (command.prompt.includes("{{args}}")) {
-    return command.prompt.replace(/\{\{args\}\}/g, trimmedArgs)
-  }
-  if (!trimmedArgs) return command.prompt
+  const positional = parseCommandArguments(trimmedArgs)
+  let replaced = false
+  const rendered = command.prompt.replace(
+    /\{\{args\}\}|\$ARGUMENTS\[(\d+)\]|\$(\d+)(?!\w)|\$ARGUMENTS/g,
+    (placeholder, indexed: string | undefined, shorthand: string | undefined) => {
+      replaced = true
+      if (placeholder === "{{args}}" || placeholder === "$ARGUMENTS") return trimmedArgs
+      const index = Number(indexed ?? shorthand)
+      return positional[index] ?? ""
+    },
+  )
+  if (replaced || !trimmedArgs) return rendered
   return `${command.prompt.trim()}\n\nUser arguments:\n${trimmedArgs}`
 }

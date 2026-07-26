@@ -9,6 +9,11 @@ import {
   DurableRunEventSink,
   createLLMClient,
   loadConfig,
+  loadAgentInstructionBundle,
+  loadSkills,
+  getClaudeCompatibilityOptions,
+  resolveConfiguredAndPluginMcpServers,
+  resolveBundledMcpServers,
   Session,
   isDelegatedAgentParentTool,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
@@ -195,7 +200,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     onSubagentEvent,
     onRunComplete,
   } = opts
-  const { session: bootstrapSession, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer, serverUrl, services } = nexus
+  const { session: bootstrapSession, mode: bootstrapMode, toolRegistry, compaction, indexer, serverUrl, services } = nexus
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug' | 'review'
 
   let session = bootstrapSession
@@ -239,6 +244,47 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         autoApproveMcp: true,
         autoApproveBrowser: true,
       },
+    }
+  }
+
+  let rulesContent = nexus.rulesContent
+  let skills = nexus.skills
+  if (!serverUrl) {
+    const compatibility = getClaudeCompatibilityOptions(config)
+    ;[rulesContent, skills] = await Promise.all([
+      loadAgentInstructionBundle(nexus.cwd, config.rules.files, config, compatibility),
+      loadSkills(
+        config.skills,
+        nexus.cwd,
+        config.skillsUrls,
+        compatibility,
+        config,
+      ).catch(() => []),
+    ])
+    const pluginMcp = await resolveConfiguredAndPluginMcpServers(nexus.cwd, config)
+    const resolvedMcp = resolveBundledMcpServers(pluginMcp.servers, {
+      cwd: nexus.cwd,
+      nexusRoot: nexus.nexusRoot,
+    })
+    const mcpFingerprint = JSON.stringify(resolvedMcp)
+    if (mcpFingerprint !== nexus.mcpConfigFingerprint) {
+      const statuses = await nexus.mcpClient.connectAll(resolvedMcp)
+      nexus.mcpConfigFingerprint = mcpFingerprint
+      for (const status of Object.values(statuses)) {
+        if (status.state !== 'connected' && status.state !== 'disabled') {
+          console.warn(`[nexus] MCP ${status.name}: ${status.error ?? status.state}`)
+        }
+      }
+    }
+    nexus.rulesContent = rulesContent
+    nexus.skills = skills
+    nexus.config = config
+    nexus.configSnapshot = {
+      ...nexus.configSnapshot,
+      skills: config.skills,
+      skillsConfig: config.skillsConfig,
+      rules: { files: config.rules.files },
+      mcp: { servers: config.mcp.servers },
     }
   }
 
@@ -286,7 +332,12 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
 
   const client = createLLMClient(config.model)
   const { builtin, dynamic } = toolRegistry.getForMode(mode)
-  const tools: ToolDef[] = toolRegistry.mergeWithHiddenExecutionTools([...builtin, ...dynamic])
+  const nonMcpDynamic = dynamic.filter((tool) => tool.integration?.kind !== 'mcp')
+  const tools: ToolDef[] = toolRegistry.mergeWithHiddenExecutionTools([
+    ...builtin,
+    ...nonMcpDynamic,
+    ...nexus.mcpClient.getTools(),
+  ])
 
   let runPromise: Promise<void>
   if (serverUrl) {

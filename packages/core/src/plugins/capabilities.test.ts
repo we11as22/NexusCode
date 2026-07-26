@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { loadSlashCommands } from "../commands/loader.js"
+import {
+  loadSlashCommands,
+  renderSlashCommandPrompt,
+  resolveSlashCommand,
+} from "../commands/loader.js"
 import { NexusConfigSchema } from "../config/schema.js"
 import { loadAgentDefinitions } from "../orchestration/agents.js"
 import { loadSkills } from "../skills/manager.js"
@@ -83,6 +87,61 @@ describe("trusted plugin capabilities", () => {
     await expect(resolveConfiguredAndPluginMcpServers(root, trusted)).resolves.toMatchObject({
       servers: [{ name: "docs", url: "https://example.test/mcp" }],
     })
+  })
+
+  it("resolves command shorthands only when they are unambiguous", () => {
+    const commands = [
+      {
+        command: "plugin:alpha:review",
+        scope: "plugin" as const,
+        sourcePath: "/alpha/review.md",
+        description: "Alpha review",
+        prompt: "Review as alpha",
+        pluginName: "alpha",
+      },
+      {
+        command: "plugin:beta:review",
+        scope: "plugin" as const,
+        sourcePath: "/beta/review.md",
+        description: "Beta review",
+        prompt: "Review as beta",
+        pluginName: "beta",
+      },
+      {
+        command: "project:ship",
+        scope: "project" as const,
+        sourcePath: "/project/ship.md",
+        description: "Ship",
+        prompt: "Ship safely",
+      },
+    ]
+
+    expect(resolveSlashCommand(commands, "project:ship")).toMatchObject({
+      status: "resolved",
+      command: { command: "project:ship" },
+    })
+    expect(resolveSlashCommand(commands, "ship")).toMatchObject({
+      status: "resolved",
+      command: { command: "project:ship" },
+    })
+    expect(resolveSlashCommand(commands, "review")).toEqual({
+      status: "ambiguous",
+      candidates: ["plugin:alpha:review", "plugin:beta:review"],
+    })
+    expect(resolveSlashCommand(commands, "missing")).toEqual({ status: "not-found" })
+  })
+
+  it("renders OpenClaude argument placeholders without reinterpreting inserted values", () => {
+    const command = {
+      command: "project:deploy",
+      scope: "project" as const,
+      sourcePath: "/project/deploy.md",
+      description: "Deploy",
+      prompt: "all=$ARGUMENTS first=$ARGUMENTS[0] second=$1 handlebars={{args}}",
+    }
+    expect(renderSlashCommandPrompt(command, '"$1" production')).toBe(
+      'all="$1" production first=$1 second=production handlebars="$1" production',
+    )
   })
 
   it("isolates an invalid MCP sibling and gives explicit config precedence", async () => {

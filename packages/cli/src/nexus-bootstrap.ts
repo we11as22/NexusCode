@@ -43,6 +43,9 @@ import {
   type NexusRunServices,
   canonicalProjectRoot,
   getClaudeCompatibilityOptions,
+  loadSlashCommands,
+  renderSlashCommandPrompt,
+  resolveSlashCommand,
 } from '@nexuscode/core'
 import type { CodebaseIndexer } from '@nexuscode/core'
 import { fileURLToPath } from 'node:url'
@@ -188,6 +191,16 @@ export interface NexusBootstrapResult {
   compaction: ReturnType<typeof createCompaction>
   indexer: CodebaseIndexer | undefined
   serverUrl: string | null
+  nexusRoot: string
+  mcpConfigFingerprint: string
+  resolvePromptCommand: (
+    name: string,
+    args: string,
+  ) => Promise<
+    | { status: 'resolved'; prompt: string }
+    | { status: 'ambiguous'; candidates: string[] }
+    | { status: 'not-found' }
+  >
 }
 
 export async function bootstrapNexus(opts: {
@@ -287,6 +300,7 @@ export async function bootstrapNexus(opts: {
   const mode: Mode = modeArg ?? 'agent'
   const toolRegistry = new ToolRegistry()
   const mcpClient = new McpClient()
+  let mcpConfigFingerprint = "[]"
 
   const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, config)
   for (const diagnostic of pluginMcp.diagnostics) {
@@ -295,6 +309,7 @@ export async function bootstrapNexus(opts: {
   if (pluginMcp.servers.length > 0) {
     process.env.CLAUDE_PROJECT_DIR = cwd
     const resolved = resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
+    mcpConfigFingerprint = JSON.stringify(resolved)
     const statuses = await mcpClient.connectAll(resolved)
     for (const status of Object.values(statuses)) {
       if (status.state !== "connected" && status.state !== "disabled") {
@@ -371,6 +386,23 @@ export async function bootstrapNexus(opts: {
 
   const compaction = createCompaction()
   const configSnapshot = buildConfigSnapshot(config)
+  const resolvePromptCommand: NexusBootstrapResult['resolvePromptCommand'] = async (
+    name,
+    args,
+  ) => {
+    const liveConfig = await loadConfig(cwd, { secrets: secretsStore })
+    const commands = await loadSlashCommands(
+      cwd,
+      getClaudeCompatibilityOptions(liveConfig),
+      liveConfig,
+    )
+    const resolved = resolveSlashCommand(commands, name)
+    if (resolved.status !== 'resolved') return resolved
+    return {
+      status: 'resolved',
+      prompt: renderSlashCommandPrompt(resolved.command, args),
+    }
+  }
 
   return {
     cwd,
@@ -388,6 +420,9 @@ export async function bootstrapNexus(opts: {
     compaction,
     indexer,
     serverUrl,
+    nexusRoot: NEXUS_ROOT,
+    mcpConfigFingerprint,
+    resolvePromptCommand,
   }
 }
 
