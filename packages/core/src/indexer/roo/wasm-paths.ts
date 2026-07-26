@@ -6,12 +6,15 @@ import * as path from "node:path"
 import { createRequire } from "node:module"
 import { existsSync } from "node:fs"
 
-const require = createRequire(path.join(__dirname, "wasm-paths.js"))
+const moduleRequire = createRequire(path.join(__dirname, "wasm-paths.js"))
 
 export function getTreeSitterLanguageWasmsDir(): string {
   const bundled = path.join(__dirname, "tree-sitter", "languages")
   if (existsSync(bundled)) return bundled
-  return path.join(path.dirname(require.resolve("tree-sitter-wasms/package.json")), "out")
+  return path.join(
+    path.dirname(moduleRequire.resolve("tree-sitter-wasms/package.json")),
+    "out",
+  )
 }
 
 export function getWebTreeSitterWasmPath(): string {
@@ -19,5 +22,8 @@ export function getWebTreeSitterWasmPath(): string {
   if (existsSync(bundled)) return bundled
   // `web-tree-sitter` 0.25+ does not export `./package.json`; resolving the
   // public CommonJS entry lands in the same package directory as the core WASM.
-  return path.join(path.dirname(require.resolve("web-tree-sitter")), "tree-sitter.wasm")
+  return path.join(
+    path.dirname(moduleRequire.resolve("web-tree-sitter")),
+    "tree-sitter.wasm",
+  )
 }
