@@ -133,6 +133,7 @@ export {
   createTaskCreateBatchTool,
   createTaskSnapshotTool,
   createTaskResumeTool,
+  type SubAgentRuntimeContext,
 } from "./agent/parallel.js"
 export {
   getOrchestrationRuntime,

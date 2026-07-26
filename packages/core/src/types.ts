@@ -98,11 +98,6 @@ export interface ToolContext {
   partId?: string
   /** Assistant message id for the in-flight tool call (loop); used e.g. to merge sub-agent file edits when part id lookup fails. */
   toolExecutionMessageId?: string
-  /**
-   * Set by the Parallel tool around batched executes so concurrent SpawnAgent calls are not
-   * mistaken for duplicate spawns (shared recentSpawnTasks guard).
-   */
-  skipSubagentDuplicateCheck?: boolean
   /** All resolved tools for this run (set by loop). Used e.g. by Parallel to run multiple tools in one call. */
   resolvedTools?: ToolDef[]
 }
@@ -706,7 +701,7 @@ export type AgentEvent =
   | { type: "reasoning_end"; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
   | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; attachments?: ToolAttachment[]; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>; metadata?: Record<string, unknown> }
-  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string; parentPartId?: string }
+  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string; parentPartId?: string; depth?: number; parentSubagentId?: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown>; parentPartId?: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
   | { type: "subagent_done"; subagentId: string; success: boolean; outputPreview?: string; error?: string; parentPartId?: string }
@@ -903,6 +898,8 @@ export interface NexusConfig {
   parallelAgents: {
     maxParallel: number
     maxTasksPerCall?: number
+    /** Maximum delegated-agent nesting depth. Root is depth 0. */
+    maxDepth?: number
   }
   compatibility?: {
     claude?: {

@@ -262,6 +262,7 @@ export const NexusConfigSchema = z.object({
     maxParallel: z.number().int().positive().default(4),
     /** Deprecated: old SpawnAgents multi-task setting. Parallel sub-agent batching now uses Parallel + SpawnAgent calls. */
     maxTasksPerCall: z.number().int().positive().default(12),
+    maxDepth: z.number().int().min(0).max(8).default(2),
   }).default({}),
 
   compatibility: z.object({

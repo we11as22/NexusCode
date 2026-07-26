@@ -319,8 +319,8 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
           {
             modelOverride: args.model,
             taskName: args.name,
-            skipDuplicateCheck: ctx.skipSubagentDuplicateCheck === true,
           },
+          { host: ctx.host, services: ctx.services },
         )
         const task = await runtime.updateTask(started.subagentId, {
           subject: args.subject,
@@ -363,8 +363,8 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
         {
           modelOverride: args.model,
           taskName: args.name,
-          skipDuplicateCheck: ctx.skipSubagentDuplicateCheck === true,
         },
+        { host: ctx.host, services: ctx.services },
       )
       const task = await runtime.updateTask(result.subagentId, {
         subject: args.subject,
@@ -631,7 +631,11 @@ export const taskOutputTool: ToolDef<z.infer<typeof taskOutputSchema>> = {
       const body = snapshot?.output?.trim() || latest?.output?.trim() || task.output?.trim() || "(no output yet)"
       const error = snapshot?.error ?? latest?.error ?? task.error
       return {
-        success: status !== "error" && status !== "failed",
+        success:
+          status !== "error" &&
+          status !== "failed" &&
+          status !== "killed" &&
+          status !== "cancelled",
         output: `[Task status: ${status}]\n${body}${error ? `\nError: ${error}` : ""}`,
         metadata: { task: latest ?? task, task_id: taskId },
       }
@@ -1003,11 +1007,18 @@ export const sendMessageTool: ToolDef<z.infer<typeof sendMessageSchema>> = {
       message,
       ...(team_name ? { teamName: team_name } : {}),
     })
+    const delivered = ctx.services.parallelAgentManager.deliverMessage(
+      to,
+      message,
+      from?.trim() || "main",
+    )
     ctx.host.emit({ type: "team_message", message: record })
     return {
       success: true,
-      output: `Queued message to ${to}.`,
-      metadata: { message: record },
+      output: delivered
+        ? `Delivered message to running agent ${to}.`
+        : `Queued message to ${to}; no matching agent is currently running.`,
+      metadata: { message: record, delivered },
     }
   },
 }

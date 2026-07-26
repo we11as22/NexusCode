@@ -192,14 +192,6 @@ CORRECT format:
       }
     }
 
-    const hasDelegatedAgentParallelBatch = resolvedToolUses.some(
-      ({ use, tool }) =>
-        tool?.name === "SpawnAgent" ||
-        tool?.name === "SpawnAgents" ||
-        isParallelDelegatedAgentTaskCreate(tool, use),
-    )
-    const prevSkipDup = ctx.skipSubagentDuplicateCheck
-    if (hasDelegatedAgentParallelBatch) ctx.skipSubagentDuplicateCheck = true
     const promises = tool_uses.map(async (use): Promise<ParallelResult> => {
       const tool = resolveTool(use, byExactName, byCanonicalName)
       if (!tool) {
@@ -298,12 +290,7 @@ CORRECT format:
       }
     })
 
-    let results: ParallelResult[]
-    try {
-      results = await Promise.all(promises)
-    } finally {
-      if (hasDelegatedAgentParallelBatch) ctx.skipSubagentDuplicateCheck = prevSkipDup
-    }
+    const results = await Promise.all(promises)
     const successful = results.filter((result) => result.success).length
     const parts = [
       `Executed ${results.length} tool calls in parallel (${successful}/${results.length} successful).`,

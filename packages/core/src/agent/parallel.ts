@@ -11,6 +11,7 @@ import type {
   ISession,
   SessionMessage,
   ToolPart,
+  IHost,
 } from "../types.js"
 import { Session } from "../session/index.js"
 import { loadAgentInstructionBundle } from "../context/agent-instructions.js"
@@ -26,6 +27,7 @@ import { runScopedHooks } from "../plugins/runtime.js"
 import { ensureTeamMemberForTask, handleCompletedTaskSideEffects } from "../orchestration/task-lifecycle.js"
 import { inheritSpillRegistryForMergedToolPart, registerToolOutputSpill } from "../context/tool-output-registry.js"
 import type { NexusRunServices } from "./run-services.js"
+import { atomicWriteJson } from "../storage/durable-fs.js"
 
 export interface SubAgentResult {
   subagentId: string
@@ -44,9 +46,45 @@ interface ResumeAgentOptions {
 }
 
 interface AgentSpawnOptions {
-  skipDuplicateCheck?: boolean
   modelOverride?: string
   taskName?: string
+}
+
+export interface SubAgentRuntimeContext {
+  host: IHost
+  services: NexusRunServices
+}
+
+/**
+ * Delegate every capability to the owning surface. Only cwd and event routing
+ * change; approvals, command policy, auth, LSP, checkpoints, and file access
+ * remain under the parent host's security boundary.
+ */
+export function createDelegatedHost(
+  parent: IHost,
+  cwd: string,
+  onEvent: (event: AgentEvent) => void,
+): IHost {
+  return new Proxy(parent, {
+    get(target, property, receiver) {
+      if (property === "cwd") return cwd
+      if (property === "emit") return onEvent
+      const value = Reflect.get(target, property, receiver)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+}
+
+async function assertDelegatedCwd(parentCwd: string, childCwd: string): Promise<void> {
+  const parent = await fs.realpath(parentCwd).catch(() => path.resolve(parentCwd))
+  const child = await fs.realpath(childCwd).catch(() => path.resolve(childCwd))
+  const relative = path.relative(parent, child)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(
+      `Delegated-agent cwd escapes the parent workspace: ${childCwd}. ` +
+      "Create an approved in-workspace worktree or switch the parent workspace first.",
+    )
+  }
 }
 
 function findAssistantMessageIdWithToolPart(
@@ -83,6 +121,17 @@ function collectCompletedWriteEditParts(messages: SessionMessage[]): ToolPart[] 
     }
   }
   return out
+}
+
+function latestAssistantText(messages: SessionMessage[]): string {
+  const message = [...messages].reverse().find((item) => item.role === "assistant")
+  if (!message) return ""
+  if (typeof message.content === "string") return message.content.trim()
+  return message.content
+    .filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("")
+    .trim()
 }
 
 function mergeSubagentFileEditsIntoParentSession(
@@ -130,7 +179,7 @@ function mergeSubagentFileEditsIntoParentSession(
   }
 }
 
-type SubAgentStatus = "running" | "completed" | "error"
+type SubAgentStatus = "running" | "completed" | "error" | "killed"
 
 interface SubAgentSnapshot {
   subagentId: string
@@ -148,6 +197,8 @@ async function writeSubagentSnapshot(args: {
   mode: Mode
   contextSummary?: string
   parentPartId?: string
+  depth: number
+  parentSubagentId?: string
   success: boolean
   output: string
   error?: string
@@ -156,27 +207,21 @@ async function writeSubagentSnapshot(args: {
   const dir = path.join(getRuntimeDir(args.cwd), "agent-runs")
   await fs.mkdir(dir, { recursive: true })
   const snapshotPath = path.join(dir, `${args.subagentId}.json`)
-  await fs.writeFile(
-    snapshotPath,
-    JSON.stringify(
-      {
-        subagentId: args.subagentId,
-        sessionId: args.sessionId,
-        description: args.description,
-        mode: args.mode,
-        contextSummary: args.contextSummary,
-        parentPartId: args.parentPartId,
-        success: args.success,
-        output: args.output,
-        error: args.error,
-        messageCount: args.messages.length,
-        messages: args.messages,
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  )
+  await atomicWriteJson(snapshotPath, {
+    subagentId: args.subagentId,
+    sessionId: args.sessionId,
+    description: args.description,
+    mode: args.mode,
+    contextSummary: args.contextSummary,
+    parentPartId: args.parentPartId,
+    depth: args.depth,
+    parentSubagentId: args.parentSubagentId,
+    success: args.success,
+    output: args.output,
+    error: args.error,
+    messageCount: args.messages.length,
+    messages: args.messages,
+  })
   return snapshotPath
 }
 
@@ -196,12 +241,10 @@ export class ParallelAgentManager {
   private statusById = new Map<string, SubAgentStatus>()
   private errorById = new Map<string, string | undefined>()
   private controllers = new Map<string, AbortController>()
+  private liveSessions = new Map<string, ISession>()
+  private aliases = new Map<string, string>()
   private history: string[] = []
   private static readonly HISTORY_CAP = 100
-  /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns. */
-  private recentSpawnTasks: string[] = []
-  private static readonly RECENT_SPAWN_CAP = 3
-  private static readonly TASK_KEY_LEN = 80
 
   private rememberId(subagentId: string): void {
     this.history.push(subagentId)
@@ -213,6 +256,10 @@ export class ParallelAgentManager {
         this.statusById.delete(evict)
         this.errorById.delete(evict)
         this.controllers.delete(evict)
+        this.liveSessions.delete(evict)
+        for (const [alias, id] of this.aliases) {
+          if (id === evict) this.aliases.delete(alias)
+        }
       }
     }
   }
@@ -229,10 +276,32 @@ export class ParallelAgentManager {
     parentPartId?: string,
     agentType?: string,
     spawnOptions?: AgentSpawnOptions,
+    runtimeContext?: SubAgentRuntimeContext,
   ): Promise<{ subagentId: string; task: Promise<SubAgentResult> }> {
     return (async () => {
+      if (!runtimeContext) {
+        throw new Error("Delegated agents require the parent host and run services.")
+      }
+      if (signal.aborted) {
+        throw new Error("Cannot start a delegated agent from an aborted run.")
+      }
+      await assertDelegatedCwd(runtimeContext.host.cwd, cwd)
+      const parentDepth = runtimeContext.services.subagentDepth
+      const maxDepth = config.parallelAgents.maxDepth ?? 2
+      if (parentDepth >= maxDepth) {
+        throw new Error(
+          `Delegated-agent depth limit reached (${parentDepth}/${maxDepth}). ` +
+          "Finish this task in the current agent or return it to the parent.",
+        )
+      }
       // Wait for a concurrency slot
       while (this.running.size >= maxParallel) {
+        if (parentDepth > 0) {
+          throw new Error(
+            `No delegated-agent capacity is available (${this.running.size}/${maxParallel}). ` +
+            "Nested delegation fails fast to avoid a parent/child pool deadlock.",
+          )
+        }
         await Promise.race([...this.running.values()]).catch(() => {})
         // Flush the microtask queue so .finally() cleanup handlers run
         // before we re-check .size
@@ -244,12 +313,27 @@ export class ParallelAgentManager {
       this.outputById.set(subagentId, "")
       this.statusById.set(subagentId, "running")
       this.errorById.set(subagentId, undefined)
+      if (spawnOptions?.taskName?.trim()) {
+        this.aliases.set(spawnOptions.taskName.trim(), subagentId)
+      }
 
       const localController = new AbortController()
       this.controllers.set(subagentId, localController)
-      signal.addEventListener("abort", () => localController.abort(), { once: true })
+      const abortChild = () => localController.abort()
+      if (signal.aborted) abortChild()
+      else signal.addEventListener("abort", abortChild, { once: true })
 
-      emit?.({ type: "subagent_start", subagentId, mode, task: description, parentPartId })
+      emit?.({
+        type: "subagent_start",
+        subagentId,
+        mode,
+        task: description,
+        parentPartId,
+        depth: parentDepth + 1,
+        ...(runtimeContext.services.subagentId
+          ? { parentSubagentId: runtimeContext.services.subagentId }
+          : {}),
+      })
 
       // The task self-removes from the map when it settles (success or error).
       // This is what makes the while-loop above eventually terminate.
@@ -265,9 +349,15 @@ export class ParallelAgentManager {
         parentPartId,
         agentType,
         spawnOptions,
+        runtimeContext,
       ).finally(() => {
+        signal.removeEventListener("abort", abortChild)
         this.running.delete(subagentId)
         this.controllers.delete(subagentId)
+        this.liveSessions.delete(subagentId)
+        for (const [alias, id] of this.aliases) {
+          if (id === subagentId) this.aliases.delete(alias)
+        }
       })
 
       this.running.set(subagentId, task)
@@ -287,27 +377,8 @@ export class ParallelAgentManager {
     parentPartId?: string,
     agentType?: string,
     spawnOptions?: AgentSpawnOptions,
+    runtimeContext?: SubAgentRuntimeContext,
   ): Promise<SubAgentResult> {
-    if (!spawnOptions?.skipDuplicateCheck) {
-      const taskKey = description.trim().slice(0, ParallelAgentManager.TASK_KEY_LEN).toLowerCase()
-      const isDuplicate = this.recentSpawnTasks.some(
-        (t) => t === taskKey || taskKey.startsWith(t) || t.startsWith(taskKey)
-      )
-      if (isDuplicate) {
-        return {
-          subagentId: `skip_${Date.now()}`,
-          sessionId: "",
-          success: true,
-          output:
-            "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not create another delegated agent task for the same work.",
-        }
-      }
-      this.recentSpawnTasks.push(taskKey)
-      if (this.recentSpawnTasks.length > ParallelAgentManager.RECENT_SPAWN_CAP) {
-        this.recentSpawnTasks.shift()
-      }
-    }
-
     const { task } = await this.startTask(
       description,
       mode,
@@ -320,6 +391,7 @@ export class ParallelAgentManager {
       parentPartId,
       agentType,
       spawnOptions,
+      runtimeContext,
     )
     return task
   }
@@ -336,43 +408,8 @@ export class ParallelAgentManager {
     parentPartId?: string,
     agentType?: string,
     spawnOptions?: AgentSpawnOptions,
+    runtimeContext?: SubAgentRuntimeContext,
   ): Promise<{ subagentId: string }> {
-    if (!spawnOptions?.skipDuplicateCheck) {
-      const taskKey = description.trim().slice(0, ParallelAgentManager.TASK_KEY_LEN).toLowerCase()
-      const isDuplicate = this.recentSpawnTasks.some(
-        (t) => t === taskKey || taskKey.startsWith(t) || t.startsWith(taskKey)
-      )
-      if (isDuplicate) {
-        const subagentId = `skip_${Date.now()}`
-        this.rememberId(subagentId)
-        this.sessions.set(subagentId, "")
-        this.outputById.set(
-          subagentId,
-          "Sub-agent for this or a very similar task was already run recently. Continue in the main agent using the results above; do not create another delegated agent task for the same work.",
-        )
-        this.statusById.set(subagentId, "completed")
-        this.errorById.set(subagentId, undefined)
-        const runtime = await getOrchestrationRuntime(cwd)
-        await runtime.registerBackgroundTask({
-          id: subagentId,
-          kind: "subagent",
-          description,
-          status: "completed",
-          output: this.outputById.get(subagentId),
-          metadata: { duplicate: true, mode },
-        })
-        emit?.({
-          type: "background_task_updated",
-          task: (await runtime.getBackgroundTask(subagentId))!,
-        })
-        return { subagentId }
-      }
-      this.recentSpawnTasks.push(taskKey)
-      if (this.recentSpawnTasks.length > ParallelAgentManager.RECENT_SPAWN_CAP) {
-        this.recentSpawnTasks.shift()
-      }
-    }
-
     const { subagentId } = await this.startTask(
       description,
       mode,
@@ -385,6 +422,7 @@ export class ParallelAgentManager {
       parentPartId,
       agentType,
       spawnOptions,
+      runtimeContext,
     )
     const runtime = await getOrchestrationRuntime(cwd)
     await runtime.registerBackgroundTask({
@@ -392,14 +430,18 @@ export class ParallelAgentManager {
       kind: "subagent",
       description,
       status: "running",
-        metadata: {
-          mode,
-          ...(agentType ? { agentType } : {}),
-          ...(spawnOptions?.modelOverride ? { model: spawnOptions.modelOverride } : {}),
-          ...(spawnOptions?.taskName ? { name: spawnOptions.taskName } : {}),
-          ...(contextSummary ? { contextSummary } : {}),
-          ...(parentPartId ? { parentPartId } : {}),
-        },
+      metadata: {
+        mode,
+        ...(agentType ? { agentType } : {}),
+        ...(spawnOptions?.modelOverride ? { model: spawnOptions.modelOverride } : {}),
+        ...(spawnOptions?.taskName ? { name: spawnOptions.taskName } : {}),
+        ...(contextSummary ? { contextSummary } : {}),
+        ...(parentPartId ? { parentPartId } : {}),
+        depth: (runtimeContext?.services.subagentDepth ?? 0) + 1,
+        ...(runtimeContext?.services.subagentId
+          ? { parentSubagentId: runtimeContext.services.subagentId }
+          : {}),
+      },
     })
     emit?.({
       type: "background_task_updated",
@@ -435,7 +477,21 @@ export class ParallelAgentManager {
   stop(subagentId: string): boolean {
     const ctrl = this.controllers.get(subagentId)
     if (!ctrl) return false
+    this.statusById.set(subagentId, "killed")
+    this.errorById.set(subagentId, "Stopped by parent agent.")
     ctrl.abort()
+    return true
+  }
+
+  /** Inject a queued user message into a currently running delegated agent. */
+  deliverMessage(target: string, message: string, from = "main"): boolean {
+    const resolved = this.aliases.get(target) ?? target
+    const session = this.liveSessions.get(resolved)
+    if (!session || !message.trim()) return false
+    session.addMessage({
+      role: "user",
+      content: `[Message from ${from.trim() || "main"}]\n${message.trim()}`,
+    })
     return true
   }
 
@@ -455,6 +511,7 @@ export class ParallelAgentManager {
     maxParallel: number,
     emit?: (event: AgentEvent) => void,
     parentPartId?: string,
+    runtimeContext?: SubAgentRuntimeContext,
   ): Promise<SubAgentResult | { subagentId: string; background: true }> {
     const runtime = await getOrchestrationRuntime(cwd)
     const existing = await runtime.getBackgroundTask(subagentId)
@@ -491,6 +548,8 @@ export class ParallelAgentManager {
         contextSummary,
         parentPartId,
         agentType,
+        undefined,
+        runtimeContext,
       )
       await runtime.updateBackgroundTask(started.subagentId, {
         metadata: {
@@ -512,6 +571,8 @@ export class ParallelAgentManager {
       contextSummary,
       parentPartId,
       agentType,
+      undefined,
+      runtimeContext,
     )
     return result
   }
@@ -528,9 +589,16 @@ export class ParallelAgentManager {
     parentPartId?: string,
     agentType?: string,
     spawnOptions?: AgentSpawnOptions,
+    runtimeContext?: SubAgentRuntimeContext,
   ): Promise<SubAgentResult> {
+    if (!runtimeContext) {
+      throw new Error("Delegated agents require the parent host and run services.")
+    }
     const session = Session.createEphemeral(cwd)
     this.sessions.set(subagentId, session.id)
+    this.liveSessions.set(subagentId, session)
+    const depth = runtimeContext.services.subagentDepth + 1
+    const parentSubagentId = runtimeContext.services.subagentId
     const runtime = await getOrchestrationRuntime(cwd)
     const existingRuntimeTask = await runtime.getBackgroundTask(subagentId)
     if (!existingRuntimeTask) {
@@ -547,6 +615,8 @@ export class ParallelAgentManager {
           description,
           ...(contextSummary ? { contextSummary } : {}),
           ...(parentPartId ? { parentPartId } : {}),
+          depth,
+          ...(parentSubagentId ? { parentSubagentId } : {}),
         },
       })
     }
@@ -560,6 +630,8 @@ export class ParallelAgentManager {
         description,
         ...(contextSummary ? { contextSummary } : {}),
         ...(parentPartId ? { parentPartId } : {}),
+        depth,
+        ...(parentSubagentId ? { parentSubagentId } : {}),
       },
     }).catch(() => null)
     let userContent = contextSummary?.trim()
@@ -580,7 +652,15 @@ export class ParallelAgentManager {
     const client = createLLMClient(taskConfig.model)
 
     const toolRegistry = new ToolRegistry()
-    const services: NexusRunServices = { parallelAgentManager: this }
+    const services: NexusRunServices = {
+      ...runtimeContext.services,
+      parallelAgentManager: this,
+      subagentDepth: runtimeContext.services.subagentDepth + 1,
+      subagentId,
+    }
+    for (const tool of services.mcpClient?.getTools() ?? []) {
+      toolRegistry.registerDynamicOrThrow(tool, "inherited MCP")
+    }
     for (const tool of [
       createSpawnAgentTool(this, taskConfig),
       createSpawnAgentsAliasTool(this, taskConfig),
@@ -601,7 +681,7 @@ export class ParallelAgentManager {
     }
     const claudeCompatibility = getClaudeCompatibilityOptions(taskConfig)
     const agentDefinition = agentType
-      ? (await loadAgentDefinitions(cwd, claudeCompatibility, taskConfig).catch(() => []))
+      ? (await loadAgentDefinitions(cwd, claudeCompatibility, taskConfig))
           .find((candidate) => candidate.agentType.toLowerCase() === agentType.toLowerCase())
       : undefined
     if (agentDefinition?.systemPrompt?.trim()) {
@@ -612,6 +692,12 @@ export class ParallelAgentManager {
 
     let { builtin: b, dynamic: d } = toolRegistry.getForMode(mode)
     let tools = toolRegistry.mergeWithHiddenExecutionTools([...b, ...d])
+    const parentSurfaceMutationTools = new Set([
+      "EnterPlanMode",
+      "EnterWorktree",
+      "ExitWorktree",
+    ])
+    tools = tools.filter((tool) => !parentSurfaceMutationTools.has(tool.name))
     if (agentDefinition?.tools?.length) {
       const allow = new Set(agentDefinition.tools)
       tools = tools.filter((tool) => allow.has(tool.name))
@@ -628,7 +714,7 @@ export class ParallelAgentManager {
       taskConfig.skillsUrls,
       claudeCompatibility,
       taskConfig,
-    ).catch(() => [])
+    )
     const compaction = createCompaction()
 
     let output = ""
@@ -648,32 +734,17 @@ export class ParallelAgentManager {
       })
     }
 
-    const mockHost = {
+    const delegatedHost = createDelegatedHost(
+      runtimeContext.host,
       cwd,
-      async readFile(p: string) {
-        return (await import("node:fs/promises")).readFile(p, "utf8")
-      },
-      async writeFile(p: string, c: string) {
-        return (await import("node:fs/promises")).writeFile(p, c, "utf8")
-      },
-      async deleteFile(p: string) {
-        return (await import("node:fs/promises")).unlink(p)
-      },
-      async exists(p: string) {
-        return (await import("node:fs/promises")).access(p).then(() => true).catch(() => false)
-      },
-      async showDiff() { return true },
-      async runCommand(cmd: string, wd: string) {
-        const { execa } = await import("execa")
-        const r = await execa(cmd, { shell: true, cwd: wd, reject: false })
-        return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", exitCode: r.exitCode ?? 0 }
-      },
-      async showApprovalDialog() { return { approved: true } },
-      emit(event: AgentEvent) {
+      (event: AgentEvent) => {
         if (event.type === "text_delta" && event.delta) {
           output += event.delta
           manager.outputById.set(subagentId, output)
-          void runtime.updateTask(subagentId, { output }).then(() => emitTaskProgress(output.slice(-300))).catch(() => null)
+          void runtime
+            .updateTask(subagentId, { output })
+            .then(() => emitTaskProgress(output.slice(-300)))
+            .catch(() => null)
         }
         if (event.type === "tool_start") {
           emit?.({
@@ -702,16 +773,36 @@ export class ParallelAgentManager {
             success: event.success,
             parentPartId,
           })
-          emit?.({ type: "subagent_tool_end", subagentId, tool: event.tool, success: event.success, parentPartId })
+          emit?.({
+            type: "subagent_tool_end",
+            subagentId,
+            tool: event.tool,
+            success: event.success,
+            parentPartId,
+          })
+        }
+        if (event.type === "error") {
+          emit?.({
+            type: "error",
+            error: `[subagent ${subagentId}] ${event.error}`,
+            fatal: event.fatal,
+          })
+        }
+        if (
+          event.type === "tool_approval_needed" ||
+          event.type === "question_request" ||
+          event.type === "plugin_hook"
+        ) {
+          emit?.(event)
         }
       },
-    }
+    )
 
     try {
       if (agentDefinition?.hooks?.length && agentDefinition.sourcePath) {
         const startHookResults = await runScopedHooks(
           cwd,
-          mockHost as any,
+          delegatedHost,
           "subagent_start",
           {
             subagentId,
@@ -725,7 +816,7 @@ export class ParallelAgentManager {
             rootDir: path.dirname(agentDefinition.sourcePath),
             hooks: agentDefinition.hooks,
           }],
-        ).catch(() => [])
+        )
         const additionalContexts = startHookResults
           .map((result) => result.additionalContext?.trim())
           .filter((value): value is string => Boolean(value))
@@ -737,7 +828,7 @@ export class ParallelAgentManager {
       await runAgentLoop({
         session,
         client,
-        host: mockHost as any,
+        host: delegatedHost,
         config: taskConfig,
         services,
         mode,
@@ -747,6 +838,10 @@ export class ParallelAgentManager {
         compaction,
         signal,
       })
+      if (signal.aborted) {
+        throw new Error("Sub-agent stopped by parent agent.")
+      }
+      if (!output.trim()) output = latestAssistantText(session.messages)
       emit?.({
         type: "subagent_done",
         subagentId,
@@ -765,6 +860,8 @@ export class ParallelAgentManager {
         mode,
         contextSummary,
         parentPartId,
+        depth,
+        parentSubagentId,
         success: true,
         output,
         messages: session.messages,
@@ -781,6 +878,8 @@ export class ParallelAgentManager {
           description,
           ...(contextSummary ? { contextSummary } : {}),
           ...(parentPartId ? { parentPartId } : {}),
+          depth,
+          ...(parentSubagentId ? { parentSubagentId } : {}),
           snapshotFile,
         },
       }).catch(() => null)
@@ -790,7 +889,7 @@ export class ParallelAgentManager {
         if (unified) {
           await ensureTeamMemberForTask({
             cwd,
-            host: mockHost as any,
+            host: delegatedHost,
             task: unified,
             agentId: subagentId,
             agentType,
@@ -799,7 +898,7 @@ export class ParallelAgentManager {
           emit?.({ type: "task_completed", task: unified, outputPreview: output.slice(0, 300) })
           await handleCompletedTaskSideEffects({
             cwd,
-            host: mockHost as any,
+            host: delegatedHost,
             config: taskConfig,
             task: unified,
             outputPreview: output.slice(0, 300),
@@ -809,7 +908,7 @@ export class ParallelAgentManager {
       if (agentDefinition?.hooks?.length && agentDefinition.sourcePath) {
         await runScopedHooks(
           cwd,
-          mockHost as any,
+          delegatedHost,
           "subagent_stop",
           {
             subagentId,
@@ -825,7 +924,7 @@ export class ParallelAgentManager {
             rootDir: path.dirname(agentDefinition.sourcePath),
             hooks: agentDefinition.hooks,
           }],
-        ).catch(() => [])
+        )
       }
       const fileEditParts = collectCompletedWriteEditParts(session.messages)
       return {
@@ -836,7 +935,12 @@ export class ParallelAgentManager {
         fileEditParts,
       }
     } catch (err) {
-      const error = (err as Error).message
+      const killed = signal.aborted || this.statusById.get(subagentId) === "killed"
+      const error = killed
+        ? "Stopped by parent agent."
+        : err instanceof Error
+          ? err.message
+          : String(err)
       emit?.({
         type: "subagent_done",
         subagentId,
@@ -846,7 +950,7 @@ export class ParallelAgentManager {
         parentPartId,
       })
       this.outputById.set(subagentId, output || "")
-      this.statusById.set(subagentId, "error")
+      this.statusById.set(subagentId, killed ? "killed" : "error")
       this.errorById.set(subagentId, error)
       const snapshotFile = await writeSubagentSnapshot({
         cwd,
@@ -856,12 +960,17 @@ export class ParallelAgentManager {
         mode,
         contextSummary,
         parentPartId,
+        depth,
+        parentSubagentId,
         success: false,
         output: output || "",
         error,
         messages: session.messages,
       })
-      const runtimeTask = await runtime.setBackgroundTaskStatus(subagentId, "failed", {
+      const runtimeTask = await runtime.setBackgroundTaskStatus(
+        subagentId,
+        killed ? "killed" : "failed",
+        {
         sessionId: session.id,
         output: output || "",
         error,
@@ -874,16 +983,19 @@ export class ParallelAgentManager {
           description,
           ...(contextSummary ? { contextSummary } : {}),
           ...(parentPartId ? { parentPartId } : {}),
+          depth,
+          ...(parentSubagentId ? { parentSubagentId } : {}),
           snapshotFile,
         },
-      }).catch(() => null)
+        },
+      ).catch(() => null)
       if (runtimeTask) {
         emit?.({ type: "background_task_updated", task: runtimeTask })
         const unified = await runtime.getTask(subagentId)
         if (unified) {
           await ensureTeamMemberForTask({
             cwd,
-            host: mockHost as any,
+            host: delegatedHost,
             task: unified,
             agentId: subagentId,
             agentType,
@@ -892,7 +1004,7 @@ export class ParallelAgentManager {
           emit?.({ type: "task_completed", task: unified, outputPreview: output.slice(0, 300) })
           await handleCompletedTaskSideEffects({
             cwd,
-            host: mockHost as any,
+            host: delegatedHost,
             config: taskConfig,
             task: unified,
             outputPreview: output.slice(0, 300),
@@ -902,7 +1014,7 @@ export class ParallelAgentManager {
       if (agentDefinition?.hooks?.length && agentDefinition.sourcePath) {
         await runScopedHooks(
           cwd,
-          mockHost as any,
+          delegatedHost,
           "subagent_stop",
           {
             subagentId,
@@ -919,7 +1031,7 @@ export class ParallelAgentManager {
             rootDir: path.dirname(agentDefinition.sourcePath),
             hooks: agentDefinition.hooks,
           }],
-        ).catch(() => [])
+        )
       }
       return {
         subagentId,
@@ -1072,10 +1184,8 @@ Max ${config.parallelAgents.maxParallel} concurrent agents (${manager.activeCoun
           contextSummary,
           ctx.partId,
           agentDefinition?.agentType,
-          {
-            skipDuplicateCheck:
-              ctx.skipSubagentDuplicateCheck === true,
-          },
+          undefined,
+          { host: ctx.host, services: ctx.services },
         )
       }
 
@@ -1092,6 +1202,8 @@ Max ${config.parallelAgents.maxParallel} concurrent agents (${manager.activeCoun
           args.context_summary,
           ctx.partId,
           agentDefinition?.agentType,
+          undefined,
+          { host: ctx.host, services: ctx.services },
         )
         return {
           success: true,
@@ -1156,7 +1268,7 @@ export function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolD
       const statusLine = `[Sub-agent status: ${status}]`
       const errLine = error ? `\nError: ${error}` : ""
       return {
-        success: status !== "error",
+        success: status === "running" || status === "completed",
         output: `${statusLine}\n${body}${errLine}`,
         metadata: {
           subagent_id,
@@ -1256,7 +1368,11 @@ export function createAgentRunSnapshotTool(manager: ParallelAgentManager): ToolD
       const output = String(parsed?.output ?? live?.output ?? task?.output ?? "").trim() || "(no output captured)"
       const error = String(parsed?.error ?? live?.error ?? task?.error ?? "").trim()
       return {
-        success: status !== "error" && status !== "failed",
+        success:
+          status !== "error" &&
+          status !== "failed" &&
+          status !== "killed" &&
+          status !== "cancelled",
         output: [
           `Sub-agent: ${subagent_id}`,
           `Status: ${status}`,
@@ -1295,6 +1411,7 @@ export function createResumeAgentTool(manager: ParallelAgentManager, config: Nex
         ctx.config.parallelAgents.maxParallel,
         emit,
         ctx.partId,
+        { host: ctx.host, services: ctx.services },
       )
       if ("background" in resumed) {
         return {
@@ -1343,6 +1460,7 @@ export function createTaskResumeTool(manager: ParallelAgentManager, config: Nexu
         ctx.config.parallelAgents.maxParallel,
         emit,
         ctx.partId,
+        { host: ctx.host, services: ctx.services },
       )
       if ("background" in resumed) {
         const runtime = await getOrchestrationRuntime(ctx.cwd)
@@ -1445,8 +1563,18 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
           ctx.cwd,
           getClaudeCompatibilityOptions(ctx.config),
           ctx.config,
-        ).catch(() => [])
+        )
         return agents.find((agent) => agent.agentType.toLowerCase() === requestedAgentType.trim().toLowerCase())
+      }
+      const maxTasksPerCall = config.parallelAgents.maxTasksPerCall ?? 12
+      if (tasks.length > maxTasksPerCall) {
+        return {
+          success: false,
+          output:
+            `TaskCreateBatch received ${tasks.length} tasks; the configured limit is ` +
+            `${maxTasksPerCall}. Split the work into smaller waves.`,
+          metadata: { taskCount: tasks.length, maxTasksPerCall },
+        }
       }
 
       if (!shouldBlock) {
@@ -1464,6 +1592,8 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
             item.context_summary,
             ctx.partId,
             agentDefinition?.agentType,
+            undefined,
+            { host: ctx.host, services: ctx.services },
           )
           const task = await runtime.getTask(subagentId)
           if (task) {
@@ -1492,7 +1622,8 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
           item.context_summary,
           ctx.partId,
           agentDefinition?.agentType,
-          { skipDuplicateCheck: true },
+          undefined,
+          { host: ctx.host, services: ctx.services },
         )
         const task = await runtime.getTask(result.subagentId)
         if (task) {
@@ -1581,6 +1712,16 @@ Max ${config.parallelAgents.maxParallel} agents (${manager.activeCount} active).
             : ((m ?? "agent") as Mode)
 
       const maxParallel = ctx.config.parallelAgents.maxParallel
+      const maxTasksPerCall = config.parallelAgents.maxTasksPerCall ?? 12
+      if (args.agents.length > maxTasksPerCall) {
+        return {
+          success: false,
+          output:
+            `SpawnAgentsParallel received ${args.agents.length} agents; the configured limit is ` +
+            `${maxTasksPerCall}. Split the work into smaller waves.`,
+          metadata: { agentCount: args.agents.length, maxTasksPerCall },
+        }
+      }
       const emit = (event: AgentEvent) => ctx.host.emit(event)
 
       const results = await Promise.all(
@@ -1596,7 +1737,8 @@ Max ${config.parallelAgents.maxParallel} agents (${manager.activeCount} active).
             agent.context_summary,
             ctx.partId,
             undefined,
-            { skipDuplicateCheck: true },
+            undefined,
+            { host: ctx.host, services: ctx.services },
           ),
         ),
       )
