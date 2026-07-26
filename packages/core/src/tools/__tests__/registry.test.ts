@@ -73,4 +73,3 @@ describe("ToolRegistry registration contracts", () => {
     expect(unresolved).toEqual([])
   })
 })
-

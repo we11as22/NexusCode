@@ -484,7 +484,6 @@ export function renderFeatureCensus(rows) {
       `| ${REPORT_COLUMNS.map((column) => escapeCell(row[column] ?? "—")).join(" | ")} |`,
     )
   }
-  lines.push("")
   return `${lines.join("\n")}\n`
 }
 

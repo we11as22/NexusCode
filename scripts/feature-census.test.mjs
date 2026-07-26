@@ -119,6 +119,7 @@ test("renders a deterministic report with the complete evidence columns", async 
     const second = renderFeatureCensus(await collectFeatureCensus(root))
 
     assert.equal(first, second)
+    assert.equal(first.endsWith("\n\n"), false)
     assert.match(
       first,
       /\| feature \| declared \| registered \| mode-visible \| executed-by \| persisted-by \| rendered-cli \| rendered-vscode \| rendered-server \| tests \| status \|/,

@@ -13,7 +13,6 @@ export interface FakeHost extends IHost {
   readonly approvals: ApprovalAction[]
   readonly events: AgentEvent[]
 }
-
 type DeepPartial<T> = T extends readonly unknown[]
   ? T
   : T extends object
@@ -168,4 +167,3 @@ export function createTestConfig(
     ),
   ) as NexusConfig
 }
-

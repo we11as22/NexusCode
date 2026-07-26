@@ -1,6 +1,7 @@
 # NexusCode reference-agent comparison
 
-**Audit date:** 2026-07-26  
+**Audit date:** 2026-07-26
+
 **Compared source trees:** Codex, OpenClaude, Kilo Code, Roo Code, Cline, OpenCode, and Claw Code.
 
 This document records implementation evidence, not README claims. The audit followed each capability through configuration, construction, execution, persistence, host rendering, and cleanup where those layers existed.
