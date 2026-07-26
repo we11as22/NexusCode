@@ -70,6 +70,7 @@ import {
 import { spillPathFromToolMetadata } from "./tool-spill.js"
 import { getToolOutputSpill } from "../context/tool-output-registry.js"
 import { runAutoMemoryDreamIfDue } from "../context/auto-dream.js"
+import type { NexusRunServices } from "./run-services.js"
 
 /** Generous tool budgets so multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
@@ -191,6 +192,7 @@ export interface AgentLoopOptions {
   client: LLMClient
   host: IHost
   config: NexusConfig
+  services: NexusRunServices
   mode: Mode
   tools: ToolDef[]
   skills: SkillDef[]
@@ -211,7 +213,7 @@ export interface AgentLoopOptions {
  */
 export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const {
-    session, client, host, config, mode,
+    session, client, host, config, services, mode,
     tools, skills, rulesContent, indexer, compaction,
     signal, gitBranch, checkpoint, createSkillMode,
   } = opts
@@ -363,6 +365,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     host,
     session,
     config,
+    services,
     mode,
     indexer,
     signal,

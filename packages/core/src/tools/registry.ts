@@ -13,13 +13,27 @@ export type RegistrationResult =
  */
 export class ToolRegistry {
   private tools: Map<string, ToolDef> = new Map()
-  private static readonly STATIC_BUILTIN_NAMES = new Set(
-    getAllBuiltinTools().map((tool) => tool.name),
-  )
-  private static readonly RESERVED_BUILTIN_NAMES = new Set([
-    ...ToolRegistry.STATIC_BUILTIN_NAMES,
-    ...MODES.flatMap((mode) => getBuiltinToolsForMode(mode)),
-  ])
+  private static staticBuiltinNames: Set<string> | undefined
+  private static reservedBuiltinNames: Set<string> | undefined
+
+  private static getStaticBuiltinNames(): Set<string> {
+    if (!this.staticBuiltinNames) {
+      this.staticBuiltinNames = new Set(
+        getAllBuiltinTools().map((tool) => tool.name),
+      )
+    }
+    return this.staticBuiltinNames
+  }
+
+  private static getReservedBuiltinNames(): Set<string> {
+    if (!this.reservedBuiltinNames) {
+      this.reservedBuiltinNames = new Set([
+        ...this.getStaticBuiltinNames(),
+        ...MODES.flatMap((mode) => getBuiltinToolsForMode(mode)),
+      ])
+    }
+    return this.reservedBuiltinNames
+  }
 
   constructor() {
     for (const tool of getAllBuiltinTools()) {
@@ -28,7 +42,7 @@ export class ToolRegistry {
   }
 
   registerDynamic(tool: ToolDef): RegistrationResult {
-    if (ToolRegistry.RESERVED_BUILTIN_NAMES.has(tool.name)) {
+    if (ToolRegistry.getReservedBuiltinNames().has(tool.name)) {
       return { ok: false, reason: "reserved-name" }
     }
     if (this.tools.has(tool.name)) {
@@ -40,8 +54,8 @@ export class ToolRegistry {
 
   registerBoundBuiltin(tool: ToolDef): RegistrationResult {
     if (
-      !ToolRegistry.RESERVED_BUILTIN_NAMES.has(tool.name) ||
-      ToolRegistry.STATIC_BUILTIN_NAMES.has(tool.name)
+      !ToolRegistry.getReservedBuiltinNames().has(tool.name) ||
+      ToolRegistry.getStaticBuiltinNames().has(tool.name)
     ) {
       return {
         ok: false,

@@ -7,10 +7,8 @@ import type { BackgroundTaskRecord, DeferredToolDef, ToolContext, ToolDef, TaskK
 import { backgroundBashJobs, startBackgroundShellTask } from "./execute-command.js"
 import { getOrchestrationRuntime } from "../../orchestration/runtime.js"
 import { loadAgentDefinitions } from "../../orchestration/agents.js"
-import { getMcpClientInstance } from "../../mcp/client.js"
 import { loadPluginRuntimeRecords, runPluginHooks } from "../../plugins/runtime.js"
 import { getClaudeCompatibilityOptions } from "../../compat/claude.js"
-import { getParallelAgentManager } from "../../agent/parallel.js"
 import { ensureTeamMemberForTask, handleCompletedTaskSideEffects } from "../../orchestration/task-lifecycle.js"
 import {
   createPlanWorkflow,
@@ -260,10 +258,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
     const runtime = await getOrchestrationRuntime(ctx.cwd)
     const kind = (args.kind ?? "tracking") as TaskKind
     if (kind === "agent") {
-      const manager = getParallelAgentManager()
-      if (!manager) {
-        return { success: false, output: "Agent task runtime is not available in this host." }
-      }
+      const manager = ctx.services.parallelAgentManager
       const agentCwd =
         typeof args.cwd === "string" && path.isAbsolute(args.cwd)
           ? args.cwd
@@ -624,8 +619,8 @@ export const taskOutputTool: ToolDef<z.infer<typeof taskOutputSchema>> = {
     if (!task) return { success: false, output: `Task not found: ${taskId}` }
     const shouldBlock = block ?? true
     if (task.kind === "agent") {
-      const manager = getParallelAgentManager()
-      const snapshot = shouldBlock ? await manager?.waitFor(taskId) : manager?.getSnapshot(taskId)
+      const manager = ctx.services.parallelAgentManager
+      const snapshot = shouldBlock ? await manager.waitFor(taskId) : manager.getSnapshot(taskId)
       const latest = await runtime.getTask(taskId)
       const status = snapshot?.status ?? latest?.status ?? task.status
       const body = snapshot?.output?.trim() || latest?.output?.trim() || task.output?.trim() || "(no output yet)"
@@ -672,8 +667,8 @@ export const taskStopTool: ToolDef<z.infer<typeof taskStopSchema>> = {
     const runtime = await getOrchestrationRuntime(ctx.cwd)
     const task = await runtime.getTask(taskId)
     if (task?.kind === "agent") {
-      const manager = getParallelAgentManager()
-      const stopped = manager?.stop(taskId) ?? false
+      const manager = ctx.services.parallelAgentManager
+      const stopped = manager.stop(taskId)
       if (!stopped) return { success: false, output: `Task ${taskId} is not an active delegated task.` }
       const updated = await runtime.updateTask(taskId, { status: "killed" })
       if (updated) {
@@ -1470,8 +1465,8 @@ export const listMcpResourcesTool: ToolDef<z.infer<typeof listMcpResourcesSchema
   description: "List resources exposed by connected MCP servers.",
   parameters: listMcpResourcesSchema,
   readOnly: true,
-  async execute({ server }, _ctx) {
-    const client = getMcpClientInstance()
+  async execute({ server }, ctx) {
+    const client = ctx.services.mcpClient
     if (!client) return { success: false, output: "MCP client is not initialized." }
     const resources = await client.listResources(server)
     if (resources.length === 0) return { success: true, output: "No MCP resources available." }
@@ -1495,8 +1490,8 @@ export const readMcpResourceTool: ToolDef<z.infer<typeof readMcpResourceSchema>>
   description: "Read a specific MCP resource by server and URI.",
   parameters: readMcpResourceSchema,
   readOnly: true,
-  async execute({ server, uri }, _ctx) {
-    const client = getMcpClientInstance()
+  async execute({ server, uri }, ctx) {
+    const client = ctx.services.mcpClient
     if (!client) return { success: false, output: "MCP client is not initialized." }
     const result = await client.readResource(server, uri)
     if (!result.length) return { success: false, output: `Resource not found: ${server} ${uri}` }
@@ -1518,10 +1513,10 @@ export const mcpAuthenticateTool: ToolDef<z.infer<typeof mcpAuthenticateSchema>>
   name: "McpAuthenticate",
   description: "Attempt to start or describe MCP authentication requirements for a server.",
   parameters: mcpAuthenticateSchema,
-  async execute({ server }, _ctx) {
-    const client = getMcpClientInstance()
+  async execute({ server }, ctx) {
+    const client = ctx.services.mcpClient
     if (!client) return { success: false, output: "MCP client is not initialized." }
-    const result = await client.authenticate(server, _ctx.host)
+    const result = await client.authenticate(server, ctx.host)
     return {
       success: result.success,
       output: result.message,

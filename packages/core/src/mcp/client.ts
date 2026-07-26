@@ -97,6 +97,7 @@ export class McpClient {
   }
 
   getTools(): ToolDef[] {
+    const owner = this
     return Array.from(this.tools.values()).map(mcpTool => {
       const normalizedSchema = normalizeToolSchema(mcpTool.inputSchema)
       const schema = buildZodSchema(normalizedSchema)
@@ -111,7 +112,7 @@ export class McpClient {
         readOnly: false,
 
         async execute(args: Record<string, unknown>, _ctx) {
-          const client = (McpClientRegistry.instance as McpClient).clients.get(serverName)
+          const client = owner.clients.get(serverName)
           if (!client) {
             return { success: false, output: `MCP server "${serverName}" not connected` }
           }
@@ -235,16 +236,19 @@ export class McpClient {
   }
 }
 
-// Simple registry for tool execution callbacks
+// Legacy compatibility adapter only. Production run paths pass the owning
+// client through NexusRunServices and generated tools close over `this`.
 class McpClientRegistryClass {
   instance: McpClient | null = null
 }
 const McpClientRegistry = new McpClientRegistryClass()
 
+/** @deprecated Pass McpClient through NexusRunServices. */
 export function setMcpClientInstance(client: McpClient): void {
   McpClientRegistry.instance = client
 }
 
+/** @deprecated Read McpClient from ToolContext.services. */
 export function getMcpClientInstance(): McpClient | null {
   return McpClientRegistry.instance
 }

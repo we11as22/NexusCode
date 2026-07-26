@@ -25,6 +25,7 @@ import { loadAgentDefinitions } from "../orchestration/agents.js"
 import { runScopedHooks } from "../plugins/runtime.js"
 import { ensureTeamMemberForTask, handleCompletedTaskSideEffects } from "../orchestration/task-lifecycle.js"
 import { inheritSpillRegistryForMergedToolPart, registerToolOutputSpill } from "../context/tool-output-registry.js"
+import type { NexusRunServices } from "./run-services.js"
 
 export interface SubAgentResult {
   subagentId: string
@@ -579,7 +580,7 @@ export class ParallelAgentManager {
     const client = createLLMClient(taskConfig.model)
 
     const toolRegistry = new ToolRegistry()
-    setParallelAgentManager(this)
+    const services: NexusRunServices = { parallelAgentManager: this }
     for (const tool of [
       createSpawnAgentTool(this, taskConfig),
       createSpawnAgentsAliasTool(this, taskConfig),
@@ -732,6 +733,7 @@ export class ParallelAgentManager {
         client,
         host: mockHost as any,
         config: taskConfig,
+        services,
         mode,
         tools,
         skills,
@@ -928,16 +930,6 @@ export class ParallelAgentManager {
   get activeCount(): number {
     return this.running.size
   }
-}
-
-let activeParallelAgentManager: ParallelAgentManager | undefined
-
-export function setParallelAgentManager(manager: ParallelAgentManager | undefined): void {
-  activeParallelAgentManager = manager
-}
-
-export function getParallelAgentManager(): ParallelAgentManager | undefined {
-  return activeParallelAgentManager
 }
 
 const spawnSchema = z

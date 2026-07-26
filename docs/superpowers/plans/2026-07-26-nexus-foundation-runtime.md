@@ -444,25 +444,25 @@ export function createNexusRunServices(input?: {
 - Adds `services: NexusRunServices` to `AgentLoopOptions`.
 - Adds `services: NexusRunServices` to `ToolContext`.
 
-- [ ] **Step 1: Write a cross-run isolation test**
+- [x] **Step 1: Write a cross-run isolation test**
 
 Create two managers and two fake MCP clients. Create two service containers and two `TaskCreate` contexts. Assert that a task invoked with context A can only reach manager A, while context B can only reach manager B.
 
 Add an MCP test in which tools from two `McpClient` instances with the same server name call different stub clients and return distinct output.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run: `pnpm --filter @nexuscode/core test -- src/agent/__tests__/run-services.test.ts`
 
 Expected: FAIL because `NexusRunServices` does not exist and MCP tools consult the global registry.
 
-- [ ] **Step 3: Implement the service container**
+- [x] **Step 3: Implement the service container**
 
 Create `run-services.ts` with the exact interface above. Require `AgentLoopOptions.services`; do not create hidden defaults inside `runAgentLoop`.
 
 Populate `toolCtx.services`.
 
-- [ ] **Step 4: Remove parallel-agent singleton usage**
+- [x] **Step 4: Remove parallel-agent singleton usage**
 
 Change orchestration tools from:
 
@@ -478,7 +478,7 @@ const manager = ctx.services.parallelAgentManager
 
 Delete `activeParallelAgentManager`, `setParallelAgentManager`, and `getParallelAgentManager` after `rg` shows no remaining consumers.
 
-- [ ] **Step 5: Scope MCP tools to their owner**
+- [x] **Step 5: Scope MCP tools to their owner**
 
 In `McpClient.getTools()`, capture the owning instance:
 
@@ -495,13 +495,13 @@ return Array.from(this.tools.values()).map((mcpTool) => ({
 
 Keep the old global setter/getter only as a deprecated compatibility adapter outside all new runtime paths. Add a removal marker to the later MCP migration plan and a test proving production hosts do not call it.
 
-- [ ] **Step 6: Pass services from every host**
+- [x] **Step 6: Pass services from every host**
 
 CLI, VS Code, and server construct one manager and MCP client per top-level run. Pass the same services to bound-tool factories and `runAgentLoop`.
 
 Server wraps run execution in `try/finally`, calls `mcpClient.disconnectAll()`, stops non-detached child work, and clears all event listeners.
 
-- [ ] **Step 7: Verify isolation**
+- [x] **Step 7: Verify isolation**
 
 Run:
 
@@ -515,7 +515,7 @@ pnpm --filter nexuscode typecheck
 
 Expected: PASS; `rg "activeParallelAgentManager|McpClientRegistry.instance" packages` returns only the explicitly documented compatibility adapter, not a host/runtime path.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add packages/core/src/agent/run-services.ts packages/core/src/agent/__tests__/run-services.test.ts packages/core/src/types.ts packages/core/src/agent/loop.ts packages/core/src/agent/parallel.ts packages/core/src/tools/built-in/orchestration-tools.ts packages/core/src/mcp/client.ts packages/core/src/index.ts packages/cli/src/nexus-bootstrap.ts packages/cli/src/nexus-query.ts packages/vscode/src/controller.ts packages/server/src/run-session.ts

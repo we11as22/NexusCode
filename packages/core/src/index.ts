@@ -79,8 +79,6 @@ export { classifyTools, classifySkills } from "./agent/classifier.js"
 export { buildSystemPrompt } from "./agent/prompts/components/index.js"
 export {
   ParallelAgentManager,
-  setParallelAgentManager,
-  getParallelAgentManager,
   createSpawnAgentTool,
   createSpawnAgentsAliasTool,
   createSpawnAgentOutputTool,
@@ -105,6 +103,10 @@ export type { LoadedSlashCommand } from "./commands/loader.js"
 
 // Tools
 export { ToolRegistry, type RegistrationResult } from "./tools/registry.js"
+export {
+  createNexusRunServices,
+  type NexusRunServices,
+} from "./agent/run-services.js"
 export {
   normalizedAppliedReplacementsFromMetadata,
   type AppliedReplacementSnippet,

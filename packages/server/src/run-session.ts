@@ -21,11 +21,10 @@ import {
   createTaskResumeTool,
   createTaskSnapshotTool,
   createSpawnAgentsParallelTool,
-  setParallelAgentManager,
+  createNexusRunServices,
   ParallelAgentManager,
   createCodebaseIndexer,
   McpClient,
-  setMcpClientInstance,
   resolveBundledMcpServers,
   CheckpointTracker,
   NexusConfigSchema,
@@ -81,7 +80,6 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   const mcpPromise = (async (): Promise<McpClient | undefined> => {
     try {
       const mc = new McpClient()
-      setMcpClientInstance(mc)
       await mc.disconnectAll().catch(() => {})
       if (configForRun.mcp.servers.length > 0) {
         const resolved = resolveBundledMcpServers(configForRun.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
@@ -125,7 +123,10 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   }
 
   const parallelManager = new ParallelAgentManager()
-  setParallelAgentManager(parallelManager)
+  const services = createNexusRunServices({
+    parallelAgentManager: parallelManager,
+    ...(mcpClient ? { mcpClient } : {}),
+  })
   for (const tool of [
     createSpawnAgentTool(parallelManager, configForRun),
     createSpawnAgentsAliasTool(parallelManager, configForRun),
@@ -169,20 +170,28 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     if (indexer) indexer.startIndexing().catch(() => {})
   }
 
-  await runAgentLoop({
-    session,
-    client,
-    host,
-    config: configForRun,
-    mode,
-    tools: allTools,
-    skills,
-    rulesContent,
-    indexer,
-    compaction,
-    signal,
-    checkpoint,
-  })
+  try {
+    await runAgentLoop({
+      session,
+      client,
+      host,
+      config: configForRun,
+      services,
+      mode,
+      tools: allTools,
+      skills,
+      rulesContent,
+      indexer,
+      compaction,
+      signal,
+      checkpoint,
+    })
+  } finally {
+    await mcpClient?.disconnectAll().catch(() => {})
+    if (!mcpClient) {
+      void mcpPromise.then((lateClient) => lateClient?.disconnectAll()).catch(() => {})
+    }
+  }
 }
 
 async function applyPresetForRun(base: NexusConfig, cwd: string, presetName: string): Promise<NexusConfig> {

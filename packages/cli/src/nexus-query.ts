@@ -193,7 +193,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     onSubagentEvent,
     onRunComplete,
   } = opts
-  const { session: bootstrapSession, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer, serverUrl } = nexus
+  const { session: bootstrapSession, mode: bootstrapMode, toolRegistry, rulesContent, skills, compaction, indexer, serverUrl, services } = nexus
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug' | 'review'
 
   let session = bootstrapSession
@@ -306,6 +306,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       client,
       host,
       config,
+      services,
       mode,
       tools,
       skills,

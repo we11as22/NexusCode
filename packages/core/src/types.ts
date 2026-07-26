@@ -1,4 +1,5 @@
 import type { z } from "zod"
+import type { NexusRunServices } from "./agent/run-services.js"
 
 // ─── Modes ───────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,7 @@ export interface ToolContext {
   host: IHost
   session: ISession
   config: NexusConfig
+  services: NexusRunServices
   /** Current loop mode (agent / plan / ask). Used e.g. by SpawnAgent to set sub-agent permissions. */
   mode?: Mode
   indexer?: IIndexer

@@ -14,7 +14,6 @@ import {
   loadSkills,
   loadAgentInstructionBundle,
   McpClient,
-  setMcpClientInstance,
   resolveBundledMcpServers,
   createCompaction,
   ParallelAgentManager,
@@ -28,7 +27,7 @@ import {
   createTaskCreateBatchTool,
   createTaskResumeTool,
   createTaskSnapshotTool,
-  setParallelAgentManager,
+  createNexusRunServices,
   listSessions,
   deleteSession as coreDeleteSession,
   readCheckpointEntries,
@@ -40,6 +39,7 @@ import {
   type Mode,
   type NexusConfig,
   type IndexStatus,
+  type NexusRunServices,
   canonicalProjectRoot,
   getClaudeCompatibilityOptions,
 } from '@nexuscode/core'
@@ -181,6 +181,7 @@ export interface NexusBootstrapResult {
   secretsStore: ReturnType<typeof createFileSecretsStore>
   toolRegistry: ToolRegistry
   mcpClient: McpClient
+  services: NexusRunServices
   rulesContent: string
   skills: Awaited<ReturnType<typeof loadSkills>>
   compaction: ReturnType<typeof createCompaction>
@@ -285,7 +286,6 @@ export async function bootstrapNexus(opts: {
   const mode: Mode = modeArg ?? 'agent'
   const toolRegistry = new ToolRegistry()
   const mcpClient = new McpClient()
-  setMcpClientInstance(mcpClient)
 
   if (config.mcp.servers.length > 0) {
     process.env.CLAUDE_PROJECT_DIR = cwd
@@ -297,7 +297,10 @@ export async function bootstrapNexus(opts: {
   }
 
   const parallelManager = new ParallelAgentManager()
-  setParallelAgentManager(parallelManager)
+  const services = createNexusRunServices({
+    parallelAgentManager: parallelManager,
+    mcpClient,
+  })
   for (const tool of [
     createSpawnAgentTool(parallelManager, config),
     createSpawnAgentsParallelTool(parallelManager, config),
@@ -358,6 +361,7 @@ export async function bootstrapNexus(opts: {
     secretsStore,
     toolRegistry,
     mcpClient,
+    services,
     rulesContent,
     skills,
     compaction,

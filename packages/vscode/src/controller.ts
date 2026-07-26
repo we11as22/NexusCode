@@ -41,7 +41,6 @@ import {
   loadSkills,
   loadAgentInstructionBundle,
   McpClient,
-  setMcpClientInstance,
   resolveBundledMcpServers,
   testMcpServers,
   createCompaction,
@@ -56,7 +55,7 @@ import {
   createTaskCreateBatchTool,
   createTaskResumeTool,
   createTaskSnapshotTool,
-  setParallelAgentManager,
+  createNexusRunServices,
   runAgentLoop,
   CheckpointTracker,
   CodebaseIndexer,
@@ -2774,7 +2773,10 @@ Return in this format:
         }
       }
       const parallelManager = new ParallelAgentManager()
-      setParallelAgentManager(parallelManager)
+      const services = createNexusRunServices({
+        parallelAgentManager: parallelManager,
+        ...(this.mcpClient ? { mcpClient: this.mcpClient } : {}),
+      })
       for (const tool of [
         createSpawnAgentTool(parallelManager, configForRun),
         createSpawnAgentOutputTool(parallelManager),
@@ -2813,6 +2815,7 @@ Return in this format:
         client,
         host,
         config: configForRun,
+        services,
         mode: runMode,
         tools: allTools,
         skills,
@@ -2873,7 +2876,6 @@ Return in this format:
     if (!this.config) return
     if (!this.mcpClient) {
       this.mcpClient = new McpClient()
-      setMcpClientInstance(this.mcpClient)
     }
     await this.mcpClient.disconnectAll().catch(() => {})
     if (this.config.mcp.servers.length === 0) return
