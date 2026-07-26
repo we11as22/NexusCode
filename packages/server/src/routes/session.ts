@@ -18,6 +18,7 @@ import { runSession } from "../run-session.js"
 import {
   abortRunBySession,
   appendRunEvent,
+  claimRunExecution,
   createActiveRun,
   finishRun,
   getActiveRun,
@@ -220,49 +221,72 @@ sessionRoutes.post("/:id/message", async (c) => {
       cwd,
       done: false,
     }
-    const recentMessages = await fsGetRecentMessages(id, cwd, RECENT_MESSAGES_FOR_RUN)
-    // This is a bounded working copy, not the authoritative full transcript.
-    // Keep it ephemeral so loop-level saves cannot truncate messages outside
-    // the window; the new messages are committed transactionally below.
-    const session = new Session(id, cwd, recentMessages, undefined, true)
-    const messageCountBeforeRun = session.messages.length
-    void (async () => {
-      let terminalStatus: "completed" | "failed" | "aborted" = "completed"
+    if (claimRunExecution(created.id)) {
+      let session: Session
+      let messageCountBeforeRun: number
       try {
-        await runSession({
-          session,
-          cwd,
+        const recentMessages = await fsGetRecentMessages(id, cwd, RECENT_MESSAGES_FOR_RUN)
+        // This is a bounded working copy, not the authoritative full transcript.
+        // Keep it ephemeral so loop-level saves cannot truncate messages outside
+        // the window. Admit the user turn durably before any provider/tool side
+        // effect; only the assistant delta is committed at run completion.
+        session = new Session(id, cwd, recentMessages, undefined, true)
+        const admitted = session.addMessage({
+          role: "user",
           content,
-          mode,
-          configOverride: presetName ? { presetName } : undefined,
-          onEvent: (event) => {
-            appendRunEvent(created.id, event)
-          },
-          signal: created.abortController.signal,
-          requestApproval: (action) =>
-            waitForRunApproval(created.id, action, created.abortController.signal),
+          presetName: presetName || "Default",
         })
-        const newMessages = session.messages.slice(messageCountBeforeRun)
-        if (newMessages.length > 0) {
-          await fsAppendMessages(id, cwd, newMessages)
-          if (messageCountBeforeRun === 0) {
-            const title = deriveSessionTitle(session.messages)
-            if (title) await fsUpdateSessionTitle(id, cwd, title)
-          }
+        await fsAppendMessages(id, cwd, [admitted])
+        messageCountBeforeRun = session.messages.length
+        if (sessionMeta.messageCount === 0) {
+          const title = deriveSessionTitle(session.messages)
+          if (title) await fsUpdateSessionTitle(id, cwd, title)
         }
-      } catch (err) {
-        terminalStatus = created.abortController.signal.aborted ? "aborted" : "failed"
-        const msg = err instanceof Error ? err.message : String(err)
-        if (!msg.includes("abort")) appendRunEvent(created.id, { type: "error", error: msg })
-      } finally {
-        await finishRun(
-          created.id,
-          created.abortController.signal.aborted ? "aborted" : terminalStatus,
-        ).catch((error) => {
-          console.error(`[nexus] Failed to finalize run ${created.id}:`, error)
+      } catch (error) {
+        appendRunEvent(created.id, {
+          type: "error",
+          error: `Failed to admit user message: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         })
+        await finishRun(created.id, "failed")
+        throw error
       }
-    })()
+      void (async () => {
+        let terminalStatus: "completed" | "failed" | "aborted" = "completed"
+        try {
+          await runSession({
+            session,
+            cwd,
+            content,
+            mode,
+            configOverride: presetName ? { presetName } : undefined,
+            onEvent: (event) => {
+              appendRunEvent(created.id, event)
+            },
+            signal: created.abortController.signal,
+            requestApproval: (action) =>
+              waitForRunApproval(created.id, action, created.abortController.signal),
+            userMessageAdmitted: true,
+          })
+          const newMessages = session.messages.slice(messageCountBeforeRun)
+          if (newMessages.length > 0) {
+            await fsAppendMessages(id, cwd, newMessages)
+          }
+        } catch (err) {
+          terminalStatus = created.abortController.signal.aborted ? "aborted" : "failed"
+          const msg = err instanceof Error ? err.message : String(err)
+          if (!msg.includes("abort")) appendRunEvent(created.id, { type: "error", error: msg })
+        } finally {
+          await finishRun(
+            created.id,
+            created.abortController.signal.aborted ? "aborted" : terminalStatus,
+          ).catch((error) => {
+            console.error(`[nexus] Failed to finalize run ${created.id}:`, error)
+          })
+        }
+      })()
+    }
   }
 
   c.header("Content-Type", "application/x-ndjson")

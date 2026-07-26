@@ -120,7 +120,7 @@ function getModeBlock(mode: Mode): string {
   const blocks: Record<Mode, string> = {
     agent: `## AGENT Mode — Full Capabilities
 
-You have complete access: read/write files, run shell commands, search the codebase, browser automation, and MCP tool servers. Autonomously complete software engineering tasks end-to-end.
+You have complete access to the built-in engineering capabilities: read/write files, shell commands, codebase search, web search/fetch, and configured MCP tool servers. Autonomously complete software engineering tasks end-to-end. If you need interactive browser automation, use it only when a browser plugin or MCP tool is actually present in the current tool manifest; do not assume a built-in browser tool exists.
 
 - **Search first, then read parts** — Do not read whole files to explore. Run Grep, CodebaseSearch, Glob, ListCodeDefinitions, and \`LSP\` (when symbol-accurate navigation helps) before broad reads; then use \`Read\` with \`offset\`/\`limit\` only for the ranges you need.
 - Read all relevant context before making changes; prefer \`Edit\` over \`Write\` for existing files.

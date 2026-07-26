@@ -44,8 +44,53 @@ import { serverIndexerCache } from "./indexer-cache.js"
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const NEXUS_ROOT = path.resolve(__dirname, "..", "..")
 
-/** Max ms to wait for loadRules + loadSkills; beyond this we start with empty rules/skills so first message is not delayed. */
+/** Max ms to wait for each rules/skills dependency; startup continues in a degraded state after this deadline. */
 const RULES_SKILLS_LOAD_TIMEOUT_MS = 2000
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Bound optional runtime dependencies without leaving timeout handles alive.
+ * The underlying loader may still settle later, but its result is deliberately
+ * ignored once the server has entered the degraded startup path.
+ */
+export async function settleRuntimeDependency<T>(
+  label: string,
+  work: Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+  onDiagnostic: (message: string) => void,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<{ type: "timeout" }>((resolve) => {
+    timeout = setTimeout(() => resolve({ type: "timeout" }), timeoutMs)
+    timeout.unref?.()
+  })
+  try {
+    const result = await Promise.race([
+      work.then(
+        (value) => ({ type: "ok" as const, value }),
+        (error) => ({ type: "error" as const, error }),
+      ),
+      deadline,
+    ])
+    if (result.type === "ok") return result.value
+    if (result.type === "timeout") {
+      onDiagnostic(
+        `[${label} runtime] loading timed out after ${timeoutMs}ms; continuing without it`,
+      )
+      return fallback
+    }
+    onDiagnostic(
+      `[${label} runtime] ${errorMessage(result.error)}; continuing without it`,
+    )
+    return fallback
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
 
 export interface RunSessionOptions {
   session: Session
@@ -56,6 +101,8 @@ export interface RunSessionOptions {
   signal: AbortSignal
   configOverride?: Record<string, unknown>
   requestApproval?: (action: ApprovalAction) => Promise<PermissionResult>
+  /** The transport durably admitted the user message before starting execution. */
+  userMessageAdmitted?: boolean
 }
 
 /**
@@ -100,7 +147,17 @@ export function enforceServerPermissionBoundary(
  * Run the agent loop for one message; all events are forwarded via onEvent.
  */
 export async function runSession(opts: RunSessionOptions): Promise<void> {
-  const { session, cwd, content, mode, onEvent, signal, configOverride, requestApproval } = opts
+  const {
+    session,
+    cwd,
+    content,
+    mode,
+    onEvent,
+    signal,
+    configOverride,
+    requestApproval,
+    userMessageAdmitted = false,
+  } = opts
 
   const secretsStore = createFileSecretsStore(getGlobalConfigDir())
   let config = await loadConfig(cwd, { secrets: secretsStore }).catch(() => undefined)
@@ -117,7 +174,13 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   const configForRun = enforceServerPermissionBoundary(selectedConfig)
 
   const host = new ServerHost(cwd, onEvent, { requestApproval })
-  session.addMessage({ role: "user", content, presetName: presetName || "Default" })
+  if (!userMessageAdmitted) {
+    session.addMessage({
+      role: "user",
+      content,
+      presetName: presetName || "Default",
+    })
+  }
 
   const client = createLLMClient(configForRun.model)
   const toolRegistry = new ToolRegistry()
@@ -158,23 +221,40 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   })()
 
   const compatibility = getClaudeCompatibilityOptions(configForRun)
-  const rulesPromise = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, compatibility)
-  const skillsWithTimeout = Promise.race([
-    loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, compatibility, configForRun)
-      .then((skills) => ({ type: "ok" as const, skills }))
-      .catch(() => ({ type: "ok" as const, skills: [] })),
-    new Promise<{ type: "timeout" }>((r) =>
-      setTimeout(() => r({ type: "timeout" }), RULES_SKILLS_LOAD_TIMEOUT_MS)
+  const emitDependencyDiagnostic = (error: string) =>
+    onEvent({ type: "error", error })
+  const rulesPromise = settleRuntimeDependency(
+    "rules",
+    loadAgentInstructionBundle(
+      cwd,
+      configForRun.rules.files,
+      configForRun,
+      compatibility,
     ),
-  ])
+    RULES_SKILLS_LOAD_TIMEOUT_MS,
+    "",
+    emitDependencyDiagnostic,
+  )
+  const skillsPromise = settleRuntimeDependency(
+    "skills",
+    loadSkills(
+      configForRun.skills,
+      cwd,
+      configForRun.skillsUrls,
+      compatibility,
+      configForRun,
+    ),
+    RULES_SKILLS_LOAD_TIMEOUT_MS,
+    [],
+    emitDependencyDiagnostic,
+  )
 
-  const [mcpResult, rulesContent, skillsResult] = await Promise.all([
+  const [mcpResult, rulesContent, skills] = await Promise.all([
     mcpPromise,
     rulesPromise,
-    skillsWithTimeout,
+    skillsPromise,
   ])
 
-  const skills = skillsResult.type === "ok" ? skillsResult.skills : []
   mcpClient = mcpResult ?? undefined
   if (mcpClient) {
     for (const tool of mcpClient.getTools()) {

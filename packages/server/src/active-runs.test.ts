@@ -4,6 +4,7 @@ import path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   appendRunEvent,
+  claimRunExecution,
   createActiveRun,
   evictFinishedRun,
   finishRun,
@@ -35,6 +36,8 @@ describe("durable active runs", () => {
 
     expect(second.id).toBe(first.id)
     expect(second.abortController).toBe(first.abortController)
+    expect(claimRunExecution(first.id)).toBe(true)
+    expect(claimRunExecution(second.id)).toBe(false)
     await finishRun(first.id)
   })
 

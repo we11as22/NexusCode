@@ -20,6 +20,7 @@ interface ActiveRun {
   createdAt: number
   updatedAt: number
   done: boolean
+  executionClaimed: boolean
   abortController: AbortController
   store: RunEventStore
   sink?: DurableRunEventSink
@@ -119,6 +120,7 @@ async function createActiveRunInternal(
     createdAt: now,
     updatedAt: now,
     done: false,
+    executionClaimed: false,
     abortController: new AbortController(),
     store,
     sink,
@@ -156,6 +158,7 @@ export async function getOrRestoreRun(
     createdAt: durable.createdAt,
     updatedAt: Date.now(),
     done: true,
+    executionClaimed: true,
     abortController: new AbortController(),
     store,
     envelopes,
@@ -184,6 +187,19 @@ export function getActiveRun(runId: string): { id: string; sessionId: string; cw
   const run = activeRuns.get(runId)
   if (!run) return null
   return { id: run.id, sessionId: run.sessionId, cwd: run.cwd, done: run.done }
+}
+
+/**
+ * Grant exactly one request ownership of the agent execution for a run id.
+ * Transport retries may all observe the same durable run, but only the winner
+ * is allowed to admit the prompt and start side effects.
+ */
+export function claimRunExecution(runId: string): boolean {
+  const run = activeRuns.get(runId)
+  if (!run || run.done || run.executionClaimed) return false
+  run.executionClaimed = true
+  run.updatedAt = Date.now()
+  return true
 }
 
 export function getLatestRunForSession(sessionId: string): { id: string; sessionId: string; cwd: string; done: boolean } | null {
