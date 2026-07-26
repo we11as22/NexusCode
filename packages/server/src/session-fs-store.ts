@@ -9,12 +9,13 @@ import type { SessionMessage } from "@nexuscode/core"
 import {
   canonicalProjectRoot,
   listSessions as coreListSessions,
-  loadSession,
   saveSession,
+  mutateSession,
   loadSessionMessages,
   deleteSession as coreDeleteSession,
   getSessionMeta,
   generateSessionId,
+  SessionConflictError,
   type StoredSession,
 } from "@nexuscode/core"
 
@@ -24,6 +25,7 @@ export interface SessionMeta {
   ts: number
   title?: string
   messageCount: number
+  revision: number
 }
 
 export async function createSession(cwd: string): Promise<SessionMeta> {
@@ -38,8 +40,8 @@ export async function createSession(cwd: string): Promise<SessionMeta> {
     todo: "",
     messages: [],
   }
-  await saveSession(stored)
-  return { id, cwd: root, ts, messageCount: 0 }
+  const revision = await saveSession(stored, { expectedRevision: 0 })
+  return { id, cwd: root, ts, messageCount: 0, revision }
 }
 
 /** Create an on-disk session with a client-chosen id (CLI / extension Session id). */
@@ -53,23 +55,38 @@ export async function ensureSessionOnDisk(sessionId: string, cwd: string): Promi
       ts: existing.ts,
       title: existing.title,
       messageCount: existing.messageCount,
+      revision: existing.revision,
     }
   }
   const ts = Date.now()
-  await saveSession({
-    id: sessionId,
-    cwd: root,
-    ts,
-    title: undefined,
-    todo: "",
-    messages: [],
-  })
-  return { id: sessionId, cwd: root, ts, messageCount: 0 }
+  try {
+    const revision = await saveSession({
+      id: sessionId,
+      cwd: root,
+      ts,
+      title: undefined,
+      todo: "",
+      messages: [],
+    }, { expectedRevision: 0 })
+    return { id: sessionId, cwd: root, ts, messageCount: 0, revision }
+  } catch (error) {
+    if (!(error instanceof SessionConflictError)) throw error
+    const raced = await getSessionMeta(sessionId, root)
+    if (!raced) throw error
+    return {
+      id: raced.id,
+      cwd: raced.cwd,
+      ts: raced.ts,
+      title: raced.title,
+      messageCount: raced.messageCount,
+      revision: raced.revision,
+    }
+  }
 }
 
 export async function listSessions(
   cwd: string
-): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number }>> {
+): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number; revision: number }>> {
   return coreListSessions(cwd)
 }
 
@@ -82,6 +99,7 @@ export async function getSession(sessionId: string, cwd: string): Promise<Sessio
     ts: meta.ts,
     title: meta.title,
     messageCount: meta.messageCount,
+    revision: meta.revision,
   }
 }
 
@@ -91,11 +109,11 @@ export async function deleteSession(sessionId: string, cwd: string): Promise<boo
 
 export async function updateSessionTitle(sessionId: string, cwd: string, title: string): Promise<void> {
   const root = canonicalProjectRoot(cwd)
-  const stored = await loadSession(sessionId, root)
-  if (!stored) return
-  stored.title = title
-  stored.ts = Date.now()
-  await saveSession(stored)
+  await mutateSession(sessionId, root, (stored) => ({
+    ...stored,
+    title,
+    ts: Date.now(),
+  }))
 }
 
 export async function getMessages(
@@ -127,9 +145,14 @@ export async function appendMessages(
 ): Promise<void> {
   if (messages.length === 0) return
   const root = canonicalProjectRoot(cwd)
-  const stored = await loadSession(sessionId, root)
-  if (!stored) throw new Error(`Session not found: ${sessionId}`)
-  stored.messages = [...stored.messages, ...messages]
-  stored.ts = Date.now()
-  await saveSession(stored)
+  const updated = await mutateSession(sessionId, root, (stored) => {
+    const existingIds = new Set(stored.messages.map((message) => message.id))
+    const additions = messages.filter((message) => !existingIds.has(message.id))
+    return {
+      ...stored,
+      messages: additions.length > 0 ? [...stored.messages, ...additions] : stored.messages,
+      ts: additions.length > 0 ? Date.now() : stored.ts,
+    }
+  })
+  if (!updated) throw new Error(`Session not found: ${sessionId}`)
 }

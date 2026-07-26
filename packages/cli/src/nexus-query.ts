@@ -297,7 +297,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           if (event.type === 'assistant_content_complete') {
             try {
               const msgs = await serverClient.getMessages(sid, { limit: 500 })
-              session = new Session(sid, nexus.cwd, msgs)
+              session = new Session(sid, nexus.cwd, msgs, undefined, true)
             } catch {
               // keep current session
             }
@@ -307,7 +307,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         }
         try {
           const msgs = await serverClient.getMessages(sid, { limit: 2000 })
-          session = new Session(sid, nexus.cwd, msgs)
+          session = new Session(sid, nexus.cwd, msgs, undefined, true)
         } catch {
           /* keep session from last assistant_content_complete */
         }

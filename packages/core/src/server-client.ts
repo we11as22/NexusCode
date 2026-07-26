@@ -42,22 +42,22 @@ export class NexusServerClient {
     return u
   }
 
-  async listSessions(): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number }>> {
+  async listSessions(): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number; revision: number }>> {
     const res = await fetch(this.url("/session", { directory: this.directory }), {
       headers: this.headers(),
     })
     if (!res.ok) throw new Error(`Server listSessions: ${res.status} ${await res.text()}`)
-    return res.json() as Promise<Array<{ id: string; ts: number; title?: string; messageCount: number }>>
+    return res.json() as Promise<Array<{ id: string; ts: number; title?: string; messageCount: number; revision: number }>>
   }
 
-  async createSession(): Promise<{ id: string; cwd: string; ts: number; messageCount: number }> {
+  async createSession(): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }> {
     const res = await fetch(this.url("/session"), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({}),
     })
     if (!res.ok) throw new Error(`Server createSession: ${res.status} ${await res.text()}`)
-    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number }>
+    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }>
   }
 
   async getMessages(
@@ -78,12 +78,12 @@ export class NexusServerClient {
     return res.json() as Promise<SessionMessage[]>
   }
 
-  async getSession(sessionId: string): Promise<{ id: string; cwd: string; ts: number; messageCount: number }> {
+  async getSession(sessionId: string): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }> {
     const res = await fetch(this.url(`/session/${sessionId}`, { directory: this.directory }), {
       headers: this.headers(),
     })
     if (!res.ok) throw new Error(`Server getSession: ${res.status} ${await res.text()}`)
-    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number }>
+    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }>
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {

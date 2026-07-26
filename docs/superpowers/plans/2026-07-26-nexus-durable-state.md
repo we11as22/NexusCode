@@ -32,14 +32,14 @@
 - Modify: `packages/server/src/session-fs-store.ts`
 - Modify: affected server/core tests.
 
-- [ ] Reject unsafe session identifiers before resolving a path.
-- [ ] Define a v2 journal header and checksummed, monotonically sequenced snapshot records.
-- [ ] Append and sync under the durable lock; compact atomically at bounded size/record thresholds.
-- [ ] Recover the last verified snapshot after a torn/corrupt tail and quarantine rejected bytes.
-- [ ] Read legacy v1 JSONL without modification; back it up and migrate idempotently on the first write.
-- [ ] Add optimistic revisions to in-process sessions and transactional server mutations.
-- [ ] Test concurrent appends, stale-writer conflicts, rewind, pagination, corrupt tail, legacy migration, and all CRUD paths.
-- [ ] Verify core/server tests/typecheck and commit.
+- [x] Reject unsafe session identifiers before resolving a path.
+- [x] Define a v2 journal header and checksummed, monotonically sequenced snapshot records.
+- [x] Append and sync under the durable lock; compact atomically at bounded size/record thresholds.
+- [x] Recover the last verified snapshot after a torn/corrupt tail and quarantine rejected bytes.
+- [x] Read legacy v1 JSONL without modification; back it up and migrate idempotently on the first write.
+- [x] Add optimistic revisions to in-process sessions and transactional server mutations.
+- [x] Test concurrent appends, stale-writer conflicts, rewind, pagination, corrupt tail, legacy migration, and all CRUD paths.
+- [x] Verify core/server tests/typecheck and commit.
 
 ## Task 3: Make orchestration state transactional and recoverable
 

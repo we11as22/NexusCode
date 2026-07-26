@@ -1,19 +1,23 @@
 import * as fs from "node:fs"
-import * as fsp from "node:fs/promises"
+import {
+  copyFile,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  unlink,
+} from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
 import * as crypto from "node:crypto"
-import type { SessionMessage, ToolPart, MessagePart } from "../types.js"
+import type { SessionMessage } from "../types.js"
+import { atomicWriteFile, withFileLock } from "../storage/durable-fs.js"
 
-/**
- * Session storage using JSONL format (like Pi).
- * Each line is a JSON entry with { id, parentId, role, content, ts, metadata }.
- * Sessions are stored per project in ~/.nexus/sessions/{project-hash}/
- *
- * All callers should use the same logical project root: CLI, VS Code, and server
- * resolve paths here so one bucket is used per workspace (symlinks, trailing
- * slashes, and Windows drive casing are normalized when possible).
- */
+const SESSION_SCHEMA_VERSION = 2
+const DEFAULT_COMPACT_AFTER_RECORDS = 64
+const DEFAULT_COMPACT_AFTER_BYTES = 4 * 1024 * 1024
+const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+
 export function canonicalProjectRoot(cwd: string): string {
   const trimmed = (cwd ?? "").trim()
   const base = trimmed.length > 0 ? trimmed : process.cwd()
@@ -25,13 +29,14 @@ export function canonicalProjectRoot(cwd: string): string {
   }
 }
 
-export function getSessionsDir(cwd: string): string {
-  const root = canonicalProjectRoot(cwd)
-  const hash = crypto.createHash("sha1").update(root).digest("hex").slice(0, 12)
-  return path.join(os.homedir(), ".nexus", "sessions", hash)
+function projectHash(cwd: string): string {
+  return crypto.createHash("sha1").update(canonicalProjectRoot(cwd)).digest("hex").slice(0, 12)
 }
 
-/** Last UI context bar snapshot (session + system + tools overhead) from agent loop; optional for older files. */
+export function getSessionsDir(cwd: string): string {
+  return path.join(os.homedir(), ".nexus", "sessions", projectHash(cwd))
+}
+
 export type StoredContextUsage = { usedTokens: number; limitTokens: number; percent: number }
 
 export interface StoredSession {
@@ -39,11 +44,11 @@ export interface StoredSession {
   cwd: string
   ts: number
   title?: string
-  /** Global todo list for the chat (persisted with session) */
   todo?: string
-  /** Persisted so CLI/extension can show the same ctx bar after resume without re-running the agent. */
   contextUsage?: StoredContextUsage
   messages: SessionMessage[]
+  /** Monotonic durable journal revision. Legacy v1 files load as revision 0. */
+  revision?: number
 }
 
 export interface StoredSessionMeta {
@@ -53,153 +58,679 @@ export interface StoredSessionMeta {
   title?: string
   todo?: string
   messageCount: number
+  revision: number
 }
 
-export async function saveSession(session: StoredSession): Promise<void> {
-  const cwd = canonicalProjectRoot(session.cwd)
-  const dir = getSessionsDir(cwd)
-  await fsp.mkdir(dir, { recursive: true })
+export type SessionStorageDiagnosticCode =
+  | "corrupt-journal-tail"
+  | "journal-backup-recovered"
+  | "legacy-session-detected"
+  | "legacy-session-migrated"
+  | "session-corrupt"
 
-  const filePath = path.join(dir, `${session.id}.jsonl`)
-  const lines = session.messages.map(m => JSON.stringify(m)).join("\n")
-  const meta = JSON.stringify({
+export interface SessionStorageDiagnostic {
+  code: SessionStorageDiagnosticCode
+  path: string
+  message: string
+}
+
+export interface SessionStoreOptions {
+  /** Nexus home containing sessions/. Defaults to ~/.nexus. */
+  homeDir?: string
+  compactAfterRecords?: number
+  compactAfterBytes?: number
+  onDiagnostic?: (diagnostic: SessionStorageDiagnostic) => void
+}
+
+export interface SaveSessionOptions {
+  expectedRevision?: number
+}
+
+export class UnsafeSessionIdError extends Error {
+  constructor(readonly sessionId: string) {
+    super(`Unsafe session id: ${JSON.stringify(sessionId)}`)
+    this.name = "UnsafeSessionIdError"
+  }
+}
+
+export class SessionConflictError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly expectedRevision: number,
+    readonly actualRevision: number,
+  ) {
+    super(
+      `Session ${sessionId} changed concurrently (expected revision ${expectedRevision}, actual ${actualRevision})`,
+    )
+    this.name = "SessionConflictError"
+  }
+}
+
+export class SessionCorruptionError extends Error {
+  constructor(
+    readonly journalPath: string,
+    message: string,
+  ) {
+    super(`Session journal is corrupt: ${journalPath}: ${message}`)
+    this.name = "SessionCorruptionError"
+  }
+}
+
+type SessionHeader = {
+  type: "session_header"
+  schemaVersion: 2
+  sessionId: string
+  cwd: string
+  createdAt: number
+  baseSequence: number
+}
+
+type SessionSnapshotPayload = Omit<StoredSession, "revision">
+
+type SessionSnapshot = {
+  type: "session_snapshot"
+  schemaVersion: 2
+  sequence: number
+  previousChecksum: string | null
+  checksum: string
+  state: SessionSnapshotPayload
+}
+
+type ParsedJournal = {
+  format: "missing" | "legacy-v1" | "v2"
+  session: StoredSession | null
+  header?: SessionHeader
+  lastChecksum: string | null
+  snapshotCount: number
+  byteLength: number
+  raw: string
+  corruptTail?: string
+}
+
+function assertSafeSessionId(sessionId: string): void {
+  if (!SAFE_SESSION_ID.test(sessionId)) throw new UnsafeSessionIdError(sessionId)
+}
+
+function isContextUsage(value: unknown): value is StoredContextUsage {
+  if (!value || typeof value !== "object") return false
+  const candidate = value as Partial<StoredContextUsage>
+  return (
+    typeof candidate.usedTokens === "number" &&
+    typeof candidate.limitTokens === "number" &&
+    typeof candidate.percent === "number"
+  )
+}
+
+function normalizeStoredSession(
+  value: Partial<StoredSession>,
+  expectedId: string,
+  cwd: string,
+  revision: number,
+): StoredSession {
+  if (value.id !== expectedId) {
+    throw new SessionCorruptionError(expectedId, `record id ${String(value.id)} does not match its file`)
+  }
+  if (!Number.isFinite(value.ts) || !Array.isArray(value.messages)) {
+    throw new SessionCorruptionError(expectedId, "record has invalid timestamp or messages")
+  }
+  return {
+    id: expectedId,
+    cwd,
+    ts: value.ts!,
+    ...(typeof value.title === "string" ? { title: value.title } : {}),
+    todo: typeof value.todo === "string" ? value.todo : "",
+    ...(isContextUsage(value.contextUsage) ? { contextUsage: value.contextUsage } : {}),
+    messages: value.messages as SessionMessage[],
+    revision,
+  }
+}
+
+function snapshotChecksum(
+  sequence: number,
+  previousChecksum: string | null,
+  state: SessionSnapshotPayload,
+): string {
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify({ sequence, previousChecksum, state }))
+    .digest("hex")
+}
+
+function createSnapshot(
+  session: StoredSession,
+  cwd: string,
+  sequence: number,
+  previousChecksum: string | null,
+): SessionSnapshot {
+  const state: SessionSnapshotPayload = {
     id: session.id,
     cwd,
     ts: session.ts,
-    title: session.title,
-    todo: session.todo ?? "",
+    ...(typeof session.title === "string" ? { title: session.title } : {}),
+    todo: typeof session.todo === "string" ? session.todo : "",
     ...(session.contextUsage ? { contextUsage: session.contextUsage } : {}),
-  })
+    messages: session.messages,
+  }
+  return {
+    type: "session_snapshot",
+    schemaVersion: SESSION_SCHEMA_VERSION,
+    sequence,
+    previousChecksum,
+    checksum: snapshotChecksum(sequence, previousChecksum, state),
+    state,
+  }
+}
 
-  await fsp.writeFile(filePath, `${meta}\n${lines}\n`, "utf8")
+function serializeCompactedJournal(session: StoredSession, cwd: string, sequence: number): string {
+  const header: SessionHeader = {
+    type: "session_header",
+    schemaVersion: SESSION_SCHEMA_VERSION,
+    sessionId: session.id,
+    cwd,
+    createdAt: session.ts,
+    baseSequence: Math.max(0, sequence - 1),
+  }
+  const snapshot = createSnapshot(session, cwd, sequence, null)
+  return `${JSON.stringify(header)}\n${JSON.stringify(snapshot)}\n`
+}
+
+function lineEntries(raw: string): Array<{ text: string; start: number; end: number }> {
+  const result: Array<{ text: string; start: number; end: number }> = []
+  let start = 0
+  for (let index = 0; index <= raw.length; index += 1) {
+    if (index !== raw.length && raw[index] !== "\n") continue
+    const text = raw.slice(start, index).replace(/\r$/, "")
+    if (text.trim().length > 0) result.push({ text, start, end: index < raw.length ? index + 1 : index })
+    start = index + 1
+  }
+  return result
+}
+
+function parseLegacy(raw: string, sessionId: string, cwd: string): ParsedJournal {
+  const entries = lineEntries(raw)
+  if (entries.length === 0) {
+    return {
+      format: "missing",
+      session: null,
+      lastChecksum: null,
+      snapshotCount: 0,
+      byteLength: raw.length,
+      raw,
+    }
+  }
+  let meta: Partial<StoredSession>
+  try {
+    meta = JSON.parse(entries[0]!.text) as Partial<StoredSession>
+  } catch (error) {
+    throw new SessionCorruptionError(sessionId, `legacy metadata cannot be parsed: ${String(error)}`)
+  }
+  const messages: SessionMessage[] = []
+  let corruptTail: string | undefined
+  for (let index = 1; index < entries.length; index += 1) {
+    try {
+      messages.push(JSON.parse(entries[index]!.text) as SessionMessage)
+    } catch {
+      corruptTail = raw.slice(entries[index]!.start)
+      break
+    }
+  }
+  return {
+    format: "legacy-v1",
+    session: normalizeStoredSession({ ...meta, messages }, sessionId, cwd, 0),
+    lastChecksum: null,
+    snapshotCount: 0,
+    byteLength: raw.length,
+    raw,
+    ...(corruptTail ? { corruptTail } : {}),
+  }
+}
+
+function isHeader(value: unknown): value is SessionHeader {
+  if (!value || typeof value !== "object") return false
+  const record = value as Partial<SessionHeader>
+  return (
+    record.type === "session_header" &&
+    record.schemaVersion === SESSION_SCHEMA_VERSION &&
+    typeof record.sessionId === "string" &&
+    typeof record.cwd === "string" &&
+    typeof record.createdAt === "number" &&
+    Number.isSafeInteger(record.baseSequence) &&
+    record.baseSequence! >= 0
+  )
+}
+
+function parseV2(raw: string, sessionId: string, cwd: string): ParsedJournal {
+  const entries = lineEntries(raw)
+  let headerValue: unknown
+  try {
+    headerValue = JSON.parse(entries[0]!.text)
+  } catch (error) {
+    throw new SessionCorruptionError(sessionId, `journal header cannot be parsed: ${String(error)}`)
+  }
+  if (!isHeader(headerValue) || headerValue.sessionId !== sessionId) {
+    throw new SessionCorruptionError(sessionId, "invalid or mismatched v2 journal header")
+  }
+
+  let sequence = headerValue.baseSequence
+  let lastChecksum: string | null = null
+  let latest: StoredSession | null = null
+  let corruptTail: string | undefined
+  let snapshotCount = 0
+  for (let index = 1; index < entries.length; index += 1) {
+    const entry = entries[index]!
+    let candidate: Partial<SessionSnapshot>
+    try {
+      candidate = JSON.parse(entry.text) as Partial<SessionSnapshot>
+    } catch {
+      corruptTail = raw.slice(entry.start)
+      break
+    }
+    const expectedSequence = sequence + 1
+    if (
+      candidate.type !== "session_snapshot" ||
+      candidate.schemaVersion !== SESSION_SCHEMA_VERSION ||
+      candidate.sequence !== expectedSequence ||
+      candidate.previousChecksum !== lastChecksum ||
+      !candidate.state ||
+      candidate.checksum !== snapshotChecksum(expectedSequence, lastChecksum, candidate.state)
+    ) {
+      corruptTail = raw.slice(entry.start)
+      break
+    }
+    latest = normalizeStoredSession(candidate.state, sessionId, cwd, expectedSequence)
+    sequence = expectedSequence
+    lastChecksum = candidate.checksum
+    snapshotCount += 1
+  }
+  if (!latest) {
+    throw new SessionCorruptionError(sessionId, "journal contains no verified snapshot")
+  }
+  return {
+    format: "v2",
+    session: latest,
+    header: headerValue,
+    lastChecksum,
+    snapshotCount,
+    byteLength: raw.length,
+    raw,
+    ...(corruptTail ? { corruptTail } : {}),
+  }
+}
+
+async function readRaw(pathname: string): Promise<string | null> {
+  try {
+    return await readFile(pathname, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw error
+  }
+}
+
+export class SessionStore {
+  private readonly homeDir: string
+  private readonly compactAfterRecords: number
+  private readonly compactAfterBytes: number
+  private readonly onDiagnostic?: (diagnostic: SessionStorageDiagnostic) => void
+  private readonly diagnostics: SessionStorageDiagnostic[] = []
+
+  constructor(options: SessionStoreOptions = {}) {
+    this.homeDir = path.resolve(options.homeDir ?? path.join(os.homedir(), ".nexus"))
+    this.compactAfterRecords = Math.max(1, options.compactAfterRecords ?? DEFAULT_COMPACT_AFTER_RECORDS)
+    this.compactAfterBytes = Math.max(1, options.compactAfterBytes ?? DEFAULT_COMPACT_AFTER_BYTES)
+    this.onDiagnostic = options.onDiagnostic
+  }
+
+  getSessionsDir(cwd: string): string {
+    return path.join(this.homeDir, "sessions", projectHash(cwd))
+  }
+
+  getSessionPath(sessionId: string, cwd: string): string {
+    assertSafeSessionId(sessionId)
+    return path.join(this.getSessionsDir(cwd), `${sessionId}.jsonl`)
+  }
+
+  private diagnostic(diagnostic: SessionStorageDiagnostic): void {
+    const duplicate = this.diagnostics.some(
+      (existing) =>
+        existing.code === diagnostic.code &&
+        existing.path === diagnostic.path &&
+        existing.message === diagnostic.message,
+    )
+    if (!duplicate) {
+      this.diagnostics.push(diagnostic)
+      if (this.diagnostics.length > 100) this.diagnostics.shift()
+    }
+    this.onDiagnostic?.(diagnostic)
+  }
+
+  getDiagnostics(): readonly SessionStorageDiagnostic[] {
+    return this.diagnostics.map((diagnostic) => ({ ...diagnostic }))
+  }
+
+  private async parseJournal(sessionId: string, cwd: string): Promise<ParsedJournal> {
+    const root = canonicalProjectRoot(cwd)
+    const journalPath = this.getSessionPath(sessionId, root)
+    const raw = await readRaw(journalPath)
+    if (raw == null || raw.trim().length === 0) {
+      return {
+        format: "missing",
+        session: null,
+        lastChecksum: null,
+        snapshotCount: 0,
+        byteLength: raw?.length ?? 0,
+        raw: raw ?? "",
+      }
+    }
+
+    const entries = lineEntries(raw)
+    let first: unknown
+    try {
+      first = JSON.parse(entries[0]!.text)
+    } catch {
+      first = undefined
+    }
+
+    try {
+      const parsed = isHeader(first) ? parseV2(raw, sessionId, root) : parseLegacy(raw, sessionId, root)
+      if (parsed.format === "legacy-v1") {
+        this.diagnostic({
+          code: "legacy-session-detected",
+          path: journalPath,
+          message: `Legacy session ${sessionId} will migrate on its next durable write`,
+        })
+      }
+      if (parsed.corruptTail) {
+        this.diagnostic({
+          code: "corrupt-journal-tail",
+          path: journalPath,
+          message: `Ignored ${Buffer.byteLength(parsed.corruptTail)} unverified tail bytes`,
+        })
+      }
+      return parsed
+    } catch (primaryError) {
+      const backup = await readRaw(`${journalPath}.bak`)
+      if (backup != null) {
+        try {
+          const parsed = parseV2(backup, sessionId, root)
+          this.diagnostic({
+            code: "journal-backup-recovered",
+            path: `${journalPath}.bak`,
+            message: `Recovered session ${sessionId} from its compacted backup`,
+          })
+          return { ...parsed, raw: backup, corruptTail: raw }
+        } catch {
+          // Preserve the primary error below: it names the authoritative path.
+        }
+      }
+      throw primaryError
+    }
+  }
+
+  private async quarantineTail(journalPath: string, corruptTail: string): Promise<void> {
+    const quarantine = `${journalPath}.corrupt-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`
+    await atomicWriteFile(quarantine, corruptTail)
+  }
+
+  private async writeLocked(
+    journalPath: string,
+    cwd: string,
+    session: StoredSession,
+    current: ParsedJournal,
+  ): Promise<number> {
+    const actualRevision = current.session?.revision ?? 0
+    const sequence = actualRevision + 1
+    const normalized: StoredSession = {
+      ...session,
+      cwd,
+      todo: typeof session.todo === "string" ? session.todo : "",
+      revision: sequence,
+    }
+
+    if (current.corruptTail) await this.quarantineTail(journalPath, current.corruptTail)
+    if (current.format === "legacy-v1") {
+      const legacyBackup = `${journalPath}.legacy-v1.bak`
+      try {
+        await copyFile(journalPath, legacyBackup, fs.constants.COPYFILE_EXCL)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+      }
+      this.diagnostic({
+        code: "legacy-session-migrated",
+        path: journalPath,
+        message: `Migrated legacy session ${session.id} to journal schema v2`,
+      })
+    }
+
+    const shouldCompact =
+      current.format !== "v2" ||
+      Boolean(current.corruptTail) ||
+      current.snapshotCount >= this.compactAfterRecords ||
+      current.byteLength >= this.compactAfterBytes
+
+    if (shouldCompact) {
+      await atomicWriteFile(journalPath, serializeCompactedJournal(normalized, cwd, sequence), {
+        backup: current.format === "v2" && !current.corruptTail,
+      })
+      return sequence
+    }
+
+    const snapshot = createSnapshot(normalized, cwd, sequence, current.lastChecksum)
+    const handle = await open(journalPath, "a", 0o600)
+    try {
+      await handle.writeFile(`${JSON.stringify(snapshot)}\n`, "utf8")
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    return sequence
+  }
+
+  async saveSession(session: StoredSession, options: SaveSessionOptions = {}): Promise<number> {
+    assertSafeSessionId(session.id)
+    const cwd = canonicalProjectRoot(session.cwd)
+    const journalPath = this.getSessionPath(session.id, cwd)
+    await mkdir(path.dirname(journalPath), { recursive: true, mode: 0o700 })
+    return withFileLock(journalPath, async () => {
+      const current = await this.parseJournal(session.id, cwd)
+      const actualRevision = current.session?.revision ?? 0
+      if (
+        options.expectedRevision !== undefined &&
+        options.expectedRevision !== actualRevision
+      ) {
+        throw new SessionConflictError(session.id, options.expectedRevision, actualRevision)
+      }
+      return this.writeLocked(journalPath, cwd, session, current)
+    })
+  }
+
+  async mutateSession(
+    sessionId: string,
+    cwd: string,
+    mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>,
+  ): Promise<StoredSession | null> {
+    assertSafeSessionId(sessionId)
+    const root = canonicalProjectRoot(cwd)
+    const journalPath = this.getSessionPath(sessionId, root)
+    return withFileLock(journalPath, async () => {
+      const current = await this.parseJournal(sessionId, root)
+      if (!current.session) return null
+      const next = await mutate({
+        ...current.session,
+        messages: [...current.session.messages],
+      })
+      if (next.id !== sessionId) {
+        throw new UnsafeSessionIdError(next.id)
+      }
+      const currentComparable = { ...current.session, revision: undefined }
+      const nextComparable = { ...next, cwd: root, revision: undefined }
+      if (JSON.stringify(currentComparable) === JSON.stringify(nextComparable)) {
+        return current.session
+      }
+      const revision = await this.writeLocked(journalPath, root, next, current)
+      return { ...next, cwd: root, revision }
+    })
+  }
+
+  async loadSession(sessionId: string, cwd: string): Promise<StoredSession | null> {
+    assertSafeSessionId(sessionId)
+    return (await this.parseJournal(sessionId, canonicalProjectRoot(cwd))).session
+  }
+
+  async getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null> {
+    const session = await this.loadSession(sessionId, cwd)
+    if (!session) return null
+    return {
+      id: session.id,
+      cwd: session.cwd,
+      ts: session.ts,
+      title: session.title,
+      todo: session.todo,
+      messageCount: session.messages.length,
+      revision: session.revision ?? 0,
+    }
+  }
+
+  async loadSessionMessages(
+    sessionId: string,
+    cwd: string,
+    limit: number,
+    offset: number,
+  ): Promise<{ meta: StoredSessionMeta; messages: SessionMessage[] } | null> {
+    const session = await this.loadSession(sessionId, cwd)
+    if (!session) return null
+    const start = Math.max(0, Number.isFinite(offset) ? Math.trunc(offset) : 0)
+    const safeLimit = Number.isFinite(limit) ? Math.trunc(limit) : 0
+    const end = safeLimit > 0 ? Math.min(session.messages.length, start + safeLimit) : session.messages.length
+    return {
+      meta: {
+        id: session.id,
+        cwd: session.cwd,
+        ts: session.ts,
+        title: session.title,
+        todo: session.todo,
+        messageCount: session.messages.length,
+        revision: session.revision ?? 0,
+      },
+      messages: session.messages.slice(start, end),
+    }
+  }
+
+  async listSessions(
+    cwd: string,
+  ): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number; revision: number }>> {
+    const root = canonicalProjectRoot(cwd)
+    const directory = this.getSessionsDir(root)
+    const files = await readdir(directory).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [] as string[]
+      throw error
+    })
+    const sessions: Array<{
+      id: string
+      ts: number
+      title?: string
+      messageCount: number
+      revision: number
+    }> = []
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue
+      const sessionId = file.slice(0, -".jsonl".length)
+      if (!SAFE_SESSION_ID.test(sessionId)) continue
+      try {
+        const meta = await this.getSessionMeta(sessionId, root)
+        if (meta) {
+          sessions.push({
+            id: meta.id,
+            ts: meta.ts,
+            title: meta.title,
+            messageCount: meta.messageCount,
+            revision: meta.revision,
+          })
+        }
+      } catch (error) {
+        this.diagnostic({
+          code: "session-corrupt",
+          path: path.join(directory, file),
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    return sessions.sort((a, b) => b.ts - a.ts)
+  }
+
+  async deleteSession(sessionId: string, cwd: string): Promise<boolean> {
+    assertSafeSessionId(sessionId)
+    const journalPath = this.getSessionPath(sessionId, canonicalProjectRoot(cwd))
+    return withFileLock(journalPath, async () => {
+      let deleted = false
+      const directory = path.dirname(journalPath)
+      const basename = path.basename(journalPath)
+      const candidates = (await readdir(directory).catch(() => []))
+        .filter(
+          (name) =>
+            name === basename ||
+            name === `${basename}.bak` ||
+            name === `${basename}.legacy-v1.bak` ||
+            name.startsWith(`${basename}.corrupt-`),
+        )
+      for (const name of candidates) {
+        try {
+          await unlink(path.join(directory, name))
+          if (name === basename) deleted = true
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+        }
+      }
+      return deleted
+    })
+  }
+}
+
+const defaultSessionStore = new SessionStore()
+
+export function getSessionStorageDiagnostics(): readonly SessionStorageDiagnostic[] {
+  return defaultSessionStore.getDiagnostics()
+}
+
+export async function saveSession(
+  session: StoredSession,
+  options: SaveSessionOptions = {},
+): Promise<number> {
+  return defaultSessionStore.saveSession(session, options)
+}
+
+export async function mutateSession(
+  sessionId: string,
+  cwd: string,
+  mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>,
+): Promise<StoredSession | null> {
+  return defaultSessionStore.mutateSession(sessionId, cwd, mutate)
 }
 
 export async function loadSession(sessionId: string, cwd: string): Promise<StoredSession | null> {
-  const root = canonicalProjectRoot(cwd)
-  const dir = getSessionsDir(root)
-  const filePath = path.join(dir, `${sessionId}.jsonl`)
-
-  if (!fs.existsSync(filePath)) return null
-
-  const content = await fsp.readFile(filePath, "utf8")
-  const lines = content.split("\n").filter(Boolean)
-
-  if (lines.length === 0) return null
-
-  const meta = JSON.parse(lines[0]!) as {
-    id: string
-    cwd: string
-    ts: number
-    title?: string
-    todo?: string
-    contextUsage?: StoredContextUsage
-  }
-  const messages = lines.slice(1).map(l => JSON.parse(l) as SessionMessage)
-
-  const cu = meta.contextUsage
-  const contextUsage =
-    cu &&
-    typeof cu.usedTokens === "number" &&
-    typeof cu.limitTokens === "number" &&
-    typeof cu.percent === "number"
-      ? cu
-      : undefined
-
-  return {
-    id: meta.id,
-    cwd: root,
-    ts: meta.ts,
-    title: meta.title,
-    todo: typeof meta.todo === "string" ? meta.todo : "",
-    contextUsage,
-    messages,
-  }
+  return defaultSessionStore.loadSession(sessionId, cwd)
 }
 
 export async function getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null> {
-  const root = canonicalProjectRoot(cwd)
-  const dir = getSessionsDir(root)
-  const filePath = path.join(dir, `${sessionId}.jsonl`)
-  if (!fs.existsSync(filePath)) return null
-
-  const content = await fsp.readFile(filePath, "utf8")
-  const lines = content.split("\n").filter(Boolean)
-  if (lines.length === 0) return null
-
-  const meta = JSON.parse(lines[0]!) as { id: string; cwd: string; ts: number; title?: string; todo?: string }
-  return {
-    id: meta.id,
-    cwd: root,
-    ts: meta.ts,
-    title: meta.title,
-    todo: typeof meta.todo === "string" ? meta.todo : "",
-    messageCount: Math.max(0, lines.length - 1),
-  }
+  return defaultSessionStore.getSessionMeta(sessionId, cwd)
 }
 
 export async function loadSessionMessages(
   sessionId: string,
   cwd: string,
   limit: number,
-  offset: number
+  offset: number,
 ): Promise<{ meta: StoredSessionMeta; messages: SessionMessage[] } | null> {
-  const root = canonicalProjectRoot(cwd)
-  const dir = getSessionsDir(root)
-  const filePath = path.join(dir, `${sessionId}.jsonl`)
-  if (!fs.existsSync(filePath)) return null
-
-  const content = await fsp.readFile(filePath, "utf8")
-  const lines = content.split("\n").filter(Boolean)
-  if (lines.length === 0) return null
-
-  const meta = JSON.parse(lines[0]!) as { id: string; cwd: string; ts: number; title?: string; todo?: string }
-  const messageLines = lines.slice(1)
-  const start = Math.max(0, offset)
-  const end = limit > 0 ? Math.min(messageLines.length, start + limit) : messageLines.length
-  const messages = messageLines.slice(start, end).map((line) => JSON.parse(line) as SessionMessage)
-  return {
-    meta: {
-      id: meta.id,
-      cwd: root,
-      ts: meta.ts,
-      title: meta.title,
-      todo: typeof meta.todo === "string" ? meta.todo : "",
-      messageCount: messageLines.length,
-    },
-    messages,
-  }
+  return defaultSessionStore.loadSessionMessages(sessionId, cwd, limit, offset)
 }
 
-export async function listSessions(cwd: string): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number }>> {
-  const dir = getSessionsDir(cwd)
-  if (!fs.existsSync(dir)) return []
-
-  const files = await fsp.readdir(dir).catch(() => [] as string[])
-  const sessions: Array<{ id: string; ts: number; title?: string; messageCount: number }> = []
-
-  for (const file of files) {
-    if (!file.endsWith(".jsonl")) continue
-    try {
-      const content = await fsp.readFile(path.join(dir, file), "utf8")
-      const lines = content.split("\n").filter(Boolean)
-      if (lines.length === 0) continue
-      const meta = JSON.parse(lines[0]!) as { id: string; ts: number; title?: string }
-      sessions.push({ id: meta.id, ts: meta.ts, title: meta.title, messageCount: lines.length - 1 })
-    } catch {}
-  }
-
-  return sessions.sort((a, b) => b.ts - a.ts)
+export async function listSessions(
+  cwd: string,
+): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number; revision: number }>> {
+  return defaultSessionStore.listSessions(cwd)
 }
 
 export async function deleteSession(sessionId: string, cwd: string): Promise<boolean> {
-  const dir = getSessionsDir(canonicalProjectRoot(cwd))
-  const filePath = path.join(dir, `${sessionId}.jsonl`)
-  try {
-    await fsp.unlink(filePath)
-    return true
-  } catch {
-    return false
-  }
+  return defaultSessionStore.deleteSession(sessionId, cwd)
 }
 
 export function generateSessionId(): string {

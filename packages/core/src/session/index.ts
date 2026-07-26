@@ -43,6 +43,8 @@ export class Session implements ISession {
   private _tokenEstimateCache: number | null = null
   /** Last context_usage from agent (full formula). Cleared when messages change. */
   private _contextUsageSnapshot: StoredContextUsage | null = null
+  /** Last verified durable journal revision used for optimistic concurrency. */
+  private _revision: number
 
   constructor(
     id: string,
@@ -51,6 +53,7 @@ export class Session implements ISession {
     initialTodo?: string,
     ephemeral = false,
     contextUsageSnapshot?: StoredContextUsage | null,
+    revision = 0,
   ) {
     this.id = id
     this.cwd = canonicalProjectRoot(cwd)
@@ -58,6 +61,7 @@ export class Session implements ISession {
     this._todo = typeof initialTodo === "string" ? initialTodo : ""
     this._ephemeral = ephemeral
     this._contextUsageSnapshot = contextUsageSnapshot ?? null
+    this._revision = revision
   }
 
   get messages(): SessionMessage[] {
@@ -145,7 +149,7 @@ export class Session implements ISession {
   fork(messageId: string): ISession {
     const idx = this._messages.findIndex(m => m.id === messageId)
     const messages = idx === -1 ? [...this._messages] : this._messages.slice(0, idx + 1)
-    return new Session(generateSessionId(), this.cwd, JSON.parse(JSON.stringify(messages)), undefined, false, null)
+    return new Session(generateSessionId(), this.cwd, JSON.parse(JSON.stringify(messages)), undefined, false, null, 0)
   }
 
   /** Rewind chat to timestamp. Keeps only messages with ts <= timestamp. */
@@ -196,7 +200,7 @@ export class Session implements ISession {
       ...(this._contextUsageSnapshot ? { contextUsage: this._contextUsageSnapshot } : {}),
       messages: this._messages,
     }
-    await saveSession(stored)
+    this._revision = await saveSession(stored, { expectedRevision: this._revision })
   }
 
   async load(): Promise<void> {
@@ -205,6 +209,7 @@ export class Session implements ISession {
       this._messages = stored.messages
       this._todo = typeof stored.todo === "string" ? stored.todo : ""
       this._contextUsageSnapshot = stored.contextUsage ?? null
+      this._revision = stored.revision ?? 0
       this.invalidateTokenEstimate()
     }
   }
@@ -222,13 +227,29 @@ export class Session implements ISession {
     const stored = await loadSession(sessionId, cwd)
     if (!stored) return null
     const todo = typeof stored.todo === "string" ? stored.todo : ""
-    return new Session(sessionId, cwd, stored.messages, todo, false, stored.contextUsage ?? null)
+    return new Session(
+      sessionId,
+      cwd,
+      stored.messages,
+      todo,
+      false,
+      stored.contextUsage ?? null,
+      stored.revision ?? 0,
+    )
   }
 
   static async resumeWindow(sessionId: string, cwd: string, limit: number, offset: number): Promise<Session | null> {
     const loaded = await loadSessionMessages(sessionId, cwd, limit, offset)
     if (!loaded) return null
-    return new Session(sessionId, cwd, loaded.messages, loaded.meta.todo ?? "", false, null)
+    return new Session(
+      sessionId,
+      cwd,
+      loaded.messages,
+      loaded.meta.todo ?? "",
+      true,
+      null,
+      loaded.meta.revision,
+    )
   }
 
   static async getMeta(sessionId: string, cwd: string) {
@@ -245,4 +266,10 @@ export {
   canonicalProjectRoot,
   saveSession,
   loadSession,
+  mutateSession,
+  SessionStore,
+  SessionConflictError,
+  SessionCorruptionError,
+  UnsafeSessionIdError,
+  getSessionStorageDiagnostics,
 } from "./storage.js"

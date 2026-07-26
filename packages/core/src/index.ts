@@ -63,8 +63,22 @@ export {
   canonicalProjectRoot,
   saveSession,
   loadSession,
+  mutateSession,
+  SessionStore,
+  SessionConflictError,
+  SessionCorruptionError,
+  UnsafeSessionIdError,
+  getSessionStorageDiagnostics,
 } from "./session/index.js"
-export type { StoredSession, StoredSessionMeta, StoredContextUsage } from "./session/storage.js"
+export type {
+  SaveSessionOptions,
+  SessionStorageDiagnostic,
+  SessionStorageDiagnosticCode,
+  SessionStoreOptions,
+  StoredSession,
+  StoredSessionMeta,
+  StoredContextUsage,
+} from "./session/storage.js"
 export { hadPlanExit, getPlanContentForFollowup } from "./session/plan-followup.js"
 export { createCompaction } from "./session/compaction.js"
 

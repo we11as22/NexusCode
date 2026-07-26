@@ -2662,7 +2662,7 @@ Return in this format:
           const meta = await client.getSession(sid)
           const offset = Math.max(0, meta.messageCount - INITIAL_SERVER_MESSAGES)
           const messages = await client.getMessages(sid, { limit: INITIAL_SERVER_MESSAGES, offset })
-          this.session = new Session(sid, cwd, messages)
+          this.session = new Session(sid, cwd, messages, undefined, true)
           this.serverSessionOldestLoadedOffset = offset
         } catch {
           // keep current session shadow
@@ -3049,6 +3049,7 @@ Return in this format:
     try {
       const offset = Math.max(0, this.serverSessionOldestLoadedOffset - limit)
       let olderMessages: SessionMessage[] = []
+      let localRevision = 0
       if (serverUrl) {
         if (this.session.id !== this.serverSessionId) return
         olderMessages = await (await this.createServerClient(cwd)).getMessages(
@@ -3059,6 +3060,7 @@ Return in this format:
         const loaded = await loadSessionMessages(this.session.id, cwd, limit, offset)
         if (!loaded) return
         olderMessages = loaded.messages
+        localRevision = loaded.meta.revision
       }
       if (olderMessages.length === 0) return
       const existingIds = new Set(this.session.messages.map((msg) => msg.id))
@@ -3067,7 +3069,15 @@ Return in this format:
         this.serverSessionOldestLoadedOffset = offset
         return
       }
-      this.session = new Session(this.session.id, cwd, [...dedupedOlder, ...this.session.messages])
+      this.session = new Session(
+        this.session.id,
+        cwd,
+        [...dedupedOlder, ...this.session.messages],
+        undefined,
+        Boolean(serverUrl) || offset > 0,
+        null,
+        localRevision,
+      )
       this.serverSessionOldestLoadedOffset = offset
       if (!serverUrl) this.localSessionWindowed = offset > 0
     } catch (error) {
@@ -3091,7 +3101,7 @@ Return in this format:
           limit: INITIAL_SERVER_MESSAGES,
           offset,
         })
-        this.session = new Session(sessionId, cwd, messages)
+        this.session = new Session(sessionId, cwd, messages, undefined, true)
         this.serverSessionId = sessionId
         this.serverSessionOldestLoadedOffset = offset
         this.localSessionWindowed = false
@@ -3126,7 +3136,7 @@ Return in this format:
     if (serverUrl) {
       try {
         const created = await (await this.createServerClient(cwd)).createSession()
-        this.session = new Session(created.id, cwd, [])
+        this.session = new Session(created.id, cwd, [], undefined, true)
         this.serverSessionId = created.id
         this.serverSessionOldestLoadedOffset = undefined
       } catch (error) {
@@ -3164,7 +3174,7 @@ Return in this format:
       if (serverUrl) {
         try {
           const created = await (await this.createServerClient(cwd)).createSession()
-          this.session = new Session(created.id, cwd, [])
+          this.session = new Session(created.id, cwd, [], undefined, true)
           this.serverSessionId = created.id
           this.serverSessionOldestLoadedOffset = undefined
         } catch (error) {

@@ -30,7 +30,7 @@ import type { ServerEnv } from "../security.js"
 const DEFAULT_MESSAGE_PAGE_SIZE = 50
 const MAX_MESSAGE_PAGE_SIZE = 200
 const RECENT_MESSAGES_FOR_RUN = 200
-const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,160}$/
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 
 function getCwd(c: { get: (key: "workspaceRoot") => string }): string {
   return c.get("workspaceRoot")
@@ -63,6 +63,7 @@ sessionRoutes.post("/", async (c) => {
     cwd: meta.cwd,
     ts: meta.ts,
     messageCount: meta.messageCount,
+    revision: meta.revision,
   })
 })
 
@@ -77,6 +78,7 @@ sessionRoutes.get("/:id", async (c) => {
     cwd: session.cwd,
     ts: session.ts,
     messageCount: session.messageCount,
+    revision: session.revision,
   })
 })
 
@@ -153,7 +155,10 @@ sessionRoutes.post("/:id/message", async (c) => {
       done: false,
     }
     const recentMessages = await fsGetRecentMessages(id, cwd, RECENT_MESSAGES_FOR_RUN)
-    const session = new Session(id, cwd, recentMessages)
+    // This is a bounded working copy, not the authoritative full transcript.
+    // Keep it ephemeral so loop-level saves cannot truncate messages outside
+    // the window; the new messages are committed transactionally below.
+    const session = new Session(id, cwd, recentMessages, undefined, true)
     const messageCountBeforeRun = session.messages.length
     void (async () => {
       try {
