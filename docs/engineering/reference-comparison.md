@@ -1,6 +1,6 @@
 # NexusCode reference-agent comparison
 
-**Audit date:** 2026-07-26
+**Audit date:** 2026-07-27
 
 **Compared source trees:** Codex, OpenClaude, Kilo Code, Roo Code, Cline, OpenCode, and Claw Code.
 
@@ -26,20 +26,20 @@ Nexus does not copy one project wholesale. It uses one shared TypeScript core fo
 | Modes | Agent, plan, ask, debug, review with mode-specific tool policy | OpenClaude, Kilo, Roo | Implemented and shared by all hosts |
 | Sessions | Checksummed JSONL journal, repair, migration, bounded active context | Codex, OpenCode | Implemented without native database dependency |
 | Remote runs | Authenticated NDJSON, durable event replay, sequence reconnect, explicit abort and approval | Codex, OpenCode | Implemented; user turn is admitted before execution and a run has one execution owner |
-| Permissions | Mode policy, ordered rules, path/command checks, interactive approvals, fail-closed server | Codex, OpenCode, Claw | Implemented at application boundary; OS process sandbox remains a separate gap |
+| Permissions | Mode policy, ordered rules, path/command checks, serialized interactive approvals, fail-closed server | Codex, OpenCode, Claw | Implemented at application boundary; privileged plugin and agent-hook actions cannot inherit read auto-approval; OS process sandbox remains a separate gap |
 | Tool lifecycle | Validation, normalization, hooks, timeout/cancel, output spill, durable task events | Codex, Kilo | Implemented |
-| Subagents | Task-first delegated runs, batches, snapshots, resume, worktree isolation, narrowed modes | OpenClaude, Codex, Cline | Implemented; legacy spawn tools hidden for transcript compatibility |
+| Subagents | Task-first delegated runs, batches, snapshots, resume, worktree isolation, narrowed modes | OpenClaude, Codex, Cline | Implemented; approval requests are serialized across root/delegated hosts and agent-hook paths are confined |
 | Teams/orchestration | Durable tasks, teams, inbox, members, messages, worktrees, remote sessions | OpenClaude | Implemented with checksummed snapshot + journal |
-| Memory | Project/session/team records, markdown auto-memory, session scrolling memory, relevance retrieval, redaction | OpenClaude, Kilo | Implemented; memories are evidence, never instruction authority |
+| Memory | Global/project/session/team and bound task/agent records, markdown import, scrolling memory, relevance retrieval, redaction, access accounting | OpenClaude, Kilo | Implemented; complete eligible scopes are ranked before prompt budgeting and private scopes fail closed |
 | Rules and skills | Managed/user/project cascade, includes, Claude compatibility, deferred skill discovery | OpenClaude, Codex | Implemented; server loading is bounded and fail-soft with visible diagnostics |
-| Plugins | Manifest validation, explicit trust, lifecycle hooks, agents, skills, commands, MCP, install/remove/reload | OpenClaude, OpenCode | Implemented for trusted local plugins; per-capability OS isolation remains a gap |
+| Plugins | Manifest validation, explicit trust, lifecycle hooks, agents, skills, commands, MCP, install/remove/reload | OpenClaude, OpenCode | Implemented for trusted local plugins; trust/install/remove/manual hook calls require user approval, and one-shot hooks are success-only and session-scoped |
 | MCP | stdio/HTTP/SSE, timeout, pagination, resources, auth handoff, schema normalization, list-change refresh, safe reconnect | Cline, OpenCode | Implemented; dropped transports reconnect without replaying a possibly mutating call |
 | Code intelligence | Tree-sitter symbols, incremental tracking, optional embeddings/Qdrant, LSP in VS Code | Roo, Kilo | Implemented; semantic index is optional and the agent works without it |
 | Checkpoints | Shadow Git, task/workspace restore, diffs, CLI and VS Code surfaces | Cline, Roo | Implemented |
 | Terminal | Foreground/background tasks, output/stop lifecycle, integrated VS Code terminal, cancellation | Codex, Cline | Implemented |
 | Providers | Anthropic, OpenAI-compatible, OpenAI, Google, Azure, Bedrock and compatible gateways | Kilo, OpenCode | Implemented with compatibility tests for the AI SDK generation in this repository |
 | Browser | Web search/fetch built in; interactive browser only through a present plugin or MCP tool | Cline | Intentionally external; prompt no longer claims a nonexistent built-in browser |
-| Surface parity | Shared core in CLI, server, and VS Code; host-specific capability adapters | Codex app server, Cline SDK | Substantial parity; deep real-VS-Code E2E coverage is still weaker than Cline |
+| Surface parity | Shared core in CLI, server, and VS Code; host-specific capability adapters | Codex app server, Cline SDK | Substantial parity; VS Code secrets use SecretStorage and the extension is disabled for untrusted workspaces; deep real-host E2E coverage is still weaker than Cline |
 
 ## What Nexus took from each implementation
 
@@ -60,6 +60,7 @@ Nexus differs by using portable JSONL and atomic/checksummed journals instead of
 - Hooks around prompts, tools, turns, task completion, and subagent lifecycle.
 - Task/subagent/team/inbox orchestration, snapshots, resume, remote state, and background work.
 - Plugin-provided agents, skills, commands, hooks, and MCP declarations.
+- Success-only one-shot hook lifecycle, scoped to the owning session rather than process-global state.
 
 Nexus keeps these contracts provider-neutral and places them behind one tool policy. Plugin code is not trusted merely because it exists in the project.
 
@@ -101,6 +102,8 @@ Nexus adopted the lifecycle and UX lessons, but did not pretend WebFetch was equ
 
 The server now persists the user turn before provider/tool side effects and atomically grants only one request ownership of a `clientRunId`, closing a crash-loss and double-execution bug.
 
+The shared approval coordinator also treats the approval event and user dialog as one serialized operation. Parallel subagents can no longer overwrite a CLI/webview resolver or attach a response to the wrong privileged action.
+
 ### Claw Code
 
 - Scoped, expiring, replay-resistant approval-token concepts.
@@ -141,7 +144,7 @@ These are not hidden behind marketing language:
 6. **Host-level E2E depth.** Core/server/CLI/VS Code unit and integration tests now exist, but Cline still has broader real-host UI coverage.
 7. **Multi-root IDE semantics.** Indexing supports multiple projects, but every host workflow is not yet proven against complex VS Code multi-root workspaces.
 
-The first two are the highest-value next architectural milestone. Browser bundling and SQLite are not prerequisites for reliable coding behavior.
+The first two are the highest-value next architectural milestone. They require a real platform process broker/isolated plugin runner rather than another application-level flag. Browser bundling and SQLite are not prerequisites for reliable coding behavior.
 
 ## Why the resulting Nexus architecture is distinct
 

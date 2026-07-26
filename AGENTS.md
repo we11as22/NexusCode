@@ -5,13 +5,13 @@ This file provides guidance to agents when working with the NexusCode repository
 ## Project layout
 
 - **packages/core** — Provider-agnostic agent engine: session, agent loop, tools, indexer, MCP client, checkpoints. No VS Code or CLI dependencies.
-- **packages/cli** — Terminal UI (Ink/React), runs the same core agent loop with a CLI host. Events (streaming, tool calls, approvals) are handled in `App.tsx`.
+- **packages/cli** — Terminal UI (Ink/React), runs the same core agent loop with a CLI host. `src/index.ts` lazily enters `entrypoints/cli.tsx`; `nexus-query.ts` bridges `AgentEvent` into `screens/REPL.tsx` and the message components.
 - **packages/vscode** — VS Code extension: webview provider, host adapter (files, diff, approval dialog, terminal). Webview UI is in `webview-ui/` (React + Zustand). Settings and config are applied via `applyVscodeOverrides()` and `saveConfig` from the webview.
 
 ## Configuration
 
 - Config is loaded from `.nexus/nexus.yaml` (project) and `~/.nexus/nexus.yaml` (global). Env vars (e.g. `NEXUS_API_KEY`, `OPENROUTER_API_KEY`) override. VS Code settings under `nexuscode.*` override when the extension runs.
-- **API keys (secrets)** are never written to YAML. Precedence: env vars → secrets store → config file. Extension uses VS Code Secret Storage (`context.secrets`); CLI uses `~/.nexus/secrets.json` (mode 0o600). Model, embeddings, and **per-profile API keys** are stored in the secrets store; on save, keys are persisted there and stripped before any YAML write (including `writeGlobalProfiles` for global profiles).
+- **API keys (secrets)** are never written to YAML or contributed as plaintext VS Code settings. Precedence: env vars → secrets store → config file. Extension uses VS Code Secret Storage (`context.secrets`) and migrates legacy explicit settings; CLI uses `~/.nexus/secrets.json` (mode 0o600). Model, embeddings, autocomplete, and **per-profile API keys** are stored in the secrets store; webview configuration receives only presence flags and redacted config.
 - **Env substitution** in config files: use `{env:VAR_NAME}` in YAML/JSON values to substitute `process.env.VAR_NAME` at load time (e.g. `apiKey: "{env:OPENROUTER_API_KEY}"` — key still not written on save).
 - **File substitution**: use `{file:path}` to inject file contents at load time; path is relative to the config file or `~/` for home. Useful for keys in a separate file (e.g. `apiKey: "{file:~/.nexus/key.txt}"`).
 - If no config file exists, the extension still gets a default config via `NexusConfigSchema.parse({})` so the Settings UI and agent can run once the user sets an API key in Settings or in the secrets store.
@@ -27,11 +27,11 @@ This file provides guidance to agents when working with the NexusCode repository
 
 ## Indexer
 
-- FTS-only by default. Vector index is used when `indexing.vector` and `vectorDb.enabled` are true and embeddings + Qdrant are available. The factory falls back to FTS-only on missing embeddings or Qdrant. Index status is pushed to the webview via **`indexStatus` only** (one indexer per workspace host; mirroring the same snapshot through deferred `agentEvent` queues caused stale overwrites of `paused` / progress).
+- The base agent does not require SQLite or a full-text database: `Grep`/`Glob`, bounded file reads, Tree-sitter definitions, and VS Code LSP remain available without an index service. `CodebaseSearch` is exposed only when `indexing.vector` and `vectorDb.enabled` are true and embeddings + Qdrant are healthy. Tracker state is portable JSON; index status is pushed to the webview via **`indexStatus` only**.
 
 ## CLI
 
-- Streaming and chat display: `App.tsx` consumes an `AsyncIterable<AgentEvent>`. On `text_delta` it appends to `currentStreaming`; on `done` it appends the final message to `messages`. Scrolling is via `chatScrollLines` (Ctrl+U/D, Ctrl+B/F, PgUp/PgDown). `buildChatLines()` builds the visible lines from `messages`, `liveTools`, `subAgents`, `reasoning`, `currentStreaming`, and errors.
+- Streaming and chat display flow through `nexus-query.ts` into the Ink REPL/message components. Interactive approvals use the TUI ref; headless/print mode denies privileged actions unless the explicitly validated dangerous bypass is active.
 
 ## MCP and skills
 
@@ -40,5 +40,7 @@ This file provides guidance to agents when working with the NexusCode repository
 ## Best practices
 
 - When changing agent loop or host behavior, ensure both CLI and extension hosts are updated (approval dialog, runCommand, emit events).
-- When adding new `AgentEvent` types, add handling in both `packages/vscode/webview-ui/src/stores/chat.ts` and `packages/cli/src/tui/App.tsx`.
+- When adding new `AgentEvent` types, update `packages/vscode/webview-ui/src/stores/chat.ts`, `packages/cli/src/nexus-query.ts`, and the relevant Ink REPL/message projection.
 - Avoid memory leaks: indexer and MCP client are disposed in the provider’s `dispose()`; session is not kept in a global.
+- Never emit an approval event separately from its dialog. Use the shared approval coordinator so root and concurrent delegated agents cannot overwrite host approval state.
+- Privileged plugin mutations must keep `requiresApproval: true`; trusted automatic hooks are the only hook path allowed to execute without a per-call dialog.
