@@ -2768,21 +2768,31 @@ Return in this format:
       if (this.mcpClient && allowedMcpServers.size > 0) {
         for (const tool of this.mcpClient.getTools()) {
           const serverName = tool.name.split("__", 1)[0] ?? ""
-          if (allowedMcpServers.has(serverName)) toolRegistry.register(tool)
+          if (allowedMcpServers.has(serverName)) {
+            toolRegistry.registerDynamicOrThrow(tool, "MCP")
+          }
         }
       }
       const parallelManager = new ParallelAgentManager()
       setParallelAgentManager(parallelManager)
-      toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
-      toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
-      toolRegistry.register(createSpawnAgentStopTool(parallelManager))
-      toolRegistry.register(createSpawnAgentsParallelTool(parallelManager, configForRun))
-      toolRegistry.register(createListAgentRunsTool(parallelManager))
-      toolRegistry.register(createAgentRunSnapshotTool(parallelManager))
-      toolRegistry.register(createResumeAgentTool(parallelManager, configForRun))
-      toolRegistry.register(createTaskCreateBatchTool(parallelManager, configForRun))
-      toolRegistry.register(createTaskSnapshotTool(parallelManager))
-      toolRegistry.register(createTaskResumeTool(parallelManager, configForRun))
+      for (const tool of [
+        createSpawnAgentTool(parallelManager, configForRun),
+        createSpawnAgentOutputTool(parallelManager),
+        createSpawnAgentStopTool(parallelManager),
+        createSpawnAgentsParallelTool(parallelManager, configForRun),
+        createListAgentRunsTool(parallelManager),
+        createAgentRunSnapshotTool(parallelManager),
+        createResumeAgentTool(parallelManager, configForRun),
+      ]) {
+        toolRegistry.registerDynamicOrThrow(tool, "manager compatibility")
+      }
+      for (const tool of [
+        createTaskCreateBatchTool(parallelManager, configForRun),
+        createTaskSnapshotTool(parallelManager),
+        createTaskResumeTool(parallelManager, configForRun),
+      ]) {
+        toolRegistry.registerBoundBuiltinOrThrow(tool)
+      }
       const { builtin, dynamic } = toolRegistry.getForMode(runMode)
       const allTools = toolRegistry.mergeWithHiddenExecutionTools([...builtin, ...dynamic])
       const compaction = createCompaction()

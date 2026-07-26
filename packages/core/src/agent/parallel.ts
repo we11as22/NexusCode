@@ -580,16 +580,24 @@ export class ParallelAgentManager {
 
     const toolRegistry = new ToolRegistry()
     setParallelAgentManager(this)
-    toolRegistry.register(createSpawnAgentTool(this, taskConfig))
-    toolRegistry.register(createSpawnAgentsAliasTool(this, taskConfig))
-    toolRegistry.register(createSpawnAgentOutputTool(this))
-    toolRegistry.register(createSpawnAgentStopTool(this))
-    toolRegistry.register(createListAgentRunsTool(this))
-    toolRegistry.register(createAgentRunSnapshotTool(this))
-    toolRegistry.register(createResumeAgentTool(this, taskConfig))
-    toolRegistry.register(createTaskCreateBatchTool(this, taskConfig))
-    toolRegistry.register(createTaskSnapshotTool(this))
-    toolRegistry.register(createTaskResumeTool(this, taskConfig))
+    for (const tool of [
+      createSpawnAgentTool(this, taskConfig),
+      createSpawnAgentsAliasTool(this, taskConfig),
+      createSpawnAgentOutputTool(this),
+      createSpawnAgentStopTool(this),
+      createListAgentRunsTool(this),
+      createAgentRunSnapshotTool(this),
+      createResumeAgentTool(this, taskConfig),
+    ]) {
+      toolRegistry.registerDynamicOrThrow(tool, "manager compatibility")
+    }
+    for (const tool of [
+      createTaskCreateBatchTool(this, taskConfig),
+      createTaskSnapshotTool(this),
+      createTaskResumeTool(this, taskConfig),
+    ]) {
+      toolRegistry.registerBoundBuiltinOrThrow(tool)
+    }
     const claudeCompatibility = getClaudeCompatibilityOptions(taskConfig)
     const agentDefinition = agentType
       ? (await loadAgentDefinitions(cwd, claudeCompatibility).catch(() => []))

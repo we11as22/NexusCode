@@ -2,14 +2,22 @@ import { MODES, type ToolDef, Mode, NexusConfig } from "../types.js"
 import { getBuiltinToolsForMode } from "../agent/modes.js"
 import { getAllBuiltinTools } from "./built-in/index.js"
 
+export type RegistrationResult =
+  | { ok: true; replaced: false }
+  | { ok: false; reason: "reserved-name" | "duplicate" }
+
 /**
  * Tool registry — manages built-in, MCP, and custom tools.
- * Built-in tools are never overwritten by MCP/custom registration (same name = keep built-in).
+ * Static, manager-bound, and dynamic tools use separate registration paths so
+ * a reserved name cannot be silently discarded or replaced.
  */
 export class ToolRegistry {
   private tools: Map<string, ToolDef> = new Map()
-  private static readonly BUILTIN_NAMES = new Set([
-    ...getAllBuiltinTools().map((t) => t.name),
+  private static readonly STATIC_BUILTIN_NAMES = new Set(
+    getAllBuiltinTools().map((tool) => tool.name),
+  )
+  private static readonly RESERVED_BUILTIN_NAMES = new Set([
+    ...ToolRegistry.STATIC_BUILTIN_NAMES,
     ...MODES.flatMap((mode) => getBuiltinToolsForMode(mode)),
   ])
 
@@ -19,9 +27,53 @@ export class ToolRegistry {
     }
   }
 
-  register(tool: ToolDef): void {
-    if (ToolRegistry.BUILTIN_NAMES.has(tool.name)) return
+  registerDynamic(tool: ToolDef): RegistrationResult {
+    if (ToolRegistry.RESERVED_BUILTIN_NAMES.has(tool.name)) {
+      return { ok: false, reason: "reserved-name" }
+    }
+    if (this.tools.has(tool.name)) {
+      return { ok: false, reason: "duplicate" }
+    }
     this.tools.set(tool.name, tool)
+    return { ok: true, replaced: false }
+  }
+
+  registerBoundBuiltin(tool: ToolDef): RegistrationResult {
+    if (
+      !ToolRegistry.RESERVED_BUILTIN_NAMES.has(tool.name) ||
+      ToolRegistry.STATIC_BUILTIN_NAMES.has(tool.name)
+    ) {
+      return {
+        ok: false,
+        reason: this.tools.has(tool.name) ? "duplicate" : "reserved-name",
+      }
+    }
+    if (this.tools.has(tool.name)) {
+      return { ok: false, reason: "duplicate" }
+    }
+    this.tools.set(tool.name, tool)
+    return { ok: true, replaced: false }
+  }
+
+  registerDynamicOrThrow(tool: ToolDef, source = "dynamic"): void {
+    this.throwOnRegistrationFailure(
+      tool,
+      source,
+      this.registerDynamic(tool),
+    )
+  }
+
+  registerBoundBuiltinOrThrow(tool: ToolDef, source = "bound built-in"): void {
+    this.throwOnRegistrationFailure(
+      tool,
+      source,
+      this.registerBoundBuiltin(tool),
+    )
+  }
+
+  /** @deprecated Use registerDynamic or registerBoundBuiltin explicitly. */
+  register(tool: ToolDef): RegistrationResult {
+    return this.registerDynamic(tool)
   }
 
   getAll(): ToolDef[] {
@@ -92,16 +144,34 @@ export class ToolRegistry {
           const exported = mod.default ?? mod
           if (Array.isArray(exported)) {
             for (const tool of exported) {
-              if (isToolDef(tool)) this.register(tool)
+              if (isToolDef(tool)) this.warnOnRegistrationFailure(tool, this.registerDynamic(tool))
             }
           } else if (isToolDef(exported)) {
-            this.register(exported)
+            this.warnOnRegistrationFailure(exported, this.registerDynamic(exported))
           }
         } catch (err) {
           console.warn(`[nexus] Failed to load custom tool ${file}:`, err)
         }
       }
     } catch {}
+  }
+
+  private warnOnRegistrationFailure(tool: ToolDef, result: RegistrationResult): void {
+    if (result.ok) return
+    console.warn(
+      `[nexus] Custom tool "${tool.name}" was not registered (${result.reason}).`,
+    )
+  }
+
+  private throwOnRegistrationFailure(
+    tool: ToolDef,
+    source: string,
+    result: RegistrationResult,
+  ): void {
+    if (result.ok) return
+    throw new Error(
+      `[nexus] Failed to register ${source} tool "${tool.name}": ${result.reason}`,
+    )
   }
 }
 

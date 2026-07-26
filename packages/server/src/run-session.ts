@@ -119,22 +119,32 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   const skills = rulesAndSkillsResult.type === "ok" ? rulesAndSkillsResult.skills : []
   mcpClient = mcpResult ?? undefined
   if (mcpClient) {
-    for (const tool of mcpClient.getTools()) toolRegistry.register(tool)
+    for (const tool of mcpClient.getTools()) {
+      toolRegistry.registerDynamicOrThrow(tool, "MCP")
+    }
   }
 
   const parallelManager = new ParallelAgentManager()
   setParallelAgentManager(parallelManager)
-  toolRegistry.register(createSpawnAgentTool(parallelManager, configForRun))
-  toolRegistry.register(createSpawnAgentsAliasTool(parallelManager, configForRun))
-  toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
-  toolRegistry.register(createSpawnAgentStopTool(parallelManager))
-  toolRegistry.register(createListAgentRunsTool(parallelManager))
-  toolRegistry.register(createAgentRunSnapshotTool(parallelManager))
-  toolRegistry.register(createResumeAgentTool(parallelManager, configForRun))
-  toolRegistry.register(createTaskCreateBatchTool(parallelManager, configForRun))
-  toolRegistry.register(createTaskSnapshotTool(parallelManager))
-  toolRegistry.register(createTaskResumeTool(parallelManager, configForRun))
-  toolRegistry.register(createSpawnAgentsParallelTool(parallelManager, configForRun))
+  for (const tool of [
+    createSpawnAgentTool(parallelManager, configForRun),
+    createSpawnAgentsAliasTool(parallelManager, configForRun),
+    createSpawnAgentOutputTool(parallelManager),
+    createSpawnAgentStopTool(parallelManager),
+    createListAgentRunsTool(parallelManager),
+    createAgentRunSnapshotTool(parallelManager),
+    createResumeAgentTool(parallelManager, configForRun),
+    createSpawnAgentsParallelTool(parallelManager, configForRun),
+  ]) {
+    toolRegistry.registerDynamicOrThrow(tool, "manager compatibility")
+  }
+  for (const tool of [
+    createTaskCreateBatchTool(parallelManager, configForRun),
+    createTaskSnapshotTool(parallelManager),
+    createTaskResumeTool(parallelManager, configForRun),
+  ]) {
+    toolRegistry.registerBoundBuiltinOrThrow(tool)
+  }
   const { builtin, dynamic } = toolRegistry.getForMode(mode)
   const allTools = toolRegistry.mergeWithHiddenExecutionTools([...builtin, ...dynamic])
   // mode and allTools match; runAgentLoop builds system prompt and tool set from this mode

@@ -292,22 +292,30 @@ export async function bootstrapNexus(opts: {
     const resolved = resolveBundledMcpServers(config.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
     await mcpClient.connectAll(resolved).catch(() => {})
     for (const tool of mcpClient.getTools()) {
-      toolRegistry.register(tool)
+      toolRegistry.registerDynamicOrThrow(tool, "MCP")
     }
   }
 
   const parallelManager = new ParallelAgentManager()
   setParallelAgentManager(parallelManager)
-  toolRegistry.register(createSpawnAgentTool(parallelManager, config))
-  toolRegistry.register(createSpawnAgentsParallelTool(parallelManager, config))
-  toolRegistry.register(createSpawnAgentOutputTool(parallelManager))
-  toolRegistry.register(createSpawnAgentStopTool(parallelManager))
-  toolRegistry.register(createListAgentRunsTool(parallelManager))
-  toolRegistry.register(createAgentRunSnapshotTool(parallelManager))
-  toolRegistry.register(createResumeAgentTool(parallelManager, config))
-  toolRegistry.register(createTaskCreateBatchTool(parallelManager, config))
-  toolRegistry.register(createTaskSnapshotTool(parallelManager))
-  toolRegistry.register(createTaskResumeTool(parallelManager, config))
+  for (const tool of [
+    createSpawnAgentTool(parallelManager, config),
+    createSpawnAgentsParallelTool(parallelManager, config),
+    createSpawnAgentOutputTool(parallelManager),
+    createSpawnAgentStopTool(parallelManager),
+    createListAgentRunsTool(parallelManager),
+    createAgentRunSnapshotTool(parallelManager),
+    createResumeAgentTool(parallelManager, config),
+  ]) {
+    toolRegistry.registerDynamicOrThrow(tool, "manager compatibility")
+  }
+  for (const tool of [
+    createTaskCreateBatchTool(parallelManager, config),
+    createTaskSnapshotTool(parallelManager),
+    createTaskResumeTool(parallelManager, config),
+  ]) {
+    toolRegistry.registerBoundBuiltinOrThrow(tool)
+  }
 
   const claudeCompatibility = getClaudeCompatibilityOptions(config)
   const rulesContent = await loadAgentInstructionBundle(cwd, config.rules.files, config, claudeCompatibility).catch(() => '')

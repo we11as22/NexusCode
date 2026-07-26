@@ -329,7 +329,7 @@ git commit -m "test: add first-party Nexus test harness"
 - Produces: `RegistrationResult = { ok: true; replaced: false } | { ok: false; reason: "reserved-name" | "duplicate" }`
 - Preserves: `register(tool)` as a deprecated adapter that delegates to `registerDynamic`.
 
-- [ ] **Step 1: Write failing bound-tool tests**
+- [x] **Step 1: Write failing bound-tool tests**
 
 ```ts
 it("registers manager-bound built-ins that are declared by modes", () => {
@@ -360,13 +360,13 @@ it("reports duplicate dynamic registration instead of silently replacing it", ()
 })
 ```
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run: `pnpm --filter @nexuscode/core test -- src/tools/__tests__/registry.test.ts`
 
 Expected: FAIL because `registerBoundBuiltin` and `registerDynamic` do not exist.
 
-- [ ] **Step 3: Implement explicit registration**
+- [x] **Step 3: Implement explicit registration**
 
 Split `BUILTIN_NAMES` into:
 
@@ -375,7 +375,7 @@ Split `BUILTIN_NAMES` into:
 
 `registerBoundBuiltin` accepts a reserved name but rejects a name already instantiated. `registerDynamic` rejects every reserved name and every duplicate. Neither method silently replaces anything.
 
-- [ ] **Step 4: Migrate call sites**
+- [x] **Step 4: Migrate call sites**
 
 Use `registerBoundBuiltin` for:
 
@@ -386,11 +386,11 @@ Use `registerBoundBuiltin` for:
 
 Use `registerDynamic` for MCP and third-party tools. Check every result and emit or throw an actionable diagnostic when registration fails.
 
-- [ ] **Step 5: Add a mode-manifest parity test**
+- [x] **Step 5: Add a mode-manifest parity test**
 
 Iterate all modes and assert that every non-compatibility name returned by `getBuiltinToolsForMode(mode)` resolves after a host registers all bound built-ins. The test must explicitly assert that `TaskCreateBatch`, `TaskSnapshot`, and `TaskResume` are present.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 Run:
 
@@ -401,7 +401,7 @@ pnpm --filter @nexuscode/core typecheck
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add packages/core/src/tools/registry.ts packages/core/src/tools/__tests__/registry.test.ts packages/core/src/agent/parallel.ts packages/cli/src/nexus-bootstrap.ts packages/vscode/src/controller.ts packages/server/src/run-session.ts

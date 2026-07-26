@@ -104,7 +104,7 @@ export { loadSlashCommands, renderSlashCommandPrompt } from "./commands/loader.j
 export type { LoadedSlashCommand } from "./commands/loader.js"
 
 // Tools
-export { ToolRegistry } from "./tools/registry.js"
+export { ToolRegistry, type RegistrationResult } from "./tools/registry.js"
 export {
   normalizedAppliedReplacementsFromMetadata,
   type AppliedReplacementSnippet,
