@@ -16,6 +16,7 @@ import {
 } from "../session-fs-store.js"
 import { runSession } from "../run-session.js"
 import {
+  ActiveSessionRunError,
   abortRunBySession,
   appendRunEvent,
   claimRunExecution,
@@ -102,7 +103,7 @@ sessionRoutes.get("/:id/message", async (c) => {
 
 sessionRoutes.post("/:id/abort", async (c) => {
   const id = c.req.param("id")
-  return c.json({ ok: abortRunBySession(id) })
+  return c.json({ ok: abortRunBySession(id, getCwd(c)) })
 })
 
 sessionRoutes.post("/:id/run/:runId/approval", async (c) => {
@@ -191,7 +192,7 @@ sessionRoutes.post("/:id/message", async (c) => {
     ? await getOrRestoreRun(requestedRunId, cwd)
     : clientRunId
       ? getActiveRun(clientRunId) ?? await getOrRestoreRun(clientRunId, cwd)
-      : getLatestRunForSession(id)
+      : getLatestRunForSession(id, cwd)
   const isResume = Boolean(requestedRunId || (clientRunId && activeRun))
   if (isResume && !activeRun) {
     return c.json({ error: "run not found" }, 404)
@@ -212,9 +213,20 @@ sessionRoutes.post("/:id/message", async (c) => {
     activeRun = null
   }
   if (!activeRun) {
-    const created = await createActiveRun(id, cwd, mode, {
-      ...(clientRunId ? { runId: clientRunId } : {}),
-    })
+    let created: Awaited<ReturnType<typeof createActiveRun>>
+    try {
+      created = await createActiveRun(id, cwd, mode, {
+        ...(clientRunId ? { runId: clientRunId } : {}),
+      })
+    } catch (error) {
+      if (error instanceof ActiveSessionRunError) {
+        return c.json({
+          error: "session already has an active run; reconnect with its runId",
+          runId: error.runId,
+        }, 409)
+      }
+      throw error
+    }
     activeRun = {
       id: created.id,
       sessionId: id,

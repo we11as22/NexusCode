@@ -3,12 +3,15 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+  ActiveSessionRunError,
+  abortRunBySession,
   appendRunEvent,
   claimRunExecution,
   createActiveRun,
   evictFinishedRun,
   finishRun,
   getBufferedRunEvents,
+  getLatestRunForSession,
   getOrRestoreRun,
   replayAndSubscribeToRun,
   resolveRunApproval,
@@ -22,6 +25,58 @@ afterEach(async () => {
 })
 
 describe("durable active runs", () => {
+  it("scopes active session ownership to the workspace", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-active-run-"))
+    roots.push(root)
+    const firstCwd = path.join(root, "workspace-a")
+    const secondCwd = path.join(root, "workspace-b")
+    const homeDir = path.join(root, ".nexus")
+    await Promise.all([mkdir(firstCwd), mkdir(secondCwd)])
+
+    const first = await createActiveRun("shared-session", firstCwd, "agent", {
+      homeDir,
+      runId: "run_workspace_a",
+    })
+    const second = await createActiveRun("shared-session", secondCwd, "agent", {
+      homeDir,
+      runId: "run_workspace_b",
+    })
+
+    expect(getLatestRunForSession("shared-session", firstCwd)?.id).toBe(first.id)
+    expect(getLatestRunForSession("shared-session", secondCwd)?.id).toBe(second.id)
+    expect(abortRunBySession("shared-session", firstCwd)).toBe(true)
+    expect(first.abortController.signal.aborted).toBe(true)
+    expect(second.abortController.signal.aborted).toBe(false)
+
+    await finishRun(first.id, "aborted")
+    await finishRun(second.id)
+  })
+
+  it("atomically rejects two different active runs for one workspace session", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-active-run-"))
+    roots.push(root)
+    const cwd = path.join(root, "workspace")
+    const homeDir = path.join(root, ".nexus")
+    await mkdir(cwd)
+
+    const firstPromise = createActiveRun("busy-session", cwd, "agent", {
+      homeDir,
+      runId: "run_first",
+    })
+    const secondPromise = createActiveRun("busy-session", cwd, "agent", {
+      homeDir,
+      runId: "run_second",
+    })
+    const rejected = expect(secondPromise).rejects.toMatchObject({
+      name: ActiveSessionRunError.name,
+      runId: "run_first",
+    })
+
+    const first = await firstPromise
+    await rejected
+    await finishRun(first.id)
+  })
+
   it("coalesces concurrent creation attempts for the same client run id", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "nexus-active-run-"))
     roots.push(root)

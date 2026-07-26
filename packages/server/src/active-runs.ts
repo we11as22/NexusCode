@@ -1,4 +1,6 @@
 import * as crypto from "node:crypto"
+import * as fs from "node:fs"
+import * as path from "node:path"
 import {
   DurableRunEventSink,
   RunEventStore,
@@ -44,17 +46,50 @@ const runCreations = new Map<
   string,
   Promise<{ id: string; abortController: AbortController }>
 >()
+const sessionRunCreations = new Map<
+  string,
+  {
+    runId: string
+    promise: Promise<{ id: string; abortController: AbortController }>
+  }
+>()
 
 const RUN_BUFFER_LIMIT = 1500
 const FINISHED_RUN_TTL_MS = 5 * 60_000
+
+function sessionRunKey(sessionId: string, cwd: string): string {
+  return `${canonicalRunCwd(cwd)}\0${sessionId}`
+}
+
+function canonicalRunCwd(cwd: string): string {
+  const resolved = path.resolve(cwd)
+  try {
+    return fs.realpathSync.native(resolved)
+  } catch {
+    return resolved
+  }
+}
+
+export class ActiveSessionRunError extends Error {
+  override readonly name = "ActiveSessionRunError"
+
+  constructor(
+    readonly sessionId: string,
+    readonly cwd: string,
+    readonly runId: string,
+  ) {
+    super(`Session already has an active run: ${runId}`)
+  }
+}
 
 function scheduleCleanup(runId: string): void {
   setTimeout(() => {
     const existing = activeRuns.get(runId)
     if (!existing || !existing.done) return
     activeRuns.delete(runId)
-    if (latestRunBySession.get(existing.sessionId) === runId) {
-      latestRunBySession.delete(existing.sessionId)
+    const key = sessionRunKey(existing.sessionId, existing.cwd)
+    if (latestRunBySession.get(key) === runId) {
+      latestRunBySession.delete(key)
     }
   }, FINISHED_RUN_TTL_MS).unref?.()
 }
@@ -65,23 +100,39 @@ export async function createActiveRun(
   mode: Mode,
   options: { homeDir?: string; runId?: string } = {},
 ): Promise<{ id: string; abortController: AbortController }> {
+  const canonicalCwd = canonicalRunCwd(cwd)
   const id = options.runId ??
     `run_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`
   const existing = activeRuns.get(id)
   if (existing) {
-    if (existing.sessionId !== sessionId || existing.cwd !== cwd) {
+    if (existing.sessionId !== sessionId || existing.cwd !== canonicalCwd) {
       throw new Error(`Run id already belongs to another session: ${id}`)
     }
     return { id, abortController: existing.abortController }
   }
   const pending = runCreations.get(id)
   if (pending) return pending
-  const creation = createActiveRunInternal(id, sessionId, cwd, mode, options)
+  const key = sessionRunKey(sessionId, canonicalCwd)
+  const pendingSession = sessionRunCreations.get(key)
+  if (pendingSession) {
+    if (pendingSession.runId === id) return pendingSession.promise
+    throw new ActiveSessionRunError(sessionId, canonicalCwd, pendingSession.runId)
+  }
+  const latestRunId = latestRunBySession.get(key)
+  const latestRun = latestRunId ? activeRuns.get(latestRunId) : undefined
+  if (latestRun && !latestRun.done && latestRun.id !== id) {
+    throw new ActiveSessionRunError(sessionId, canonicalCwd, latestRun.id)
+  }
+  const creation = createActiveRunInternal(id, sessionId, canonicalCwd, mode, options)
   runCreations.set(id, creation)
+  sessionRunCreations.set(key, { runId: id, promise: creation })
   try {
     return await creation
   } finally {
     if (runCreations.get(id) === creation) runCreations.delete(id)
+    if (sessionRunCreations.get(key)?.promise === creation) {
+      sessionRunCreations.delete(key)
+    }
   }
 }
 
@@ -130,7 +181,7 @@ async function createActiveRunInternal(
     pendingApprovals: new Map(),
   }
   activeRuns.set(id, run)
-  latestRunBySession.set(sessionId, id)
+  latestRunBySession.set(sessionRunKey(sessionId, cwd), id)
   return { id, abortController: run.abortController }
 }
 
@@ -139,11 +190,12 @@ export async function getOrRestoreRun(
   cwd: string,
   options: { homeDir?: string } = {},
 ): Promise<{ id: string; sessionId: string; cwd: string; done: boolean } | null> {
+  const canonicalCwd = canonicalRunCwd(cwd)
   const active = getActiveRun(runId)
-  if (active) return active
-  const store = new RunEventStore(cwd, options)
+  if (active) return active.cwd === canonicalCwd ? active : null
+  const store = new RunEventStore(canonicalCwd, options)
   const durable = await store.getRun(runId)
-  if (!durable || durable.cwd !== cwd) return null
+  if (!durable || canonicalRunCwd(durable.cwd) !== canonicalCwd) return null
   if (durable.status === "running") {
     await store.finishRun(runId, "interrupted")
   }
@@ -167,7 +219,7 @@ export async function getOrRestoreRun(
     pendingApprovals: new Map(),
   }
   activeRuns.set(run.id, run)
-  latestRunBySession.set(run.sessionId, run.id)
+  latestRunBySession.set(sessionRunKey(run.sessionId, run.cwd), run.id)
   scheduleCleanup(run.id)
   return getActiveRun(run.id)
 }
@@ -177,8 +229,9 @@ export function evictFinishedRun(runId: string): boolean {
   const run = activeRuns.get(runId)
   if (!run?.done) return false
   activeRuns.delete(runId)
-  if (latestRunBySession.get(run.sessionId) === runId) {
-    latestRunBySession.delete(run.sessionId)
+  const key = sessionRunKey(run.sessionId, run.cwd)
+  if (latestRunBySession.get(key) === runId) {
+    latestRunBySession.delete(key)
   }
   return true
 }
@@ -202,8 +255,11 @@ export function claimRunExecution(runId: string): boolean {
   return true
 }
 
-export function getLatestRunForSession(sessionId: string): { id: string; sessionId: string; cwd: string; done: boolean } | null {
-  const runId = latestRunBySession.get(sessionId)
+export function getLatestRunForSession(
+  sessionId: string,
+  cwd: string,
+): { id: string; sessionId: string; cwd: string; done: boolean } | null {
+  const runId = latestRunBySession.get(sessionRunKey(sessionId, cwd))
   return runId ? getActiveRun(runId) : null
 }
 
@@ -381,8 +437,8 @@ export async function replayAndSubscribeToRun(
   }
 }
 
-export function abortRunBySession(sessionId: string): boolean {
-  const runId = latestRunBySession.get(sessionId)
+export function abortRunBySession(sessionId: string, cwd: string): boolean {
+  const runId = latestRunBySession.get(sessionRunKey(sessionId, cwd))
   if (!runId) return false
   const run = activeRuns.get(runId)
   if (!run || run.done) return false
