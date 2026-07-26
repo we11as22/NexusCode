@@ -141,22 +141,24 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
         ])
       : mcpPromise
 
-  const rulesAndSkillsPromise = Promise.all([
-    loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, getClaudeCompatibilityOptions(configForRun)).catch(() => ""),
-    loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, getClaudeCompatibilityOptions(configForRun)).catch(() => []),
-  ]).then(([rulesContent, skills]) => ({ type: "ok" as const, rulesContent, skills }))
-  const rulesAndSkillsWithTimeout = Promise.race([
-    rulesAndSkillsPromise,
+  const compatibility = getClaudeCompatibilityOptions(configForRun)
+  const rulesPromise = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, compatibility)
+  const skillsWithTimeout = Promise.race([
+    loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, compatibility)
+      .then((skills) => ({ type: "ok" as const, skills }))
+      .catch(() => ({ type: "ok" as const, skills: [] })),
     new Promise<{ type: "timeout" }>((r) =>
       setTimeout(() => r({ type: "timeout" }), RULES_SKILLS_LOAD_TIMEOUT_MS)
     ),
   ])
 
-  const [mcpResult, rulesAndSkillsResult] = await Promise.all([mcpWithTimeout, rulesAndSkillsWithTimeout])
+  const [mcpResult, rulesContent, skillsResult] = await Promise.all([
+    mcpWithTimeout,
+    rulesPromise,
+    skillsWithTimeout,
+  ])
 
-  const rulesContent =
-    rulesAndSkillsResult.type === "ok" ? rulesAndSkillsResult.rulesContent : ""
-  const skills = rulesAndSkillsResult.type === "ok" ? rulesAndSkillsResult.skills : []
+  const skills = skillsResult.type === "ok" ? skillsResult.skills : []
   mcpClient = mcpResult ?? undefined
   if (mcpClient) {
     for (const tool of mcpClient.getTools()) {

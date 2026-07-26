@@ -18,6 +18,7 @@ import {
 } from "../types.js"
 import { canonicalProjectRoot } from "../session/storage.js"
 import { atomicWriteFile, atomicWriteJson, withFileLock } from "../storage/durable-fs.js"
+import { normalizeMemoryRecord, redactMemorySecrets } from "../memory/index.js"
 
 type StoredRuntimeState = {
   tasks: TaskRecord[]
@@ -350,7 +351,10 @@ export class OrchestrationRuntime {
     for (const team of state.teams) this.teams.set(team.name, team)
     for (const worktree of state.worktrees) this.worktrees.set(worktree.id, worktree)
     for (const backgroundTask of state.backgroundTasks) this.backgroundTasks.set(backgroundTask.id, backgroundTask)
-    for (const memory of state.memories) this.memories.set(memory.id, memory)
+    for (const memory of state.memories) {
+      const normalized = normalizeMemoryRecord(memory)
+      this.memories.set(normalized.id, normalized)
+    }
     for (const remoteSession of state.remoteSessions) this.remoteSessions.set(remoteSession.id, remoteSession)
     for (const backgroundTask of this.backgroundTasks.values()) {
         if (this.tasks.has(backgroundTask.id)) continue
@@ -1266,19 +1270,38 @@ export class OrchestrationRuntime {
     scope: MemoryRecord["scope"]
     title: string
     content: string
+    kind?: MemoryRecord["kind"]
+    source?: MemoryRecord["source"]
+    author?: MemoryRecord["author"]
+    trust?: MemoryRecord["trust"]
+    confidence?: number
+    expiresAt?: number
+    supersedes?: string[]
+    contradicts?: string[]
     metadata?: Record<string, unknown>
   }): Promise<MemoryRecord> {
     return this.mutate(() => {
       const now = Date.now()
-      const memory: MemoryRecord = {
+      const title = redactMemorySecrets(input.title)
+      const content = redactMemorySecrets(input.content)
+      const memory = normalizeMemoryRecord({
         id: newId("memory"),
         scope: input.scope,
-        title: input.title,
-        content: input.content,
+        title: title.text,
+        content: content.text,
         createdAt: now,
         updatedAt: now,
+        ...(input.kind ? { kind: input.kind } : {}),
+        source: input.source ?? { type: "tool" },
+        author: input.author ?? { type: "agent" },
+        trust: input.trust ?? "agent",
+        confidence: input.confidence ?? 0.7,
+        sensitivity: title.redacted || content.redacted ? "sensitive" : "normal",
+        ...(typeof input.expiresAt === "number" ? { expiresAt: input.expiresAt } : {}),
+        ...(input.supersedes ? { supersedes: input.supersedes } : {}),
+        ...(input.contradicts ? { contradicts: input.contradicts } : {}),
         ...(input.metadata ? { metadata: input.metadata } : {}),
-      }
+      })
       this.memories.set(memory.id, memory)
       return memory
     })
@@ -1319,6 +1342,11 @@ export class OrchestrationRuntime {
   async updateMemory(
     memoryId: string,
     updates: Partial<Pick<MemoryRecord, "title" | "content">> & {
+      kind?: MemoryRecord["kind"]
+      confidence?: number
+      expiresAt?: number | null
+      supersedes?: string[]
+      contradicts?: string[]
       metadata?: Record<string, unknown | null>
     },
   ): Promise<MemoryRecord | null> {
@@ -1330,13 +1358,23 @@ export class OrchestrationRuntime {
         if (value === null) delete nextMetadata[key]
         else nextMetadata[key] = value
       }
-      const next: MemoryRecord = {
-      ...existing,
-      ...(typeof updates.title === "string" ? { title: updates.title } : {}),
-      ...(typeof updates.content === "string" ? { content: updates.content } : {}),
-      ...(updates.metadata ? { metadata: nextMetadata } : {}),
-      updatedAt: Date.now(),
-      }
+      const title = typeof updates.title === "string" ? redactMemorySecrets(updates.title) : null
+      const content = typeof updates.content === "string" ? redactMemorySecrets(updates.content) : null
+      const next = normalizeMemoryRecord({
+        ...existing,
+        ...(title ? { title: title.text } : {}),
+        ...(content ? { content: content.text } : {}),
+        ...(updates.kind ? { kind: updates.kind } : {}),
+        ...(typeof updates.confidence === "number" ? { confidence: updates.confidence } : {}),
+        ...(updates.expiresAt === null ? { expiresAt: undefined } : typeof updates.expiresAt === "number" ? { expiresAt: updates.expiresAt } : {}),
+        ...(updates.supersedes ? { supersedes: updates.supersedes } : {}),
+        ...(updates.contradicts ? { contradicts: updates.contradicts } : {}),
+        ...(updates.metadata ? { metadata: nextMetadata } : {}),
+        sensitivity: existing.sensitivity === "sensitive" || title?.redacted || content?.redacted
+          ? "sensitive"
+          : "normal",
+        updatedAt: Date.now(),
+      })
       this.memories.set(memoryId, next)
       return next
     })
@@ -1346,6 +1384,14 @@ export class OrchestrationRuntime {
     scope: MemoryRecord["scope"]
     title: string
     content: string
+    kind?: MemoryRecord["kind"]
+    source?: MemoryRecord["source"]
+    author?: MemoryRecord["author"]
+    trust?: MemoryRecord["trust"]
+    confidence?: number
+    expiresAt?: number
+    supersedes?: string[]
+    contradicts?: string[]
     metadata?: Record<string, unknown>
   }): Promise<MemoryRecord> {
     return this.mutate(() => {
@@ -1356,25 +1402,48 @@ export class OrchestrationRuntime {
           JSON.stringify(memory.metadata ?? {}) === JSON.stringify(input.metadata ?? {}),
       )
       const now = Date.now()
+      const title = redactMemorySecrets(input.title)
+      const content = redactMemorySecrets(input.content)
       if (!existing) {
-        const created: MemoryRecord = {
+        const created = normalizeMemoryRecord({
           id: newId("memory"),
           scope: input.scope,
-          title: input.title,
-          content: input.content,
+          title: title.text,
+          content: content.text,
           createdAt: now,
           updatedAt: now,
+          ...(input.kind ? { kind: input.kind } : {}),
+          source: input.source ?? { type: "tool" },
+          author: input.author ?? { type: "agent" },
+          trust: input.trust ?? "agent",
+          confidence: input.confidence ?? 0.7,
+          sensitivity: title.redacted || content.redacted ? "sensitive" : "normal",
+          ...(typeof input.expiresAt === "number" ? { expiresAt: input.expiresAt } : {}),
+          ...(input.supersedes ? { supersedes: input.supersedes } : {}),
+          ...(input.contradicts ? { contradicts: input.contradicts } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
-        }
+        })
         this.memories.set(created.id, created)
         return created
       }
-      const updated: MemoryRecord = {
+      const updated = normalizeMemoryRecord({
         ...existing,
-        content: input.content,
+        title: title.text,
+        content: content.text,
+        ...(input.kind ? { kind: input.kind } : {}),
+        ...(input.source ? { source: input.source } : {}),
+        ...(input.author ? { author: input.author } : {}),
+        ...(input.trust ? { trust: input.trust } : {}),
+        ...(typeof input.confidence === "number" ? { confidence: input.confidence } : {}),
+        ...(typeof input.expiresAt === "number" ? { expiresAt: input.expiresAt } : {}),
+        ...(input.supersedes ? { supersedes: input.supersedes } : {}),
+        ...(input.contradicts ? { contradicts: input.contradicts } : {}),
+        sensitivity: existing.sensitivity === "sensitive" || title.redacted || content.redacted
+          ? "sensitive"
+          : "normal",
         updatedAt: now,
         ...(input.metadata ? { metadata: { ...input.metadata } } : {}),
-      }
+      })
       this.memories.set(updated.id, updated)
       return updated
     })

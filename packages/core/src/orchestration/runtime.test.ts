@@ -101,6 +101,51 @@ describe("OrchestrationRuntime durable state", () => {
     ])
   })
 
+  it("upgrades legacy memories and redacts secrets on the next mutation", async () => {
+    const { homeDir, cwd } = await fixture()
+    const runtime = new OrchestrationRuntime(cwd, { homeDir })
+    const statePath = runtime.getStatePath()
+    await mkdir(path.dirname(statePath), { recursive: true })
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        tasks: [],
+        teams: [],
+        worktrees: [],
+        backgroundTasks: [],
+        memories: [{
+          id: "memory_legacy",
+          scope: "project",
+          title: "Legacy convention",
+          content: "Use pnpm",
+          createdAt: 1,
+          updatedAt: 2,
+          metadata: { kind: "compaction.discovery" },
+        }],
+        remoteSessions: [],
+      }),
+      "utf8",
+    )
+
+    expect(await runtime.getMemory("memory_legacy")).toMatchObject({
+      schemaVersion: 2,
+      kind: "fact",
+      trust: "agent",
+      source: { type: "compaction" },
+    })
+    const secret = await runtime.createMemory({
+      scope: "project",
+      title: "Credential",
+      content: "api_key=sk-abcdefghijklmnopqrstuvwxyz123456",
+    })
+    expect(secret.content).toBe("[redacted]")
+    expect(secret.sensitivity).toBe("sensitive")
+
+    const persisted = JSON.parse(await readFile(statePath, "utf8"))
+    expect(persisted.state.memories.find((item: { id: string }) => item.id === "memory_legacy"))
+      .toMatchObject({ schemaVersion: 2 })
+  })
+
   it("recovers a verified journal revision after a torn tail", async () => {
     const { homeDir, cwd } = await fixture()
     const diagnostics: string[] = []

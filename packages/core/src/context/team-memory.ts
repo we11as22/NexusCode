@@ -4,7 +4,6 @@ import * as os from "node:os"
 import { glob } from "glob"
 import { getOrchestrationRuntime } from "../orchestration/runtime.js"
 import type { NexusConfig } from "../types.js"
-import { expandInstructionIncludes } from "./instruction-include.js"
 
 function safeTeamDirSegment(name: string): string {
   return encodeURIComponent(name.trim().slice(0, 120) || "default")
@@ -33,8 +32,7 @@ export async function loadTeamMemoryMarkdown(cwd: string, config: NexusConfig): 
     for (const f of files.sort()) {
       const raw = await fs.readFile(f, "utf8").catch(() => "")
       if (!raw.trim()) continue
-      const expanded = await expandInstructionIncludes(raw, path.dirname(f), new Set())
-      chunks.push(`<!-- team-memory: ${name} / ${path.relative(base, f).replace(/\\/g, "/")} -->\n${expanded}`)
+      chunks.push(`<!-- team-memory (untrusted, includes not expanded): ${name} / ${path.relative(base, f).replace(/\\/g, "/")} -->\n${raw}`)
     }
   }
 

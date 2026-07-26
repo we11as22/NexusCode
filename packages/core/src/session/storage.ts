@@ -33,8 +33,8 @@ function projectHash(cwd: string): string {
   return crypto.createHash("sha1").update(canonicalProjectRoot(cwd)).digest("hex").slice(0, 12)
 }
 
-export function getSessionsDir(cwd: string): string {
-  return path.join(os.homedir(), ".nexus", "sessions", projectHash(cwd))
+export function getSessionsDir(cwd: string, homeDir = path.join(os.homedir(), ".nexus")): string {
+  return path.join(homeDir, "sessions", projectHash(cwd))
 }
 
 export type StoredContextUsage = { usedTokens: number; limitTokens: number; percent: number }

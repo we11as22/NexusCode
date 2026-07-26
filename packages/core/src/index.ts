@@ -46,6 +46,19 @@ export type {
   LspOperation, LspPosition, LspRange, LspLocation, LspSymbolRecord, LspCallRecord, LspQueryRequest, LspQueryResult,
   ModeChangeResult, WorkingDirectoryChangeResult, McpAuthRequest, McpAuthResult,
 } from "./types.js"
+export {
+  MEMORY_SCHEMA_VERSION,
+  normalizeMemoryRecord,
+  redactMemorySecrets,
+  retrieveMemories,
+  tokenizeMemoryText,
+} from "./memory/index.js"
+export type {
+  LegacyMemoryRecord,
+  MemoryRetrievalOptions,
+  MemoryRetrievalResult,
+  RetrievedMemory,
+} from "./memory/index.js"
 
 // Provider
 export { createLLMClient, createEmbeddingClient } from "./provider/index.js"
@@ -215,6 +228,10 @@ export {
 } from "./context/tool-output-registry.js"
 export type { ToolSpillRegistryEntry } from "./context/tool-output-registry.js"
 export { loadTeamMemoryMarkdown } from "./context/team-memory.js"
+export {
+  importLegacyMemoryFiles,
+  type LegacyMemoryImportResult,
+} from "./context/legacy-memory-import.js"
 export { runAutoMemoryDreamIfDue } from "./context/auto-dream.js"
 export { estimateTokens } from "./context/condense.js"
 export {

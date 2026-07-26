@@ -67,14 +67,14 @@
 - Modify: `packages/core/src/session/session-memory.ts`
 - Modify: `packages/core/src/agent/loop.ts`
 
-- [ ] Introduce versioned memory records with scope, kind, provenance, trust, confidence, sensitivity, expiry, access metadata, and contradiction/supersession links.
-- [ ] Import legacy runtime memories and Markdown memory idempotently while retaining source provenance.
-- [ ] Implement Unicode-aware tokenization and deterministic lexical retrieval for Russian and non-Latin text.
-- [ ] Keep vector retrieval optional and merge it with lexical ranking only when healthy.
-- [ ] Enforce prompt budgets, citations, trust boundaries, redaction, deduplication, and contradiction filtering.
-- [ ] Serialize session/project consolidation and make writes atomic.
-- [ ] Test Russian retrieval, poisoning boundaries, expiry, contradictions, migration, budgets, and concurrent consolidation.
-- [ ] Verify core tests/typecheck and commit.
+- [x] Introduce versioned memory records with scope, kind, provenance, trust, confidence, sensitivity, expiry, access metadata, and contradiction/supersession links.
+- [x] Import legacy runtime memories and Markdown memory idempotently while retaining source provenance.
+- [x] Implement Unicode-aware tokenization and deterministic lexical retrieval for Russian and non-Latin text.
+- [x] Keep vector retrieval optional and merge it with lexical ranking only when healthy.
+- [x] Enforce prompt budgets, citations, trust boundaries, redaction, deduplication, and contradiction filtering.
+- [x] Serialize session/project consolidation and make writes atomic.
+- [x] Test Russian retrieval, poisoning boundaries, expiry, contradictions, migration, budgets, and concurrent consolidation.
+- [x] Verify core tests/typecheck and commit.
 
 ## Task 5: Persist run events, approvals, and compaction state
 

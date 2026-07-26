@@ -321,7 +321,7 @@ export async function bootstrapNexus(opts: {
   }
 
   const claudeCompatibility = getClaudeCompatibilityOptions(config)
-  const rulesContent = await loadAgentInstructionBundle(cwd, config.rules.files, config, claudeCompatibility).catch(() => '')
+  const rulesContent = await loadAgentInstructionBundle(cwd, config.rules.files, config, claudeCompatibility)
   const skills = await loadSkills(config.skills, cwd, config.skillsUrls, claudeCompatibility).catch(() => [])
 
   let session: Session

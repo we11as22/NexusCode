@@ -5,7 +5,6 @@ import * as os from "node:os"
 import { glob } from "glob"
 import { canonicalProjectRoot } from "../session/storage.js"
 import type { NexusConfig } from "../types.js"
-import { expandInstructionIncludes } from "./instruction-include.js"
 
 function expandHome(p: string): string {
   const t = p.trim()
@@ -41,9 +40,8 @@ export async function loadAutoMemoryMarkdown(cwd: string, config: NexusConfig): 
   for (const f of files.sort()) {
     const raw = await fs.readFile(f, "utf8").catch(() => "")
     if (!raw.trim()) continue
-    const expanded = await expandInstructionIncludes(raw, path.dirname(f), new Set())
     const rel = path.relative(base, f)
-    chunks.push(`<!-- auto-memory: ${rel.replace(/\\/g, "/")} -->\n${expanded}`)
+    chunks.push(`<!-- auto-memory (untrusted, includes not expanded): ${rel.replace(/\\/g, "/")} -->\n${raw}`)
   }
   return chunks.join("\n\n")
 }

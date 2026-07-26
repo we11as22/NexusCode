@@ -621,7 +621,7 @@ export class ParallelAgentManager {
       tools = tools.filter((tool) => !deny.has(tool.name))
     }
 
-    const rulesContent = await loadAgentInstructionBundle(cwd, taskConfig.rules.files, taskConfig, claudeCompatibility).catch(() => "")
+    const rulesContent = await loadAgentInstructionBundle(cwd, taskConfig.rules.files, taskConfig, claudeCompatibility)
     const skills = await loadSkills(taskConfig.skills, cwd, taskConfig.skillsUrls, claudeCompatibility).catch(() => [])
     const compaction = createCompaction()
 

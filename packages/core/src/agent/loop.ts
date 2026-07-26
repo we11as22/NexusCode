@@ -70,6 +70,7 @@ import {
 import { spillPathFromToolMetadata } from "./tool-spill.js"
 import { getToolOutputSpill } from "../context/tool-output-registry.js"
 import { runAutoMemoryDreamIfDue } from "../context/auto-dream.js"
+import { importLegacyMemoryFiles } from "../context/legacy-memory-import.js"
 import type { NexusRunServices } from "./run-services.js"
 import {
   executeToolPipeline,
@@ -499,6 +500,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   let lastToolName = ""
   let attemptedCompletionThisIteration = false
   let doneEmitted = false
+  await getOrchestrationRuntime(host.cwd)
+    .then((runtime) => importLegacyMemoryFiles({ cwd: host.cwd, config, runtime }))
+    .catch((error) => {
+      console.warn("[nexus] Legacy memory import failed:", error)
+    })
   while (!signal.aborted) {
     loopIterations++
     const toolCallsAtStartOfIteration = executedToolCallsTotal
@@ -1536,9 +1542,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         cwd: host.cwd,
         config,
         signal,
-      }).finally(() => {
-        sessionMemoryRefreshBusy = false
       })
+        .catch((error) => {
+          if (!signal.aborted) console.warn("[nexus] Session memory refresh failed:", error)
+        })
+        .finally(() => {
+          sessionMemoryRefreshBusy = false
+        })
     }
   }
 

@@ -534,11 +534,39 @@ export interface DeferredToolDef {
 
 export interface MemoryRecord {
   id: string
-  scope: "session" | "project" | "team"
+  schemaVersion: 2
+  scope: "global" | "project" | "session" | "team" | "task" | "agent"
+  kind:
+    | "fact"
+    | "preference"
+    | "command"
+    | "architecture"
+    | "decision"
+    | "instruction"
+    | "summary"
+    | "artifact_reference"
   title: string
   content: string
+  source: {
+    type: "user" | "tool" | "compaction" | "legacy_file" | "system" | "external"
+    uri?: string
+    sessionId?: string
+    importedAt?: number
+  }
+  author: {
+    type: "user" | "agent" | "system" | "external"
+    id?: string
+  }
+  trust: "user" | "trusted" | "agent" | "external" | "untrusted"
+  confidence: number
+  sensitivity: "normal" | "sensitive"
   createdAt: number
   updatedAt: number
+  accessedAt: number
+  accessCount: number
+  expiresAt?: number
+  supersedes?: string[]
+  contradicts?: string[]
   metadata?: Record<string, unknown>
 }
 

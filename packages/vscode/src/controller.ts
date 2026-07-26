@@ -2786,16 +2786,16 @@ Return in this format:
           ])
         : Promise.resolve()
       const claudeCompatibility = getClaudeCompatibilityOptions(configForRun)
-      const rulesP = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, claudeCompatibility).catch(() => "")
-      const skillsP = loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, claudeCompatibility).catch(() => [])
+      const rulesP = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, claudeCompatibility)
+      const skillsP = loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, claudeCompatibility)
+        .catch(() => [])
       const RULES_SKILLS_TIMEOUT_MS = 2000
-      const rulesAndSkillsP = Promise.race([
-        Promise.all([rulesP, skillsP]).then(([rulesContent, skills]) => ({ type: "ok" as const, rulesContent, skills })),
+      const skillsWithTimeout = Promise.race([
+        skillsP.then((skills) => ({ type: "ok" as const, skills })),
         new Promise<{ type: "timeout" }>((r) => setTimeout(() => r({ type: "timeout" }), RULES_SKILLS_TIMEOUT_MS)),
       ])
-      const [, rulesAndSkillsResult] = await Promise.all([mcpP, rulesAndSkillsP])
-      const rulesContent = rulesAndSkillsResult.type === "ok" ? rulesAndSkillsResult.rulesContent : ""
-      const skills = rulesAndSkillsResult.type === "ok" ? rulesAndSkillsResult.skills : []
+      const [, rulesContent, skillsResult] = await Promise.all([mcpP, rulesP, skillsWithTimeout])
+      const skills = skillsResult.type === "ok" ? skillsResult.skills : []
 
       const client = createLLMClient(configForRun.model)
       const toolRegistry = new ToolRegistry()

@@ -83,6 +83,7 @@ async function loadUserGlobalBlock(compatibility?: ClaudeCompatibilityOptions): 
 async function collectFilesForDir(
   dir: string,
   cwd: string,
+  authorityRoot: string,
   topLevelFiles: string[],
   compatibility?: ClaudeCompatibilityOptions,
 ): Promise<string[]> {
@@ -95,7 +96,7 @@ async function collectFilesForDir(
     const content = await readFileSafe(candidate)
     if (!content) continue
     seen.add(candidate)
-    const expanded = await expandInstructionIncludes(content, path.dirname(candidate), new Set())
+    const expanded = await expandInstructionIncludes(content, path.dirname(candidate), new Set(), 0, authorityRoot)
     const rel = path.relative(cwd, candidate)
     parts.push(`<!-- ${rel} -->\n${expanded}`)
   }
@@ -106,7 +107,7 @@ async function collectFilesForDir(
     const content = await readFileSafe(candidate)
     if (!content) continue
     seen.add(candidate)
-    const expanded = await expandInstructionIncludes(content, path.dirname(candidate), new Set())
+    const expanded = await expandInstructionIncludes(content, path.dirname(candidate), new Set(), 0, authorityRoot)
     const rel = path.relative(cwd, candidate)
     parts.push(`<!-- ${rel} -->\n${expanded}`)
   }
@@ -118,7 +119,7 @@ async function collectFilesForDir(
     const content = await readFileSafe(match)
     if (!content) continue
     seen.add(match)
-    const expanded = await expandInstructionIncludes(content, path.dirname(match), new Set())
+    const expanded = await expandInstructionIncludes(content, path.dirname(match), new Set(), 0, authorityRoot)
     const rel = path.relative(cwd, match)
     parts.push(`<!-- ${rel} -->\n${expanded}`)
   }
@@ -129,7 +130,7 @@ async function collectFilesForDir(
       const c = await readFileSafe(claudeMd)
       if (c) {
         seen.add(claudeMd)
-        const expanded = await expandInstructionIncludes(c, path.dirname(claudeMd), new Set())
+        const expanded = await expandInstructionIncludes(c, path.dirname(claudeMd), new Set(), 0, authorityRoot)
         parts.push(`<!-- ${path.relative(cwd, claudeMd)} -->\n${expanded}`)
       }
     }
@@ -140,7 +141,7 @@ async function collectFilesForDir(
       const content = await readFileSafe(match)
       if (!content) continue
       seen.add(match)
-      const expanded = await expandInstructionIncludes(content, path.dirname(match), new Set())
+      const expanded = await expandInstructionIncludes(content, path.dirname(match), new Set(), 0, authorityRoot)
       const rel = path.relative(cwd, match)
       parts.push(`<!-- Claude rules: ${rel} -->\n${expanded}`)
     }
@@ -149,8 +150,24 @@ async function collectFilesForDir(
   return parts
 }
 
+async function findProjectInstructionBoundary(cwd: string): Promise<string> {
+  let current = path.resolve(cwd)
+  for (let depth = 0; depth < 24; depth += 1) {
+    try {
+      await fs.stat(path.join(current, ".git"))
+      return current
+    } catch {
+      const parent = path.dirname(current)
+      if (parent === current) break
+      current = parent
+    }
+  }
+  return path.resolve(cwd)
+}
+
 export async function loadRules(cwd: string, rulePatterns: string[], compatibility?: ClaudeCompatibilityOptions): Promise<string> {
   const resolvedCwd = path.resolve(cwd)
+  const projectBoundary = await findProjectInstructionBoundary(resolvedCwd)
   const contents: string[] = []
 
   const managed = await loadManagedBlock()
@@ -171,6 +188,7 @@ export async function loadRules(cwd: string, rulePatterns: string[], compatibili
   let maxUp = 24
   while (maxUp-- > 0) {
     chain.push(dir)
+    if (dir === projectBoundary) break
     const parent = path.dirname(dir)
     if (parent === dir) break
     dir = parent
@@ -178,7 +196,7 @@ export async function loadRules(cwd: string, rulePatterns: string[], compatibili
   chain.reverse()
 
   for (const d of chain) {
-    const layer = await collectFilesForDir(d, resolvedCwd, topLevelFiles, compatibility)
+    const layer = await collectFilesForDir(d, resolvedCwd, projectBoundary, topLevelFiles, compatibility)
     if (layer.length > 0) {
       contents.push(layer.join("\n\n"))
     }

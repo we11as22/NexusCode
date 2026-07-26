@@ -4,6 +4,11 @@ interface ExtractedMemoryInput {
   scope: MemoryRecord["scope"]
   title: string
   content: string
+  kind?: MemoryRecord["kind"]
+  source?: MemoryRecord["source"]
+  author?: MemoryRecord["author"]
+  trust?: MemoryRecord["trust"]
+  confidence?: number
   metadata?: Record<string, unknown>
 }
 
@@ -59,8 +64,13 @@ export function extractMemoriesFromCompactionSummary(
   if (durable) {
     extracted.push({
       scope: "project",
+      kind: "preference",
       title: "Project instructions and preferences",
       content: cap(toBulletLines(durable).join("\n")),
+      source: { type: "compaction", sessionId },
+      author: { type: "agent" },
+      trust: "agent",
+      confidence: 0.6,
       metadata: { kind: "compaction.instructions" },
     })
   }
@@ -70,8 +80,13 @@ export function extractMemoriesFromCompactionSummary(
     for (const line of toBulletLines(discoveries).slice(0, 4)) {
       extracted.push({
         scope: "project",
+        kind: "fact",
         title: line.slice(0, 72),
         content: cap(line, 400),
+        source: { type: "compaction", sessionId },
+        author: { type: "agent" },
+        trust: "agent",
+        confidence: 0.6,
         metadata: { kind: "compaction.discovery" },
       })
     }
@@ -82,8 +97,13 @@ export function extractMemoriesFromCompactionSummary(
     for (const line of toBulletLines(stableFacts).slice(0, 5)) {
       extracted.push({
         scope: "project",
+        kind: line.toLowerCase().includes("command") ? "command" : "fact",
         title: line.slice(0, 72),
         content: cap(line, 420),
+        source: { type: "compaction", sessionId },
+        author: { type: "agent" },
+        trust: "agent",
+        confidence: 0.65,
         metadata: { kind: "compaction.stable_fact" },
       })
     }
@@ -93,8 +113,13 @@ export function extractMemoriesFromCompactionSummary(
   if (pending) {
     extracted.push({
       scope: "session",
+      kind: "summary",
       title: "Pending work",
       content: cap(toBulletLines(pending).join("\n")),
+      source: { type: "compaction", sessionId },
+      author: { type: "agent" },
+      trust: "agent",
+      confidence: 0.7,
       metadata: { kind: "compaction.pending", sessionId },
     })
   }
@@ -103,8 +128,13 @@ export function extractMemoriesFromCompactionSummary(
   if (current) {
     extracted.push({
       scope: "session",
+      kind: "summary",
       title: "Current work",
       content: cap(toBulletLines(current).join("\n")),
+      source: { type: "compaction", sessionId },
+      author: { type: "agent" },
+      trust: "agent",
+      confidence: 0.7,
       metadata: { kind: "compaction.current", sessionId },
     })
   }
@@ -113,8 +143,13 @@ export function extractMemoriesFromCompactionSummary(
   if (next) {
     extracted.push({
       scope: "session",
+      kind: "summary",
       title: "Immediate next step",
       content: cap(toBulletLines(next).join("\n") || next),
+      source: { type: "compaction", sessionId },
+      author: { type: "agent" },
+      trust: "agent",
+      confidence: 0.7,
       metadata: { kind: "compaction.next_step", sessionId },
     })
   }
@@ -123,8 +158,13 @@ export function extractMemoriesFromCompactionSummary(
   if (delegation) {
     extracted.push({
       scope: "session",
+      kind: "summary",
       title: "Delegation and background state",
       content: cap(toBulletLines(delegation).join("\n") || delegation),
+      source: { type: "compaction", sessionId },
+      author: { type: "agent" },
+      trust: "agent",
+      confidence: 0.7,
       metadata: { kind: "compaction.delegation", sessionId },
     })
   }

@@ -31,16 +31,27 @@ function resolveIncludeSpec(spec: string, baseDir: string): string | null {
   return path.resolve(baseDir, s)
 }
 
+function isWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate)
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+}
+
+type IncludeBudget = { chars: number }
+
 /**
  * Expand `@relative-or-absolute` lines (OpenClaude @include parity).
+ * Includes retain the authority boundary of the original instruction file:
+ * recursive traversal, absolute paths, and symlinks cannot escape `baseDir`.
  */
 export async function expandInstructionIncludes(
   content: string,
   baseDir: string,
   seen: Set<string>,
   depth = 0,
+  authorityRoot = path.resolve(baseDir),
+  budget: IncludeBudget = { chars: 0 },
 ): Promise<string> {
-  if (depth > MAX_INCLUDE_DEPTH) return content
+  if (depth > MAX_INCLUDE_DEPTH) return "[nexus] include depth limit reached"
 
   const lines = content.split("\n")
   const out: string[] = []
@@ -65,12 +76,36 @@ export async function expandInstructionIncludes(
     }
 
     const abs = resolveIncludeSpec(m[1]!, baseDir)
-    if (!abs || seen.has(abs)) continue
-    seen.add(abs)
-    const raw = await readInstructionFileRaw(abs)
+    if (!abs) continue
+    const real = await fs.realpath(abs).catch(() => null)
+    const realRoot = await fs.realpath(authorityRoot).catch(() => path.resolve(authorityRoot))
+    if (!real || !isWithin(realRoot, real)) {
+      out.push(`[nexus] blocked include outside approved root: ${m[1]}`)
+      continue
+    }
+    if (seen.has(real)) {
+      out.push(`[nexus] skipped cyclic include: ${m[1]}`)
+      continue
+    }
+    seen.add(real)
+    const raw = await readInstructionFileRaw(real)
     if (!raw) continue
-    const expanded = await expandInstructionIncludes(raw, path.dirname(abs), seen, depth + 1)
-    out.push(`<!-- included: ${m[1]} → ${abs} -->\n${expanded}`)
+    const remaining = MAX_INSTRUCTION_FILE_CHARS * 4 - budget.chars
+    if (remaining <= 0) {
+      out.push("[nexus] include budget exhausted")
+      continue
+    }
+    const bounded = raw.slice(0, remaining)
+    budget.chars += bounded.length
+    const expanded = await expandInstructionIncludes(
+      bounded,
+      path.dirname(real),
+      seen,
+      depth + 1,
+      realRoot,
+      budget,
+    )
+    out.push(`<!-- included: ${m[1]} → ${real} -->\n${expanded}`)
   }
 
   return out.join("\n")
