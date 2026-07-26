@@ -4,6 +4,7 @@ import * as diff from "diff"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { buildDiffHunks } from "./diff-hunks.js"
 import { isNexusPlansPath } from "../plan-paths.js"
+import { requestHostApproval } from "../../agent/approval-coordinator.js"
 
 const MAX_DIFF_PREVIEW_LINES = 80
 
@@ -98,26 +99,14 @@ WARNING: Write replaces the entire file. Provide complete final content, not a p
         isNewFile,
       })
       if (!skipApproval) {
-        ctx.host.emit({
-          type: "tool_approval_needed",
-          action: {
-            type: "write",
-            tool: "Write",
-            description: `Write to ${filePath}`,
-            content,
-            diff: diffPreview,
-            diffStats,
-          },
-          partId: ctx.partId ?? "",
-        })
-        const approval = await ctx.host.showApprovalDialog({
+        const approval = await requestHostApproval(ctx.host, {
           type: "write",
           tool: "Write",
           description: `Write to ${filePath}`,
           content,
           diff: diffPreview,
           diffStats,
-        })
+        }, ctx.partId ?? "")
         if (!approval.approved) {
           await ctx.host.revertFileEdit!(filePath)
           return { success: false, output: `User denied write to ${filePath}` }

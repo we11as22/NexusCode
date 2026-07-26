@@ -1,9 +1,11 @@
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
+import { randomUUID } from "node:crypto"
 import type { IHost, NexusConfig, PluginManifestRecord } from "../types.js"
 import { loadPluginManifests, resolvePluginDeclaredPath } from "./index.js"
 import { getClaudeCompatibilityOptions } from "../compat/claude.js"
+import { requestHostApproval } from "../agent/approval-coordinator.js"
 
 export interface PluginHookExecution {
   pluginName: string
@@ -486,7 +488,11 @@ async function runHookDeclarations(
             content: hookPath,
             warning: "Agent-definition hooks execute local code with the host process permissions.",
           }
-          const approval = await host.showApprovalDialog(action)
+          const approval = await requestHostApproval(
+            host,
+            action,
+            `part_agent_hook_${randomUUID()}`,
+          )
           if (!approval.approved) {
             executions.push({
               pluginName: item.name,

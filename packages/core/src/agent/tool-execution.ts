@@ -12,6 +12,7 @@ import type {
   IIndexer,
 } from "../types.js"
 import { PLAN_MODE_ALLOWED_WRITE_PATTERN, PLAN_MODE_BLOCKED_EXTENSIONS, READ_ONLY_TOOLS } from "./modes.js"
+import { requestHostApproval } from "./approval-coordinator.js"
 import { getMessagesForActiveContext } from "../session/active-context.js"
 import { truncateOutput } from "../context/truncate.js"
 import { registerToolOutputSpill } from "../context/tool-output-registry.js"
@@ -999,8 +1000,7 @@ export async function executeValidatedTool(
   if (ruleResult === "ask") {
     const action = buildApprovalAction(toolName, toolInput)
     action.description = `[Permission Rule] ${action.description}`
-    host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` })
-    const approval = await host.showApprovalDialog(action)
+    const approval = await requestHostApproval(host, action, `part_${toolCallId}`)
     if (!approval.approved) {
       return { success: false, output: `User denied ${toolName}` }
     }
@@ -1048,9 +1048,7 @@ export async function executeValidatedTool(
     )
     if (needsApproval) {
       const action = buildApprovalAction(toolName, toolInput)
-      host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` })
-
-      const approval = await host.showApprovalDialog(action)
+      const approval = await requestHostApproval(host, action, `part_${toolCallId}`)
       if (!approval.approved) {
         if (approval.whatToDoInstead?.trim()) {
           session.addMessage({
