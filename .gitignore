@@ -55,6 +55,7 @@ Thumbs.db
 .nexus/agent-configs.json
 
 # Generated / temp
+.worktrees/
 *.log
 coverage/
 .turbo/
