@@ -42,6 +42,7 @@ import {
   loadAgentInstructionBundle,
   McpClient,
   resolveBundledMcpServers,
+  resolveConfiguredAndPluginMcpServers,
   testMcpServers,
   createCompaction,
   ParallelAgentManager,
@@ -1194,7 +1195,13 @@ export class Controller {
   private loadAndSendSkillDefinitions(): void {
     const cwd = this.getCwd()
     const paths = this.config?.skills ?? []
-    loadSkills(paths, cwd, this.config?.skillsUrls, this.config ? getClaudeCompatibilityOptions(this.config) : undefined)
+    loadSkills(
+      paths,
+      cwd,
+      this.config?.skillsUrls,
+      this.config ? getClaudeCompatibilityOptions(this.config) : undefined,
+      this.config,
+    )
       .then((skills) => {
         this.postMessageToWebview({
           type: "skillDefinitions",
@@ -1760,7 +1767,7 @@ export class Controller {
           break
         }
         try {
-          const resolved = this.getResolvedMcpServers()
+          const resolved = await this.getResolvedMcpServers()
           const results = await testMcpServers(resolved)
           this.postMessageToWebview({ type: "mcpServerStatus", results })
         } catch (err) {
@@ -2105,11 +2112,12 @@ export class Controller {
             break
           default: {
             const compat = this.config ? getClaudeCompatibilityOptions(this.config) : undefined
-            const loaded = await loadSlashCommands(cwd, compat)
+            const loaded = await loadSlashCommands(cwd, compat, this.config)
             const resolved =
               loaded.find((item) => item.command === name) ??
               loaded.find((item) => item.command === `project:${name}`) ??
-              loaded.find((item) => item.command === `user:${name}`)
+              loaded.find((item) => item.command === `user:${name}`) ??
+              loaded.find((item) => item.scope === "plugin" && item.command.endsWith(`:${name}`))
             if (resolved) {
               await this.runAgent(renderSlashCommandPrompt(resolved, args), this.mode)
               break
@@ -2304,6 +2312,7 @@ export class Controller {
       cwd,
       this.config?.skillsUrls,
       this.config ? getClaudeCompatibilityOptions(this.config) : undefined,
+      this.config,
     ).catch(() => [])
     const skills = dedupeStringList(skillDefs.map((s) => s.path))
     const fromConfig = (this.config?.mcp?.servers ?? []).map((s) => (s as McpServerConfig).name).filter((n): n is string => Boolean(n?.trim()))
@@ -2799,7 +2808,13 @@ Return in this format:
         : Promise.resolve()
       const claudeCompatibility = getClaudeCompatibilityOptions(configForRun)
       const rulesP = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, claudeCompatibility)
-      const skillsP = loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, claudeCompatibility)
+      const skillsP = loadSkills(
+        configForRun.skills,
+        cwd,
+        configForRun.skillsUrls,
+        claudeCompatibility,
+        configForRun,
+      )
         .catch(() => [])
       const RULES_SKILLS_TIMEOUT_MS = 2000
       const skillsWithTimeout = Promise.race([
@@ -2922,11 +2937,12 @@ Return in this format:
     }
   }
 
-  private getResolvedMcpServers(): McpServerConfig[] {
-    if (!this.config?.mcp.servers.length) return []
+  private async getResolvedMcpServers(): Promise<McpServerConfig[]> {
+    if (!this.config) return []
     const cwd = this.getCwd()
     const nexusRoot = this.getNexusRoot()
-    return resolveBundledMcpServers(this.config.mcp.servers, { cwd, nexusRoot })
+    const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, this.config)
+    return resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot })
   }
 
   private async reconnectMcpServers(): Promise<void> {
@@ -2935,8 +2951,8 @@ Return in this format:
       this.mcpClient = new McpClient()
     }
     await this.mcpClient.disconnectAll().catch(() => {})
-    if (this.config.mcp.servers.length === 0) return
-    const resolved = this.getResolvedMcpServers()
+    const resolved = await this.getResolvedMcpServers()
+    if (resolved.length === 0) return
     process.env.CLAUDE_PROJECT_DIR = this.getCwd()
     await this.mcpClient.connectAll(resolved).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err)
@@ -2945,7 +2961,7 @@ Return in this format:
     const status = this.mcpClient.getStatus()
     this.postMessageToWebview({
       type: "mcpServerStatus",
-      results: this.config.mcp.servers.map((s) => ({
+      results: resolved.map((s) => ({
         name: s.name,
         status: status[s.name] === "connected" ? ("ok" as const) : ("error" as const),
         error: status[s.name] === "connected" ? undefined : "Not connected",

@@ -575,10 +575,17 @@ export interface PluginManifestRecord {
   version?: string
   description: string
   commands: string[]
+  commandEntries?: Array<{
+    name: string
+    source?: string
+    content?: string
+    description?: string
+  }>
   agents: string[]
   skills: string[]
   hooks: string[]
   mcpServers: string[]
+  inlineMcpServers?: Record<string, unknown>
   enabled: boolean
   rootDir: string
   sourcePath: string

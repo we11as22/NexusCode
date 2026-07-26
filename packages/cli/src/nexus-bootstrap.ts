@@ -15,6 +15,7 @@ import {
   loadAgentInstructionBundle,
   McpClient,
   resolveBundledMcpServers,
+  resolveConfiguredAndPluginMcpServers,
   createCompaction,
   ParallelAgentManager,
   createSpawnAgentTool,
@@ -287,9 +288,10 @@ export async function bootstrapNexus(opts: {
   const toolRegistry = new ToolRegistry()
   const mcpClient = new McpClient()
 
-  if (config.mcp.servers.length > 0) {
+  const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, config)
+  if (pluginMcp.servers.length > 0) {
     process.env.CLAUDE_PROJECT_DIR = cwd
-    const resolved = resolveBundledMcpServers(config.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
+    const resolved = resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
     await mcpClient.connectAll(resolved).catch(() => {})
     for (const tool of mcpClient.getTools()) {
       toolRegistry.registerDynamicOrThrow(tool, "MCP")
@@ -322,7 +324,13 @@ export async function bootstrapNexus(opts: {
 
   const claudeCompatibility = getClaudeCompatibilityOptions(config)
   const rulesContent = await loadAgentInstructionBundle(cwd, config.rules.files, config, claudeCompatibility)
-  const skills = await loadSkills(config.skills, cwd, config.skillsUrls, claudeCompatibility).catch(() => [])
+  const skills = await loadSkills(
+    config.skills,
+    cwd,
+    config.skillsUrls,
+    claudeCompatibility,
+    config,
+  ).catch(() => [])
 
   let session: Session
   if (continueFlag) {

@@ -3,8 +3,9 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { glob } from "glob"
 import yaml from "js-yaml"
-import type { AgentDefinition } from "../types.js"
-import { loadPluginManifests, resolvePluginDeclaredPath } from "../plugins/index.js"
+import type { AgentDefinition, NexusConfig } from "../types.js"
+import { resolvePluginDeclaredPath } from "../plugins/index.js"
+import { loadTrustedPluginRuntimeRecords } from "../plugins/runtime.js"
 import type { ClaudeCompatibilityOptions } from "../compat/claude.js"
 
 const BUILTIN_AGENTS: AgentDefinition[] = [
@@ -100,11 +101,28 @@ async function loadOne(filePath: string): Promise<AgentDefinition | null> {
   }
 }
 
-export async function loadAgentDefinitions(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<AgentDefinition[]> {
+export async function loadAgentDefinitions(
+  cwd: string,
+  compatibility?: ClaudeCompatibilityOptions,
+  config?: NexusConfig,
+): Promise<AgentDefinition[]> {
   const homeDir = path.join(os.homedir(), ".nexus", "agents", "**", "*.md")
   const projectDir = path.join(path.resolve(cwd), ".nexus", "agents", "**", "*.md")
-  const pluginAgents = (await loadPluginManifests(cwd, compatibility).catch(() => []))
+  const pluginAgentPaths = (
+    config
+      ? await loadTrustedPluginRuntimeRecords(cwd, config)
+      : []
+  )
     .flatMap((plugin) => plugin.agents.map((agentPath) => resolvePluginDeclaredPath(plugin, agentPath)))
+  const pluginAgents = (
+    await Promise.all(pluginAgentPaths.map(async (agentPath) => {
+      const stats = await fs.stat(agentPath).catch(() => null)
+      if (stats?.isDirectory()) {
+        return glob(path.join(agentPath, "**", "*.md"), { absolute: true })
+      }
+      return stats?.isFile() && agentPath.toLowerCase().endsWith(".md") ? [agentPath] : []
+    }))
+  ).flat()
   const files = [
     ...(compatibility?.includeGlobalDir && compatibility?.includeAgents
       ? (await glob(path.join(os.homedir(), ".claude", "agents", "**", "*.md"), { absolute: true }).catch(() => [] as string[])).map((file) => ({ file, priority: 1 }))

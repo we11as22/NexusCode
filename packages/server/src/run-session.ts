@@ -26,6 +26,7 @@ import {
   createCodebaseIndexer,
   McpClient,
   resolveBundledMcpServers,
+  resolveConfiguredAndPluginMcpServers,
   CheckpointTracker,
   NexusConfigSchema,
   getClaudeCompatibilityOptions,
@@ -119,12 +120,13 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   const toolRegistry = new ToolRegistry()
 
   let mcpClient: McpClient | undefined
+  const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, configForRun)
   const mcpPromise = (async (): Promise<McpClient | undefined> => {
     try {
       const mc = new McpClient()
       await mc.disconnectAll().catch(() => {})
-      if (configForRun.mcp.servers.length > 0) {
-        const resolved = resolveBundledMcpServers(configForRun.mcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
+      if (pluginMcp.servers.length > 0) {
+        const resolved = resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
         process.env.CLAUDE_PROJECT_DIR = cwd
         await mc.connectAll(resolved).catch(() => {})
       }
@@ -134,7 +136,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     }
   })()
   const mcpWithTimeout =
-    configForRun.mcp.servers.length > 0
+    pluginMcp.servers.length > 0
       ? Promise.race([
           mcpPromise,
           new Promise<undefined>((r) => setTimeout(() => r(undefined), MCP_CONNECT_TIMEOUT_MS)),
@@ -144,7 +146,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   const compatibility = getClaudeCompatibilityOptions(configForRun)
   const rulesPromise = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, compatibility)
   const skillsWithTimeout = Promise.race([
-    loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, compatibility)
+    loadSkills(configForRun.skills, cwd, configForRun.skillsUrls, compatibility, configForRun)
       .then((skills) => ({ type: "ok" as const, skills }))
       .catch(() => ({ type: "ok" as const, skills: [] })),
     new Promise<{ type: "timeout" }>((r) =>

@@ -601,7 +601,7 @@ export class ParallelAgentManager {
     }
     const claudeCompatibility = getClaudeCompatibilityOptions(taskConfig)
     const agentDefinition = agentType
-      ? (await loadAgentDefinitions(cwd, claudeCompatibility).catch(() => []))
+      ? (await loadAgentDefinitions(cwd, claudeCompatibility, taskConfig).catch(() => []))
           .find((candidate) => candidate.agentType.toLowerCase() === agentType.toLowerCase())
       : undefined
     if (agentDefinition?.systemPrompt?.trim()) {
@@ -622,7 +622,13 @@ export class ParallelAgentManager {
     }
 
     const rulesContent = await loadAgentInstructionBundle(cwd, taskConfig.rules.files, taskConfig, claudeCompatibility)
-    const skills = await loadSkills(taskConfig.skills, cwd, taskConfig.skillsUrls, claudeCompatibility).catch(() => [])
+    const skills = await loadSkills(
+      taskConfig.skills,
+      cwd,
+      taskConfig.skillsUrls,
+      claudeCompatibility,
+      taskConfig,
+    ).catch(() => [])
     const compaction = createCompaction()
 
     let output = ""
@@ -1031,7 +1037,11 @@ Max ${config.parallelAgents.maxParallel} concurrent agents (${manager.activeCoun
       const parentMode = ctx.mode ?? "agent"
       const resolveAgentDefinition = async (requestedAgentType?: string) => {
         if (!requestedAgentType?.trim()) return undefined
-        const agents = await loadAgentDefinitions(ctx.cwd, getClaudeCompatibilityOptions(ctx.config)).catch(() => [])
+        const agents = await loadAgentDefinitions(
+          ctx.cwd,
+          getClaudeCompatibilityOptions(ctx.config),
+          ctx.config,
+        ).catch(() => [])
         return agents.find((agent) => agent.agentType.toLowerCase() === requestedAgentType.trim().toLowerCase())
       }
       const normalizeMode = (m?: Mode | "search" | "explore"): Mode =>
@@ -1431,7 +1441,11 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
             : ((m ?? "agent") as Mode)
       const resolveAgentDefinition = async (requestedAgentType?: string) => {
         if (!requestedAgentType?.trim()) return undefined
-        const agents = await loadAgentDefinitions(ctx.cwd, getClaudeCompatibilityOptions(ctx.config)).catch(() => [])
+        const agents = await loadAgentDefinitions(
+          ctx.cwd,
+          getClaudeCompatibilityOptions(ctx.config),
+          ctx.config,
+        ).catch(() => [])
         return agents.find((agent) => agent.agentType.toLowerCase() === requestedAgentType.trim().toLowerCase())
       }
 

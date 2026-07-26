@@ -51,6 +51,16 @@ export async function loadPluginRuntimeRecords(
   return manifests.map((plugin) => applyPluginRuntimeSettings(plugin, config))
 }
 
+/** Capabilities from project-controlled plugins are active only after explicit trust. */
+export async function loadTrustedPluginRuntimeRecords(
+  cwd: string,
+  config: NexusConfig,
+): Promise<PluginManifestRecord[]> {
+  return (await loadPluginRuntimeRecords(cwd, config)).filter(
+    (plugin) => plugin.runtimeEnabled !== false && plugin.trusted === true,
+  )
+}
+
 function getHookRunnerCommand(hookPath: string, payloadPath: string): string {
   const quotedHook = `"${hookPath.replace(/"/g, '\\"')}"`
   const quotedPayload = `"${payloadPath.replace(/"/g, '\\"')}"`

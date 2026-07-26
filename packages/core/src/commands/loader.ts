@@ -3,13 +3,17 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { glob } from "glob"
 import type { ClaudeCompatibilityOptions } from "../compat/claude.js"
+import type { NexusConfig } from "../types.js"
+import { resolvePluginDeclaredPath } from "../plugins/index.js"
+import { loadTrustedPluginRuntimeRecords } from "../plugins/runtime.js"
 
 export interface LoadedSlashCommand {
   command: string
-  scope: "project" | "user"
+  scope: "project" | "user" | "plugin"
   sourcePath: string
   description: string
   prompt: string
+  pluginName?: string
 }
 
 function buildCommandName(scope: "project" | "user", sourcePath: string, baseDir: string): string {
@@ -23,7 +27,11 @@ function summarizePrompt(text: string): string {
   return first.replace(/^#+\s*/, "").slice(0, 160) || "Custom slash command"
 }
 
-async function readCommandFile(sourcePath: string, scope: "project" | "user", baseDir: string): Promise<LoadedSlashCommand | null> {
+async function readCommandFile(
+  sourcePath: string,
+  scope: "project" | "user",
+  baseDir: string,
+): Promise<LoadedSlashCommand | null> {
   try {
     const raw = await fs.readFile(sourcePath, "utf8")
     const prompt = raw.trim()
@@ -40,7 +48,61 @@ async function readCommandFile(sourcePath: string, scope: "project" | "user", ba
   }
 }
 
-export async function loadSlashCommands(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<LoadedSlashCommand[]> {
+async function loadPluginCommandFiles(
+  cwd: string,
+  config?: NexusConfig,
+): Promise<Array<{ command: LoadedSlashCommand; priority: number }>> {
+  if (!config) return []
+  const plugins = await loadTrustedPluginRuntimeRecords(cwd, config)
+  const loaded: Array<{ command: LoadedSlashCommand; priority: number }> = []
+  for (const plugin of plugins) {
+    for (const declared of plugin.commands) {
+      const declaredPath = resolvePluginDeclaredPath(plugin, declared)
+      const stats = await fs.stat(declaredPath).catch(() => null)
+      const files = stats?.isDirectory()
+        ? await glob(path.join(declaredPath, "**", "*.md"), { absolute: true })
+        : stats?.isFile() && declaredPath.toLowerCase().endsWith(".md")
+          ? [declaredPath]
+          : []
+      const baseDir = stats?.isDirectory() ? declaredPath : path.dirname(declaredPath)
+      for (const file of files.sort()) {
+        const command = await readCommandFile(file, "project", baseDir)
+        if (!command) continue
+        const relative = path.relative(baseDir, file).replace(/\\/g, "/").replace(/\.md$/i, "")
+        loaded.push({
+          command: {
+            ...command,
+            command: `plugin:${plugin.name}:${relative}`,
+            scope: "plugin",
+            pluginName: plugin.name,
+          },
+          priority: plugin.scope === "project" ? 6 : 5,
+        })
+      }
+    }
+    for (const entry of plugin.commandEntries ?? []) {
+      if (!entry.content) continue
+      loaded.push({
+        command: {
+          command: `plugin:${plugin.name}:${entry.name}`,
+          scope: "plugin",
+          sourcePath: `${plugin.sourcePath}#commands.${entry.name}`,
+          description: entry.description?.trim() || summarizePrompt(entry.content),
+          prompt: entry.content,
+          pluginName: plugin.name,
+        },
+        priority: plugin.scope === "project" ? 6 : 5,
+      })
+    }
+  }
+  return loaded
+}
+
+export async function loadSlashCommands(
+  cwd: string,
+  compatibility?: ClaudeCompatibilityOptions,
+  config?: NexusConfig,
+): Promise<LoadedSlashCommand[]> {
   const projectNexusDir = path.join(path.resolve(cwd), ".nexus", "commands")
   const globalNexusDir = path.join(os.homedir(), ".nexus", "commands")
   const dirs: Array<{ dir: string; scope: "project" | "user"; priority: number }> = [
@@ -60,8 +122,11 @@ export async function loadSlashCommands(cwd: string, compatibility?: ClaudeCompa
     return loaded.map((command) => command ? { command, priority } : null)
   }))
 
+  const pluginCommands = await loadPluginCommandFiles(cwd, config)
   const byName = new Map<string, { command: LoadedSlashCommand; priority: number }>()
-  for (const item of all.flat().filter((entry): entry is { command: LoadedSlashCommand; priority: number } => Boolean(entry))) {
+  for (const item of [...all.flat(), ...pluginCommands].filter(
+    (entry): entry is { command: LoadedSlashCommand; priority: number } => Boolean(entry),
+  )) {
     const existing = byName.get(item.command.command)
     if (!existing || existing.priority <= item.priority) {
       byName.set(item.command.command, item)

@@ -15,7 +15,13 @@ export type ResolvedSkillBody = { displayName: string; content: string; skillDir
 
 /** Rows for the `Skill` tool description (`<available_skills>`), from the same set as `loadSkills`. */
 export async function loadSkillToolCatalogRows(cwd: string, config: NexusConfig): Promise<SkillToolDescriptionRow[]> {
-  const skills = await loadSkills(config.skills ?? [], cwd, config.skillsUrls, getClaudeCompatibilityOptions(config)).catch(() => [] as SkillDef[])
+  const skills = await loadSkills(
+    config.skills ?? [],
+    cwd,
+    config.skillsUrls,
+    getClaudeCompatibilityOptions(config),
+    config,
+  ).catch(() => [] as SkillDef[])
   return skills
     .map((s) => ({
       name: s.name,
@@ -40,7 +46,13 @@ export async function resolveSkillBody(
   const q = query.trim()
   if (!q) return null
 
-  const loaded = await loadSkills(config.skills ?? [], cwd, config.skillsUrls, getClaudeCompatibilityOptions(config)).catch(() => [] as SkillDef[])
+  const loaded = await loadSkills(
+    config.skills ?? [],
+    cwd,
+    config.skillsUrls,
+    getClaudeCompatibilityOptions(config),
+    config,
+  ).catch(() => [] as SkillDef[])
   const inputNorm = normalizeName(q)
 
   let found = loaded.find((s) => s.name.toLowerCase() === q.toLowerCase())

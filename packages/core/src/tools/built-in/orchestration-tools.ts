@@ -277,7 +277,11 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
       const parentMode = ctx.mode ?? "agent"
       const requestedAgentType = args.agent_type?.trim()
       const agentDefinition = requestedAgentType
-        ? (await loadAgentDefinitions(ctx.cwd, getClaudeCompatibilityOptions(ctx.config)).catch(() => []))
+        ? (await loadAgentDefinitions(
+            ctx.cwd,
+            getClaudeCompatibilityOptions(ctx.config),
+            ctx.config,
+          ).catch(() => []))
             .find((agent) => agent.agentType.toLowerCase() === requestedAgentType.toLowerCase())
         : undefined
       const normalizedMode =
@@ -1534,7 +1538,11 @@ export const listAgentsTool: ToolDef<z.infer<typeof listAgentsSchema>> = {
   parameters: listAgentsSchema,
   readOnly: true,
   async execute(_args, ctx) {
-    const agents = await loadAgentDefinitions(ctx.cwd, getClaudeCompatibilityOptions(ctx.config))
+    const agents = await loadAgentDefinitions(
+      ctx.cwd,
+      getClaudeCompatibilityOptions(ctx.config),
+      ctx.config,
+    )
     return {
       success: true,
       output: agents

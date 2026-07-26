@@ -3,8 +3,9 @@ import * as path from "node:path"
 import * as os from "node:os"
 import { glob } from "glob"
 import yaml from "js-yaml"
-import type { SkillDef } from "../types.js"
-import { loadPluginManifests, resolvePluginDeclaredPath } from "../plugins/index.js"
+import type { NexusConfig, SkillDef } from "../types.js"
+import { resolvePluginDeclaredPath } from "../plugins/index.js"
+import { loadTrustedPluginRuntimeRecords } from "../plugins/runtime.js"
 import type { ClaudeCompatibilityOptions } from "../compat/claude.js"
 
 /**
@@ -19,12 +20,22 @@ import type { ClaudeCompatibilityOptions } from "../compat/claude.js"
  *
  * Optional `skillsUrls`: remote registries (each base URL must serve `index.json` + skill files); cached under `~/.nexus/cache/skills/`.
  */
-export async function loadSkills(skillPaths: string[], cwd: string, skillsUrls?: string[], compatibility?: ClaudeCompatibilityOptions): Promise<SkillDef[]> {
+export async function loadSkills(
+  skillPaths: string[],
+  cwd: string,
+  skillsUrls?: string[],
+  compatibility?: ClaudeCompatibilityOptions,
+  config?: NexusConfig,
+): Promise<SkillDef[]> {
   const skills: SkillDef[] = []
   const seen = new Set<string>()
 
   const configPaths = skillPaths.map(p => (path.isAbsolute(p) ? p : path.resolve(cwd, p)))
-  const pluginSkillPaths = (await loadPluginManifests(cwd, compatibility).catch(() => []))
+  const pluginSkillPaths = (
+    config
+      ? await loadTrustedPluginRuntimeRecords(cwd, config)
+      : []
+  )
     .flatMap((plugin) => plugin.skills.map((skillPath) => resolvePluginDeclaredPath(plugin, skillPath)))
 
   const home = os.homedir()

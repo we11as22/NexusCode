@@ -45,7 +45,7 @@ const modeConfigSchema = z.object({
   customInstructions: z.string().optional(),
 })
 
-const mcpServerSchema = z.object({
+export const McpServerConfigSchema = z.object({
   name: z.string().min(1),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
@@ -63,6 +63,31 @@ const mcpServerSchema = z.object({
     startUrl: z.string().optional(),
     message: z.string().optional(),
   }).optional(),
+}).superRefine((server, ctx) => {
+  const launchTargets = [server.command, server.url, server.bundle].filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  )
+  if (launchTargets.length !== 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Exactly one of command, url, or bundle is required",
+    })
+  }
+  const transport = server.transport ?? server.type
+  if (server.command && transport && transport !== "stdio") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["transport"],
+      message: "Command-based MCP servers must use stdio transport",
+    })
+  }
+  if (server.url && transport === "stdio") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["transport"],
+      message: "URL-based MCP servers cannot use stdio transport",
+    })
+  }
 })
 
 export const NexusConfigSchema = z.object({
@@ -190,7 +215,7 @@ export const NexusConfigSchema = z.object({
   }).default({}),
 
   mcp: z.object({
-    servers: z.array(mcpServerSchema).default([]),
+    servers: z.array(McpServerConfigSchema).default([]),
   }).default({}),
 
   skills: z.array(z.union([

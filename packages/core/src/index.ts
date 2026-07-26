@@ -21,7 +21,7 @@ export {
   NEXUS_SECRETS_STORAGE_KEY,
 } from "./config/index.js"
 export type { ProjectSettings, NexusSecretsStore, NexusSecretsPayload } from "./config/index.js"
-export { NexusConfigSchema } from "./config/schema.js"
+export { NexusConfigSchema, McpServerConfigSchema } from "./config/schema.js"
 export type {
   NexusConfig,
   ProviderConfig,
@@ -161,8 +161,27 @@ export {
 export { loadAgentDefinitions } from "./orchestration/agents.js"
 export { ensureTeamMemberForTask, handleCompletedTaskSideEffects } from "./orchestration/task-lifecycle.js"
 export { extractMemoriesFromCompactionSummary } from "./orchestration/memory-extraction.js"
-export { loadPluginManifests, validatePluginManifestFile, resolvePluginDeclaredPath } from "./plugins/index.js"
-export { loadPluginRuntimeRecords, applyPluginRuntimeSettings, runPluginHooks, runScopedHooks } from "./plugins/runtime.js"
+export {
+  discoverPluginManifests,
+  loadPluginManifests,
+  validatePluginManifestFile,
+  resolvePluginDeclaredPath,
+  type PluginDiagnostic,
+  type PluginDiscoveryResult,
+} from "./plugins/index.js"
+export {
+  loadPluginRuntimeRecords,
+  loadTrustedPluginRuntimeRecords,
+  applyPluginRuntimeSettings,
+  runPluginHooks,
+  runScopedHooks,
+} from "./plugins/runtime.js"
+export {
+  loadPluginMcpServers,
+  resolveConfiguredAndPluginMcpServers,
+  type PluginCapabilityDiagnostic,
+  type PluginMcpCapabilityResult,
+} from "./plugins/capabilities.js"
 export { getClaudeCompatibilityOptions } from "./compat/claude.js"
 export { loadSlashCommands, renderSlashCommandPrompt } from "./commands/loader.js"
 export type { LoadedSlashCommand } from "./commands/loader.js"
