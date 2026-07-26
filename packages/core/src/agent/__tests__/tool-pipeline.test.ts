@@ -227,6 +227,60 @@ it("marks a rejected approval and does not execute", async () => {
   expect(executed).toBe(false)
 })
 
+it("honors requiresApproval for sensitive non-shell tools", async () => {
+  const cwd = process.cwd()
+  const actions: Array<{ type: string; tool: string }> = []
+  let executed = false
+  const context: ToolContext = {
+    cwd,
+    host: createFakeHost({
+      cwd,
+      async showApprovalDialog(action) {
+        actions.push({ type: action.type, tool: action.tool })
+        return { approved: false }
+      },
+    }),
+    session: createFakeSession(cwd),
+    config: createTestConfig({ permissions: { autoApproveRead: true } }),
+    services: createNexusRunServices(),
+    mode: "agent",
+    signal: new AbortController().signal,
+  }
+  const result = await executeToolPipeline(
+    {
+      callId: "sensitive",
+      messageId: "message",
+      partId: "part_sensitive",
+      toolName: "PluginTrust",
+      input: { name: "demo", trusted: true },
+      origin: "native",
+    },
+    {
+      tools: [{
+        name: "PluginTrust",
+        description: "test",
+        parameters: z.object({ name: z.string(), trusted: z.boolean() }),
+        requiresApproval: true,
+        async execute() {
+          executed = true
+          return { success: true, output: "unexpected" }
+        },
+      }],
+      context,
+      autoApproveActions: new Set(["read", "execute"]),
+      mode: "agent",
+      mcpToolNames: new Set(),
+      async hookRunner() {
+        return []
+      },
+    },
+  )
+
+  expect(result).toMatchObject({ success: false, denied: true })
+  expect(actions).toEqual([{ type: "execute", tool: "PluginTrust" }])
+  expect(executed).toBe(false)
+})
+
 it("preserves rich tool attachments through the shared execution pipeline", async () => {
   const context = createContext([])
   const result = await executeToolPipeline(

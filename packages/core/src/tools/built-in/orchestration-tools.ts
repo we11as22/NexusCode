@@ -1682,6 +1682,7 @@ export const runPluginHookTool: ToolDef<z.infer<typeof runPluginHookSchema>> = {
   description: "Run trusted plugin hooks for a lifecycle event such as prompt submit, before/after tool, turn completion, or task completion.",
   parameters: runPluginHookSchema,
   shouldDefer: true,
+  requiresApproval: true,
   async execute({ hook_event, payload }, ctx) {
     await refreshProjectPluginConfig(ctx)
     const results = await runPluginHooks(ctx.cwd, ctx.host, ctx.config, hook_event, {
@@ -1718,6 +1719,7 @@ export const pluginTrustTool: ToolDef<z.infer<typeof pluginTrustSchema>> = {
   description: "Update the runtime trust setting for a plugin in .nexus/nexus.yaml.",
   parameters: pluginTrustSchema,
   shouldDefer: true,
+  requiresApproval: true,
   async execute({ name, trusted }, ctx) {
     let nextTrusted: string[] = []
     await updateProjectPluginConfig(ctx.cwd, (plugins) => {
@@ -1749,6 +1751,7 @@ export const pluginEnableTool: ToolDef<z.infer<typeof pluginEnableSchema>> = {
   description: "Enable or disable a plugin in .nexus/nexus.yaml without removing it from disk.",
   parameters: pluginEnableSchema,
   shouldDefer: true,
+  requiresApproval: true,
   async execute({ name, enabled }, ctx) {
     let nextBlocked: string[] = []
     await updateProjectPluginConfig(ctx.cwd, (plugins) => {
@@ -1782,6 +1785,7 @@ export const pluginConfigureTool: ToolDef<z.infer<typeof pluginConfigureSchema>>
   description: "Persist plugin-specific runtime options in .nexus/nexus.yaml.",
   parameters: pluginConfigureSchema,
   shouldDefer: true,
+  requiresApproval: true,
   async execute({ name, key, value, unset }, ctx) {
     let nextOptions: Record<string, Record<string, unknown>> = {}
     await updateProjectPluginConfig(ctx.cwd, (plugins) => {
@@ -1817,6 +1821,7 @@ export const pluginReloadTool: ToolDef<z.infer<typeof pluginReloadSchema>> = {
   description: "Reload plugin manifests from disk and return the active runtime view.",
   parameters: pluginReloadSchema,
   shouldDefer: true,
+  requiresApproval: true,
   async execute(_args, ctx) {
     await refreshProjectPluginConfig(ctx)
     const plugins = await loadPluginRuntimeRecords(ctx.cwd, ctx.config)
@@ -1872,6 +1877,7 @@ export const pluginInstallLocalTool: ToolDef<z.infer<typeof pluginInstallLocalSc
   description: "Install a local plugin directory into the project-scoped .nexus/plugins runtime.",
   parameters: pluginInstallLocalSchema,
   shouldDefer: true,
+  requiresApproval: true,
   async execute({ source_dir, name, overwrite }, ctx) {
     const sourceDirInput = path.isAbsolute(source_dir) ? source_dir : path.join(ctx.cwd, source_dir)
     const sourceDir = await fs.realpath(sourceDirInput).catch(() => sourceDirInput)
@@ -1963,6 +1969,7 @@ export const pluginRemoveTool: ToolDef<z.infer<typeof pluginRemoveSchema>> = {
   description: "Remove a project-scoped installed plugin directory and clear its runtime config entry.",
   parameters: pluginRemoveSchema,
   shouldDefer: true,
+  requiresApproval: true,
   async execute({ name }, ctx) {
     const plugins = await loadPluginRuntimeRecords(ctx.cwd, ctx.config)
     const plugin = plugins.find((item) => item.name === name)

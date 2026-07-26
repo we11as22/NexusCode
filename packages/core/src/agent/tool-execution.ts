@@ -712,6 +712,16 @@ function commandMatchesPattern(normalizedCommand: string, pattern: string): bool
   return normalizedCommand === p
 }
 
+const EXECUTION_APPROVAL_TOOLS = new Set([
+  "RunPluginHook",
+  "PluginTrust",
+  "PluginEnable",
+  "PluginConfigure",
+  "PluginInstallLocal",
+  "PluginRemove",
+  "PluginReload",
+])
+
 export function buildApprovalAction(toolName: string, toolInput: Record<string, unknown>): ApprovalAction {
   if (["Write", "Edit"].includes(toolName)) {
     return {
@@ -730,6 +740,15 @@ export function buildApprovalAction(toolName: string, toolInput: Record<string, 
       description: `Run: ${cmd}`,
       content: cmd || undefined,
       shortDescription: shortDesc,
+    }
+  }
+  if (EXECUTION_APPROVAL_TOOLS.has(toolName)) {
+    return {
+      type: "execute",
+      tool: toolName,
+      description: `${toolName}: ${JSON.stringify(toolInput).slice(0, 500)}`,
+      content: JSON.stringify(toolInput),
+      warning: "This action can enable, execute, install, reconfigure, or remove trusted plugin code.",
     }
   }
   if (toolName.includes("__")) {
@@ -759,8 +778,10 @@ export function toolNeedsApproval(
   toolInput: Record<string, unknown>,
   autoApproveActions: Set<string>,
   config: NexusConfig,
-  mcpToolNames: Set<string>
+  mcpToolNames: Set<string>,
+  requiresApproval = false,
 ): boolean {
+  if (requiresApproval) return true
   if (mcpToolNames.has(toolName)) {
     const allowedMcp = config.permissions.allowedMcpTools ?? []
     if (allowedMcp.includes(toolName)) return false
@@ -1017,7 +1038,14 @@ export async function executeValidatedTool(
     typeof host.revertFileEdit === "function"
 
   if (ruleResult === null && !useFileEditFlow) {
-    const needsApproval = toolNeedsApproval(toolName, toolInput, autoApproveActions, config, mcpToolNames)
+    const needsApproval = toolNeedsApproval(
+      toolName,
+      toolInput,
+      autoApproveActions,
+      config,
+      mcpToolNames,
+      tool.requiresApproval === true,
+    )
     if (needsApproval) {
       const action = buildApprovalAction(toolName, toolInput)
       host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` })
