@@ -280,6 +280,20 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     await this.controller.runAgentWithPrompt(content, mode)
   }
 
+  async createNewSession(): Promise<void> {
+    await this.controller.handleWebviewMessage({ type: "createNewSession" })
+    this.switchView("chat")
+  }
+
+  async compact(): Promise<void> {
+    await this.controller.handleWebviewMessage({ type: "compact" })
+  }
+
+  async clearChat(): Promise<void> {
+    await this.controller.handleWebviewMessage({ type: "clearChat" })
+    this.switchView("chat")
+  }
+
   async reindex(): Promise<void> {
     await this.controller.reindex()
   }

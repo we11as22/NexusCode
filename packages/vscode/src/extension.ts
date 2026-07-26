@@ -1,21 +1,11 @@
 import * as vscode from "vscode"
-import * as fs from "node:fs"
 import { NexusProvider } from "./provider.js"
 
 let provider: NexusProvider | undefined
 
 export function activate(context: vscode.ExtensionContext): void {
-  try {
-    fs.appendFileSync("/tmp/nexuscode-extension.log", `[${new Date().toISOString()}] activate()\n`)
-  } catch {}
   provider = new NexusProvider(context)
-  try {
-    fs.appendFileSync("/tmp/nexuscode-extension.log", `[${new Date().toISOString()}] provider created\n`)
-  } catch {}
   provider.warmup()
-  try {
-    fs.appendFileSync("/tmp/nexuscode-extension.log", `[${new Date().toISOString()}] warmup queued\n`)
-  } catch {}
 
   // Register sidebar view provider
   context.subscriptions.push(
@@ -25,9 +15,6 @@ export function activate(context: vscode.ExtensionContext): void {
       { webviewOptions: { retainContextWhenHidden: true } }
     )
   )
-  try {
-    fs.appendFileSync("/tmp/nexuscode-extension.log", `[${new Date().toISOString()}] registerWebviewViewProvider done\n`)
-  } catch {}
 
   // Register the provider itself for disposal
   context.subscriptions.push(provider)
@@ -56,8 +43,9 @@ export function activate(context: vscode.ExtensionContext): void {
       /* Do not run sidebar.focus here — it can open the Explorer on some setups. */
     }),
 
-    vscode.commands.registerCommand("nexuscode.newTask", () => {
-      vscode.commands.executeCommand("nexuscode.sidebar.focus")
+    vscode.commands.registerCommand("nexuscode.newTask", async () => {
+      await provider?.createNewSession()
+      await vscode.commands.executeCommand("nexuscode.sidebar.focus")
     }),
 
     vscode.commands.registerCommand("nexuscode.addToChat", () => {
@@ -102,12 +90,14 @@ export function activate(context: vscode.ExtensionContext): void {
       await provider?.runAgentWithPrompt(prompt, "agent")
     }),
 
-    vscode.commands.registerCommand("nexuscode.compact", () => {
-      vscode.commands.executeCommand("nexuscode.sidebar.focus")
+    vscode.commands.registerCommand("nexuscode.compact", async () => {
+      await provider?.compact()
+      await vscode.commands.executeCommand("nexuscode.sidebar.focus")
     }),
 
-    vscode.commands.registerCommand("nexuscode.clearChat", () => {
-      vscode.commands.executeCommand("nexuscode.sidebar.focus")
+    vscode.commands.registerCommand("nexuscode.clearChat", async () => {
+      await provider?.clearChat()
+      await vscode.commands.executeCommand("nexuscode.sidebar.focus")
     }),
 
     vscode.commands.registerCommand("nexuscode.reindex", async () => {
