@@ -8,10 +8,14 @@ import { createMcpTransport } from "./transport-factory.js"
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000
 const DEFAULT_TOOL_TIMEOUT_MS = 60_000
+const DEFAULT_RECONNECT_ATTEMPTS = 3
+const DEFAULT_RECONNECT_BASE_DELAY_MS = 500
 const MAX_TOOL_DESCRIPTION_CHARS = 2_048
 const MAX_LIST_PAGES = 100
 
 interface McpProtocolClient {
+  onclose?: () => void
+  onerror?: (error: Error) => void
   connect(transport: Transport): Promise<void>
   close(): Promise<void>
   listTools(params?: { cursor?: string }): Promise<{
@@ -75,6 +79,8 @@ type McpDiscoveredTool = Awaited<
 export interface McpClientOptions {
   startupTimeoutMs?: number
   toolTimeoutMs?: number
+  reconnectAttempts?: number
+  reconnectBaseDelayMs?: number
   clientFactory?: () => McpProtocolClient
   transportFactory?: (config: McpServerConfig) => Transport
 }
@@ -304,13 +310,23 @@ export class McpClient {
     client: McpProtocolClient
     promise: Promise<void>
   }>()
-  private readonly options: Required<Pick<McpClientOptions, "startupTimeoutMs" | "toolTimeoutMs">> &
+  private reconnects = new Map<string, Promise<void>>()
+  private lifecycleEpoch = 0
+  private readonly options: Required<Pick<
+    McpClientOptions,
+    "startupTimeoutMs" | "toolTimeoutMs" | "reconnectAttempts" | "reconnectBaseDelayMs"
+  >> &
     Pick<McpClientOptions, "clientFactory" | "transportFactory">
 
   constructor(options: McpClientOptions = {}) {
     this.options = {
       startupTimeoutMs: options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
       toolTimeoutMs: options.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
+      reconnectAttempts: Math.max(0, options.reconnectAttempts ?? DEFAULT_RECONNECT_ATTEMPTS),
+      reconnectBaseDelayMs: Math.max(
+        1,
+        options.reconnectBaseDelayMs ?? DEFAULT_RECONNECT_BASE_DELAY_MS,
+      ),
       clientFactory: options.clientFactory,
       transportFactory: options.transportFactory,
     }
@@ -351,6 +367,50 @@ export class McpClient {
     this.clients.delete(serverName)
     this.deleteServerTools(serverName)
     if (existing) await closeProtocolClient(existing)
+  }
+
+  private handleTransportLoss(
+    serverName: string,
+    client: McpProtocolClient,
+    error?: unknown,
+  ): void {
+    if (this.clients.get(serverName) !== client) return
+    const config = this.configs.get(serverName)
+    if (!config || config.enabled === false) return
+
+    this.clients.delete(serverName)
+    this.deleteServerTools(serverName)
+    this.setStatus(config, "disconnected", {
+      error: error ? `Transport lost: ${errorMessage(error)}` : "Transport closed",
+    })
+    void closeProtocolClient(client)
+
+    if (this.options.reconnectAttempts === 0 || this.reconnects.has(serverName)) {
+      return
+    }
+    const epoch = this.lifecycleEpoch
+    const reconnect = (async () => {
+      for (let attempt = 0; attempt < this.options.reconnectAttempts; attempt += 1) {
+        const delayMs = Math.min(
+          30_000,
+          this.options.reconnectBaseDelayMs * 2 ** attempt,
+        )
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delayMs)
+          timer.unref?.()
+        })
+        if (this.lifecycleEpoch !== epoch) return
+        const current = this.configs.get(serverName)
+        if (!current || current.enabled === false) return
+        const status = await this.connect(current)
+        if (status.state === "connected") return
+      }
+    })().finally(() => {
+      if (this.reconnects.get(serverName) === reconnect) {
+        this.reconnects.delete(serverName)
+      }
+    })
+    this.reconnects.set(serverName, reconnect)
   }
 
   private async listAllTools(client: McpProtocolClient): Promise<McpDiscoveredTool[]> {
@@ -445,6 +505,12 @@ export class McpClient {
         this.clients.set(config.name, client)
         this.configs.set(config.name, candidate)
         await this.refreshTools(config.name, client)
+        client.onclose = () => {
+          this.handleTransportLoss(config.name, client)
+        }
+        client.onerror = (error) => {
+          this.handleTransportLoss(config.name, client, error)
+        }
         client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
           await this.refreshTools(config.name, client).catch((error) => {
             this.setStatus(candidate, "connected", {
@@ -629,6 +695,8 @@ export class McpClient {
   }
 
   async disconnectAll(): Promise<void> {
+    this.lifecycleEpoch += 1
+    this.reconnects.clear()
     const names = new Set([...this.clients.keys(), ...this.configs.keys()])
     for (const name of names) {
       await this.closeServer(name)

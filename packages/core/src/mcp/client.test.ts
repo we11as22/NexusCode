@@ -234,6 +234,49 @@ describe("McpClient lifecycle", () => {
     await late
     expect(mcp.getTools().map((tool) => tool.name)).toEqual(["demo__current"])
   })
+
+  it("reconnects a dropped transport without replaying the interrupted tool call", async () => {
+    vi.useFakeTimers()
+    const first = fakeClient({
+      listTools: vi.fn(async () => ({
+        tools: [{
+          name: "mutate",
+          inputSchema: { type: "object", properties: {} },
+        }],
+      })),
+    })
+    const second = fakeClient({
+      listTools: vi.fn(async () => ({
+        tools: [{
+          name: "mutate",
+          inputSchema: { type: "object", properties: {} },
+        }],
+      })),
+    })
+    const clients = [first, second]
+    const mcp = new McpClient({
+      reconnectAttempts: 2,
+      reconnectBaseDelayMs: 10,
+      clientFactory: () => clients.shift() as never,
+      transportFactory: () => ({}) as never,
+    })
+
+    await mcp.connect({ name: "demo", command: "demo" })
+    expect(typeof (first as { onclose?: unknown }).onclose).toBe("function")
+    ;(first as { onclose?: () => void }).onclose?.()
+    expect(mcp.getServerStatuses().demo?.state).toBe("disconnected")
+
+    await vi.advanceTimersByTimeAsync(10)
+    await vi.waitFor(() => {
+      expect(mcp.getServerStatuses().demo?.state).toBe("connected")
+    })
+
+    expect(first.callTool).not.toHaveBeenCalled()
+    expect(second.connect).toHaveBeenCalledOnce()
+    expect(mcp.getTools().map((tool) => tool.name)).toEqual(["demo__mutate"])
+    await mcp.disconnectAll()
+    vi.useRealTimers()
+  })
 })
 
 describe("buildMcpToolSchema", () => {
