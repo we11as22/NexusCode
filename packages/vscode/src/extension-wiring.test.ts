@@ -10,6 +10,14 @@ const controllerSource = readFileSync(
   path.join(process.cwd(), "src", "controller.ts"),
   "utf8",
 )
+const esbuildSource = readFileSync(
+  path.join(process.cwd(), "esbuild.mjs"),
+  "utf8",
+)
+const vscodeIgnore = readFileSync(
+  path.join(process.cwd(), ".vscodeignore"),
+  "utf8",
+)
 
 describe("VS Code command wiring", () => {
   it("does not run the coding agent in an untrusted VS Code workspace", () => {
@@ -18,6 +26,13 @@ describe("VS Code command wiring", () => {
     ) as { capabilities?: { untrustedWorkspaces?: { supported?: boolean } } }
 
     expect(manifest.capabilities?.untrustedWorkspaces?.supported).toBe(false)
+  })
+
+  it("does not ship production extension source maps or packaging scripts", () => {
+    expect(esbuildSource).toContain("sourcemap: watch")
+    expect(vscodeIgnore).toContain("**/*.map")
+    expect(vscodeIgnore).toMatch(/^scripts$/m)
+    expect(vscodeIgnore).toContain("vitest.config.*")
   })
 
   it.each([

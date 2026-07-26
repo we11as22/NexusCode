@@ -1,11 +1,117 @@
 import { z } from 'zod';
-import { LanguageModelV1 } from 'ai';
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
+import { LanguageModelV1 } from 'ai';
 
 declare function getNexusDataDir(): string;
 declare function getToolOutputDir(): string;
 declare function getRunLogsDir(): string;
 
+declare const McpServerConfigSchema: z.ZodEffects<z.ZodObject<{
+    name: z.ZodString;
+    command: z.ZodOptional<z.ZodString>;
+    args: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    cwd: z.ZodOptional<z.ZodString>;
+    url: z.ZodOptional<z.ZodString>;
+    transport: z.ZodOptional<z.ZodEnum<["stdio", "http", "sse"]>>;
+    type: z.ZodOptional<z.ZodEnum<["stdio", "sse", "streamable-http", "http"]>>;
+    headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
+    startupTimeoutMs: z.ZodOptional<z.ZodNumber>;
+    toolTimeoutMs: z.ZodOptional<z.ZodNumber>;
+    /** Optional bundle id (e.g. "context-mode"); resolved by host to command/args/env when installed. */
+    bundle: z.ZodOptional<z.ZodString>;
+    auth: z.ZodOptional<z.ZodObject<{
+        type: z.ZodOptional<z.ZodEnum<["oauth", "url", "manual"]>>;
+        startUrl: z.ZodOptional<z.ZodString>;
+        message: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        message?: string | undefined;
+        type?: "url" | "oauth" | "manual" | undefined;
+        startUrl?: string | undefined;
+    }, {
+        message?: string | undefined;
+        type?: "url" | "oauth" | "manual" | undefined;
+        startUrl?: string | undefined;
+    }>>;
+}, "strip", z.ZodTypeAny, {
+    name: string;
+    enabled: boolean;
+    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+    command?: string | undefined;
+    args?: string[] | undefined;
+    env?: Record<string, string> | undefined;
+    cwd?: string | undefined;
+    url?: string | undefined;
+    transport?: "stdio" | "http" | "sse" | undefined;
+    headers?: Record<string, string> | undefined;
+    startupTimeoutMs?: number | undefined;
+    toolTimeoutMs?: number | undefined;
+    bundle?: string | undefined;
+    auth?: {
+        message?: string | undefined;
+        type?: "url" | "oauth" | "manual" | undefined;
+        startUrl?: string | undefined;
+    } | undefined;
+}, {
+    name: string;
+    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+    command?: string | undefined;
+    args?: string[] | undefined;
+    env?: Record<string, string> | undefined;
+    cwd?: string | undefined;
+    url?: string | undefined;
+    transport?: "stdio" | "http" | "sse" | undefined;
+    headers?: Record<string, string> | undefined;
+    enabled?: boolean | undefined;
+    startupTimeoutMs?: number | undefined;
+    toolTimeoutMs?: number | undefined;
+    bundle?: string | undefined;
+    auth?: {
+        message?: string | undefined;
+        type?: "url" | "oauth" | "manual" | undefined;
+        startUrl?: string | undefined;
+    } | undefined;
+}>, {
+    name: string;
+    enabled: boolean;
+    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+    command?: string | undefined;
+    args?: string[] | undefined;
+    env?: Record<string, string> | undefined;
+    cwd?: string | undefined;
+    url?: string | undefined;
+    transport?: "stdio" | "http" | "sse" | undefined;
+    headers?: Record<string, string> | undefined;
+    startupTimeoutMs?: number | undefined;
+    toolTimeoutMs?: number | undefined;
+    bundle?: string | undefined;
+    auth?: {
+        message?: string | undefined;
+        type?: "url" | "oauth" | "manual" | undefined;
+        startUrl?: string | undefined;
+    } | undefined;
+}, {
+    name: string;
+    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+    command?: string | undefined;
+    args?: string[] | undefined;
+    env?: Record<string, string> | undefined;
+    cwd?: string | undefined;
+    url?: string | undefined;
+    transport?: "stdio" | "http" | "sse" | undefined;
+    headers?: Record<string, string> | undefined;
+    enabled?: boolean | undefined;
+    startupTimeoutMs?: number | undefined;
+    toolTimeoutMs?: number | undefined;
+    bundle?: string | undefined;
+    auth?: {
+        message?: string | undefined;
+        type?: "url" | "oauth" | "manual" | undefined;
+        startUrl?: string | undefined;
+    } | undefined;
+}>;
 declare const NexusConfigSchema: z.ZodObject<{
     model: z.ZodDefault<z.ZodObject<{
         provider: z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity", "minimax"]>;
@@ -536,7 +642,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         showReasoningInChat?: boolean | undefined;
     }>>;
     mcp: z.ZodDefault<z.ZodObject<{
-        servers: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        servers: z.ZodDefault<z.ZodArray<z.ZodEffects<z.ZodObject<{
             name: z.ZodString;
             command: z.ZodOptional<z.ZodString>;
             args: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
@@ -547,7 +653,9 @@ declare const NexusConfigSchema: z.ZodObject<{
             type: z.ZodOptional<z.ZodEnum<["stdio", "sse", "streamable-http", "http"]>>;
             headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
             enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
-            /** Bundled server id (e.g. "context-mode"); resolved by host to command/args/env */
+            startupTimeoutMs: z.ZodOptional<z.ZodNumber>;
+            toolTimeoutMs: z.ZodOptional<z.ZodNumber>;
+            /** Optional bundle id (e.g. "context-mode"); resolved by host to command/args/env when installed. */
             bundle: z.ZodOptional<z.ZodString>;
             auth: z.ZodOptional<z.ZodObject<{
                 type: z.ZodOptional<z.ZodEnum<["oauth", "url", "manual"]>>;
@@ -573,6 +681,8 @@ declare const NexusConfigSchema: z.ZodObject<{
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
             headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
             bundle?: string | undefined;
             auth?: {
                 message?: string | undefined;
@@ -590,6 +700,46 @@ declare const NexusConfigSchema: z.ZodObject<{
             transport?: "stdio" | "http" | "sse" | undefined;
             headers?: Record<string, string> | undefined;
             enabled?: boolean | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            bundle?: string | undefined;
+            auth?: {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+        }>, {
+            name: string;
+            enabled: boolean;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            command?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+            cwd?: string | undefined;
+            url?: string | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            bundle?: string | undefined;
+            auth?: {
+                message?: string | undefined;
+                type?: "url" | "oauth" | "manual" | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+        }, {
+            name: string;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            command?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+            cwd?: string | undefined;
+            url?: string | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            headers?: Record<string, string> | undefined;
+            enabled?: boolean | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
             bundle?: string | undefined;
             auth?: {
                 message?: string | undefined;
@@ -609,6 +759,8 @@ declare const NexusConfigSchema: z.ZodObject<{
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
             headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
             bundle?: string | undefined;
             auth?: {
                 message?: string | undefined;
@@ -628,6 +780,8 @@ declare const NexusConfigSchema: z.ZodObject<{
             transport?: "stdio" | "http" | "sse" | undefined;
             headers?: Record<string, string> | undefined;
             enabled?: boolean | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
             bundle?: string | undefined;
             auth?: {
                 message?: string | undefined;
@@ -706,12 +860,15 @@ declare const NexusConfigSchema: z.ZodObject<{
         maxParallel: z.ZodDefault<z.ZodNumber>;
         /** Deprecated: old SpawnAgents multi-task setting. Parallel sub-agent batching now uses Parallel + SpawnAgent calls. */
         maxTasksPerCall: z.ZodDefault<z.ZodNumber>;
+        maxDepth: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
         maxParallel: number;
         maxTasksPerCall: number;
+        maxDepth: number;
     }, {
         maxParallel?: number | undefined;
         maxTasksPerCall?: number | undefined;
+        maxDepth?: number | undefined;
     }>>;
     compatibility: z.ZodDefault<z.ZodObject<{
         claude: z.ZodDefault<z.ZodObject<{
@@ -875,6 +1032,50 @@ declare const NexusConfigSchema: z.ZodObject<{
     }, {
         files?: string[] | undefined;
     }>>;
+    /**
+     * OpenClaude-class memory: auto-memory dir, session scrolling notes file, tool spill hints.
+     * Session file lives next to JSONL under .nexus/sessions (per project hash).
+     */
+    memory: z.ZodDefault<z.ZodObject<{
+        /** Load project auto-memory markdown into the rules block (OpenClaude auto-memory parity). */
+        autoMemoryEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** Override directory; tilde expanded for home. When unset, uses default project memory dir. */
+        autoMemoryDirectory: z.ZodOptional<z.ZodString>;
+        /** Maintain session-memory.md next to JSONL and inject into system prompt. */
+        sessionMemoryEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** Background LLM refresh after this many tool results in the outer loop (approximate). */
+        sessionMemoryMinToolCallsBetweenUpdates: z.ZodDefault<z.ZodNumber>;
+        /** Max stored characters for the session memory file. */
+        sessionMemoryMaxChars: z.ZodDefault<z.ZodNumber>;
+        /** When compacting tool results, keep spill path in model-facing text (stronger OpenClaude parity). */
+        emphasizeToolSpillPaths: z.ZodDefault<z.ZodBoolean>;
+        /** Load team markdown from ~/.nexus/teams/{encoded name}/memory/ for runtime teams. */
+        teamMemoryEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** Periodically consolidate auto-memory dir into _nexus_consolidated_memory.md via LLM. */
+        autoDreamEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** Min milliseconds between auto-dream runs. */
+        autoDreamMinIntervalMs: z.ZodDefault<z.ZodNumber>;
+    }, "strip", z.ZodTypeAny, {
+        autoMemoryEnabled: boolean;
+        sessionMemoryEnabled: boolean;
+        sessionMemoryMinToolCallsBetweenUpdates: number;
+        sessionMemoryMaxChars: number;
+        emphasizeToolSpillPaths: boolean;
+        teamMemoryEnabled: boolean;
+        autoDreamEnabled: boolean;
+        autoDreamMinIntervalMs: number;
+        autoMemoryDirectory?: string | undefined;
+    }, {
+        autoMemoryEnabled?: boolean | undefined;
+        autoMemoryDirectory?: string | undefined;
+        sessionMemoryEnabled?: boolean | undefined;
+        sessionMemoryMinToolCallsBetweenUpdates?: number | undefined;
+        sessionMemoryMaxChars?: number | undefined;
+        emphasizeToolSpillPaths?: boolean | undefined;
+        teamMemoryEnabled?: boolean | undefined;
+        autoDreamEnabled?: boolean | undefined;
+        autoDreamMinIntervalMs?: number | undefined;
+    }>>;
     profiles: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
         provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity", "minimax"]>>;
         id: z.ZodOptional<z.ZodString>;
@@ -942,6 +1143,8 @@ declare const NexusConfigSchema: z.ZodObject<{
             url?: string | undefined;
             transport?: "stdio" | "http" | "sse" | undefined;
             headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
             bundle?: string | undefined;
             auth?: {
                 message?: string | undefined;
@@ -1066,6 +1269,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     parallelAgents: {
         maxParallel: number;
         maxTasksPerCall: number;
+        maxDepth: number;
     };
     compatibility: {
         claude: {
@@ -1104,6 +1308,17 @@ declare const NexusConfigSchema: z.ZodObject<{
             debug?: number | undefined;
             review?: number | undefined;
         } | undefined;
+    };
+    memory: {
+        autoMemoryEnabled: boolean;
+        sessionMemoryEnabled: boolean;
+        sessionMemoryMinToolCallsBetweenUpdates: number;
+        sessionMemoryMaxChars: number;
+        emphasizeToolSpillPaths: boolean;
+        teamMemoryEnabled: boolean;
+        autoDreamEnabled: boolean;
+        autoDreamMinIntervalMs: number;
+        autoMemoryDirectory?: string | undefined;
     };
     profiles: Record<string, {
         provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
@@ -1166,6 +1381,8 @@ declare const NexusConfigSchema: z.ZodObject<{
             transport?: "stdio" | "http" | "sse" | undefined;
             headers?: Record<string, string> | undefined;
             enabled?: boolean | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
             bundle?: string | undefined;
             auth?: {
                 message?: string | undefined;
@@ -1356,6 +1573,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     parallelAgents?: {
         maxParallel?: number | undefined;
         maxTasksPerCall?: number | undefined;
+        maxDepth?: number | undefined;
     } | undefined;
     compatibility?: {
         claude?: {
@@ -1395,6 +1613,17 @@ declare const NexusConfigSchema: z.ZodObject<{
             review?: number | undefined;
         } | undefined;
     } | undefined;
+    memory?: {
+        autoMemoryEnabled?: boolean | undefined;
+        autoMemoryDirectory?: string | undefined;
+        sessionMemoryEnabled?: boolean | undefined;
+        sessionMemoryMinToolCallsBetweenUpdates?: number | undefined;
+        sessionMemoryMaxChars?: number | undefined;
+        emphasizeToolSpillPaths?: boolean | undefined;
+        teamMemoryEnabled?: boolean | undefined;
+        autoDreamEnabled?: boolean | undefined;
+        autoDreamMinIntervalMs?: number | undefined;
+    } | undefined;
     profiles?: Record<string, {
         provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
         id?: string | undefined;
@@ -1410,6 +1639,374 @@ declare const NexusConfigSchema: z.ZodObject<{
         extra?: Record<string, unknown> | undefined;
     }> | undefined;
 }>;
+
+interface McpProtocolClient {
+    onclose?: () => void;
+    onerror?: (error: Error) => void;
+    connect(transport: Transport): Promise<void>;
+    close(): Promise<void>;
+    listTools(params?: {
+        cursor?: string;
+    }): Promise<{
+        tools: Array<{
+            name: string;
+            description?: string;
+            inputSchema: Record<string, unknown>;
+            annotations?: {
+                readOnlyHint?: boolean;
+                destructiveHint?: boolean;
+                idempotentHint?: boolean;
+                openWorldHint?: boolean;
+            };
+        }>;
+        nextCursor?: string;
+    }>;
+    callTool(params: {
+        name: string;
+        arguments: Record<string, unknown>;
+    }): Promise<{
+        content?: unknown[];
+        structuredContent?: unknown;
+        isError?: boolean;
+    }>;
+    listResources(params?: {
+        cursor?: string;
+    }): Promise<{
+        resources?: Array<{
+            uri: string;
+            name: string;
+            description?: string;
+            mimeType?: string;
+        }>;
+        nextCursor?: string;
+    }>;
+    listResourceTemplates(params?: {
+        cursor?: string;
+    }): Promise<{
+        resourceTemplates?: Array<{
+            uriTemplate: string;
+            name: string;
+            description?: string;
+            mimeType?: string;
+        }>;
+        nextCursor?: string;
+    }>;
+    readResource(params: {
+        uri: string;
+    }): Promise<{
+        contents?: Array<{
+            uri: string;
+            mimeType?: string;
+            text?: string;
+            blob?: string;
+        }>;
+    }>;
+    setNotificationHandler(schema: typeof ToolListChangedNotificationSchema, handler: () => void | Promise<void>): void;
+}
+interface McpClientOptions {
+    startupTimeoutMs?: number;
+    toolTimeoutMs?: number;
+    reconnectAttempts?: number;
+    reconnectBaseDelayMs?: number;
+    clientFactory?: () => McpProtocolClient;
+    transportFactory?: (config: McpServerConfig) => Transport;
+}
+type McpConnectionState = "connecting" | "connected" | "disabled" | "failed" | "needs_auth" | "disconnected";
+interface McpServerStatus {
+    name: string;
+    state: McpConnectionState;
+    toolCount: number;
+    updatedAt: number;
+    connectedAt?: number;
+    error?: string;
+    transport?: "stdio" | "http" | "sse";
+}
+interface McpResourceRef {
+    serverName: string;
+    uri: string;
+    name: string;
+    description?: string;
+    mimeType?: string;
+}
+interface McpResourceContent {
+    serverName: string;
+    uri: string;
+    mimeType?: string;
+    text?: string;
+    blob?: string;
+}
+interface McpResourceTemplateRef {
+    serverName: string;
+    uriTemplate: string;
+    name: string;
+    description?: string;
+    mimeType?: string;
+}
+declare function buildMcpToolSchema(inputSchema: Record<string, unknown>): z.ZodTypeAny;
+/**
+ * Stateful MCP runtime with deterministic reconnects, explicit health, bounded
+ * requests, paginated discovery, and list-changed refresh.
+ */
+declare class McpClient {
+    private clients;
+    private tools;
+    private configs;
+    private statuses;
+    private refreshes;
+    private reconnects;
+    private lifecycleEpoch;
+    private readonly options;
+    constructor(options?: McpClientOptions);
+    private createClient;
+    private createTransport;
+    private setStatus;
+    private deleteServerTools;
+    private closeServer;
+    private handleTransportLoss;
+    private listAllTools;
+    private refreshTools;
+    connect(config: McpServerConfig): Promise<McpServerStatus>;
+    connectAll(configs: McpServerConfig[]): Promise<Record<string, McpServerStatus>>;
+    testServers(configs: McpServerConfig[]): Promise<Array<{
+        name: string;
+        status: "ok" | "error";
+        error?: string;
+    }>>;
+    getTools(): ToolDef[];
+    /** Backward-compatible coarse state for existing hosts. */
+    getStatus(): Record<string, "connected" | "disconnected">;
+    getServerStatuses(): Record<string, McpServerStatus>;
+    disconnectAll(): Promise<void>;
+    listResources(serverName?: string): Promise<McpResourceRef[]>;
+    listResourceTemplates(serverName?: string): Promise<McpResourceTemplateRef[]>;
+    readResource(serverName: string, uri: string): Promise<McpResourceContent[]>;
+    authenticate(serverName: string, host?: IHost): Promise<{
+        success: boolean;
+        message: string;
+    }>;
+}
+/** Standalone test of MCP server configs (does not keep connections). */
+declare function testMcpServers(configs: McpServerConfig[]): Promise<Array<{
+    name: string;
+    status: "ok" | "error";
+    error?: string;
+}>>;
+
+interface SubAgentResult {
+    subagentId: string;
+    sessionId: string;
+    success: boolean;
+    output: string;
+    error?: string;
+    /** Write/Edit tool parts from the sub-agent session (merged into parent for session diff). */
+    fileEditParts?: ToolPart[];
+}
+interface ResumeAgentOptions {
+    followupInstruction?: string;
+    fork?: boolean;
+    runInBackground?: boolean;
+}
+interface AgentSpawnOptions {
+    modelOverride?: string;
+    taskName?: string;
+}
+interface SubAgentRuntimeContext {
+    host: IHost;
+    services: NexusRunServices;
+}
+type SubAgentStatus = "running" | "completed" | "error" | "killed";
+interface SubAgentSnapshot {
+    subagentId: string;
+    sessionId: string;
+    status: SubAgentStatus;
+    output: string;
+    error?: string;
+}
+/**
+ * Manager for parallel sub-agents.
+ * Each sub-agent runs its own isolated session and agent loop.
+ *
+ * Concurrency model: each promise added to `this.running` removes itself
+ * via `.finally()`, so after `await Promise.race(...)` at least one slot
+ * is guaranteed to be free (the race resolves in a microtask, `.finally`
+ * queues in the next microtask, `await Promise.resolve()` drains them).
+ */
+declare class ParallelAgentManager {
+    private running;
+    private sessions;
+    private outputById;
+    private statusById;
+    private errorById;
+    private controllers;
+    private liveSessions;
+    private aliases;
+    private history;
+    private static readonly HISTORY_CAP;
+    private rememberId;
+    private startTask;
+    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string, agentType?: string, spawnOptions?: AgentSpawnOptions, runtimeContext?: SubAgentRuntimeContext): Promise<SubAgentResult>;
+    spawnInBackground(description: string, mode: Mode, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string, agentType?: string, spawnOptions?: AgentSpawnOptions, runtimeContext?: SubAgentRuntimeContext): Promise<{
+        subagentId: string;
+    }>;
+    getSnapshot(subagentId: string): SubAgentSnapshot | null;
+    waitFor(subagentId: string): Promise<SubAgentSnapshot | null>;
+    stop(subagentId: string): boolean;
+    /** Inject a queued user message into a currently running delegated agent. */
+    deliverMessage(target: string, message: string, from?: string): boolean;
+    listRuns(cwd: string): Promise<BackgroundTaskRecord[]>;
+    resume(subagentId: string, options: ResumeAgentOptions, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, parentPartId?: string, runtimeContext?: SubAgentRuntimeContext): Promise<SubAgentResult | {
+        subagentId: string;
+        background: true;
+    }>;
+    private runSubAgent;
+    /** How many agents are currently running */
+    get activeCount(): number;
+}
+declare const spawnOutputSchema: z.ZodObject<{
+    subagent_id: z.ZodString;
+    block: z.ZodOptional<z.ZodBoolean>;
+}, "strict", z.ZodTypeAny, {
+    subagent_id: string;
+    block?: boolean | undefined;
+}, {
+    subagent_id: string;
+    block?: boolean | undefined;
+}>;
+declare const spawnStopSchema: z.ZodObject<{
+    subagent_id: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    subagent_id: string;
+}, {
+    subagent_id: string;
+}>;
+declare const listAgentRunsSchema: z.ZodObject<{
+    limit: z.ZodOptional<z.ZodNumber>;
+}, "strip", z.ZodTypeAny, {
+    limit?: number | undefined;
+}, {
+    limit?: number | undefined;
+}>;
+declare const agentRunSnapshotSchema: z.ZodObject<{
+    subagent_id: z.ZodString;
+    format: z.ZodOptional<z.ZodEnum<["summary", "json"]>>;
+}, "strip", z.ZodTypeAny, {
+    subagent_id: string;
+    format?: "summary" | "json" | undefined;
+}, {
+    subagent_id: string;
+    format?: "summary" | "json" | undefined;
+}>;
+declare const resumeAgentSchema: z.ZodObject<{
+    subagent_id: z.ZodString;
+    instruction: z.ZodOptional<z.ZodString>;
+    fork: z.ZodOptional<z.ZodBoolean>;
+    run_in_background: z.ZodOptional<z.ZodBoolean>;
+}, "strip", z.ZodTypeAny, {
+    subagent_id: string;
+    instruction?: string | undefined;
+    run_in_background?: boolean | undefined;
+    fork?: boolean | undefined;
+}, {
+    subagent_id: string;
+    instruction?: string | undefined;
+    run_in_background?: boolean | undefined;
+    fork?: boolean | undefined;
+}>;
+declare const taskResumeSchema: z.ZodObject<{
+    task_id: z.ZodString;
+    instruction: z.ZodOptional<z.ZodString>;
+    fork: z.ZodOptional<z.ZodBoolean>;
+    block: z.ZodOptional<z.ZodBoolean>;
+}, "strip", z.ZodTypeAny, {
+    task_id: string;
+    block?: boolean | undefined;
+    instruction?: string | undefined;
+    fork?: boolean | undefined;
+}, {
+    task_id: string;
+    block?: boolean | undefined;
+    instruction?: string | undefined;
+    fork?: boolean | undefined;
+}>;
+declare const taskSnapshotSchema: z.ZodObject<{
+    task_id: z.ZodString;
+    format: z.ZodOptional<z.ZodEnum<["summary", "json"]>>;
+}, "strip", z.ZodTypeAny, {
+    task_id: string;
+    format?: "summary" | "json" | undefined;
+}, {
+    task_id: string;
+    format?: "summary" | "json" | undefined;
+}>;
+declare const taskCreateBatchSchema: z.ZodObject<{
+    tasks: z.ZodArray<z.ZodObject<{
+        description: z.ZodString;
+        agent_type: z.ZodOptional<z.ZodString>;
+        context_summary: z.ZodOptional<z.ZodString>;
+        mode: z.ZodOptional<z.ZodEnum<["agent", "plan", "ask", "debug", "review", "search", "explore"]>>;
+    }, "strip", z.ZodTypeAny, {
+        description: string;
+        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
+        agent_type?: string | undefined;
+        context_summary?: string | undefined;
+    }, {
+        description: string;
+        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
+        agent_type?: string | undefined;
+        context_summary?: string | undefined;
+    }>, "many">;
+    block: z.ZodOptional<z.ZodBoolean>;
+}, "strip", z.ZodTypeAny, {
+    tasks: {
+        description: string;
+        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
+        agent_type?: string | undefined;
+        context_summary?: string | undefined;
+    }[];
+    block?: boolean | undefined;
+}, {
+    tasks: {
+        description: string;
+        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
+        agent_type?: string | undefined;
+        context_summary?: string | undefined;
+    }[];
+    block?: boolean | undefined;
+}>;
+declare function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
+declare function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnOutputSchema>>;
+declare function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnStopSchema>>;
+declare function createListAgentRunsTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof listAgentRunsSchema>>;
+declare function createAgentRunSnapshotTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof agentRunSnapshotSchema>>;
+declare function createResumeAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof resumeAgentSchema>>;
+declare function createTaskResumeTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof taskResumeSchema>>;
+declare function createTaskSnapshotTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof taskSnapshotSchema>>;
+declare function createTaskCreateBatchTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof taskCreateBatchSchema>>;
+/**
+ * SpawnAgentsParallel — simple alternative to Parallel+SpawnAgent for concurrent sub-agent launch.
+ * Flat schema: no recipient_name/parameters wrapping needed.
+ */
+declare function createSpawnAgentsParallelTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
+/**
+ * Backward-compatible alias for old sessions/prompts that still call SpawnAgents.
+ * Runtime behavior is identical to SpawnAgent (single sub-agent per call).
+ */
+declare function createSpawnAgentsAliasTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
+
+interface NexusRunServices {
+    parallelAgentManager: ParallelAgentManager;
+    mcpClient?: McpClient;
+    /** Root run is 0; incremented for every delegated-agent generation. */
+    subagentDepth: number;
+    /** Current delegated run id; absent for the root run. */
+    subagentId?: string;
+}
+declare function createNexusRunServices(input?: {
+    parallelAgentManager?: ParallelAgentManager;
+    mcpClient?: McpClient;
+    subagentDepth?: number;
+    subagentId?: string;
+}): NexusRunServices;
 
 type Mode = "agent" | "plan" | "ask" | "debug" | "review";
 declare const MODES: Mode[];
@@ -1442,6 +2039,12 @@ interface ToolDef<TArgs = Record<string, unknown>> {
     alwaysLoad?: boolean;
     /** If true, can be executed in parallel with other read-only tools */
     readOnly?: boolean;
+    /** Stable integration provenance; never infer ownership from a tool-name delimiter. */
+    integration?: {
+        kind: "mcp";
+        serverName: string;
+        originalName: string;
+    };
     /** Which modes this tool is available in. undefined = all modes */
     modes?: Mode[];
     /** If true, always show approval dialog */
@@ -1472,26 +2075,22 @@ interface ToolContext {
     host: IHost;
     session: ISession;
     config: NexusConfig;
+    services: NexusRunServices;
     /** Current loop mode (agent / plan / ask). Used e.g. by SpawnAgent to set sub-agent permissions. */
     mode?: Mode;
     indexer?: IIndexer;
     signal: AbortSignal;
-    /** Optional: trigger context compaction (condense/summarize_task tools). */
+    /** Optional: trigger context compaction (e.g. Condense tool). */
     compactSession?: () => Promise<void>;
     /** Current tool call part id (e.g. part_xyz). Set by loop for write/replace so tool can emit tool_approval_needed. */
     partId?: string;
     /** Assistant message id for the in-flight tool call (loop); used e.g. to merge sub-agent file edits when part id lookup fails. */
     toolExecutionMessageId?: string;
-    /**
-     * Set by the Parallel tool around batched executes so concurrent SpawnAgent calls are not
-     * mistaken for duplicate spawns (shared recentSpawnTasks guard).
-     */
-    skipSubagentDuplicateCheck?: boolean;
     /** All resolved tools for this run (set by loop). Used e.g. by Parallel to run multiple tools in one call. */
     resolvedTools?: ToolDef[];
 }
 interface ApprovalAction {
-    type: "write" | "execute" | "mcp" | "browser" | "read" | "doom_loop";
+    type: "write" | "execute" | "mcp" | "plugin" | "browser" | "read" | "doom_loop";
     tool: string;
     description: string;
     content?: string;
@@ -1509,12 +2108,20 @@ interface ApprovalAction {
 interface UserQuestionOption {
     id: string;
     label: string;
+    /** Longer explanation (OpenClaude-style option description). */
+    description?: string;
+    /** Markdown preview when focused; hosts must hide for multi-select (OpenClaude rule). */
+    preview?: string;
 }
 interface UserQuestionItem {
     id: string;
     question: string;
+    /** Short chip / section label (OpenClaude `header`). */
+    header?: string;
     options: UserQuestionOption[];
     allowCustom?: boolean;
+    /** When true, user may pick several options; answers use `optionIds` / `optionLabels`. */
+    multiSelect?: boolean;
 }
 interface UserQuestionRequest {
     requestId: string;
@@ -1525,8 +2132,12 @@ interface UserQuestionRequest {
 }
 interface UserQuestionAnswer {
     questionId: string;
+    /** Single-select */
     optionId?: string;
     optionLabel?: string;
+    /** Multi-select (mutually exclusive with optionId for a given question). */
+    optionIds?: string[];
+    optionLabels?: string[];
     customText?: string;
 }
 type LspOperation = "goToDefinition" | "findReferences" | "hover" | "documentSymbol" | "workspaceSymbol" | "goToImplementation" | "prepareCallHierarchy" | "incomingCalls" | "outgoingCalls";
@@ -1734,11 +2345,17 @@ interface ToolPart {
     status: "pending" | "running" | "completed" | "error";
     input?: Record<string, unknown>;
     output?: string;
+    attachments?: ToolAttachment[];
     error?: string;
     timeStart?: number;
     timeEnd?: number;
     /** If true, output has been pruned for compaction */
     compacted?: boolean;
+    /**
+     * Absolute path to full tool output when truncated to disk (~/.nexus/data/tool-output/).
+     * Preserved for model hints after prune/compaction (OpenClaude-style spill registry).
+     */
+    outputSpillPath?: string;
     /** Set when tool is Write/Edit and completed; used for session diff (e.g. CLI "N files" block). */
     path?: string;
     diffStats?: {
@@ -1867,11 +2484,31 @@ interface DeferredToolDef {
 }
 interface MemoryRecord {
     id: string;
-    scope: "session" | "project" | "team";
+    schemaVersion: 2;
+    scope: "global" | "project" | "session" | "team" | "task" | "agent";
+    kind: "fact" | "preference" | "command" | "architecture" | "decision" | "instruction" | "summary" | "artifact_reference";
     title: string;
     content: string;
+    source: {
+        type: "user" | "tool" | "compaction" | "legacy_file" | "system" | "external";
+        uri?: string;
+        sessionId?: string;
+        importedAt?: number;
+    };
+    author: {
+        type: "user" | "agent" | "system" | "external";
+        id?: string;
+    };
+    trust: "user" | "trusted" | "agent" | "external" | "untrusted";
+    confidence: number;
+    sensitivity: "normal" | "sensitive";
     createdAt: number;
     updatedAt: number;
+    accessedAt: number;
+    accessCount: number;
+    expiresAt?: number;
+    supersedes?: string[];
+    contradicts?: string[];
     metadata?: Record<string, unknown>;
 }
 interface PluginManifestRecord {
@@ -1879,10 +2516,18 @@ interface PluginManifestRecord {
     version?: string;
     description: string;
     commands: string[];
+    commandEntries?: Array<{
+        name: string;
+        source?: string;
+        content?: string;
+        description?: string;
+    }>;
     agents: string[];
     skills: string[];
     hooks: string[];
+    inlineHookConfigs?: Record<string, unknown>[];
     mcpServers: string[];
+    inlineMcpServers?: Record<string, unknown>;
     enabled: boolean;
     rootDir: string;
     sourcePath: string;
@@ -2003,6 +2648,7 @@ type AgentEvent = {
     success: boolean;
     output?: string;
     error?: string;
+    attachments?: ToolAttachment[];
     compacted?: boolean;
     path?: string;
     writtenContent?: string;
@@ -2026,6 +2672,8 @@ type AgentEvent = {
     mode: Mode;
     task: string;
     parentPartId?: string;
+    depth?: number;
+    parentSubagentId?: string;
 } | {
     type: "subagent_tool_start";
     subagentId: string;
@@ -2057,6 +2705,11 @@ type AgentEvent = {
     type: "compaction_start";
 } | {
     type: "compaction_end";
+} | {
+    type: "run_context";
+    mode: Mode;
+    memoryCitations: string[];
+    taskIds: string[];
 } | {
     type: "index_update";
     status: IndexStatus;
@@ -2284,6 +2937,8 @@ interface NexusConfig {
     parallelAgents: {
         maxParallel: number;
         maxTasksPerCall?: number;
+        /** Maximum delegated-agent nesting depth. Root is depth 0. */
+        maxDepth?: number;
     };
     compatibility?: {
         claude?: {
@@ -2311,6 +2966,18 @@ interface NexusConfig {
     agentLoop?: {
         toolCallBudget?: Partial<Record<Mode, number>>;
         maxIterations?: Partial<Record<Mode, number>>;
+    };
+    /** OpenClaude-class: auto-memory dir, session memory file, tool spill hints. */
+    memory?: {
+        autoMemoryEnabled?: boolean;
+        autoMemoryDirectory?: string;
+        sessionMemoryEnabled?: boolean;
+        sessionMemoryMinToolCallsBetweenUpdates?: number;
+        sessionMemoryMaxChars?: number;
+        emphasizeToolSpillPaths?: boolean;
+        teamMemoryEnabled?: boolean;
+        autoDreamEnabled?: boolean;
+        autoDreamMinIntervalMs?: number;
     };
     rules: {
         files: string[];
@@ -2361,7 +3028,11 @@ interface McpServerConfig {
     /** Extra headers for SSE / Streamable HTTP (e.g. Authorization). */
     headers?: Record<string, string>;
     enabled?: boolean;
-    /** Resolve to a bundled MCP server (e.g. "context-mode") when nexusRoot is set by host */
+    /** Maximum time allowed for transport initialization and initial capability discovery. */
+    startupTimeoutMs?: number;
+    /** Maximum time allowed for a single MCP tool/resource request. */
+    toolTimeoutMs?: number;
+    /** Resolve an optional MCP bundle (e.g. "context-mode") through a host path or environment override. */
     bundle?: string;
     auth?: {
         type?: "oauth" | "url" | "manual";
@@ -2513,6 +3184,168 @@ declare function writeProjectSettings(cwd: string, settings: ProjectSettings): v
  */
 declare function writeGlobalSettings(settings: ProjectSettings): void;
 
+declare const MEMORY_SCHEMA_VERSION: 2;
+type LegacyMemoryRecord = Pick<MemoryRecord, "id" | "scope" | "title" | "content" | "createdAt" | "updatedAt"> & Partial<Omit<MemoryRecord, "id" | "scope" | "title" | "content" | "createdAt" | "updatedAt">>;
+/**
+ * Upgrade a persisted v1 memory in-memory. The next orchestration mutation
+ * writes the upgraded record, so old checksummed snapshots remain readable.
+ */
+declare function normalizeMemoryRecord(input: LegacyMemoryRecord): MemoryRecord;
+
+interface RetrievedMemory {
+    memory: MemoryRecord;
+    score: number;
+    reasons: string[];
+    citation: string;
+    estimatedChars: number;
+}
+interface MemoryRetrievalResult {
+    items: RetrievedMemory[];
+    totalChars: number;
+    excluded: {
+        expired: number;
+        superseded: number;
+        contradicted: number;
+        duplicate: number;
+        irrelevant: number;
+        budget: number;
+    };
+}
+interface MemoryRetrievalOptions {
+    memories: MemoryRecord[];
+    query: string;
+    limit?: number;
+    maxChars?: number;
+    now?: number;
+    /** Optional healthy vector-service similarity scores keyed by memory id (0..1). */
+    vectorScores?: ReadonlyMap<string, number> | Record<string, number>;
+}
+declare function tokenizeMemoryText(text: string): string[];
+declare function retrieveMemories(options: MemoryRetrievalOptions): MemoryRetrievalResult;
+
+declare function redactMemorySecrets(input: string): {
+    text: string;
+    redacted: boolean;
+};
+
+type RunStatus = "running" | "completed" | "failed" | "aborted" | "interrupted";
+interface RunToolArtifact {
+    partId: string;
+    tool: string;
+    path?: string;
+    outputSpillPath?: string;
+}
+interface PendingRunApproval {
+    partId: string;
+    action: ApprovalAction;
+    requestedAt: number;
+}
+interface DurableRunRecord {
+    schemaVersion: 1;
+    id: string;
+    sessionId: string;
+    cwd: string;
+    mode: Mode;
+    status: RunStatus;
+    createdAt: number;
+    updatedAt: number;
+    lastSeq: number;
+    lastChecksum: string | null;
+    recentIdempotencyKeys: Record<string, number>;
+    pendingApprovals: PendingRunApproval[];
+    toolArtifacts: RunToolArtifact[];
+    memoryCitations: string[];
+    taskIds: string[];
+}
+interface RunEventEnvelope {
+    type: "run_event";
+    schemaVersion: 1;
+    runId: string;
+    seq: number;
+    ts: number;
+    idempotencyKey: string;
+    previousChecksum: string | null;
+    event: AgentEvent;
+    checksum: string;
+    deduplicated?: boolean;
+}
+interface RunEventDiagnostic {
+    code: "corrupt-event-tail" | "snapshot-recovered";
+    path: string;
+    message: string;
+}
+interface RunEventStoreOptions {
+    homeDir?: string;
+    onDiagnostic?: (diagnostic: RunEventDiagnostic) => void;
+}
+interface DurableRunEventSinkOptions extends RunEventStoreOptions {
+    runId?: string;
+}
+declare class RunEventStore {
+    readonly cwd: string;
+    private readonly root;
+    private readonly diagnostics;
+    private readonly onDiagnostic?;
+    private readonly mutationCache;
+    constructor(cwd: string, options?: RunEventStoreOptions);
+    getSnapshotPath(runId: string): string;
+    getJournalPath(runId: string): string;
+    getDiagnostics(): readonly RunEventDiagnostic[];
+    private diagnostic;
+    private verifiedEventState;
+    private verifiedEvents;
+    private validateSnapshot;
+    private readSnapshot;
+    private normalizeSnapshotRecord;
+    private writeSnapshot;
+    private load;
+    private loadForMutation;
+    createRun(input: {
+        id: string;
+        sessionId: string;
+        mode: Mode;
+    }): Promise<DurableRunRecord>;
+    getRun(runId: string): Promise<DurableRunRecord | null>;
+    listRuns(filters?: {
+        sessionId?: string;
+        status?: RunStatus | RunStatus[];
+        limit?: number;
+    }): Promise<DurableRunRecord[]>;
+    appendEvent(runId: string, event: AgentEvent, idempotencyKey?: string): Promise<RunEventEnvelope>;
+    appendEvents(runId: string, inputs: Array<{
+        event: AgentEvent;
+        idempotencyKey?: string;
+    }>): Promise<RunEventEnvelope[]>;
+    readEvents(runId: string, afterSeq?: number): Promise<RunEventEnvelope[]>;
+    finishRun(runId: string, status: Exclude<RunStatus, "running">): Promise<DurableRunRecord>;
+}
+/**
+ * Persist-before-deliver event adapter for local hosts. `emit` stays
+ * synchronous for IHost compatibility while writes and delivery are strictly
+ * ordered through one promise chain.
+ */
+declare class DurableRunEventSink {
+    readonly runId: string;
+    private readonly store;
+    private readonly deliver;
+    private queue;
+    private persistenceError;
+    private pending;
+    private flushTimer;
+    private closed;
+    private constructor();
+    static create(input: {
+        cwd: string;
+        sessionId: string;
+        mode: Mode;
+        deliver: (event: AgentEvent) => void;
+        options?: DurableRunEventSinkOptions;
+    }): Promise<DurableRunEventSink>;
+    emit(event: AgentEvent, idempotencyKey?: string): void;
+    private flushPending;
+    finish(status: Exclude<RunStatus, "running">): Promise<DurableRunRecord>;
+}
+
 interface LLMStreamEvent {
     type: "text_delta" | "reasoning_start" | "reasoning_delta" | "reasoning_end" | "tool_input_start" | "tool_call" | "tool_result" | "finish" | "error";
     delta?: string;
@@ -2617,17 +3450,7 @@ declare function createEmbeddingClient(config: EmbeddingConfig): EmbeddingClient
 
 declare function createLLMClient(config: ProviderConfig): LLMClient;
 
-/**
- * Session storage using JSONL format (like Pi).
- * Each line is a JSON entry with { id, parentId, role, content, ts, metadata }.
- * Sessions are stored per project in ~/.nexus/sessions/{project-hash}/
- *
- * All callers should use the same logical project root: CLI, VS Code, and server
- * resolve paths here so one bucket is used per workspace (symlinks, trailing
- * slashes, and Windows drive casing are normalized when possible).
- */
 declare function canonicalProjectRoot(cwd: string): string;
-/** Last UI context bar snapshot (session + system + tools overhead) from agent loop; optional for older files. */
 type StoredContextUsage = {
     usedTokens: number;
     limitTokens: number;
@@ -2638,11 +3461,11 @@ interface StoredSession {
     cwd: string;
     ts: number;
     title?: string;
-    /** Global todo list for the chat (persisted with session) */
     todo?: string;
-    /** Persisted so CLI/extension can show the same ctx bar after resume without re-running the agent. */
     contextUsage?: StoredContextUsage;
     messages: SessionMessage[];
+    /** Monotonic durable journal revision. Legacy v1 files load as revision 0. */
+    revision?: number;
 }
 interface StoredSessionMeta {
     id: string;
@@ -2651,8 +3474,72 @@ interface StoredSessionMeta {
     title?: string;
     todo?: string;
     messageCount: number;
+    revision: number;
 }
-declare function saveSession(session: StoredSession): Promise<void>;
+type SessionStorageDiagnosticCode = "corrupt-journal-tail" | "journal-backup-recovered" | "legacy-session-detected" | "legacy-session-migrated" | "session-corrupt";
+interface SessionStorageDiagnostic {
+    code: SessionStorageDiagnosticCode;
+    path: string;
+    message: string;
+}
+interface SessionStoreOptions {
+    /** Nexus home containing sessions/. Defaults to ~/.nexus. */
+    homeDir?: string;
+    compactAfterRecords?: number;
+    compactAfterBytes?: number;
+    onDiagnostic?: (diagnostic: SessionStorageDiagnostic) => void;
+}
+interface SaveSessionOptions {
+    expectedRevision?: number;
+}
+declare class UnsafeSessionIdError extends Error {
+    readonly sessionId: string;
+    constructor(sessionId: string);
+}
+declare class SessionConflictError extends Error {
+    readonly sessionId: string;
+    readonly expectedRevision: number;
+    readonly actualRevision: number;
+    constructor(sessionId: string, expectedRevision: number, actualRevision: number);
+}
+declare class SessionCorruptionError extends Error {
+    readonly journalPath: string;
+    constructor(journalPath: string, message: string);
+}
+declare class SessionStore {
+    private readonly homeDir;
+    private readonly compactAfterRecords;
+    private readonly compactAfterBytes;
+    private readonly onDiagnostic?;
+    private readonly diagnostics;
+    constructor(options?: SessionStoreOptions);
+    getSessionsDir(cwd: string): string;
+    getSessionPath(sessionId: string, cwd: string): string;
+    private diagnostic;
+    getDiagnostics(): readonly SessionStorageDiagnostic[];
+    private parseJournal;
+    private quarantineTail;
+    private writeLocked;
+    saveSession(session: StoredSession, options?: SaveSessionOptions): Promise<number>;
+    mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>): Promise<StoredSession | null>;
+    loadSession(sessionId: string, cwd: string): Promise<StoredSession | null>;
+    getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
+    loadSessionMessages(sessionId: string, cwd: string, limit: number, offset: number): Promise<{
+        meta: StoredSessionMeta;
+        messages: SessionMessage[];
+    } | null>;
+    listSessions(cwd: string): Promise<Array<{
+        id: string;
+        ts: number;
+        title?: string;
+        messageCount: number;
+        revision: number;
+    }>>;
+    deleteSession(sessionId: string, cwd: string): Promise<boolean>;
+}
+declare function getSessionStorageDiagnostics(): readonly SessionStorageDiagnostic[];
+declare function saveSession(session: StoredSession, options?: SaveSessionOptions): Promise<number>;
+declare function mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>): Promise<StoredSession | null>;
 declare function loadSession(sessionId: string, cwd: string): Promise<StoredSession | null>;
 declare function getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
 declare function loadSessionMessages(sessionId: string, cwd: string, limit: number, offset: number): Promise<{
@@ -2664,6 +3551,7 @@ declare function listSessions(cwd: string): Promise<Array<{
     ts: number;
     title?: string;
     messageCount: number;
+    revision: number;
 }>>;
 declare function deleteSession(sessionId: string, cwd: string): Promise<boolean>;
 declare function generateSessionId(): string;
@@ -2684,7 +3572,9 @@ declare class Session implements ISession {
     private _tokenEstimateCache;
     /** Last context_usage from agent (full formula). Cleared when messages change. */
     private _contextUsageSnapshot;
-    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean, contextUsageSnapshot?: StoredContextUsage | null);
+    /** Last verified durable journal revision used for optimistic concurrency. */
+    private _revision;
+    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean, contextUsageSnapshot?: StoredContextUsage | null, revision?: number);
     get messages(): SessionMessage[];
     invalidateTokenEstimate(): void;
     private clearContextUsageSnapshot;
@@ -2731,15 +3621,23 @@ interface SessionCompaction {
     compact(session: ISession, client: LLMClient, signal?: AbortSignal, opts?: {
         keepRecentMessages?: number;
         force?: boolean;
+        durableContext?: CompactionDurableContext;
     }): Promise<void>;
     isOverflow(tokenCount: number, contextLimit: number, threshold: number): boolean;
+}
+interface CompactionDurableContext {
+    mode: string;
+    memoryCitations: string[];
+    taskIds: string[];
 }
 declare function createCompaction(): SessionCompaction;
 
 interface NexusServerClientOptions {
     baseUrl: string;
     directory: string;
+    token: string;
 }
+declare const NEXUS_SERVER_TOKEN_SECRET_KEY = "nexuscode_server_token";
 /**
  * Client for NexusCode server — list/create sessions, get messages, stream agent events.
  * Shared by extension and CLI when serverUrl is set.
@@ -2747,20 +3645,24 @@ interface NexusServerClientOptions {
 declare class NexusServerClient {
     private baseUrl;
     private directory;
+    private token;
     constructor(opts: NexusServerClientOptions);
     private headers;
     private url;
+    private sessionPath;
     listSessions(): Promise<Array<{
         id: string;
         ts: number;
         title?: string;
         messageCount: number;
+        revision: number;
     }>>;
     createSession(): Promise<{
         id: string;
         cwd: string;
         ts: number;
         messageCount: number;
+        revision: number;
     }>;
     getMessages(sessionId: string, opts?: {
         limit?: number;
@@ -2771,13 +3673,19 @@ declare class NexusServerClient {
         cwd: string;
         ts: number;
         messageCount: number;
+        revision: number;
     }>;
+    getRecentMessages(sessionId: string, limit?: number): Promise<SessionMessage[]>;
     deleteSession(sessionId: string): Promise<boolean>;
+    abortSession(sessionId: string): Promise<boolean>;
+    respondToApproval(sessionId: string, runId: string, partId: string, result: PermissionResult): Promise<void>;
     /**
      * Send message and stream AgentEvents as NDJSON. Yields each event (heartbeat lines are skipped).
      * Malformed lines yield an error event. Throws on fetch error.
      */
-    streamMessage(sessionId: string, content: string, mode: Mode, presetName?: string, signal?: AbortSignal): AsyncGenerator<AgentEvent>;
+    streamMessage(sessionId: string, content: string, mode: Mode, presetName?: string, signal?: AbortSignal, options?: {
+        onRunId?: (runId: string) => void;
+    }): AsyncGenerator<AgentEvent>;
 }
 /** If no event (including heartbeat) received for this long, consider stream dead. */
 declare const DEFAULT_HEARTBEAT_TIMEOUT_MS = 20000;
@@ -2787,6 +3695,7 @@ interface AgentLoopOptions {
     client: LLMClient;
     host: IHost;
     config: NexusConfig;
+    services: NexusRunServices;
     mode: Mode;
     tools: ToolDef[];
     skills: SkillDef[];
@@ -2808,7 +3717,7 @@ interface AgentLoopOptions {
  */
 declare function runAgentLoop(opts: AgentLoopOptions): Promise<void>;
 
-type ToolGroup = "read" | "write" | "execute" | "search" | "mcp" | "skills" | "agents" | "always" | "context" | "plan_exit"
+type ToolGroup = "read" | "write" | "execute" | "search" | "mcp" | "skills" | "agents" | "always" | "context" | "git_inspect" | "plan_exit"
 /** Switch UI/session to plan mode (only where planning is not already the focus). */
  | "plan_enter";
 /**
@@ -2861,7 +3770,11 @@ interface PromptContext {
     /** Short project layout (top-level dirs and key files) at start */
     initialProjectContext?: string;
     /** Persistent memories relevant to this run (project/session/team). */
-    memories?: MemoryRecord[];
+    memories?: RetrievedMemory[];
+    /** OpenClaude-class session scrolling notes (`<id>.session-memory.md`), re-read each loop iteration. */
+    sessionMemoryContent?: string;
+    /** After compaction in plan mode: inject short OpenClaude-style workflow reminder (once per compaction). */
+    planModeSparseReminder?: boolean;
     /** Context window usage (shown at start of system info so model sees token budget) */
     contextUsedTokens?: number;
     contextLimitTokens?: number;
@@ -2890,221 +3803,63 @@ declare function buildSystemPrompt(ctx: PromptContext): {
     cacheableCount: number;
 };
 
-interface SubAgentResult {
-    subagentId: string;
-    sessionId: string;
-    success: boolean;
-    output: string;
-    error?: string;
-    /** Write/Edit tool parts from the sub-agent session (merged into parent for session diff). */
-    fileEditParts?: ToolPart[];
+type OrchestrationDiagnosticCode = "corrupt-journal-tail" | "snapshot-backup-recovered" | "journal-recovered" | "legacy-state-detected" | "legacy-state-migrated" | "stale-run-reconciled";
+interface OrchestrationDiagnostic {
+    code: OrchestrationDiagnosticCode;
+    path: string;
+    message: string;
 }
-interface ResumeAgentOptions {
-    followupInstruction?: string;
-    fork?: boolean;
-    runInBackground?: boolean;
+interface OrchestrationRuntimeOptions {
+    homeDir?: string;
+    compactAfterRecords?: number;
+    compactAfterBytes?: number;
+    reconcileStaleRuns?: boolean;
+    onDiagnostic?: (diagnostic: OrchestrationDiagnostic) => void;
 }
-interface AgentSpawnOptions {
-    skipDuplicateCheck?: boolean;
-    modelOverride?: string;
-    taskName?: string;
+declare class OrchestrationCorruptionError extends Error {
+    readonly statePath: string;
+    constructor(statePath: string, message: string);
 }
-type SubAgentStatus = "running" | "completed" | "error";
-interface SubAgentSnapshot {
-    subagentId: string;
-    sessionId: string;
-    status: SubAgentStatus;
-    output: string;
-    error?: string;
+declare class OrchestrationInvariantError extends Error {
+    constructor(message: string);
 }
-/**
- * Manager for parallel sub-agents.
- * Each sub-agent runs its own isolated session and agent loop.
- *
- * Concurrency model: each promise added to `this.running` removes itself
- * via `.finally()`, so after `await Promise.race(...)` at least one slot
- * is guaranteed to be free (the race resolves in a microtask, `.finally`
- * queues in the next microtask, `await Promise.resolve()` drains them).
- */
-declare class ParallelAgentManager {
-    private running;
-    private sessions;
-    private outputById;
-    private statusById;
-    private errorById;
-    private controllers;
-    private history;
-    private static readonly HISTORY_CAP;
-    /** Recent spawn task keys (normalized) to prevent infinite restart / duplicate spawns. */
-    private recentSpawnTasks;
-    private static readonly RECENT_SPAWN_CAP;
-    private static readonly TASK_KEY_LEN;
-    private rememberId;
-    private startTask;
-    spawn(description: string, mode: Mode | undefined, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string, agentType?: string, spawnOptions?: AgentSpawnOptions): Promise<SubAgentResult>;
-    spawnInBackground(description: string, mode: Mode, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string, agentType?: string, spawnOptions?: AgentSpawnOptions): Promise<{
-        subagentId: string;
-    }>;
-    getSnapshot(subagentId: string): SubAgentSnapshot | null;
-    waitFor(subagentId: string): Promise<SubAgentSnapshot | null>;
-    stop(subagentId: string): boolean;
-    listRuns(cwd: string): Promise<BackgroundTaskRecord[]>;
-    resume(subagentId: string, options: ResumeAgentOptions, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, parentPartId?: string): Promise<SubAgentResult | {
-        subagentId: string;
-        background: true;
-    }>;
-    private runSubAgent;
-    /** How many agents are currently running */
-    get activeCount(): number;
-}
-declare function setParallelAgentManager(manager: ParallelAgentManager | undefined): void;
-declare function getParallelAgentManager(): ParallelAgentManager | undefined;
-declare const spawnOutputSchema: z.ZodObject<{
-    subagent_id: z.ZodString;
-    block: z.ZodOptional<z.ZodBoolean>;
-}, "strict", z.ZodTypeAny, {
-    subagent_id: string;
-    block?: boolean | undefined;
-}, {
-    subagent_id: string;
-    block?: boolean | undefined;
-}>;
-declare const spawnStopSchema: z.ZodObject<{
-    subagent_id: z.ZodString;
-}, "strict", z.ZodTypeAny, {
-    subagent_id: string;
-}, {
-    subagent_id: string;
-}>;
-declare const listAgentRunsSchema: z.ZodObject<{
-    limit: z.ZodOptional<z.ZodNumber>;
-}, "strip", z.ZodTypeAny, {
-    limit?: number | undefined;
-}, {
-    limit?: number | undefined;
-}>;
-declare const agentRunSnapshotSchema: z.ZodObject<{
-    subagent_id: z.ZodString;
-    format: z.ZodOptional<z.ZodEnum<["summary", "json"]>>;
-}, "strip", z.ZodTypeAny, {
-    subagent_id: string;
-    format?: "summary" | "json" | undefined;
-}, {
-    subagent_id: string;
-    format?: "summary" | "json" | undefined;
-}>;
-declare const resumeAgentSchema: z.ZodObject<{
-    subagent_id: z.ZodString;
-    instruction: z.ZodOptional<z.ZodString>;
-    fork: z.ZodOptional<z.ZodBoolean>;
-    run_in_background: z.ZodOptional<z.ZodBoolean>;
-}, "strip", z.ZodTypeAny, {
-    subagent_id: string;
-    run_in_background?: boolean | undefined;
-    instruction?: string | undefined;
-    fork?: boolean | undefined;
-}, {
-    subagent_id: string;
-    run_in_background?: boolean | undefined;
-    instruction?: string | undefined;
-    fork?: boolean | undefined;
-}>;
-declare const taskResumeSchema: z.ZodObject<{
-    task_id: z.ZodString;
-    instruction: z.ZodOptional<z.ZodString>;
-    fork: z.ZodOptional<z.ZodBoolean>;
-    block: z.ZodOptional<z.ZodBoolean>;
-}, "strip", z.ZodTypeAny, {
-    task_id: string;
-    block?: boolean | undefined;
-    instruction?: string | undefined;
-    fork?: boolean | undefined;
-}, {
-    task_id: string;
-    block?: boolean | undefined;
-    instruction?: string | undefined;
-    fork?: boolean | undefined;
-}>;
-declare const taskSnapshotSchema: z.ZodObject<{
-    task_id: z.ZodString;
-    format: z.ZodOptional<z.ZodEnum<["summary", "json"]>>;
-}, "strip", z.ZodTypeAny, {
-    task_id: string;
-    format?: "summary" | "json" | undefined;
-}, {
-    task_id: string;
-    format?: "summary" | "json" | undefined;
-}>;
-declare const taskCreateBatchSchema: z.ZodObject<{
-    tasks: z.ZodArray<z.ZodObject<{
-        description: z.ZodString;
-        agent_type: z.ZodOptional<z.ZodString>;
-        context_summary: z.ZodOptional<z.ZodString>;
-        mode: z.ZodOptional<z.ZodEnum<["agent", "plan", "ask", "debug", "review", "search", "explore"]>>;
-    }, "strip", z.ZodTypeAny, {
-        description: string;
-        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
-        agent_type?: string | undefined;
-        context_summary?: string | undefined;
-    }, {
-        description: string;
-        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
-        agent_type?: string | undefined;
-        context_summary?: string | undefined;
-    }>, "many">;
-    block: z.ZodOptional<z.ZodBoolean>;
-}, "strip", z.ZodTypeAny, {
-    tasks: {
-        description: string;
-        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
-        agent_type?: string | undefined;
-        context_summary?: string | undefined;
-    }[];
-    block?: boolean | undefined;
-}, {
-    tasks: {
-        description: string;
-        mode?: "search" | "agent" | "plan" | "ask" | "debug" | "review" | "explore" | undefined;
-        agent_type?: string | undefined;
-        context_summary?: string | undefined;
-    }[];
-    block?: boolean | undefined;
-}>;
-declare function createSpawnAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
-declare function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnOutputSchema>>;
-declare function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof spawnStopSchema>>;
-declare function createListAgentRunsTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof listAgentRunsSchema>>;
-declare function createAgentRunSnapshotTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof agentRunSnapshotSchema>>;
-declare function createResumeAgentTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof resumeAgentSchema>>;
-declare function createTaskResumeTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof taskResumeSchema>>;
-declare function createTaskSnapshotTool(manager: ParallelAgentManager): ToolDef<z.infer<typeof taskSnapshotSchema>>;
-declare function createTaskCreateBatchTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef<z.infer<typeof taskCreateBatchSchema>>;
-/**
- * SpawnAgentsParallel — simple alternative to Parallel+SpawnAgent for concurrent sub-agent launch.
- * Flat schema: no recipient_name/parameters wrapping needed.
- */
-declare function createSpawnAgentsParallelTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
-/**
- * Backward-compatible alias for old sessions/prompts that still call SpawnAgents.
- * Runtime behavior is identical to SpawnAgent (single sub-agent per call).
- */
-declare function createSpawnAgentsAliasTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
-
-declare function getRuntimeDir(cwd: string): string;
+declare function getRuntimeDir(cwd: string, homeDir?: string): string;
 declare class OrchestrationRuntime {
     readonly cwd: string;
     private readonly root;
     private readonly stateFile;
-    private loaded;
+    private readonly journalFile;
+    private readonly writer;
+    private readonly compactAfterRecords;
+    private readonly compactAfterBytes;
+    private readonly reconcileStaleRuns;
+    private readonly onDiagnostic?;
+    private readonly diagnostics;
     private tasks;
     private teams;
     private worktrees;
     private backgroundTasks;
     private memories;
     private remoteSessions;
-    constructor(cwd: string);
+    constructor(cwd: string, options?: OrchestrationRuntimeOptions);
+    getStatePath(): string;
+    getJournalPath(): string;
+    getDiagnostics(): readonly OrchestrationDiagnostic[];
+    private diagnostic;
+    private applyState;
+    private captureState;
+    private parseSnapshot;
+    private parseJournal;
+    private reconcileState;
+    private loadDurableState;
+    private quarantineJournalTail;
+    private persistLoaded;
     private ensureLoaded;
-    private persist;
+    private mutate;
+    private assertCanComplete;
+    private assertValidTaskDependencies;
+    private synchronizeTaskEdges;
+    private assertValidTaskTransition;
     createTask(input: {
         id?: string;
         kind?: TaskKind;
@@ -3180,6 +3935,14 @@ declare class OrchestrationRuntime {
         scope: MemoryRecord["scope"];
         title: string;
         content: string;
+        kind?: MemoryRecord["kind"];
+        source?: MemoryRecord["source"];
+        author?: MemoryRecord["author"];
+        trust?: MemoryRecord["trust"];
+        confidence?: number;
+        expiresAt?: number;
+        supersedes?: string[];
+        contradicts?: string[];
         metadata?: Record<string, unknown>;
     }): Promise<MemoryRecord>;
     getMemory(memoryId: string): Promise<MemoryRecord | null>;
@@ -3188,13 +3951,27 @@ declare class OrchestrationRuntime {
         limit?: number;
         metadataMatch?: Record<string, string | number | boolean>;
     }): Promise<MemoryRecord[]>;
+    recordMemoryAccess(memoryIds: readonly string[], accessedAt?: number): Promise<MemoryRecord[]>;
     updateMemory(memoryId: string, updates: Partial<Pick<MemoryRecord, "title" | "content">> & {
+        kind?: MemoryRecord["kind"];
+        confidence?: number;
+        expiresAt?: number | null;
+        supersedes?: string[];
+        contradicts?: string[];
         metadata?: Record<string, unknown | null>;
     }): Promise<MemoryRecord | null>;
     upsertMemoryByTitle(input: {
         scope: MemoryRecord["scope"];
         title: string;
         content: string;
+        kind?: MemoryRecord["kind"];
+        source?: MemoryRecord["source"];
+        author?: MemoryRecord["author"];
+        trust?: MemoryRecord["trust"];
+        confidence?: number;
+        expiresAt?: number;
+        supersedes?: string[];
+        contradicts?: string[];
         metadata?: Record<string, unknown>;
     }): Promise<MemoryRecord>;
     deleteMemory(memoryId: string): Promise<boolean>;
@@ -3219,7 +3996,53 @@ declare class OrchestrationRuntime {
 }
 declare function getOrchestrationRuntime(cwd: string): Promise<OrchestrationRuntime>;
 
-declare function loadAgentDefinitions(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<AgentDefinition[]>;
+type StorageDiagnosticCode = "primary-corrupt" | "backup-corrupt" | "recovered-from-backup" | "stale-lock-recovered";
+interface StorageDiagnostic {
+    code: StorageDiagnosticCode;
+    path: string;
+    message: string;
+}
+declare class StorageCorruptionError extends Error {
+    readonly diagnostics: readonly StorageDiagnostic[];
+    constructor(target: string, diagnostics: readonly StorageDiagnostic[]);
+}
+declare class FileLockTimeoutError extends Error {
+    readonly target: string;
+    readonly timeoutMs: number;
+    constructor(target: string, timeoutMs: number);
+}
+interface AtomicWriteOptions {
+    backup?: boolean;
+    mode?: number;
+}
+interface FileLockOptions {
+    timeoutMs?: number;
+    staleMs?: number;
+    retryMinMs?: number;
+    retryMaxMs?: number;
+    signal?: AbortSignal;
+    onDiagnostic?: (diagnostic: StorageDiagnostic) => void;
+}
+/**
+ * Replace a file without exposing a partially written target. The temporary
+ * file is created in the same directory so rename remains an atomic boundary.
+ */
+declare function atomicWriteFile(target: string, content: string | Uint8Array, options?: AtomicWriteOptions): Promise<void>;
+declare function atomicWriteJson(target: string, value: unknown, options?: AtomicWriteOptions): Promise<void>;
+interface JsonRecoveryResult<T> {
+    value: T | undefined;
+    source: "primary" | "backup" | "missing";
+    diagnostics: StorageDiagnostic[];
+}
+declare function readJsonWithRecovery<T>(target: string): Promise<JsonRecoveryResult<T>>;
+declare function getFileLockPath(target: string): string;
+/**
+ * Serialize a durable mutation across both async callers in this process and
+ * other Nexus processes sharing the same state directory.
+ */
+declare function withFileLock<T>(target: string, operation: () => Promise<T>, options?: FileLockOptions): Promise<T>;
+
+declare function loadAgentDefinitions(cwd: string, compatibility?: ClaudeCompatibilityOptions, config?: NexusConfig): Promise<AgentDefinition[]>;
 
 declare function ensureTeamMemberForTask(args: {
     cwd: string;
@@ -3240,10 +4063,26 @@ interface ExtractedMemoryInput {
     scope: MemoryRecord["scope"];
     title: string;
     content: string;
+    kind?: MemoryRecord["kind"];
+    source?: MemoryRecord["source"];
+    author?: MemoryRecord["author"];
+    trust?: MemoryRecord["trust"];
+    confidence?: number;
     metadata?: Record<string, unknown>;
 }
 declare function extractMemoriesFromCompactionSummary(summary: string, sessionId: string): ExtractedMemoryInput[];
 
+interface PluginDiagnostic {
+    level: "warning" | "error";
+    code: "manifest-glob-failed" | "manifest-invalid" | "manifest-shadowed";
+    path: string;
+    pluginName?: string;
+    message: string;
+}
+interface PluginDiscoveryResult {
+    plugins: PluginManifestRecord[];
+    diagnostics: PluginDiagnostic[];
+}
 declare function resolvePluginDeclaredPath(plugin: PluginManifestRecord, declaredPath: string): string;
 declare function validatePluginManifestFile(filePath: string): Promise<{
     success: boolean;
@@ -3251,6 +4090,7 @@ declare function validatePluginManifestFile(filePath: string): Promise<{
     warnings: string[];
     plugin?: PluginManifestRecord;
 }>;
+declare function discoverPluginManifests(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<PluginDiscoveryResult>;
 declare function loadPluginManifests(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<PluginManifestRecord[]>;
 
 interface PluginHookExecution {
@@ -3262,9 +4102,13 @@ interface PluginHookExecution {
     stopReason?: string;
     additionalContext?: string;
 }
-type PluginHookEvent = "user_prompt_submit" | "before_tool" | "after_tool" | "turn_complete" | "task_completed" | "subagent_start" | "subagent_stop" | "teammate_idle";
+type PluginHookEvent = "user_prompt_submit" | "before_tool" | "after_tool" | "turn_complete" | "task_completed" | "subagent_start" | "subagent_stop" | "teammate_idle"
+/** Fired once per agent run when the instruction bundle is active (observability; OpenClaude instructions_loaded parity). */
+ | "instructions_loaded";
 declare function applyPluginRuntimeSettings(plugin: PluginManifestRecord, config: NexusConfig): PluginManifestRecord;
 declare function loadPluginRuntimeRecords(cwd: string, config: NexusConfig): Promise<PluginManifestRecord[]>;
+/** Capabilities from project-controlled plugins are active only after explicit trust. */
+declare function loadTrustedPluginRuntimeRecords(cwd: string, config: NexusConfig): Promise<PluginManifestRecord[]>;
 declare function runPluginHooks(cwd: string, host: IHost, config: NexusConfig, hookEvent: PluginHookEvent, payload: Record<string, unknown>): Promise<PluginHookExecution[]>;
 declare function runScopedHooks(cwd: string, host: IHost, hookEvent: PluginHookEvent, payload: Record<string, unknown>, items: Array<{
     name: string;
@@ -3272,25 +4116,80 @@ declare function runScopedHooks(cwd: string, host: IHost, hookEvent: PluginHookE
     hooks: string[];
 }>): Promise<PluginHookExecution[]>;
 
+interface PluginCapabilityDiagnostic {
+    level: "warning" | "error";
+    code: "plugin-mcp-file-invalid" | "plugin-mcp-server-invalid" | "plugin-mcp-server-shadowed" | "plugin-mcp-cwd-escape";
+    pluginName: string;
+    path: string;
+    serverName?: string;
+    message: string;
+}
+interface PluginMcpCapabilityResult {
+    servers: McpServerConfig[];
+    diagnostics: PluginCapabilityDiagnostic[];
+}
+/**
+ * Load MCP server definitions contributed by explicitly trusted and enabled
+ * plugins. Invalid siblings are isolated and reported instead of hiding valid
+ * servers from the same file.
+ */
+declare function loadPluginMcpServers(cwd: string, config: NexusConfig): Promise<PluginMcpCapabilityResult>;
+/** Explicit project/user MCP configuration wins over plugin contributions. */
+declare function resolveConfiguredAndPluginMcpServers(cwd: string, config: NexusConfig): Promise<PluginMcpCapabilityResult>;
+
 interface LoadedSlashCommand {
     command: string;
-    scope: "project" | "user";
+    scope: "project" | "user" | "plugin";
     sourcePath: string;
     description: string;
     prompt: string;
+    pluginName?: string;
 }
-declare function loadSlashCommands(cwd: string, compatibility?: ClaudeCompatibilityOptions): Promise<LoadedSlashCommand[]>;
+type SlashCommandResolution = {
+    status: "resolved";
+    command: LoadedSlashCommand;
+} | {
+    status: "ambiguous";
+    candidates: string[];
+} | {
+    status: "not-found";
+};
+declare function loadSlashCommands(cwd: string, compatibility?: ClaudeCompatibilityOptions, config?: NexusConfig): Promise<LoadedSlashCommand[]>;
+/**
+ * Resolve a slash command consistently across CLI and editor surfaces.
+ * Canonical names always win. Project commands shadow user commands, while a
+ * plugin basename is accepted only when exactly one plugin contributes it.
+ */
+declare function resolveSlashCommand(commands: LoadedSlashCommand[], requestedName: string): SlashCommandResolution;
 declare function renderSlashCommandPrompt(command: LoadedSlashCommand, args: string): string;
 
+type RegistrationResult = {
+    ok: true;
+    replaced: false;
+} | {
+    ok: false;
+    reason: "reserved-name" | "duplicate";
+};
 /**
  * Tool registry — manages built-in, MCP, and custom tools.
- * Built-in tools are never overwritten by MCP/custom registration (same name = keep built-in).
+ * Static, manager-bound, and dynamic tools use separate registration paths so
+ * a reserved name cannot be silently discarded or replaced.
  */
 declare class ToolRegistry {
     private tools;
-    private static readonly BUILTIN_NAMES;
+    private static staticBuiltinNames;
+    private static reservedBuiltinNames;
+    private static canonicalReservedBuiltinNames;
+    private static getStaticBuiltinNames;
+    private static getReservedBuiltinNames;
+    private static isReservedBuiltinName;
     constructor();
-    register(tool: ToolDef): void;
+    registerDynamic(tool: ToolDef): RegistrationResult;
+    registerBoundBuiltin(tool: ToolDef): RegistrationResult;
+    registerDynamicOrThrow(tool: ToolDef, source?: string): void;
+    registerBoundBuiltinOrThrow(tool: ToolDef, source?: string): void;
+    /** @deprecated Use registerDynamic or registerBoundBuiltin explicitly. */
+    register(tool: ToolDef): RegistrationResult;
     getAll(): ToolDef[];
     get(name: string): ToolDef | undefined;
     getByNames(names: string[]): ToolDef[];
@@ -3304,11 +4203,60 @@ declare class ToolRegistry {
         dynamic: ToolDef[];
     };
     /**
+     * Append tools with `hiddenFromAgent` (e.g. legacy Spawn*, BashOutput) so old transcript tool
+     * names still execute, while {@link getForMode} keeps them out of the LLM manifest.
+     */
+    mergeWithHiddenExecutionTools(visibleTools: ToolDef[]): ToolDef[];
+    /**
      * Load custom tools from JS/TS files.
      * Custom tools export a default ToolDef or array of ToolDef.
      */
     loadFromDirectory(dir: string): Promise<void>;
+    private warnOnRegistrationFailure;
+    private throwOnRegistrationFailure;
 }
+
+type CompletionState = {
+    doubleCheckEnabled: boolean;
+    pending: {
+        current: boolean;
+    };
+    checkpoint?: {
+        commit(description?: string): Promise<string>;
+    };
+};
+
+type ToolExecutionOrigin = "native" | "textual" | "parallel" | "mcp" | "plugin" | "subagent";
+interface ToolExecutionRequest {
+    callId: string;
+    messageId: string;
+    partId: string;
+    toolName: string;
+    input: Record<string, unknown>;
+    origin: ToolExecutionOrigin;
+}
+type HookRunner = (cwd: string, host: IHost, config: ToolContext["config"], event: PluginHookEvent, payload: Record<string, unknown>) => Promise<PluginHookExecution[]>;
+type ToolPipelineStage = "validate" | "before_tool" | "approve" | "execute" | "spill" | "after_tool";
+interface ToolExecutionEnvironment {
+    tools: readonly ToolDef[];
+    context: ToolContext;
+    autoApproveActions: ReadonlySet<PermissionAction>;
+    mode: Mode;
+    mcpToolNames: ReadonlySet<string>;
+    completionState?: CompletionState;
+    hookRunner?: HookRunner;
+    onStage?: (stage: ToolPipelineStage) => void;
+}
+interface ToolExecutionOutcome extends ToolResult {
+    toolName: string;
+    normalizedInput: Record<string, unknown>;
+    denied?: boolean;
+    stoppedByHook?: boolean;
+    outputSpillPath?: string;
+    beforeHookResults?: PluginHookExecution[];
+    afterHookResults?: PluginHookExecution[];
+}
+declare function executeToolPipeline(request: ToolExecutionRequest, environment: ToolExecutionEnvironment): Promise<ToolExecutionOutcome>;
 
 /** Snippets actually applied by the Edit tool — for compact CLI/webview previews. */
 type AppliedReplacementSnippet = {
@@ -3326,11 +4274,39 @@ interface ShellCommandInterpretation {
 }
 declare function interpretShellCommandResult(command: string, exitCode: number, stdout: string, stderr: string): ShellCommandInterpretation;
 
+/** One row from the model before padding / id assignment (OpenClaude-style). */
+type QuestionOptionRow = {
+    label: string;
+    description?: string;
+    preview?: string;
+};
 /** Synthetic option id for the host-added “Other / custom” row (never send from the model). */
 declare const NEXUS_CUSTOM_OPTION_ID = "__nexus_other__";
 /** First line of user messages created after submitting a questionnaire (hosts may use for compact UI). */
 declare const NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX = "[nexus:questionnaire-response]\n";
 declare function formatQuestionnaireAnswersForAgent(request: UserQuestionRequest, answers: UserQuestionAnswer[]): string;
+
+/**
+ * Shared rules for which tool starts count as “subagent parents” in hosts (CLI timeline, VS Code shadow, webview).
+ * Keep webview `transcript/helpers.ts` in sync — webview cannot bundle @nexuscode/core.
+ */
+/** Strip functions./tools. prefix, then lowercase alnum-only (for Parallel inner recipient_name). */
+declare function canonParallelInnerRecipient(raw: string): string;
+declare function parallelInnerUseIsDelegatedAgent(use: {
+    recipient_name?: unknown;
+    parameters?: unknown;
+}): boolean;
+/** True when Parallel’s tool_uses are only delegated-agent spawns (legacy Spawn* or TaskCreate kind=agent). */
+declare function isPureSubagentParallelInput(input: unknown): boolean;
+declare function delegatedAgentDescriptionFromParallelInnerParams(parameters: unknown): string | null;
+declare function getParallelDelegatedAgentTaskDescriptions(input?: Record<string, unknown>): string[];
+/** Tool start that should receive subagent_* events when parentPartId is missing. */
+declare function isDelegatedAgentParentTool(tool: string, input?: Record<string, unknown>): boolean;
+/**
+ * Whether finishing this tool should clear the “last subagent parent part id” fallback.
+ * Parallel is excluded: subagent_* may arrive after Parallel tool_end; keep the parent id until a later tool overwrites it.
+ */
+declare function isDelegatedAgentParentToolEndClear(tool: string, input?: Record<string, unknown>): boolean;
 
 /**
  * Optional host-provided behavior (VS Code: ripgrep file list + globalStorage tracker).
@@ -3355,6 +4331,8 @@ declare class CodebaseIndexer implements IIndexer {
     private _status;
     private indexing;
     private abortController?;
+    private indexRun?;
+    private lifecycleTail;
     private debounceTimers;
     private statusListeners;
     private indexingPaused;
@@ -3371,7 +4349,10 @@ declare class CodebaseIndexer implements IIndexer {
     /** Pause between parse/embed checkpoints (does not cancel in-flight embedding API calls). */
     pauseIndexing(): void;
     resumeIndexing(): void;
+    private withLifecycleLock;
+    private stopActiveRun;
     startIndexing(): Promise<void>;
+    private beginIndexing;
     private fatalResetAfterIndexingStarted;
     private indexInBackground;
     private extractEntriesForIndex;
@@ -3394,14 +4375,21 @@ declare class CodebaseIndexer implements IIndexer {
     /** @deprecated use syncIndexing */
     reindex(): Promise<void>;
     deleteIndex(): Promise<void>;
+    private deleteIndexData;
     /**
      * Remove tracker + vector points for a repo-relative prefix (folder or file path).
      * Does not delete other paths; one collection remains for the workspace.
      */
     deleteIndexScope(relPathOrAbs: string): Promise<void>;
+    private deleteIndexScopeData;
     stop(): void;
     close(): void;
+    /** Await in-flight parse/embed work before replacing or disposing this indexer. */
+    closeAndWait(): Promise<void>;
 }
+
+declare function getTreeSitterLanguageWasmsDir(): string;
+declare function getWebTreeSitterWasmPath(): string;
 
 /** Schema default; Roo parity: `maxIndexedFiles === 0` disables listing. */
 declare const DEFAULT_MAX_INDEXED_FILES = 50000;
@@ -3431,6 +4419,7 @@ declare class ProjectRegistry {
     private save;
 }
 declare function getIndexDir(projectRoot: string): string;
+declare function getProjectHash(projectRoot: string): string;
 
 interface IndexerFactoryOptions {
     onWarning?: (message: string) => void;
@@ -3489,11 +4478,106 @@ declare function parseMentions(text: string, cwd: string, host?: IHost): Promise
     contextBlocks: string[];
 }>;
 
-/**
- * Load rules from NEXUS.md, CLAUDE.md, AGENTS.md, .nexus/rules/** etc.
- * Walks up from cwd to find all applicable rule files.
- */
 declare function loadRules(cwd: string, rulePatterns: string[], compatibility?: ClaudeCompatibilityOptions): Promise<string>;
+
+/**
+ * Trusted instruction bundle for the agent.
+ *
+ * Agent-authored auto/team/session memory must never be concatenated here:
+ * this string is rendered as authoritative project rules. Memory is selected,
+ * cited, and rendered through the explicitly untrusted memory prompt block.
+ */
+declare function loadAgentInstructionBundle(cwd: string, rulePatterns: string[], _config: NexusConfig, compatibility?: ClaudeCompatibilityOptions): Promise<string>;
+
+/** OpenClaude-style: `~/.nexus/projects/<project-hash>/memory/`. */
+declare function getDefaultAutoMemoryDir(cwd: string): string;
+declare function resolveAutoMemoryDirectory(cwd: string, config: NexusConfig): string | null;
+/**
+ * Load all `*.md` under the auto-memory directory (project-scoped notes, agent-written memory).
+ */
+declare function loadAutoMemoryMarkdown(cwd: string, config: NexusConfig): Promise<string>;
+
+declare function getSessionMemoryFilePath(sessionId: string, cwd: string, homeDir?: string): string;
+declare function readSessionMemoryFile(sessionId: string, cwd: string): Promise<string>;
+/**
+ * Background refresh: merge conversation tail into the session memory file (OpenClaude Session Memory parity).
+ */
+declare function refreshSessionMemoryFile(opts: {
+    session: ISession;
+    client: LLMClient;
+    cwd: string;
+    config: NexusConfig;
+    signal: AbortSignal;
+}): Promise<void>;
+declare function appendCompactionSnippetToSessionMemory(sessionId: string, cwd: string, summaryText: string, maxChars: number, homeDir?: string): Promise<void>;
+
+/**
+ * Process-wide registry of spilled tool outputs (OpenClaude-style toolResultStorage parity).
+ * Survives in memory for the process lifetime so hooks and compaction can resolve paths even if
+ * a ToolPart was rebuilt before outputSpillPath was persisted.
+ */
+type ToolSpillRegistryEntry = {
+    absolutePath: string;
+    toolName: string;
+    sessionId: string;
+    partId: string;
+    createdAt: number;
+};
+declare function registerToolOutputSpill(args: {
+    sessionId: string;
+    partId: string;
+    absolutePath: string;
+    toolName: string;
+}): void;
+declare function getToolOutputSpill(sessionId: string, partId: string): ToolSpillRegistryEntry | undefined;
+/**
+ * Re-key spill registry when a subagent {@link ToolPart} is cloned into the parent session (new part id).
+ * Uses {@link ToolPart.outputSpillPath} if set, else looks up the subagent session + source part id.
+ */
+declare function inheritSpillRegistryForMergedToolPart(args: {
+    parentSessionId: string;
+    newPartId: string;
+    subagentSessionId: string;
+    sourcePartId: string;
+    toolName: string;
+    outputSpillPath?: string;
+}): string | undefined;
+declare function clearToolSpillsForSession(sessionId: string): void;
+/** All spills for a session (e.g. auto-dream / diagnostics). */
+declare function listToolSpillsForSession(sessionId: string): ToolSpillRegistryEntry[];
+
+/**
+ * Optional team-scoped markdown under ~/.nexus/teams/{name}/memory/ (recursive .md files).
+ */
+declare function loadTeamMemoryMarkdown(cwd: string, config: NexusConfig): Promise<string>;
+
+interface LegacyMemoryImportResult {
+    imported: number;
+    unchanged: number;
+    skipped: number;
+    truncated: boolean;
+}
+/**
+ * Migrate OpenClaude-style Markdown memory into the canonical transactional
+ * store. Files are treated as opaque, untrusted data: @include directives are
+ * deliberately not expanded.
+ */
+declare function importLegacyMemoryFiles(input: {
+    cwd: string;
+    config: NexusConfig;
+    runtime: OrchestrationRuntime;
+    homeDir?: string;
+}): Promise<LegacyMemoryImportResult>;
+
+/**
+ * Periodically merge project auto-memory markdown into one durable file (OpenClaude auto-dream parity).
+ */
+declare function runAutoMemoryDreamIfDue(opts: {
+    cwd: string;
+    config: NexusConfig;
+    client: LLMClient;
+    signal: AbortSignal;
+}): Promise<void>;
 
 /**
  * Token estimation utilities.
@@ -3546,7 +4630,7 @@ declare function computeContextUsageMetrics(opts: {
  *
  * Optional `skillsUrls`: remote registries (each base URL must serve `index.json` + skill files); cached under `~/.nexus/cache/skills/`.
  */
-declare function loadSkills(skillPaths: string[], cwd: string, skillsUrls?: string[], compatibility?: ClaudeCompatibilityOptions): Promise<SkillDef[]>;
+declare function loadSkills(skillPaths: string[], cwd: string, skillsUrls?: string[], compatibility?: ClaudeCompatibilityOptions, config?: NexusConfig): Promise<SkillDef[]>;
 
 type SkillToolDescriptionRow = {
     name: string;
@@ -3574,54 +4658,6 @@ declare function sampleSkillSiblingFiles(skillDir: string, signal?: AbortSignal)
  */
 declare function fetchSkillUrlRegistryRoots(baseUrl: string): Promise<string[]>;
 
-interface McpResourceRef {
-    serverName: string;
-    uri: string;
-    name: string;
-    description?: string;
-    mimeType?: string;
-}
-interface McpResourceContent {
-    serverName: string;
-    uri: string;
-    mimeType?: string;
-    text?: string;
-    blob?: string;
-}
-/**
- * MCP client that connects to MCP servers and exposes their tools.
- */
-declare class McpClient {
-    private clients;
-    private tools;
-    private configs;
-    connect(config: McpServerConfig): Promise<void>;
-    connectAll(configs: McpServerConfig[]): Promise<void>;
-    /** Test each server and return status (ok or error message). Does not keep connections. */
-    testServers(configs: McpServerConfig[]): Promise<Array<{
-        name: string;
-        status: "ok" | "error";
-        error?: string;
-    }>>;
-    getTools(): ToolDef[];
-    getStatus(): Record<string, "connected" | "disconnected">;
-    disconnectAll(): Promise<void>;
-    listResources(serverName?: string): Promise<McpResourceRef[]>;
-    readResource(serverName: string, uri: string): Promise<McpResourceContent[]>;
-    authenticate(serverName: string, host?: IHost): Promise<{
-        success: boolean;
-        message: string;
-    }>;
-}
-declare function setMcpClientInstance(client: McpClient): void;
-declare function getMcpClientInstance(): McpClient | null;
-/** Standalone test of MCP server configs (does not keep connections). */
-declare function testMcpServers(configs: McpServerConfig[]): Promise<Array<{
-    name: string;
-    status: "ok" | "error";
-    error?: string;
-}>>;
-
 /**
  * MCP client transports: stdio, SSE (legacy remote), Streamable HTTP (current spec).
  */
@@ -3644,8 +4680,9 @@ interface ResolveBundledOptions {
 }
 /**
  * Resolves any server with bundle === "context-mode" to a full config
- * (command, args, env with CLAUDE_PROJECT_DIR). Skips the entry if nexusRoot
- * is missing or start.mjs is not present.
+ * (command, args, env with CLAUDE_PROJECT_DIR). An absolute
+ * NEXUS_CONTEXT_MODE_PATH also works in installed CLI/VSIX builds that do not
+ * have a Nexus repository root. Missing optional bundles are omitted.
  */
 declare function resolveBundledMcpServers(servers: McpServerConfig[], options: ResolveBundledOptions): McpServerConfig[];
 
@@ -3784,4 +4821,4 @@ declare function writeCheckpointEntries(cwd: string, sessionId: string, entries:
  */
 declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
 
-export { type AgentDefinition, type AgentEvent, type AppliedReplacementSnippet, type ApprovalAction, type BackgroundTaskRecord, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type ContextUsageSnapshot, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, type DeferredToolDef, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, type EmbeddingClient, type EmbeddingConfig, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type LLMClient, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MODES, MODE_TOOL_GROUPS, type McpAuthRequest, type McpAuthResult, McpClient, type McpResourceContent, type McpResourceRef, type McpServerConfig, type MemoryRecord, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, type NexusConfig, NexusConfigSchema, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationRuntime, ParallelAgentManager, type PermissionResult, type PluginManifestRecord, ProjectRegistry, type ProjectSettings, type ProviderConfig, type ProviderName, READ_ONLY_TOOLS, type RemoteSessionRecord, type ResolveBundledOptions, type ResolvedSkillBody, Session, type SessionMessage, type SkillDef, type SkillToolDescriptionRow, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskKind, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolDef, type ToolPart, ToolRegistry, type ToolResult, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, type WorkingDirectoryChangeResult, type WorktreeSession, applyPluginRuntimeSettings, applySecretsToConfig, buildIndexWatcherGlobPattern, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpTransport, createResumeAgentTool, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, createTaskCreateBatchTool, createTaskResumeTool, createTaskSnapshotTool, deleteSession, deriveSessionTitle, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, ensureTeamMemberForTask, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getContextWindowLimit, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getMcpClientInstance, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getOrchestrationRuntime, getParallelAgentManager, getPlanContentForFollowup, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMeta, getToolOutputDir, hadPlanExit, handleCompletedTaskSideEffects, interpretShellCommandResult, listSessions, loadAgentDefinitions, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, normalizedAppliedReplacementsFromMetadata, parseMentions, persistSecretsFromConfig, readCheckpointEntries, renderSlashCommandPrompt, resolveBundledMcpServers, resolvePluginDeclaredPath, resolveSkillBody, runAgentLoop, runPluginHooks, runScopedHooks, sampleSkillSiblingFiles, saveSession, setIndexTelemetrySink, setMcpClientInstance, setParallelAgentManager, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, validatePluginManifestFile, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AgentDefinition, type AgentEvent, type AppliedReplacementSnippet, type ApprovalAction, type AtomicWriteOptions, type BackgroundTaskRecord, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type ContextUsageSnapshot, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, type DeferredToolDef, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, DurableRunEventSink, type DurableRunEventSinkOptions, type DurableRunRecord, type EmbeddingClient, type EmbeddingConfig, type FileLockOptions, FileLockTimeoutError, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type IndexerFactoryOptions, type JsonRecoveryResult, type LLMClient, type LegacyMemoryImportResult, type LegacyMemoryRecord, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MEMORY_SCHEMA_VERSION, MODES, MODE_TOOL_GROUPS, type McpAuthRequest, type McpAuthResult, McpClient, type McpClientOptions, type McpConnectionState, type McpResourceContent, type McpResourceRef, type McpResourceTemplateRef, type McpServerConfig, McpServerConfigSchema, type McpServerStatus, type MemoryRecord, type MemoryRetrievalOptions, type MemoryRetrievalResult, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, NEXUS_SERVER_TOKEN_SECRET_KEY, type NexusConfig, NexusConfigSchema, type NexusRunServices, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationCorruptionError, type OrchestrationDiagnostic, type OrchestrationDiagnosticCode, OrchestrationInvariantError, OrchestrationRuntime, type OrchestrationRuntimeOptions, ParallelAgentManager, type PendingRunApproval, type PermissionResult, type PluginCapabilityDiagnostic, type PluginDiagnostic, type PluginDiscoveryResult, type PluginManifestRecord, type PluginMcpCapabilityResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, type ProviderName, type QuestionOptionRow, READ_ONLY_TOOLS, type RegistrationResult, type RemoteSessionRecord, type ResolveBundledOptions, type ResolvedSkillBody, type RetrievedMemory, type RunEventDiagnostic, type RunEventEnvelope, RunEventStore, type RunEventStoreOptions, type RunStatus, type RunToolArtifact, type SaveSessionOptions, Session, SessionConflictError, SessionCorruptionError, type SessionMessage, type SessionStorageDiagnostic, type SessionStorageDiagnosticCode, SessionStore, type SessionStoreOptions, type SkillDef, type SkillToolDescriptionRow, type SlashCommandResolution, StorageCorruptionError, type StorageDiagnostic, type StorageDiagnosticCode, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SubAgentRuntimeContext, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskKind, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolDef, type ToolExecutionEnvironment, type ToolExecutionOrigin, type ToolExecutionOutcome, type ToolExecutionRequest, type ToolPart, ToolRegistry, type ToolResult, type ToolSpillRegistryEntry, UnsafeSessionIdError, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, type WorkingDirectoryChangeResult, type WorktreeSession, appendCompactionSnippetToSessionMemory, applyPluginRuntimeSettings, applySecretsToConfig, atomicWriteFile, atomicWriteJson, buildIndexWatcherGlobPattern, buildMcpToolSchema, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonParallelInnerRecipient, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, clearToolSpillsForSession, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpTransport, createNexusRunServices, createResumeAgentTool, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, createTaskCreateBatchTool, createTaskResumeTool, createTaskSnapshotTool, delegatedAgentDescriptionFromParallelInnerParams, deleteSession, deriveSessionTitle, discoverPluginManifests, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, ensureTeamMemberForTask, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, executeToolPipeline, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getContextWindowLimit, getDefaultAutoMemoryDir, getFileLockPath, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getOrchestrationRuntime, getParallelDelegatedAgentTaskDescriptions, getPlanContentForFollowup, getProjectHash, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMemoryFilePath, getSessionMeta, getSessionStorageDiagnostics, getToolOutputDir, getToolOutputSpill, getTreeSitterLanguageWasmsDir, getWebTreeSitterWasmPath, hadPlanExit, handleCompletedTaskSideEffects, importLegacyMemoryFiles, inheritSpillRegistryForMergedToolPart, interpretShellCommandResult, isDelegatedAgentParentTool, isDelegatedAgentParentToolEndClear, isPureSubagentParallelInput, listSessions, listToolSpillsForSession, loadAgentDefinitions, loadAgentInstructionBundle, loadAutoMemoryMarkdown, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginMcpServers, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, loadTeamMemoryMarkdown, loadTrustedPluginRuntimeRecords, mutateSession, normalizeMemoryRecord, normalizedAppliedReplacementsFromMetadata, parallelInnerUseIsDelegatedAgent, parseMentions, persistSecretsFromConfig, readCheckpointEntries, readJsonWithRecovery, readSessionMemoryFile, redactMemorySecrets, refreshSessionMemoryFile, registerToolOutputSpill, renderSlashCommandPrompt, resolveAutoMemoryDirectory, resolveBundledMcpServers, resolveConfiguredAndPluginMcpServers, resolvePluginDeclaredPath, resolveSkillBody, resolveSlashCommand, retrieveMemories, runAgentLoop, runAutoMemoryDreamIfDue, runPluginHooks, runScopedHooks, sampleSkillSiblingFiles, saveSession, setIndexTelemetrySink, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, tokenizeMemoryText, validatePluginManifestFile, withFileLock, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

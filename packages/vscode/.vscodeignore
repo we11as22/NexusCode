@@ -8,7 +8,7 @@ src
 !*.d.ts
 esbuild.mjs
 tsconfig.json
-*.map
+**/*.map
 
 # Webview: exclude source, keep only built output (webview-ui/dist)
 webview-ui/**
@@ -17,5 +17,7 @@ webview-ui/**
 
 # Dev / doc
 *.md
+scripts
+vitest.config.*
 .env*
 .DS_Store

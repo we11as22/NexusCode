@@ -6,7 +6,9 @@ export default defineConfig({
   base: "./",
   build: {
     outDir: "dist",
-    chunkSizeWarningLimit: 600,
+    // The application shell includes the chat/settings/session state machine;
+    // heavy Mermaid/rendering dependencies are already split into lazy chunks.
+    chunkSizeWarningLimit: 750,
     rollupOptions: {
       output: {
         entryFileNames: "index.js",
