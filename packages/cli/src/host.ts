@@ -171,6 +171,10 @@ export class CliHost implements IHost {
       } else if (action.type === "mcp") {
         lines.push(`\x1b[1;35m🔌 MCP tool call:\x1b[0m`)
         lines.push(`  \x1b[36m${action.description}\x1b[0m`)
+      } else if (action.type === "plugin") {
+        lines.push(`\x1b[1;35m🧩 Plugin action:\x1b[0m`)
+        lines.push(`  \x1b[36m${action.description}\x1b[0m`)
+        if (action.warning) lines.push(`  \x1b[33m${action.warning}\x1b[0m`)
       } else if (action.type === "doom_loop") {
         lines.push(`\x1b[1;31m⚠ Potential infinite loop detected:\x1b[0m`)
         lines.push(`  \x1b[31m${action.description}\x1b[0m`)

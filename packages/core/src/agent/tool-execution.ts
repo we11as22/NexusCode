@@ -744,7 +744,7 @@ export function buildApprovalAction(toolName: string, toolInput: Record<string, 
   }
   if (EXECUTION_APPROVAL_TOOLS.has(toolName)) {
     return {
-      type: "execute",
+      type: "plugin",
       tool: toolName,
       description: `${toolName}: ${JSON.stringify(toolInput).slice(0, 500)}`,
       content: JSON.stringify(toolInput),

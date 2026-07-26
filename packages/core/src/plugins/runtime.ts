@@ -453,6 +453,7 @@ async function runHookDeclarations(
     item: { name: string; hooks: string[] },
     relativePath: string,
   ) => string | Promise<string>,
+  options: { requireApproval?: boolean } = {},
 ): Promise<PluginHookExecution[]> {
   if (items.length === 0) return []
   const payloadDir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-hooks-"))
@@ -476,6 +477,25 @@ async function runHookDeclarations(
             output: error instanceof Error ? error.message : String(error),
           })
           continue
+        }
+        if (options.requireApproval) {
+          const action = {
+            type: "plugin" as const,
+            tool: `AgentHook:${item.name}`,
+            description: `Run ${hookEvent} hook for agent ${item.name}: ${parsed.relativePath}`,
+            content: hookPath,
+            warning: "Agent-definition hooks execute local code with the host process permissions.",
+          }
+          const approval = await host.showApprovalDialog(action)
+          if (!approval.approved) {
+            executions.push({
+              pluginName: item.name,
+              hookEvent,
+              success: false,
+              output: `User denied agent hook execution: ${parsed.relativePath}`,
+            })
+            continue
+          }
         }
         const command = getHookRunnerCommand(hookPath, payloadPath)
         const abortController = new AbortController()
@@ -578,5 +598,6 @@ export async function runScopedHooks(
       }
       return canonicalTarget
     },
+    { requireApproval: true },
   )
 }

@@ -381,6 +381,21 @@ export function NexusApprovalPanel({
             ) : null}
           </>
         )}
+        {action.type === 'plugin' && (
+          <>
+            <Box marginTop={1}>
+              <Text bold> Plugin action</Text>
+            </Box>
+            <Box marginTop={0}>
+              <Text color={theme.primary}>  {truncateMiddle(action.description, columns - 6)}</Text>
+            </Box>
+            {action.warning ? (
+              <Box marginTop={0}>
+                <Text color={theme.warning}>  {action.warning}</Text>
+              </Box>
+            ) : null}
+          </>
+        )}
         {action.type === 'doom_loop' && (
           <>
             <Box marginTop={1}>

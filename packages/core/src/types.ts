@@ -105,7 +105,7 @@ export interface ToolContext {
 // ─── Host Interface ───────────────────────────────────────────────────────────
 
 export interface ApprovalAction {
-  type: "write" | "execute" | "mcp" | "browser" | "read" | "doom_loop"
+  type: "write" | "execute" | "mcp" | "plugin" | "browser" | "read" | "doom_loop"
   tool: string
   description: string
   content?: string

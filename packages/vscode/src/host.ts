@@ -373,7 +373,12 @@ export class VsCodeHost implements IHost {
     }
 
     // Native dialog fallback (Cline/Roo-style labels)
-    const actionStr = action.type === "write" ? "Write" : "Bash"
+    const actionStr =
+      action.type === "write"
+        ? "write"
+        : action.type === "plugin"
+          ? "perform this plugin action"
+          : "run"
     const buttons: string[] =
       action.type === "execute"
         ? ["Allow once", "Add to allowed for this folder", "Always allow", "Allow all (session)", "Say what to do instead", "Deny"]
@@ -382,7 +387,7 @@ export class VsCodeHost implements IHost {
     const message =
       action.type === "execute"
         ? (action.content ? `NexusCode wants to run: ${action.content}` : `NexusCode: ${action.description}`)
-        : `NexusCode wants to ${actionStr}: ${action.description}`
+        : `NexusCode wants to ${actionStr}: ${action.description}${action.warning ? `\n\n${action.warning}` : ""}`
 
     const choice = await vscode.window.showInformationMessage(
       message,

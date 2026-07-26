@@ -165,4 +165,45 @@ describe("plugin hook execution", () => {
       output: expect.stringMatching(/escapes/i),
     }])
   })
+
+  it("requires explicit approval before executing a scoped agent hook", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-agent-hook-approval-"))
+    roots.push(root)
+    const agentRoot = path.join(root, ".nexus", "agents", "reviewer")
+    await mkdir(agentRoot, { recursive: true })
+    await writeFile(path.join(agentRoot, "start.sh"), "#!/bin/sh\n", "utf8")
+    let executed = false
+    const host = createFakeHost({
+      cwd: root,
+      async runCommand() {
+        executed = true
+        return { stdout: "unexpected", stderr: "", exitCode: 0 }
+      },
+      async showApprovalDialog() {
+        return { approved: false }
+      },
+    })
+
+    const results = await runScopedHooks(
+      root,
+      host,
+      "subagent_start",
+      { sessionId: "session-a" },
+      [{
+        name: "Reviewer",
+        rootDir: agentRoot,
+        hooks: ["subagent_start:start.sh"],
+      }],
+    )
+
+    expect(executed).toBe(false)
+    expect(host.approvals).toMatchObject([{
+      type: "plugin",
+      tool: "AgentHook:Reviewer",
+    }])
+    expect(results).toMatchObject([{
+      success: false,
+      output: expect.stringMatching(/denied/i),
+    }])
+  })
 })

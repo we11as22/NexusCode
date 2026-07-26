@@ -277,7 +277,7 @@ it("honors requiresApproval for sensitive non-shell tools", async () => {
   )
 
   expect(result).toMatchObject({ success: false, denied: true })
-  expect(actions).toEqual([{ type: "execute", tool: "PluginTrust" }])
+  expect(actions).toEqual([{ type: "plugin", tool: "PluginTrust" }])
   expect(executed).toBe(false)
 })
 
