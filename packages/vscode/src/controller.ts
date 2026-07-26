@@ -905,6 +905,18 @@ export class Controller {
 
   private async rollbackToBeforeMessage(messageId: string): Promise<void> {
     if (!this.session || !this.config) return
+    if (this.isRunning) {
+      vscode.window.showWarningMessage(
+        "NexusCode: Stop the current run before rolling back.",
+      )
+      return
+    }
+    if (this.getServerUrl()) {
+      vscode.window.showInformationMessage(
+        "NexusCode: Checkpoint rollback is not supported when using NexusCode Server.",
+      )
+      return
+    }
     const msgs = this.session.messages
     const idx = msgs.findIndex((m) => m.id === messageId)
     if (idx < 0) return
@@ -1139,8 +1151,12 @@ export class Controller {
       connectionState: this.serverConnectionState,
       serverConnectionError: this.serverConnectionError,
       modelsCatalog: this.modelsCatalogCache ?? null,
-      checkpointEnabled: this.config?.checkpoint?.enabled === true || this.checkpoint != null,
-      checkpointEntries: this.checkpoint?.getEntries() ?? [],
+      checkpointEnabled:
+        !this.getServerUrl() &&
+        (this.config?.checkpoint?.enabled === true || this.checkpoint != null),
+      checkpointEntries: this.getServerUrl()
+        ? []
+        : this.checkpoint?.getEntries() ?? [],
       planCompleted:
         this.session && this.mode === "plan" && !this.isRunning && hadPlanExit(this.session),
       planFollowupText: null,
@@ -1268,7 +1284,6 @@ export class Controller {
   async cancelTask(): Promise<void> {
     await this.abortServerTask()
     this.abortController?.abort()
-    this.isRunning = false
     this.postStateToWebview()
   }
 
@@ -1379,19 +1394,13 @@ export class Controller {
       case "abort":
         await this.abortServerTask()
         this.abortController?.abort()
-        this.isRunning = false
         this.postStateToWebview()
         break
       case "compact":
         await this.compactHistory()
         break
       case "clearChat":
-        this.session = Session.create(this.getCwd())
-        this.lastRunMode = null
-        this.sessionUnacceptedEdits = []
-        this.checkpoint = undefined
-        this.serverSessionId = undefined
-        this.postStateToWebview()
+        await this.createNewSession()
         break
       case "setMode":
         this.mode = msg.mode
@@ -1487,6 +1496,12 @@ export class Controller {
         break
       case "forkSession":
         if (this.session && msg.messageId) {
+          if (this.isRunning) {
+            vscode.window.showWarningMessage(
+              "NexusCode: Stop the current run before forking the session.",
+            )
+            break
+          }
           this.session = this.session.fork(msg.messageId) as Session
           if (this.getServerUrl()) {
             this.serverSessionId = undefined
@@ -2657,9 +2672,6 @@ Return in this format:
 
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
-    await this.commitCheckpointForUserMessage(this.session.id, cwd, configForRun, userMessage).catch((err) => {
-      console.warn("[nexus] Failed to commit message checkpoint:", err)
-    })
 
     if (serverUrl) {
       this.activeServerRunId = undefined
@@ -2725,7 +2737,6 @@ Return in this format:
             }
           }
           if (event.type === "error") {
-            this.isRunning = false
             this.setServerConnectionState("error", event.error)
             this.postStateToWebview()
           }
@@ -2767,6 +2778,15 @@ Return in this format:
       }
       return
     }
+
+    await this.commitCheckpointForUserMessage(
+      this.session.id,
+      cwd,
+      configForRun,
+      userMessage,
+    ).catch((err) => {
+      console.warn("[nexus] Failed to commit message checkpoint:", err)
+    })
 
     const deliverLocalEvent = (event: AgentEvent) => {
       if (event.type === "question_request") {
@@ -2810,7 +2830,6 @@ Return in this format:
         })
       }
       if (event.type === "error") {
-        this.isRunning = false
         this.postStateToWebview()
       }
       // Sync full state after tool_end so webview gets latest todo and messages
@@ -3215,6 +3234,12 @@ Return in this format:
   }
 
   private async switchSession(sessionId: string): Promise<void> {
+    if (this.isRunning) {
+      vscode.window.showWarningMessage(
+        "NexusCode: Stop the current run before switching sessions.",
+      )
+      return
+    }
     this.lastRunMode = null
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
@@ -3256,6 +3281,12 @@ Return in this format:
   }
 
   private async createNewSession(): Promise<void> {
+    if (this.isRunning) {
+      vscode.window.showWarningMessage(
+        "NexusCode: Stop the current run before creating a new session.",
+      )
+      return
+    }
     this.lastRunMode = null
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
@@ -3283,6 +3314,12 @@ Return in this format:
   }
 
   private async deleteSession(sessionId: string): Promise<void> {
+    if (this.isRunning && this.session?.id === sessionId) {
+      vscode.window.showWarningMessage(
+        "NexusCode: Stop the current run before deleting its session.",
+      )
+      return
+    }
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
     let deleted = false

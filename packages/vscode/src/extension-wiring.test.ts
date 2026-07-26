@@ -47,4 +47,33 @@ describe("VS Code command wiring", () => {
       'type: "configLoaded", config: this.config',
     )
   })
+
+  it("uses the real session lifecycle for Clear Chat", () => {
+    const clearChatCase = controllerSource.slice(
+      controllerSource.indexOf('case "clearChat"'),
+      controllerSource.indexOf('case "setMode"'),
+    )
+    expect(clearChatCase).toContain("await this.createNewSession()")
+    expect(clearChatCase).not.toContain("Session.create(")
+  })
+
+  it("does not create local checkpoints for server-owned runs", () => {
+    const runStart = controllerSource.indexOf("private async runAgent(")
+    const serverUrl = controllerSource.indexOf(
+      "const serverUrl = this.getServerUrl()",
+      runStart,
+    )
+    const serverBranch = controllerSource.indexOf("if (serverUrl)", serverUrl)
+    expect(controllerSource.slice(serverUrl, serverBranch))
+      .not.toContain("commitCheckpointForUserMessage")
+  })
+
+  it("keeps a run busy until its loop has actually unwound after abort", () => {
+    const abortCase = controllerSource.slice(
+      controllerSource.indexOf('case "abort"'),
+      controllerSource.indexOf('case "compact"'),
+    )
+    expect(abortCase).toContain("this.abortController?.abort()")
+    expect(abortCase).not.toContain("this.isRunning = false")
+  })
 })
