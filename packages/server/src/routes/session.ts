@@ -1,6 +1,7 @@
 import { Hono } from "hono"
+import type { MiddlewareHandler } from "hono"
 import { stream } from "hono/streaming"
-import { Session, deriveSessionTitle, canonicalProjectRoot, getOrchestrationRuntime } from "@nexuscode/core"
+import { Session, deriveSessionTitle, getOrchestrationRuntime } from "@nexuscode/core"
 import type { AgentEvent, Mode } from "@nexuscode/core"
 import {
   createSession as fsCreateSession,
@@ -24,23 +25,27 @@ import {
   getLatestRunForSession,
   subscribeToRun,
 } from "../active-runs.js"
+import type { ServerEnv } from "../security.js"
 
 const DEFAULT_MESSAGE_PAGE_SIZE = 50
 const MAX_MESSAGE_PAGE_SIZE = 200
 const RECENT_MESSAGES_FOR_RUN = 200
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,160}$/
 
-function getCwd(c: { req: { query: (x: string) => string | undefined; header: (x: string) => string | undefined } }): string {
-  const raw = c.req.query("directory") || c.req.header("x-nexus-directory") || process.cwd()
-  let decoded = raw
-  try {
-    decoded = decodeURIComponent(raw)
-  } catch {
-    decoded = raw
-  }
-  return canonicalProjectRoot(decoded)
+function getCwd(c: { get: (key: "workspaceRoot") => string }): string {
+  return c.get("workspaceRoot")
 }
 
-export const sessionRoutes = new Hono()
+const sessionRoutes = new Hono<ServerEnv>()
+
+const validateSessionId: MiddlewareHandler<ServerEnv> = async (c, next) => {
+  if (!SESSION_ID_PATTERN.test(c.req.param("id") ?? "")) {
+    return c.json({ error: "Invalid session id" }, 400)
+  }
+  await next()
+}
+sessionRoutes.use("/:id", validateSessionId)
+sessionRoutes.use("/:id/*", validateSessionId)
 
 // GET /session — list sessions (JSONL, same as CLI)
 sessionRoutes.get("/", async (c) => {
@@ -272,3 +277,7 @@ sessionRoutes.post("/:id/message", async (c) => {
     }
   })
 })
+
+export function createSessionRoutes() {
+  return sessionRoutes
+}

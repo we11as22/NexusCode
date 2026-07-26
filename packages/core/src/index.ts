@@ -69,7 +69,11 @@ export { hadPlanExit, getPlanContentForFollowup } from "./session/plan-followup.
 export { createCompaction } from "./session/compaction.js"
 
 // Server client (extension + CLI when serverUrl is set)
-export { NexusServerClient, DEFAULT_HEARTBEAT_TIMEOUT_MS } from "./server-client.js"
+export {
+  NexusServerClient,
+  DEFAULT_HEARTBEAT_TIMEOUT_MS,
+  NEXUS_SERVER_TOKEN_SECRET_KEY,
+} from "./server-client.js"
 export type { NexusServerClientOptions } from "./server-client.js"
 
 // Agent

@@ -1,14 +1,28 @@
 import { createApp } from "./app.js"
 import { serve } from "@hono/node-server"
+import {
+  isLoopbackHost,
+  readServerSecurityOptions,
+  type ServerSecurityOptions,
+} from "./security.js"
 
 const port = Number(process.env.NEXUS_SERVER_PORT || process.env.PORT || "4097")
 const hostname = process.env.NEXUS_SERVER_HOST || "127.0.0.1"
 
-const app = createApp()
-
-export async function listen(opts?: { port?: number; hostname?: string }) {
+export async function listen(opts?: {
+  port?: number
+  hostname?: string
+  security?: ServerSecurityOptions
+}) {
   const p = opts?.port ?? port
   const h = opts?.hostname ?? hostname
+  const security = opts?.security ?? readServerSecurityOptions()
+  if (!isLoopbackHost(h) && security.allowedOrigins.length === 0) {
+    throw new Error(
+      "Binding NexusCode server to a non-loopback host requires NEXUS_SERVER_ORIGINS",
+    )
+  }
+  const app = createApp(security)
   return new Promise<{ stop: () => void }>((resolve, reject) => {
     const server = serve(
       {

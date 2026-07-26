@@ -4,7 +4,10 @@ import { canonicalProjectRoot } from "./session/storage.js"
 export interface NexusServerClientOptions {
   baseUrl: string
   directory: string
+  token: string
 }
+
+export const NEXUS_SERVER_TOKEN_SECRET_KEY = "nexuscode_server_token"
 
 /**
  * Client for NexusCode server — list/create sessions, get messages, stream agent events.
@@ -13,16 +16,20 @@ export interface NexusServerClientOptions {
 export class NexusServerClient {
   private baseUrl: string
   private directory: string
+  private token: string
 
   constructor(opts: NexusServerClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/$/, "")
     this.directory = canonicalProjectRoot(opts.directory)
+    this.token = opts.token.trim()
+    if (!this.token) throw new Error("NexusCode server token is required")
   }
 
   private headers(): Record<string, string> {
     return {
       "Content-Type": "application/json",
       "x-nexus-directory": this.directory,
+      Authorization: `Bearer ${this.token}`,
     }
   }
 

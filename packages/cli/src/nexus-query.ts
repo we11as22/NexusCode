@@ -10,6 +10,7 @@ import {
   loadConfig,
   Session,
   isDelegatedAgentParentTool,
+  NEXUS_SERVER_TOKEN_SECRET_KEY,
   type AgentEvent,
   type ToolDef,
 } from '@nexuscode/core'
@@ -276,7 +277,19 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
 
   let runPromise: Promise<void>
   if (serverUrl) {
-    const serverClient = new NexusServerClient({ baseUrl: serverUrl, directory: nexus.cwd })
+    const serverToken =
+      process.env.NEXUS_SERVER_TOKEN?.trim() ||
+      await nexus.secretsStore.getSecret(NEXUS_SERVER_TOKEN_SECRET_KEY)
+    if (!serverToken) {
+      throw new Error(
+        "NexusCode server token is required. Set NEXUS_SERVER_TOKEN or store nexuscode_server_token in the Nexus secrets store.",
+      )
+    }
+    const serverClient = new NexusServerClient({
+      baseUrl: serverUrl,
+      directory: nexus.cwd,
+      token: serverToken,
+    })
     const sid = bootstrapSession.id
     runPromise = (async () => {
       try {

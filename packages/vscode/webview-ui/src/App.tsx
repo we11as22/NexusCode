@@ -1378,6 +1378,7 @@ function SettingsView({
   const [draft, setDraft] = useState<SettingsDraft>(() => getDefaultDraft())
   const serverSettingsFingerprintRef = useRef<string>("")
   const [serverUrlLocal, setServerUrlLocal] = useState(serverUrl)
+  const [serverTokenLocal, setServerTokenLocal] = useState("")
   const [tab, setTab] = useState<SettingsTabId>("llm")
   const [integTab, setIntegTab] = useState<SettingsIntegTabId>("rules-skills")
   const [rulesFilter, setRulesFilter] = useState<"all" | "user" | "projects">("all")
@@ -1471,7 +1472,7 @@ function SettingsView({
       <section className="nexus-section mt-2">
         <h3 className="nexus-section-title">NexusCode Server</h3>
         <p className="nexus-muted text-[10px] mb-2">
-          When set, the extension uses this server for sessions and agent runs (DB-backed, paginated). Leave empty to run in-process.
+          When set, the extension uses this server for authenticated sessions and agent runs (portable JSONL storage, paginated). Leave empty to run in-process.
         </p>
         <SettingsInput
           label="Server URL (e.g. http://127.0.0.1:4097)"
@@ -1481,6 +1482,35 @@ function SettingsView({
             postMessage({ type: "setServerUrl", url: v })
           }}
         />
+        <SettingsInput
+          label="Server token (stored in VS Code Secret Storage)"
+          value={serverTokenLocal}
+          type="password"
+          onChange={setServerTokenLocal}
+        />
+        <div className="flex gap-2 mt-2">
+          <button
+            type="button"
+            className="nexus-secondary-btn text-xs"
+            disabled={!serverTokenLocal.trim()}
+            onClick={() => {
+              postMessage({ type: "setServerToken", token: serverTokenLocal })
+              setServerTokenLocal("")
+            }}
+          >
+            Save token
+          </button>
+          <button
+            type="button"
+            className="nexus-secondary-btn text-xs"
+            onClick={() => {
+              postMessage({ type: "setServerToken", token: "" })
+              setServerTokenLocal("")
+            }}
+          >
+            Remove token
+          </button>
+        </div>
       </section>
 
       <div className="flex flex-wrap gap-1.5 mt-2 mb-2">

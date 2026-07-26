@@ -14,10 +14,10 @@
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts --format esm --dts --target node18 --outDir dist",
-    "dev": "tsup src/index.ts --format esm --dts --target node18 --outDir dist --watch",
+    "build": "tsup src/index.ts src/cli.ts --format esm --dts --target node20 --outDir dist",
+    "dev": "tsup src/index.ts --format esm --dts --target node20 --outDir dist --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node -e \"process.exit(0)\""
+    "test": "vitest run"
   },
   "dependencies": {
     "@nexuscode/core": "workspace:*",
@@ -28,7 +28,8 @@
   "devDependencies": {
     "@types/node": "^22.10.1",
     "tsup": "^8.3.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "vitest": "3.2.3"
   },
   "bin": {
     "nexus-serve": "./dist/cli.js"

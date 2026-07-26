@@ -2,12 +2,15 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { execa } from "execa"
 import type { IHost, AgentEvent, ApprovalAction, PermissionResult, McpAuthRequest, McpAuthResult } from "@nexuscode/core"
+import { resolveWorkspaceRoot } from "./security.js"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
 
 /**
- * Server host — runs on server machine, emits events to stream. Auto-approves all actions (like "Allow Always").
+ * Server host — runs on the server machine and emits events to the stream.
+ * Remote interactive approvals are not part of the foundation protocol, so
+ * every privileged request fails closed.
  */
 export class ServerHost implements IHost {
   readonly cwd: string
@@ -19,8 +22,10 @@ export class ServerHost implements IHost {
   }
 
   private resolve(filePath: string): string {
-    if (path.isAbsolute(filePath)) return filePath
-    return path.resolve(this.cwd, filePath)
+    const requested = path.isAbsolute(filePath)
+      ? filePath
+      : path.resolve(this.cwd, filePath)
+    return resolveWorkspaceRoot(requested, [this.cwd])
   }
 
   private checkPathSecurity(absPath: string, op: string): void {
@@ -66,9 +71,10 @@ export class ServerHost implements IHost {
   }
 
   async runCommand(command: string, cwd: string, signal?: AbortSignal) {
+    const commandCwd = resolveWorkspaceRoot(cwd || this.cwd, [this.cwd])
     const result = await execa(command, {
       shell: true,
-      cwd: cwd || this.cwd,
+      cwd: commandCwd,
       reject: false,
       timeout: 120_000,
       cancelSignal: signal,
@@ -81,7 +87,7 @@ export class ServerHost implements IHost {
   }
 
   async showApprovalDialog(_action: ApprovalAction): Promise<PermissionResult> {
-    return { approved: true }
+    return { approved: false }
   }
 
   emit(event: AgentEvent): void {

@@ -68,6 +68,7 @@ import {
   getPlanContentForFollowup,
   NexusServerClient,
   DEFAULT_HEARTBEAT_TIMEOUT_MS,
+  NEXUS_SERVER_TOKEN_SECRET_KEY,
   INDEX_FILE_WATCHER_DEBOUNCE_MS,
   canonicalProjectRoot,
   computeContextUsageMetrics,
@@ -237,6 +238,7 @@ export type WebviewMessage =
   | { type: "openFileAtLocation"; path: string; line?: number; endLine?: number }
   | { type: "showDiff"; path: string }
   | { type: "setServerUrl"; url: string }
+  | { type: "setServerToken"; token: string }
   | { type: "openNexusConfigFolder"; scope: "global" | "project" }
   | { type: "openCursorignore" }
   | { type: "openMcpConfig" }
@@ -981,6 +983,22 @@ export class Controller {
     return vscode.workspace.getConfiguration("nexuscode").get<string>("serverUrl")?.trim() ?? ""
   }
 
+  private async createServerClient(cwd = this.getCwd()): Promise<NexusServerClient> {
+    const token =
+      process.env.NEXUS_SERVER_TOKEN?.trim() ||
+      await this.context.secrets.get(NEXUS_SERVER_TOKEN_SECRET_KEY)
+    if (!token) {
+      throw new Error(
+        "NexusCode server token is missing. Set NEXUS_SERVER_TOKEN for the extension host or store nexuscode_server_token in VS Code Secret Storage.",
+      )
+    }
+    return new NexusServerClient({
+      baseUrl: this.getServerUrl(),
+      directory: cwd,
+      token,
+    })
+  }
+
   private readAutocompleteExtensionSettingsForWebview(): AutocompleteExtensionUiState {
     const c = vscode.workspace.getConfiguration()
     const temp = c.get<number>("nexuscode.autocomplete.temperature")
@@ -1164,6 +1182,11 @@ export class Controller {
     this.serverConnectionState = state
     this.serverConnectionError = error
     this.postStateToWebview()
+  }
+
+  private reportServerError(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error)
+    this.setServerConnectionState("error", message)
   }
 
   /** Load skills from config paths, skillsUrls registries, Nexus skill dirs (.nexus/skills), Claude ~/.claude/skills, walk-up, send to webview Skills list. */
@@ -1601,6 +1624,23 @@ export class Controller {
       case "setServerUrl": {
         const url = typeof msg.url === "string" ? msg.url.trim() : ""
         await vscode.workspace.getConfiguration("nexuscode").update("serverUrl", url || undefined, vscode.ConfigurationTarget.Global)
+        this.postStateToWebview()
+        break
+      }
+      case "setServerToken": {
+        const token = typeof msg.token === "string" ? msg.token.trim() : ""
+        if (token) {
+          await this.context.secrets.store(NEXUS_SERVER_TOKEN_SECRET_KEY, token)
+          vscode.window.showInformationMessage(
+            "NexusCode: Server token saved securely.",
+          )
+        } else {
+          await this.context.secrets.delete(NEXUS_SERVER_TOKEN_SECRET_KEY)
+          vscode.window.showInformationMessage(
+            "NexusCode: Stored server token removed.",
+          )
+        }
+        this.serverConnectionError = undefined
         this.postStateToWebview()
         break
       }
@@ -2565,7 +2605,7 @@ Return in this format:
         }, DEFAULT_HEARTBEAT_TIMEOUT_MS)
       }
       try {
-        const client = new NexusServerClient({ baseUrl: serverUrl, directory: cwd })
+        const client = await this.createServerClient(cwd)
         let sid = this.serverSessionId
         if (!sid) {
           const created = await client.createSession()
@@ -2976,16 +3016,14 @@ Return in this format:
     try {
       if (serverUrl) {
         try {
-          const res = await fetch(
-            `${serverUrl.replace(/\/$/, "")}/session?directory=${encodeURIComponent(cwd)}`,
-            { headers: { "x-nexus-directory": cwd } }
-          )
-          if (res.ok) {
-            const sessions = (await res.json()) as Array<{ id: string; ts: number; title?: string; messageCount: number }>
-            this.postMessageToWebview({ type: "sessionList", sessions })
-            return
-          }
-        } catch {}
+          const sessions = await (await this.createServerClient(cwd)).listSessions()
+          this.postMessageToWebview({ type: "sessionList", sessions })
+          return
+        } catch (error) {
+          this.reportServerError(error)
+          this.postMessageToWebview({ type: "sessionList", sessions: [] })
+          return
+        }
       }
       const sessions = await listSessions(cwd).catch(() => [])
       this.postMessageToWebview({ type: "sessionList", sessions })
@@ -3013,12 +3051,10 @@ Return in this format:
       let olderMessages: SessionMessage[] = []
       if (serverUrl) {
         if (this.session.id !== this.serverSessionId) return
-        const msgRes = await fetch(
-          `${serverUrl.replace(/\/$/, "")}/session/${this.session.id}/message?directory=${encodeURIComponent(cwd)}&limit=${limit}&offset=${offset}`,
-          { headers: { "x-nexus-directory": cwd } }
+        olderMessages = await (await this.createServerClient(cwd)).getMessages(
+          this.session.id,
+          { limit, offset },
         )
-        if (!msgRes.ok) return
-        olderMessages = (await msgRes.json()) as SessionMessage[]
       } else {
         const loaded = await loadSessionMessages(this.session.id, cwd, limit, offset)
         if (!loaded) return
@@ -3034,6 +3070,8 @@ Return in this format:
       this.session = new Session(this.session.id, cwd, [...dedupedOlder, ...this.session.messages])
       this.serverSessionOldestLoadedOffset = offset
       if (!serverUrl) this.localSessionWindowed = offset > 0
+    } catch (error) {
+      if (serverUrl) this.reportServerError(error)
     } finally {
       this.loadingOlderMessages = false
       this.postStateToWebview()
@@ -3046,19 +3084,13 @@ Return in this format:
     const serverUrl = this.getServerUrl()
     if (serverUrl) {
       try {
-        const metaRes = await fetch(
-          `${serverUrl.replace(/\/$/, "")}/session/${sessionId}?directory=${encodeURIComponent(cwd)}`,
-          { headers: { "x-nexus-directory": cwd } }
-        )
-        if (!metaRes.ok) return
-        const meta = (await metaRes.json()) as { messageCount: number }
+        const client = await this.createServerClient(cwd)
+        const meta = await client.getSession(sessionId)
         const offset = Math.max(0, meta.messageCount - INITIAL_SERVER_MESSAGES)
-        const msgRes = await fetch(
-          `${serverUrl.replace(/\/$/, "")}/session/${sessionId}/message?directory=${encodeURIComponent(cwd)}&limit=${INITIAL_SERVER_MESSAGES}&offset=${offset}`,
-          { headers: { "x-nexus-directory": cwd } }
-        )
-        if (!msgRes.ok) return
-        const messages = (await msgRes.json()) as SessionMessage[]
+        const messages = await client.getMessages(sessionId, {
+          limit: INITIAL_SERVER_MESSAGES,
+          offset,
+        })
         this.session = new Session(sessionId, cwd, messages)
         this.serverSessionId = sessionId
         this.serverSessionOldestLoadedOffset = offset
@@ -3066,7 +3098,9 @@ Return in this format:
         this.pendingQuestionRequest = null
         this.checkpoint = undefined
         this.postStateToWebview()
-      } catch {}
+      } catch (error) {
+        this.reportServerError(error)
+      }
       return
     }
     const meta = await getSessionMeta(sessionId, cwd)
@@ -3091,21 +3125,13 @@ Return in this format:
     const serverUrl = this.getServerUrl()
     if (serverUrl) {
       try {
-        const res = await fetch(`${serverUrl.replace(/\/$/, "")}/session`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
-          body: "{}",
-        })
-        if (res.ok) {
-          const created = (await res.json()) as { id: string }
-          this.session = new Session(created.id, cwd, [])
-          this.serverSessionId = created.id
-          this.serverSessionOldestLoadedOffset = undefined
-        }
-      } catch {
-        // fallback to local session
-        this.session = Session.create(cwd)
-        this.serverSessionId = undefined
+        const created = await (await this.createServerClient(cwd)).createSession()
+        this.session = new Session(created.id, cwd, [])
+        this.serverSessionId = created.id
+        this.serverSessionOldestLoadedOffset = undefined
+      } catch (error) {
+        this.reportServerError(error)
+        return
       }
     } else {
       this.session = Session.create(cwd)
@@ -3126,13 +3152,10 @@ Return in this format:
     let deleted = false
     if (serverUrl) {
       try {
-        const res = await fetch(
-          `${serverUrl.replace(/\/$/, "")}/session/${sessionId}?directory=${encodeURIComponent(cwd)}`,
-          { method: "DELETE", headers: { "x-nexus-directory": cwd } }
-        )
-        deleted = res.ok
-      } catch {
-        // fall through to sendSessionList
+        deleted = await (await this.createServerClient(cwd)).deleteSession(sessionId)
+      } catch (error) {
+        this.reportServerError(error)
+        return
       }
     } else {
       deleted = await deleteSession(sessionId, cwd)
@@ -3140,19 +3163,13 @@ Return in this format:
     if (deleted && this.session?.id === sessionId) {
       if (serverUrl) {
         try {
-          const createRes = await fetch(`${serverUrl.replace(/\/$/, "")}/session`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "x-nexus-directory": cwd },
-            body: "{}",
-          })
-          if (createRes.ok) {
-            const created = (await createRes.json()) as { id: string }
-            this.session = new Session(created.id, cwd, [])
-            this.serverSessionId = created.id
-            this.serverSessionOldestLoadedOffset = undefined
-          }
-        } catch {
-          // keep current session ref; list will refresh
+          const created = await (await this.createServerClient(cwd)).createSession()
+          this.session = new Session(created.id, cwd, [])
+          this.serverSessionId = created.id
+          this.serverSessionOldestLoadedOffset = undefined
+        } catch (error) {
+          this.reportServerError(error)
+          return
         }
       } else {
         this.session = Session.create(cwd)

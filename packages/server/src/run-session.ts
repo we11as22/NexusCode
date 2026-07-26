@@ -54,6 +54,45 @@ export interface RunSessionOptions {
 }
 
 /**
+ * The current HTTP protocol cannot carry an interactive approval decision
+ * back to a running server agent. Project allowlists therefore cannot grant
+ * remote mutation implicitly; only deny/ask rules remain authoritative.
+ */
+export function enforceServerPermissionBoundary(
+  config: NexusConfig,
+): NexusConfig {
+  const modes = Object.fromEntries(
+    Object.entries(config.modes ?? {}).map(([name, modeConfig]) => [
+      name,
+      modeConfig
+        ? {
+            ...modeConfig,
+            autoApprove: modeConfig.autoApprove?.filter(
+              (action) => action === "read" || action === "search",
+            ),
+          }
+        : modeConfig,
+    ]),
+  ) as NexusConfig["modes"]
+
+  return {
+    ...config,
+    modes,
+    permissions: {
+      ...config.permissions,
+      autoApproveWrite: false,
+      autoApproveCommand: false,
+      autoApproveMcp: false,
+      autoApproveBrowser: false,
+      allowedCommands: [],
+      allowCommandPatterns: [],
+      allowedMcpTools: [],
+      rules: config.permissions.rules.filter((rule) => rule.action !== "allow"),
+    },
+  }
+}
+
+/**
  * Run the agent loop for one message; all events are forwarded via onEvent.
  */
 export async function runSession(opts: RunSessionOptions): Promise<void> {
@@ -68,7 +107,10 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     configOverride && typeof (configOverride as { presetName?: unknown }).presetName === "string"
       ? String((configOverride as { presetName?: string }).presetName).trim()
       : ""
-  const configForRun = presetName ? await applyPresetForRun(config, cwd, presetName) : config
+  const selectedConfig = presetName
+    ? await applyPresetForRun(config, cwd, presetName)
+    : config
+  const configForRun = enforceServerPermissionBoundary(selectedConfig)
 
   const host = new ServerHost(cwd, onEvent)
   session.addMessage({ role: "user", content, presetName: presetName || "Default" })
