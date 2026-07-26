@@ -386,11 +386,10 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         )) {
           if (
             event.type === 'tool_approval_needed' &&
-            tuiApprovalRef &&
             activeServerRunId
           ) {
             const partId = event.partId
-            serverApprovalResolver = (result) => {
+            const respond = (result: PermissionResult) => {
               void serverClient.respondToApproval(
                 sid,
                 activeServerRunId,
@@ -403,7 +402,14 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
                 })
               })
             }
-            tuiApprovalRef.current = serverApprovalResolver
+            if (tuiApprovalRef) {
+              serverApprovalResolver = respond
+              tuiApprovalRef.current = serverApprovalResolver
+            } else {
+              // Print/headless mode must fail closed instead of waiting forever
+              // for an approval UI that does not exist.
+              respond({ approved: false })
+            }
           }
           if (event.type === 'assistant_content_complete') {
             try {

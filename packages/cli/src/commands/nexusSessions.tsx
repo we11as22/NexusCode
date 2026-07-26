@@ -2,7 +2,6 @@ import type { Command } from '../commands.js'
 import { NexusSessionsPanel } from '../components/NexusSessionsPanel.js'
 import React from 'react'
 import type { NexusBootstrapResult } from '../nexus-bootstrap.js'
-import { listSessions } from '@nexuscode/core'
 
 export function createNexusSessionsCommand(
   nexus: NexusBootstrapResult,
@@ -18,8 +17,7 @@ export function createNexusSessionsCommand(
       return 'sessions'
     },
     async call(onDone) {
-      const cwd = nexus.cwd
-      const sessions = await listSessions(cwd).catch(() => [])
+      const sessions = await nexus.sessionStore.list().catch(() => [])
       return (
         <NexusSessionsPanel
           sessions={sessions}

@@ -91,9 +91,9 @@ import { createNexusMcpCommand } from '../commands/nexusMcp.js'
 import { createNexusSessionsCommand } from '../commands/nexusSessions.js'
 import { queryNexus } from '../nexus-query.js'
 import { shouldAutoApprovePrint } from '../host.js'
-import { Session } from '@nexuscode/core'
 import type { RenderOptionsWithFlicker } from '../utils/ink.js'
 import type { Command as SlashCommand } from '../commands.js'
+import { resolveRuntimeMode } from '../session-selection.js'
 
 export function completeOnboarding(): void {
   const config = getGlobalConfig()
@@ -416,14 +416,7 @@ ${commandList}`,
       ) => {
         await showSetupScreens(dangerouslySkipPermissions, print)
         const effectiveCwd = project ? path.resolve(cwd, project) : cwd
-        const mode =
-          modeOpt === 'ask' ||
-          modeOpt === 'plan' ||
-          modeOpt === 'debug' ||
-          modeOpt === 'review' ||
-          modeOpt === 'agent'
-            ? modeOpt
-            : 'agent'
+        const mode = resolveRuntimeMode(modeOpt)
         setCwd(effectiveCwd)
         logEvent('tengu_init', {
           entrypoint: 'nexus',
@@ -461,7 +454,7 @@ ${commandList}`,
             indexEnabled: index !== false,
             sessionId: session ?? null,
             continue: Boolean(continueSession),
-            serverUrl: server ?? null,
+            serverUrl: server ?? process.env.NEXUS_SERVER_URL ?? null,
             modelOverride: model,
             temperatureOverride: temperature,
             reasoningEffortOverride: reasoningEffort,
@@ -507,7 +500,7 @@ ${commandList}`,
             indexEnabled: index !== false,
             sessionId: session ?? null,
             continue: Boolean(continueSession),
-            serverUrl: server ?? null,
+            serverUrl: server ?? process.env.NEXUS_SERVER_URL ?? null,
             modelOverride: model,
             temperatureOverride: temperature,
             reasoningEffortOverride: reasoningEffort,
@@ -545,7 +538,7 @@ ${commandList}`,
             const handleSwitchSession = React.useCallback(
               async (sessionId: string) => {
                 if (sessionId === n.session.id) return
-                const resumed = await Session.resume(sessionId, n.cwd)
+                const resumed = await n.sessionStore.load(sessionId)
                 if (!resumed) {
                   process.stderr.write(`[nexus] Session not found: ${sessionId}\n`)
                   return
@@ -587,9 +580,11 @@ ${commandList}`,
                 nexusOnRestoreCheckpoint={(id, type) =>
                   runTaskRestore(effectiveCwd, activeSessionId, id, type)
                 }
-                nexusGetSessionList={() => listSessions(effectiveCwd)}
+                nexusGetSessionList={n.sessionStore.list}
                 nexusOnSwitchSession={handleSwitchSession}
-                nexusOnDeleteSession={async () => {}}
+                nexusOnDeleteSession={async (sessionId) => {
+                  await n.sessionStore.delete(sessionId)
+                }}
               />
             )
           }

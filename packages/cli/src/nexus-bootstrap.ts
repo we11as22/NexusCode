@@ -46,9 +46,15 @@ import {
   loadSlashCommands,
   renderSlashCommandPrompt,
   resolveSlashCommand,
+  NexusServerClient,
+  NEXUS_SERVER_TOKEN_SECRET_KEY,
 } from '@nexuscode/core'
 import type { CodebaseIndexer } from '@nexuscode/core'
 import { fileURLToPath } from 'node:url'
+import {
+  resolveRuntimeServerUrl,
+  selectSession,
+} from './session-selection.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const NEXUS_ROOT = path.resolve(__dirname, '..', '..', '..')
@@ -191,6 +197,12 @@ export interface NexusBootstrapResult {
   compaction: ReturnType<typeof createCompaction>
   indexer: CodebaseIndexer | undefined
   serverUrl: string | null
+  sessionStore: {
+    list: () => Promise<Array<{ id: string; ts: number; title?: string; messageCount: number }>>
+    load: (sessionId: string) => Promise<Session | null>
+    create: () => Promise<Session>
+    delete: (sessionId: string) => Promise<boolean>
+  }
   nexusRoot: string
   mcpConfigFingerprint: string
   resolvePromptCommand: (
@@ -221,7 +233,7 @@ export async function bootstrapNexus(opts: {
     indexEnabled = true,
     sessionId: sessionIdOpt,
     continue: continueFlag,
-    serverUrl = null,
+    serverUrl: serverUrlOption = null,
     modelOverride,
     temperatureOverride,
     reasoningEffortOverride,
@@ -229,6 +241,10 @@ export async function bootstrapNexus(opts: {
   } = opts
 
   const cwd = canonicalProjectRoot(cwdRaw)
+  const serverUrl = resolveRuntimeServerUrl(
+    serverUrlOption,
+    process.env.NEXUS_SERVER_URL,
+  )
 
   const secretsStore = createFileSecretsStore(getGlobalConfigDir())
   let config = await loadConfig(cwd, { secrets: secretsStore })
@@ -291,8 +307,10 @@ export async function bootstrapNexus(opts: {
     }
   }
 
-  if (profileOverride && (config as unknown as { profiles?: Record<string, unknown> }).profiles?.[profileOverride]) {
-    const profile = (config as unknown as { profiles: Record<string, unknown> }).profiles[profileOverride] as Record<string, unknown>
+  if (profileOverride) {
+    const profile = (config as unknown as { profiles?: Record<string, unknown> })
+      .profiles?.[profileOverride] as Record<string, unknown> | undefined
+    if (!profile) throw new Error(`Profile not found: ${profileOverride}`)
     config.model = { ...config.model, ...profile } as NexusConfig['model']
     config.model = normalizeModelConfig(config.model)
   }
@@ -355,20 +373,52 @@ export async function bootstrapNexus(opts: {
     config,
   ).catch(() => [])
 
-  let session: Session
-  if (continueFlag) {
-    const sessions = await listSessions(cwd)
-    const last = sessions[0]
-    if (last) {
-      session = (await Session.resume(last.id, cwd)) ?? Session.create(cwd)
-    } else {
-      session = Session.create(cwd)
+  const remoteClient = serverUrl
+    ? new NexusServerClient({
+        baseUrl: serverUrl,
+        directory: cwd,
+        token:
+          process.env.NEXUS_SERVER_TOKEN?.trim() ||
+          await secretsStore.getSecret(NEXUS_SERVER_TOKEN_SECRET_KEY) ||
+          "",
+      })
+    : null
+  const loadRemoteSession = async (sessionId: string): Promise<Session | null> => {
+    if (!remoteClient) return null
+    try {
+      const meta = await remoteClient.getSession(sessionId)
+      const messages = await remoteClient.getRecentMessages(sessionId)
+      return new Session(meta.id, cwd, messages, undefined, true)
+    } catch (error) {
+      if (error instanceof Error && /\b404\b/.test(error.message)) return null
+      throw error
     }
-  } else if (sessionIdOpt) {
-    session = (await Session.resume(sessionIdOpt, cwd)) ?? Session.create(cwd)
-  } else {
-    session = Session.create(cwd)
   }
+  const createRemoteSession = async (): Promise<Session> => {
+    if (!remoteClient) throw new Error("Remote session client is not configured")
+    const meta = await remoteClient.createSession()
+    return new Session(meta.id, cwd, [], undefined, true)
+  }
+  const sessionStore: NexusBootstrapResult["sessionStore"] = remoteClient
+    ? {
+        list: () => remoteClient.listSessions(),
+        load: loadRemoteSession,
+        create: createRemoteSession,
+        delete: (sessionId) => remoteClient.deleteSession(sessionId),
+      }
+    : {
+        list: () => listSessions(cwd),
+        load: (sessionId) => Session.resume(sessionId, cwd),
+        create: async () => Session.create(cwd),
+        delete: (sessionId) => coreDeleteSession(sessionId, cwd),
+      }
+  const session = await selectSession({
+    sessionId: sessionIdOpt,
+    continueSession: Boolean(continueFlag),
+    list: sessionStore.list,
+    load: sessionStore.load,
+    create: sessionStore.create,
+  })
 
   let indexer: CodebaseIndexer | undefined
   if (
@@ -420,6 +470,7 @@ export async function bootstrapNexus(opts: {
     compaction,
     indexer,
     serverUrl,
+    sessionStore,
     nexusRoot: NEXUS_ROOT,
     mcpConfigFingerprint,
     resolvePromptCommand,

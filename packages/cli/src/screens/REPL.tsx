@@ -1042,10 +1042,9 @@ export function REPL({
         ? `${nexusSessionId.slice(0, 10)}…${nexusSessionId.slice(-6)}`
         : nexusSessionId
     setMessages([
+      ...replMessagesFromSession(nexusBootstrap.session.messages),
       createAssistantMessage(
-        `Switched session · ${sid}\n` +
-          `Chat view cleared for this session. Context reflects loaded history (send a message to refresh after edits).\n` +
-          `CLI resume: nexus --session ${nexusSessionId}`,
+        `Switched session · ${sid}\nCLI resume: nexus --session ${nexusSessionId}`,
       ),
     ])
   }, [nexusSessionId, nexusBootstrap])
