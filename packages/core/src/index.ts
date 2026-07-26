@@ -96,6 +96,20 @@ export {
   createTaskResumeTool,
 } from "./agent/parallel.js"
 export { getOrchestrationRuntime, OrchestrationRuntime, getRuntimeDir } from "./orchestration/runtime.js"
+export {
+  FileLockTimeoutError,
+  StorageCorruptionError,
+  atomicWriteFile,
+  atomicWriteJson,
+  getFileLockPath,
+  readJsonWithRecovery,
+  withFileLock,
+  type AtomicWriteOptions,
+  type FileLockOptions,
+  type JsonRecoveryResult,
+  type StorageDiagnostic,
+  type StorageDiagnosticCode,
+} from "./storage/index.js"
 export { loadAgentDefinitions } from "./orchestration/agents.js"
 export { ensureTeamMemberForTask, handleCompletedTaskSideEffects } from "./orchestration/task-lifecycle.js"
 export { extractMemoriesFromCompactionSummary } from "./orchestration/memory-extraction.js"
