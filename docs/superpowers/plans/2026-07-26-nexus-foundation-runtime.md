@@ -572,7 +572,7 @@ export async function executeToolPipeline(
 
 - Consumes low-level normalization, validation, doom-loop, approval, and execution helpers from `tool-execution.ts`.
 
-- [ ] **Step 1: Write pipeline ordering tests**
+- [x] **Step 1: Write pipeline ordering tests**
 
 Use a fake plugin hook recorder and fake tool. Assert exact order:
 
@@ -597,13 +597,13 @@ Add parameterized tests for origins `native`, `textual`, and `parallel`. Add tes
 - `autoApproveSkillLoad: false` is respected;
 - `toolExecutionMessageId` is present inside the tool.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run: `pnpm --filter @nexuscode/core test -- src/agent/__tests__/tool-pipeline.test.ts`
 
 Expected: FAIL because `executeToolPipeline` does not exist.
 
-- [ ] **Step 3: Implement the pipeline around existing proven helpers**
+- [x] **Step 3: Implement the pipeline around existing proven helpers**
 
 Move the public orchestration currently split between `loop.ts` and `tool-execution.ts` into `tool-pipeline.ts`. Keep pure helper functions in `tool-execution.ts`; do not copy them.
 
@@ -619,15 +619,15 @@ The pipeline:
 
 The loop remains responsible for persisting the returned part and emitting protocol/UI events in one helper.
 
-- [ ] **Step 4: Route parallel reads through the pipeline**
+- [x] **Step 4: Route parallel reads through the pipeline**
 
 Replace `flushPendingReads` direct calls with `executeToolPipeline` using origin `parallel`. Create a child context for each call so `partId` cannot race.
 
-- [ ] **Step 5: Route native and textual calls through the pipeline**
+- [x] **Step 5: Route native and textual calls through the pipeline**
 
 Both stream `tool_call` and parsed textual fallback construct the same `ToolExecutionRequest`. Remove their local hook and approval logic.
 
-- [ ] **Step 6: Remove duplicate executors**
+- [x] **Step 6: Remove duplicate executors**
 
 Delete the local `executeToolCall` from `loop.ts`. Delete `processor.ts` only after:
 
@@ -637,7 +637,7 @@ rg "processStreamStep|from \"\\./processor" packages/core/src
 
 returns no consumer outside the file. Move any uniquely reachable behavior into the pipeline with a focused test before deletion.
 
-- [ ] **Step 7: Verify all origins**
+- [x] **Step 7: Verify all origins**
 
 Run:
 
@@ -655,7 +655,7 @@ Expected:
 - `rg` finds no private duplicate executor in `loop.ts`;
 - generic spill test reports a valid persisted path.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add packages/core/src/agent/tool-pipeline.ts packages/core/src/agent/__tests__/tool-pipeline.test.ts packages/core/src/agent/loop.ts packages/core/src/agent/tool-execution.ts packages/core/src/types.ts packages/core/src/plugins/runtime.ts

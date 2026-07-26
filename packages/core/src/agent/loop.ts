@@ -71,6 +71,10 @@ import { spillPathFromToolMetadata } from "./tool-spill.js"
 import { getToolOutputSpill } from "../context/tool-output-registry.js"
 import { runAutoMemoryDreamIfDue } from "../context/auto-dream.js"
 import type { NexusRunServices } from "./run-services.js"
+import {
+  executeToolPipeline,
+  type ToolExecutionOrigin,
+} from "./tool-pipeline.js"
 
 /** Generous tool budgets so multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
@@ -426,6 +430,47 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     pending: { current: false },
     checkpoint: opts.checkpoint,
   }
+  const runToolPipeline = async (
+    toolCallId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    messageId: string,
+    origin: ToolExecutionOrigin,
+  ) => {
+    const result = await executeToolPipeline(
+      {
+        callId: toolCallId,
+        messageId,
+        partId: `part_${toolCallId}`,
+        toolName,
+        input: toolInput,
+        origin,
+      },
+      {
+        tools: resolvedTools,
+        context: toolCtx,
+        autoApproveActions,
+        mode,
+        mcpToolNames,
+        completionState,
+      },
+    )
+    await recordPluginHookOutputs(
+      session,
+      host,
+      "before-tool-hook",
+      result.beforeHookResults ?? [],
+      { tool: result.toolName },
+    )
+    await recordPluginHookOutputs(
+      session,
+      host,
+      "after-tool-hook",
+      result.afterHookResults ?? [],
+      { tool: result.toolName },
+    )
+    return result
+  }
   /** Full system prompt from the last completed loop iteration (for context bar + next iteration's pre-build estimate). */
   let lastBuiltSystemPrompt = ""
   const toolsDefinitionTokens = estimateToolsDefinitionsTokens(resolvedToolsForLlm)
@@ -757,7 +802,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       if (pendingReads.length === 0) return
 
       const tasks = pendingReads.map(tc =>
-        executeToolCall(tc.toolCallId, tc.toolName, tc.toolInput, resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode, mcpToolNames)
+        runToolPipeline(tc.toolCallId, tc.toolName, tc.toolInput, newMessageId, "parallel")
           .catch(err => ({ success: false, output: `Error: ${err.message}`, metadata: undefined }))
       )
 
@@ -1041,66 +1086,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 }
               }
 
-              const beforeToolHookResults = await runPluginHooks(
-                host.cwd,
-                host,
-                config,
-                "before_tool",
-                {
-                  mode,
-                  sessionId: session.id,
-                  toolName,
-                  toolInput,
-                },
-              ).catch(() => [])
-              await recordPluginHookOutputs(session, host, "before-tool-hook", beforeToolHookResults, {
-                tool: toolName,
-              })
-              const beforeToolStopReason = getPreventContinuationReason(beforeToolHookResults)
-              if (beforeToolStopReason) {
-                session.updateToolPart(newMessageId, partId, {
-                  status: "error",
-                  output: beforeToolStopReason,
-                  timeEnd: Date.now(),
-                })
-                host.emit({
-                  type: "tool_end",
-                  tool: toolName,
-                  partId,
-                  messageId: newMessageId,
-                  success: false,
-                  output: beforeToolStopReason,
-                })
-                attemptedCompletionThisIteration = true
-                lastToolName = toolName
-                executedToolThisIteration = true
-                executedToolCallsTotal++
-                break
-              }
-
-              const result = await executeToolCall(
-                toolCallId, toolName, toolInput,
-                resolvedTools, toolCtx, autoApproveActions, config, host, session, newMessageId, completionState, mode, mcpToolNames
+              const result = await runToolPipeline(
+                toolCallId,
+                toolName,
+                toolInput,
+                newMessageId,
+                "native",
               )
-
-              const afterToolHookResults = await runPluginHooks(
-                host.cwd,
-                host,
-                config,
-                "after_tool",
-                {
-                  mode,
-                  sessionId: session.id,
-                  toolName,
-                  toolInput,
-                  success: result.success,
-                  output: result.output,
-                },
-              ).catch(() => [])
-              await recordPluginHookOutputs(session, host, "after-tool-hook", afterToolHookResults, {
-                tool: toolName,
-              })
-              const afterToolStopReason = getPreventContinuationReason(afterToolHookResults)
 
               const spillLoop = spillPathFromToolMetadata(result.metadata)
               session.updateToolPart(newMessageId, partId, {
@@ -1156,7 +1148,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               lastToolName = toolName
               executedToolThisIteration = true
               executedToolCallsTotal++
-              if (afterToolStopReason) {
+              if (result.stoppedByHook) {
                 attemptedCompletionThisIteration = true
                 break
               }
@@ -1303,20 +1295,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             continue
           }
 
-          const result = await executeToolCall(
+          const result = await runToolPipeline(
             syntheticCallId,
             call.toolName,
             call.toolInput,
-            resolvedTools,
-            toolCtx,
-            autoApproveActions,
-            config,
-            host,
-            session,
             newMessageId,
-            completionState,
-            mode,
-            mcpToolNames
+            "textual",
           )
 
           const spillTextual = spillPathFromToolMetadata(result.metadata)
@@ -1479,20 +1463,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           timeStart: Date.now(),
         })
         host.emit({ type: "tool_start", tool: mandatoryTool, partId, messageId: newMessageId, input: toolInput })
-        const forcedResult = await executeToolCall(
+        const forcedResult = await runToolPipeline(
           syntheticId,
           mandatoryTool,
           toolInput,
-          resolvedTools,
-          toolCtx,
-          autoApproveActions,
-          config,
-          host,
-          session,
           newMessageId,
-          completionState,
-          mode,
-          mcpToolNames
+          "native",
         )
         session.updateToolPart(newMessageId, partId, {
           status: forcedResult.success ? "completed" : "error",
@@ -1659,194 +1635,6 @@ function parseLooseValue(value: string): unknown {
   return value
 }
 
-async function executeToolCall(
-  toolCallId: string,
-  toolName: string,
-  toolInput: Record<string, unknown>,
-  tools: ToolDef[],
-  ctx: ToolContext,
-  autoApproveActions: Set<string>,
-  config: NexusConfig,
-  host: IHost,
-  session: ISession,
-  messageId: string,
-  completionState: { doubleCheckEnabled: boolean; pending: { current: boolean }; checkpoint?: { commit(description?: string): Promise<string> } } | undefined,
-  mode: Mode,
-  mcpToolNames: Set<string>
-): Promise<ToolResult> {
-  // Resolve gateway name to builtin name so we always use our List (path-only schema)
-  const resolvedToolName =
-    toolName === "list_dir" || toolName === "ListDirectory" || toolName === "list_directory"
-      ? "List"
-      : toolName === "ask_followup_question"
-        ? "AskFollowupQuestion"
-        : toolName
-  const tool = tools.find(t => t.name === resolvedToolName)
-  if (!tool) {
-    const availableList = tools.map(t => t.name).join(", ")
-    return {
-      success: false,
-      output: `ERROR: Tool "${toolName}" does not exist. IMPORTANT: Use ONLY these available tools: ${availableList}. To run shell commands, use Bash.`,
-    }
-  }
-
-  const ctxWithPartId = ctx as ToolContext & { partId?: string }
-  ctxWithPartId.partId = `part_${toolCallId}`
-
-  // Plan mode: allow writes only to .nexus/plans/*.md|*.txt (no source code edits)
-  if (mode === "plan" && ["Write", "Edit"].includes(resolvedToolName)) {
-    const targetPath = extractWriteTargetPath(resolvedToolName, toolInput)
-    if (!targetPath) {
-      return {
-        success: false,
-        output: "In plan mode, write operations require an explicit target path under .nexus/plans/*.md or .txt.",
-      }
-    }
-    const rel = path.isAbsolute(targetPath) ? path.relative(ctx.cwd, targetPath) : targetPath
-    const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "")
-    if (!PLAN_MODE_ALLOWED_WRITE_PATTERN.test(normalized)) {
-      const extMatch = normalized.match(/\.[a-zA-Z0-9]+$/)
-      const ext = extMatch ? extMatch[0].toLowerCase() : ""
-      if (ext && PLAN_MODE_BLOCKED_EXTENSIONS.has(ext)) {
-        return {
-          success: false,
-          output: `In plan mode you cannot modify source code files (${ext}). Write only the plan to .nexus/plans/*.md or .txt, then call PlanExit.`,
-        }
-      }
-      return {
-        success: false,
-        output: "In plan mode you may only write plan documentation under .nexus/plans/ (*.md or *.txt). Do not modify source files.",
-      }
-    }
-  }
-
-  // --- Evaluate permission rules (fine-grained, first-match wins) ---
-  const ruleResult = evaluatePermissionRules(toolName, toolInput, config)
-  if (ruleResult === "deny") {
-    const ruleReason = findRuleReason(toolName, toolInput, config)
-    return { success: false, output: `Access denied by permission rule${ruleReason ? `: ${ruleReason}` : ""}` }
-  }
-  if (ruleResult === "ask") {
-    const action = buildApprovalAction(toolName, toolInput)
-    action.description = `[Permission Rule] ${action.description}`
-    host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` })
-    const approval = await host.showApprovalDialog(action)
-    if (!approval.approved) {
-      return { success: false, output: `User denied ${toolName}` }
-    }
-  }
-
-  // --- Legacy deny patterns (kept for backwards compat) ---
-  const writePath = (toolInput["file_path"] ?? toolInput["path"]) as string | undefined
-  if (ruleResult === null && writePath) {
-    for (const pattern of config.permissions.denyPatterns) {
-      if (matchesGlob(writePath, pattern)) {
-        return { success: false, output: `Access denied: path matches deny pattern "${pattern}"` }
-      }
-    }
-  }
-
-  // --- Standard approval flow (only when no explicit rule matched) ---
-  // For Write/Edit with host file-edit API: tool does open → approve → save/revert; skip here.
-  const useFileEditFlow =
-    (toolName === "Write" || toolName === "Edit") &&
-    typeof host.openFileEdit === "function" &&
-    typeof host.saveFileEdit === "function" &&
-    typeof host.revertFileEdit === "function"
-
-  if (ruleResult === null && !useFileEditFlow) {
-    const needsApproval = toolNeedsApproval(toolName, toolInput, autoApproveActions, config, mcpToolNames)
-    if (needsApproval) {
-      const action = buildApprovalAction(toolName, toolInput)
-      host.emit({ type: "tool_approval_needed", action, partId: `part_${toolCallId}` })
-
-      const approval = await host.showApprovalDialog(action)
-      if (!approval.approved) {
-        if (approval.whatToDoInstead?.trim()) {
-          session.addMessage({
-            role: "user",
-            content: `[Regarding the declined action: ${action.description}]\n\nDo this instead: ${approval.whatToDoInstead.trim()}`,
-          })
-          return {
-            success: false,
-            output: `User declined this action and asked to do the following instead:\n\n${approval.whatToDoInstead.trim()}\n\nContinue your work following this instruction; do not repeat the declined action.`,
-          }
-        }
-        return { success: false, output: `User denied ${toolName}` }
-      }
-      if (approval.addToAllowedCommand != null && toolName === "Bash") {
-        const toAdd = normalizeCommand(approval.addToAllowedCommand)
-        if (toAdd) {
-          await host.addAllowedCommand?.(ctx.cwd, toAdd)
-          if (!config.permissions.allowedCommands) config.permissions.allowedCommands = []
-          if (!config.permissions.allowedCommands.includes(toAdd)) {
-            config.permissions.allowedCommands.push(toAdd)
-          }
-        }
-      }
-      if (approval.addToAllowedPattern != null && toolName === "Bash") {
-        const pattern = approval.addToAllowedPattern.trim()
-        if (pattern) {
-          await host.addAllowedPattern?.(ctx.cwd, pattern)
-          if (!config.permissions.allowCommandPatterns) config.permissions.allowCommandPatterns = []
-          if (!config.permissions.allowCommandPatterns.includes(pattern)) {
-            config.permissions.allowCommandPatterns.push(pattern)
-          }
-        }
-      }
-      if (approval.addToAllowedMcpTool != null && mcpToolNames.has(toolName)) {
-        const tool = approval.addToAllowedMcpTool.trim()
-        if (tool) {
-          await host.addAllowedMcpTool?.(ctx.cwd, tool)
-          if (!config.permissions.allowedMcpTools) config.permissions.allowedMcpTools = []
-          if (!config.permissions.allowedMcpTools.includes(tool)) {
-            config.permissions.allowedMcpTools.push(tool)
-          }
-        }
-      }
-    }
-  }
-
-  // Validate args — normalize all tools so gateway/API quirks (paths vs path, [undefined] in arrays) don't cause parse errors.
-  let validatedArgs: unknown
-  let inputToParse: Record<string, unknown> =
-    toolInput && typeof toolInput === "object" ? { ...toolInput } : {}
-  inputToParse = normalizeToolInputForParse(resolvedToolName, inputToParse) as Record<string, unknown>
-  try {
-    validatedArgs = tool.parameters.parse(inputToParse)
-  } catch (err) {
-    return { success: false, output: formatToolValidationError(resolvedToolName, err, inputToParse) }
-  }
-
-  // Execute
-  try {
-    const result = await tool.execute(validatedArgs as Record<string, unknown>, ctx)
-
-    // Keep code index fresh after successful file edits in both CLI and VSCode hosts.
-    if (result.success && ctx.indexer && ["Write", "Edit"].includes(toolName)) {
-      const targetPath = extractWriteTargetPath(toolName, validatedArgs as Record<string, unknown>)
-      const refreshFile = ctx.indexer.refreshFile
-      const refreshFileNow = ctx.indexer.refreshFileNow
-      if (targetPath && (refreshFileNow || refreshFile)) {
-        const absolutePath = path.isAbsolute(targetPath) ? targetPath : path.resolve(ctx.cwd, targetPath)
-        try {
-          if (refreshFileNow) {
-            await refreshFileNow.call(ctx.indexer, absolutePath)
-          } else if (refreshFile) {
-            await refreshFile.call(ctx.indexer, absolutePath)
-          }
-        } catch {
-          // Ignore index refresh errors; they should not fail a successful write.
-        }
-      }
-    }
-
-    return { success: result.success, output: result.output, metadata: result.metadata }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return { success: false, output: `Tool ${toolName} error: ${msg}` }
-  }
-}
 
 type HandleCompactionOpts = {
   /** Full next-request size (session + system + tools); required for accurate overflow vs UI/API limits. */

@@ -941,8 +941,8 @@ export async function executeToolCall(
   }
 
   const ctxWithPartId = ctx as ToolContext & { partId?: string; toolExecutionMessageId?: string }
-  ctxWithPartId.partId = `part_${toolCallId}`
-  ctxWithPartId.toolExecutionMessageId = messageId
+  ctxWithPartId.partId ??= `part_${toolCallId}`
+  ctxWithPartId.toolExecutionMessageId ??= messageId
 
   if (mode === "plan" && ["Write", "Edit"].includes(resolvedToolName)) {
     const targetPath = extractWriteTargetPath(toolName, toolInput)

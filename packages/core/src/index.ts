@@ -108,6 +108,13 @@ export {
   type NexusRunServices,
 } from "./agent/run-services.js"
 export {
+  executeToolPipeline,
+  type ToolExecutionEnvironment,
+  type ToolExecutionOrigin,
+  type ToolExecutionOutcome,
+  type ToolExecutionRequest,
+} from "./agent/tool-pipeline.js"
+export {
   normalizedAppliedReplacementsFromMetadata,
   type AppliedReplacementSnippet,
 } from "./tools/applied-replacements.js"
