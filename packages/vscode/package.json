@@ -21,12 +21,13 @@
   "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "scripts": {
-    "build": "pnpm build:ext && pnpm build:webview",
+    "build": "corepack pnpm build:ext && corepack pnpm build:webview",
     "build:ext": "node esbuild.mjs",
-    "build:webview": "pnpm --filter @nexuscode/webview-ui build",
+    "build:webview": "corepack pnpm --filter @nexuscode/webview-ui build",
     "package": "node scripts/svg-to-png.cjs && node scripts/package-vsix.cjs",
     "dev": "node esbuild.mjs --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node -e \"process.exit(0)\""
   },
   "contributes": {
     "viewsContainers": {

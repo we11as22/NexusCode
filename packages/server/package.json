@@ -16,7 +16,8 @@
   "scripts": {
     "build": "tsup src/index.ts src/cli.ts --format esm --dts --target node18 --outDir dist",
     "dev": "tsup src/index.ts --format esm --dts --target node18 --outDir dist --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node -e \"process.exit(0)\""
   },
   "dependencies": {
     "@nexuscode/core": "workspace:*",

@@ -40,7 +40,7 @@ This foundation plan is the first independently testable sub-project. Follow-up 
 - `scripts/runtime-version.mjs` — pure Node/package-manager version validation.
 - `scripts/runtime-version.test.mjs` — built-in Node test coverage for version validation.
 - `scripts/storage-portability.test.mjs` — prevent unused native database addons from returning to the critical runtime path.
-- `packages/core/vitest.config.ts` — first-party core test configuration.
+- `packages/core/vitest.config.mts` — first-party core test configuration without Vite's deprecated CJS config loader.
 - `packages/core/src/test/fakes.ts` — small fake host/session builders used by contract tests.
 - `packages/core/src/agent/run-services.ts` — session-scoped dependencies passed into a run.
 - `packages/core/src/agent/tool-pipeline.ts` — the only public tool execution entry point.
@@ -209,7 +209,7 @@ git commit -m "build: pin a portable Nexus runtime"
 ### Task 2: Establish first-party test infrastructure
 
 **Files:**
-- Create: `packages/core/vitest.config.ts`
+- Create: `packages/core/vitest.config.mts`
 - Create: `packages/core/src/test/fakes.ts`
 - Create: `packages/core/src/test/smoke.test.ts`
 - Modify: `package.json`
@@ -220,7 +220,7 @@ git commit -m "build: pin a portable Nexus runtime"
 - Produces: `pnpm test`, `pnpm test:core`, and package-local `pnpm test`.
 - Consumes: existing `IHost`, `ISession`, `NexusConfigSchema`, and `Session`.
 
-- [ ] **Step 1: Add a failing core smoke test**
+- [x] **Step 1: Add a failing core smoke test**
 
 ```ts
 // packages/core/src/test/smoke.test.ts
@@ -238,12 +238,12 @@ describe("core test harness", () => {
 })
 ```
 
-- [ ] **Step 2: Install and configure Vitest**
+- [x] **Step 2: Install and configure Vitest**
 
 Add `vitest: "3.2.3"` to core devDependencies and:
 
 ```ts
-// packages/core/vitest.config.ts
+// packages/core/vitest.config.mts
 import { defineConfig } from "vitest/config"
 
 export default defineConfig({
@@ -273,19 +273,19 @@ Add root scripts:
 
 Packages without tests receive `test: "node -e \"process.exit(0)\""` temporarily in the same change so recursive testing is deterministic; later plans replace these no-op scripts before acceptance.
 
-- [ ] **Step 3: Run the smoke test**
+- [x] **Step 3: Run the smoke test**
 
 Run: `pnpm --filter @nexuscode/core test -- src/test/smoke.test.ts`
 
 Expected: PASS with one test.
 
-- [ ] **Step 4: Add typed fakes**
+- [x] **Step 4: Add typed fakes**
 
 Implement `createFakeHost` with in-memory files, captured approvals, captured events, and a command stub that throws unless overridden. Implement `createFakeSession` by constructing the existing `Session` with a generated test ID. Implement `createTestConfig` with `NexusConfigSchema.parse` and an explicit deep merge helper local to the test file.
 
 The fake host default approval result is `{ approved: false }`. Tests must opt into approval.
 
-- [ ] **Step 5: Verify fakes with focused assertions**
+- [x] **Step 5: Verify fakes with focused assertions**
 
 Extend `smoke.test.ts`:
 
@@ -304,10 +304,10 @@ Run: `pnpm --filter @nexuscode/core test -- src/test/smoke.test.ts`
 
 Expected: PASS with two tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
-git add package.json packages/core/package.json packages/core/vitest.config.ts packages/core/src/test pnpm-lock.yaml packages/*/package.json packages/vscode/webview-ui/package.json
+git add package.json packages/core/package.json packages/core/vitest.config.mts packages/core/src/test pnpm-lock.yaml packages/*/package.json packages/vscode/webview-ui/package.json
 git commit -m "test: add first-party Nexus test harness"
 ```
 

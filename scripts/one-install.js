@@ -33,9 +33,9 @@ rm("packages/vscode/node_modules");
 rm("packages/vscode/webview-ui/node_modules");
 
 console.log("Installing dependencies...");
-run("pnpm install");
+run("corepack pnpm install");
 
 console.log("Building...");
-run("pnpm build");
+run("corepack pnpm build");
 
 console.log("Done. Run: nexus");
