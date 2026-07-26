@@ -221,32 +221,77 @@ class BedrockEmbeddingClient implements EmbeddingClient {
 }
 
 /**
- * Local embedding using @xenova/transformers (offline, CPU-based).
- * Lazy-loaded to avoid import if not used.
+ * Dependency-free offline feature-hashing embeddings.
+ *
+ * This is intentionally lexical rather than pretending to ship a neural model:
+ * it gives Nexus a portable, deterministic local index in CLI, server and VSIX
+ * builds without downloading model weights or relying on an undeclared native
+ * dependency. Users who want neural semantic search can select Ollama or a
+ * hosted embedding provider.
  */
 class LocalEmbeddingClient implements EmbeddingClient {
   readonly dimensions: number
-  private modelName: string
-  private pipeline: ((texts: string[], opts?: Record<string, unknown>) => Promise<{ data: Float32Array[] }>) | null = null
 
   constructor(config: EmbeddingConfig) {
-    this.modelName = config.model ?? "Xenova/all-MiniLM-L6-v2"
-    this.dimensions = config.dimensions ?? 384
+    this.dimensions = Math.max(1, Math.floor(config.dimensions ?? 384))
   }
 
   async embed(texts: string[]): Promise<number[][]> {
-    if (!this.pipeline) {
-      // Lazy load @xenova/transformers
-      const { pipeline } = await import("@xenova/transformers" as string as any) as any
-      this.pipeline = await pipeline("feature-extraction", this.modelName)
-    }
-    const results: number[][] = []
-    for (const text of texts) {
-      const output = await this.pipeline!([text], { pooling: "mean", normalize: true })
-      results.push(Array.from(output.data[0]))
-    }
-    return results
+    return texts.map((text) => featureHashEmbedding(text, this.dimensions))
   }
+}
+
+function stableHash(value: string, seed: number): number {
+  let hash = seed >>> 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return hash >>> 0
+}
+
+function localEmbeddingFeatures(text: string): string[] {
+  const expanded = text
+    .normalize("NFKC")
+    .replace(/([\p{Ll}\d])(\p{Lu})/gu, "$1 $2")
+    .toLocaleLowerCase("en-US")
+  const words = expanded.match(/[\p{L}\p{N}_$]+/gu) ?? []
+  const tokens = words.flatMap((word) => {
+    const parts = word.split(/[_$]+/).filter(Boolean)
+    return parts.length > 1 ? [word, ...parts] : [word]
+  })
+  const features: string[] = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!
+    features.push(`word:${token}`)
+    const padded = `^${token}$`
+    if (padded.length <= 3) {
+      features.push(`char:${padded}`)
+    } else {
+      for (let offset = 0; offset <= padded.length - 3; offset += 1) {
+        features.push(`char:${padded.slice(offset, offset + 3)}`)
+      }
+    }
+    const next = tokens[index + 1]
+    if (next) features.push(`pair:${token}\u0001${next}`)
+  }
+  return features
+}
+
+function featureHashEmbedding(text: string, dimensions: number): number[] {
+  const vector = Array.from({ length: dimensions }, () => 0)
+  const counts = new Map<string, number>()
+  for (const feature of localEmbeddingFeatures(text)) {
+    counts.set(feature, (counts.get(feature) ?? 0) + 1)
+  }
+  for (const [feature, count] of counts) {
+    const bucket = stableHash(feature, 0x811c9dc5) % dimensions
+    const sign = (stableHash(feature, 0x9e3779b9) & 1) === 0 ? 1 : -1
+    vector[bucket] = (vector[bucket] ?? 0) + sign * (1 + Math.log(count))
+  }
+  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0))
+  if (norm === 0) return vector
+  return vector.map((value) => value / norm)
 }
 
 function isLocalBaseUrl(baseUrl: string | undefined): boolean {

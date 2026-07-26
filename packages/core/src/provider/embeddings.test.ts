@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { EmbeddingConfig } from "../types.js"
-import { isEmbeddingApiKeyMissing } from "./embeddings.js"
+import { createEmbeddingClient, isEmbeddingApiKeyMissing } from "./embeddings.js"
 
 function embedding(
   provider: EmbeddingConfig["provider"],
@@ -53,5 +53,26 @@ describe("embedding credential discovery", () => {
     expect(isEmbeddingApiKeyMissing(embedding("openai-compatible", {
       baseUrl: "https://embeddings.example.com/v1",
     }))).toBe(true)
+  })
+})
+
+describe("offline local embeddings", () => {
+  it("produces deterministic normalized vectors without an optional runtime dependency", async () => {
+    const client = createEmbeddingClient(embedding("local", { dimensions: 128 }))
+    const [first, repeated, related, unrelated] = await client.embed([
+      "parse TypeScript source files",
+      "parse TypeScript source files",
+      "TypeScript parser for source code",
+      "banana orchard irrigation",
+    ])
+    const similarity = (left: number[], right: number[]) =>
+      left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0)
+    const norm = (values: number[]) =>
+      Math.sqrt(values.reduce((sum, value) => sum + value * value, 0))
+
+    expect(first).toEqual(repeated)
+    expect(first).toHaveLength(128)
+    expect(norm(first)).toBeCloseTo(1, 8)
+    expect(similarity(first, related)).toBeGreaterThan(similarity(first, unrelated))
   })
 })
