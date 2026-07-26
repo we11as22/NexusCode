@@ -910,7 +910,7 @@ export type CompletionState = {
   checkpoint?: { commit(description?: string): Promise<string> }
 }
 
-export async function executeToolCall(
+export async function executeValidatedTool(
   toolCallId: string,
   toolName: string,
   toolInput: Record<string, unknown>,

@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 /**
  * One-command install + build. Removes node_modules and local store so pnpm
- * never hits "Unexpected store location", then installs, sets up native modules, builds.
+ * never hits "Unexpected store location", then installs and builds.
  */
-require("./check-node.js");
-
 const path = require("path");
 const fs = require("fs");
-const { execSync } = require("child_process");
+const { execFileSync, execSync } = require("child_process");
 
 const root = path.resolve(__dirname, "..");
 process.chdir(root);
+execFileSync(process.execPath, [path.join(root, "scripts/check-node.js")], {
+  stdio: "inherit",
+  cwd: root,
+});
 
 function rm(dir) {
   try {

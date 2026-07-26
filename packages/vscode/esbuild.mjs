@@ -25,7 +25,7 @@ const ctx = await esbuild.context({
   ],
   format: "cjs",
   platform: "node",
-  target: "node18",
+  target: "node20",
   sourcemap: true,
   minify: !watch,
   loader: { ".md": "text", ".txt": "text" },

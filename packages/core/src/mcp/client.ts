@@ -236,23 +236,6 @@ export class McpClient {
   }
 }
 
-// Legacy compatibility adapter only. Production run paths pass the owning
-// client through NexusRunServices and generated tools close over `this`.
-class McpClientRegistryClass {
-  instance: McpClient | null = null
-}
-const McpClientRegistry = new McpClientRegistryClass()
-
-/** @deprecated Pass McpClient through NexusRunServices. */
-export function setMcpClientInstance(client: McpClient): void {
-  McpClientRegistry.instance = client
-}
-
-/** @deprecated Read McpClient from ToolContext.services. */
-export function getMcpClientInstance(): McpClient | null {
-  return McpClientRegistry.instance
-}
-
 /** Standalone test of MCP server configs (does not keep connections). */
 export async function testMcpServers(
   configs: McpServerConfig[]

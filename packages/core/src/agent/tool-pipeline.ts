@@ -14,7 +14,7 @@ import {
   type PluginHookEvent,
 } from "../plugins/runtime.js"
 import {
-  executeToolCall,
+  executeValidatedTool,
   formatToolValidationError,
   normalizeToolInputForParse,
   type CompletionState,
@@ -189,7 +189,7 @@ export async function executeToolPipeline(
     candidate === tool ? wrappedTool : candidate,
   )
 
-  const result = await executeToolCall(
+  const result = await executeValidatedTool(
     request.callId,
     resolvedToolName,
     normalizedInput,

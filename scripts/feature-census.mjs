@@ -430,7 +430,11 @@ export async function collectFeatureCensus(root) {
 
   for (const row of rows.values()) {
     const rawName = row.feature.slice(row.feature.indexOf(":") + 1)
-    for (const testPath of testFilesContaining(files, rawName)) {
+    const testNeedle =
+      row.kind === "tool" || row.kind === "event"
+        ? rawName
+        : row.feature
+    for (const testPath of testFilesContaining(files, testNeedle)) {
       row.tests.add(testPath)
     }
   }

@@ -202,8 +202,6 @@ export { fetchSkillUrlRegistryRoots } from "./skills/url-registry.js"
 // MCP
 export {
   McpClient,
-  setMcpClientInstance,
-  getMcpClientInstance,
   testMcpServers,
 } from "./mcp/client.js"
 export type { McpResourceRef, McpResourceContent } from "./mcp/client.js"

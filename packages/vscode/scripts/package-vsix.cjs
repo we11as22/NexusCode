@@ -1,21 +1,13 @@
 #!/usr/bin/env node
 /**
- * Run vsce package.
- * Node 18 lacks global File used by undici; inject a lightweight polyfill via NODE_OPTIONS.
+ * Run vsce package on the repository-pinned Node 20 runtime.
  */
 const { execSync } = require('child_process')
 const path = require('path')
 const cwd = path.resolve(__dirname, '..')
-const polyfillPath = path.join(cwd, 'scripts', 'node18-file-polyfill.cjs')
-const extraNodeOpts = `--require=${JSON.stringify(polyfillPath)}`
-const inheritedNodeOpts = process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : ''
-execSync('pnpm exec vsce package --no-dependencies --allow-missing-repository --no-yarn', {
+execSync('corepack pnpm exec vsce package --no-dependencies --allow-missing-repository --no-yarn', {
   stdio: 'inherit',
   cwd,
-  env: {
-    ...process.env,
-    NODE_OPTIONS: `${inheritedNodeOpts}${extraNodeOpts}`.trim(),
-  },
 })
 const vsixName = 'nexuscode-0.1.0.vsix'
 console.log('')

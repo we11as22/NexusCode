@@ -683,7 +683,7 @@ git commit -m "refactor: unify Nexus tool execution"
 - Produces `resolveNonInteractiveApproval(action, policy): PermissionResult`.
 - Review mode exposes `GitInspect` but not `Bash`, `PowerShell`, `Write`, or `Edit`.
 
-- [ ] **Step 1: Write mode reachability tests**
+- [x] **Step 1: Write mode reachability tests**
 
 For every mode, resolve the complete visible tool set including dynamic aliases. Assert:
 
@@ -698,13 +698,13 @@ expect(names("plan")).not.toContain("Bash")
 
 Invoke `GitInspect` with an unsupported operation and assert schema validation rejects it.
 
-- [ ] **Step 2: Implement read-only Git inspection**
+- [x] **Step 2: Implement read-only Git inspection**
 
 Use `ctx.host.runCommand` only with commands assembled from validated enum operations and separately validated path/revision arguments. Reject revisions or paths beginning with `-`. Never accept a raw command string.
 
 The tool requests read approval only and declares a read-only concurrency class.
 
-- [ ] **Step 3: Write failing CLI headless tests**
+- [x] **Step 3: Write failing CLI headless tests**
 
 Test that:
 
@@ -730,7 +730,7 @@ export default defineConfig({
 })
 ```
 
-- [ ] **Step 4: Implement fail-closed CLI behavior**
+- [x] **Step 4: Implement fail-closed CLI behavior**
 
 Extract a pure approval resolver used before readline creation. Non-interactive mode denies privileged actions and emits one diagnostic explaining how to provide an explicit policy.
 
@@ -742,7 +742,7 @@ autoApprove: dangerouslySkipPermissions === true
 
 Do not skip workspace trust merely because `--print` is active; use a non-interactive trust policy that denies mutation unless explicitly configured.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run:
 
@@ -755,7 +755,7 @@ pnpm --filter @nexuscode/cli typecheck
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add packages/core/src/tools/built-in/git-inspect.ts packages/core/src/tools/built-in/index.ts packages/core/src/agent/modes.ts packages/core/src/agent/__tests__/modes.test.ts packages/cli/vitest.config.ts packages/cli/package.json packages/cli/src/host.ts packages/cli/src/host.test.ts packages/cli/src/entrypoints/cli.tsx pnpm-lock.yaml
@@ -799,7 +799,7 @@ export function resolveWorkspaceRoot(
 - `createApp(options: ServerSecurityOptions)` replaces the global unconfigured app.
 - Clients send `Authorization: Bearer <token>`.
 
-- [ ] **Step 1: Write pure security tests**
+- [x] **Step 1: Write pure security tests**
 
 Cover:
 
@@ -827,17 +827,17 @@ export default defineConfig({
 })
 ```
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run: `pnpm --filter @nexuscode/server test -- src/security.test.ts`
 
 Expected: FAIL because `security.ts` does not exist.
 
-- [ ] **Step 3: Implement the security helpers**
+- [x] **Step 3: Implement the security helpers**
 
 Canonicalize both allowed and requested paths with `realpath` when they exist and with nearest-existing-parent resolution for a not-yet-created path. Compare path segments, not string prefixes. Use `timingSafeEqual` for equal-length bearer token buffers.
 
-- [ ] **Step 4: Refactor app construction**
+- [x] **Step 4: Refactor app construction**
 
 `createApp(options)` installs:
 
@@ -848,7 +848,7 @@ Canonicalize both allowed and requested paths with `realpath` when they exist an
 
 Remove `origin || "*"`. Reject a browser origin not in the allowlist.
 
-- [ ] **Step 5: Make workspace resolution authoritative**
+- [x] **Step 5: Make workspace resolution authoritative**
 
 Replace route-local `getCwd` with `resolveWorkspaceRoot`. A client cannot select `process.cwd()` implicitly unless it is in configured roots.
 
@@ -860,17 +860,17 @@ Parse server configuration from:
 
 Default binding remains `127.0.0.1`. Binding a non-loopback address fails unless token and origins were explicitly supplied.
 
-- [ ] **Step 6: Remove server auto-approval**
+- [x] **Step 6: Remove server auto-approval**
 
 `ServerHost.showApprovalDialog` returns denial unless the run carries an authenticated explicit capability policy. Foundation behavior denies; the later protocol plan adds remote interactive approvals.
 
-- [ ] **Step 7: Update clients**
+- [x] **Step 7: Update clients**
 
 CLI and VS Code server clients accept `token` in constructors and attach the bearer header to every request and stream reconnect.
 
 Read the token from the secrets store or `NEXUS_SERVER_TOKEN`; never place it in URL query parameters or logs.
 
-- [ ] **Step 8: Run endpoint tests**
+- [x] **Step 8: Run endpoint tests**
 
 Using `app.request`, prove:
 
@@ -880,7 +880,7 @@ Using `app.request`, prove:
 - an authenticated request inside an allowed root reaches the route;
 - privileged tool approval is not automatic.
 
-- [ ] **Step 9: Verify**
+- [x] **Step 9: Verify**
 
 Run:
 
@@ -893,7 +893,7 @@ pnpm --filter nexuscode typecheck
 
 Expected: PASS.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add packages/server/vitest.config.ts packages/server/src/security.ts packages/server/src/security.test.ts packages/server/src/app.test.ts packages/server/src/app.ts packages/server/src/routes/session.ts packages/server/src/index.ts packages/server/src/host.ts packages/server/package.json packages/cli/src/nexus-server-client.ts packages/vscode/src pnpm-lock.yaml
@@ -915,7 +915,7 @@ git commit -m "security: authenticate and constrain Nexus server"
 - Produces a deterministic Markdown report with columns:
   `feature`, `declared`, `registered`, `mode-visible`, `executed-by`, `persisted-by`, `rendered-cli`, `rendered-vscode`, `rendered-server`, `tests`, `status`.
 
-- [ ] **Step 1: Write census parser tests**
+- [x] **Step 1: Write census parser tests**
 
 Create a temporary fixture repository containing:
 
@@ -926,13 +926,13 @@ Create a temporary fixture repository containing:
 
 Assert statuses `working-evidence`, `documentation-only`, `surface-gap`, and `orphan-setting`.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run: `node --test scripts/feature-census.test.mjs`
 
 Expected: FAIL because the census module does not exist.
 
-- [ ] **Step 3: Implement deterministic static census**
+- [x] **Step 3: Implement deterministic static census**
 
 Use Node filesystem APIs and bounded regular-expression parsing. The script must not claim a feature works from static evidence; only a linked test file can yield `working-evidence`. Static reachability yields `reachable-untested`.
 
@@ -947,7 +947,7 @@ Seed the feature list from:
 - MCP/resource features;
 - documented headings and tool names.
 
-- [ ] **Step 4: Generate and inspect the report**
+- [x] **Step 4: Generate and inspect the report**
 
 Run:
 
@@ -958,11 +958,11 @@ rg "documentation-only|unreachable|surface-gap|orphan-setting" docs/engineering/
 
 Expected: the report exposes current gaps rather than marking them complete.
 
-- [ ] **Step 5: Add a CI guard**
+- [x] **Step 5: Add a CI guard**
 
 Add `census:features:check` that regenerates to a temporary path and fails when the committed report differs. It does not fail merely because known gaps exist; later tasks change statuses as tests are added.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/feature-census.mjs scripts/feature-census.test.mjs package.json
@@ -983,7 +983,7 @@ git commit -m "test: add executable Nexus feature census"
 - Produces a clean, reproducible foundation on Node 20.19.2.
 - Provides the stable interfaces consumed by every follow-up plan.
 
-- [ ] **Step 1: Run formatting and static checks**
+- [x] **Step 1: Run formatting and static checks**
 
 Run:
 
@@ -996,15 +996,15 @@ pnpm typecheck
 
 Expected: PASS.
 
-- [ ] **Step 2: Run all first-party tests**
+- [x] **Step 2: Run all first-party tests**
 
 Run: `pnpm test`
 
 Expected: PASS with non-zero first-party test counts in core, CLI, and server.
 
-- [ ] **Step 3: Verify native runtime**
+- [x] **Step 3: Verify native runtime**
 
-- [ ] **Step 4: Build every surface**
+- [x] **Step 4: Build every surface**
 
 Run:
 
@@ -1017,7 +1017,7 @@ pnpm build:vscode
 
 Expected: PASS with no swallowed optional-component error.
 
-- [ ] **Step 5: Run security smoke checks**
+- [x] **Step 5: Run security smoke checks**
 
 Start the server with a temporary token and workspace root. Verify:
 
@@ -1029,7 +1029,7 @@ curl -i -H "Authorization: Bearer $NEXUS_TEST_SERVER_TOKEN" "http://127.0.0.1:40
 
 Expected: 401, 401, then 403. Stop the server.
 
-- [ ] **Step 6: Audit forbidden patterns**
+- [x] **Step 6: Audit forbidden patterns**
 
 Run:
 
@@ -1042,7 +1042,7 @@ rg "async function executeToolCall" packages/core/src/agent
 
 Expected: no production runtime hits. Explicit compatibility tests or comments must be reviewed individually.
 
-- [ ] **Step 7: Review feature parity**
+- [x] **Step 7: Review feature parity**
 
 Inspect the census and confirm:
 
@@ -1052,7 +1052,7 @@ Inspect the census and confirm:
 - CLI headless and server are fail closed;
 - core, CLI, server, and VS Code build against the pinned runtime.
 
-- [ ] **Step 8: Commit the verified foundation**
+- [x] **Step 8: Commit the verified foundation**
 
 ```bash
 git add -A

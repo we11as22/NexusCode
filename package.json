@@ -25,7 +25,7 @@
         "typecheck": "corepack pnpm -r --stream typecheck",
         "test": "corepack pnpm -r --stream test",
         "test:core": "corepack pnpm --filter @nexuscode/core test",
-        "test:runtime": "node --test scripts/runtime-version.test.mjs scripts/build-optional-context-mode.test.mjs scripts/storage-portability.test.mjs",
+        "test:runtime": "node --test scripts/runtime-version.test.mjs scripts/build-optional-context-mode.test.mjs scripts/storage-portability.test.mjs scripts/feature-census.test.mjs",
         "census:features": "node scripts/feature-census.mjs",
         "census:features:check": "node scripts/feature-census.mjs --check",
         "validate:mcp-skills": "corepack pnpm run build:core && node scripts/validate-mcp-skills-workflow.mjs",
