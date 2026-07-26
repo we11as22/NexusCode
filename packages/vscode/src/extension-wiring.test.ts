@@ -12,6 +12,14 @@ const controllerSource = readFileSync(
 )
 
 describe("VS Code command wiring", () => {
+  it("does not run the coding agent in an untrusted VS Code workspace", () => {
+    const manifest = JSON.parse(
+      readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
+    ) as { capabilities?: { untrustedWorkspaces?: { supported?: boolean } } }
+
+    expect(manifest.capabilities?.untrustedWorkspaces?.supported).toBe(false)
+  })
+
   it.each([
     ["nexuscode.newTask", "provider?.createNewSession()"],
     ["nexuscode.compact", "provider?.compact()"],

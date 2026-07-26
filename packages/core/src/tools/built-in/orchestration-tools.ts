@@ -985,6 +985,7 @@ export const teamSetMemberStatusTool: ToolDef<z.infer<typeof teamSetMemberStatus
     ctx.host.emit({ type: "team_updated", team })
     if (status === "idle") {
       const hookResults = await runPluginHooks(ctx.cwd, ctx.host, ctx.config, "teammate_idle", {
+        sessionId: ctx.session.id,
         teammate: member_name,
         teamName: team_name,
         note: note ?? "",
@@ -1683,7 +1684,10 @@ export const runPluginHookTool: ToolDef<z.infer<typeof runPluginHookSchema>> = {
   shouldDefer: true,
   async execute({ hook_event, payload }, ctx) {
     await refreshProjectPluginConfig(ctx)
-    const results = await runPluginHooks(ctx.cwd, ctx.host, ctx.config, hook_event, payload ?? {})
+    const results = await runPluginHooks(ctx.cwd, ctx.host, ctx.config, hook_event, {
+      ...(payload ?? {}),
+      sessionId: ctx.session.id,
+    })
     if (results.length === 0) return { success: true, output: `No trusted plugin hooks handled ${hook_event}.` }
     for (const result of results) {
       ctx.host.emit({

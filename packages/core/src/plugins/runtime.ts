@@ -42,6 +42,22 @@ const OPENCLAUDE_EVENT_MAP: Record<string, PluginHookEvent> = {
 }
 
 const completedOneShotHooks = new Set<string>()
+const MAX_COMPLETED_ONE_SHOT_HOOKS = 10_000
+
+function oneShotSessionKey(payload: Record<string, unknown>): string {
+  return typeof payload.sessionId === "string" && payload.sessionId.trim()
+    ? payload.sessionId
+    : "unscoped"
+}
+
+function rememberCompletedOneShotHook(key: string): void {
+  completedOneShotHooks.add(key)
+  while (completedOneShotHooks.size > MAX_COMPLETED_ONE_SHOT_HOOKS) {
+    const oldest = completedOneShotHooks.values().next().value as string | undefined
+    if (!oldest) break
+    completedOneShotHooks.delete(oldest)
+  }
+}
 
 export function applyPluginRuntimeSettings(
   plugin: PluginManifestRecord,
@@ -269,6 +285,7 @@ async function runOpenClaudeHookDeclarations(
   try {
     for (const declaration of declarations) {
       const oneShotKey = [
+        oneShotSessionKey(payload),
         declaration.plugin.sourcePath,
         declaration.sourcePath,
         declaration.sourceEvent,
@@ -337,7 +354,9 @@ async function runOpenClaudeHookDeclarations(
             ...(parsed.stopReason ? { stopReason: parsed.stopReason } : {}),
             ...(parsed.additionalContext ? { additionalContext: parsed.additionalContext } : {}),
           })
-          if (declaration.hook.once === true) completedOneShotHooks.add(oneShotKey)
+          if (declaration.hook.once === true && response.ok) {
+            rememberCompletedOneShotHook(oneShotKey)
+          }
         } catch (error) {
           executions.push({
             pluginName: declaration.plugin.name,
@@ -413,7 +432,9 @@ async function runOpenClaudeHookDeclarations(
             : {}),
         ...(parsed.additionalContext ? { additionalContext: parsed.additionalContext } : {}),
       })
-      if (declaration.hook.once === true) completedOneShotHooks.add(oneShotKey)
+      if (declaration.hook.once === true && result.exitCode === 0) {
+        rememberCompletedOneShotHook(oneShotKey)
+      }
     }
   } finally {
     await fs.rm(payloadDir, { recursive: true, force: true }).catch(() => undefined)
@@ -428,7 +449,10 @@ async function runHookDeclarations(
   hookEvent: PluginHookEvent,
   payload: Record<string, unknown>,
   items: Array<{ name: string; hooks: string[] }>,
-  resolveHookPath: (item: { name: string; hooks: string[] }, relativePath: string) => string,
+  resolveHookPath: (
+    item: { name: string; hooks: string[] },
+    relativePath: string,
+  ) => string | Promise<string>,
 ): Promise<PluginHookExecution[]> {
   if (items.length === 0) return []
   const payloadDir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-hooks-"))
@@ -441,7 +465,18 @@ async function runHookDeclarations(
       for (const declared of item.hooks) {
         const parsed = splitHookDeclaration(declared)
         if (parsed.hookEvent !== hookEvent || !parsed.relativePath) continue
-        const hookPath = resolveHookPath(item, parsed.relativePath)
+        let hookPath: string
+        try {
+          hookPath = await resolveHookPath(item, parsed.relativePath)
+        } catch (error) {
+          executions.push({
+            pluginName: item.name,
+            hookEvent,
+            success: false,
+            output: error instanceof Error ? error.message : String(error),
+          })
+          continue
+        }
         const command = getHookRunnerCommand(hookPath, payloadPath)
         const abortController = new AbortController()
         const timeout = setTimeout(() => abortController.abort(), timeoutMs)
@@ -525,9 +560,23 @@ export async function runScopedHooks(
     hookEvent,
     payload,
     items.map((item) => ({ name: item.name, hooks: item.hooks })),
-    (item, relativePath) => {
+    async (item, relativePath) => {
       const source = items.find((candidate) => candidate.name === item.name)!
-      return path.resolve(source.rootDir, relativePath)
+      const declaredRoot = path.resolve(source.rootDir)
+      const declaredTarget = path.resolve(declaredRoot, relativePath)
+      const relative = path.relative(declaredRoot, declaredTarget)
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw new Error(`Scoped hook path escapes agent root: ${relativePath}`)
+      }
+      const canonicalRoot = await fs.realpath(declaredRoot)
+      const canonicalTarget = await fs.realpath(declaredTarget).catch(() => {
+        throw new Error(`Scoped hook path does not exist: ${relativePath}`)
+      })
+      const canonicalRelative = path.relative(canonicalRoot, canonicalTarget)
+      if (canonicalRelative.startsWith("..") || path.isAbsolute(canonicalRelative)) {
+        throw new Error(`Scoped hook symlink escapes agent root: ${relativePath}`)
+      }
+      return canonicalTarget
     },
   )
 }

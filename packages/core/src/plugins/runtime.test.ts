@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { NexusConfigSchema } from "../config/schema.js"
 import { createFakeHost } from "../test/fakes.js"
 import type { NexusConfig } from "../types.js"
-import { runPluginHooks } from "./runtime.js"
+import { runPluginHooks, runScopedHooks } from "./runtime.js"
 
 const roots: string[] = []
 
@@ -86,6 +86,83 @@ describe("plugin hook execution", () => {
       success: false,
       preventContinuation: true,
       stopReason: "blocked by policy",
+    }])
+  })
+
+  it("runs one-shot OpenClaude hooks once per session and consumes them only after success", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-openclaude-once-"))
+    roots.push(root)
+    const pluginRoot = path.join(root, ".nexus", "plugins", "demo")
+    await mkdir(path.join(pluginRoot, "hooks"), { recursive: true })
+    await writeFile(path.join(pluginRoot, "plugin.json"), JSON.stringify({ name: "demo" }), "utf8")
+    await writeFile(
+      path.join(pluginRoot, "hooks", "hooks.json"),
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [{
+            matcher: "^Read$",
+            hooks: [{ type: "command", command: "record-read", once: true }],
+          }],
+        },
+      }),
+      "utf8",
+    )
+    let executions = 0
+    const host = createFakeHost({
+      cwd: root,
+      async runCommand() {
+        executions += 1
+        return executions === 1
+          ? { stdout: "", stderr: "temporary failure", exitCode: 1 }
+          : { stdout: "ok", stderr: "", exitCode: 0 }
+      },
+    })
+    const config = NexusConfigSchema.parse({ plugins: { trusted: ["demo"] } }) as NexusConfig
+    const payload = (sessionId: string) => ({ sessionId, toolName: "Read" })
+
+    await expect(runPluginHooks(root, host, config, "after_tool", payload("session-a")))
+      .resolves.toMatchObject([{ success: false }])
+    await expect(runPluginHooks(root, host, config, "after_tool", payload("session-a")))
+      .resolves.toMatchObject([{ success: true }])
+    await expect(runPluginHooks(root, host, config, "after_tool", payload("session-a")))
+      .resolves.toEqual([])
+    await expect(runPluginHooks(root, host, config, "after_tool", payload("session-b")))
+      .resolves.toMatchObject([{ success: true }])
+    expect(executions).toBe(3)
+  })
+
+  it("rejects scoped agent hooks that escape the agent definition directory", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-agent-hook-"))
+    roots.push(root)
+    const agentRoot = path.join(root, ".nexus", "agents", "reviewer")
+    await mkdir(agentRoot, { recursive: true })
+    await writeFile(path.join(root, "outside.sh"), "#!/bin/sh\n", "utf8")
+    let executed = false
+    const host = createFakeHost({
+      cwd: root,
+      async runCommand() {
+        executed = true
+        return { stdout: "unexpected", stderr: "", exitCode: 0 }
+      },
+    })
+
+    const results = await runScopedHooks(
+      root,
+      host,
+      "subagent_start",
+      { sessionId: "session-a" },
+      [{
+        name: "Reviewer",
+        rootDir: agentRoot,
+        hooks: ["subagent_start:../../../outside.sh"],
+      }],
+    )
+
+    expect(executed).toBe(false)
+    expect(results).toMatchObject([{
+      pluginName: "Reviewer",
+      success: false,
+      output: expect.stringMatching(/escapes/i),
     }])
   })
 })

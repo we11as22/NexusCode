@@ -19,6 +19,12 @@
     "url": "https://github.com/we11as22/NexusCode/issues"
   },
   "activationEvents": ["onStartupFinished"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "NexusCode can read, modify, and execute files while running agent tools. Trust the workspace before enabling the extension."
+    }
+  },
   "main": "./dist/extension.js",
   "scripts": {
     "build": "corepack pnpm build:ext && corepack pnpm build:webview",

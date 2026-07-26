@@ -46,6 +46,7 @@ export async function handleCompletedTaskSideEffects(args: {
     "task_completed",
     {
       taskId: task.id,
+      sessionId: task.sessionId,
       kind: task.kind,
       status: task.status,
       subject: task.subject,
@@ -85,6 +86,7 @@ export async function handleCompletedTaskSideEffects(args: {
       "teammate_idle",
       {
         taskId: task.id,
+        sessionId: task.sessionId,
         teammate: task.owner,
         teamName: task.teamName,
         status: nextStatus,
