@@ -1,9 +1,9 @@
-import * as crypto from "node:crypto"
 import type { NexusConfig } from "../types.js"
 import { createEmbeddingClient, isEmbeddingApiKeyMissing } from "../provider/index.js"
 import { CodebaseIndexer } from "./index.js"
 import { ensureQdrantRunning } from "./qdrant-manager.js"
 import type { CodebaseIndexerHostOptions, ListIndexAbsolutePathsFn } from "./host-types.js"
+import { getProjectHash } from "./multi-project.js"
 
 export type { ListIndexAbsolutePathsFn, CodebaseIndexerHostOptions }
 
@@ -80,7 +80,7 @@ export async function createCodebaseIndexer(
     warn(`[nexus] Embeddings init failed (${msg}). Indexer will run without vector search. Set embeddings.apiKey or env (e.g. OPENROUTER_API_KEY) if using a remote embeddings API.`)
     return new CodebaseIndexer(projectRoot, config, undefined, undefined, undefined, host)
   }
-  const projectHash = crypto.createHash("sha1").update(projectRoot).digest("hex").slice(0, 16)
+  const projectHash = getProjectHash(projectRoot)
 
   progress("Vector DB ready. Preparing index…")
   return new CodebaseIndexer(projectRoot, config, embeddingClient, vectorUrl, projectHash, host)

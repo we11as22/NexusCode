@@ -5,7 +5,6 @@
 
 import * as vscode from "vscode"
 import * as path from "path"
-import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import { promises as fsPromises } from "node:fs"
 import * as os from "node:os"
@@ -3319,19 +3318,18 @@ Return in this format:
     this.indexStatusUnsubscribe = undefined
     this.indexerFileWatcher?.dispose()
     this.indexerFileWatcher = undefined
-    this.indexer?.close()
+    await this.indexer?.closeAndWait()
     this.indexer = undefined
-    if (!this.config?.indexing.enabled) {
+    if (
+      !this.config?.indexing.enabled ||
+      !this.config.indexing.vector ||
+      !this.config.vectorDb?.enabled
+    ) {
       this.sendIndexStatus({ state: "idle" })
       return
     }
     // Same as server run-session: short timeout so first message is not delayed (Qdrant default is 20s).
     const INDEXER_CREATE_TIMEOUT_MS = 2500
-    const projectHash = createHash("sha1").update(cwd).digest("hex").slice(0, 16)
-    const fileTrackerJsonPath = vscode.Uri.joinPath(
-      this.context.globalStorageUri,
-      `nexus-index-tracker-${projectHash}.json`,
-    ).fsPath
     this.indexer = await Promise.race([
       createCodebaseIndexer(cwd, this.config, {
         onWarning: (message: string) => console.warn(message),
@@ -3340,7 +3338,6 @@ Return in this format:
         },
         maxQdrantWaitMs: INDEXER_CREATE_TIMEOUT_MS,
         listAbsolutePaths: listAbsolutePathsRipgrep,
-        fileTrackerJsonPath,
       }),
       new Promise<undefined>((r) => setTimeout(() => r(undefined), INDEXER_CREATE_TIMEOUT_MS)),
     ])

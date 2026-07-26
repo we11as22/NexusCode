@@ -356,7 +356,12 @@ export async function bootstrapNexus(opts: {
   }
 
   let indexer: CodebaseIndexer | undefined
-  if (indexEnabled && config.indexing.enabled) {
+  if (
+    indexEnabled &&
+    config.indexing.enabled &&
+    config.indexing.vector &&
+    config.vectorDb?.enabled
+  ) {
     indexer = await createCodebaseIndexer(cwd, config, {
       onWarning: (msg) => console.warn(msg),
       onProgress: (msg) => console.warn("[nexus]", msg),

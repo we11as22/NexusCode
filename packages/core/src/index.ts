@@ -230,9 +230,10 @@ export {
   DEFAULT_MAX_PENDING_EMBED_BATCHES,
   DEFAULT_BATCH_PROCESSING_CONCURRENCY,
 } from "./indexer/constants.js"
-export { ProjectRegistry, getIndexDir } from "./indexer/multi-project.js"
+export { ProjectRegistry, getIndexDir, getProjectHash } from "./indexer/multi-project.js"
 export {
   createCodebaseIndexer,
+  type IndexerFactoryOptions,
   type ListIndexAbsolutePathsFn,
   type CodebaseIndexerHostOptions,
 } from "./indexer/factory.js"

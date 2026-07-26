@@ -136,14 +136,36 @@ Only available when vector search is enabled (indexing.vector + vectorDb.enabled
       }
 
       const scopeCandidates = Array.isArray(target_directories) ? target_directories : []
+      if (scopeCandidates.length > 1) {
+        return {
+          success: false,
+          output:
+            "CodebaseSearch accepts one target directory per call. Run independent scoped searches in parallel.",
+        }
+      }
+      const normalizedCandidates = scopeCandidates.map((candidate) => ({
+        candidate,
+        normalized: normalizeScopePath(candidate, ctx.cwd),
+      }))
+      const invalidScope = normalizedCandidates.find(
+        ({ normalized }) => normalized === null,
+      )
+      if (invalidScope) {
+        return {
+          success: false,
+          output:
+            `Invalid target directory: ${invalidScope.candidate}. ` +
+            "Use one workspace-relative directory or file path without glob syntax.",
+        }
+      }
       const normalizedScopes = Array.from(new Set(
-        scopeCandidates
-          .map((p) => normalizeScopePath(p, ctx.cwd))
-          .filter(Boolean)
+        normalizedCandidates
+          .map(({ normalized }) => normalized)
+          .filter((value): value is string => Boolean(value))
       ))
       const scopesToUse = normalizedScopes.length > 0 ? normalizedScopes : [""]
       const effectiveLimit = limit ?? 10
-      const effectiveKind = kind === "any" ? undefined : (kind as any)
+      const effectiveKind = kind === "any" ? undefined : kind
       const snippetMax = Math.max(1, ctx.config.indexing?.codebaseSearchSnippetMaxChars ?? 4000)
 
       // Run all (query, scope) searches in parallel
@@ -212,11 +234,12 @@ Only available when vector search is enabled (indexing.vector + vectorDb.enabled
   },
 }
 
-function normalizeScopePath(input: string, cwd: string): string {
+function normalizeScopePath(input: string, cwd: string): string | null {
   const raw = input.trim()
   if (!raw) return ""
+  if (/[*?[\]{}]/.test(raw)) return null
   const abs = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw)
   const rel = path.relative(cwd, abs)
-  const safe = rel && !rel.startsWith("..") ? rel : raw
-  return safe.replace(/\\/g, "/").replace(/\/+$/, "")
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return null
+  return rel.replace(/\\/g, "/").replace(/\/+$/, "")
 }

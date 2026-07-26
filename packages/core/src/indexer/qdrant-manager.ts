@@ -68,23 +68,31 @@ export async function ensureQdrantRunning(opts: EnsureQdrantOptions): Promise<En
   }
 
   const waitMs = Math.max(1000, maxWaitMs)
+  const deadline = Date.now() + waitMs
+  const remainingWait = () => Math.max(0, deadline - Date.now())
 
   progress("Starting Qdrant (trying local binary)…")
   if (await tryStartLocalBinary(port, log)) {
     progress("Waiting for Qdrant to be ready…")
-    if (await waitForHealthy(url, waitMs)) {
+    if (await waitForHealthy(url, Math.min(5_000, remainingWait()))) {
       progress("Qdrant is ready.")
       return { available: true, started: true, method: "binary" }
     }
   }
 
-  progress("Starting Qdrant (trying Docker)…")
-  if (await tryStartDocker(port, log)) {
+  if (remainingWait() > 0) progress("Starting Qdrant (trying Docker)…")
+  if (remainingWait() > 0 && await tryStartDocker(port, log)) {
     progress("Waiting for Qdrant to be ready…")
-    if (await waitForHealthy(url, waitMs)) {
+    if (await waitForHealthy(url, remainingWait())) {
       progress("Qdrant is ready.")
       return { available: true, started: true, method: "docker" }
     }
+  }
+
+  // Another Nexus process may have won the binary/container startup race.
+  if (await isQdrantHealthy(url)) {
+    progress("Qdrant is ready.")
+    return { available: true, started: false, method: "existing" }
   }
 
   return {
@@ -95,21 +103,23 @@ export async function ensureQdrantRunning(opts: EnsureQdrantOptions): Promise<En
 }
 
 async function isQdrantHealthy(baseUrl: string, timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS): Promise<boolean> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
     const response = await fetch(joinUrl(baseUrl, "/collections"), {
       signal: controller.signal as any,
       headers: { Accept: "application/json" },
     })
-    clearTimeout(timer)
     return response.ok
   } catch {
     return false
+  } finally {
+    clearTimeout(timer)
   }
 }
 
 async function waitForHealthy(baseUrl: string, timeoutMs: number): Promise<boolean> {
+  if (timeoutMs <= 0) return false
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (await isQdrantHealthy(baseUrl, 1_000)) return true
@@ -124,7 +134,8 @@ async function tryStartLocalBinary(port: number, log?: (message: string) => void
   }
 
   try {
-    const storagePath = path.join(os.homedir(), ".nexus", "qdrant", "storage")
+    const storageName = port === 6333 ? "storage" : `storage-${port}`
+    const storagePath = path.join(os.homedir(), ".nexus", "qdrant", storageName)
     await mkdir(storagePath, { recursive: true })
 
     const child = spawn("qdrant", [], {
@@ -169,7 +180,8 @@ async function tryStartDocker(port: number, log?: (message: string) => void): Pr
       }
     }
 
-    const storagePath = path.join(os.homedir(), ".nexus", "qdrant", "docker-storage")
+    const storageName = port === 6333 ? "docker-storage" : `docker-storage-${port}`
+    const storagePath = path.join(os.homedir(), ".nexus", "qdrant", storageName)
     await mkdir(storagePath, { recursive: true })
 
     const result = await execa(
@@ -200,9 +212,8 @@ async function tryStartDocker(port: number, log?: (message: string) => void): Pr
 }
 
 async function commandExists(cmd: string): Promise<boolean> {
-  const result = await execa("bash", ["-lc", `command -v ${cmd} >/dev/null 2>&1`], {
-    reject: false,
-  })
+  const probe = process.platform === "win32" ? "where" : "which"
+  const result = await execa(probe, [cmd], { reject: false })
   return result.exitCode === 0
 }
 

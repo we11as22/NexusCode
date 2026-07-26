@@ -8,17 +8,19 @@ export function parseQdrantUrl(url: string | undefined): string {
     return "http://localhost:6333"
   }
   const trimmed = url.trim()
-  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://") && !trimmed.includes("://")) {
-    if (trimmed.includes(":")) {
-      return trimmed.startsWith("http") ? trimmed : `http://${trimmed}`
-    }
-    return `http://${trimmed}`
-  }
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+  const candidate = hasScheme ? trimmed : `http://${trimmed}`
   try {
-    new URL(trimmed)
-    return trimmed
+    const parsed = new URL(candidate)
+    if (!hasScheme && !parsed.port) parsed.port = "6333"
+    const pathname = parsed.pathname.replace(/\/+$/, "")
+    parsed.pathname = pathname || "/"
+    const normalized = parsed.toString()
+    return parsed.pathname === "/"
+      ? normalized.replace(/\/$/, "")
+      : normalized.replace(/\/+$/, "")
   } catch {
-    return trimmed.includes(":") ? `http://${trimmed}` : `http://${trimmed}`
+    return candidate
   }
 }
 

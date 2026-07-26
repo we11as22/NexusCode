@@ -12,21 +12,30 @@ export class VectorAuthError extends Error {
   }
 }
 
+class VectorBatchValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "VectorBatchValidationError"
+  }
+}
+
 /** Deterministic point id for indexing metadata (indexing_complete marker). */
 function getIndexingMetadataPointId(): string {
   const hex = crypto.createHash("md5").update("__nexus_indexing_metadata__").digest("hex")
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
 }
 
-/** Build pathSegments payload for Qdrant filter (indexed by pathSegments.0 .. pathSegments.4). */
-function pathToSegments(filePath: string): Record<string, string> {
+const INDEX_SCHEMA_VERSION = 2
+
+/** Every cumulative repo-relative prefix, allowing exact prefix filters at any depth. */
+function pathToPrefixes(filePath: string): string[] {
   const normalized = filePath.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/|\/$/g, "")
   const segments = normalized.split("/").filter(Boolean)
-  const out: Record<string, string> = {}
-  for (let i = 0; i < Math.min(segments.length, 5); i++) {
-    out[String(i)] = segments[i]!
+  const prefixes: string[] = []
+  for (let i = 0; i < segments.length; i++) {
+    prefixes.push(segments.slice(0, i + 1).join("/"))
   }
-  return out
+  return prefixes
 }
 
 /**
@@ -70,6 +79,18 @@ function pointsFromScrollResponse(response: unknown): Array<Record<string, unkno
   return []
 }
 
+function isNotFoundError(error: unknown): boolean {
+  const candidate = error as {
+    status?: unknown
+    statusCode?: unknown
+    response?: { status?: unknown }
+    message?: unknown
+  }
+  const status = candidate?.status ?? candidate?.statusCode ?? candidate?.response?.status
+  if (status === 404) return true
+  return typeof candidate?.message === "string" && /\bnot found\b|\b404\b/i.test(candidate.message)
+}
+
 const MAX_BATCH_RETRIES = 3
 const INITIAL_RETRY_DELAY_MS = 500
 
@@ -101,6 +122,7 @@ export class VectorIndex {
       embeddingBatchSize?: number
       embeddingConcurrency?: number
       qdrantApiKey?: string
+      collectionPrefix?: string
       upsertWait?: boolean
       searchMinScore?: number
       searchHnswEf?: number
@@ -108,7 +130,10 @@ export class VectorIndex {
     }
   ) {
     this.client = createQdrantClient(url, opts?.qdrantApiKey)
-    this.collectionName = `nexus_${projectHash}`
+    const collectionPrefix = (opts?.collectionPrefix ?? "nexus")
+      .replace(/[^a-zA-Z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "nexus"
+    this.collectionName = `${collectionPrefix}_${projectHash}`
     this.embeddings = embeddings
     this.dimensions = embeddings.dimensions
     this.vectorSize = embeddings.dimensions
@@ -133,6 +158,9 @@ export class VectorIndex {
       if (exists) {
         const existingSize = await this.getExistingVectorSize().catch(() => null)
         if (existingSize && existingSize !== resolvedSize) {
+          await this.client.deleteCollection(this.collectionName)
+          exists = false
+        } else if (await this.collectionNeedsSchemaMigration()) {
           await this.client.deleteCollection(this.collectionName)
           exists = false
         }
@@ -196,29 +224,29 @@ export class VectorIndex {
     return null
   }
 
-  /** Create payload indexes for pathSegments (server-side path filter) and type (metadata). */
+  private async collectionNeedsSchemaMigration(): Promise<boolean> {
+    const body = qdrantCollectionBody(await this.client.getCollection(this.collectionName))
+    const pointsCount = body?.["points_count"]
+    if (typeof pointsCount !== "number" || pointsCount <= 0) return false
+    const points = await this.client.retrieve(this.collectionName, {
+      ids: [getIndexingMetadataPointId()],
+    })
+    const version = points[0]?.payload?.["index_schema_version"]
+    return version !== INDEX_SCHEMA_VERSION
+  }
+
+  /** Create payload indexes used by exact path, path-prefix, and metadata filters. */
   private async ensurePayloadIndexes(): Promise<void> {
-    try {
-      await this.client.createPayloadIndex(this.collectionName, {
-        field_name: "type",
-        field_schema: "keyword",
-      })
-    } catch (e: unknown) {
-      const msg = (e as Error)?.message ?? ""
-      if (!msg.toLowerCase().includes("already exists")) {
-        console.warn("[nexus] Vector payload index type:", (e as Error)?.message)
-      }
-    }
-    for (let i = 0; i <= 4; i++) {
+    for (const fieldName of ["type", "path", "pathPrefixes"]) {
       try {
         await this.client.createPayloadIndex(this.collectionName, {
-          field_name: `pathSegments.${i}`,
+          field_name: fieldName,
           field_schema: "keyword",
         })
       } catch (e: unknown) {
         const msg = (e as Error)?.message ?? ""
         if (!msg.toLowerCase().includes("already exists")) {
-          console.warn(`[nexus] Vector payload index pathSegments.${i}:`, (e as Error)?.message)
+          console.warn(`[nexus] Vector payload index ${fieldName}:`, (e as Error)?.message)
         }
       }
     }
@@ -251,6 +279,7 @@ export class VectorIndex {
             break
           } catch (err) {
             lastErr = err instanceof Error ? err : new Error(String(err))
+            if (lastErr instanceof VectorBatchValidationError) throw lastErr
             if (attempt < MAX_BATCH_RETRIES) {
               const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1)
               await new Promise(r => setTimeout(r, delay))
@@ -275,6 +304,7 @@ export class VectorIndex {
         throw new VectorAuthError(message)
       }
       console.warn(`[nexus] Vector upsert failed: ${message}`)
+      throw err
     }
   }
 
@@ -294,21 +324,39 @@ export class VectorIndex {
       [s.name, s.kind ?? "", s.parent ?? "", s.content.slice(0, 500)].filter(Boolean).join(" ")
     )
     const vectors = await this.embeddings.embed(texts)
-    if (vectors.length === 0) return
+    if (vectors.length !== symbols.length) {
+      throw new VectorBatchValidationError(
+        `Embedding provider returned ${vectors.length} vectors for ${symbols.length} inputs.`,
+      )
+    }
 
     const observedSize = vectors[0]?.length ?? 0
-    if (observedSize > 0 && observedSize !== this.vectorSize) {
-      await this.recreateCollection(observedSize)
+    if (observedSize <= 0 || observedSize !== this.vectorSize) {
+      throw new VectorBatchValidationError(
+        `Embedding vector dimension changed during indexing: expected ${this.vectorSize}, got ${observedSize}. ` +
+        "Restart indexing so Nexus can rebuild the collection safely.",
+      )
+    }
+    const invalidVectorIndex = vectors.findIndex(
+      (vector) =>
+        !Array.isArray(vector) ||
+        vector.length !== this.vectorSize ||
+        vector.some((value) => !Number.isFinite(value)),
+    )
+    if (invalidVectorIndex >= 0) {
+      throw new VectorBatchValidationError(
+        `Embedding provider returned an invalid vector at batch index ${invalidVectorIndex}.`,
+      )
     }
 
     const points = symbols.map((s, i) => {
-      const pathSegments = pathToSegments(s.path)
+      const pathPrefixes = pathToPrefixes(s.path)
       return {
         id: toPointId(s.id),
         vector: vectors[i]!,
         payload: {
           path: s.path,
-          pathSegments,
+          pathPrefixes,
           name: s.name,
           kind: s.kind ?? "chunk",
           parent: s.parent ?? null,
@@ -317,49 +365,20 @@ export class VectorIndex {
           content: s.content.slice(0, 1000),
         },
       }
-    }).filter(p => Array.isArray(p.vector) && p.vector.length === this.vectorSize)
-
-    if (points.length === 0) return
+    })
 
     const upsertOpts = { wait: this.upsertWait }
-    try {
-      await this.client.upsert(this.collectionName, { points, ...upsertOpts })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      const sizeHint = detectSizeFromMessage(message)
-      if (sizeHint && sizeHint !== this.vectorSize) {
-        await this.recreateCollection(sizeHint)
-        await this.client.upsert(this.collectionName, { points, ...upsertOpts })
-        return
-      }
-      if (/bad request/i.test(message)) {
-        const fallbackSize = observedSize > 0 ? observedSize : this.vectorSize
-        await this.recreateCollection(fallbackSize)
-        await this.client.upsert(this.collectionName, { points, ...upsertOpts })
-        return
-      }
-      throw err
-    }
+    await this.client.upsert(this.collectionName, { points, ...upsertOpts })
   }
 
   async deleteByPath(filePath: string): Promise<void> {
     if (!this.initialized) return
-    try {
-      const segments = pathToSegments(filePath)
-      const keys = Object.keys(segments)
-      if (keys.length === 0) {
-        await this.client.delete(this.collectionName, {
-          filter: { must: [{ key: "path", match: { value: filePath } }] },
-          wait: this.upsertWait,
-        })
-        return
-      }
-      const must = keys.map(i => ({
-        key: `pathSegments.${i}`,
-        match: { value: segments[i]! },
-      }))
-      await this.client.delete(this.collectionName, { filter: { must }, wait: this.upsertWait })
-    } catch {}
+    const normalized = filePath.replace(/\\/g, "/").replace(/^\.\/|\/+$/g, "")
+    if (!normalized) return
+    await this.client.delete(this.collectionName, {
+      filter: { must: [{ key: "path", match: { value: normalized } }] },
+      wait: this.upsertWait,
+    })
   }
 
   /** Delete all points under a repo-relative directory prefix (same segment filter as scoped search). */
@@ -367,15 +386,12 @@ export class VectorIndex {
     if (!this.initialized) return
     const normalized = dirPrefix.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim()
     if (!normalized) return
-    const segments = normalized.split("/").filter(Boolean)
-    if (segments.length === 0) return
-    try {
-      const must = segments.map((s, i) => ({
-        key: `pathSegments.${i}`,
-        match: { value: s },
-      }))
-      await this.client.delete(this.collectionName, { filter: { must }, wait: this.upsertWait })
-    } catch {}
+    await this.client.delete(this.collectionName, {
+      filter: {
+        must: [{ key: "pathPrefixes", match: { value: normalized } }],
+      },
+      wait: this.upsertWait,
+    })
   }
 
   async search(
@@ -399,10 +415,7 @@ export class VectorIndex {
       if (prefix && prefix.trim()) {
         const normalized = prefix.replace(/\\/g, "/").replace(/^\.\/|\/+$/g, "").trim()
         if (normalized && normalized !== ".") {
-          const segments = normalized.split("/").filter(Boolean)
-          for (let i = 0; i < segments.length; i++) {
-            must.push({ key: `pathSegments.${i}`, match: { value: segments[i]! } })
-          }
+          must.push({ key: "pathPrefixes", match: { value: normalized } })
         }
       }
 
@@ -426,7 +439,7 @@ export class VectorIndex {
         with_payload: {
           include: [
             "path",
-            "pathSegments",
+            "pathPrefixes",
             "name",
             "kind",
             "parent",
@@ -458,7 +471,7 @@ export class VectorIndex {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.warn(`[nexus] Vector search failed: ${message}`)
-      return []
+      throw err
     }
   }
 
@@ -511,9 +524,10 @@ export class VectorIndex {
 
       const metaId = getIndexingMetadataPointId()
       const points = await this.client.retrieve(this.collectionName, { ids: [metaId] })
-      if (points.length > 0 && points[0]?.payload?.indexing_complete === true) {
-        return true
+      if (points.length > 0) {
+        return points[0]?.payload?.indexing_complete === true
       }
+      // Collections written before Nexus added completion markers remain readable.
       return pointsCount > 0
     } catch {
       return false
@@ -528,7 +542,12 @@ export class VectorIndex {
         points: [{
           id: metaId,
           vector: new Array(this.vectorSize).fill(0),
-          payload: { type: "metadata", indexing_complete: false, started_at: Date.now() },
+          payload: {
+            type: "metadata",
+            index_schema_version: INDEX_SCHEMA_VERSION,
+            indexing_complete: false,
+            started_at: Date.now(),
+          },
         }],
         wait: this.upsertWait,
       })
@@ -547,7 +566,12 @@ export class VectorIndex {
         points: [{
           id: metaId,
           vector: new Array(this.vectorSize).fill(0),
-          payload: { type: "metadata", indexing_complete: true, completed_at: Date.now() },
+          payload: {
+            type: "metadata",
+            index_schema_version: INDEX_SCHEMA_VERSION,
+            indexing_complete: true,
+            completed_at: Date.now(),
+          },
         }],
         wait: this.upsertWait,
       })
@@ -559,35 +583,13 @@ export class VectorIndex {
   async clearCollection(): Promise<void> {
     try {
       await this.client.deleteCollection(this.collectionName)
-    } catch {
-      // No-op if collection does not exist or cannot be removed now.
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
     } finally {
       this.initialized = false
     }
   }
 
-  private async recreateCollection(size: number): Promise<void> {
-    if (!Number.isFinite(size) || size <= 0) return
-    try {
-      await this.client.deleteCollection(this.collectionName)
-    } catch {
-      // collection may not exist yet
-    }
-    await this.client.createCollection(this.collectionName, {
-      vectors: {
-        size,
-        distance: "Cosine",
-        on_disk: true,
-      },
-      hnsw_config: {
-        m: 64,
-        ef_construct: 512,
-        on_disk: true,
-      },
-    } as Record<string, unknown>)
-    this.vectorSize = size
-    this.initialized = true
-  }
 }
 
 function toPointId(value: string): string {
@@ -601,19 +603,4 @@ function chunk<T>(items: T[], size: number): T[][] {
     out.push(items.slice(i, i + size))
   }
   return out
-}
-
-function detectSizeFromMessage(message: string): number | null {
-  // Qdrant mismatch errors usually contain "... expected 1024 ... got 1536 ..."
-  const expected = message.match(/expected[^0-9]*(\d{2,5})/i)
-  if (expected?.[1]) {
-    const n = Number(expected[1])
-    if (Number.isFinite(n) && n > 0) return n
-  }
-  const vectorSize = message.match(/vector[^0-9]*(\d{2,5})/i)
-  if (vectorSize?.[1]) {
-    const n = Number(vectorSize[1])
-    if (Number.isFinite(n) && n > 0) return n
-  }
-  return null
 }

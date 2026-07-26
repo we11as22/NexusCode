@@ -1,5 +1,5 @@
 import type { Session, NexusConfig, Mode } from "@nexuscode/core"
-import type { AgentEvent } from "@nexuscode/core"
+import type { AgentEvent, CodebaseIndexer } from "@nexuscode/core"
 import { runAgentLoop } from "@nexuscode/core"
 import {
   loadConfig,
@@ -23,7 +23,6 @@ import {
   createSpawnAgentsParallelTool,
   createNexusRunServices,
   ParallelAgentManager,
-  createCodebaseIndexer,
   McpClient,
   resolveBundledMcpServers,
   resolveConfiguredAndPluginMcpServers,
@@ -35,6 +34,7 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { ServerHost } from "./host.js"
+import { serverIndexerCache } from "./indexer-cache.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const NEXUS_ROOT = path.resolve(__dirname, "..", "..")
@@ -213,16 +213,16 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     void checkpoint.init(configForRun.checkpoint.timeoutMs).catch(() => {})
   }
 
-  let indexer: Awaited<ReturnType<typeof createCodebaseIndexer>> | undefined
-  if (configForRun.indexing.enabled) {
-    indexer = await Promise.race([
-      createCodebaseIndexer(cwd, configForRun, {
-        onWarning: () => {},
-        maxQdrantWaitMs: 2500,
-      }),
-      new Promise<undefined>((r) => setTimeout(() => r(undefined), 2500)),
-    ])
-    if (indexer) indexer.startIndexing().catch(() => {})
+  let indexer: CodebaseIndexer | undefined
+  if (
+    configForRun.indexing.enabled &&
+    configForRun.indexing.vector &&
+    configForRun.vectorDb?.enabled
+  ) {
+    indexer = await serverIndexerCache.get(cwd, configForRun, {
+      onWarning: () => {},
+      maxQdrantWaitMs: 2500,
+    })
   }
 
   try {

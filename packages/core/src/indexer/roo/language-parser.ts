@@ -31,6 +31,7 @@ import {
   embeddedTemplateQuery,
   elispQuery,
   elixirQuery,
+  scalaQuery,
 } from "./queries/index.js"
 import { getTreeSitterLanguageWasmsDir, getWebTreeSitterWasmPath } from "./wasm-paths.js"
 
@@ -77,6 +78,8 @@ export async function loadRequiredLanguageParsers(filesToParse: string[]): Promi
     switch (ext) {
       case "js":
       case "jsx":
+      case "mjs":
+      case "cjs":
       case "json":
         language = await loadLanguage("javascript")
         query = new Query(language, javascriptQuery)
@@ -152,7 +155,7 @@ export async function loadRequiredLanguageParsers(filesToParse: string[]): Promi
         break
       case "scala":
         language = await loadLanguage("scala")
-        query = new Query(language, luaQuery) // Scala: temporary Lua query until a dedicated Scala query ships
+        query = new Query(language, scalaQuery)
         break
       case "sol":
         language = await loadLanguage("solidity")

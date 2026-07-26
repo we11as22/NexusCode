@@ -13,26 +13,45 @@ const OPENROUTER_BASE = "https://openrouter.ai/api/v1"
  * When true, we should not create the embedding client (so nexus starts without vector; key can be added later).
  */
 export function isEmbeddingApiKeyMissing(config: EmbeddingConfig): boolean {
-  const key =
-    config.apiKey
-    ?? process.env["OPENAI_API_KEY"]
-    ?? process.env["OPENROUTER_API_KEY"]
-    ?? process.env["NEXUS_API_KEY"]
-    ?? ""
-  if (typeof key === "string" && key.trim() !== "") return false
+  const hasKey = (...values: Array<string | undefined>) =>
+    values.some((value) => typeof value === "string" && value.trim() !== "")
   switch (config.provider) {
     case "ollama":
     case "local":
+    case "bedrock":
       return false
     case "openai-compatible":
-      return !isLocalBaseUrl(config.baseUrl)
+      return !isLocalBaseUrl(config.baseUrl) && !hasKey(
+        config.apiKey,
+        process.env["OPENAI_API_KEY"],
+        process.env["OPENROUTER_API_KEY"],
+        process.env["NEXUS_API_KEY"],
+      )
     case "openrouter":
-      return true
+      return !hasKey(
+        config.apiKey,
+        process.env["OPENROUTER_API_KEY"],
+        process.env["NEXUS_API_KEY"],
+      )
     case "openai":
+      return !hasKey(
+        config.apiKey,
+        process.env["OPENAI_API_KEY"],
+        process.env["NEXUS_API_KEY"],
+      )
     case "google":
+      return !hasKey(
+        config.apiKey,
+        process.env["GOOGLE_GENERATIVE_AI_API_KEY"],
+        process.env["GEMINI_API_KEY"],
+        process.env["NEXUS_API_KEY"],
+      )
     case "mistral":
-    case "bedrock":
-      return true
+      return !hasKey(
+        config.apiKey,
+        process.env["MISTRAL_API_KEY"],
+        process.env["NEXUS_API_KEY"],
+      )
     default:
       return true
   }
@@ -143,7 +162,12 @@ class GoogleEmbeddingClient implements EmbeddingClient {
 
   constructor(config: EmbeddingConfig) {
     const google = createGoogleGenerativeAI({
-      apiKey: config.apiKey ?? process.env["GOOGLE_GENERATIVE_AI_API_KEY"] ?? process.env["GEMINI_API_KEY"] ?? "",
+      apiKey:
+        config.apiKey ??
+        process.env["GOOGLE_GENERATIVE_AI_API_KEY"] ??
+        process.env["GEMINI_API_KEY"] ??
+        process.env["NEXUS_API_KEY"] ??
+        "",
     })
     this.model = google.embedding(config.model)
     this.dimensions = config.dimensions ?? 768
@@ -161,7 +185,11 @@ class MistralEmbeddingClient implements EmbeddingClient {
 
   constructor(config: EmbeddingConfig) {
     const mistral = createMistral({
-      apiKey: config.apiKey ?? process.env["MISTRAL_API_KEY"] ?? "",
+      apiKey:
+        config.apiKey ??
+        process.env["MISTRAL_API_KEY"] ??
+        process.env["NEXUS_API_KEY"] ??
+        "",
     })
     this.model = mistral.embedding(config.model)
     this.dimensions = config.dimensions ?? 1024
@@ -223,6 +251,20 @@ class LocalEmbeddingClient implements EmbeddingClient {
 
 function isLocalBaseUrl(baseUrl: string | undefined): boolean {
   if (!baseUrl) return false
-  const url = baseUrl.toLowerCase()
-  return url.includes("localhost") || url.includes("127.0.0.1")
+  try {
+    const parsed = new URL(
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(baseUrl)
+        ? baseUrl
+        : `http://${baseUrl}`,
+    )
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "")
+    return (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1" ||
+      hostname === "0.0.0.0"
+    )
+  } catch {
+    return false
+  }
 }

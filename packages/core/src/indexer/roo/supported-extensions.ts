@@ -22,6 +22,7 @@ export const fallbackExtensions = [
   ".vb", // Visual Basic .NET - no dedicated WASM parser
   ".scala", // Scala - uses fallback chunking instead of Lua query workaround
   ".swift", // Swift - uses fallback chunking due to parser instability
+  ".elm", // No bundled Elm WASM grammar in tree-sitter-wasms.
 ]
 
 export function shouldUseFallbackChunking(extension: string): boolean {

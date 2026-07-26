@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises"
+import { realpathSync } from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
 import * as crypto from "node:crypto"
@@ -101,6 +102,16 @@ export class ProjectRegistry {
 }
 
 export function getIndexDir(projectRoot: string): string {
-  const hash = crypto.createHash("sha1").update(projectRoot).digest("hex").slice(0, 16)
-  return path.join(INDEX_BASE_DIR, hash)
+  return path.join(INDEX_BASE_DIR, getProjectHash(projectRoot))
+}
+
+export function getProjectHash(projectRoot: string): string {
+  const resolved = path.resolve(projectRoot)
+  let canonical = resolved
+  try {
+    canonical = realpathSync.native(resolved)
+  } catch {
+    // The workspace may be created immediately after configuration is loaded.
+  }
+  return crypto.createHash("sha1").update(canonical).digest("hex").slice(0, 16)
 }

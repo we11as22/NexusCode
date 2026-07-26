@@ -89,7 +89,7 @@ export class CodeParser {
 		const seenSegmentHashes = new Set<string>()
 
 		// Handle markdown files specially
-		if (ext === "md" || ext === "markdown") {
+		if (ext === "md" || ext === "mdx" || ext === "markdown") {
 			return this.parseMarkdownContent(filePath, content, fileHash, seenSegmentHashes)
 		}
 

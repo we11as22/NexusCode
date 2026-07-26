@@ -80,6 +80,8 @@ export class CodebaseIndexer implements IIndexer {
   private _status: IndexStatus = { state: "idle" }
   private indexing = false
   private abortController?: AbortController
+  private indexRun?: Promise<void>
+  private lifecycleTail: Promise<void> = Promise.resolve()
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private statusListeners: Array<(status: IndexStatus) => void> = []
   private indexingPaused = false
@@ -94,7 +96,9 @@ export class CodebaseIndexer implements IIndexer {
     projectHash?: string,
     hostOptions?: CodebaseIndexerHostOptions,
   ) {
-    const indexDir = getIndexDir(projectRoot)
+    const indexDir = hostOptions?.fileTrackerJsonPath
+      ? path.dirname(hostOptions.fileTrackerJsonPath)
+      : getIndexDir(projectRoot)
     mkdirSync(indexDir, { recursive: true })
     this.fileTracker = new FileTracker(indexDir, hostOptions?.fileTrackerJsonPath)
     this.hostListAbsolutePaths = hostOptions?.listAbsolutePaths
@@ -104,6 +108,7 @@ export class CodebaseIndexer implements IIndexer {
         embeddingBatchSize: config.indexing.embeddingBatchSize,
         embeddingConcurrency: config.indexing.embeddingConcurrency,
         qdrantApiKey: config.vectorDb.apiKey || undefined,
+        collectionPrefix: config.vectorDb.collection,
         upsertWait: config.vectorDb.upsertWait ?? true,
         searchMinScore: config.vectorDb.searchMinScore,
         searchHnswEf: config.vectorDb.searchHnswEf ?? 128,
@@ -176,15 +181,32 @@ export class CodebaseIndexer implements IIndexer {
     }
   }
 
+  private withLifecycleLock<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.lifecycleTail.catch(() => undefined).then(operation)
+    this.lifecycleTail = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  private async stopActiveRun(): Promise<void> {
+    const active = this.indexRun
+    this.stop()
+    await active?.catch(() => undefined)
+  }
+
   async startIndexing(): Promise<void> {
-    if (this.indexing) {
-      this.stop()
-      await new Promise<void>(r => setTimeout(r, 100))
+    return this.withLifecycleLock(() => this.beginIndexing())
+  }
+
+  private async beginIndexing(): Promise<void> {
+    if (this.indexRun || this.indexing) {
+      await this.stopActiveRun()
     }
     this.indexingPaused = false
     this.flushPauseWaiters()
     this.indexing = true
-    this.abortController = new AbortController()
+    const controller = new AbortController()
+    const signal = controller.signal
+    this.abortController = controller
 
     if (this.vector) {
       try {
@@ -198,6 +220,11 @@ export class CodebaseIndexer implements IIndexer {
       }
     } else {
       this.forceVectorBackfill = false
+    }
+    if (signal.aborted) {
+      this.indexing = false
+      this.notifyStatus({ state: "idle" })
+      return
     }
 
     this.notifyStatus({
@@ -213,19 +240,36 @@ export class CodebaseIndexer implements IIndexer {
     })
     await this.fileTracker.load()
 
-    this.indexInBackground().catch(err => {
-      console.warn("[nexus] Indexing error:", err)
-      this.notifyStatus({ state: "error", error: (err as Error).message })
-      this.indexing = false
-    })
+    let run!: Promise<void>
+    run = this.indexInBackground(signal)
+      .catch(err => {
+        if (signal.aborted) return
+        console.warn("[nexus] Indexing error:", err)
+        this.notifyStatus({ state: "error", error: (err as Error).message })
+      })
+      .finally(() => {
+        if (this.indexRun !== run) return
+        this.indexRun = undefined
+        this.indexing = false
+        if (this.abortController === controller) {
+          this.abortController = undefined
+        }
+      })
+    this.indexRun = run
   }
 
   private async fatalResetAfterIndexingStarted(msg: string): Promise<void> {
     captureIndexTelemetry("index_fatal_reset", { message: msg })
     try {
       await this.vector?.clearCollection()
-    } catch {
-      /* */
+    } catch (error) {
+      const resetError = error instanceof Error ? error.message : String(error)
+      this.notifyStatus({
+        state: "error",
+        error: `${msg} Nexus could not clear the Qdrant collection: ${resetError}`,
+      })
+      this.indexing = false
+      return
     }
     this.vector = undefined
     this.fileTracker.clear()
@@ -234,7 +278,7 @@ export class CodebaseIndexer implements IIndexer {
     this.indexing = false
   }
 
-  private async indexInBackground(): Promise<void> {
+  private async indexInBackground(signal: AbortSignal): Promise<void> {
     const vectorOn = Boolean(this.vector && this.config.indexing.vector)
     const maxFiles = this.config.indexing.maxIndexedFiles ?? 0
 
@@ -253,7 +297,6 @@ export class CodebaseIndexer implements IIndexer {
       return
     }
 
-    const signal = this.abortController!.signal
     let discovered: FileInfo[]
     let truncated: boolean
 
@@ -285,7 +328,7 @@ export class CodebaseIndexer implements IIndexer {
       truncated = r.truncated
     }
 
-    if (this.abortController?.signal.aborted) {
+    if (signal.aborted) {
       this.indexing = false
       this.notifyStatus({ state: "idle" })
       return
@@ -455,9 +498,9 @@ export class CodebaseIndexer implements IIndexer {
     const parseSlots = await Promise.all(
       discovered.map((file, idx) =>
         parseLimit(async (): Promise<ParseSlot> => {
-          if (this.abortController?.signal.aborted) return { idx, result: null }
+          if (signal.aborted) return { idx, result: null }
           await this.waitIfPaused()
-          if (this.abortController?.signal.aborted) return { idx, result: null }
+          if (signal.aborted) return { idx, result: null }
           const unchanged = this.fileTracker.isFileIndexed(file.path, file.contentSha256)
           const shouldUpdateVector = unchanged ? this.forceVectorBackfill : true
           if (incrementalMode && unchanged && !this.forceVectorBackfill) return { idx, result: null }
@@ -473,7 +516,7 @@ export class CodebaseIndexer implements IIndexer {
 
     for (const { result: r } of parseSlots) {
       await this.waitIfPaused()
-      if (this.abortController?.signal.aborted) break
+      if (signal.aborted) break
       filesParsed++
       if (!r) continue
       chunksFoundSoFar += r.extracted.length
@@ -493,11 +536,11 @@ export class CodebaseIndexer implements IIndexer {
       }
     }
 
-    if (!this.abortController?.signal.aborted) {
+    if (!signal.aborted) {
       emitProgress("embedding")
     }
 
-    if (this.abortController?.signal.aborted) {
+    if (signal.aborted) {
       this.indexing = false
       this.notifyStatus({ state: "idle" })
       return
@@ -520,7 +563,7 @@ export class CodebaseIndexer implements IIndexer {
     await this.waitIfPaused()
     await Promise.all([...activeBatchPromises])
 
-    if (this.abortController?.signal.aborted) {
+    if (signal.aborted) {
       this.indexing = false
       this.notifyStatus({ state: "idle" })
       return
@@ -814,11 +857,13 @@ export class CodebaseIndexer implements IIndexer {
 
   /** Full wipe + re-index (same collection name, empty contents). */
   async fullRebuildIndex(): Promise<void> {
-    this.stop()
-    this.fileTracker.clear()
-    await this.fileTracker.save()
-    await this.vector?.clearCollection()
-    await this.startIndexing()
+    await this.withLifecycleLock(async () => {
+      await this.stopActiveRun()
+      await this.vector?.clearCollection()
+      this.fileTracker.clear()
+      await this.fileTracker.save()
+      await this.beginIndexing()
+    })
   }
 
   /** @deprecated use syncIndexing */
@@ -827,10 +872,16 @@ export class CodebaseIndexer implements IIndexer {
   }
 
   async deleteIndex(): Promise<void> {
-    this.stop()
+    await this.withLifecycleLock(async () => {
+      await this.stopActiveRun()
+      await this.deleteIndexData()
+    })
+  }
+
+  private async deleteIndexData(): Promise<void> {
+    await this.vector?.clearCollection()
     this.fileTracker.clear()
     await this.fileTracker.save()
-    await this.vector?.clearCollection()
     this.notifyStatus({ state: "idle" })
   }
 
@@ -839,6 +890,13 @@ export class CodebaseIndexer implements IIndexer {
    * Does not delete other paths; one collection remains for the workspace.
    */
   async deleteIndexScope(relPathOrAbs: string): Promise<void> {
+    await this.withLifecycleLock(async () => {
+      await this.stopActiveRun()
+      await this.deleteIndexScopeData(relPathOrAbs)
+    })
+  }
+
+  private async deleteIndexScopeData(relPathOrAbs: string): Promise<void> {
     let norm = relPathOrAbs.replace(/\\/g, "/").trim()
     if (path.isAbsolute(norm)) {
       norm = path.relative(this.projectRoot, norm).replace(/\\/g, "/")
@@ -846,26 +904,27 @@ export class CodebaseIndexer implements IIndexer {
     norm = norm.replace(/^\/+|\/+$/g, "")
     if (norm.startsWith("..")) return
     if (!norm) {
-      await this.deleteIndex()
+      await this.deleteIndexData()
       return
     }
 
-    this.stop()
     await this.fileTracker.load()
-    this.fileTracker.deleteFilesUnderPrefix(norm)
-    await this.fileTracker.save()
+    const remainingPaths = this.fileTracker
+      .listPaths()
+      .filter((filePath) => filePath !== norm && !filePath.startsWith(`${norm}/`))
     if (this.vector && this.config.indexing.vector) {
-      try {
-        await this.vector.init()
+      await this.vector.init()
+      if (remainingPaths.length === 0) {
+        await this.vector.clearCollection()
+      } else {
         await this.vector.deleteByPathPrefix(norm)
-      } catch {
-        /* */
       }
     }
 
-    const remaining = this.fileTracker.listPaths().length
+    this.fileTracker.deleteFilesUnderPrefix(norm)
+    await this.fileTracker.save()
+    const remaining = remainingPaths.length
     if (remaining === 0) {
-      await this.vector?.clearCollection()
       this.notifyStatus({ state: "idle" })
       return
     }
@@ -895,6 +954,14 @@ export class CodebaseIndexer implements IIndexer {
   close(): void {
     this.stop()
     this.statusListeners = []
+  }
+
+  /** Await in-flight parse/embed work before replacing or disposing this indexer. */
+  async closeAndWait(): Promise<void> {
+    await this.withLifecycleLock(async () => {
+      await this.stopActiveRun()
+      this.statusListeners = []
+    })
   }
 }
 

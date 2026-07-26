@@ -455,7 +455,8 @@
     "openai": "^4.85.4",
     "quick-lru": "^7.0.0",
     "uri-js": "^4.4.1",
-    "web-tree-sitter": "^0.25.6",
+    "tree-sitter-wasms": "0.1.13",
+    "web-tree-sitter": "0.25.10",
     "yaml": "^2.7.0"
   },
   "devDependencies": {

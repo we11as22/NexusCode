@@ -98,13 +98,13 @@ export async function* walkDir(
       if (shouldSkipDirectorySegment(entry)) continue
 
       const absPath = path.join(dir, entry)
-      const relPath = path.relative(root, absPath)
+      const relPath = path.relative(root, absPath).replace(/\\/g, "/")
 
       if (ig.ignores(relPath)) continue
 
-      let stat: Awaited<ReturnType<typeof fs.stat>>
+      let stat: Awaited<ReturnType<typeof fs.lstat>>
       try {
-        stat = await fs.stat(absPath)
+        stat = await fs.lstat(absPath)
       } catch {
         continue
       }
@@ -120,7 +120,12 @@ export async function* walkDir(
         if (!allowed.has(ext)) continue
         if (stat.size > INDEX_MAX_FILE_SIZE_BYTES) continue
 
-        const contentSha256 = await hashFileSha256(absPath)
+        let contentSha256: string
+        try {
+          contentSha256 = await hashFileSha256(absPath)
+        } catch {
+          continue
+        }
         yielded++
         yield {
           path: relPath,
@@ -151,11 +156,14 @@ export async function collectIndexFiles(
     return { files: [], truncated: false }
   }
   const files: FileInfo[] = []
-  for await (const f of walkDir(root, excludePatterns, { ...opts, maxFiles })) {
+  for await (const f of walkDir(root, excludePatterns, {
+    ...opts,
+    maxFiles: maxFiles + 1,
+  })) {
     files.push(f)
   }
-  const truncated = files.length >= maxFiles
-  return { files, truncated }
+  const truncated = files.length > maxFiles
+  return { files: truncated ? files.slice(0, maxFiles) : files, truncated }
 }
 
 /** Build {@link FileInfo} from an absolute path (stat, size cap, extension, full-file SHA-256). */
@@ -165,11 +173,18 @@ export async function buildIndexFileInfo(
   vectorIndexing: boolean,
 ): Promise<FileInfo | null> {
   try {
-    const s = await fs.stat(absPath)
+    const s = await fs.lstat(absPath)
+    if (s.isSymbolicLink()) return null
     if (!s.isFile()) return null
     if (s.size > INDEX_MAX_FILE_SIZE_BYTES) return null
     const relPath = path.relative(root, absPath).replace(/\\/g, "/")
     if (!relPath || relPath.startsWith("..")) return null
+    const [realRoot, realFile] = await Promise.all([
+      fs.realpath(root),
+      fs.realpath(absPath),
+    ])
+    const realRelative = path.relative(realRoot, realFile)
+    if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) return null
     const ext = path.extname(absPath).toLowerCase()
     if (!getIndexableExtensions(vectorIndexing).has(ext)) return null
     const content = await fs.readFile(absPath)
