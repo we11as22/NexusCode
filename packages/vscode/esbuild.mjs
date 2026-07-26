@@ -10,6 +10,14 @@ const require = createRequire(import.meta.url)
 
 async function copyTreeSitterRuntime() {
   const outputDir = path.join(__dirname, "dist", "tree-sitter")
+  const querySourceDir = path.join(
+    __dirname,
+    "src",
+    "services",
+    "autocomplete",
+    "continuedev",
+    "tree-sitter",
+  )
   const webTreeSitterDir = path.dirname(require.resolve("web-tree-sitter"))
   const languagePackage = require.resolve("tree-sitter-wasms/package.json")
   const languageDir = path.join(path.dirname(languagePackage), "out")
@@ -19,6 +27,10 @@ async function copyTreeSitterRuntime() {
     path.join(outputDir, "tree-sitter.wasm"),
   )
   await fs.cp(languageDir, path.join(outputDir, "languages"), {
+    recursive: true,
+    force: true,
+  })
+  await fs.cp(querySourceDir, path.join(outputDir, "queries"), {
     recursive: true,
     force: true,
   })

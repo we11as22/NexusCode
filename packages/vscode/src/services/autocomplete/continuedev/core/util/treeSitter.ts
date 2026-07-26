@@ -3,6 +3,10 @@ import path from "path"
 
 import type Parser from "web-tree-sitter"
 import type { Node as SyntaxNode } from "web-tree-sitter"
+import {
+  getTreeSitterLanguageWasmsDir,
+  getWebTreeSitterWasmPath,
+} from "@nexuscode/core"
 
 type Language = Parser.Language
 type Query = Parser.Query
@@ -123,6 +127,8 @@ export const IGNORE_PATH_PATTERNS: Partial<Record<LanguageName, RegExp[]>> = {
   [LanguageName.JAVASCRIPT]: [/.*node_modules/],
 }
 
+let parserInitialization: Promise<void> | undefined
+
 export async function getParserForFile(filepath: string) {
   try {
     // Dynamically import Parser to avoid issues with WASM loading
@@ -131,7 +137,13 @@ export async function getParserForFile(filepath: string) {
       return undefined
     }
 
-    await Parser.init()
+    parserInitialization ??= Parser.init({
+      locateFile: () => getWebTreeSitterWasmPath(),
+    }).catch((error: unknown) => {
+      parserInitialization = undefined
+      throw error
+    })
+    await parserInitialization
     const parser = new Parser()
 
     const language = await getLanguageForFile(filepath)
@@ -207,17 +219,16 @@ export async function getQueryForFile(filepathOrUri: string, queryPath: string):
 
   // Resolve the query file from tree-sitter directory.
   // The tree-sitter directory is at src/services/autocomplete/continuedev/tree-sitter/
-  const repoRoot = path.resolve(__dirname, "..", "..", "..", "..", "..")
+  const extensionRoot = path.resolve(__dirname, "..", "..", "..", "..", "..", "..")
 
   const candidatePaths: string[] = [
     // Development: from src/services/autocomplete/continuedev/core/util -> src/services/autocomplete/continuedev/tree-sitter
     path.join(__dirname, "..", "..", "tree-sitter", queryPath),
-    // Production: tree-sitter might be copied alongside compiled code
-    path.join(__dirname, "tree-sitter", queryPath),
-    // Alternative: from repo root
-    path.join(repoRoot, "src", "services", "autocomplete", "continuedev", "tree-sitter", queryPath),
-    // Fallback: dist directory
-    path.join(repoRoot, "dist", "tree-sitter", queryPath),
+    // Production: extension.js and copied queries both live below dist.
+    path.join(__dirname, "tree-sitter", "queries", queryPath),
+    // Alternative development resolution from the extension package root.
+    path.join(extensionRoot, "src", "services", "autocomplete", "continuedev", "tree-sitter", queryPath),
+    path.join(extensionRoot, "dist", "tree-sitter", "queries", queryPath),
   ]
 
   const sourcePath = findExistingPath(candidatePaths)
@@ -227,7 +238,8 @@ export async function getQueryForFile(filepathOrUri: string, queryPath: string):
   }
 
   const querySource = fs.readFileSync(sourcePath).toString()
-  return language.query(querySource)
+  const { Query } = require("web-tree-sitter")
+  return new Query(language, querySource)
 }
 
 async function loadLanguageForFileExt(fileExtension: string): Promise<Language> {
@@ -235,29 +247,7 @@ async function loadLanguageForFileExt(fileExtension: string): Promise<Language> 
   const { Language } = require("web-tree-sitter")
 
   const filename = `tree-sitter-${supportedLanguages[fileExtension]}.wasm`
-  const repoRoot = path.resolve(__dirname, "..", "..", "..", "..", "..")
-
-  // The WASM files are copied to src/dist/ during build
-  // In production (compiled): __dirname = /path/to/kilocode/src/dist or dist/
-  // In development: __dirname = /path/to/kilocode/src/services/autocomplete/continuedev/core/util
-  const candidatePaths: string[] = [
-    // Production: WASM files are in the same directory as the compiled code
-    path.join(__dirname, filename),
-    // Development: from src/services/autocomplete/continuedev/core/util -> src/dist
-    path.join(repoRoot, "dist", filename),
-    // Fallback: repo root
-    path.join(repoRoot, filename),
-    // Legacy: node_modules location (fallback for older setups)
-    path.join(repoRoot, "src", "node_modules", "tree-sitter-wasms", "out", filename),
-  ]
-
-  const wasmPath = findExistingPath(candidatePaths)
-
-  if (!wasmPath) {
-    console.error(`Could not find ${filename}. Tried paths:`, candidatePaths)
-    throw new Error(`Could not find language WASM file: ${filename}`)
-  }
-
+  const wasmPath = path.join(getTreeSitterLanguageWasmsDir(), filename)
   return await Language.load(wasmPath)
 }
 

@@ -27,7 +27,7 @@
     "package": "node scripts/svg-to-png.cjs && node scripts/package-vsix.cjs",
     "dev": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node -e \"process.exit(0)\""
+    "test": "vitest run"
   },
   "contributes": {
     "viewsContainers": {
@@ -231,13 +231,33 @@
       "properties": {
         "nexuscode.provider": {
           "type": "string",
-          "default": "anthropic",
-          "description": "Default LLM provider (overrides .nexus/nexus.yaml)"
+          "default": "",
+          "enum": [
+            "",
+            "anthropic",
+            "openai",
+            "openrouter",
+            "google",
+            "ollama",
+            "openai-compatible",
+            "azure",
+            "bedrock",
+            "groq",
+            "mistral",
+            "xai",
+            "deepinfra",
+            "cerebras",
+            "cohere",
+            "togetherai",
+            "perplexity",
+            "minimax"
+          ],
+          "description": "Optional LLM provider override. Leave empty to use .nexus/nexus.yaml."
         },
         "nexuscode.model": {
           "type": "string",
-          "default": "claude-sonnet-4-5",
-          "description": "Default model ID (overrides .nexus/nexus.yaml)"
+          "default": "",
+          "description": "Optional model ID override. Leave empty to use .nexus/nexus.yaml."
         },
         "nexuscode.apiKey": {
           "type": "string",
@@ -259,7 +279,7 @@
           "default": 0,
           "minimum": 0,
           "maximum": 2,
-          "description": "Model temperature (0-2). Lower is more deterministic."
+          "description": "Optional model temperature override (0-2). The contribution default is ignored unless this setting is explicitly changed."
         },
         "nexuscode.reasoningEffort": {
           "type": "string",
@@ -466,6 +486,7 @@
     "@vscode/vsce": "^3.2.0",
     "sharp": "^0.33.5",
     "typescript": "^5.5.0",
-    "esbuild": "^0.24.0"
+    "esbuild": "^0.24.0",
+    "vitest": "3.2.3"
   }
 }

@@ -19,9 +19,17 @@ async function fixture() {
         async execute() {},
       }
     `,
+    "packages/core/src/tools/built-in/legacy.ts": `
+      export const legacyTool = {
+        name: "LegacyTool",
+        hiddenFromAgent: true,
+        async execute() {},
+      }
+    `,
     "packages/core/src/tools/built-in/index.ts": `
       import { alphaTool } from "./alpha.js"
-      export function getAllBuiltinTools() { return [alphaTool] }
+      import { legacyTool } from "./legacy.js"
+      export function getAllBuiltinTools() { return [alphaTool, legacyTool] }
     `,
     "packages/core/src/agent/modes.ts": `
       export const TOOL_GROUP_MEMBERS = { read: ["AlphaTool"] }
@@ -61,6 +69,7 @@ test("classifies linked evidence and static gaps without claiming runtime succes
     const byFeature = new Map(rows.map((row) => [row.feature, row]))
 
     assert.equal(byFeature.get("tool:AlphaTool")?.status, "working-evidence")
+    assert.equal(byFeature.get("tool:LegacyTool")?.status, "compatibility-only")
     assert.equal(byFeature.get("tool:MissingTool")?.status, "documentation-only")
     assert.equal(
       byFeature.get("event:registered_event")?.status,

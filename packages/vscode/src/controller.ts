@@ -83,6 +83,7 @@ import {
   resolveSlashCommand,
 } from "@nexuscode/core"
 import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
+import { applyExplicitConfigOverrides } from "./config-overrides.js"
 import { MarketplaceService, type MarketplaceItem } from "./services/marketplace/index.js"
 import { listAbsolutePathsRipgrep } from "./services/indexing/list-absolute-paths-rg.js"
 
@@ -2784,7 +2785,7 @@ Return in this format:
     })
     const host = new VsCodeHost(cwd, (event: AgentEvent) => {
       durableEventSink.emit(event)
-    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onModeChangeRequested: async (nextMode) => {
+    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, runCommandsInTerminal: vscode.workspace.getConfiguration("nexuscode").get<boolean>("runCommandsInTerminal") ?? true, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onModeChangeRequested: async (nextMode) => {
       this.mode = nextMode
       this.postStateToWebview()
     }, onWorkingDirectoryChangeRequested: async (nextCwd) => {
@@ -3260,60 +3261,16 @@ Return in this format:
 
   private applyVscodeOverrides(config: NexusConfig): void {
     const cfg = vscode.workspace.getConfiguration("nexuscode")
-    const getConfiguredBoolean = (key: string): boolean | undefined => {
-      const inspected = cfg.inspect<boolean>(key)
+    const getExplicitValue = <T>(key: string): T | undefined => {
+      const inspected = cfg.inspect<T>(key)
       if (!inspected) return undefined
-      const hasExplicitValue =
-        inspected.workspaceFolderValue !== undefined ||
-        inspected.workspaceValue !== undefined ||
-        inspected.globalValue !== undefined
-      if (!hasExplicitValue) return undefined
       return (
         inspected.workspaceFolderValue ??
         inspected.workspaceValue ??
-        inspected.globalValue ??
-        inspected.defaultValue
+        inspected.globalValue
       )
     }
-    const provider = cfg.get<string>("provider")
-    if (provider != null && provider !== "") {
-      if (provider === "openrouter") {
-        config.model.provider = "openai-compatible"
-        if (!config.model.baseUrl) config.model.baseUrl = "https://openrouter.ai/api/v1"
-      } else {
-        config.model.provider = provider as NexusConfig["model"]["provider"]
-      }
-    }
-    const model = cfg.get<string>("model")
-    if (model != null && model !== "") config.model.id = model
-    const apiKey = cfg.get<string>("apiKey")
-    if (apiKey != null && apiKey !== "") config.model.apiKey = apiKey
-    const baseUrl = cfg.get<string>("baseUrl")
-    if (baseUrl != null && baseUrl !== "") config.model.baseUrl = baseUrl
-    const temperature = cfg.get<number>("temperature")
-    if (typeof temperature === "number" && Number.isFinite(temperature)) {
-      config.model.temperature = Math.max(0, Math.min(2, temperature))
-    }
-    const reasoningEffort = cfg.get<string>("reasoningEffort")
-    if (typeof reasoningEffort === "string" && reasoningEffort.trim() !== "") {
-      config.model.reasoningEffort = reasoningEffort.trim()
-    }
-    const contextWindow = cfg.get<number>("contextWindow")
-    if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-      config.model.contextWindow = Math.floor(contextWindow)
-    }
-    const enableCheckpoints = getConfiguredBoolean("enableCheckpoints")
-    if (typeof enableCheckpoints === "boolean") config.checkpoint.enabled = enableCheckpoints
-    const autoApproveRead = getConfiguredBoolean("autoApproveRead")
-    if (typeof autoApproveRead === "boolean") config.permissions.autoApproveRead = autoApproveRead
-    const autoApproveWrite = getConfiguredBoolean("autoApproveWrite")
-    if (typeof autoApproveWrite === "boolean") config.permissions.autoApproveWrite = autoApproveWrite
-    const autoApproveCommand = getConfiguredBoolean("autoApproveCommand")
-    if (typeof autoApproveCommand === "boolean") config.permissions.autoApproveCommand = autoApproveCommand
-    const autoApproveMcp = getConfiguredBoolean("autoApproveMcp")
-    if (typeof autoApproveMcp === "boolean") config.permissions.autoApproveMcp = autoApproveMcp
-    const autoApproveBrowser = getConfiguredBoolean("autoApproveBrowser")
-    if (typeof autoApproveBrowser === "boolean") config.permissions.autoApproveBrowser = autoApproveBrowser
+    applyExplicitConfigOverrides(config, getExplicitValue)
   }
 
   private queueIndexerRefresh(fsPath: string): void {

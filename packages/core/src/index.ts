@@ -232,6 +232,10 @@ export {
 // Indexer
 export { CodebaseIndexer } from "./indexer/index.js"
 export {
+  getTreeSitterLanguageWasmsDir,
+  getWebTreeSitterWasmPath,
+} from "./indexer/roo/wasm-paths.js"
+export {
   INDEX_FILE_WATCHER_DEBOUNCE_MS,
   DEFAULT_MAX_INDEXED_FILES,
   DEFAULT_MAX_PENDING_EMBED_BATCHES,

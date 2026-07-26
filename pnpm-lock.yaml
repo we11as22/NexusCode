@@ -337,6 +337,9 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+      vitest:
+        specifier: 3.2.3
+        version: 3.2.3(@types/debug@4.1.12)(@types/node@22.19.13)
 
   packages/vscode/webview-ui:
     dependencies:

@@ -83,6 +83,7 @@ function createEvidenceRow(feature, kind) {
     renderedServer: new Set(),
     tests: new Set(),
     documented: new Set(),
+    compatibilityOnly: false,
   }
 }
 
@@ -171,7 +172,12 @@ function extractToolDefinitions(files) {
       const variable = match[1]
       const name = match[2]
       if (!variable || !name) continue
-      definitions.set(variable, { name, relative })
+      const definitionWindow = source.slice(match.index, match.index + 800)
+      definitions.set(variable, {
+        name,
+        relative,
+        hiddenFromAgent: /hiddenFromAgent\s*:\s*true/.test(definitionWindow),
+      })
     }
   }
   return definitions
@@ -200,6 +206,9 @@ function classify(row) {
 
   if (row.kind === "setting" && row.renderedVscode.size === 0) {
     return "orphan-setting"
+  }
+  if (row.kind === "tool" && row.compatibilityOnly && hasRegistered) {
+    return "compatibility-only"
   }
   if (
     row.documented.size > 0 &&
@@ -275,6 +284,7 @@ export async function collectFeatureCensus(root) {
   for (const [variable, definition] of toolDefinitions) {
     const row = ensureRow(rows, `tool:${definition.name}`, "tool")
     row.declared.add(definition.relative)
+    row.compatibilityOnly = definition.hiddenFromAgent
     if (new RegExp(`\\b${variable}\\b`).test(builtinIndex)) {
       row.registered.add("getAllBuiltinTools")
     }
