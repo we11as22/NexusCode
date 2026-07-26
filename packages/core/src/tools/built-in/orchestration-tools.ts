@@ -27,6 +27,7 @@ import {
 import { interpretShellCommandResult } from "./shell-command-semantics.js"
 import { validatePluginManifestFile } from "../../plugins/index.js"
 import { retrieveMemories } from "../../memory/index.js"
+import { isMemoryAccessibleFromSession } from "../../orchestration/memory-selection.js"
 
 function zodPreview(schema: z.ZodTypeAny): unknown {
   const def = (schema as z.ZodTypeAny & { _def?: { typeName?: string; shape?: () => Record<string, z.ZodTypeAny>; innerType?: z.ZodTypeAny; options?: z.ZodTypeAny[]; values?: readonly string[] } })._def
@@ -2390,6 +2391,7 @@ export const memoryListTool: ToolDef<z.infer<typeof memoryListSchema>> = {
         }).items.map((item) => item.memory)
       : scoped.filter((memory) => include_expired || memory.expiresAt == null || memory.expiresAt > Date.now())
     if (filtered.length === 0) return { success: true, output: "No memories found." }
+    await runtime.recordMemoryAccess(filtered.map((memory) => memory.id)).catch(() => [])
     return {
       success: true,
       output: [
@@ -2419,7 +2421,10 @@ export const memoryGetTool: ToolDef<z.infer<typeof memoryGetSchema>> = {
   async execute({ memory_id }, ctx) {
     const runtime = await getOrchestrationRuntime(ctx.cwd)
     const memory = await runtime.getMemory(memory_id)
-    if (!memory) return { success: false, output: `Memory not found: ${memory_id}` }
+    if (!memory || !isMemoryAccessibleFromSession(memory, ctx.session.id)) {
+      return { success: false, output: `Memory not found: ${memory_id}` }
+    }
+    await runtime.recordMemoryAccess([memory.id]).catch(() => [])
     return {
       success: true,
       output: `# ${memory.title}\n\nScope: ${memory.scope}\n\n${memory.content}`,
@@ -2448,6 +2453,10 @@ export const memoryUpdateTool: ToolDef<z.infer<typeof memoryUpdateSchema>> = {
       return { success: false, output: `Invalid expires_at timestamp: ${expires_at}` }
     }
     const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const existing = await runtime.getMemory(memory_id)
+    if (!existing || !isMemoryAccessibleFromSession(existing, ctx.session.id)) {
+      return { success: false, output: `Memory not found: ${memory_id}` }
+    }
     const memory = await runtime.updateMemory(memory_id, {
       title,
       content,
@@ -2475,6 +2484,10 @@ export const memoryDeleteTool: ToolDef<z.infer<typeof memoryDeleteSchema>> = {
   parameters: memoryDeleteSchema,
   async execute({ memory_id }, ctx) {
     const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const existing = await runtime.getMemory(memory_id)
+    if (!existing || !isMemoryAccessibleFromSession(existing, ctx.session.id)) {
+      return { success: false, output: `Memory not found: ${memory_id}` }
+    }
     const deleted = await runtime.deleteMemory(memory_id)
     if (!deleted) return { success: false, output: `Memory not found: ${memory_id}` }
     return { success: true, output: `Deleted memory ${memory_id}.` }

@@ -146,6 +146,36 @@ describe("OrchestrationRuntime durable state", () => {
       .toMatchObject({ schemaVersion: 2 })
   })
 
+  it("records memory access metadata transactionally and at most once per id per call", async () => {
+    const { homeDir, cwd } = await fixture()
+    const runtime = new OrchestrationRuntime(cwd, { homeDir })
+    const first = await runtime.createMemory({
+      scope: "project",
+      title: "First",
+      content: "first",
+    })
+    const second = await runtime.createMemory({
+      scope: "project",
+      title: "Second",
+      content: "second",
+    })
+
+    const touched = await runtime.recordMemoryAccess(
+      [first.id, first.id, second.id, "missing"],
+      123_456,
+    )
+
+    expect(touched.map((memory) => memory.id).sort()).toEqual([first.id, second.id].sort())
+    expect(await runtime.getMemory(first.id)).toMatchObject({
+      accessedAt: 123_456,
+      accessCount: 1,
+    })
+    expect(await runtime.getMemory(second.id)).toMatchObject({
+      accessedAt: 123_456,
+      accessCount: 1,
+    })
+  })
+
   it("recovers a verified journal revision after a torn tail", async () => {
     const { homeDir, cwd } = await fixture()
     const diagnostics: string[] = []

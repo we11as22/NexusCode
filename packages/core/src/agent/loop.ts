@@ -59,7 +59,10 @@ import {
   getDefaultTopP,
 } from "../provider/provider-options.js"
 import { getOrchestrationRuntime } from "../orchestration/runtime.js"
-import { selectRelevantMemories } from "../orchestration/memory-selection.js"
+import {
+  filterPromptMemoryCandidates,
+  selectRelevantMemories,
+} from "../orchestration/memory-selection.js"
 import { extractMemoriesFromCompactionSummary } from "../orchestration/memory-extraction.js"
 import { runPluginHooks } from "../plugins/runtime.js"
 import {
@@ -513,6 +516,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   let attemptedCompletionThisIteration = false
   let doneEmitted = false
   let lastRunContextFingerprint = ""
+  const accessedMemoryIds = new Set<string>()
   await getOrchestrationRuntime(host.cwd)
     .then((runtime) => importLegacyMemoryFiles({ cwd: host.cwd, config, runtime }))
     .catch((error) => {
@@ -566,17 +570,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     const memoryQuery = [taskDesc, latestUserTaskText, mentionsContext ?? ""]
       .filter((item) => item.trim().length > 0)
       .join("\n")
-    const projectMemories = await runtime.listMemories({ scope: "project", limit: 24 }).catch(() => [])
-    const sessionMemories = await runtime.listMemories({
-      scope: "session",
-      limit: 16,
-      metadataMatch: { sessionId: session.id },
-    }).catch(() => [])
+    const memoryCandidates = await runtime.listMemories().catch(() => [])
     const memories = selectRelevantMemories(
-      [...sessionMemories, ...projectMemories],
+      filterPromptMemoryCandidates(memoryCandidates, {
+        sessionId: session.id,
+        includeTeam: config.memory?.teamMemoryEnabled !== false,
+      }),
       memoryQuery,
       8,
     )
+    const newlyAccessedMemoryIds = memories
+      .map((item) => item.memory.id)
+      .filter((memoryId) => !accessedMemoryIds.has(memoryId))
+    if (newlyAccessedMemoryIds.length > 0) {
+      for (const memoryId of newlyAccessedMemoryIds) accessedMemoryIds.add(memoryId)
+      await runtime.recordMemoryAccess(newlyAccessedMemoryIds).catch(() => [])
+    }
     const activeBackgroundTasks = await runtime.listBackgroundTasks()
       .then((tasks) => tasks.filter((task) => task.status === "running" || task.status === "pending"))
       .catch(() => [])

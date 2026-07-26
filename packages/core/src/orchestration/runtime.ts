@@ -1339,6 +1339,29 @@ export class OrchestrationRuntime {
     return items
   }
 
+  async recordMemoryAccess(
+    memoryIds: readonly string[],
+    accessedAt = Date.now(),
+  ): Promise<MemoryRecord[]> {
+    const ids = [...new Set(memoryIds)]
+    if (ids.length === 0) return []
+    return this.mutate(() => {
+      const touched: MemoryRecord[] = []
+      for (const memoryId of ids) {
+        const existing = this.memories.get(memoryId)
+        if (!existing) continue
+        const next = normalizeMemoryRecord({
+          ...existing,
+          accessedAt,
+          accessCount: existing.accessCount + 1,
+        })
+        this.memories.set(memoryId, next)
+        touched.push(next)
+      }
+      return touched
+    })
+  }
+
   async updateMemory(
     memoryId: string,
     updates: Partial<Pick<MemoryRecord, "title" | "content">> & {
