@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import type { AgentEvent, Mode, SessionMessage } from "./types.js"
 import { canonicalProjectRoot } from "./session/storage.js"
 
@@ -111,6 +112,7 @@ export class NexusServerClient {
     let reconnectAttempt = 0
     let runId = ""
     let lastSeq = 0
+    const clientRunId = `run_${randomUUID().replaceAll("-", "")}`
 
     const parseLine = (line: string): { event: AgentEvent | null; seq: number | null } => {
       const t = line.trim()
@@ -129,22 +131,48 @@ export class NexusServerClient {
     }
 
     while (true) {
-      const res = await fetch(this.url(`/session/${sessionId}/message`, { directory: this.directory }), {
-        method: "POST",
-        headers: this.headers(),
-        body: JSON.stringify(
-          runId
-            ? { runId, afterSeq: lastSeq }
-            : { content, mode, presetName },
-        ),
-        signal,
-      })
+      let res: Response
+      try {
+        res = await fetch(this.url(`/session/${sessionId}/message`, { directory: this.directory }), {
+          method: "POST",
+          headers: this.headers(),
+          body: JSON.stringify(
+            runId
+              ? { runId, afterSeq: lastSeq }
+              : { content, mode, presetName, clientRunId, afterSeq: lastSeq },
+          ),
+          signal,
+        })
+      } catch (error) {
+        if (signal?.aborted) return
+        if (reconnectAttempt >= maxReconnects) {
+          yield { type: "error", error: `Server request failed: ${(error as Error).message}` }
+          return
+        }
+        reconnectAttempt++
+        yield {
+          type: "remote_session_updated",
+          remoteSession: {
+            id: `remote-${sessionId}`,
+            url: this.url(`/session/${sessionId}`),
+            sessionId,
+            runId: runId || clientRunId,
+            status: "reconnecting",
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            reconnectAttempts: reconnectAttempt,
+            reconnectable: true,
+            metadata: { source: "client-request", lastSeq },
+          },
+        }
+        continue
+      }
       if (!res.ok) {
         const text = await res.text()
         yield { type: "error", error: `Server: ${res.status} ${text}` }
         return
       }
-      runId = res.headers.get("x-nexus-run-id") ?? runId
+      runId = res.headers.get("x-nexus-run-id") ?? (runId || clientRunId)
       const reader = res.body?.getReader()
       if (!reader) {
         yield { type: "error", error: "No response body" }

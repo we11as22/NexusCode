@@ -120,4 +120,48 @@ describe("NexusServerClient authorization", () => {
       ),
     ).toBe(true)
   })
+
+  it("retries an initial request with the same client-generated run id", async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    let attempt = 0
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        attempt++
+        if (attempt === 1) throw new Error("socket closed before response headers")
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.close()
+            },
+          }),
+          {
+            status: 200,
+            headers: { "x-nexus-run-id": String(bodies[0]?.clientRunId) },
+          },
+        )
+      }),
+    )
+    const client = new NexusServerClient({
+      baseUrl: "http://127.0.0.1:4097",
+      directory: process.cwd(),
+      token: "secret-token",
+    })
+
+    for await (const _event of client.streamMessage(
+      "session_test",
+      "hello exactly once",
+      "agent",
+    )) {
+      // Drain request reconnect status events.
+    }
+
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0]?.clientRunId).toMatch(/^run_[a-f0-9]{32}$/)
+    expect(bodies[1]).toMatchObject({
+      clientRunId: bodies[0]?.clientRunId,
+      content: "hello exactly once",
+    })
+  })
 })

@@ -78,11 +78,11 @@
 
 ## Task 5: Persist run events, approvals, and compaction state
 
-- [ ] Add versioned run/event records with monotonic sequence and idempotency keys.
-- [ ] Persist an event before delivery and support replay after restart.
-- [ ] Persist unresolved approvals, mode, task links, tool artifacts, and memory citations through compaction.
-- [ ] Add reconnect/replay integration tests for local and server transports.
-- [ ] Verify all package tests/typecheck/builds and commit.
+- [x] Add versioned run/event records with monotonic sequence and idempotency keys.
+- [x] Persist an event before delivery and support replay after restart.
+- [x] Persist unresolved approvals, mode, task links, tool artifacts, and memory citations through compaction.
+- [x] Add reconnect/replay integration tests for local and server transports.
+- [x] Verify all package tests/typecheck/builds and commit.
 
 ## Durable-state completion gate
 

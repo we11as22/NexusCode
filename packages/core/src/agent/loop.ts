@@ -363,6 +363,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
   /** After compaction, inject OpenClaude-style sparse plan reminder on the next system prompt (plan mode only). */
   let planSparseReminderAfterCompaction = false
+  let durableRunContext = {
+    mode,
+    memoryCitations: [] as string[],
+    taskIds: [] as string[],
+  }
 
   // Tool context
   const toolCtx: ToolContext = {
@@ -380,6 +385,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       await handleCompaction(session, activeClient, config, host, compaction, signal, {
         systemPromptText: lastBuiltSystemPrompt,
         toolsDefinitionTokens,
+        durableContext: durableRunContext,
       })
       if (mode === "plan") planSparseReminderAfterCompaction = true
       host.emit({ type: "compaction_end" })
@@ -500,6 +506,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   let lastToolName = ""
   let attemptedCompletionThisIteration = false
   let doneEmitted = false
+  let lastRunContextFingerprint = ""
   await getOrchestrationRuntime(host.cwd)
     .then((runtime) => importLegacyMemoryFiles({ cwd: host.cwd, config, runtime }))
     .catch((error) => {
@@ -564,9 +571,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       memoryQuery,
       8,
     )
-    const backgroundTaskSummary = await runtime.listBackgroundTasks()
-      .then((tasks) =>
-        tasks
+    const activeBackgroundTasks = await runtime.listBackgroundTasks()
+      .then((tasks) => tasks.filter((task) => task.status === "running" || task.status === "pending"))
+      .catch(() => [])
+    const backgroundTaskSummary = activeBackgroundTasks
           .filter((task) => task.status === "running" || task.status === "pending")
           .map((task) => {
             const parts = [
@@ -580,9 +588,23 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             if (task.description) parts.push(`desc=${task.description}`)
             return parts.join(" | ")
           })
-          .join("\n"),
-      )
-      .catch(() => "")
+          .join("\n")
+    const runContext = {
+      type: "run_context" as const,
+      mode,
+      memoryCitations: memories.map((item) => item.citation),
+      taskIds: activeBackgroundTasks.map((task) => task.id),
+    }
+    const runContextFingerprint = JSON.stringify(runContext)
+    durableRunContext = {
+      mode: runContext.mode,
+      memoryCitations: [...runContext.memoryCitations],
+      taskIds: [...runContext.taskIds],
+    }
+    if (runContextFingerprint !== lastRunContextFingerprint) {
+      host.emit(runContext)
+      lastRunContextFingerprint = runContextFingerprint
+    }
     const mergedBackgroundSummary = [getBackgroundBashJobsForPrompt(host.cwd), backgroundTaskSummary]
       .filter((item) => item.trim().length > 0)
       .join("\n")
@@ -668,6 +690,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           await handleCompaction(session, activeClient, config, host, compaction, signal, {
             systemPromptText: systemPrompt,
             toolsDefinitionTokens,
+            durableContext: durableRunContext,
           })
           if (mode === "plan") planSparseReminderAfterCompaction = true
           host.emit({ type: "compaction_end" })
@@ -1238,6 +1261,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           systemPromptText: lastBuiltSystemPrompt,
           toolsDefinitionTokens,
           aggressive: true,
+          durableContext: durableRunContext,
         })
         if (mode === "plan") planSparseReminderAfterCompaction = true
         host.emit({ type: "compaction_end" })
@@ -1516,6 +1540,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       await handleCompaction(session, activeClient, config, host, compaction, signal, {
         systemPromptText: lastBuiltSystemPrompt,
         toolsDefinitionTokens,
+        durableContext: durableRunContext,
       })
       if (mode === "plan") planSparseReminderAfterCompaction = true
       host.emit({ type: "compaction_end" })
@@ -1652,6 +1677,11 @@ type HandleCompactionOpts = {
   toolsDefinitionTokens?: number
   /** When true, force a full summary pass after prune/microcompact even if our local estimate is slightly under. */
   aggressive?: boolean
+  durableContext?: {
+    mode: string
+    memoryCitations: string[]
+    taskIds: string[]
+  }
 }
 
 async function handleCompaction(
@@ -1686,6 +1716,7 @@ async function handleCompaction(
       await compaction.compact(session, client, signal, {
         keepRecentMessages: config.summarization?.keepRecentMessages ?? 8,
         force: opts?.aggressive === true,
+        durableContext: opts?.durableContext,
       })
 
       const nextSummaryCount = session.messages.filter((message) => message.summary).length

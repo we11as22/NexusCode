@@ -57,6 +57,7 @@ import {
   createTaskSnapshotTool,
   createNexusRunServices,
   runAgentLoop,
+  DurableRunEventSink,
   CheckpointTracker,
   CodebaseIndexer,
   createCodebaseIndexer,
@@ -2683,7 +2684,7 @@ Return in this format:
       return
     }
 
-    const host = new VsCodeHost(cwd, (event: AgentEvent) => {
+    const deliverLocalEvent = (event: AgentEvent) => {
       if (event.type === "question_request") {
         this.pendingQuestionRequest = event.request
       }
@@ -2749,6 +2750,15 @@ Return in this format:
           }
         }
       }
+    }
+    const durableEventSink = await DurableRunEventSink.create({
+      cwd,
+      sessionId: this.session.id,
+      mode: runMode,
+      deliver: deliverLocalEvent,
+    })
+    const host = new VsCodeHost(cwd, (event: AgentEvent) => {
+      durableEventSink.emit(event)
     }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onModeChangeRequested: async (nextMode) => {
       this.mode = nextMode
       this.postStateToWebview()
@@ -2765,13 +2775,15 @@ Return in this format:
     } })
     this.activeRunHost = host
 
+    let durableRunStatus: "completed" | "failed" | "aborted" = "completed"
     const timeoutMs = 10 * 60_000
     const timeout = setTimeout(() => {
       if (!this.isRunning) return
       this.abortController?.abort()
-      this.postMessageToWebview({
-        type: "agentEvent",
-        event: { type: "error", error: `LLM request timed out after ${Math.round(timeoutMs / 60000)} minutes.` },
+      durableEventSink.emit({
+        type: "error",
+        error: `LLM request timed out after ${Math.round(timeoutMs / 60000)} minutes.`,
+        fatal: true,
       })
     }, timeoutMs)
 
@@ -2868,12 +2880,17 @@ Return in this format:
       })
     } catch (err) {
       const errMsg = (err as Error).message
+      durableRunStatus = this.abortController?.signal.aborted ? "aborted" : "failed"
       if (errMsg !== "AbortError" && !errMsg.includes("aborted")) {
         console.error("[nexus] Agent loop error:", err)
-        this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: errMsg } })
+        durableEventSink.emit({ type: "error", error: errMsg, fatal: true })
       }
     } finally {
       clearTimeout(timeout)
+      if (this.abortController?.signal.aborted) durableRunStatus = "aborted"
+      await durableEventSink.finish(durableRunStatus).catch((error) => {
+        console.error("[nexus] Failed to finalize durable local run:", error)
+      })
       this.activeRunHost = null
       this.isRunning = false
       await this.session!.save().catch(() => {})

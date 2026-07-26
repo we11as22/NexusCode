@@ -53,6 +53,18 @@ export {
   retrieveMemories,
   tokenizeMemoryText,
 } from "./memory/index.js"
+export {
+  DurableRunEventSink,
+  RunEventStore,
+  type DurableRunEventSinkOptions,
+  type DurableRunRecord,
+  type PendingRunApproval,
+  type RunEventDiagnostic,
+  type RunEventEnvelope,
+  type RunEventStoreOptions,
+  type RunStatus,
+  type RunToolArtifact,
+} from "./run/index.js"
 export type {
   LegacyMemoryRecord,
   MemoryRetrievalOptions,

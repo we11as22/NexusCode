@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import type { SessionMessage, MessagePart, TextPart, ToolPart, UserQuestionRequest } from '@nexuscode/core'
 import {
   runAgentLoop,
+  DurableRunEventSink,
   createLLMClient,
   loadConfig,
   Session,
@@ -261,9 +262,21 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     autoApprovePermissions.mcp === true &&
     autoApprovePermissions.browser === true
 
-  const host = new CliHost(nexus.cwd, (event: AgentEvent) => {
+  const deliverEvent = (event: AgentEvent) => {
     eventQueue.push(event)
     wakeWaitingConsumer()
+  }
+  const durableEventSink = !serverUrl
+    ? await DurableRunEventSink.create({
+        cwd: nexus.cwd,
+        sessionId: session.id,
+        mode,
+        deliver: deliverEvent,
+      })
+    : null
+  const host = new CliHost(nexus.cwd, (event: AgentEvent) => {
+    if (durableEventSink) durableEventSink.emit(event)
+    else deliverEvent(event)
   }, autoApprove || allApprovalsEnabled, tuiApprovalRef, {
     read: autoApprovePermissions?.read === true,
   })
@@ -316,22 +329,35 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       }
     })()
   } else {
-    runPromise = runAgentLoop({
-      session,
-      client,
-      host,
-      config,
-      services,
-      mode,
-      tools,
-      skills,
-      rulesContent,
-      indexer: indexer ?? undefined,
-      compaction,
-      signal,
-    }).catch((err) => {
-      runError = err instanceof Error ? err : new Error(String(err))
-    })
+    runPromise = (async () => {
+      let status: "completed" | "failed" | "aborted" = "completed"
+      try {
+        await runAgentLoop({
+          session,
+          client,
+          host,
+          config,
+          services,
+          mode,
+          tools,
+          skills,
+          rulesContent,
+          indexer: indexer ?? undefined,
+          compaction,
+          signal,
+        })
+        if (signal.aborted) status = "aborted"
+      } catch (err) {
+        status = signal.aborted ? "aborted" : "failed"
+        runError = err instanceof Error ? err : new Error(String(err))
+        wakeWaitingConsumer()
+      } finally {
+        await durableEventSink!.finish(status).catch((error) => {
+          runError ??= error instanceof Error ? error : new Error(String(error))
+          wakeWaitingConsumer()
+        })
+      }
+    })()
   }
 
   const consumed: MessageType[] = []

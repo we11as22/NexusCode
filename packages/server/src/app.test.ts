@@ -101,6 +101,19 @@ describe("server boundary", () => {
     expect(response.status).toBe(400)
   })
 
+  it("rejects unsafe durable run identifiers before storage lookup", async () => {
+    const response = await app().request("/session/session_test/message", {
+      method: "POST",
+      headers: {
+        ...authHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ runId: "../outside" }),
+    })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ error: "Invalid run id" })
+  })
+
   it("does not auto-approve privileged server tool calls", async () => {
     const host = new ServerHost(root, () => {})
 

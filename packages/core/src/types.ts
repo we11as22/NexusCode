@@ -700,6 +700,7 @@ export type AgentEvent =
   | { type: "question_request"; request: UserQuestionRequest; partId?: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
+  | { type: "run_context"; mode: Mode; memoryCitations: string[]; taskIds: string[] }
   | { type: "index_update"; status: IndexStatus }
   | { type: "vector_db_progress"; message?: string }
   | { type: "vector_db_ready" }

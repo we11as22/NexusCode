@@ -21,9 +21,9 @@ import {
   createActiveRun,
   finishRun,
   getActiveRun,
-  getBufferedRunEvents,
+  getOrRestoreRun,
   getLatestRunForSession,
-  subscribeToRun,
+  replayAndSubscribeToRun,
 } from "../active-runs.js"
 import type { ServerEnv } from "../security.js"
 
@@ -114,24 +114,27 @@ sessionRoutes.delete("/:id", async (c) => {
 sessionRoutes.post("/:id/message", async (c) => {
   const cwd = getCwd(c)
   const id = c.req.param("id")
-  let sessionMeta = await fsGetSession(id, cwd)
-  if (!sessionMeta) {
-    await ensureSessionOnDisk(id, cwd)
-    sessionMeta = await fsGetSession(id, cwd)
-  }
-  if (!sessionMeta) return c.json({ error: "Session not found" }, 404)
-
   const body = (await c.req.json().catch(() => ({}))) as {
     content?: string
     mode?: Mode
     presetName?: string
     runId?: string
+    clientRunId?: string
     afterSeq?: number
   }
   const content = typeof body.content === "string" ? body.content : ""
   const presetName = typeof body.presetName === "string" ? body.presetName.trim() : ""
   const requestedRunId = typeof body.runId === "string" ? body.runId.trim() : ""
-  const afterSeq = typeof body.afterSeq === "number" && Number.isFinite(body.afterSeq) ? body.afterSeq : 0
+  const clientRunId = typeof body.clientRunId === "string" ? body.clientRunId.trim() : ""
+  if (
+    (requestedRunId && !SESSION_ID_PATTERN.test(requestedRunId)) ||
+    (clientRunId && !SESSION_ID_PATTERN.test(clientRunId))
+  ) {
+    return c.json({ error: "Invalid run id" }, 400)
+  }
+  const afterSeq = typeof body.afterSeq === "number" && Number.isSafeInteger(body.afterSeq)
+    ? Math.max(0, body.afterSeq)
+    : 0
   const mode: Mode =
     body.mode === "plan" ||
     body.mode === "ask" ||
@@ -139,15 +142,42 @@ sessionRoutes.post("/:id/message", async (c) => {
     body.mode === "review"
       ? body.mode
       : "agent"
+  let sessionMeta = await fsGetSession(id, cwd)
+  if (!sessionMeta) {
+    await ensureSessionOnDisk(id, cwd)
+    sessionMeta = await fsGetSession(id, cwd)
+  }
+  if (!sessionMeta) return c.json({ error: "Session not found" }, 404)
+
   const runtime = await getOrchestrationRuntime(cwd)
-  let activeRun = requestedRunId ? getActiveRun(requestedRunId) : getLatestRunForSession(id)
-  const isResume = Boolean(requestedRunId)
+  let activeRun = requestedRunId
+    ? await getOrRestoreRun(requestedRunId, cwd)
+    : clientRunId
+      ? getActiveRun(clientRunId) ?? await getOrRestoreRun(clientRunId, cwd)
+      : getLatestRunForSession(id)
+  const isResume = Boolean(requestedRunId || (clientRunId && activeRun))
   if (isResume && !activeRun) {
     return c.json({ error: "run not found" }, 404)
   }
-  if (!activeRun) {
+  if (isResume && activeRun?.sessionId !== id) {
+    return c.json({ error: "runId does not belong to this session" }, 400)
+  }
+  if (!isResume) {
     if (!content.trim()) return c.json({ error: "content required" }, 400)
-    const created = createActiveRun(id, cwd)
+    if (activeRun && !activeRun.done) {
+      return c.json({
+        error: "session already has an active run; reconnect with its runId",
+        runId: activeRun.id,
+      }, 409)
+    }
+    // A completed run remains replayable for its TTL but must never swallow a
+    // new user turn. Every new message gets a fresh durable run.
+    activeRun = null
+  }
+  if (!activeRun) {
+    const created = await createActiveRun(id, cwd, mode, {
+      ...(clientRunId ? { runId: clientRunId } : {}),
+    })
     activeRun = {
       id: created.id,
       sessionId: id,
@@ -161,6 +191,7 @@ sessionRoutes.post("/:id/message", async (c) => {
     const session = new Session(id, cwd, recentMessages, undefined, true)
     const messageCountBeforeRun = session.messages.length
     void (async () => {
+      let terminalStatus: "completed" | "failed" | "aborted" = "completed"
       try {
         await runSession({
           session,
@@ -182,16 +213,18 @@ sessionRoutes.post("/:id/message", async (c) => {
           }
         }
       } catch (err) {
+        terminalStatus = created.abortController.signal.aborted ? "aborted" : "failed"
         const msg = err instanceof Error ? err.message : String(err)
         if (!msg.includes("abort")) appendRunEvent(created.id, { type: "error", error: msg })
       } finally {
-        finishRun(created.id)
+        await finishRun(
+          created.id,
+          created.abortController.signal.aborted ? "aborted" : terminalStatus,
+        ).catch((error) => {
+          console.error(`[nexus] Failed to finalize run ${created.id}:`, error)
+        })
       }
     })()
-  } else if (!isResume && !content.trim()) {
-    return c.json({ error: "content required" }, 400)
-  } else if (isResume && activeRun.sessionId !== id) {
-    return c.json({ error: "runId does not belong to this session" }, 400)
   }
 
   c.header("Content-Type", "application/x-ndjson")
@@ -252,11 +285,7 @@ sessionRoutes.post("/:id/message", async (c) => {
     })
     try {
       heartbeatTimer = setInterval(writeHeartbeat, HEARTBEAT_INTERVAL_MS)
-      for (const envelope of getBufferedRunEvents(activeRun.id, afterSeq)) {
-        lastDeliveredSeq = envelope.seq
-        writeEnvelope(envelope)
-      }
-      const subscription = subscribeToRun(activeRun.id, (envelope) => {
+      const subscription = await replayAndSubscribeToRun(activeRun.id, afterSeq, (envelope) => {
         lastDeliveredSeq = envelope.seq
         writeEnvelope(envelope)
       })
