@@ -56,6 +56,8 @@ export const McpServerConfigSchema = z.object({
   type: z.enum(["stdio", "sse", "streamable-http", "http"]).optional(),
   headers: z.record(z.string()).optional(),
   enabled: z.boolean().optional().default(true),
+  startupTimeoutMs: z.number().int().positive().max(300000).optional(),
+  toolTimeoutMs: z.number().int().positive().max(900000).optional(),
   /** Bundled server id (e.g. "context-mode"); resolved by host to command/args/env */
   bundle: z.string().optional(),
   auth: z.object({

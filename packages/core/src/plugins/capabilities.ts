@@ -34,6 +34,13 @@ function asObject(value: unknown): Record<string, unknown> | null {
     : null
 }
 
+function substitutePluginRoot(value: string, pluginRoot: string): string {
+  return value.replace(
+    /\$\{(?:CLAUDE|CODEX|NEXUS)_PLUGIN_ROOT\}/g,
+    pluginRoot,
+  )
+}
+
 function serverCandidates(value: unknown): Array<{ name?: string; value: unknown }> | null {
   if (Array.isArray(value)) return value.map((item) => ({ value: item }))
   const root = asObject(value)
@@ -76,8 +83,11 @@ async function normalizePluginServer(
     }
   }
   const root = await fs.realpath(plugin.rootDir)
-  const configuredCwd = parsed.data.cwd
-    ? path.resolve(plugin.rootDir, parsed.data.cwd)
+  const substitutedCwd = parsed.data.cwd
+    ? substitutePluginRoot(parsed.data.cwd, root)
+    : undefined
+  const configuredCwd = substitutedCwd
+    ? path.resolve(plugin.rootDir, substitutedCwd)
     : root
   const canonicalCwd = await fs.realpath(configuredCwd).catch(() => configuredCwd)
   if (!isPathInside(root, canonicalCwd)) {
@@ -89,6 +99,25 @@ async function normalizePluginServer(
   return {
     server: {
       ...parsed.data,
+      ...(parsed.data.command
+        ? { command: substitutePluginRoot(parsed.data.command, root) }
+        : {}),
+      ...(parsed.data.args
+        ? { args: parsed.data.args.map((arg) => substitutePluginRoot(arg, root)) }
+        : {}),
+      ...(parsed.data.env
+        ? {
+            env: Object.fromEntries(
+              Object.entries(parsed.data.env).map(([key, envValue]) => [
+                key,
+                substitutePluginRoot(envValue, root),
+              ]),
+            ),
+          }
+        : {}),
+      ...(parsed.data.url
+        ? { url: substitutePluginRoot(parsed.data.url, root) }
+        : {}),
       ...(parsed.data.command ? { cwd: canonicalCwd } : {}),
     },
   }

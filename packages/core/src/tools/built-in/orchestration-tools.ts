@@ -1473,14 +1473,26 @@ export const listMcpResourcesTool: ToolDef<z.infer<typeof listMcpResourcesSchema
   async execute({ server }, ctx) {
     const client = ctx.services.mcpClient
     if (!client) return { success: false, output: "MCP client is not initialized." }
-    const resources = await client.listResources(server)
-    if (resources.length === 0) return { success: true, output: "No MCP resources available." }
+    const [resources, templates] = await Promise.all([
+      client.listResources(server),
+      client.listResourceTemplates(server),
+    ])
+    if (resources.length === 0 && templates.length === 0) {
+      return { success: true, output: "No MCP resources or resource templates available." }
+    }
     return {
       success: true,
-      output: resources
-        .map((resource) => `- [${resource.serverName}] ${resource.name ?? resource.uri} (${resource.uri})`)
-        .join("\n"),
-      metadata: { resources },
+      output: [
+        ...resources.map(
+          (resource) =>
+            `- [${resource.serverName}] ${resource.name ?? resource.uri} (${resource.uri})`,
+        ),
+        ...templates.map(
+          (template) =>
+            `- [${template.serverName}] ${template.name} (${template.uriTemplate}) [template]`,
+        ),
+      ].join("\n"),
+      metadata: { resources, templates },
     }
   },
 }

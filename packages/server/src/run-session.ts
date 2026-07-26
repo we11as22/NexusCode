@@ -39,8 +39,6 @@ import { ServerHost } from "./host.js"
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const NEXUS_ROOT = path.resolve(__dirname, "..", "..")
 
-/** Max ms to wait for MCP connect before first message (avoids long delay when vector is off). */
-const MCP_CONNECT_TIMEOUT_MS = 2500
 /** Max ms to wait for loadRules + loadSkills; beyond this we start with empty rules/skills so first message is not delayed. */
 const RULES_SKILLS_LOAD_TIMEOUT_MS = 2000
 
@@ -121,6 +119,12 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
 
   let mcpClient: McpClient | undefined
   const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, configForRun)
+  for (const diagnostic of pluginMcp.diagnostics) {
+    onEvent({
+      type: "error",
+      error: `[plugin MCP ${diagnostic.pluginName}] ${diagnostic.message}`,
+    })
+  }
   const mcpPromise = (async (): Promise<McpClient | undefined> => {
     try {
       const mc = new McpClient()
@@ -128,20 +132,25 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
       if (pluginMcp.servers.length > 0) {
         const resolved = resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
         process.env.CLAUDE_PROJECT_DIR = cwd
-        await mc.connectAll(resolved).catch(() => {})
+        const statuses = await mc.connectAll(resolved)
+        for (const status of Object.values(statuses)) {
+          if (status.state !== "connected" && status.state !== "disabled") {
+            onEvent({
+              type: "error",
+              error: `[MCP ${status.name}] ${status.error ?? status.state}`,
+            })
+          }
+        }
       }
       return mc
-    } catch {
+    } catch (error) {
+      onEvent({
+        type: "error",
+        error: `[MCP runtime] ${error instanceof Error ? error.message : String(error)}`,
+      })
       return undefined
     }
   })()
-  const mcpWithTimeout =
-    pluginMcp.servers.length > 0
-      ? Promise.race([
-          mcpPromise,
-          new Promise<undefined>((r) => setTimeout(() => r(undefined), MCP_CONNECT_TIMEOUT_MS)),
-        ])
-      : mcpPromise
 
   const compatibility = getClaudeCompatibilityOptions(configForRun)
   const rulesPromise = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, compatibility)
@@ -155,7 +164,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   ])
 
   const [mcpResult, rulesContent, skillsResult] = await Promise.all([
-    mcpWithTimeout,
+    mcpPromise,
     rulesPromise,
     skillsWithTimeout,
   ])
@@ -234,9 +243,6 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     })
   } finally {
     await mcpClient?.disconnectAll().catch(() => {})
-    if (!mcpClient) {
-      void mcpPromise.then((lateClient) => lateClient?.disconnectAll()).catch(() => {})
-    }
   }
 }
 

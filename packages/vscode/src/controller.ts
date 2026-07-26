@@ -1759,7 +1759,7 @@ export class Controller {
         break
       }
       case "testMcpServers": {
-        if (!this.config?.mcp.servers.length) {
+        if (!this.config) {
           this.postMessageToWebview({
             type: "mcpServerStatus",
             results: [],
@@ -1768,6 +1768,10 @@ export class Controller {
         }
         try {
           const resolved = await this.getResolvedMcpServers()
+          if (resolved.length === 0) {
+            this.postMessageToWebview({ type: "mcpServerStatus", results: [] })
+            break
+          }
           const results = await testMcpServers(resolved)
           this.postMessageToWebview({ type: "mcpServerStatus", results })
         } catch (err) {
@@ -2315,7 +2319,12 @@ export class Controller {
       this.config,
     ).catch(() => [])
     const skills = dedupeStringList(skillDefs.map((s) => s.path))
-    const fromConfig = (this.config?.mcp?.servers ?? []).map((s) => (s as McpServerConfig).name).filter((n): n is string => Boolean(n?.trim()))
+    const configuredAndPlugin = this.config
+      ? await resolveConfiguredAndPluginMcpServers(cwd, this.config).catch(() => ({ servers: [] }))
+      : { servers: [] }
+    const fromConfig = configuredAndPlugin.servers
+      .map((server) => server.name)
+      .filter((name): name is string => Boolean(name?.trim()))
     const discoveredMcp = await discoverMcpServerNamesForExtension(cwd)
     const mcpServers = dedupeStringList([...fromConfig, ...discoveredMcp])
     const rulesFiles = await discoverRuleFilesForExtension(cwd)
@@ -2958,13 +2967,16 @@ Return in this format:
       const message = err instanceof Error ? err.message : String(err)
       this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
     })
-    const status = this.mcpClient.getStatus()
+    const status = this.mcpClient.getServerStatuses()
     this.postMessageToWebview({
       type: "mcpServerStatus",
       results: resolved.map((s) => ({
         name: s.name,
-        status: status[s.name] === "connected" ? ("ok" as const) : ("error" as const),
-        error: status[s.name] === "connected" ? undefined : "Not connected",
+        status: status[s.name]?.state === "connected" ? ("ok" as const) : ("error" as const),
+        error:
+          status[s.name]?.state === "connected"
+            ? status[s.name]?.error
+            : status[s.name]?.error ?? status[s.name]?.state ?? "Not connected",
       })),
     })
   }

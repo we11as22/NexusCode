@@ -288,8 +288,16 @@ export { fetchSkillUrlRegistryRoots } from "./skills/url-registry.js"
 export {
   McpClient,
   testMcpServers,
+  buildMcpToolSchema,
 } from "./mcp/client.js"
-export type { McpResourceRef, McpResourceContent } from "./mcp/client.js"
+export type {
+  McpClientOptions,
+  McpConnectionState,
+  McpServerStatus,
+  McpResourceRef,
+  McpResourceContent,
+  McpResourceTemplateRef,
+} from "./mcp/client.js"
 export { createMcpTransport, effectiveUrlTransport } from "./mcp/transport-factory.js"
 export { resolveBundledMcpServers } from "./mcp/resolve-bundled.js"
 export type { ResolveBundledOptions } from "./mcp/resolve-bundled.js"

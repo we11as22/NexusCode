@@ -227,6 +227,52 @@ it("marks a rejected approval and does not execute", async () => {
   expect(executed).toBe(false)
 })
 
+it("preserves rich tool attachments through the shared execution pipeline", async () => {
+  const context = createContext([])
+  const result = await executeToolPipeline(
+    {
+      callId: "rich",
+      messageId: "message",
+      partId: "part_rich",
+      toolName: "Rich",
+      input: {},
+      origin: "mcp",
+    },
+    {
+      tools: [{
+        name: "Rich",
+        description: "rich result",
+        parameters: z.object({}),
+        readOnly: true,
+        async execute() {
+          return {
+            success: true,
+            output: "[image]",
+            attachments: [{
+              type: "image",
+              content: "aGVsbG8=",
+              mimeType: "image/png",
+            }],
+          }
+        },
+      }],
+      context,
+      autoApproveActions: new Set(["read"]),
+      mode: "agent",
+      mcpToolNames: new Set(),
+      async hookRunner() {
+        return []
+      },
+    },
+  )
+
+  expect(result.attachments).toEqual([{
+    type: "image",
+    content: "aGVsbG8=",
+    mimeType: "image/png",
+  }])
+})
+
 it("respects disabled automatic skill loading", async () => {
   const cwd = process.cwd()
   const context: ToolContext = {

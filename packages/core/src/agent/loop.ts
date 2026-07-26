@@ -255,15 +255,17 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   ).catch(() => [])
   await recordPluginHookOutputs(session, host, "user-prompt-submit-hook", promptSubmitHookResults)
 
-  // Build MCP server list from dynamic tools (name format: "serverName__toolName"). Custom tools have no "__".
+  // Build MCP server list from explicit provenance. Tool names are user-controlled,
+  // so delimiters are not a reliable ownership boundary.
   const serverToTools = new Map<string, ToolDef[]>()
   const customDynamicTools: ToolDef[] = []
   for (const t of dynamicTools) {
-    const sep = t.name.indexOf("__")
-    if (sep === -1) {
+    const server = t.integration?.kind === "mcp"
+      ? t.integration.serverName
+      : undefined
+    if (!server) {
       customDynamicTools.push(t)
     } else {
-      const server = t.name.slice(0, sep)
       if (!serverToTools.has(server)) serverToTools.set(server, [])
       serverToTools.get(server)!.push(t)
     }
@@ -335,7 +337,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
 
   const resolvedTools = [...builtinTools, ...resolvedDynamicTools, ...blockedFallbackTools]
-  const mcpToolNames = new Set(resolvedDynamicTools.filter(t => t.name.includes("__")).map(t => t.name))
+  const mcpToolNames = new Set(
+    resolvedDynamicTools
+      .filter((tool) => tool.integration?.kind === "mcp")
+      .map((tool) => tool.name),
+  )
 
   const skillToolDescription = await buildSkillToolDescriptionMerged(host.cwd, config).catch(() => useSkillTool.description)
   const deferredTools = resolvedTools.filter((tool) => tool.shouldDefer && !tool.alwaysLoad)
@@ -832,7 +838,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
       const tasks = pendingReads.map(tc =>
         runToolPipeline(tc.toolCallId, tc.toolName, tc.toolInput, newMessageId, "parallel")
-          .catch(err => ({ success: false, output: `Error: ${err.message}`, metadata: undefined }))
+          .catch(err => ({
+            success: false,
+            output: `Error: ${err.message}`,
+            attachments: undefined,
+            metadata: undefined,
+          }))
       )
 
       const results = await Promise.all(tasks)
@@ -847,6 +858,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         session.updateToolPart(newMessageId, partId, {
           status: result.success ? "completed" : "error",
           output: result.output,
+          attachments: result.attachments,
           timeEnd: Date.now(),
           ...(spillFlush ? { outputSpillPath: spillFlush } : {}),
         })
@@ -859,6 +871,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           success: result.success,
           output: result.output,
           error: result.success ? undefined : result.output,
+          attachments: result.attachments,
           metadata: result.metadata,
         })
         if (tc.toolName === "TodoWrite") {
@@ -1127,6 +1140,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               session.updateToolPart(newMessageId, partId, {
                 status: result.success ? "completed" : "error",
                 output: result.output,
+                attachments: result.attachments,
                 timeEnd: Date.now(),
                 ...(spillLoop ? { outputSpillPath: spillLoop } : {}),
                 ...(result.success && (toolName === "Write" || toolName === "Edit")
@@ -1150,6 +1164,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 success: result.success,
                 output: result.output,
                 error: result.success ? undefined : result.output,
+                attachments: result.attachments,
                 compacted: (result as { compacted?: boolean }).compacted,
                 metadata: result.metadata,
                 ...(result.success && (toolName === "Write" || toolName === "Edit")
@@ -1337,6 +1352,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           session.updateToolPart(newMessageId, partId, {
             status: result.success ? "completed" : "error",
             output: result.output,
+            attachments: result.attachments,
             timeEnd: Date.now(),
             ...(spillTextual ? { outputSpillPath: spillTextual } : {}),
             ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
@@ -1360,6 +1376,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             success: result.success,
             output: result.output,
             error: result.success ? undefined : result.output,
+            attachments: result.attachments,
             compacted: (result as { compacted?: boolean }).compacted,
             metadata: result.metadata,
             ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")

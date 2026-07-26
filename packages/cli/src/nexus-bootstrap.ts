@@ -289,10 +289,18 @@ export async function bootstrapNexus(opts: {
   const mcpClient = new McpClient()
 
   const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, config)
+  for (const diagnostic of pluginMcp.diagnostics) {
+    console.warn(`[nexus] plugin MCP ${diagnostic.pluginName}: ${diagnostic.message}`)
+  }
   if (pluginMcp.servers.length > 0) {
     process.env.CLAUDE_PROJECT_DIR = cwd
     const resolved = resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
-    await mcpClient.connectAll(resolved).catch(() => {})
+    const statuses = await mcpClient.connectAll(resolved)
+    for (const status of Object.values(statuses)) {
+      if (status.state !== "connected" && status.state !== "disabled") {
+        console.warn(`[nexus] MCP ${status.name}: ${status.error ?? status.state}`)
+      }
+    }
     for (const tool of mcpClient.getTools()) {
       toolRegistry.registerDynamicOrThrow(tool, "MCP")
     }

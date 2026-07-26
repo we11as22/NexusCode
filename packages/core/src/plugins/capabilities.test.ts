@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -8,6 +8,7 @@ import { loadAgentDefinitions } from "../orchestration/agents.js"
 import { loadSkills } from "../skills/manager.js"
 import type { NexusConfig } from "../types.js"
 import {
+  loadPluginMcpServers,
   resolveConfiguredAndPluginMcpServers,
 } from "./capabilities.js"
 import { validatePluginManifestFile } from "./index.js"
@@ -89,7 +90,11 @@ describe("trusted plugin capabilities", () => {
     await writeJson(manifestPath, { name: "demo", mcpServers: "./mcp.json" })
     await writeJson(path.join(pluginRoot, "mcp.json"), {
       mcpServers: {
-        valid: { command: "node", args: ["server.js"] },
+        valid: {
+          command: "node",
+          args: ["${CLAUDE_PLUGIN_ROOT}/server.js"],
+          env: { PLUGIN_HOME: "${CODEX_PLUGIN_ROOT}" },
+        },
         broken: { args: ["missing-command-and-url"] },
       },
     })
@@ -97,6 +102,14 @@ describe("trusted plugin capabilities", () => {
       plugins: { trusted: ["demo"] },
       mcp: { servers: [{ name: "valid", url: "https://override.test/mcp", transport: "http" }] },
     }) as NexusConfig
+
+    const contributed = await loadPluginMcpServers(root, configured)
+    const canonicalPluginRoot = await realpath(pluginRoot)
+    expect(contributed.servers.find((server) => server.name === "valid")).toMatchObject({
+      args: [path.join(canonicalPluginRoot, "server.js")],
+      env: { PLUGIN_HOME: canonicalPluginRoot },
+      cwd: canonicalPluginRoot,
+    })
 
     const result = await resolveConfiguredAndPluginMcpServers(root, configured)
     expect(result.servers).toEqual([

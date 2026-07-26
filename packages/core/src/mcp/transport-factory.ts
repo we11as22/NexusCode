@@ -33,7 +33,10 @@ export function createMcpTransport(config: McpServerConfig): Transport {
 
   if (config.command) {
     const baseEnv = getDefaultEnvironment() as Record<string, string>
-    const env = { ...baseEnv, ...process.env, ...(config.env ?? {}) } as Record<string, string>
+    // Do not forward the entire parent environment: it commonly contains API
+    // keys unrelated to this server. The SDK allowlist plus explicit config is
+    // the capability boundary.
+    const env = { ...baseEnv, ...(config.env ?? {}) }
     return new StdioClientTransport({
       command: config.command,
       args: config.args ?? [],

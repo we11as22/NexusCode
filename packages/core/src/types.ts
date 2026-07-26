@@ -48,6 +48,12 @@ export interface ToolDef<TArgs = Record<string, unknown>> {
   alwaysLoad?: boolean
   /** If true, can be executed in parallel with other read-only tools */
   readOnly?: boolean
+  /** Stable integration provenance; never infer ownership from a tool-name delimiter. */
+  integration?: {
+    kind: "mcp"
+    serverName: string
+    originalName: string
+  }
   /** Which modes this tool is available in. undefined = all modes */
   modes?: Mode[]
   /** If true, always show approval dialog */
@@ -376,6 +382,7 @@ export interface ToolPart {
   status: "pending" | "running" | "completed" | "error"
   input?: Record<string, unknown>
   output?: string
+  attachments?: ToolAttachment[]
   error?: string
   timeStart?: number
   timeEnd?: number
@@ -698,7 +705,7 @@ export type AgentEvent =
   | { type: "reasoning_delta"; delta: string; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "reasoning_end"; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
-  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>; metadata?: Record<string, unknown> }
+  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; attachments?: ToolAttachment[]; compacted?: boolean; path?: string; writtenContent?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>; metadata?: Record<string, unknown> }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string; parentPartId?: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown>; parentPartId?: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
@@ -994,6 +1001,10 @@ export interface McpServerConfig {
   /** Extra headers for SSE / Streamable HTTP (e.g. Authorization). */
   headers?: Record<string, string>
   enabled?: boolean
+  /** Maximum time allowed for transport initialization and initial capability discovery. */
+  startupTimeoutMs?: number
+  /** Maximum time allowed for a single MCP tool/resource request. */
+  toolTimeoutMs?: number
   /** Resolve to a bundled MCP server (e.g. "context-mode") when nexusRoot is set by host */
   bundle?: string
   auth?: {

@@ -1123,6 +1123,7 @@ export async function executeValidatedTool(
         return {
           success: result.success,
           output: truncated.content,
+          attachments: result.attachments,
           metadata: {
             ...result.metadata,
             truncated: true,
@@ -1133,7 +1134,12 @@ export async function executeValidatedTool(
       }
     }
 
-    return { success: result.success, output: result.output, metadata: result.metadata }
+    return {
+      success: result.success,
+      output: result.output,
+      attachments: result.attachments,
+      metadata: result.metadata,
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return { success: false, output: `Tool ${toolName} error: ${msg}` }
