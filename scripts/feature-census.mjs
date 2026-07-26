@@ -137,6 +137,12 @@ function settingConsumers(files, setting, manifestPath) {
   const keyAccess = new RegExp(
     `\\.(?:get|inspect|update)(?:<[^>]+>)?\\(\\s*["']${escapeRegex(key)}["']`,
   )
+  const explicitReaderAccess = new RegExp(
+    `\\bread(?:<[^>]+>)?\\(\\s*["']${escapeRegex(key)}["']`,
+  )
+  const explicitReaderWrapperAccess = new RegExp(
+    `\\b[A-Za-z_$][\\w$]*\\(\\s*read\\s*,\\s*["']${escapeRegex(key)}["']`,
+  )
   const namespaceAccess = namespace
     ? new RegExp(
         `getConfiguration\\(\\s*["']${escapeRegex(namespace)}["']\\s*\\)`,
@@ -147,6 +153,10 @@ function settingConsumers(files, setting, manifestPath) {
     if (relative === manifestPath || !relative.includes("/src/")) continue
     if (
       source.includes(setting) ||
+      ((source.includes("ExplicitSettingReader") ||
+        source.includes("applyExplicitConfigOverrides")) &&
+        (explicitReaderAccess.test(source) ||
+          explicitReaderWrapperAccess.test(source))) ||
       (namespaceAccess?.test(source) &&
         (keyAccess.test(source) ||
           source.includes(`"${key}"`) ||

@@ -45,12 +45,26 @@ async function fixture() {
         configuration: {
           properties: {
             "nexuscode.orphanSetting": { type: "boolean", default: false },
+            "nexuscode.adapterSetting": { type: "boolean", default: false },
+            "nexuscode.wrappedSetting": { type: "boolean", default: false },
           },
         },
       },
     }),
     "packages/cli/src/nexus-query.ts": "const rendered = 'other_event'",
     "packages/vscode/src/controller.ts": "const rendered = 'other_event'",
+    "packages/vscode/src/config-overrides.ts": `
+      export type ExplicitSettingReader = <T>(key: string) => T | undefined
+      function configuredBoolean(read: ExplicitSettingReader, key: string) {
+        return read<boolean>(key)
+      }
+      export function applyExplicitConfigOverrides(read: ExplicitSettingReader) {
+        return [
+          read<boolean>("adapterSetting"),
+          configuredBoolean(read, "wrappedSetting"),
+        ]
+      }
+    `,
     "packages/server/src/routes/session.ts": `
       const transport = 'ndjson'
       function getCwd(c) { return c.get("workspaceRoot") }
@@ -82,6 +96,14 @@ test("classifies linked evidence and static gaps without claiming runtime succes
     assert.equal(
       byFeature.get("setting:nexuscode.orphanSetting")?.status,
       "orphan-setting",
+    )
+    assert.equal(
+      byFeature.get("setting:nexuscode.adapterSetting")?.status,
+      "reachable-untested",
+    )
+    assert.equal(
+      byFeature.get("setting:nexuscode.wrappedSetting")?.status,
+      "reachable-untested",
     )
     assert.ok(byFeature.has("server-route:GET /session/:id"))
     assert.equal(byFeature.has("server-route:GET /sessionworkspaceRoot"), false)
