@@ -109,11 +109,12 @@ sessionRoutes.post("/:id/abort", async (c) => {
 sessionRoutes.post("/:id/run/:runId/approval", async (c) => {
   const sessionId = c.req.param("id")
   const runId = c.req.param("runId")
+  const cwd = getCwd(c)
   if (!SESSION_ID_PATTERN.test(runId)) {
     return c.json({ error: "Invalid run id" }, 400)
   }
   const run = getActiveRun(runId)
-  if (!run || run.sessionId !== sessionId || run.done) {
+  if (!run || run.sessionId !== sessionId || run.cwd !== cwd || run.done) {
     return c.json({ error: "Active run not found" }, 404)
   }
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>

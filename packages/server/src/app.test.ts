@@ -215,6 +215,52 @@ describe("server boundary", () => {
     await finishRun(created.id)
   })
 
+  it("rejects an approval submitted from a different allowed workspace", async () => {
+    const multiRootApp = createApp({
+      token,
+      allowedOrigins: [],
+      workspaceRoots: [root, outside],
+    })
+    const created = await createActiveRun(
+      "session_scoped_approval",
+      root,
+      "agent",
+      {
+        runId: "run_scoped_approval",
+        homeDir: path.join(path.dirname(root), ".nexus-test"),
+      },
+    )
+    const action = {
+      type: "execute" as const,
+      tool: "Bash",
+      description: "run tests",
+    }
+    appendRunEvent(created.id, {
+      type: "tool_approval_needed",
+      partId: "part_scoped_approval",
+      action,
+    })
+
+    const response = await multiRootApp.request(
+      "/session/session_scoped_approval/run/run_scoped_approval/approval",
+      {
+        method: "POST",
+        headers: {
+          ...authHeaders(outside),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          partId: "part_scoped_approval",
+          approved: true,
+        }),
+      },
+    )
+
+    expect(response.status).toBe(404)
+    created.abortController.abort()
+    await finishRun(created.id, "aborted")
+  })
+
   it("turns an explicit authenticated stop into a run abort", async () => {
     const created = await createActiveRun(
       "session_abort",
