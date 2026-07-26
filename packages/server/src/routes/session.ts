@@ -144,6 +144,13 @@ sessionRoutes.post("/:id/run/:runId/approval", async (c) => {
 sessionRoutes.delete("/:id", async (c) => {
   const cwd = getCwd(c)
   const id = c.req.param("id")
+  const activeRun = getLatestRunForSession(id, cwd)
+  if (activeRun && !activeRun.done) {
+    return c.json({
+      error: "Session has an active run; abort it before deleting",
+      runId: activeRun.id,
+    }, 409)
+  }
   const deleted = await fsDeleteSession(id, cwd)
   if (!deleted) return c.json({ error: "Session not found" }, 404)
   return c.json({ ok: true })

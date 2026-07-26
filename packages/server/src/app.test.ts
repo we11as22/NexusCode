@@ -283,4 +283,25 @@ describe("server boundary", () => {
     expect(created.abortController.signal.aborted).toBe(true)
     await finishRun(created.id, "aborted")
   })
+
+  it("does not delete a session while its agent run is still active", async () => {
+    const sessionId = "session_delete_guard"
+    const run = await createActiveRun(sessionId, root, "agent", {
+      runId: "run_delete_guard",
+      homeDir: path.join(path.dirname(root), ".nexus-test"),
+    })
+
+    const response = await app().request(`/session/${sessionId}`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    })
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      error: "Session has an active run; abort it before deleting",
+      runId: "run_delete_guard",
+    })
+    run.abortController.abort()
+    await finishRun(run.id, "aborted")
+  })
 })
