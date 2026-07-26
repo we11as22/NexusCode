@@ -26,6 +26,7 @@ const PROVIDER_OPTIONS: { id: ProviderConfig['provider']; label: string }[] = [
   { id: 'cohere', label: 'Cohere' },
   { id: 'togetherai', label: 'Together AI' },
   { id: 'perplexity', label: 'Perplexity' },
+  { id: 'minimax', label: 'MiniMax' },
   { id: 'azure', label: 'Azure OpenAI' },
   { id: 'bedrock', label: 'AWS Bedrock' },
 ]

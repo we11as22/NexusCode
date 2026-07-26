@@ -1,9 +1,11 @@
-import { createDeepInfra } from "@ai-sdk/deepinfra"
 import type { ProviderConfig } from "../types.js"
-import { BaseLLMClient } from "./base.js"
+import { createNamedOpenAICompatibleClient } from "./openai-compatible.js"
 
 export function createDeepInfraClient(config: ProviderConfig) {
-  const apiKey = config.apiKey ?? process.env["DEEPINFRA_API_KEY"] ?? ""
-  const deepinfra = createDeepInfra({ apiKey })
-  return new BaseLLMClient(deepinfra(config.id) as any, "deepinfra", config.id)
+  return createNamedOpenAICompatibleClient(
+    config,
+    "deepinfra",
+    "https://api.deepinfra.com/v1/openai",
+    ["DEEPINFRA_API_KEY"],
+  )
 }

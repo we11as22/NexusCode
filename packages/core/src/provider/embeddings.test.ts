@@ -15,6 +15,7 @@ function embedding(
 
 afterEach(() => {
   vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
 })
 
 beforeEach(() => {
@@ -74,5 +75,44 @@ describe("offline local embeddings", () => {
     expect(first).toHaveLength(128)
     expect(norm(first)).toBeCloseTo(1, 8)
     expect(similarity(first, related)).toBeGreaterThan(similarity(first, unrelated))
+  })
+})
+
+describe("embedding SDK compatibility", () => {
+  it("uses the AI SDK v4-compatible OpenAI protocol for Mistral embeddings", async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request) => new Response(JSON.stringify({
+      data: [{ embedding: [0.25, 0.75], index: 0 }],
+      usage: { prompt_tokens: 2, total_tokens: 2 },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    const client = createEmbeddingClient(embedding("mistral", {
+      apiKey: "test-key",
+      model: "mistral-embed",
+      dimensions: 2,
+    }))
+    await expect(client.embed(["hello"])).resolves.toEqual([[0.25, 0.75]])
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("api.mistral.ai/v1/embeddings")
+  })
+
+  it("normalizes a bare Ollama URL to the v1 embeddings endpoint", async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request) => new Response(JSON.stringify({
+      data: [{ embedding: [1], index: 0 }],
+      usage: { prompt_tokens: 1, total_tokens: 1 },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    const client = createEmbeddingClient(embedding("ollama", {
+      baseUrl: "http://localhost:11434/",
+      dimensions: 1,
+    }))
+    await expect(client.embed(["hello"])).resolves.toEqual([[1]])
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("http://localhost:11434/v1/embeddings")
   })
 })

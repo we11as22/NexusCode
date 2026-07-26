@@ -312,7 +312,7 @@
         "nexuscode.embeddingsProvider": {
           "type": "string",
           "default": "",
-          "description": "Embeddings provider (openai, openai-compatible, ollama, local)"
+          "description": "Embeddings provider (openai, openai-compatible, openrouter, ollama, google, mistral, bedrock, local)"
         },
         "nexuscode.embeddingsModel": {
           "type": "string",

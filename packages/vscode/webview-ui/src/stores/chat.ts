@@ -96,7 +96,7 @@ export interface NexusConfigState {
     contextWindow?: number
   }
   embeddings?: {
-    provider: "openai" | "openai-compatible" | "ollama" | "local"
+    provider: "openai" | "openai-compatible" | "openrouter" | "ollama" | "google" | "mistral" | "bedrock" | "local"
     model: string
     baseUrl?: string
     apiKey?: string

@@ -440,6 +440,7 @@ export class Controller {
   private initPromise?: Promise<void>
   /** Started in ensureInitialized (not awaited there); runAgent awaits it so MCP is ready before first run. */
   private mcpReconnectPromise: Promise<void> | null = null
+  private mcpConfigFingerprint: string | null = null
   private modelsCatalogCache: import("@nexuscode/core").ModelsCatalog | null = null
   private indexStatusUnsubscribe?: () => void
   private indexerFileWatcher?: vscode.Disposable
@@ -969,6 +970,7 @@ export class Controller {
     this.cwdOverride = canonicalProjectRoot(cwd)
     this.checkpoint = undefined
     this.indexer = undefined
+    this.mcpConfigFingerprint = null
     this.sendIndexStatus()
     this.postStateToWebview()
     void this.reconnectMcpServers().catch((err: unknown) => {
@@ -2115,8 +2117,14 @@ export class Controller {
             this.postStateToWebview()
             break
           default: {
-            const compat = this.config ? getClaudeCompatibilityOptions(this.config) : undefined
-            const loaded = await loadSlashCommands(cwd, compat, this.config)
+            const liveConfig = await loadConfig(cwd, { secrets: this.secretsStore })
+              .catch(() => this.config)
+            if (liveConfig) {
+              this.applyVscodeOverrides(liveConfig)
+              this.config = liveConfig
+            }
+            const compat = liveConfig ? getClaudeCompatibilityOptions(liveConfig) : undefined
+            const loaded = await loadSlashCommands(cwd, compat, liveConfig)
             const resolved = resolveSlashCommand(loaded, name)
             if (resolved.status === "resolved") {
               await this.runAgent(renderSlashCommandPrompt(resolved.command, args), this.mode)
@@ -2272,17 +2280,7 @@ export class Controller {
 
   private resolveConfigForPreset(base: NexusConfig, presetName: string): NexusConfig {
     const trimmed = presetName.trim() || "Default"
-    if (trimmed === "Default") {
-      const snap = this.initialFullConfigSnapshot
-      if (!snap) return base
-      return {
-        ...base,
-        indexing: { ...base.indexing, ...snap.indexing },
-        skills: snap.skills,
-        mcp: { servers: [...snap.mcp.servers] },
-        rules: { files: snap.rules.files.length > 0 ? [...snap.rules.files] : ["NEXUS.md", "AGENTS.md", "CLAUDE.md"] },
-      }
-    }
+    if (trimmed === "Default") return base
     // NOTE: preset lookup is async; this function expects caller to already resolve selected preset if needed.
     return base
   }
@@ -2536,6 +2534,13 @@ export class Controller {
     if (/^\/compact(\s|$)/i.test(trimmedInput)) {
       await this.compactHistory()
       return
+    }
+
+    const liveConfig = await loadConfig(this.getCwd(), { secrets: this.secretsStore })
+      .catch(() => undefined)
+    if (liveConfig) {
+      this.applyVscodeOverrides(liveConfig)
+      this.config = liveConfig
     }
 
     const reviewCommand = /^\/review(\s|$)/i.test(trimmedInput)
@@ -2811,12 +2816,13 @@ Return in this format:
       // MCP (started in ensureInitialized), rules, skills in parallel so first message is faster.
       // Cap MCP wait so first message is not blocked when vector is off or MCP servers are slow.
       const MCP_FIRST_MESSAGE_TIMEOUT_MS = 2500
-      const mcpP = this.mcpReconnectPromise
-        ? Promise.race([
-            this.mcpReconnectPromise,
-            new Promise<void>((r) => setTimeout(r, MCP_FIRST_MESSAGE_TIMEOUT_MS)),
-          ])
-        : Promise.resolve()
+      const mcpP = Promise.race([
+        (async () => {
+          await this.mcpReconnectPromise
+          await this.reconnectMcpServers(configForRun)
+        })(),
+        new Promise<void>((r) => setTimeout(r, MCP_FIRST_MESSAGE_TIMEOUT_MS)),
+      ])
       const claudeCompatibility = getClaudeCompatibilityOptions(configForRun)
       const rulesP = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, claudeCompatibility)
       const skillsP = loadSkills(
@@ -2837,9 +2843,10 @@ Return in this format:
 
       const client = createLLMClient(configForRun.model)
       const toolRegistry = new ToolRegistry()
+      const configuredAndPluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, configForRun)
       const allowedMcpServers = new Set(
-        (configForRun.mcp?.servers ?? [])
-          .map((s) => (s as McpServerConfig).name)
+        configuredAndPluginMcp.servers
+          .map((s) => s.name)
           .filter((n): n is string => typeof n === "string" && n.trim().length > 0),
       )
       if (this.mcpClient && allowedMcpServers.size > 0) {
@@ -2948,24 +2955,37 @@ Return in this format:
     }
   }
 
-  private async getResolvedMcpServers(): Promise<McpServerConfig[]> {
-    if (!this.config) return []
+  private async getResolvedMcpServers(config = this.config): Promise<McpServerConfig[]> {
+    if (!config) return []
     const cwd = this.getCwd()
     const nexusRoot = this.getNexusRoot()
-    const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, this.config)
+    const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, config)
     return resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot })
   }
 
-  private async reconnectMcpServers(): Promise<void> {
-    if (!this.config) return
+  private async reconnectMcpServers(config = this.config): Promise<void> {
+    if (!config) return
+    const resolved = await this.getResolvedMcpServers(config)
+    const fingerprint = JSON.stringify(resolved)
+    const currentStatuses = this.mcpClient?.getServerStatuses() ?? {}
+    const healthy =
+      Object.keys(currentStatuses).length === resolved.length &&
+      Object.values(currentStatuses).every(
+        (status) => status.state === "connected" || status.state === "disabled",
+      )
+    if (this.mcpClient && this.mcpConfigFingerprint === fingerprint && healthy) return
     if (!this.mcpClient) {
       this.mcpClient = new McpClient()
     }
-    await this.mcpClient.disconnectAll().catch(() => {})
-    const resolved = await this.getResolvedMcpServers()
-    if (resolved.length === 0) return
+    if (resolved.length === 0) {
+      await this.mcpClient.connectAll([])
+      this.mcpConfigFingerprint = fingerprint
+      return
+    }
     process.env.CLAUDE_PROJECT_DIR = this.getCwd()
-    await this.mcpClient.connectAll(resolved).catch((err: unknown) => {
+    await this.mcpClient.connectAll(resolved).then(() => {
+      this.mcpConfigFingerprint = fingerprint
+    }).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err)
       this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
     })
@@ -3427,6 +3447,7 @@ Return in this format:
     this.indexer = undefined
     this.mcpClient?.disconnectAll().catch(() => {})
     this.mcpClient = undefined
+    this.mcpConfigFingerprint = null
     for (const d of this.disposables) {
       d.dispose()
     }

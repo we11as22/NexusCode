@@ -1,9 +1,11 @@
-import { createMistral } from "@ai-sdk/mistral"
 import type { ProviderConfig } from "../types.js"
-import { BaseLLMClient } from "./base.js"
+import { createNamedOpenAICompatibleClient } from "./openai-compatible.js"
 
 export function createMistralClient(config: ProviderConfig) {
-  const apiKey = config.apiKey ?? process.env["MISTRAL_API_KEY"] ?? ""
-  const mistral = createMistral({ apiKey, baseURL: config.baseUrl })
-  return new BaseLLMClient(mistral(config.id) as any, "mistral", config.id)
+  return createNamedOpenAICompatibleClient(
+    config,
+    "mistral",
+    "https://api.mistral.ai/v1",
+    ["MISTRAL_API_KEY"],
+  )
 }

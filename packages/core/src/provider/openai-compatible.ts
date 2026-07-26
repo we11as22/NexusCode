@@ -58,10 +58,47 @@ export function createOllamaClient(config: ProviderConfig) {
   const provider = createOpenAICompatible({
     name: "ollama",
     apiKey: "ollama",
-    baseURL: config.baseUrl ?? "http://localhost:11434/v1",
+    baseURL: normalizeOllamaBaseUrl(config.baseUrl),
   })
   const model = provider.chatModel(config.id)
   return new BaseLLMClient(model as any, "ollama", config.id)
+}
+
+function normalizeOllamaBaseUrl(baseUrl: string | undefined): string {
+  const value = (baseUrl ?? "http://localhost:11434/v1").trim().replace(/\/+$/, "")
+  return /\/v1$/i.test(value) ? value : `${value}/v1`
+}
+
+/**
+ * Keep OpenAI-compatible services on the same LanguageModelV1 protocol as the
+ * Nexus AI SDK v4 runtime. Several latest provider packages expose only v3
+ * models, which compile behind `as any` but fail at the first stream call.
+ */
+export function createNamedOpenAICompatibleClient(
+  config: ProviderConfig,
+  providerName: string,
+  defaultBaseUrl: string,
+  apiKeyEnvNames: string[],
+) {
+  const apiKey =
+    config.apiKey ??
+    apiKeyEnvNames.map((name) => process.env[name]).find((value) => value?.trim()) ??
+    ""
+  const extraHeaders = config.extra?.["headers"]
+  const headers =
+    extraHeaders && typeof extraHeaders === "object" && !Array.isArray(extraHeaders)
+      ? Object.fromEntries(
+          Object.entries(extraHeaders)
+            .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+        )
+      : undefined
+  const provider = createOpenAICompatible({
+    name: providerName,
+    apiKey,
+    baseURL: config.baseUrl ?? defaultBaseUrl,
+    headers,
+  })
+  return new BaseLLMClient(provider.chatModel(config.id) as any, providerName, config.id)
 }
 
 function detectProviderFromUrl(baseUrl: string): string {
@@ -76,7 +113,12 @@ function detectProviderFromUrl(baseUrl: string): string {
   if (url.includes("perplexity")) return "perplexity"
   if (url.includes("deepseek")) return "deepseek"
   if (url.includes("x.ai") || url.includes("xai")) return "xai"
-  if (url.includes("localhost") || url.includes("127.0.0.1")) return "local"
+  if (
+    url.includes("localhost") ||
+    url.includes("127.0.0.1") ||
+    url.includes("[::1]") ||
+    url.includes("0.0.0.0")
+  ) return "local"
   return "openai-compatible"
 }
 
@@ -85,6 +127,8 @@ function isApiKeyOptionalBaseUrl(baseUrl: string): boolean {
   return (
     url.includes("localhost") ||
     url.includes("127.0.0.1") ||
+    url.includes("[::1]") ||
+    url.includes("0.0.0.0") ||
     url.includes("api.kilo.ai/api/")
   )
 }

@@ -10,7 +10,6 @@ export default defineConfig({
   external: [
     "web-tree-sitter",
     "vscode",
-    "@xenova/transformers",
     "puppeteer",
     "node:fs",
     "node:path",

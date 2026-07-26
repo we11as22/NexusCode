@@ -1,7 +1,6 @@
 import { embedMany } from "ai"
 import { createOpenAI } from "@ai-sdk/openai"
 import { createGoogleGenerativeAI } from "@ai-sdk/google"
-import { createMistral } from "@ai-sdk/mistral"
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock"
 import type { EmbeddingConfig } from "../types.js"
 import type { EmbeddingClient } from "./types.js"
@@ -143,7 +142,7 @@ class OllamaEmbeddingClient implements EmbeddingClient {
   constructor(config: EmbeddingConfig) {
     const openai = createOpenAI({
       apiKey: "ollama",
-      baseURL: config.baseUrl ?? "http://localhost:11434/v1",
+      baseURL: normalizeOllamaBaseUrl(config.baseUrl),
       compatibility: "compatible",
     })
     this.model = openai.embedding(config.model)
@@ -154,6 +153,11 @@ class OllamaEmbeddingClient implements EmbeddingClient {
     const result = await embedMany({ model: this.model, values: texts })
     return result.embeddings
   }
+}
+
+function normalizeOllamaBaseUrl(baseUrl: string | undefined): string {
+  const value = (baseUrl ?? "http://localhost:11434/v1").trim().replace(/\/+$/, "")
+  return /\/v1$/i.test(value) ? value : `${value}/v1`
 }
 
 class GoogleEmbeddingClient implements EmbeddingClient {
@@ -180,24 +184,25 @@ class GoogleEmbeddingClient implements EmbeddingClient {
 }
 
 class MistralEmbeddingClient implements EmbeddingClient {
-  private model: ReturnType<ReturnType<typeof createMistral>["embedding"]>
+  private model: ReturnType<ReturnType<typeof createOpenAI>["embedding"]>
   readonly dimensions: number
 
   constructor(config: EmbeddingConfig) {
-    const mistral = createMistral({
+    const mistral = createOpenAI({
       apiKey:
         config.apiKey ??
         process.env["MISTRAL_API_KEY"] ??
         process.env["NEXUS_API_KEY"] ??
         "",
+      baseURL: config.baseUrl ?? "https://api.mistral.ai/v1",
+      compatibility: "compatible",
     })
     this.model = mistral.embedding(config.model)
     this.dimensions = config.dimensions ?? 1024
   }
 
   async embed(texts: string[]): Promise<number[][]> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await embedMany({ model: this.model as any, values: texts })
+    const result = await embedMany({ model: this.model, values: texts })
     return result.embeddings
   }
 }

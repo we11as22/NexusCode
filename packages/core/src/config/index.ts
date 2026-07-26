@@ -217,7 +217,7 @@ const PROVIDER_API_KEY_ENV: Record<string, string[]> = {
   anthropic:    ["ANTHROPIC_API_KEY"],
   openai:       ["OPENAI_API_KEY"],
   "openai-compatible": ["OPENAI_API_KEY", "OPENROUTER_API_KEY"],
-  google:       ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+  google:       ["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
   openrouter:   ["OPENROUTER_API_KEY"],
   azure:        ["AZURE_OPENAI_API_KEY"],
   bedrock:      ["AWS_ACCESS_KEY_ID"],

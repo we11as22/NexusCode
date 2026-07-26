@@ -1,9 +1,11 @@
-import { createCerebras } from "@ai-sdk/cerebras"
 import type { ProviderConfig } from "../types.js"
-import { BaseLLMClient } from "./base.js"
+import { createNamedOpenAICompatibleClient } from "./openai-compatible.js"
 
 export function createCerebrasClient(config: ProviderConfig) {
-  const apiKey = config.apiKey ?? process.env["CEREBRAS_API_KEY"] ?? ""
-  const cerebras = createCerebras({ apiKey })
-  return new BaseLLMClient(cerebras(config.id) as any, "cerebras", config.id)
+  return createNamedOpenAICompatibleClient(
+    config,
+    "cerebras",
+    "https://api.cerebras.ai/v1",
+    ["CEREBRAS_API_KEY"],
+  )
 }

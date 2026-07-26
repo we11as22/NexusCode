@@ -1,9 +1,11 @@
-import { createGroq } from "@ai-sdk/groq"
 import type { ProviderConfig } from "../types.js"
-import { BaseLLMClient } from "./base.js"
+import { createNamedOpenAICompatibleClient } from "./openai-compatible.js"
 
 export function createGroqClient(config: ProviderConfig) {
-  const apiKey = config.apiKey ?? process.env["GROQ_API_KEY"] ?? ""
-  const groq = createGroq({ apiKey })
-  return new BaseLLMClient(groq(config.id) as any, "groq", config.id)
+  return createNamedOpenAICompatibleClient(
+    config,
+    "groq",
+    "https://api.groq.com/openai/v1",
+    ["GROQ_API_KEY"],
+  )
 }

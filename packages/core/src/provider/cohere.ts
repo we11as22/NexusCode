@@ -1,9 +1,11 @@
-import { createCohere } from "@ai-sdk/cohere"
 import type { ProviderConfig } from "../types.js"
-import { BaseLLMClient } from "./base.js"
+import { createNamedOpenAICompatibleClient } from "./openai-compatible.js"
 
 export function createCohereClient(config: ProviderConfig) {
-  const apiKey = config.apiKey ?? process.env["COHERE_API_KEY"] ?? ""
-  const cohere = createCohere({ apiKey })
-  return new BaseLLMClient(cohere(config.id) as any, "cohere", config.id)
+  return createNamedOpenAICompatibleClient(
+    config,
+    "cohere",
+    "https://api.cohere.com/compatibility/v1",
+    ["COHERE_API_KEY"],
+  )
 }

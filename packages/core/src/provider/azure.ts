@@ -3,9 +3,14 @@ import type { ProviderConfig } from "../types.js"
 import { BaseLLMClient } from "./base.js"
 
 export function createAzureClient(config: ProviderConfig) {
-  const apiKey = config.apiKey ?? process.env["AZURE_API_KEY"] ?? ""
+  const apiKey =
+    config.apiKey ??
+    process.env["AZURE_OPENAI_API_KEY"] ??
+    process.env["AZURE_API_KEY"] ??
+    ""
   const azure = createAzure({
     apiKey,
+    baseURL: config.baseUrl,
     resourceName: config.resourceName ?? "",
     apiVersion: config.apiVersion ?? "2025-01-01-preview",
   })
