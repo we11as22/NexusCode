@@ -1,6 +1,7 @@
 import { z } from "zod"
 import { formatToolValidationError, normalizeToolInputForParse } from "../../agent/tool-execution.js"
 import type { ToolDef, ToolContext, UserQuestionRequest, UserQuestionItem } from "../../types.js"
+import { canonicalizeToolName, resolveToolNameAlias } from "../aliases.js"
 import {
   buildUserQuestionOptionsFromRows,
   coerceQuestionOptionRows,
@@ -45,60 +46,14 @@ type ParallelResult = {
   output: string
 }
 
-const ALIAS_TO_TOOL: Record<string, string> = {
-  readfile: "Read",
-  listdir: "List",
-  listdirectory: "List",
-  listdefinitions: "ListCodeDefinitions",
-  readlints: "ReadLints",
-  writefile: "Write",
-  writetofile: "Write",
-  editfile: "Edit",
-  replaceinfile: "Edit",
-  executecommand: "Bash",
-  runterminalcmd: "Bash",
-  grepsearch: "Grep",
-  filesearch: "Glob",
-  globfilesearch: "Glob",
-  codebasesearch: "CodebaseSearch",
-  webfetch: "WebFetch",
-  websearch: "WebSearch",
-  todowrite: "TodoWrite",
-  askfollowupquestion: "AskFollowupQuestion",
-  spawnagent: "SpawnAgent",
-  spawnagents: "SpawnAgent",
-  spawnagentoutput: "SpawnAgentOutput",
-  spawnagentstop: "SpawnAgentStop",
-  taskcreate: "TaskCreate",
-  taskcreatebatch: "TaskCreateBatch",
-}
-
-function canonicalizeToolName(name: string): string {
-  return name.trim().toLowerCase().replace(/[^a-z0-9]/g, "")
-}
-
-function normalizeRecipientName(rawName: string): string {
-  const trimmed = rawName.trim()
-  if (!trimmed) return trimmed
-  const lower = trimmed.toLowerCase()
-  const prefixes = ["functions.", "function.", "multi_tool_use.", "tools.", "tool."]
-  const match = prefixes.find((prefix) => lower.startsWith(prefix))
-  if (match) return trimmed.slice(match.length)
-  return trimmed
-}
-
 function resolveTool(
   use: ParallelToolUse,
   byExactName: Map<string, ToolDef>,
   byCanonicalName: Map<string, ToolDef>,
 ): ToolDef | undefined {
-  const normalized = normalizeRecipientName(use.recipient_name)
-  const exact = byExactName.get(normalized)
-  if (exact) return exact
-  const canonical = canonicalizeToolName(normalized)
-  const aliasedName = ALIAS_TO_TOOL[canonical]
-  if (aliasedName && byExactName.has(aliasedName)) return byExactName.get(aliasedName)
-  return byCanonicalName.get(canonical)
+  const resolved = resolveToolNameAlias(use.recipient_name, byExactName.keys())
+  return byExactName.get(resolved)
+    ?? byCanonicalName.get(canonicalizeToolName(resolved))
 }
 
 export const parallelTool: ToolDef<z.infer<typeof schema>> = {

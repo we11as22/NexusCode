@@ -7,6 +7,25 @@ import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticIte
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
 
+export interface NonInteractiveApprovalPolicy {
+  read?: boolean
+}
+
+export function resolveNonInteractiveApproval(
+  action: ApprovalAction,
+  policy: NonInteractiveApprovalPolicy,
+): PermissionResult {
+  return {
+    approved: action.type === "read" && policy.read === true,
+  }
+}
+
+export function shouldAutoApprovePrint(
+  dangerouslySkipPermissions: boolean | undefined,
+): boolean {
+  return dangerouslySkipPermissions === true
+}
+
 /**
  * CLI host adapter — terminal-based approvals, output, and security guards.
  * When tuiApprovalRef is provided, showApprovalDialog does NOT use readline (TUI handles input).
@@ -18,6 +37,7 @@ export class CliHost implements IHost {
   /** When set, approval is resolved via this ref (TUI mode — no readline). */
   private tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
   private alwaysApproved = new Set<string>()
+  private nonInteractiveDiagnosticEmitted = false
   private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
   /** File edits from the current assistant turn (path → originalContent + isNewFile). Cleared on next assistant_message_started. */
   private turnFileEdits: Array<{ path: string; originalContent: string; isNewFile: boolean }> = []
@@ -28,7 +48,8 @@ export class CliHost implements IHost {
     cwd: string,
     onEvent: (event: AgentEvent) => void,
     autoApprove = false,
-    tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
+    tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null },
+    private readonly nonInteractivePolicy: NonInteractiveApprovalPolicy = {},
   ) {
     this.cwd = cwd
     this.eventEmitter = onEvent
@@ -86,6 +107,20 @@ export class CliHost implements IHost {
 
   async showApprovalDialog(action: ApprovalAction): Promise<PermissionResult> {
     if (this.autoApprove) return { approved: true }
+
+    if (!this.tuiApprovalRef && !process.stdin.isTTY) {
+      const result = resolveNonInteractiveApproval(
+        action,
+        this.nonInteractivePolicy,
+      )
+      if (!result.approved && !this.nonInteractiveDiagnosticEmitted) {
+        this.nonInteractiveDiagnosticEmitted = true
+        process.stderr.write(
+          "[nexus] Non-interactive mode denied a privileged action. Use an interactive terminal, or --dangerously-skip-permissions only inside its validated offline container.\n",
+        )
+      }
+      return result
+    }
 
     // Read ops always auto-approved in CLI
     if (action.type === "read") return { approved: true }
@@ -190,12 +225,6 @@ export class CliHost implements IHost {
         })
       })
 
-      // Non-TTY (CI/pipe) — default approve with warning
-      if (!process.stdin.isTTY) {
-        rl.close()
-        process.stderr.write("[nexus] Non-interactive mode: auto-approving all actions\n")
-        resolve({ approved: true })
-      }
     })
   }
 

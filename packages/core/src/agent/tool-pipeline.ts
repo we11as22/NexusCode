@@ -19,6 +19,7 @@ import {
   normalizeToolInputForParse,
   type CompletionState,
 } from "./tool-execution.js"
+import { resolveToolNameAlias } from "../tools/aliases.js"
 
 export type ToolExecutionOrigin =
   | "native"
@@ -74,19 +75,6 @@ export interface ToolExecutionOutcome extends ToolResult {
   afterHookResults?: PluginHookExecution[]
 }
 
-function resolveToolName(toolName: string): string {
-  if (
-    toolName === "list_dir" ||
-    toolName === "ListDirectory" ||
-    toolName === "list_directory"
-  ) {
-    return "List"
-  }
-  return toolName === "ask_followup_question"
-    ? "AskFollowupQuestion"
-    : toolName
-}
-
 function stopReason(results: PluginHookExecution[]): string | undefined {
   const stopped = results.find((result) => result.preventContinuation)
   return stopped?.stopReason?.trim() ||
@@ -105,7 +93,10 @@ export async function executeToolPipeline(
     completionState,
     onStage,
   } = environment
-  const resolvedToolName = resolveToolName(request.toolName)
+  const resolvedToolName = resolveToolNameAlias(
+    request.toolName,
+    environment.tools.map((tool) => tool.name),
+  )
   const tool = environment.tools.find(
     (candidate) => candidate.name === resolvedToolName,
   )
@@ -244,4 +235,3 @@ export async function executeToolPipeline(
     afterHookResults,
   }
 }
-

@@ -1,6 +1,7 @@
 import { MODES, type ToolDef, Mode, NexusConfig } from "../types.js"
 import { getBuiltinToolsForMode } from "../agent/modes.js"
 import { getAllBuiltinTools } from "./built-in/index.js"
+import { canonicalizeToolName, resolveToolNameAlias } from "./aliases.js"
 
 export type RegistrationResult =
   | { ok: true; replaced: false }
@@ -15,6 +16,7 @@ export class ToolRegistry {
   private tools: Map<string, ToolDef> = new Map()
   private static staticBuiltinNames: Set<string> | undefined
   private static reservedBuiltinNames: Set<string> | undefined
+  private static canonicalReservedBuiltinNames: Set<string> | undefined
 
   private static getStaticBuiltinNames(): Set<string> {
     if (!this.staticBuiltinNames) {
@@ -35,6 +37,18 @@ export class ToolRegistry {
     return this.reservedBuiltinNames
   }
 
+  private static isReservedBuiltinName(name: string): boolean {
+    const reserved = this.getReservedBuiltinNames()
+    const resolved = resolveToolNameAlias(name)
+    if (reserved.has(name) || reserved.has(resolved)) return true
+    if (!this.canonicalReservedBuiltinNames) {
+      this.canonicalReservedBuiltinNames = new Set(
+        Array.from(reserved, canonicalizeToolName),
+      )
+    }
+    return this.canonicalReservedBuiltinNames.has(canonicalizeToolName(name))
+  }
+
   constructor() {
     for (const tool of getAllBuiltinTools()) {
       this.tools.set(tool.name, tool)
@@ -42,7 +56,7 @@ export class ToolRegistry {
   }
 
   registerDynamic(tool: ToolDef): RegistrationResult {
-    if (ToolRegistry.getReservedBuiltinNames().has(tool.name)) {
+    if (ToolRegistry.isReservedBuiltinName(tool.name)) {
       return { ok: false, reason: "reserved-name" }
     }
     if (this.tools.has(tool.name)) {
@@ -112,14 +126,17 @@ export class ToolRegistry {
    */
   getForMode(mode: Mode): { builtin: ToolDef[]; dynamic: ToolDef[] } {
     const builtinNames = new Set(getBuiltinToolsForMode(mode))
+    const reservedBuiltinNames = ToolRegistry.getReservedBuiltinNames()
     const builtin: ToolDef[] = []
     const dynamic: ToolDef[] = []
 
     for (const tool of this.tools.values()) {
       if (tool.hiddenFromAgent) continue
-      if (builtinNames.has(tool.name)) {
+      if (reservedBuiltinNames.has(tool.name)) {
+        if (!builtinNames.has(tool.name)) continue
         builtin.push(tool)
       } else {
+        if (tool.modes && !tool.modes.includes(mode)) continue
         dynamic.push(tool)
       }
     }

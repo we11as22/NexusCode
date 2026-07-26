@@ -13,6 +13,7 @@ import { codebaseSearchTool } from "./codebase-search.js"
 import { webFetchTool, webSearchTool } from "./web-fetch.js"
 import { globFileSearchTool } from "./glob-file-search.js"
 import { useSkillTool } from "./use-skill.js"
+import { gitInspectTool } from "./git-inspect.js"
 import { condenseTool, planExitTool } from "./context-tools.js"
 import {
   askFollowupTool,
@@ -99,6 +100,7 @@ export function getAllBuiltinTools(): ToolDef[] {
     webFetchTool,
     webSearchTool,
     globFileSearchTool,
+    gitInspectTool,
     taskCreateTool,
     taskGetTool,
     taskListTool,
@@ -175,6 +177,7 @@ export {
   webFetchTool,
   webSearchTool,
   globFileSearchTool,
+  gitInspectTool,
   useSkillTool,
   askFollowupTool,
   todoWriteTool,

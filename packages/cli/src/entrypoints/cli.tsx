@@ -90,6 +90,7 @@ import { createNexusSkillsCommand } from '../commands/nexusSkills.js'
 import { createNexusMcpCommand } from '../commands/nexusMcp.js'
 import { createNexusSessionsCommand } from '../commands/nexusSessions.js'
 import { queryNexus } from '../nexus-query.js'
+import { shouldAutoApprovePrint } from '../host.js'
 import { Session } from '@nexuscode/core'
 import type { RenderOptionsWithFlicker } from '../utils/ink.js'
 import type { Command as SlashCommand } from '../commands.js'
@@ -112,6 +113,20 @@ async function showSetupScreens(
   }
 
   const config = getGlobalConfig()
+  if (print) {
+    if (!config.hasCompletedOnboarding) {
+      process.stderr.write(
+        '[nexus] Headless first run: using safe defaults; run nexus interactively to complete onboarding.\n',
+      )
+    }
+    if (!dangerouslySkipPermissions && !checkHasTrustDialogAccepted()) {
+      process.stderr.write(
+        '[nexus] Workspace trust has not been accepted; print mode is restricted to fail-closed, non-interactive permissions.\n',
+      )
+    }
+    return
+  }
+
   if (
     !config.theme ||
     !config.hasCompletedOnboarding // always show onboarding at least once
@@ -157,8 +172,7 @@ async function showSetupScreens(
     }
   }
 
-  // In non-interactive or dangerously-skip-permissions mode, skip the trust dialog
-  if (!print && !dangerouslySkipPermissions) {
+  if (!dangerouslySkipPermissions) {
     if (!checkHasTrustDialogAccepted()) {
       await new Promise<void>(resolve => {
         const onDone = () => {
@@ -190,6 +204,7 @@ function logStartup(): void {
 async function setup(
   cwd: string,
   dangerouslySkipPermissions?: boolean,
+  nonInteractive = false,
 ): Promise<void> {
   // Don't await so we don't block startup
   setCwd(cwd)
@@ -273,7 +288,7 @@ async function setup(
 
   // Check auto-updater permissions
   const autoUpdaterStatus = globalConfig.autoUpdaterStatus ?? 'not_configured'
-  if (autoUpdaterStatus === 'not_configured') {
+  if (autoUpdaterStatus === 'not_configured' && !nonInteractive) {
     logEvent('tengu_setup_auto_updater_not_configured', {})
     await new Promise<void>(resolve => {
       render(<Doctor onDone={() => resolve()} />)
@@ -376,7 +391,7 @@ ${commandList}`,
     .option('--server <url>', 'NexusCode server URL (e.g. http://127.0.0.1:4097); uses NEXUS_SERVER_URL env if set', String)
     .option('--continue', 'Continue most recent session', () => true)
     .option('--profile <name>', 'Named profile from nexus.yaml', String)
-    .option('--mode <mode>', 'Mode: agent | ask | plan | debug', 'agent')
+    .option('--mode <mode>', 'Mode: agent | ask | plan | debug | review', 'agent')
     .action(
       async (
         prompt,
@@ -405,6 +420,7 @@ ${commandList}`,
           modeOpt === 'ask' ||
           modeOpt === 'plan' ||
           modeOpt === 'debug' ||
+          modeOpt === 'review' ||
           modeOpt === 'agent'
             ? modeOpt
             : 'agent'
@@ -418,7 +434,7 @@ ${commandList}`,
           debug: debug?.toString() ?? 'false',
           print: print?.toString() ?? 'false',
         })
-        await setup(effectiveCwd, dangerouslySkipPermissions)
+        await setup(effectiveCwd, dangerouslySkipPermissions, Boolean(print))
 
         assertMinVersion()
 
@@ -458,7 +474,7 @@ ${commandList}`,
             userPrompt: inputPrompt,
             repoTools: tools,
             signal: AbortSignal.timeout(10 * 60 * 1000),
-            autoApprove: true,
+            autoApprove: shouldAutoApprovePrint(dangerouslySkipPermissions),
             modeOverride: mode,
           })) {
             if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'assistant') {

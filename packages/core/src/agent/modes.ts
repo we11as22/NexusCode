@@ -10,6 +10,7 @@ export type ToolGroup =
   | "agents"
   | "always"
   | "context"
+  | "git_inspect"
   | "plan_exit"
   /** Switch UI/session to plan mode (only where planning is not already the focus). */
   | "plan_enter"
@@ -24,7 +25,7 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
   plan: ["always", "read", "write", "search", "mcp", "skills", "agents", "context", "plan_exit"],
   ask: ["always", "read", "search", "mcp", "skills", "agents", "context"],
   debug: ["always", "plan_enter", "read", "write", "execute", "search", "mcp", "skills", "agents", "context"],
-  review: ["always", "read", "execute", "search", "mcp", "skills", "agents", "context"],
+  review: ["always", "read", "git_inspect", "search", "mcp", "skills", "agents", "context"],
 }
 
 /**
@@ -95,6 +96,10 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   review: [
     "Write",
     "Edit",
+    "Bash",
+    "PowerShell",
+    "EnterWorktree",
+    "ExitWorktree",
     "PlanExit",
     "ExitPlanMode",
     "EnterPlanMode",
@@ -153,6 +158,7 @@ export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   read:    ["Read", "List", "ListCodeDefinitions", "LSP", "ReadLints"],
   write:   ["Write", "Edit"],
   execute: ["Bash", "PowerShell", "EnterWorktree", "ExitWorktree"],
+  git_inspect: ["GitInspect"],
   search:  ["Grep", "CodebaseSearch", "WebFetch", "WebSearch", "Glob"],
   mcp:     ["ListMcpResources", "ReadMcpResource", "McpAuthenticate"],
   skills:  ["Skill"],
@@ -252,6 +258,7 @@ export const READ_ONLY_TOOLS = new Set([
   "ListMcpResources",
   "ReadMcpResource",
   "PlanVerifyExecution",
+  "GitInspect",
 ])
 
 /**
@@ -296,7 +303,7 @@ export function getModeToolPolicySummary(mode: Mode): string {
     case "debug":
       return "Same built-in surface as agent (incl. EnterPlanMode); use for diagnose-then-fix. PlanExit/ExitPlanMode disabled."
     case "review":
-      return "Read/search/shell (e.g. git), MCP, skills, Condense; inspect tasks/teams/remotes/plugins/plans (list/get/output/snapshot). No file edits, task create/resume/stop/update, memory writes, team mutations, plugin install, remote control, plan workflow mutations, RunPluginHook."
+      return "Read/search and validated read-only Git inspection, MCP, skills, Condense; inspect tasks/teams/remotes/plugins/plans (list/get/output/snapshot). No arbitrary shell, file edits, task create/resume/stop/update, memory writes, team mutations, plugin install, remote control, plan workflow mutations, RunPluginHook."
     default:
       return String(mode)
   }
@@ -346,5 +353,5 @@ export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   debug:
     "DEBUG mode: same tool palette as agent; diagnose first with evidence, then minimal fixes and re-verify. PlanExit/ExitPlanMode disabled.",
   review:
-    "REVIEW mode: audit only — read/search/shell for git, MCP, skills; inspect existing tasks/teams/remotes/plugins/plans without creating or mutating orchestration. No Write/Edit, no new tasks, no PlanExit/EnterPlanMode.",
+    "REVIEW mode: audit only — read/search and validated GitInspect, MCP, skills; inspect existing tasks/teams/remotes/plugins/plans without creating or mutating orchestration. No arbitrary shell, Write/Edit, new tasks, or PlanExit/EnterPlanMode.",
 }

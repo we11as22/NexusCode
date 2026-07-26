@@ -263,7 +263,9 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   const host = new CliHost(nexus.cwd, (event: AgentEvent) => {
     eventQueue.push(event)
     wakeWaitingConsumer()
-  }, autoApprove || allApprovalsEnabled, tuiApprovalRef)
+  }, autoApprove || allApprovalsEnabled, tuiApprovalRef, {
+    read: autoApprovePermissions?.read === true,
+  })
 
   /** Start of this run: previous turn’s edits become revertable for /undo. */
   host.startNewTurn()
