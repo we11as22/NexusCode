@@ -16,30 +16,45 @@ export interface ResolveBundledOptions {
   nexusRoot: string | null | undefined
 }
 
-/** Path to context-mode start script. Override with NEXUS_CONTEXT_MODE_PATH (absolute or relative to nexusRoot). */
-const CONTEXT_MODE_START = process.env.NEXUS_CONTEXT_MODE_PATH ?? "context-mode/start.mjs"
+const CONTEXT_MODE_DEFAULT_PATHS = [
+  "sources/claude-context-mode/start.mjs",
+  "context-mode/start.mjs",
+] as const
+
+function resolveContextModeStart(nexusRoot: string | null | undefined): string | undefined {
+  const configured = process.env["NEXUS_CONTEXT_MODE_PATH"]?.trim()
+  if (configured) {
+    const candidate = path.isAbsolute(configured)
+      ? configured
+      : nexusRoot
+        ? path.resolve(nexusRoot, configured)
+        : undefined
+    return candidate && fs.existsSync(candidate) ? candidate : undefined
+  }
+  if (!nexusRoot) return undefined
+  const root = path.resolve(nexusRoot)
+  return CONTEXT_MODE_DEFAULT_PATHS
+    .map((relativePath) => path.join(root, relativePath))
+    .find((candidate) => fs.existsSync(candidate))
+}
 
 /**
  * Resolves any server with bundle === "context-mode" to a full config
- * (command, args, env with CLAUDE_PROJECT_DIR). Skips the entry if nexusRoot
- * is missing or start.mjs is not present.
+ * (command, args, env with CLAUDE_PROJECT_DIR). An absolute
+ * NEXUS_CONTEXT_MODE_PATH also works in installed CLI/VSIX builds that do not
+ * have a Nexus repository root. Missing optional bundles are omitted.
  */
 export function resolveBundledMcpServers(
   servers: McpServerConfig[],
   options: ResolveBundledOptions
 ): McpServerConfig[] {
   const { cwd, nexusRoot } = options
-  if (!nexusRoot || !cwd) {
-    return servers.filter((s) => !s.bundle)
-  }
-  const root = path.resolve(nexusRoot)
+  if (!cwd) return servers.filter((server) => !server.bundle)
   const resolved: McpServerConfig[] = []
   for (const server of servers) {
     if (server.bundle === "context-mode") {
-      const startPath = path.isAbsolute(CONTEXT_MODE_START) ? CONTEXT_MODE_START : path.join(root, CONTEXT_MODE_START)
-      if (!fs.existsSync(startPath)) {
-        continue
-      }
+      const startPath = resolveContextModeStart(nexusRoot)
+      if (!startPath) continue
       resolved.push({
         name: server.name,
         command: "node",
@@ -47,9 +62,9 @@ export function resolveBundledMcpServers(
         env: { ...server.env, CLAUDE_PROJECT_DIR: cwd },
         enabled: server.enabled !== false,
       })
-    } else if (server.bundle) {
+    } else if (server.bundle && nexusRoot) {
       resolved.push(server)
-    } else {
+    } else if (!server.bundle) {
       resolved.push(server)
     }
   }

@@ -58,7 +58,7 @@ export const McpServerConfigSchema = z.object({
   enabled: z.boolean().optional().default(true),
   startupTimeoutMs: z.number().int().positive().max(300000).optional(),
   toolTimeoutMs: z.number().int().positive().max(900000).optional(),
-  /** Bundled server id (e.g. "context-mode"); resolved by host to command/args/env */
+  /** Optional bundle id (e.g. "context-mode"); resolved by host to command/args/env when installed. */
   bundle: z.string().optional(),
   auth: z.object({
     type: z.enum(["oauth", "url", "manual"]).optional(),

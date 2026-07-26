@@ -34,9 +34,8 @@
 
 ### Требования
 
-- **Node.js 20+** — рекомендуется для `better-sqlite3`, `pnpm run serve`, сборки .vsix и CLI; в корне репозитория в `package.json` формально указано `>=18`, но скрипты сервера и практика проекта ориентированы на 20 (файл `.nvmrc`: `20`).
-- **pnpm** — монорепозиторий и скрипты в корне.
-- **Bun** — для OpenTUI в CLI (см. README).
+- **Node.js 20.19.2** — закреплён в `.nvmrc` и проверяется скриптами CLI, сервера и упаковки VSIX.
+- **pnpm 10.8.1** — закреплён через `packageManager`; рекомендуется Corepack.
 
 ### Установка pnpm
 
@@ -62,11 +61,7 @@ pnpm build
 
 После `pnpm run cli` или `cd packages/cli && npm link` добавьте `~/bin` (или каталог установки) в `PATH`. Запуск: `nexus`.
 
-### Устранение (native module)
-
-Ошибка `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`: запускайте `nexus` той же мажорной версией Node, под которой собирали `better-sqlite3` (обычно `nvm use 20`, затем `pnpm run one` или `pnpm rebuild better-sqlite3`).
-
-Временно без индекса: `nexus --no-index`.
+Nexus core не использует нативный SQLite addon: сессии хранятся в JSONL, индексный tracker — в атомарном JSON, векторы — в Qdrant. Временно отключить индекс можно через `nexus --no-index`.
 
 ---
 
@@ -355,7 +350,7 @@ Enter — отправить; Shift+Enter — новая строка; Shift+Tab
 
 Транспорты в schema: `stdio`, `http`, `sse`; поле `type` — расширенные варианты для SDK.
 
-Встроенный bundle **`context-mode`**: `bundle: "context-mode"` → `resolveBundledMcpServers` (см. ARCHITECTURE).
+Опциональный bundle **`context-mode`**: `bundle: "context-mode"` → `resolveBundledMcpServers`; нужен отдельный source checkout или абсолютный `NEXUS_CONTEXT_MODE_PATH` (см. ARCHITECTURE).
 
 ---
 
@@ -384,7 +379,7 @@ API: поток сообщений **NDJSON** с heartbeat; health **GET /health
 | Симптом | Что проверить |
 |---------|----------------|
 | `CodebaseSearch` «disabled» | `indexing.vector` и `vectorDb.enabled`, доступность Qdrant |
-| Расхождение Node / native | Одна версия Node при build и run; `pnpm rebuild better-sqlite3` |
+| Неподдерживаемая версия Node | Выполнить `nvm use`; Nexus требует закреплённую версию из `.nvmrc` |
 | Пустая коллекция после индексации | Нормализация ответа Qdrant `getCollection` (`vector.ts`) |
 | Сервер не стартует на Node 18 | `pnpm serve` требует 20+ (`check-node.js`) |
 

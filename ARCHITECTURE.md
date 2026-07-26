@@ -295,9 +295,9 @@ Before each agent loop, the latest user message is parsed for `@file`, `@folder`
 
 Presets (model/vector/skills/MCP/rules) are stored in **`.nexus/agent-configs.json`**. The extension and CLI discover skill paths from local `SKILL.md` and `AGENTS.md`; MCP server names come from config. Applying a preset updates the active config via the host’s `saveConfig` and reconnects MCP / indexer as needed.
 
-### Bundled MCP (context-mode)
+### Optional MCP bundle (context-mode)
 
-The repo ships **`sources/claude-context-mode`** (Context Mode MCP). Config can reference `bundle: "context-mode"`; hosts resolve it via **`resolveBundledMcpServers`** in core (`packages/core/src/mcp/resolve-bundled.ts`) to a full server config (command/args/env). `CLAUDE_PROJECT_DIR` is set to the agent cwd when running from the NexusCode repo.
+Config can reference `bundle: "context-mode"`; hosts resolve an optional checkout under `sources/claude-context-mode` or an absolute `NEXUS_CONTEXT_MODE_PATH` via **`resolveBundledMcpServers`** in core (`packages/core/src/mcp/resolve-bundled.ts`). The source is not part of the normal repository or build, and unavailable optional bundles are omitted. `CLAUDE_PROJECT_DIR` is set to the agent cwd.
 
 ---
 
@@ -361,7 +361,7 @@ NexusCode/
 │   ├── cli/               ← CLI host + TUI (slash commands, agent-config, sessions)
 │   └── server/            ← Optional: HTTP server + NDJSON streaming; JSONL session store (shared with CLI/extension)
 ├── sources/
-│   └── claude-context-mode/  ← Bundled MCP (context compression, FTS, batch_execute)
+│   └── claude-context-mode/  ← Optional local MCP source (not shipped)
 └── .nexus/                ← Project config (nexus.yaml, agent-configs.json, rules, skills)
 ```
 
@@ -406,8 +406,8 @@ Mode tool matrix (`packages/core/src/agent/modes.ts`): `MODE_TOOL_GROUPS` + `MOD
 
 ## Version requirements
 
-- **Node.js**: в корневом `package.json` указано `"engines": { "node": ">=18.0.0" }`, но **`pnpm run serve`** и `scripts/check-node.js` требуют **Node 20+** (совместимость с prebuild **better-sqlite3**). Сборка и публикация **.vsix** (`pnpm package:vscode` / vsce) на практике тоже ожидают **20+**. **`.nvmrc` = 20** — рекомендуемая версия для всего рабочего цикла.
-- **pnpm**: workspace и скрипты; минимальная версия в коде не зафиксирована.
+- **Node.js**: `package.json`, `.nvmrc` и `scripts/check-node.js` закрепляют **20.19.2** для одинакового поведения CLI, сервера и упаковки VSIX. Core runtime не зависит от нативного SQLite addon.
+- **pnpm**: **10.8.1**, закреплён через `packageManager`.
 
 ---
 

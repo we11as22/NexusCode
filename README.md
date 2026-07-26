@@ -60,7 +60,7 @@ pnpm build
 pnpm package:vscode
 ```
 
-Output: **`packages/vscode/nexuscode-0.1.0.vsix`**. Install in VS Code: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**) → **Extensions: Install from VSIX...** → choose that file. **Node 20** is required (vsce / native tooling).
+Output: **`packages/vscode/nexuscode-0.1.0.vsix`**. Install in VS Code: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**) → **Extensions: Install from VSIX...** → choose that file. Use the repository-pinned **Node 20.19.2** runtime for reproducible builds.
 
 `pnpm package:vscode` already runs `pnpm build` internally; keeping both steps matches a clear “build, then package” flow and is safe if you ever run `pnpm build` alone first.
 
@@ -70,12 +70,12 @@ Output: **`packages/vscode/nexuscode-0.1.0.vsix`**. Install in VS Code: **Ctrl+S
 
 Clone the repo, then a **single command** installs everything; `nexus` can be run from anywhere afterward.
 
-**Important:** use **Node 20** for both install and when running `nexus` (the native module `better-sqlite3` is tied to the Node version). For the TUI you also need **Bun** (OpenTUI runtime): `curl -fsSL https://bun.sh/install | bash`.
+**Important:** use the repository-pinned **Node 20.19.2** for install, build, and `nexus`. The CLI uses Ink on Node and does not require Bun or a native SQLite addon.
 
 ```bash
 git clone <repo> NexusCode && cd NexusCode
 nvm use 20          # or: nvm use (if .nvmrc exists)
-pnpm run cli        # one command: install → rebuild native → build → install nexus to ~/bin
+pnpm run cli        # one command: install → build → install nexus to ~/bin
 ```
 
 Add to `~/.bashrc` (or `~/.profile`) once:
@@ -90,13 +90,13 @@ Then in **any** terminal and from **any** directory:
 nexus
 ```
 
-To update after code changes (with the same Node 20):
+To update after code changes (with the same pinned Node runtime):
 
 ```bash
 cd NexusCode && nvm use 20 && pnpm run cli
 ```
 
-If on first run you see `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`, `nexus` is running under a different Node version than at install time. Run `nvm use 20` in that terminal and start `nexus` again. The wrapper in `~/bin/nexus` remembers the Node from install; if you switched nvm after install, reinstall with `pnpm run cli`.
+The wrapper in `~/bin/nexus` remembers the Node binary used during installation. If that binary moves after an nvm change, run `pnpm run cli` again.
 
 ---
 
@@ -110,7 +110,7 @@ From the repo root with **Node.js 20** (e.g. `nvm use 20`):
 pnpm run one
 ```
 
-This single command: removes `node_modules` and `.pnpm-store` → installs dependencies → builds native **better-sqlite3** → full build. Then run the CLI: `node packages/cli/dist/index.js` (or make a global command: `cd packages/cli && npm link`).
+This single command removes `node_modules` and `.pnpm-store`, installs dependencies, and performs a full build. Then run the CLI: `node packages/cli/dist/index.js` (or make a global command: `cd packages/cli && npm link`).
 
 **Option “everything at once” (global CLI + .vsix extension):**
 
@@ -119,8 +119,6 @@ pnpm run ready
 ```
 
 Does the same as `pnpm run one`, plus packages the extension and `npm link` for the `nexus` command. Result: **CLI** — `nexus` from any directory; **extension** — install `packages/vscode/nexuscode-0.1.0.vsix` via **Ctrl+Shift+P** → **Extensions: Install from VSIX...** (macOS: **Cmd+Shift+P**).
-
-**If `nexus` shows `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`** — you are running under a different Node version than the one used at build time. Use Node 20 (`nvm use 20`), run `pnpm run one` from the repo root, then start `nexus` again.
 
 ---
 
@@ -135,9 +133,7 @@ pnpm run setup
 nexus
 ```
 
-`pnpm run setup` runs: `pnpm install` → downloads prebuilt **better-sqlite3** binaries (`setup:native`) → `pnpm build`. For a clean install without store issues, prefer **`pnpm run one`** (full reinstall into the local store).
-
-**If `setup:native` does not find a prebuilt binary** (e.g. uncommon platform) — you need build tools (python3, make, g++). After `pnpm install` run manually: `pnpm rebuild better-sqlite3`, then `pnpm build`.
+`pnpm run setup` runs `pnpm install` and then `pnpm build`. For a clean install without store issues, prefer **`pnpm run one`** (full reinstall into the local store).
 
 CLI after setup: `node packages/cli/dist/index.js` (or `nexus` if you ran `cd packages/cli && npm link`).
 
@@ -157,8 +153,8 @@ Result: **CLI** — `nexus` is available globally; **extension** — `packages/v
 
 | Requirement | Version | Note |
 |-------------|---------|------|
-| **Node.js** | **20+** | Required for build **and** for running `nexus` and `pnpm run serve`: the native module better-sqlite3 is tied to the Node version. If you see `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED` in a terminal with Node 18, run `nvm use 20` in that terminal and start `nexus` or `pnpm run serve` again. Packaging .vsix also requires Node 20 (vsce fails on Node 18). |
-| **pnpm** | current | Recommended: `npm install -g pnpm` |
+| **Node.js** | **20.19.2** | Pinned in `.nvmrc` and enforced by the repository scripts so CLI, server, and VSIX builds use one tested runtime. Nexus core has no native SQLite dependency. |
+| **pnpm** | **10.8.1** | Pinned through `packageManager`; Corepack is recommended. |
 
 The repo has **`.nvmrc`** set to `20`. With nvm, run in the root: `nvm use`. Check Node: `node -v` (for .vsix packaging you need v20.x or higher). If Node &lt; 20: `nvm use 20` or install Node 20 from [nodejs.org](https://nodejs.org/).
 
@@ -549,20 +545,20 @@ mcp:
         GITHUB_TOKEN: "${GITHUB_TOKEN}"
     - name: my-service
       url: "http://localhost:3100/mcp"
-    # Bundled: Context Mode (saves ~98% context — sandboxed execute, FTS5 search, batch_execute)
+    # Optional local Context Mode source (when installed separately)
     - name: context-mode
       bundle: context-mode
 ```
 
 When many **MCP servers** are configured, you can enable "Filter MCP servers when list is large" in Settings (Tools tab). The classifier then selects which **servers** to use for the task; all tools from selected servers are included. Built-in tools are always available.
 
-### Context Mode (bundled)
+### Context Mode (optional)
 
-NexusCode includes **[claude-context-mode](sources/claude-context-mode)** (MCP + plugin for context compression). It reduces tool output in the context window by running code in a sandbox and returning only stdout, and provides FTS5/BM25 search, `batch_execute`, and session stats.
+NexusCode can integrate a separately installed **claude-context-mode** MCP for context compression. The source is not shipped in this repository, so normal Nexus builds and indexing do not depend on its SQLite/FTS implementation.
 
-- **Enable:** add `{ "name": "context-mode", "bundle": "context-mode" }` to `mcp.servers` in `.nexus/nexus.yaml` or `.nexus/mcp-servers.json`. When running from the NexusCode repo (CLI, server, or extension F5), the bundle is resolved to `sources/claude-context-mode/start.mjs` and `CLAUDE_PROJECT_DIR` is set to the project cwd.
-- **Build:** `pnpm build` runs `build:context-mode` (install + build + optional bundle in `sources/claude-context-mode`). Ensure Node 18+ there for `better-sqlite3`.
-- **Use cases:** large log/JSON/Playwright output → only summaries in context; multi-query search via `search(queries: [...])`; repo research via `batch_execute`. See [sources/claude-context-mode/README.md](sources/claude-context-mode/README.md) for tools and security (permissions).
+- **Enable:** set `NEXUS_CONTEXT_MODE_PATH` to an absolute `start.mjs` path, then add `{ "name": "context-mode", "bundle": "context-mode" }` to `mcp.servers`. A development checkout under `sources/claude-context-mode/start.mjs` is also detected.
+- **Build:** `pnpm run build:context-mode` only builds that optional source when it is present; the normal `pnpm build` remains portable.
+- **Use cases:** large log/JSON/browser output, multi-query search, and batched repository research.
 
 ---
 

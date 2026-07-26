@@ -1003,7 +1003,7 @@ export interface McpServerConfig {
   startupTimeoutMs?: number
   /** Maximum time allowed for a single MCP tool/resource request. */
   toolTimeoutMs?: number
-  /** Resolve to a bundled MCP server (e.g. "context-mode") when nexusRoot is set by host */
+  /** Resolve an optional MCP bundle (e.g. "context-mode") through a host path or environment override. */
   bundle?: string
   auth?: {
     type?: "oauth" | "url" | "manual"
