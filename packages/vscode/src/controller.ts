@@ -30,6 +30,8 @@ import {
   writeGlobalProfiles,
   loadProjectSettings,
   persistSecretsFromConfig,
+  stripSecretsFromConfig,
+  NEXUS_SECRETS_STORAGE_KEY,
   Session,
   listSessions,
   deleteSession,
@@ -86,6 +88,11 @@ import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js
 import { applyExplicitConfigOverrides } from "./config-overrides.js"
 import { MarketplaceService, type MarketplaceItem } from "./services/marketplace/index.js"
 import { listAbsolutePathsRipgrep } from "./services/indexing/list-absolute-paths-rg.js"
+import {
+  AUTOCOMPLETE_API_KEY_SECRET,
+  mergeLegacyNexusSecrets,
+  selectLegacySetting,
+} from "./secret-settings.js"
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
@@ -345,6 +352,7 @@ export interface AutocompleteExtensionUiState {
   modelProvider: string
   modelId: string
   modelApiKey: string
+  hasModelApiKey: boolean
   modelBaseUrl: string
   modelTemperature: string
   modelReasoningEffort: string
@@ -452,6 +460,7 @@ export class Controller {
   private disposables: vscode.Disposable[] = []
   private readonly marketplaceService = new MarketplaceService()
   private onAutocompleteConfigReady?: () => void
+  private autocompleteApiKeyConfigured = false
   private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
   /** VS Code Secret Storage for API keys (keys not stored in YAML). */
   private readonly secretsStore = {
@@ -1024,7 +1033,8 @@ export class Controller {
       useSeparateModel: c.get<boolean>("nexuscode.autocomplete.useSeparateModel") ?? false,
       modelProvider: c.get<string>("nexuscode.autocomplete.provider") ?? "",
       modelId: c.get<string>("nexuscode.autocomplete.model") ?? "",
-      modelApiKey: c.get<string>("nexuscode.autocomplete.apiKey") ?? "",
+      modelApiKey: "",
+      hasModelApiKey: this.autocompleteApiKeyConfigured,
       modelBaseUrl: c.get<string>("nexuscode.autocomplete.baseUrl") ?? "",
       modelTemperature:
         typeof temp === "number" && !Number.isNaN(temp) ? String(temp) : "0.2",
@@ -1235,7 +1245,7 @@ export class Controller {
       /* keep previous config */
     }
     if (this.config) {
-      this.postMessageToWebview({ type: "configLoaded", config: this.config })
+      this.postConfigToWebview()
       void this.loadAndSendSkillDefinitions()
       void this.reconnectMcpServers().catch(() => {})
     }
@@ -1272,6 +1282,7 @@ export class Controller {
     this.initPromise = (async () => {
       this.initialized = true
       const cwd = this.getCwd()
+      await this.migrateLegacyPlaintextSecrets(cwd)
       try {
         this.config = await loadConfig(cwd, { secrets: this.secretsStore })
       } catch {
@@ -1293,7 +1304,7 @@ export class Controller {
           indexing: { ...this.config.indexing },
         }
       }
-      this.postMessageToWebview({ type: "configLoaded", config: this.config })
+      this.postConfigToWebview()
       void this.loadAndSendSkillDefinitions()
       try {
         const allowPath = path.join(cwd, ".nexus", "allowed-commands.json")
@@ -1392,7 +1403,7 @@ export class Controller {
             if (this.defaultModelProfile) {
               this.config.model = { ...this.defaultModelProfile }
             }
-            this.postMessageToWebview({ type: "configLoaded", config: this.config })
+            this.postConfigToWebview()
         void this.loadAndSendSkillDefinitions()
             this.postStateToWebview()
             break
@@ -1400,7 +1411,7 @@ export class Controller {
           const profile = this.config.profiles[msg.profile]
           if (!profile) break
           this.config.model = { ...this.config.model, ...profile }
-          this.postMessageToWebview({ type: "configLoaded", config: this.config })
+          this.postConfigToWebview()
         void this.loadAndSendSkillDefinitions()
           this.postStateToWebview()
         }
@@ -1409,7 +1420,7 @@ export class Controller {
         this.postStateToWebview()
         this.sendIndexStatus()
         if (this.config) {
-          this.postMessageToWebview({ type: "configLoaded", config: this.config })
+          this.postConfigToWebview()
           void this.loadAndSendSkillDefinitions()
         }
         void this.ensureInitialized().then(() => {
@@ -1438,7 +1449,7 @@ export class Controller {
         this.postStateToWebview()
         this.sendIndexStatus()
         if (this.config) {
-          this.postMessageToWebview({ type: "configLoaded", config: this.config })
+          this.postConfigToWebview()
           void this.loadAndSendSkillDefinitions()
         }
         void this.ensureInitialized().then(() => {
@@ -1686,7 +1697,13 @@ export class Controller {
           await c.update("nexuscode.autocomplete.model", p.modelId.trim() || undefined, t)
         }
         if (p.modelApiKey !== undefined) {
-          await c.update("nexuscode.autocomplete.apiKey", p.modelApiKey.trim() || undefined, t)
+          const key = p.modelApiKey.trim()
+          if (key) {
+            await this.context.secrets.store(AUTOCOMPLETE_API_KEY_SECRET, key)
+          } else {
+            await this.context.secrets.delete(AUTOCOMPLETE_API_KEY_SECRET)
+          }
+          this.autocompleteApiKeyConfigured = Boolean(key)
         }
         if (p.modelBaseUrl !== undefined) {
           await c.update("nexuscode.autocomplete.baseUrl", p.modelBaseUrl.trim() || undefined, t)
@@ -1706,6 +1723,7 @@ export class Controller {
             t,
           )
         }
+        this.onAutocompleteConfigReady?.()
         this.postStateToWebview()
         break
       }
@@ -2484,7 +2502,7 @@ export class Controller {
         "NexusCode: Open a workspace folder first so settings can be saved to .nexus/nexus.yaml in the project.",
         { modal: false }
       )
-      this.postMessageToWebview({ type: "configLoaded", config: this.config })
+      this.postConfigToWebview()
         void this.loadAndSendSkillDefinitions()
       this.postStateToWebview()
       return
@@ -2532,7 +2550,7 @@ export class Controller {
         this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[indexer] ${message}` } })
       })
     }
-    this.postMessageToWebview({ type: "configLoaded", config: this.config })
+    this.postConfigToWebview()
         void this.loadAndSendSkillDefinitions()
     this.postStateToWebview()
   }
@@ -3311,6 +3329,94 @@ Return in this format:
       )
     }
     applyExplicitConfigOverrides(config, getExplicitValue)
+  }
+
+  private async migrateLegacyPlaintextSecrets(cwd: string): Promise<void> {
+    const resource = vscode.Uri.file(cwd)
+    const cfg = vscode.workspace.getConfiguration("nexuscode", resource)
+    const model = selectLegacySetting(cfg.inspect<string>("apiKey"))
+    const embeddings = selectLegacySetting(cfg.inspect<string>("embeddingsApiKey"))
+    const autocomplete = selectLegacySetting(
+      cfg.inspect<string>("autocomplete.apiKey"),
+    )
+
+    if (model || embeddings) {
+      const existing = await this.context.secrets.get(
+        NEXUS_SECRETS_STORAGE_KEY,
+      )
+      const merged = mergeLegacyNexusSecrets(existing, { model, embeddings })
+      if (merged !== existing) {
+        await this.context.secrets.store(NEXUS_SECRETS_STORAGE_KEY, merged)
+      }
+    }
+
+    const existingAutocomplete = (
+      await this.context.secrets.get(AUTOCOMPLETE_API_KEY_SECRET)
+    )?.trim()
+    if (!existingAutocomplete && autocomplete) {
+      await this.context.secrets.store(
+        AUTOCOMPLETE_API_KEY_SECRET,
+        autocomplete,
+      )
+    }
+    this.autocompleteApiKeyConfigured = Boolean(
+      existingAutocomplete || autocomplete,
+    )
+
+    await this.clearLegacySecretSetting("apiKey")
+    await this.clearLegacySecretSetting("embeddingsApiKey")
+    await this.clearLegacySecretSetting("autocomplete.apiKey")
+  }
+
+  private async clearLegacySecretSetting(key: string): Promise<void> {
+    let failed = false
+    const clearConfiguredScopes = async (
+      cfg: vscode.WorkspaceConfiguration,
+      includeSharedScopes: boolean,
+    ): Promise<void> => {
+      const inspected = cfg.inspect<string>(key)
+      if (!inspected) return
+      const clear = async (target: vscode.ConfigurationTarget): Promise<void> => {
+        try {
+          await cfg.update(key, undefined, target)
+        } catch {
+          failed = true
+        }
+      }
+      if (includeSharedScopes && inspected.globalValue !== undefined) {
+        await clear(vscode.ConfigurationTarget.Global)
+      }
+      if (includeSharedScopes && inspected.workspaceValue !== undefined) {
+        await clear(vscode.ConfigurationTarget.Workspace)
+      }
+      if (inspected.workspaceFolderValue !== undefined) {
+        await clear(vscode.ConfigurationTarget.WorkspaceFolder)
+      }
+    }
+
+    await clearConfiguredScopes(
+      vscode.workspace.getConfiguration("nexuscode"),
+      true,
+    )
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      await clearConfiguredScopes(
+        vscode.workspace.getConfiguration("nexuscode", folder.uri),
+        false,
+      )
+    }
+    if (failed) {
+      vscode.window.showWarningMessage(
+        `NexusCode migrated the legacy ${key} secret, but could not remove every plaintext setting. Remove it manually from settings.json.`,
+      )
+    }
+  }
+
+  private postConfigToWebview(): void {
+    if (!this.config) return
+    const safeConfig = stripSecretsFromConfig(
+      this.config as unknown as Record<string, unknown>,
+    ) as unknown as NexusConfig
+    this.postMessageToWebview({ type: "configLoaded", config: safeConfig })
   }
 
   private queueIndexerRefresh(fsPath: string): void {

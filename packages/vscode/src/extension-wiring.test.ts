@@ -6,6 +6,10 @@ const extensionSource = readFileSync(
   path.join(process.cwd(), "src", "extension.ts"),
   "utf8",
 )
+const controllerSource = readFileSync(
+  path.join(process.cwd(), "src", "controller.ts"),
+  "utf8",
+)
 
 describe("VS Code command wiring", () => {
   it.each([
@@ -24,5 +28,23 @@ describe("VS Code command wiring", () => {
       extensionSource.indexOf("// Register sidebar view provider"),
     )
     expect(activationBody).not.toContain("appendFileSync")
+  })
+
+  it("does not contribute plaintext API-key settings", () => {
+    const manifest = JSON.parse(
+      readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
+    ) as { contributes?: { configuration?: { properties?: Record<string, unknown> } } }
+    const properties = manifest.contributes?.configuration?.properties ?? {}
+
+    expect(properties).not.toHaveProperty("nexuscode.apiKey")
+    expect(properties).not.toHaveProperty("nexuscode.embeddingsApiKey")
+    expect(properties).not.toHaveProperty("nexuscode.autocomplete.apiKey")
+  })
+
+  it("redacts API keys before sending configuration to the webview", () => {
+    expect(controllerSource).toContain("stripSecretsFromConfig(")
+    expect(controllerSource).not.toContain(
+      'type: "configLoaded", config: this.config',
+    )
   })
 })

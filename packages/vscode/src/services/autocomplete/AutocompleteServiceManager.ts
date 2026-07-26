@@ -8,6 +8,7 @@ import { AutocompleteStatusBar } from "./AutocompleteStatusBar.js"
 import { AutocompleteCodeActionProvider } from "./AutocompleteCodeActionProvider.js"
 import { AutocompleteInlineCompletionProvider } from "./classic-auto-complete/AutocompleteInlineCompletionProvider.js"
 import { AutocompleteTelemetry } from "./classic-auto-complete/AutocompleteTelemetry.js"
+import { AUTOCOMPLETE_API_KEY_SECRET } from "../../secret-settings.js"
 
 export interface AutocompleteServiceSettings {
   enableAutoTrigger?: boolean
@@ -46,6 +47,7 @@ export class AutocompleteServiceManager implements vscode.Disposable {
   private readonly model: AutocompleteModel
   private readonly context: vscode.ExtensionContext
   private settings: AutocompleteServiceSettings | null = null
+  private autocompleteApiKey: string | undefined
 
   private taskId: string | null = null
 
@@ -66,7 +68,10 @@ export class AutocompleteServiceManager implements vscode.Disposable {
   ) {
     this.context = context
 
-    this.model = new AutocompleteModel(getNexusConfig)
+    this.model = new AutocompleteModel(
+      getNexusConfig,
+      () => this.autocompleteApiKey,
+    )
 
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ""
 
@@ -85,6 +90,9 @@ export class AutocompleteServiceManager implements vscode.Disposable {
   }
 
   public async load(): Promise<void> {
+    this.autocompleteApiKey =
+      (await this.context.secrets.get(AUTOCOMPLETE_API_KEY_SECRET))?.trim() ||
+      undefined
     this.settings = readSettings()
 
     await this.updateGlobalContext()

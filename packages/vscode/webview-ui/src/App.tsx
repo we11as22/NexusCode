@@ -35,6 +35,7 @@ const DEFAULT_AUTOCOMPLETE_UI: AutocompleteExtensionUiState = {
   modelProvider: "",
   modelId: "",
   modelApiKey: "",
+  hasModelApiKey: false,
   modelBaseUrl: "",
   modelTemperature: "0.2",
   modelReasoningEffort: "",
@@ -1394,6 +1395,7 @@ function SettingsView({
   const [acPanelOpen, setAcPanelOpen] = useState(false)
   const [acModelPickerOpen, setAcModelPickerOpen] = useState(false)
   const [acModelPickerQuery, setAcModelPickerQuery] = useState("")
+  const [acApiKeyDraft, setAcApiKeyDraft] = useState("")
 
   const ac = autocompleteExtension ?? DEFAULT_AUTOCOMPLETE_UI
 
@@ -1581,7 +1583,13 @@ function SettingsView({
               value={draft.modelContextWindow}
               onChange={(v) => setDraft({ ...draft, modelContextWindow: v })}
             />
-            <SettingsInput type="password" label="API Key" value={draft.modelApiKey} onChange={(v) => setDraft({ ...draft, modelApiKey: v })} />
+            <SettingsInput
+              type="password"
+              label="API Key"
+              value={draft.modelApiKey}
+              placeholder="Leave blank to keep the securely stored key"
+              onChange={(v) => setDraft({ ...draft, modelApiKey: v })}
+            />
             <SettingsInput label="Base URL" value={draft.modelBaseUrl} onChange={(v) => setDraft({ ...draft, modelBaseUrl: v })} />
             <div className="nexus-muted text-[10px]">Default context window fallback: 128k tokens.</div>
           </section>
@@ -1697,11 +1705,40 @@ function SettingsView({
                     <SettingsInput
                       type="password"
                       label="API Key"
-                      value={ac.modelApiKey}
-                      onChange={(v) =>
-                        postMessage({ type: "setAutocompleteExtensionSettings", patch: { modelApiKey: v } })
-                      }
+                      value={acApiKeyDraft}
+                      placeholder={ac.hasModelApiKey ? "Stored securely — enter a replacement" : "Optional"}
+                      onChange={setAcApiKeyDraft}
                     />
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="nexus-secondary-btn text-xs"
+                        disabled={!acApiKeyDraft.trim()}
+                        onClick={() => {
+                          postMessage({
+                            type: "setAutocompleteExtensionSettings",
+                            patch: { modelApiKey: acApiKeyDraft },
+                          })
+                          setAcApiKeyDraft("")
+                        }}
+                      >
+                        Save key securely
+                      </button>
+                      {ac.hasModelApiKey && (
+                        <button
+                          type="button"
+                          className="nexus-secondary-btn text-xs"
+                          onClick={() =>
+                            postMessage({
+                              type: "setAutocompleteExtensionSettings",
+                              patch: { modelApiKey: "" },
+                            })
+                          }
+                        >
+                          Remove stored key
+                        </button>
+                      )}
+                    </div>
                     <SettingsInput
                       label="Base URL"
                       value={ac.modelBaseUrl}
@@ -3313,11 +3350,13 @@ function SettingsInput({
   value,
   onChange,
   type = "text",
+  placeholder,
 }: {
   label: string
   value: string
   onChange: (value: string) => void
   type?: "text" | "password"
+  placeholder?: string
 }) {
   return (
     <label className="nexus-field">
@@ -3325,6 +3364,7 @@ function SettingsInput({
       <input
         type={type}
         value={value}
+        placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
         className="nexus-input"
       />

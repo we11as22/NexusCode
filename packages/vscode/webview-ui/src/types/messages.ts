@@ -32,6 +32,7 @@ export interface AutocompleteExtensionUiState {
   modelProvider: string
   modelId: string
   modelApiKey: string
+  hasModelApiKey: boolean
   modelBaseUrl: string
   modelTemperature: string
   modelReasoningEffort: string

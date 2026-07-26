@@ -259,11 +259,6 @@
           "default": "",
           "description": "Optional model ID override. Leave empty to use .nexus/nexus.yaml."
         },
-        "nexuscode.apiKey": {
-          "type": "string",
-          "default": "",
-          "description": "API key for the provider (overrides env and YAML; leave empty to use env)"
-        },
         "nexuscode.serverUrl": {
           "type": "string",
           "default": "",
@@ -339,11 +334,6 @@
           "default": "",
           "description": "Embeddings model ID"
         },
-        "nexuscode.embeddingsApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Embeddings API key (optional)"
-        },
         "nexuscode.embeddingsBaseUrl": {
           "type": "string",
           "default": "",
@@ -418,11 +408,6 @@
           "type": "string",
           "default": "",
           "description": "Model id for inline autocomplete when useSeparateModel is enabled"
-        },
-        "nexuscode.autocomplete.apiKey": {
-          "type": "string",
-          "default": "",
-          "description": "API key for autocomplete-only model (optional if env / agent key applies)"
         },
         "nexuscode.autocomplete.baseUrl": {
           "type": "string",

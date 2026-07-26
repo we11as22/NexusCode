@@ -81,8 +81,6 @@ export function applyExplicitConfigOverrides(
 
   const model = nonEmptyString(read<string>("model"))
   if (model) config.model.id = model
-  const apiKey = nonEmptyString(read<string>("apiKey"))
-  if (apiKey) config.model.apiKey = apiKey
   const temperature = finiteNumber(read<number>("temperature"))
   if (temperature !== undefined) {
     config.model.temperature = Math.max(0, Math.min(2, temperature))
@@ -148,8 +146,6 @@ export function applyExplicitConfigOverrides(
   }
   if (config.embeddings && embeddingProvider) config.embeddings.provider = embeddingProvider
   if (config.embeddings && embeddingModel) config.embeddings.model = embeddingModel
-  const embeddingsApiKey = nonEmptyString(read<string>("embeddingsApiKey"))
-  if (config.embeddings && embeddingsApiKey) config.embeddings.apiKey = embeddingsApiKey
   const embeddingsBaseUrl = nonEmptyString(read<string>("embeddingsBaseUrl"))
   if (config.embeddings && embeddingsBaseUrl) config.embeddings.baseUrl = embeddingsBaseUrl
   const embeddingsDimensions = positiveInteger(read<number>("embeddingsDimensions"))

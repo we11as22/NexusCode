@@ -35,7 +35,7 @@ function normalizeAutocompleteProvider(raw: string): { provider: ProviderName; d
 }
 
 /** VS Code settings override when `nexuscode.autocomplete.useSeparateModel` is true. */
-export function buildAutocompleteOverrideModel(): ProviderConfig | null {
+export function buildAutocompleteOverrideModel(apiKey?: string): ProviderConfig | null {
   const c = vscode.workspace.getConfiguration()
   if (!(c.get<boolean>("nexuscode.autocomplete.useSeparateModel") ?? false)) {
     return null
@@ -47,7 +47,6 @@ export function buildAutocompleteOverrideModel(): ProviderConfig | null {
   let baseUrl = (c.get<string>("nexuscode.autocomplete.baseUrl") ?? "").trim() || undefined
   if (!baseUrl && norm.defaultBaseUrl) baseUrl = norm.defaultBaseUrl
 
-  const apiKey = (c.get<string>("nexuscode.autocomplete.apiKey") ?? "").trim() || undefined
   const temp = c.get<number>("nexuscode.autocomplete.temperature")
   const reasoningEffort = (c.get<string>("nexuscode.autocomplete.reasoningEffort") ?? "").trim() || undefined
   const cw = c.get<number>("nexuscode.autocomplete.contextWindow")
@@ -80,14 +79,17 @@ export class AutocompleteModel {
   public profileName: string | null = null
   public profileType: string | null = null
 
-  constructor(private readonly getNexusConfig: () => NexusConfig | undefined) {}
+  constructor(
+    private readonly getNexusConfig: () => NexusConfig | undefined,
+    private readonly getAutocompleteApiKey: () => string | undefined,
+  ) {}
 
   public supportsFim(): boolean {
     return true
   }
 
   private tryGetEffectiveModel(): ProviderConfig | null {
-    const override = buildAutocompleteOverrideModel()
+    const override = buildAutocompleteOverrideModel(this.getAutocompleteApiKey())
     if (override) return override
     const agent = this.getNexusConfig()?.model
     if (!agent?.id || !agent?.provider) return null

@@ -106,4 +106,19 @@ describe("applyExplicitConfigOverrides", () => {
     })
     expect(target.indexing.embeddingConcurrency).toBe(4)
   })
+
+  it("never reads API keys from plaintext VS Code settings", () => {
+    const target = config({
+      model: { provider: "anthropic", id: "claude-custom" },
+      embeddings: { provider: "mistral", model: "mistral-embed" },
+    })
+
+    applyExplicitConfigOverrides(target, reader({
+      apiKey: "plaintext-model-secret",
+      embeddingsApiKey: "plaintext-embeddings-secret",
+    }))
+
+    expect(target.model.apiKey).toBeUndefined()
+    expect(target.embeddings?.apiKey).toBeUndefined()
+  })
 })
