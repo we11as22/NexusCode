@@ -2,6 +2,7 @@ import * as crypto from "node:crypto"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
+import { hostname } from "node:os"
 import {
   type BackgroundTaskRecord,
   type BackgroundTaskStatus,
@@ -16,6 +17,7 @@ import {
   type WorktreeSession,
 } from "../types.js"
 import { canonicalProjectRoot } from "../session/storage.js"
+import { atomicWriteFile, atomicWriteJson, withFileLock } from "../storage/durable-fs.js"
 
 type StoredRuntimeState = {
   tasks: TaskRecord[]
@@ -26,16 +28,217 @@ type StoredRuntimeState = {
   remoteSessions: RemoteSessionRecord[]
 }
 
+type RuntimeWriter = {
+  pid: number
+  hostname: string
+  instanceId: string
+}
+
+type RuntimeSnapshot = {
+  schemaVersion: 2
+  revision: number
+  updatedAt: number
+  writer: RuntimeWriter
+  stateChecksum: string
+  state: StoredRuntimeState
+  checksum: string
+}
+
+type RuntimeJournalRecord = {
+  type: "orchestration_transition"
+  schemaVersion: 2
+  revision: number
+  ts: number
+  writer: RuntimeWriter
+  previousChecksum: string | null
+  stateChecksum: string
+  checksum: string
+  state: StoredRuntimeState
+}
+
+type LoadedRuntimeState = {
+  state: StoredRuntimeState
+  revision: number
+  format: "fresh" | "legacy-v1" | "v2"
+  writer?: RuntimeWriter
+  snapshotHealthy: boolean
+  journalCount: number
+  journalBytes: number
+  journalLastChecksum: string | null
+  corruptJournalTail?: string
+  legacyRaw?: string
+  reconciled: boolean
+}
+
+export type OrchestrationDiagnosticCode =
+  | "corrupt-journal-tail"
+  | "snapshot-backup-recovered"
+  | "journal-recovered"
+  | "legacy-state-detected"
+  | "legacy-state-migrated"
+  | "stale-run-reconciled"
+
+export interface OrchestrationDiagnostic {
+  code: OrchestrationDiagnosticCode
+  path: string
+  message: string
+}
+
+export interface OrchestrationRuntimeOptions {
+  homeDir?: string
+  compactAfterRecords?: number
+  compactAfterBytes?: number
+  reconcileStaleRuns?: boolean
+  onDiagnostic?: (diagnostic: OrchestrationDiagnostic) => void
+}
+
+export class OrchestrationCorruptionError extends Error {
+  constructor(
+    readonly statePath: string,
+    message: string,
+  ) {
+    super(`Orchestration state is corrupt: ${statePath}: ${message}`)
+    this.name = "OrchestrationCorruptionError"
+  }
+}
+
+export class OrchestrationInvariantError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "OrchestrationInvariantError"
+  }
+}
+
+const RUNTIME_SCHEMA_VERSION = 2
+const DEFAULT_COMPACT_AFTER_RECORDS = 32
+const DEFAULT_COMPACT_AFTER_BYTES = 4 * 1024 * 1024
+
+function emptyRuntimeState(): StoredRuntimeState {
+  return {
+    tasks: [],
+    teams: [],
+    worktrees: [],
+    backgroundTasks: [],
+    memories: [],
+    remoteSessions: [],
+  }
+}
+
+function normalizeRuntimeState(value: unknown, statePath: string): StoredRuntimeState {
+  if (!value || typeof value !== "object") {
+    throw new OrchestrationCorruptionError(statePath, "state is not an object")
+  }
+  const candidate = value as Partial<StoredRuntimeState>
+  const fields: Array<keyof StoredRuntimeState> = [
+    "tasks",
+    "teams",
+    "worktrees",
+    "backgroundTasks",
+    "memories",
+    "remoteSessions",
+  ]
+  for (const field of fields) {
+    if (candidate[field] !== undefined && !Array.isArray(candidate[field])) {
+      throw new OrchestrationCorruptionError(statePath, `${field} is not an array`)
+    }
+  }
+  return {
+    tasks: [...(candidate.tasks ?? [])],
+    teams: [...(candidate.teams ?? [])],
+    worktrees: [...(candidate.worktrees ?? [])],
+    backgroundTasks: [...(candidate.backgroundTasks ?? [])],
+    memories: [...(candidate.memories ?? [])],
+    remoteSessions: [...(candidate.remoteSessions ?? [])],
+  }
+}
+
+function stateChecksum(state: StoredRuntimeState): string {
+  return crypto.createHash("sha256").update(JSON.stringify(state)).digest("hex")
+}
+
+function journalChecksum(record: Omit<RuntimeJournalRecord, "checksum">): string {
+  return crypto.createHash("sha256").update(JSON.stringify(record)).digest("hex")
+}
+
+function snapshotChecksum(snapshot: Omit<RuntimeSnapshot, "checksum">): string {
+  return crypto.createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")
+}
+
+function isRuntimeWriter(value: unknown): value is RuntimeWriter {
+  if (!value || typeof value !== "object") return false
+  const candidate = value as Partial<RuntimeWriter>
+  return (
+    Number.isSafeInteger(candidate.pid) &&
+    candidate.pid! > 0 &&
+    typeof candidate.hostname === "string" &&
+    candidate.hostname.length > 0 &&
+    typeof candidate.instanceId === "string" &&
+    candidate.instanceId.length > 0
+  )
+}
+
+function isRuntimeSnapshot(value: unknown, statePath: string): value is RuntimeSnapshot {
+  if (!value || typeof value !== "object") return false
+  const candidate = value as Partial<RuntimeSnapshot>
+  if (
+    candidate.schemaVersion !== RUNTIME_SCHEMA_VERSION ||
+    !Number.isSafeInteger(candidate.revision) ||
+    candidate.revision! < 0 ||
+    typeof candidate.updatedAt !== "number" ||
+    !isRuntimeWriter(candidate.writer) ||
+    typeof candidate.stateChecksum !== "string" ||
+    !candidate.state ||
+    typeof candidate.checksum !== "string"
+  ) {
+    return false
+  }
+  const normalized = normalizeRuntimeState(candidate.state, statePath)
+  if (stateChecksum(normalized) !== candidate.stateChecksum) return false
+  const { checksum, ...withoutChecksum } = candidate as RuntimeSnapshot
+  return checksum === snapshotChecksum(withoutChecksum)
+}
+
+function runtimeJournalLines(raw: string): Array<{ text: string; start: number }> {
+  const lines: Array<{ text: string; start: number }> = []
+  let start = 0
+  for (let index = 0; index <= raw.length; index += 1) {
+    if (index !== raw.length && raw[index] !== "\n") continue
+    const text = raw.slice(start, index).replace(/\r$/, "")
+    if (text.trim()) lines.push({ text, start })
+    start = index + 1
+  }
+  return lines
+}
+
+async function readOptional(target: string): Promise<string | null> {
+  try {
+    return await fs.readFile(target, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw error
+  }
+}
+
 function projectHash(cwd: string): string {
   return crypto.createHash("sha1").update(canonicalProjectRoot(cwd)).digest("hex").slice(0, 12)
 }
 
-export function getRuntimeDir(cwd: string): string {
-  return path.join(os.homedir(), ".nexus", "runtime", projectHash(cwd))
+export function getRuntimeDir(cwd: string, homeDir = path.join(os.homedir(), ".nexus")): string {
+  return path.join(homeDir, "runtime", projectHash(cwd))
 }
 
 function newId(prefix: string): string {
   return `${prefix}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
 }
 
 function mapBackgroundKindToTaskKind(kind: BackgroundTaskRecord["kind"]): TaskKind {
@@ -69,7 +272,13 @@ function mapBackgroundStatusToTaskStatus(status: BackgroundTaskStatus): TaskStat
 export class OrchestrationRuntime {
   private readonly root: string
   private readonly stateFile: string
-  private loaded = false
+  private readonly journalFile: string
+  private readonly writer: RuntimeWriter
+  private readonly compactAfterRecords: number
+  private readonly compactAfterBytes: number
+  private readonly reconcileStaleRuns: boolean
+  private readonly onDiagnostic?: (diagnostic: OrchestrationDiagnostic) => void
+  private readonly diagnostics: OrchestrationDiagnostic[] = []
   private tasks = new Map<string, TaskRecord>()
   private teams = new Map<string, TeamRecord>()
   private worktrees = new Map<string, WorktreeSession>()
@@ -77,29 +286,73 @@ export class OrchestrationRuntime {
   private memories = new Map<string, MemoryRecord>()
   private remoteSessions = new Map<string, RemoteSessionRecord>()
 
-  constructor(readonly cwd: string) {
-    this.root = getRuntimeDir(cwd)
+  constructor(readonly cwd: string, options: OrchestrationRuntimeOptions = {}) {
+    this.root = getRuntimeDir(cwd, path.resolve(options.homeDir ?? path.join(os.homedir(), ".nexus")))
     this.stateFile = path.join(this.root, "state.json")
+    this.journalFile = path.join(this.root, "state.journal.jsonl")
+    this.writer = {
+      pid: process.pid,
+      hostname: hostname(),
+      instanceId: crypto.randomBytes(12).toString("hex"),
+    }
+    this.compactAfterRecords = Math.max(
+      1,
+      options.compactAfterRecords ?? DEFAULT_COMPACT_AFTER_RECORDS,
+    )
+    this.compactAfterBytes = Math.max(
+      1,
+      options.compactAfterBytes ?? DEFAULT_COMPACT_AFTER_BYTES,
+    )
+    this.reconcileStaleRuns = options.reconcileStaleRuns ?? true
+    this.onDiagnostic = options.onDiagnostic
   }
 
-  private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return
-    await fs.mkdir(this.root, { recursive: true })
-    try {
-      const raw = await fs.readFile(this.stateFile, "utf8")
-      const parsed = JSON.parse(raw) as Partial<StoredRuntimeState>
-      for (const task of parsed.tasks ?? []) {
+  getStatePath(): string {
+    return this.stateFile
+  }
+
+  getJournalPath(): string {
+    return this.journalFile
+  }
+
+  getDiagnostics(): readonly OrchestrationDiagnostic[] {
+    return this.diagnostics.map((diagnostic) => ({ ...diagnostic }))
+  }
+
+  private diagnostic(diagnostic: OrchestrationDiagnostic): void {
+    if (
+      !this.diagnostics.some(
+        (existing) =>
+          existing.code === diagnostic.code &&
+          existing.path === diagnostic.path &&
+          existing.message === diagnostic.message,
+      )
+    ) {
+      this.diagnostics.push(diagnostic)
+      if (this.diagnostics.length > 100) this.diagnostics.shift()
+    }
+    this.onDiagnostic?.(diagnostic)
+  }
+
+  private applyState(state: StoredRuntimeState): void {
+    this.tasks.clear()
+    this.teams.clear()
+    this.worktrees.clear()
+    this.backgroundTasks.clear()
+    this.memories.clear()
+    this.remoteSessions.clear()
+    for (const task of state.tasks) {
         this.tasks.set(task.id, {
           ...task,
           kind: task.kind ?? "tracking",
         })
       }
-      for (const team of parsed.teams ?? []) this.teams.set(team.name, team)
-      for (const worktree of parsed.worktrees ?? []) this.worktrees.set(worktree.id, worktree)
-      for (const backgroundTask of parsed.backgroundTasks ?? []) this.backgroundTasks.set(backgroundTask.id, backgroundTask)
-      for (const memory of parsed.memories ?? []) this.memories.set(memory.id, memory)
-      for (const remoteSession of parsed.remoteSessions ?? []) this.remoteSessions.set(remoteSession.id, remoteSession)
-      for (const backgroundTask of this.backgroundTasks.values()) {
+    for (const team of state.teams) this.teams.set(team.name, team)
+    for (const worktree of state.worktrees) this.worktrees.set(worktree.id, worktree)
+    for (const backgroundTask of state.backgroundTasks) this.backgroundTasks.set(backgroundTask.id, backgroundTask)
+    for (const memory of state.memories) this.memories.set(memory.id, memory)
+    for (const remoteSession of state.remoteSessions) this.remoteSessions.set(remoteSession.id, remoteSession)
+    for (const backgroundTask of this.backgroundTasks.values()) {
         if (this.tasks.has(backgroundTask.id)) continue
         this.tasks.set(backgroundTask.id, {
           id: backgroundTask.id,
@@ -123,15 +376,10 @@ export class OrchestrationRuntime {
           ...(backgroundTask.metadata ? { metadata: backgroundTask.metadata } : {}),
         })
       }
-    } catch {
-      // Fresh runtime state.
-    }
-    this.loaded = true
   }
 
-  private async persist(): Promise<void> {
-    await fs.mkdir(this.root, { recursive: true })
-    const state: StoredRuntimeState = {
+  private captureState(): StoredRuntimeState {
+    return {
       tasks: Array.from(this.tasks.values()).sort((a, b) => a.createdAt - b.createdAt),
       teams: Array.from(this.teams.values()).sort((a, b) => a.createdAt - b.createdAt),
       worktrees: Array.from(this.worktrees.values()).sort((a, b) => a.createdAt - b.createdAt),
@@ -139,7 +387,444 @@ export class OrchestrationRuntime {
       memories: Array.from(this.memories.values()).sort((a, b) => a.createdAt - b.createdAt),
       remoteSessions: Array.from(this.remoteSessions.values()).sort((a, b) => a.createdAt - b.createdAt),
     }
-    await fs.writeFile(this.stateFile, JSON.stringify(state, null, 2), "utf8")
+  }
+
+  private parseSnapshot(raw: string, sourcePath: string): {
+    state: StoredRuntimeState
+    revision: number
+    format: "legacy-v1" | "v2"
+    writer?: RuntimeWriter
+  } {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch (error) {
+      throw new OrchestrationCorruptionError(sourcePath, `invalid JSON: ${String(error)}`)
+    }
+    if (isRuntimeSnapshot(parsed, sourcePath)) {
+      return {
+        state: normalizeRuntimeState(parsed.state, sourcePath),
+        revision: parsed.revision,
+        format: "v2",
+        writer: parsed.writer,
+      }
+    }
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      ("schemaVersion" in parsed || "state" in parsed || "stateChecksum" in parsed)
+    ) {
+      throw new OrchestrationCorruptionError(sourcePath, "invalid v2 snapshot or checksum")
+    }
+    return {
+      state: normalizeRuntimeState(parsed, sourcePath),
+      revision: 0,
+      format: "legacy-v1",
+    }
+  }
+
+  private parseJournal(raw: string): {
+    state: StoredRuntimeState | null
+    revision: number
+    writer?: RuntimeWriter
+    count: number
+    lastChecksum: string | null
+    corruptTail?: string
+  } {
+    const lines = runtimeJournalLines(raw)
+    let revision = 0
+    let lastChecksum: string | null = null
+    let state: StoredRuntimeState | null = null
+    let writer: RuntimeWriter | undefined
+    let count = 0
+    let corruptTail: string | undefined
+    for (const line of lines) {
+      let record: RuntimeJournalRecord
+      try {
+        record = JSON.parse(line.text) as RuntimeJournalRecord
+      } catch {
+        corruptTail = raw.slice(line.start)
+        break
+      }
+      let normalized: StoredRuntimeState
+      try {
+        normalized = normalizeRuntimeState(record.state, this.journalFile)
+      } catch {
+        corruptTail = raw.slice(line.start)
+        break
+      }
+      const { checksum, ...withoutChecksum } = record
+      const validFirstRevision = count === 0 && record.revision >= 1
+      const validNextRevision = count > 0 && record.revision === revision + 1
+      if (
+        record.type !== "orchestration_transition" ||
+        record.schemaVersion !== RUNTIME_SCHEMA_VERSION ||
+        !isRuntimeWriter(record.writer) ||
+        (!validFirstRevision && !validNextRevision) ||
+        record.previousChecksum !== lastChecksum ||
+        record.stateChecksum !== stateChecksum(normalized) ||
+        checksum !== journalChecksum(withoutChecksum)
+      ) {
+        corruptTail = raw.slice(line.start)
+        break
+      }
+      state = normalized
+      revision = record.revision
+      writer = record.writer
+      lastChecksum = record.checksum
+      count += 1
+    }
+    return { state, revision, writer, count, lastChecksum, ...(corruptTail ? { corruptTail } : {}) }
+  }
+
+  private reconcileState(
+    state: StoredRuntimeState,
+    previousWriter?: RuntimeWriter,
+  ): boolean {
+    if (!this.reconcileStaleRuns) return false
+    if (previousWriter?.hostname === hostname() && isProcessAlive(previousWriter.pid)) return false
+    let changed = false
+    const now = Date.now()
+    state.backgroundTasks = state.backgroundTasks.map((task) => {
+      if (task.status !== "running") return task
+      if (task.kind === "bash" && task.processId && isProcessAlive(task.processId)) return task
+      changed = true
+      return {
+        ...task,
+        status: "failed",
+        updatedAt: now,
+        error: task.error ?? "Interrupted because the previous Nexus process is no longer running.",
+      }
+    })
+    const failedBackground = new Map(
+      state.backgroundTasks
+        .filter((task) => task.status === "failed")
+        .map((task) => [task.id, task]),
+    )
+    state.tasks = state.tasks.map((task) => {
+      const background = failedBackground.get(task.id)
+      if (!background) return task
+      changed = true
+      return {
+        ...task,
+        status: "failed",
+        updatedAt: background.updatedAt,
+        error: background.error,
+      }
+    })
+    state.remoteSessions = state.remoteSessions.map((remote) => {
+      if (!["connecting", "connected", "reconnecting"].includes(remote.status)) return remote
+      changed = true
+      return {
+        ...remote,
+        status: "disconnected",
+        updatedAt: now,
+        error: remote.error ?? "Disconnected because the previous Nexus process stopped.",
+      }
+    })
+    if (changed) {
+      this.diagnostic({
+        code: "stale-run-reconciled",
+        path: this.stateFile,
+        message: "Reconciled running tasks and remote sessions left by a previous process",
+      })
+    }
+    return changed
+  }
+
+  private async loadDurableState(): Promise<LoadedRuntimeState> {
+    await fs.mkdir(this.root, { recursive: true, mode: 0o700 })
+    const primaryRaw = await readOptional(this.stateFile)
+    const backupRaw = await readOptional(`${this.stateFile}.bak`)
+    const journalRaw = await readOptional(this.journalFile)
+
+    let snapshot:
+      | { state: StoredRuntimeState; revision: number; format: "legacy-v1" | "v2"; writer?: RuntimeWriter }
+      | undefined
+    let primaryError: unknown
+    let snapshotHealthy = true
+    if (primaryRaw != null) {
+      try {
+        snapshot = this.parseSnapshot(primaryRaw, this.stateFile)
+      } catch (error) {
+        primaryError = error
+        snapshotHealthy = false
+      }
+    }
+    if (!snapshot && backupRaw != null) {
+      try {
+        snapshot = this.parseSnapshot(backupRaw, `${this.stateFile}.bak`)
+        this.diagnostic({
+          code: "snapshot-backup-recovered",
+          path: `${this.stateFile}.bak`,
+          message: "Recovered orchestration snapshot from its backup",
+        })
+      } catch {
+        // The primary error remains authoritative below.
+      }
+    }
+
+    const journal = journalRaw == null
+      ? { state: null, revision: 0, count: 0, lastChecksum: null }
+      : this.parseJournal(journalRaw)
+    if (journal.corruptTail) {
+      this.diagnostic({
+        code: "corrupt-journal-tail",
+        path: this.journalFile,
+        message: `Ignored ${Buffer.byteLength(journal.corruptTail)} unverified journal bytes`,
+      })
+    }
+
+    if (!snapshot && !journal.state) {
+      if (primaryError || (journalRaw != null && journalRaw.trim())) {
+        throw primaryError instanceof Error
+          ? primaryError
+          : new OrchestrationCorruptionError(this.stateFile, "no verified snapshot or journal record")
+      }
+      return {
+        state: emptyRuntimeState(),
+        revision: 0,
+        format: "fresh",
+        snapshotHealthy,
+        journalCount: journal.count,
+        journalBytes: journalRaw?.length ?? 0,
+        journalLastChecksum: journal.lastChecksum,
+        ...(journal.corruptTail ? { corruptJournalTail: journal.corruptTail } : {}),
+        reconciled: false,
+      }
+    }
+
+    const useJournal = Boolean(journal.state && journal.revision >= (snapshot?.revision ?? 0))
+    const selectedState = useJournal ? journal.state! : snapshot!.state
+    const selectedRevision = useJournal ? journal.revision : snapshot!.revision
+    const selectedWriter = useJournal ? journal.writer : snapshot?.writer
+    if (useJournal && journal.revision > (snapshot?.revision ?? 0)) {
+      this.diagnostic({
+        code: "journal-recovered",
+        path: this.journalFile,
+        message: `Recovered orchestration revision ${journal.revision} from the journal`,
+      })
+    }
+    const format = snapshot?.format === "legacy-v1" && !useJournal ? "legacy-v1" : "v2"
+    if (format === "legacy-v1") {
+      this.diagnostic({
+        code: "legacy-state-detected",
+        path: this.stateFile,
+        message: "Legacy orchestration state will migrate on its next durable mutation",
+      })
+    }
+    const state = normalizeRuntimeState(selectedState, this.stateFile)
+    const reconciled = this.reconcileState(state, selectedWriter)
+    return {
+      state,
+      revision: selectedRevision,
+      format,
+      writer: selectedWriter,
+      snapshotHealthy,
+      journalCount: journal.count,
+      journalBytes: journalRaw?.length ?? 0,
+      journalLastChecksum: journal.lastChecksum,
+      ...(journal.corruptTail ? { corruptJournalTail: journal.corruptTail } : {}),
+      ...(format === "legacy-v1" && primaryRaw != null ? { legacyRaw: primaryRaw } : {}),
+      reconciled,
+    }
+  }
+
+  private async quarantineJournalTail(tail: string): Promise<void> {
+    const target = `${this.journalFile}.corrupt-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`
+    await atomicWriteFile(target, tail)
+  }
+
+  private async persistLoaded(loaded: LoadedRuntimeState): Promise<void> {
+    const state = this.captureState()
+    const revision = loaded.revision + 1
+    if (loaded.format === "legacy-v1" && loaded.legacyRaw != null) {
+      const legacyBackup = `${this.stateFile}.legacy-v1.bak`
+      if ((await readOptional(legacyBackup)) == null) {
+        await atomicWriteFile(legacyBackup, loaded.legacyRaw)
+      }
+      this.diagnostic({
+        code: "legacy-state-migrated",
+        path: this.stateFile,
+        message: "Migrated legacy orchestration state to schema v2",
+      })
+    }
+    if (loaded.corruptJournalTail) {
+      await this.quarantineJournalTail(loaded.corruptJournalTail)
+    }
+
+    const stateHash = stateChecksum(state)
+    const baseRecord: Omit<RuntimeJournalRecord, "checksum"> = {
+      type: "orchestration_transition",
+      schemaVersion: RUNTIME_SCHEMA_VERSION,
+      revision,
+      ts: Date.now(),
+      writer: this.writer,
+      previousChecksum: loaded.corruptJournalTail ? null : loaded.journalLastChecksum,
+      stateChecksum: stateHash,
+      state,
+    }
+    const record: RuntimeJournalRecord = {
+      ...baseRecord,
+      checksum: journalChecksum(baseRecord),
+    }
+    const compact =
+      loaded.format !== "v2" ||
+      Boolean(loaded.corruptJournalTail) ||
+      loaded.journalCount >= this.compactAfterRecords ||
+      loaded.journalBytes >= this.compactAfterBytes
+    if (compact) {
+      const compactBase = { ...baseRecord, previousChecksum: null }
+      const compactRecord: RuntimeJournalRecord = {
+        ...compactBase,
+        checksum: journalChecksum(compactBase),
+      }
+      await atomicWriteFile(this.journalFile, `${JSON.stringify(compactRecord)}\n`, {
+        backup: loaded.journalCount > 0 && !loaded.corruptJournalTail,
+      })
+    } else {
+      const handle = await fs.open(this.journalFile, "a", 0o600)
+      try {
+        await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8")
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+    }
+
+    const snapshotBase: Omit<RuntimeSnapshot, "checksum"> = {
+      schemaVersion: RUNTIME_SCHEMA_VERSION,
+      revision,
+      updatedAt: Date.now(),
+      writer: this.writer,
+      stateChecksum: stateHash,
+      state,
+    }
+    const snapshot: RuntimeSnapshot = {
+      ...snapshotBase,
+      checksum: snapshotChecksum(snapshotBase),
+    }
+    await atomicWriteJson(this.stateFile, snapshot, {
+      backup: loaded.snapshotHealthy && loaded.format === "v2",
+    })
+  }
+
+  private async ensureLoaded(): Promise<void> {
+    await withFileLock(this.stateFile, async () => {
+      const loaded = await this.loadDurableState()
+      this.applyState(loaded.state)
+      if (loaded.reconciled) await this.persistLoaded(loaded)
+    })
+  }
+
+  private async mutate<T>(operation: () => T | Promise<T>): Promise<T> {
+    return withFileLock(this.stateFile, async () => {
+      const loaded = await this.loadDurableState()
+      this.applyState(loaded.state)
+      const before = JSON.stringify(this.captureState())
+      const result = await operation()
+      const after = JSON.stringify(this.captureState())
+      if (before !== after || loaded.format === "legacy-v1" || loaded.reconciled) {
+        await this.persistLoaded(loaded)
+      }
+      return result
+    })
+  }
+
+  private assertCanComplete(task: TaskRecord): void {
+    const unresolved = (task.blockedBy ?? []).filter((taskId) => {
+      const blocker = this.tasks.get(taskId)
+      return !blocker || !["completed", "cancelled", "deleted"].includes(blocker.status)
+    })
+    if (unresolved.length > 0) {
+      throw new OrchestrationInvariantError(
+        `Task ${task.id} cannot complete while blockers remain unresolved: ${unresolved.join(", ")}`,
+      )
+    }
+    const unfinishedChildren = Array.from(this.tasks.values())
+      .filter((candidate) => candidate.parentTaskId === task.id)
+      .filter((candidate) => !["completed", "cancelled", "deleted"].includes(candidate.status))
+      .map((candidate) => candidate.id)
+    if (unfinishedChildren.length > 0) {
+      throw new OrchestrationInvariantError(
+        `Task ${task.id} cannot complete while child tasks remain unfinished: ${unfinishedChildren.join(", ")}`,
+      )
+    }
+  }
+
+  private assertValidTaskDependencies(taskId: string, blockedBy: readonly string[]): void {
+    if (blockedBy.includes(taskId)) {
+      throw new OrchestrationInvariantError(`Task ${taskId} cannot block itself`)
+    }
+    const visit = (currentId: string, seen: Set<string>): boolean => {
+      if (currentId === taskId) return true
+      if (seen.has(currentId)) return false
+      seen.add(currentId)
+      const current = this.tasks.get(currentId)
+      return (current?.blockedBy ?? []).some((nextId) => visit(nextId, seen))
+    }
+    for (const blockerId of blockedBy) {
+      if (visit(blockerId, new Set())) {
+        throw new OrchestrationInvariantError(
+          `Adding blocker ${blockerId} would create a dependency cycle for task ${taskId}`,
+        )
+      }
+    }
+  }
+
+  private synchronizeTaskEdges(taskId: string): void {
+    const original = this.tasks.get(taskId)
+    if (!original) return
+    const inferredBlockedBy = Array.from(this.tasks.values())
+      .filter((candidate) => (candidate.blocks ?? []).includes(taskId))
+      .map((candidate) => candidate.id)
+    const inferredBlocks = Array.from(this.tasks.values())
+      .filter((candidate) => (candidate.blockedBy ?? []).includes(taskId))
+      .map((candidate) => candidate.id)
+    const task: TaskRecord = {
+      ...original,
+      ...((original.blockedBy?.length || inferredBlockedBy.length)
+        ? { blockedBy: Array.from(new Set([...(original.blockedBy ?? []), ...inferredBlockedBy])) }
+        : {}),
+      ...((original.blocks?.length || inferredBlocks.length)
+        ? { blocks: Array.from(new Set([...(original.blocks ?? []), ...inferredBlocks])) }
+        : {}),
+    }
+    this.assertValidTaskDependencies(task.id, task.blockedBy ?? [])
+    this.tasks.set(taskId, task)
+
+    for (const blockedId of task.blocks ?? []) {
+      const blocked = this.tasks.get(blockedId)
+      if (!blocked) continue
+      const blockedBy = Array.from(new Set([...(blocked.blockedBy ?? []), taskId]))
+      this.assertValidTaskDependencies(blocked.id, blockedBy)
+      this.tasks.set(blocked.id, {
+        ...blocked,
+        blockedBy,
+        updatedAt: Date.now(),
+      })
+    }
+    for (const blockerId of task.blockedBy ?? []) {
+      const blocker = this.tasks.get(blockerId)
+      if (!blocker) continue
+      this.tasks.set(blocker.id, {
+        ...blocker,
+        blocks: Array.from(new Set([...(blocker.blocks ?? []), taskId])),
+        updatedAt: Date.now(),
+      })
+    }
+  }
+
+  private assertValidTaskTransition(previous: TaskStatus, next: TaskStatus, taskId: string): void {
+    const terminal = new Set<TaskStatus>(["completed", "failed", "killed", "cancelled", "deleted"])
+    if (terminal.has(previous) && previous !== next && !terminal.has(next)) {
+      throw new OrchestrationInvariantError(
+        `Task ${taskId} cannot transition from terminal status ${previous} back to ${next}; resume or fork it instead`,
+      )
+    }
+    if (previous === "deleted" && next !== "deleted") {
+      throw new OrchestrationInvariantError(`Deleted task ${taskId} cannot be changed`)
+    }
   }
 
   async createTask(input: {
@@ -169,9 +854,9 @@ export class OrchestrationRuntime {
     agentType?: string
     toolUseId?: string
   }): Promise<TaskRecord> {
-    await this.ensureLoaded()
-    const now = Date.now()
-    const task: TaskRecord = {
+    return this.mutate(() => {
+      const now = Date.now()
+      const task: TaskRecord = {
       id: input.id ?? newId("task"),
       kind: input.kind ?? "tracking",
       subject: input.subject,
@@ -199,10 +884,26 @@ export class OrchestrationRuntime {
       ...(input.forkOf ? { forkOf: input.forkOf } : {}),
       ...(input.agentType ? { agentType: input.agentType } : {}),
       ...(input.toolUseId ? { toolUseId: input.toolUseId } : {}),
-    }
-    this.tasks.set(task.id, task)
-    await this.persist()
-    return task
+      }
+      const existing = this.tasks.get(task.id)
+      if (
+        existing &&
+        existing.kind === task.kind &&
+        existing.subject === task.subject &&
+        existing.description === task.description
+      ) {
+        return existing
+      }
+      if (existing) {
+        throw new OrchestrationInvariantError(`Task id already exists: ${task.id}`)
+      }
+      this.assertValidTaskDependencies(task.id, task.blockedBy ?? [])
+      this.tasks.set(task.id, task)
+      this.synchronizeTaskEdges(task.id)
+      const synchronized = this.tasks.get(task.id)!
+      if (synchronized.status === "completed") this.assertCanComplete(synchronized)
+      return synchronized
+    })
   }
 
   async getTask(taskId: string): Promise<TaskRecord | null> {
@@ -245,15 +946,15 @@ export class OrchestrationRuntime {
       addBlockedBy?: string[]
     },
   ): Promise<TaskRecord | null> {
-    await this.ensureLoaded()
-    const existing = this.tasks.get(taskId)
-    if (!existing) return null
-    const nextMetadata = { ...(existing.metadata ?? {}) }
-    for (const [key, value] of Object.entries(updates.metadata ?? {})) {
-      if (value === null) delete nextMetadata[key]
-      else nextMetadata[key] = value
-    }
-    const next: TaskRecord = {
+    return this.mutate(() => {
+      const existing = this.tasks.get(taskId)
+      if (!existing) return null
+      const nextMetadata = { ...(existing.metadata ?? {}) }
+      for (const [key, value] of Object.entries(updates.metadata ?? {})) {
+        if (value === null) delete nextMetadata[key]
+        else nextMetadata[key] = value
+      }
+      const next: TaskRecord = {
       ...existing,
       ...(updates.status ? { status: updates.status } : {}),
       ...(typeof updates.subject === "string" ? { subject: updates.subject } : {}),
@@ -282,10 +983,15 @@ export class OrchestrationRuntime {
         ? { blockedBy: Array.from(new Set([...(existing.blockedBy ?? []), ...updates.addBlockedBy])) }
         : {}),
       updatedAt: Date.now(),
-    }
-    this.tasks.set(taskId, next)
-    await this.persist()
-    return next
+      }
+      this.assertValidTaskTransition(existing.status, next.status, taskId)
+      this.assertValidTaskDependencies(taskId, next.blockedBy ?? [])
+      this.tasks.set(taskId, next)
+      this.synchronizeTaskEdges(taskId)
+      const synchronized = this.tasks.get(taskId)!
+      if (synchronized.status === "completed") this.assertCanComplete(synchronized)
+      return synchronized
+    })
   }
 
   async createTeam(input: {
@@ -293,19 +999,19 @@ export class OrchestrationRuntime {
     description: string
     members?: TeamMemberRecord[]
   }): Promise<TeamRecord> {
-    await this.ensureLoaded()
-    const existing = this.teams.get(input.teamName)
-    if (existing) return existing
-    const team: TeamRecord = {
-      name: input.teamName,
-      description: input.description,
-      createdAt: Date.now(),
-      members: input.members ?? [],
-      messages: [],
-    }
-    this.teams.set(team.name, team)
-    await this.persist()
-    return team
+    return this.mutate(() => {
+      const existing = this.teams.get(input.teamName)
+      if (existing) return existing
+      const team: TeamRecord = {
+        name: input.teamName,
+        description: input.description,
+        createdAt: Date.now(),
+        members: input.members ?? [],
+        messages: [],
+      }
+      this.teams.set(team.name, team)
+      return team
+    })
   }
 
   async getTeam(teamName: string): Promise<TeamRecord | null> {
@@ -319,31 +1025,28 @@ export class OrchestrationRuntime {
   }
 
   async deleteTeam(teamName: string): Promise<boolean> {
-    await this.ensureLoaded()
-    const existed = this.teams.delete(teamName)
-    if (existed) await this.persist()
-    return existed
+    return this.mutate(() => this.teams.delete(teamName))
   }
 
   async addTeamMember(teamName: string, member: TeamMemberRecord): Promise<TeamRecord | null> {
-    await this.ensureLoaded()
-    const team = this.teams.get(teamName)
-    if (!team) return null
-    const existing = team.members.find((item) => item.name === member.name)
-    const next: TeamRecord = {
-      ...team,
-      members: [
-        ...team.members.filter((item) => item.name !== member.name),
-        {
-          ...(existing ?? {}),
-          ...member,
-          joinedAt: existing?.joinedAt ?? member.joinedAt,
-        },
-      ],
-    }
-    this.teams.set(teamName, next)
-    await this.persist()
-    return next
+    return this.mutate(() => {
+      const team = this.teams.get(teamName)
+      if (!team) return null
+      const existing = team.members.find((item) => item.name === member.name)
+      const next: TeamRecord = {
+        ...team,
+        members: [
+          ...team.members.filter((item) => item.name !== member.name),
+          {
+            ...(existing ?? {}),
+            ...member,
+            joinedAt: existing?.joinedAt ?? member.joinedAt,
+          },
+        ],
+      }
+      this.teams.set(teamName, next)
+      return next
+    })
   }
 
   async updateTeamMember(
@@ -351,12 +1054,12 @@ export class OrchestrationRuntime {
     memberName: string,
     updates: Partial<Omit<TeamMemberRecord, "name" | "joinedAt" | "note">> & { note?: string | null },
   ): Promise<TeamRecord | null> {
-    await this.ensureLoaded()
-    const team = this.teams.get(teamName)
-    if (!team) return null
-    const existing = team.members.find((item) => item.name === memberName)
-    if (!existing) return null
-    const nextMember: TeamMemberRecord = {
+    return this.mutate(() => {
+      const team = this.teams.get(teamName)
+      if (!team) return null
+      const existing = team.members.find((item) => item.name === memberName)
+      if (!existing) return null
+      const nextMember: TeamMemberRecord = {
       ...existing,
       ...(typeof updates.agentId === "string" ? { agentId: updates.agentId } : {}),
       ...(typeof updates.agentType === "string" ? { agentType: updates.agentType } : {}),
@@ -364,18 +1067,18 @@ export class OrchestrationRuntime {
       ...(typeof updates.lastActiveAt === "number" ? { lastActiveAt: updates.lastActiveAt } : {}),
       ...(typeof updates.lastIdleAt === "number" ? { lastIdleAt: updates.lastIdleAt } : {}),
       ...(updates.note === null ? {} : typeof updates.note === "string" ? { note: updates.note } : {}),
-    }
-    if (updates.note === null) delete nextMember.note
-    const next: TeamRecord = {
+      }
+      if (updates.note === null) delete nextMember.note
+      const next: TeamRecord = {
       ...team,
       members: [
         ...team.members.filter((item) => item.name !== memberName),
         nextMember,
       ],
-    }
-    this.teams.set(teamName, next)
-    await this.persist()
-    return next
+      }
+      this.teams.set(teamName, next)
+      return next
+    })
   }
 
   async sendMessage(input: {
@@ -384,39 +1087,41 @@ export class OrchestrationRuntime {
     message: string
     teamName?: string
   }): Promise<TeamMessageRecord> {
-    await this.ensureLoaded()
-    const record: TeamMessageRecord = {
-      id: newId("teammsg"),
-      ts: Date.now(),
-      from: input.from,
-      to: input.to,
-      message: input.message,
-      ...(input.teamName ? { teamName: input.teamName } : {}),
-    }
-    if (input.teamName && this.teams.has(input.teamName)) {
-      const team = this.teams.get(input.teamName)!
-      this.teams.set(input.teamName, {
-        ...team,
-        messages: [...team.messages, record],
-      })
-      await this.persist()
-    }
-    return record
+    return this.mutate(() => {
+      const record: TeamMessageRecord = {
+        id: newId("teammsg"),
+        ts: Date.now(),
+        from: input.from,
+        to: input.to,
+        message: input.message,
+        ...(input.teamName ? { teamName: input.teamName } : {}),
+      }
+      if (input.teamName && this.teams.has(input.teamName)) {
+        const team = this.teams.get(input.teamName)!
+        this.teams.set(input.teamName, {
+          ...team,
+          messages: [...team.messages, record],
+        })
+      }
+      return record
+    })
   }
 
   async registerBackgroundTask(
     task: Omit<BackgroundTaskRecord, "createdAt" | "updatedAt">,
   ): Promise<BackgroundTaskRecord> {
-    await this.ensureLoaded()
-    const now = Date.now()
-    const record: BackgroundTaskRecord = {
-      ...task,
-      createdAt: now,
-      updatedAt: now,
-    }
-    this.backgroundTasks.set(record.id, record)
-    const existingTask = this.tasks.get(record.id)
-    const mirrored: TaskRecord = {
+    return this.mutate(() => {
+      const now = Date.now()
+      const existingBackground = this.backgroundTasks.get(task.id)
+      if (existingBackground) return existingBackground
+      const record: BackgroundTaskRecord = {
+        ...task,
+        createdAt: now,
+        updatedAt: now,
+      }
+      this.backgroundTasks.set(record.id, record)
+      const existingTask = this.tasks.get(record.id)
+      const mirrored: TaskRecord = {
       id: record.id,
       kind: mapBackgroundKindToTaskKind(record.kind),
       subject: existingTask?.subject ?? record.description,
@@ -447,28 +1152,28 @@ export class OrchestrationRuntime {
       ...(typeof record.metadata?.forkOf === "string" ? { forkOf: record.metadata.forkOf } : {}),
       ...(typeof record.metadata?.agentType === "string" ? { agentType: record.metadata.agentType } : {}),
       ...(existingTask?.toolUseId ? { toolUseId: existingTask.toolUseId } : {}),
-    }
-    this.tasks.set(record.id, mirrored)
-    await this.persist()
-    return record
+      }
+      this.tasks.set(record.id, mirrored)
+      return record
+    })
   }
 
   async updateBackgroundTask(
     taskId: string,
     updates: Partial<Omit<BackgroundTaskRecord, "id" | "kind" | "createdAt">>,
   ): Promise<BackgroundTaskRecord | null> {
-    await this.ensureLoaded()
-    const existing = this.backgroundTasks.get(taskId)
-    if (!existing) return null
-    const next: BackgroundTaskRecord = {
-      ...existing,
-      ...updates,
-      updatedAt: Date.now(),
-    }
-    this.backgroundTasks.set(taskId, next)
-    const mirrored = this.tasks.get(taskId)
-    if (mirrored) {
-      this.tasks.set(taskId, {
+    return this.mutate(() => {
+      const existing = this.backgroundTasks.get(taskId)
+      if (!existing) return null
+      const next: BackgroundTaskRecord = {
+        ...existing,
+        ...updates,
+        updatedAt: Date.now(),
+      }
+      this.backgroundTasks.set(taskId, next)
+      const mirrored = this.tasks.get(taskId)
+      if (mirrored) {
+        this.tasks.set(taskId, {
         ...mirrored,
         kind: mapBackgroundKindToTaskKind(next.kind),
         description: next.description,
@@ -489,10 +1194,10 @@ export class OrchestrationRuntime {
           ...(mirrored.metadata ?? {}),
           ...(next.metadata ?? {}),
         },
-      })
-    }
-    await this.persist()
-    return next
+        })
+      }
+      return next
+    })
   }
 
   async setBackgroundTaskStatus(
@@ -519,19 +1224,19 @@ export class OrchestrationRuntime {
     branch: string
     metadata?: Record<string, unknown>
   }): Promise<WorktreeSession> {
-    await this.ensureLoaded()
-    const session: WorktreeSession = {
-      id: newId("worktree"),
-      originalCwd: input.originalCwd,
-      worktreePath: input.worktreePath,
-      branch: input.branch,
-      createdAt: Date.now(),
-      status: "active",
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-    }
-    this.worktrees.set(session.id, session)
-    await this.persist()
-    return session
+    return this.mutate(() => {
+      const session: WorktreeSession = {
+        id: newId("worktree"),
+        originalCwd: input.originalCwd,
+        worktreePath: input.worktreePath,
+        branch: input.branch,
+        createdAt: Date.now(),
+        status: "active",
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+      }
+      this.worktrees.set(session.id, session)
+      return session
+    })
   }
 
   async findActiveWorktree(worktreePath?: string): Promise<WorktreeSession | null> {
@@ -548,13 +1253,13 @@ export class OrchestrationRuntime {
     worktreeId: string,
     updates: Partial<Pick<WorktreeSession, "status" | "metadata">>,
   ): Promise<WorktreeSession | null> {
-    await this.ensureLoaded()
-    const current = this.worktrees.get(worktreeId)
-    if (!current) return null
-    const next: WorktreeSession = { ...current, ...updates }
-    this.worktrees.set(worktreeId, next)
-    await this.persist()
-    return next
+    return this.mutate(() => {
+      const current = this.worktrees.get(worktreeId)
+      if (!current) return null
+      const next: WorktreeSession = { ...current, ...updates }
+      this.worktrees.set(worktreeId, next)
+      return next
+    })
   }
 
   async createMemory(input: {
@@ -563,20 +1268,20 @@ export class OrchestrationRuntime {
     content: string
     metadata?: Record<string, unknown>
   }): Promise<MemoryRecord> {
-    await this.ensureLoaded()
-    const now = Date.now()
-    const memory: MemoryRecord = {
-      id: newId("memory"),
-      scope: input.scope,
-      title: input.title,
-      content: input.content,
-      createdAt: now,
-      updatedAt: now,
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-    }
-    this.memories.set(memory.id, memory)
-    await this.persist()
-    return memory
+    return this.mutate(() => {
+      const now = Date.now()
+      const memory: MemoryRecord = {
+        id: newId("memory"),
+        scope: input.scope,
+        title: input.title,
+        content: input.content,
+        createdAt: now,
+        updatedAt: now,
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+      }
+      this.memories.set(memory.id, memory)
+      return memory
+    })
   }
 
   async getMemory(memoryId: string): Promise<MemoryRecord | null> {
@@ -617,24 +1322,24 @@ export class OrchestrationRuntime {
       metadata?: Record<string, unknown | null>
     },
   ): Promise<MemoryRecord | null> {
-    await this.ensureLoaded()
-    const existing = this.memories.get(memoryId)
-    if (!existing) return null
-    const nextMetadata = { ...(existing.metadata ?? {}) }
-    for (const [key, value] of Object.entries(updates.metadata ?? {})) {
-      if (value === null) delete nextMetadata[key]
-      else nextMetadata[key] = value
-    }
-    const next: MemoryRecord = {
+    return this.mutate(() => {
+      const existing = this.memories.get(memoryId)
+      if (!existing) return null
+      const nextMetadata = { ...(existing.metadata ?? {}) }
+      for (const [key, value] of Object.entries(updates.metadata ?? {})) {
+        if (value === null) delete nextMetadata[key]
+        else nextMetadata[key] = value
+      }
+      const next: MemoryRecord = {
       ...existing,
       ...(typeof updates.title === "string" ? { title: updates.title } : {}),
       ...(typeof updates.content === "string" ? { content: updates.content } : {}),
       ...(updates.metadata ? { metadata: nextMetadata } : {}),
       updatedAt: Date.now(),
-    }
-    this.memories.set(memoryId, next)
-    await this.persist()
-    return next
+      }
+      this.memories.set(memoryId, next)
+      return next
+    })
   }
 
   async upsertMemoryByTitle(input: {
@@ -643,27 +1348,40 @@ export class OrchestrationRuntime {
     content: string
     metadata?: Record<string, unknown>
   }): Promise<MemoryRecord> {
-    await this.ensureLoaded()
-    const existing = Array.from(this.memories.values()).find(
-      (memory) =>
-        memory.scope === input.scope &&
-        memory.title === input.title &&
-        JSON.stringify(memory.metadata ?? {}) === JSON.stringify(input.metadata ?? {}),
-    )
-    if (!existing) return this.createMemory(input)
-    return (await this.updateMemory(existing.id, {
-      content: input.content,
-      metadata: input.metadata
-        ? Object.fromEntries(Object.entries(input.metadata).map(([key, value]) => [key, value]))
-        : undefined,
-    })) ?? existing
+    return this.mutate(() => {
+      const existing = Array.from(this.memories.values()).find(
+        (memory) =>
+          memory.scope === input.scope &&
+          memory.title === input.title &&
+          JSON.stringify(memory.metadata ?? {}) === JSON.stringify(input.metadata ?? {}),
+      )
+      const now = Date.now()
+      if (!existing) {
+        const created: MemoryRecord = {
+          id: newId("memory"),
+          scope: input.scope,
+          title: input.title,
+          content: input.content,
+          createdAt: now,
+          updatedAt: now,
+          ...(input.metadata ? { metadata: input.metadata } : {}),
+        }
+        this.memories.set(created.id, created)
+        return created
+      }
+      const updated: MemoryRecord = {
+        ...existing,
+        content: input.content,
+        updatedAt: now,
+        ...(input.metadata ? { metadata: { ...input.metadata } } : {}),
+      }
+      this.memories.set(updated.id, updated)
+      return updated
+    })
   }
 
   async deleteMemory(memoryId: string): Promise<boolean> {
-    await this.ensureLoaded()
-    const existed = this.memories.delete(memoryId)
-    if (existed) await this.persist()
-    return existed
+    return this.mutate(() => this.memories.delete(memoryId))
   }
 
   async createRemoteSession(input: {
@@ -675,23 +1393,23 @@ export class OrchestrationRuntime {
     reconnectable?: boolean
     metadata?: Record<string, unknown>
   }): Promise<RemoteSessionRecord> {
-    await this.ensureLoaded()
-    const now = Date.now()
-    const record: RemoteSessionRecord = {
-      id: newId("remote"),
-      url: input.url,
-      createdAt: now,
-      updatedAt: now,
-      status: input.status ?? "connecting",
-      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-      ...(input.runId ? { runId: input.runId } : {}),
-      ...(typeof input.viewerOnly === "boolean" ? { viewerOnly: input.viewerOnly } : {}),
-      ...(typeof input.reconnectable === "boolean" ? { reconnectable: input.reconnectable } : {}),
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-    }
-    this.remoteSessions.set(record.id, record)
-    await this.persist()
-    return record
+    return this.mutate(() => {
+      const now = Date.now()
+      const record: RemoteSessionRecord = {
+        id: newId("remote"),
+        url: input.url,
+        createdAt: now,
+        updatedAt: now,
+        status: input.status ?? "connecting",
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        ...(input.runId ? { runId: input.runId } : {}),
+        ...(typeof input.viewerOnly === "boolean" ? { viewerOnly: input.viewerOnly } : {}),
+        ...(typeof input.reconnectable === "boolean" ? { reconnectable: input.reconnectable } : {}),
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+      }
+      this.remoteSessions.set(record.id, record)
+      return record
+    })
   }
 
   async getRemoteSession(remoteSessionId: string): Promise<RemoteSessionRecord | null> {
@@ -723,23 +1441,23 @@ export class OrchestrationRuntime {
       metadata?: Record<string, unknown | null>
     },
   ): Promise<RemoteSessionRecord | null> {
-    await this.ensureLoaded()
-    const existing = this.remoteSessions.get(remoteSessionId)
-    if (!existing) return null
-    const nextMetadata = { ...(existing.metadata ?? {}) }
-    for (const [key, value] of Object.entries(updates.metadata ?? {})) {
-      if (value === null) delete nextMetadata[key]
-      else nextMetadata[key] = value
-    }
-    const next: RemoteSessionRecord = {
+    return this.mutate(() => {
+      const existing = this.remoteSessions.get(remoteSessionId)
+      if (!existing) return null
+      const nextMetadata = { ...(existing.metadata ?? {}) }
+      for (const [key, value] of Object.entries(updates.metadata ?? {})) {
+        if (value === null) delete nextMetadata[key]
+        else nextMetadata[key] = value
+      }
+      const next: RemoteSessionRecord = {
       ...existing,
       ...updates,
       ...(updates.metadata ? { metadata: nextMetadata } : {}),
       updatedAt: Date.now(),
-    }
-    this.remoteSessions.set(remoteSessionId, next)
-    await this.persist()
-    return next
+      }
+      this.remoteSessions.set(remoteSessionId, next)
+      return next
+    })
   }
 }
 

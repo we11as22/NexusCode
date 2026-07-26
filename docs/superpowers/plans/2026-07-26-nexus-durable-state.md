@@ -48,13 +48,13 @@
 - Modify: `packages/core/src/orchestration/runtime.ts`
 - Modify: orchestration tool/parallel-agent callers as required.
 
-- [ ] Version orchestration snapshots and add an append-only transition journal.
-- [ ] Run every mutation as lock → reload → validate → append transition → replace snapshot.
-- [ ] Validate task status transitions, dependencies, parent/child lineage, and completion invariants.
-- [ ] Reconcile stale running agents/processes after restart instead of leaving immortal running state.
-- [ ] Preserve and migrate the legacy `state.json` with checksum-backed migration metadata.
-- [ ] Test concurrent runtime instances, forced truncated writes, recovery, idempotent retries, and migration.
-- [ ] Verify core tests/typecheck and commit.
+- [x] Version orchestration snapshots and add an append-only transition journal.
+- [x] Run every mutation as lock → reload → validate → append transition → replace snapshot.
+- [x] Validate task status transitions, dependencies, parent/child lineage, and completion invariants.
+- [x] Reconcile stale running agents/processes after restart instead of leaving immortal running state.
+- [x] Preserve and migrate the legacy `state.json` with checksum-backed migration metadata.
+- [x] Test concurrent runtime instances, forced truncated writes, recovery, idempotent retries, and migration.
+- [x] Verify core tests/typecheck and commit.
 
 ## Task 4: Unify memory records and Unicode retrieval
 

@@ -109,7 +109,16 @@ export {
   createTaskSnapshotTool,
   createTaskResumeTool,
 } from "./agent/parallel.js"
-export { getOrchestrationRuntime, OrchestrationRuntime, getRuntimeDir } from "./orchestration/runtime.js"
+export {
+  getOrchestrationRuntime,
+  OrchestrationRuntime,
+  OrchestrationCorruptionError,
+  OrchestrationInvariantError,
+  getRuntimeDir,
+  type OrchestrationDiagnostic,
+  type OrchestrationDiagnosticCode,
+  type OrchestrationRuntimeOptions,
+} from "./orchestration/runtime.js"
 export {
   FileLockTimeoutError,
   StorageCorruptionError,
