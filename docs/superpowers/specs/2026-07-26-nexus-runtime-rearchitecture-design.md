@@ -173,7 +173,7 @@ flowchart LR
     PLUGINS["PluginRuntime"]
     MCP["MCP session"]
     INDEX["IndexService"]
-    STORE["SQLite event and state store"]
+    STORE["Portable event and state repositories"]
     SANDBOX["Sandbox and process broker"]
 
     CLI --> PROTOCOL
@@ -586,9 +586,11 @@ Existing Markdown memory files are imported with provenance and remain readable/
 
 ## 15. Persistence
 
-SQLite with WAL is the authoritative local store. `better-sqlite3` may remain the initial implementation because it is already a project dependency, but all access goes through repository interfaces so the server can later use another transactional backend.
+Repository interfaces are authoritative; a database implementation is not. The portable baseline uses append-only JSONL journals plus atomically replaced manifests and snapshots. This works in CLI, server, and the VS Code extension without a native Node addon or Electron ABI coupling.
 
-Core tables cover:
+SQLite is an optional projection backend for high-volume deployments, not a startup requirement and not the sole copy of user data. This follows Codex's useful separation between durable rollout history and rebuildable SQLite state, while preserving OpenClaude-style fallback behavior. Any SQLite adapter must use WAL, migrations, integrity checks, corruption quarantine, and automatic projection rebuild from the canonical journal. The agent, memory, and coding tools remain usable when that adapter is absent or unhealthy.
+
+Repository records cover:
 
 - schema migrations;
 - projects and configured roots;
@@ -605,7 +607,7 @@ Core tables cover:
 - checkpoints;
 - index metadata and file fingerprints.
 
-Transactions preserve state and corresponding events atomically.
+Journal append and manifest replacement preserve state transitions atomically. Backends with native transactions must commit state and corresponding events together.
 
 ### 15.1 Migration
 
@@ -616,7 +618,7 @@ On first open:
 3. import orchestration `state.json`;
 4. import memory files and runtime memory records;
 5. import plugin and MCP metadata;
-6. record source checksums and migration version;
+6. record source checksums, journal sequence, and migration version;
 7. leave original files intact until verification succeeds.
 
 Migration can be rerun safely. Failures report an actionable diagnostic and never overwrite the source.
@@ -625,9 +627,7 @@ Exports to legacy JSONL/Markdown remain available during the transition.
 
 ## 16. Index Service
 
-Indexing is a workspace-scoped service with one owner and explicit consumers.
-
-The baseline index is always available:
+Indexing is an optional workspace-scoped service with one owner and explicit consumers. Core coding, memory, orchestration, and repository tools do not depend on index availability. When indexing is enabled, its baseline service provides:
 
 - ignore-aware incremental file discovery;
 - content hashing and file fingerprints;
@@ -643,10 +643,11 @@ Vector search is optional and additive:
 - provider/dimension compatibility is validated;
 - Qdrant collection schema is versioned;
 - batching, concurrency, retry, and rate-limit handling are configurable;
-- vector failures fall back to FTS without corrupting index state;
+- vector failures fall back to the available lexical/file tools without corrupting index state;
 - stale vectors are detected by content hash;
 - project collections cannot collide;
-- startup does not silently abandon indexing after an arbitrary timeout.
+- startup does not silently abandon indexing after an arbitrary timeout;
+- index unavailability is reported as a capability state and never blocks the core agent.
 
 Roo's tested scanner, cache, parser, watcher, and Qdrant lifecycle patterns are the primary targeted reference. Kilo's recall/search integrations inform the combined retrieval API.
 
@@ -932,11 +933,11 @@ The re-architecture is complete only when all of the following are true:
 
 **Mitigation:** Strangler stages, compatibility fixtures, and an authoritative boundary per stage.
 
-### Native dependency and SQLite portability
+### Storage portability
 
-**Risk:** `better-sqlite3` complicates Node compatibility and VSIX packaging.
+**Risk:** A native database addon couples CLI Node ABI, Electron ABI, installation scripts, and VSIX packaging while making recovery dependent on one binary format.
 
-**Mitigation:** Repository abstraction, Node 20 baseline, packaging smoke tests, and a documented alternative backend path.
+**Mitigation:** Portable canonical journals, repository abstraction, atomic file operations, corruption fixtures, and optional rebuildable database projections outside the critical startup path.
 
 ### Sandbox portability
 
@@ -975,7 +976,7 @@ The implementation plan will refine paths, but the target responsibilities are:
 - `memory/` — records, retrieval, consolidation, compatibility import;
 - `plugins/` — manifests, isolation, lifecycle, hooks;
 - `mcp/` — scoped clients, auth, content normalization;
-- `index/` — FTS, vectors, watchers, health;
+- `index/` — optional lexical/vector indexes, watchers, health;
 - `config/` — resolution, provenance, live snapshots;
 - `providers/` — normalized model contract;
 - `compat/` — time-bounded legacy adapters;

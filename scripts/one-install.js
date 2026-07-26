@@ -35,9 +35,6 @@ rm("packages/vscode/webview-ui/node_modules");
 console.log("Installing dependencies...");
 run("pnpm install");
 
-console.log("Setting up native modules (better-sqlite3)...");
-run("pnpm run setup:native");
-
 console.log("Building...");
 run("pnpm build");
 

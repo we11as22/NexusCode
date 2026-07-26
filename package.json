@@ -3,22 +3,19 @@
     "version": "0.1.0",
     "private": true,
     "description": "NexusCode — AI coding agent combining best practices from all vibe-coding tools",
+    "packageManager": "pnpm@10.8.1",
     "engines": {
-        "node": ">=18.0.0"
-    },
-    "pnpm": {
-        "overrides": {
-            "react": "^18.3.1",
-            "react-dom": "^18.3.1"
-        }
+        "node": "20.19.2",
+        "pnpm": "10.8.1"
     },
     "workspaces": [
         "packages/*",
         "packages/vscode/webview-ui"
     ],
     "scripts": {
-        "build": "pnpm run build:context-mode; pnpm -r --stream build",
-        "build:context-mode": "cd sources/claude-context-mode && (npm install --silent && npm run build && (npm run bundle || true)) || true",
+        "preinstall": "node scripts/check-node.js",
+        "build": "pnpm -r --stream build",
+        "build:context-mode": "node scripts/build-optional-context-mode.mjs",
         "build:core": "pnpm --filter @nexuscode/core build",
         "build:vscode": "pnpm --filter nexuscode build",
         "build:cli": "pnpm --filter @nexuscode/cli build",
@@ -26,13 +23,12 @@
         "dev:core": "pnpm --filter @nexuscode/core dev",
         "dev:cli": "pnpm --filter @nexuscode/cli dev",
         "typecheck": "pnpm -r --stream typecheck",
+        "test:runtime": "node --test scripts/runtime-version.test.mjs scripts/build-optional-context-mode.test.mjs scripts/storage-portability.test.mjs",
         "validate:mcp-skills": "pnpm run build:core && node scripts/validate-mcp-skills-workflow.mjs",
         "clean": "pnpm -r --stream clean && rm -rf node_modules",
         "build:server": "pnpm --filter @nexuscode/server build",
-        "rebuild:native": "pnpm rebuild",
         "serve": "node scripts/check-node.js && node packages/server/dist/cli.js",
-    "setup:native": "node scripts/setup-native.js",
-    "setup": "pnpm install && pnpm run setup:native && pnpm build",
+        "setup": "pnpm install && pnpm build",
     "one": "node scripts/one-install.js",
     "fullbuild": "pnpm run setup && pnpm --filter nexuscode package",
     "ready": "node scripts/one-install.js && pnpm --filter nexuscode package && cd packages/cli && npm link && cd ../..",

@@ -12,8 +12,6 @@ export default defineConfig({
     "vscode",
     "@xenova/transformers",
     "puppeteer",
-    // Native modules — keep as external to avoid require() in ESM
-    "better-sqlite3",
     "node:fs",
     "node:path",
     "node:os",
@@ -26,7 +24,7 @@ export default defineConfig({
   ],
   noExternal: [],
   treeshake: true,
-  target: "node18",
+  target: "node20",
   // ESM bundles have no `__dirname`; wasm-paths uses createRequire(path.join(__dirname, ...)).
   esbuildOptions(options, { format }) {
     if (format === "esm") {

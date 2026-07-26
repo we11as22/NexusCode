@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Establish a reproducible, tested, session-scoped Nexus runtime with one tool execution pipeline and fail-closed CLI/server security before migrating persistence, memory, indexing, plugins, and orchestration depth.
+**Goal:** Establish a reproducible, tested, session-scoped Nexus runtime with one tool execution pipeline and fail-closed CLI/server security before migrating persistence, memory, optional indexing, plugins, and orchestration depth.
 
-**Architecture:** Keep existing public APIs alive through adapters while making `NexusRuntimeServices`, `ToolRegistry`, and `ToolExecutionPipeline` authoritative. Pin the native runtime, prove SQLite/FTS compatibility, remove process-global run ownership, and route every tool-call form through the same policy/hook/approval/output path.
+**Architecture:** Keep existing public APIs alive through adapters while making `NexusRuntimeServices`, `ToolRegistry`, and `ToolExecutionPipeline` authoritative. Pin the runtime, remove the unused native SQLite addon from the critical path, remove process-global run ownership, and route every tool-call form through the same policy/hook/approval/output path.
 
-**Tech Stack:** Node.js 20.19.2, pnpm 10.8.1, TypeScript 5.5+, Vitest 3.2.3, Zod, Hono, better-sqlite3 9.6.0, existing Nexus provider and host interfaces.
+**Tech Stack:** Node.js 20.19.2, pnpm 10.8.1, TypeScript 5.5+, Vitest 3.2.3, Zod, Hono, portable JSONL journals and atomic manifests, existing Nexus provider and host interfaces.
 
 ## Global Constraints
 
@@ -24,11 +24,11 @@
 
 This foundation plan is the first independently testable sub-project. Follow-up plans are created and executed in this dependency order:
 
-1. transactional SQLite storage and legacy migration;
+1. transactional repository storage, optional rebuildable projections, and legacy migration;
 2. durable tasks, teams, child agents, background jobs, snapshots, resume/fork, and remote events;
 3. isolated plugins, deterministic hooks, and scoped rich-content MCP;
 4. unified multilingual memory and deterministic context assembly;
-5. Roo/Kilo-derived FTS/vector index service and checkpoint hardening;
+5. optional Roo/Kilo-derived lexical/vector index service and checkpoint hardening;
 6. config/provider normalization, CLI/VS Code/server protocol convergence, evals, packaging, and documentation.
 
 ---
@@ -39,7 +39,7 @@ This foundation plan is the first independently testable sub-project. Follow-up 
 
 - `scripts/runtime-version.mjs` — pure Node/package-manager version validation.
 - `scripts/runtime-version.test.mjs` — built-in Node test coverage for version validation.
-- `scripts/check-native-sqlite.mjs` — load `better-sqlite3`, verify ABI, WAL, FTS5, and cleanup.
+- `scripts/storage-portability.test.mjs` — prevent unused native database addons from returning to the critical runtime path.
 - `packages/core/vitest.config.ts` — first-party core test configuration.
 - `packages/core/src/test/fakes.ts` — small fake host/session builders used by contract tests.
 - `packages/core/src/agent/run-services.ts` — session-scoped dependencies passed into a run.
@@ -77,12 +77,12 @@ This foundation plan is the first independently testable sub-project. Follow-up 
 
 ---
 
-### Task 1: Pin and prove the native runtime
+### Task 1: Pin and prove the portable runtime
 
 **Files:**
 - Create: `scripts/runtime-version.mjs`
 - Create: `scripts/runtime-version.test.mjs`
-- Create: `scripts/check-native-sqlite.mjs`
+- Create: `scripts/storage-portability.test.mjs`
 - Modify: `.nvmrc`
 - Modify: `package.json`
 - Modify: `pnpm-workspace.yaml`
@@ -90,10 +90,10 @@ This foundation plan is the first independently testable sub-project. Follow-up 
 
 **Interfaces:**
 - Produces: `validateRuntimeVersion(version: string): { ok: true } | { ok: false; message: string }`
-- Produces: `pnpm run doctor:native`, which exits non-zero unless SQLite, WAL, and FTS5 work under the pinned Node ABI.
-- Consumes: `better-sqlite3` from `packages/core`.
+- Produces: a runtime test that fails if the unused native SQLite addon returns to the core dependency or install path.
+- Consumes: the root/core package manifests and pnpm workspace policy.
 
-- [ ] **Step 1: Write exact version tests**
+- [x] **Step 1: Write exact version tests**
 
 ```js
 // scripts/runtime-version.test.mjs
@@ -114,13 +114,13 @@ test("rejects Node 18, older Node 20, and a different major", () => {
 })
 ```
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
 Run: `node --test scripts/runtime-version.test.mjs`
 
 Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `runtime-version.mjs`.
 
-- [ ] **Step 3: Implement exact runtime validation**
+- [x] **Step 3: Implement exact runtime validation**
 
 ```js
 // scripts/runtime-version.mjs
@@ -164,74 +164,44 @@ overrides:
 
 in `pnpm-workspace.yaml`. Make `scripts/check-node.js` import and call `assertRuntimeVersion`.
 
-- [ ] **Step 4: Add the native SQLite smoke command**
+- [x] **Step 4: Remove the stale native SQLite requirement**
 
 ```js
-// scripts/check-native-sqlite.mjs
-import { createRequire } from "node:module"
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-
-const requireFromCore = createRequire(
-  new URL("../packages/core/package.json", import.meta.url),
-)
-const Database = requireFromCore("better-sqlite3")
-const dir = mkdtempSync(join(tmpdir(), "nexus-sqlite-"))
-const dbPath = join(dir, "doctor.sqlite")
-
-try {
-  const db = new Database(dbPath)
-  const journal = db.pragma("journal_mode = WAL", { simple: true })
-  if (String(journal).toLowerCase() !== "wal") throw new Error(`WAL unavailable: ${journal}`)
-  db.exec("CREATE VIRTUAL TABLE docs USING fts5(content)")
-  db.prepare("INSERT INTO docs(content) VALUES (?)").run("проверка nexus")
-  const row = db.prepare("SELECT content FROM docs WHERE docs MATCH ?").get("nexus")
-  if (row?.content !== "проверка nexus") throw new Error("FTS5 query failed")
-  const sqlite = db.prepare("select sqlite_version() version").get().version
-  db.close()
-  console.log(JSON.stringify({
-    ok: true,
-    node: process.versions.node,
-    modules: process.versions.modules,
-    sqlite,
-  }))
-} finally {
-  rmSync(dir, { recursive: true, force: true })
-}
+// scripts/storage-portability.test.mjs
+// Assert that core dependencies, root scripts, and pnpm build policy do not
+// require better-sqlite3. SQLite may return later only as an optional,
+// rebuildable repository projection with its own adapter contract.
 ```
 
 Add root scripts:
 
 ```json
 "preinstall": "node scripts/check-node.js",
-"test:runtime": "node --test scripts/runtime-version.test.mjs",
-"doctor:native": "node scripts/check-node.js && node scripts/check-native-sqlite.mjs"
+"test:runtime": "node --test scripts/runtime-version.test.mjs scripts/build-optional-context-mode.test.mjs scripts/storage-portability.test.mjs"
 ```
 
 Remove the missing `sources/claude-context-mode` build from the unconditional root build. Replace it with an explicit optional script that first checks the directory and never masks a failed build when the directory exists.
 
-- [ ] **Step 5: Verify the pinned runtime and SQLite**
+- [x] **Step 5: Verify the pinned, portable runtime**
 
 Run under Node 20.19.2:
 
 ```bash
 corepack pnpm --version
 pnpm test:runtime
-pnpm doctor:native
 ```
 
 Expected:
 
 - pnpm prints `10.8.1`;
 - runtime tests pass;
-- native doctor prints JSON with `ok: true`, Node `20.19.2`, a SQLite version, and no ABI error.
+- no first-party install or runtime path requires a native SQLite addon.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
-git add .nvmrc package.json pnpm-workspace.yaml scripts/check-node.js scripts/runtime-version.mjs scripts/runtime-version.test.mjs scripts/check-native-sqlite.mjs pnpm-lock.yaml
-git commit -m "build: pin and verify the Nexus native runtime"
+git add .nvmrc package.json packages/core/package.json packages/core/tsup.config.ts pnpm-workspace.yaml scripts/check-node.js scripts/runtime-version.mjs scripts/runtime-version.test.mjs scripts/storage-portability.test.mjs pnpm-lock.yaml
+git commit -m "build: pin a portable Nexus runtime"
 ```
 
 ---
@@ -1034,10 +1004,6 @@ Expected: PASS with non-zero first-party test counts in core, CLI, and server.
 
 - [ ] **Step 3: Verify native runtime**
 
-Run: `pnpm doctor:native`
-
-Expected: JSON reports Node 20.19.2, SQLite, WAL, and FTS5 success.
-
 - [ ] **Step 4: Build every surface**
 
 Run:
@@ -1102,7 +1068,7 @@ The commit may be empty if every preceding task commit already leaves the tree c
 Do not begin the transactional storage plan until:
 
 - Node 20.19.2 and pnpm 10.8.1 are pinned and reproducible;
-- `better-sqlite3` loads without ABI errors and passes WAL/FTS5 smoke;
+- the portable runtime has no unused native SQLite addon in its critical install or startup path;
 - first-party tests execute in CI-compatible commands;
 - bound task tools register;
 - run-critical global managers are gone from production paths;

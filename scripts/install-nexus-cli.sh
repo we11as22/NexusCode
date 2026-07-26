@@ -45,11 +45,7 @@ _e=$?
 set -e
 if [ "$_e" -ne 0 ]; then echo "[install-nexus-cli] pnpm install failed (exit $_e)" >&2; exit "$_e"; fi
 
-echo "[2/4] Rebuilding native modules (better-sqlite3) for this Node..."
-pnpm rebuild better-sqlite3 2>/dev/null || true
-(cd packages/core && pnpm rebuild better-sqlite3) 2>/dev/null || true
-
-echo "[3/4] Building NexusCode..."
+echo "[2/3] Building NexusCode..."
 set +e
 pnpm run build
 _e=$?
@@ -63,7 +59,7 @@ if [ ! -f "$CLI_DIST/index.js" ]; then
 fi
 CLI_INDEX="$(cd "$CLI_DIST" && pwd)/index.js"
 
-echo "[4/4] Installing nexus to ~/bin..."
+echo "[3/3] Installing nexus to ~/bin..."
 # CLI TUI uses @opentui/core which requires Bun (bun:ffi). Use bun in the wrapper.
 find_bun() {
   for candidate in bun "$(command -v bun 2>/dev/null)" /usr/local/bin/bun "$HOME/.bun/bin/bun"; do
