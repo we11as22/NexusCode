@@ -159,11 +159,13 @@ This keeps more recent granular context intact while still recovering from provi
 | **CLI in-process** | `runAgentLoop()` in CLI process, `CliHost` | Local JSONL | N/A |
 | **CLI + server** | Server process | Same JSONL as local (per canonical `directory`) | CLI `--server <url>` (or `NEXUS_SERVER_URL`); `queryNexus` reuses the bootstrap session id with `streamMessage` (no per-message session fork); REPL consumes identically |
 
-Server stream (POST `/session/:id/message`) returns **NDJSON** (`Content-Type: application/x-ndjson`, chunked): one JSON object per line. Each object is an `AgentEvent` or a **heartbeat** line `{"type":"heartbeat","ts":<ms>}` sent every 10s so proxies and clients can detect dead connections. Clients skip heartbeat lines; if no event (including heartbeat) is received for `DEFAULT_HEARTBEAT_TIMEOUT_MS` (20s), the client treats the stream as dead and surfaces an error (extension: connection state "error" + retry by sending again). Malformed lines yield an `AgentEvent` `{ type: "error", error: "Invalid stream line: ..." }`. Abort is via client closing the request (`AbortController.signal`); the server forwards `c.req.raw.signal` to `runSession` so the run stops when the client disconnects.
+Server stream (POST `/session/:id/message`) returns **NDJSON** (`Content-Type: application/x-ndjson`, chunked): one JSON object per line. Each object is an `AgentEvent` or a **heartbeat** line `{"type":"heartbeat","ts":<ms>}` sent every 10s so proxies and clients can detect dead connections. Clients skip heartbeat lines; if no event (including heartbeat) is received for `DEFAULT_HEARTBEAT_TIMEOUT_MS` (20s), the client reconnects from its last confirmed sequence. Every per-read heartbeat timer is cleared when that read settles. Malformed lines yield an `AgentEvent` `{ type: "error", error: "Invalid stream line: ..." }`.
 
-Streaming is now reconnectable. The server assigns each live run an `X-Nexus-Run-Id`, buffers recent `{ seq, event }` envelopes in `packages/server/src/active-runs.ts`, and accepts resume requests with `{ runId, afterSeq }`. `NexusServerClient.streamMessage()` tracks the last delivered sequence, retries up to three times on dead streams, and requests replay from the last confirmed sequence instead of restarting the whole run. The server also mirrors these connections into `RemoteSessionRecord`s so reconnect/disconnect/completion state is visible to the runtime.
+Streaming is reconnectable. Closing or losing a viewer stream marks the remote connection disconnected but deliberately leaves the run alive for replay. An explicit user Stop calls authenticated `POST /session/:id/abort`, which aborts the server-side run; CLI and VS Code both use this endpoint before closing their local stream. The server assigns each live run an `X-Nexus-Run-Id`, buffers recent `{ seq, event }` envelopes in `packages/server/src/active-runs.ts`, and accepts resume requests with `{ runId, afterSeq }`. `NexusServerClient.streamMessage()` tracks the last delivered sequence, retries up to three times on dead streams, and requests replay from the last confirmed sequence instead of restarting the whole run. The server also mirrors these connections into `RemoteSessionRecord`s so reconnect/disconnect/completion state is visible to the runtime.
 
-**Health:** GET `/health` returns `{ ok: true, ts }` for liveness checks.
+Remote privileged actions are fail-closed but interactive: `tool_approval_needed` creates a pending approval keyed by run + part id, and an authenticated client resolves it through `POST /session/:id/run/:runId/approval`. Abort and run finalization reject any unresolved approval. Local auto-approval/allowlists are stripped from server runs; only the exact authenticated decision can release the pending action.
+
+**Health:** GET `/health` returns `{ ok: true }` for liveness checks.
 
 **Extension → webview:** `agentEvent` still flows to the webview immediately so tool and text progress stay live, but heavier `stateUpdate` snapshots are now **coalesced** in the extension before posting. This keeps streaming responsive while avoiding repeated full-state serialization, token re-estimation, diff-stat recomputation, and React store churn on every visible event. Connection state (`connecting` / `streaming` / `error`) and optional `serverConnectionError` remain in `stateUpdate` so the UI can show an indicator and "Send again to retry" on error.
 
@@ -340,7 +342,7 @@ Config can reference `bundle: "context-mode"`; hosts resolve an optional checkou
 
 ## Project layout
 
-**Reference fork:** `sources/openclaude/` is a vendored OpenClaude tree used to **compare** UX and prompt semantics (e.g. `AskUserQuestion`, session memory, plan mode). NexusCode does not run that code directly; parity is applied selectively in `packages/core` prompts and tools.
+Reference agent trees used during engineering audits are not runtime dependencies and are not shipped in the NexusCode package. Parity is implemented and tested in Nexus-owned `packages/core`, CLI, server, and VS Code code.
 
 ```
 NexusCode/
@@ -349,11 +351,11 @@ NexusCode/
 │   │   ├── agent/         ← Loop, modes, classifier (MCP servers + skills), prompts
 │   │   ├── tools/         ← Built-in tool registry + built-in implementations
 │   │   ├── session/       ← JSONL storage, compaction
-│   │   ├── indexer/       ← AST + FTS + Qdrant
+│   │   ├── indexer/       ← AST/symbol parsing + optional Qdrant vectors
 │   │   ├── provider/      ← LLM providers + embeddings
 │   │   ├── checkpoint/    ← Shadow git
 │   │   ├── context/       ← @mentions, rules, condense
-│   │   ├── skills/        ← Skill loader + FTS + classifier
+│   │   ├── skills/        ← Skill loader + lexical ranking + classifier
 │   │   ├── mcp/           ← MCP client, resolveBundledMcpServers
 │   │   ├── config/        ← Schema (NexusConfigSchema), load, merge
 │   │   └── review/        ← Review helpers (if any)
@@ -374,7 +376,7 @@ Static registry (`getAllBuiltinTools` in `packages/core/src/tools/built-in/index
 - **always:** `AskFollowupQuestion`, `TodoWrite`, `Parallel`
 - **read:** `Read`, `List`, `ListCodeDefinitions`, `ReadLints`
 - **write:** `Write`, `Edit`
-- **execute:** `Bash`, `BashOutput`, `KillBash` (background jobs log under the global data dir; see `execute-command.ts`)
+- **execute:** `Bash`, `PowerShell`, `EnterWorktree`, `ExitWorktree`. Background execution is exposed through the task lifecycle (`TaskOutput` / `TaskStop`); legacy `BashOutput` / `KillBash` remain hidden only so old transcripts can replay.
 - **search:** `Grep`, `CodebaseSearch`, `WebFetch`, `WebSearch`, `Glob`
 - **skills:** `Skill` — catalog in the tool description (`<available_skills>`) from `loadSkills` (configured paths, `skillsUrls` → cache under `~/.nexus/cache/skills`, **`~/.nexus/skills`**, walk-up **`.nexus/skills`** from cwd ancestors). Marketplace installs use **`<project>/.nexus/skills/<id>`** or **`~/.nexus/skills/<id>`**. `permissions.autoApproveSkillLoad` defaults to **true**; when approval is required, `Skill` must not run inside `Parallel`. **Integrations → Marketplace:** SkillNet skills index; MCP tab appends servers to **`.nexus/mcp-servers.json`** (project) or **`~/.nexus/mcp-servers.json`** (global). **Rules:** configured patterns plus walk-up **`NEXUS.md` / `NEXUS.local.md` / `AGENTS.md`**, same filenames under **`.nexus/`**, **`.nexus/rules/**/*.md`**, **`~/.nexus/rules/**`**. If `compatibility.claude.enabled` is on, the same loader also reads **`CLAUDE.md` / `CLAUDE.local.md`**, **`.claude/rules/**`**, **`.claude/skills/**`**, **`.claude/agents/**`**, **`.claude/plugins/**`**, and **`.claude/settings*.json`** without letting those override native `.nexus` entries of the same name.
 - **context:** `Condense`

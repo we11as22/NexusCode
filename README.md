@@ -384,6 +384,8 @@ When the server URL is set:
 - **Sessions** tab loads the session list from the server (with a loading indicator).
 - You can switch between sessions; messages load in a recent window first, with older turns fetched on demand (see server routes).
 - Each new message is sent to the server; replies are streamed back. Data is persisted to the same on-disk JSONL files as in local mode.
+- Approval panels resolve the exact pending server action over an authenticated run/part endpoint; server runs never inherit local auto-approval grants.
+- **Stop** explicitly aborts the server-side run. A network disconnect alone keeps the run reconnectable and does not silently kill it.
 
 ### 3. CLI: use the server
 
@@ -398,6 +400,7 @@ NEXUS_SERVER_URL=http://127.0.0.1:4097 nexus
 - `--continue` uses the most recent session from the server.
 - `--session <id>` resumes a specific session.
 - Only a bounded window of recent messages is held in memory; the rest stays in JSONL and is loaded in pages when needed.
+- Interactive approvals and **Escape** cancellation are forwarded to the authenticated server run rather than affecting only the local TUI.
 
 ### 4. Run order (extension + CLI with server)
 

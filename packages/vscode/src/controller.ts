@@ -431,6 +431,7 @@ export class Controller {
   private indexer?: CodebaseIndexer
   private mcpClient?: McpClient
   private serverSessionId?: string
+  private activeServerRunId?: string
   /** For server sessions: offset of the oldest loaded message (0 = all loaded). Used for "Load older" pagination. */
   private serverSessionOldestLoadedOffset: number | undefined = undefined
   private loadingOlderMessages = false
@@ -1004,6 +1005,16 @@ export class Controller {
     })
   }
 
+  private async abortServerTask(): Promise<void> {
+    if (!this.getServerUrl() || !this.serverSessionId) return
+    try {
+      const client = await this.createServerClient()
+      await client.abortSession(this.serverSessionId)
+    } catch (error) {
+      this.reportServerError(error)
+    }
+  }
+
   private readAutocompleteExtensionSettingsForWebview(): AutocompleteExtensionUiState {
     const c = vscode.workspace.getConfiguration()
     const temp = c.get<number>("nexuscode.autocomplete.temperature")
@@ -1233,6 +1244,7 @@ export class Controller {
 
   /** Clear current task/session and reset run state. */
   async clearTask(): Promise<void> {
+    await this.abortServerTask()
     this.abortController?.abort()
     this.session = undefined
     this.sessionUnacceptedEdits = []
@@ -1244,6 +1256,7 @@ export class Controller {
 
   /** Cancel running agent (abort + keep session, then post state). */
   async cancelTask(): Promise<void> {
+    await this.abortServerTask()
     this.abortController?.abort()
     this.isRunning = false
     this.postStateToWebview()
@@ -1353,6 +1366,7 @@ export class Controller {
         break
       }
       case "abort":
+        await this.abortServerTask()
         this.abortController?.abort()
         this.isRunning = false
         this.postStateToWebview()
@@ -1883,15 +1897,32 @@ export class Controller {
         break
       }
       case "approvalResponse": {
+        const result: PermissionResult = {
+          approved: msg.approved,
+          alwaysApprove: msg.alwaysApprove,
+          addToAllowedCommand: msg.addToAllowedCommand,
+          skipAll: msg.skipAll,
+          whatToDoInstead: msg.whatToDoInstead,
+        }
         const resolve = this.approvalResolveRef.current
         if (resolve) {
-          resolve({
-            approved: msg.approved,
-            alwaysApprove: msg.alwaysApprove,
-            addToAllowedCommand: msg.addToAllowedCommand,
-            skipAll: msg.skipAll,
-            whatToDoInstead: msg.whatToDoInstead,
-          })
+          resolve(result)
+        } else if (
+          this.getServerUrl() &&
+          this.serverSessionId &&
+          this.activeServerRunId
+        ) {
+          try {
+            const client = await this.createServerClient()
+            await client.respondToApproval(
+              this.serverSessionId,
+              this.activeServerRunId,
+              msg.partId,
+              result,
+            )
+          } catch (error) {
+            this.reportServerError(error)
+          }
         }
         break
       }
@@ -2613,6 +2644,7 @@ Return in this format:
     })
 
     if (serverUrl) {
+      this.activeServerRunId = undefined
       this.setServerConnectionState("connecting")
       let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
       const clearHeartbeat = () => {
@@ -2680,7 +2712,14 @@ Return in this format:
             this.postStateToWebview()
           }
         }
-        for await (const event of client.streamMessage(sid, actualContent, runMode, effectivePresetName, this.abortController!.signal)) {
+        for await (const event of client.streamMessage(
+          sid,
+          actualContent,
+          runMode,
+          effectivePresetName,
+          this.abortController!.signal,
+          { onRunId: (runId) => { this.activeServerRunId = runId } },
+        )) {
           if (this.abortController?.signal.aborted) break
           resetHeartbeat()
           forwardServerEvent(event)
@@ -2702,6 +2741,7 @@ Return in this format:
         }
       } finally {
         clearHeartbeat()
+        this.activeServerRunId = undefined
         this.isRunning = false
         this.serverConnectionState = "idle"
         this.serverConnectionError = undefined

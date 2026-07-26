@@ -9,16 +9,24 @@ const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
 
 /**
  * Server host — runs on the server machine and emits events to the stream.
- * Remote interactive approvals are not part of the foundation protocol, so
- * every privileged request fails closed.
+ * Privileged requests fail closed unless the authenticated run transport
+ * provides an interactive approval callback.
  */
 export class ServerHost implements IHost {
   readonly cwd: string
   private onEvent: (event: AgentEvent) => void
+  private requestApproval?: (action: ApprovalAction) => Promise<PermissionResult>
 
-  constructor(cwd: string, onEvent: (event: AgentEvent) => void) {
+  constructor(
+    cwd: string,
+    onEvent: (event: AgentEvent) => void,
+    options: {
+      requestApproval?: (action: ApprovalAction) => Promise<PermissionResult>
+    } = {},
+  ) {
     this.cwd = cwd
     this.onEvent = onEvent
+    this.requestApproval = options.requestApproval
   }
 
   private resolve(filePath: string): string {
@@ -76,7 +84,6 @@ export class ServerHost implements IHost {
       shell: true,
       cwd: commandCwd,
       reject: false,
-      timeout: 120_000,
       cancelSignal: signal,
     })
     return {
@@ -86,8 +93,8 @@ export class ServerHost implements IHost {
     }
   }
 
-  async showApprovalDialog(_action: ApprovalAction): Promise<PermissionResult> {
-    return { approved: false }
+  async showApprovalDialog(action: ApprovalAction): Promise<PermissionResult> {
+    return this.requestApproval?.(action) ?? { approved: false }
   }
 
   emit(event: AgentEvent): void {

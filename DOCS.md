@@ -232,8 +232,7 @@ model:
 | **Write** | Запись файла |
 | **Edit** | Замены в файле (search/replace блоки) |
 | **Bash** | Shell; `run_in_background` → лог в `~/.nexus/data/run/` |
-| **BashOutput** | Вывод/статус фонового Bash |
-| **KillBash** | Остановка фонового процесса |
+| **BashOutput**, **KillBash** | Скрытая совместимость старых транскриптов; новые запуски используют **TaskOutput / TaskStop** |
 | **Grep** | Ripgrep |
 | **CodebaseSearch** | Семантический поиск (только при векторе) |
 | **WebFetch**, **WebSearch** | Сеть (для WebSearch могут нуждаться внешние ключи — см. описание инструмента) |
@@ -370,7 +369,9 @@ Enter — отправить; Shift+Enter — новая строка; Shift+Tab
 
 Запуск из корня: `pnpm build` затем **`pnpm serve`** (через `scripts/check-node.js`, Node 20+). Порт по умолчанию **4097**, хост **127.0.0.1**.
 
-API: поток сообщений **NDJSON** с heartbeat; health **GET /health** — см. ARCHITECTURE.
+API: поток сообщений **NDJSON** с heartbeat и replay по `runId + afterSeq`; health **GET /health** — см. ARCHITECTURE. Обычный обрыв соединения оставляет run доступным для reconnect. Явный Stop из CLI/VS Code вызывает аутентифицированный `POST /session/:id/abort` и действительно останавливает серверный run.
+
+Сервер не наследует локальные auto-approve/allowlist для опасных действий. `tool_approval_needed` ожидает точное решение клиента по `runId + partId` через аутентифицированный approval endpoint; завершение или abort отклоняет все незакрытые подтверждения.
 
 ---
 

@@ -3,7 +3,14 @@
  * Converts AgentEvent → UserMessage | AssistantMessage | ProgressMessage so the REPL can render.
  */
 import { randomUUID } from 'node:crypto'
-import type { SessionMessage, MessagePart, TextPart, ToolPart, UserQuestionRequest } from '@nexuscode/core'
+import type {
+  PermissionResult,
+  SessionMessage,
+  MessagePart,
+  TextPart,
+  ToolPart,
+  UserQuestionRequest,
+} from '@nexuscode/core'
 import {
   runAgentLoop,
   DurableRunEventSink,
@@ -171,7 +178,7 @@ export interface QueryNexusOptions {
   userPrompt: string
   repoTools: Tool[]
   signal: AbortSignal
-  tuiApprovalRef?: { current: ((r: { approved: boolean; alwaysApprove?: boolean; skipAll?: boolean; whatToDoInstead?: string; addToAllowedCommand?: string }) => void) | null }
+  tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
   autoApprovePermissions?: Partial<AutoApprovePermissions>
   autoApprove?: boolean
   /** Override mode for this run (agent/plan/ask/debug/review). Defaults to nexus.mode. */
@@ -355,12 +362,52 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       token: serverToken,
     })
     const sid = bootstrapSession.id
+    let activeServerRunId = ""
+    let serverApprovalResolver: ((result: PermissionResult) => void) | null = null
+    const abortRemoteRun = () => {
+      void serverClient.abortSession(sid).catch((error: unknown) => {
+        deliverEvent({
+          type: 'error',
+          error: `Server abort failed: ${error instanceof Error ? error.message : String(error)}`,
+        })
+      })
+    }
+    signal.addEventListener('abort', abortRemoteRun, { once: true })
+    if (signal.aborted) abortRemoteRun()
     runPromise = (async () => {
       try {
-        for await (const event of serverClient.streamMessage(sid, userPrompt, mode, undefined, signal)) {
+        for await (const event of serverClient.streamMessage(
+          sid,
+          userPrompt,
+          mode,
+          undefined,
+          signal,
+          { onRunId: (runId) => { activeServerRunId = runId } },
+        )) {
+          if (
+            event.type === 'tool_approval_needed' &&
+            tuiApprovalRef &&
+            activeServerRunId
+          ) {
+            const partId = event.partId
+            serverApprovalResolver = (result) => {
+              void serverClient.respondToApproval(
+                sid,
+                activeServerRunId,
+                partId,
+                result,
+              ).catch((error: unknown) => {
+                deliverEvent({
+                  type: 'error',
+                  error: `Server approval failed: ${error instanceof Error ? error.message : String(error)}`,
+                })
+              })
+            }
+            tuiApprovalRef.current = serverApprovalResolver
+          }
           if (event.type === 'assistant_content_complete') {
             try {
-              const msgs = await serverClient.getMessages(sid, { limit: 500 })
+              const msgs = await serverClient.getRecentMessages(sid)
               session = new Session(sid, nexus.cwd, msgs, undefined, true)
             } catch {
               // keep current session
@@ -370,13 +417,18 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           wakeWaitingConsumer()
         }
         try {
-          const msgs = await serverClient.getMessages(sid, { limit: 2000 })
+          const msgs = await serverClient.getRecentMessages(sid)
           session = new Session(sid, nexus.cwd, msgs, undefined, true)
         } catch {
           /* keep session from last assistant_content_complete */
         }
       } catch (err) {
         runError = err instanceof Error ? err : new Error(String(err))
+      } finally {
+        signal.removeEventListener('abort', abortRemoteRun)
+        if (tuiApprovalRef?.current === serverApprovalResolver) {
+          tuiApprovalRef.current = null
+        }
       }
     })()
   } else {

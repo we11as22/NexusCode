@@ -6,6 +6,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { createApp } from "./app.js"
 import { ServerHost } from "./host.js"
 import { enforceServerPermissionBoundary } from "./run-session.js"
+import {
+  appendRunEvent,
+  createActiveRun,
+  finishRun,
+  waitForRunApproval,
+} from "./active-runs.js"
 import { NexusConfigSchema, type NexusConfig } from "@nexuscode/core"
 
 const token = "server-test-token"
@@ -57,6 +63,15 @@ describe("server boundary", () => {
       }),
       new Request("http://localhost/session/session_test", {
         method: "DELETE",
+      }),
+      new Request("http://localhost/session/session_test/abort", {
+        method: "POST",
+        body: "{}",
+      }),
+      new Request("http://localhost/session/session_test/run/run_test/approval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ partId: "part_test", approved: true }),
       }),
     ]
 
@@ -156,5 +171,70 @@ describe("server boundary", () => {
       /outside/i,
     )
     await expect(host.runCommand("pwd", outside)).rejects.toThrow(/outside/i)
+  })
+
+  it("accepts an authenticated decision for the matching pending run approval", async () => {
+    const created = await createActiveRun(
+      "session_approval",
+      root,
+      "agent",
+      {
+        runId: "run_approval",
+        homeDir: path.join(path.dirname(root), ".nexus-test"),
+      },
+    )
+    const action = {
+      type: "execute" as const,
+      tool: "Bash",
+      description: "run the focused tests",
+    }
+    appendRunEvent(created.id, {
+      type: "tool_approval_needed",
+      partId: "part_approval",
+      action,
+    })
+    const waiting = waitForRunApproval(created.id, action, created.abortController.signal)
+
+    const response = await app().request(
+      "/session/session_approval/run/run_approval/approval",
+      {
+        method: "POST",
+        headers: {
+          ...authHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          partId: "part_approval",
+          approved: true,
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    await expect(waiting).resolves.toMatchObject({ approved: true })
+    await finishRun(created.id)
+  })
+
+  it("turns an explicit authenticated stop into a run abort", async () => {
+    const created = await createActiveRun(
+      "session_abort",
+      root,
+      "agent",
+      {
+        runId: "run_abort",
+        homeDir: path.join(path.dirname(root), ".nexus-test"),
+      },
+    )
+
+    const response = await app().request("/session/session_abort/abort", {
+      method: "POST",
+      headers: authHeaders(),
+      body: "{}",
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true })
+    expect(created.abortController.signal.aborted).toBe(true)
+    await finishRun(created.id, "aborted")
   })
 })

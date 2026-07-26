@@ -10,6 +10,8 @@ import {
   getBufferedRunEvents,
   getOrRestoreRun,
   replayAndSubscribeToRun,
+  resolveRunApproval,
+  waitForRunApproval,
 } from "./active-runs.js"
 
 const roots: string[] = []
@@ -115,5 +117,55 @@ describe("durable active runs", () => {
       { seq: 1, delta: "before" },
       { seq: 2, delta: "during" },
     ])
+  })
+
+  it("waits for the matching remote approval and resolves by part id", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-active-run-"))
+    roots.push(root)
+    const cwd = path.join(root, "workspace")
+    const homeDir = path.join(root, ".nexus")
+    await mkdir(cwd)
+    const created = await createActiveRun("session-approval", cwd, "agent", { homeDir })
+    const action = {
+      type: "execute" as const,
+      tool: "Bash",
+      description: "run tests",
+    }
+    appendRunEvent(created.id, {
+      type: "tool_approval_needed",
+      partId: "part_approval",
+      action,
+    })
+
+    const waiting = waitForRunApproval(created.id, action, created.abortController.signal)
+    expect(resolveRunApproval(created.id, "part_approval", { approved: true })).toBe(true)
+    await expect(waiting).resolves.toEqual({ approved: true })
+    expect(resolveRunApproval(created.id, "part_approval", { approved: true })).toBe(false)
+    await finishRun(created.id)
+  })
+
+  it("fails pending approvals closed when the run is aborted", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-active-run-"))
+    roots.push(root)
+    const cwd = path.join(root, "workspace")
+    const homeDir = path.join(root, ".nexus")
+    await mkdir(cwd)
+    const created = await createActiveRun("session-abort-approval", cwd, "agent", { homeDir })
+    const action = {
+      type: "write" as const,
+      tool: "Write",
+      description: "write file",
+    }
+    appendRunEvent(created.id, {
+      type: "tool_approval_needed",
+      partId: "part_abort_approval",
+      action,
+    })
+
+    const waiting = waitForRunApproval(created.id, action, created.abortController.signal)
+    created.abortController.abort()
+
+    await expect(waiting).resolves.toEqual({ approved: false })
+    await finishRun(created.id, "aborted")
   })
 })

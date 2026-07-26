@@ -421,7 +421,8 @@ export async function collectFeatureCensus(root) {
 
   for (const [relative, source] of files) {
     if (!relative.startsWith("packages/server/src/")) continue
-    const routePattern = /\.(get|post|put|delete)\(\s*["']([^"']+)["']/g
+    const routePattern =
+      /\b(?:app|router|routes|[A-Za-z0-9_]+Routes)\.(get|post|put|delete)\(\s*["']([^"']+)["']/g
     routePattern.lastIndex = 0
     let match
     while ((match = routePattern.exec(source)) !== null) {
@@ -429,7 +430,8 @@ export async function collectFeatureCensus(root) {
       const localPath = match[2]
       if (!method || !localPath) continue
       const prefix = relative.includes("/routes/session") ? "/session" : ""
-      const route = `${method} ${prefix}${localPath === "/" ? "" : localPath}`
+      const fullPath = `${prefix}${localPath === "/" ? "" : localPath}` || "/"
+      const route = `${method} ${fullPath}`
       const row = ensureRow(rows, `server-route:${route}`, "server-route")
       row.declared.add(relative)
       row.registered.add("Hono route")

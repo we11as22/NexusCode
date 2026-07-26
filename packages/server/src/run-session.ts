@@ -1,5 +1,10 @@
 import type { Session, NexusConfig, Mode } from "@nexuscode/core"
-import type { AgentEvent, CodebaseIndexer } from "@nexuscode/core"
+import type {
+  AgentEvent,
+  ApprovalAction,
+  CodebaseIndexer,
+  PermissionResult,
+} from "@nexuscode/core"
 import { runAgentLoop } from "@nexuscode/core"
 import {
   loadConfig,
@@ -50,12 +55,12 @@ export interface RunSessionOptions {
   onEvent: (event: AgentEvent) => void
   signal: AbortSignal
   configOverride?: Record<string, unknown>
+  requestApproval?: (action: ApprovalAction) => Promise<PermissionResult>
 }
 
 /**
- * The current HTTP protocol cannot carry an interactive approval decision
- * back to a running server agent. Project allowlists therefore cannot grant
- * remote mutation implicitly; only deny/ask rules remain authoritative.
+ * Server runs never inherit local auto-approval grants. The authenticated
+ * transport may still approve one pending action explicitly by run + part id.
  */
 export function enforceServerPermissionBoundary(
   config: NexusConfig,
@@ -95,7 +100,7 @@ export function enforceServerPermissionBoundary(
  * Run the agent loop for one message; all events are forwarded via onEvent.
  */
 export async function runSession(opts: RunSessionOptions): Promise<void> {
-  const { session, cwd, content, mode, onEvent, signal, configOverride } = opts
+  const { session, cwd, content, mode, onEvent, signal, configOverride, requestApproval } = opts
 
   const secretsStore = createFileSecretsStore(getGlobalConfigDir())
   let config = await loadConfig(cwd, { secrets: secretsStore }).catch(() => undefined)
@@ -111,7 +116,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     : config
   const configForRun = enforceServerPermissionBoundary(selectedConfig)
 
-  const host = new ServerHost(cwd, onEvent)
+  const host = new ServerHost(cwd, onEvent, { requestApproval })
   session.addMessage({ role: "user", content, presetName: presetName || "Default" })
 
   const client = createLLMClient(configForRun.model)

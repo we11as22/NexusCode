@@ -3,7 +3,9 @@ import {
   DurableRunEventSink,
   RunEventStore,
   type AgentEvent,
+  type ApprovalAction,
   type Mode,
+  type PermissionResult,
 } from "@nexuscode/core"
 
 export interface StreamEnvelope {
@@ -24,6 +26,15 @@ interface ActiveRun {
   envelopes: StreamEnvelope[]
   listeners: Set<(envelope: StreamEnvelope) => void>
   completionWaiters: Set<() => void>
+  pendingApprovals: Map<string, PendingApproval>
+}
+
+interface PendingApproval {
+  partId: string
+  action: ApprovalAction
+  claimed: boolean
+  promise: Promise<PermissionResult>
+  resolve: (result: PermissionResult) => void
 }
 
 const activeRuns = new Map<string, ActiveRun>()
@@ -114,6 +125,7 @@ async function createActiveRunInternal(
     envelopes: [],
     listeners: new Set(),
     completionWaiters: new Set(),
+    pendingApprovals: new Map(),
   }
   activeRuns.set(id, run)
   latestRunBySession.set(sessionId, id)
@@ -149,6 +161,7 @@ export async function getOrRestoreRun(
     envelopes,
     listeners: new Set(),
     completionWaiters: new Set(),
+    pendingApprovals: new Map(),
   }
   activeRuns.set(run.id, run)
   latestRunBySession.set(run.sessionId, run.id)
@@ -181,7 +194,80 @@ export function getLatestRunForSession(sessionId: string): { id: string; session
 export function appendRunEvent(runId: string, event: AgentEvent, idempotencyKey?: string): void {
   const run = activeRuns.get(runId)
   if (!run) return
+  if (event.type === "tool_approval_needed" && !run.pendingApprovals.has(event.partId)) {
+    let resolve!: (result: PermissionResult) => void
+    const promise = new Promise<PermissionResult>((done) => {
+      resolve = done
+    })
+    run.pendingApprovals.set(event.partId, {
+      partId: event.partId,
+      action: event.action,
+      claimed: false,
+      promise,
+      resolve,
+    })
+  }
   run.sink?.emit(event, idempotencyKey)
+}
+
+function actionMatches(left: ApprovalAction, right: ApprovalAction): boolean {
+  return (
+    left.type === right.type &&
+    left.tool === right.tool &&
+    left.description === right.description
+  )
+}
+
+export async function waitForRunApproval(
+  runId: string,
+  action: ApprovalAction,
+  signal?: AbortSignal,
+): Promise<PermissionResult> {
+  const run = activeRuns.get(runId)
+  const pending = run
+    ? [...run.pendingApprovals.values()].find(
+        (candidate) => !candidate.claimed && actionMatches(candidate.action, action),
+      )
+    : undefined
+  if (!pending) return { approved: false }
+  pending.claimed = true
+  if (signal?.aborted) {
+    run?.pendingApprovals.delete(pending.partId)
+    pending.resolve({ approved: false })
+    return { approved: false }
+  }
+  let abortListener: (() => void) | undefined
+  const aborted = new Promise<PermissionResult>((resolve) => {
+    abortListener = () => resolve({ approved: false })
+    signal?.addEventListener("abort", abortListener, { once: true })
+  })
+  try {
+    const result = await Promise.race([pending.promise, aborted])
+    run?.pendingApprovals.delete(pending.partId)
+    return result
+  } finally {
+    if (abortListener) signal?.removeEventListener("abort", abortListener)
+  }
+}
+
+export function resolveRunApproval(
+  runId: string,
+  partId: string,
+  result: PermissionResult,
+): boolean {
+  const run = activeRuns.get(runId)
+  const pending = run?.pendingApprovals.get(partId)
+  if (!run || !pending) return false
+  run.pendingApprovals.delete(partId)
+  pending.resolve(result)
+  return true
+}
+
+function rejectPendingApprovals(run: ActiveRun): void {
+  for (const pending of run.pendingApprovals.values()) {
+    pending.resolve({ approved: false })
+  }
+  run.pendingApprovals.clear()
 }
 
 export async function getBufferedRunEvents(runId: string, afterSeq = 0): Promise<StreamEnvelope[]> {
@@ -211,6 +297,7 @@ export async function finishRun(
     persistenceFailure = error
   }
   run.done = true
+  rejectPendingApprovals(run)
   run.updatedAt = Date.now()
   for (const waiter of run.completionWaiters) waiter()
   run.completionWaiters.clear()
@@ -283,6 +370,7 @@ export function abortRunBySession(sessionId: string): boolean {
   if (!runId) return false
   const run = activeRuns.get(runId)
   if (!run || run.done) return false
+  rejectPendingApprovals(run)
   run.abortController.abort()
   run.updatedAt = Date.now()
   return true

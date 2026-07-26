@@ -51,7 +51,11 @@ async function fixture() {
     }),
     "packages/cli/src/nexus-query.ts": "const rendered = 'other_event'",
     "packages/vscode/src/controller.ts": "const rendered = 'other_event'",
-    "packages/server/src/routes/session.ts": "const transport = 'ndjson'",
+    "packages/server/src/routes/session.ts": `
+      const transport = 'ndjson'
+      function getCwd(c) { return c.get("workspaceRoot") }
+      sessionRoutes.get("/:id", () => undefined)
+    `,
   }
 
   for (const [relative, content] of Object.entries(files)) {
@@ -79,6 +83,8 @@ test("classifies linked evidence and static gaps without claiming runtime succes
       byFeature.get("setting:nexuscode.orphanSetting")?.status,
       "orphan-setting",
     )
+    assert.ok(byFeature.has("server-route:GET /session/:id"))
+    assert.equal(byFeature.has("server-route:GET /sessionworkspaceRoot"), false)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

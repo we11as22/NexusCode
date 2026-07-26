@@ -24,6 +24,8 @@ import {
   getOrRestoreRun,
   getLatestRunForSession,
   replayAndSubscribeToRun,
+  resolveRunApproval,
+  waitForRunApproval,
 } from "../active-runs.js"
 import type { ServerEnv } from "../security.js"
 
@@ -99,7 +101,41 @@ sessionRoutes.get("/:id/message", async (c) => {
 
 sessionRoutes.post("/:id/abort", async (c) => {
   const id = c.req.param("id")
-  return c.json(abortRunBySession(id))
+  return c.json({ ok: abortRunBySession(id) })
+})
+
+sessionRoutes.post("/:id/run/:runId/approval", async (c) => {
+  const sessionId = c.req.param("id")
+  const runId = c.req.param("runId")
+  if (!SESSION_ID_PATTERN.test(runId)) {
+    return c.json({ error: "Invalid run id" }, 400)
+  }
+  const run = getActiveRun(runId)
+  if (!run || run.sessionId !== sessionId || run.done) {
+    return c.json({ error: "Active run not found" }, 404)
+  }
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  const partId = typeof body.partId === "string" ? body.partId.trim() : ""
+  if (!SESSION_ID_PATTERN.test(partId) || typeof body.approved !== "boolean") {
+    return c.json({ error: "partId and approved are required" }, 400)
+  }
+  const optionalBoolean = (key: string) =>
+    typeof body[key] === "boolean" ? body[key] as boolean : undefined
+  const optionalText = (key: string) => {
+    const value = typeof body[key] === "string" ? body[key].trim() : ""
+    return value ? value.slice(0, 20_000) : undefined
+  }
+  const resolved = resolveRunApproval(runId, partId, {
+    approved: body.approved,
+    alwaysApprove: optionalBoolean("alwaysApprove"),
+    skipAll: optionalBoolean("skipAll"),
+    whatToDoInstead: optionalText("whatToDoInstead"),
+    addToAllowedCommand: optionalText("addToAllowedCommand"),
+    addToAllowedPattern: optionalText("addToAllowedPattern"),
+    addToAllowedMcpTool: optionalText("addToAllowedMcpTool"),
+  })
+  if (!resolved) return c.json({ error: "Pending approval not found" }, 404)
+  return c.json({ ok: true })
 })
 
 sessionRoutes.delete("/:id", async (c) => {
@@ -203,6 +239,8 @@ sessionRoutes.post("/:id/message", async (c) => {
             appendRunEvent(created.id, event)
           },
           signal: created.abortController.signal,
+          requestApproval: (action) =>
+            waitForRunApproval(created.id, action, created.abortController.signal),
         })
         const newMessages = session.messages.slice(messageCountBeforeRun)
         if (newMessages.length > 0) {

@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto"
-import type { AgentEvent, Mode, SessionMessage } from "./types.js"
+import type {
+  AgentEvent,
+  Mode,
+  PermissionResult,
+  SessionMessage,
+} from "./types.js"
 import { canonicalProjectRoot } from "./session/storage.js"
 
 export interface NexusServerClientOptions {
@@ -9,6 +14,26 @@ export interface NexusServerClientOptions {
 }
 
 export const NEXUS_SERVER_TOKEN_SECRET_KEY = "nexuscode_server_token"
+
+async function readStreamChunkWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number,
+) {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("heartbeat timeout")),
+          timeoutMs,
+        )
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
 
 /**
  * Client for NexusCode server — list/create sessions, get messages, stream agent events.
@@ -43,6 +68,10 @@ export class NexusServerClient {
     return u
   }
 
+  private sessionPath(sessionId: string): string {
+    return `/session/${encodeURIComponent(sessionId)}`
+  }
+
   async listSessions(): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number; revision: number }>> {
     const res = await fetch(this.url("/session", { directory: this.directory }), {
       headers: this.headers(),
@@ -68,7 +97,7 @@ export class NexusServerClient {
     const limit = Math.min(200, Math.max(1, opts?.limit ?? 50))
     const offset = Math.max(0, opts?.offset ?? 0)
     const res = await fetch(
-      this.url(`/session/${sessionId}/message`, {
+      this.url(`${this.sessionPath(sessionId)}/message`, {
         directory: this.directory,
         limit: String(limit),
         offset: String(offset),
@@ -80,21 +109,69 @@ export class NexusServerClient {
   }
 
   async getSession(sessionId: string): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }> {
-    const res = await fetch(this.url(`/session/${sessionId}`, { directory: this.directory }), {
+    const res = await fetch(this.url(this.sessionPath(sessionId), { directory: this.directory }), {
       headers: this.headers(),
     })
     if (!res.ok) throw new Error(`Server getSession: ${res.status} ${await res.text()}`)
     return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }>
   }
 
+  async getRecentMessages(
+    sessionId: string,
+    limit = 200,
+  ): Promise<SessionMessage[]> {
+    const boundedLimit = Math.min(200, Math.max(1, Math.floor(limit)))
+    const meta = await this.getSession(sessionId)
+    return this.getMessages(sessionId, {
+      limit: boundedLimit,
+      offset: Math.max(0, meta.messageCount - boundedLimit),
+    })
+  }
+
   async deleteSession(sessionId: string): Promise<boolean> {
-    const res = await fetch(this.url(`/session/${sessionId}`, { directory: this.directory }), {
+    const res = await fetch(this.url(this.sessionPath(sessionId), { directory: this.directory }), {
       method: "DELETE",
       headers: this.headers(),
     })
     if (res.status === 404) return false
     if (!res.ok) throw new Error(`Server deleteSession: ${res.status} ${await res.text()}`)
     return true
+  }
+
+  async abortSession(sessionId: string): Promise<boolean> {
+    const res = await fetch(
+      this.url(`${this.sessionPath(sessionId)}/abort`),
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify({}),
+      },
+    )
+    if (!res.ok) {
+      throw new Error(`Server abortSession: ${res.status} ${await res.text()}`)
+    }
+    return Boolean((await res.json() as { ok?: unknown }).ok)
+  }
+
+  async respondToApproval(
+    sessionId: string,
+    runId: string,
+    partId: string,
+    result: PermissionResult,
+  ): Promise<void> {
+    const res = await fetch(
+      this.url(
+        `${this.sessionPath(sessionId)}/run/${encodeURIComponent(runId)}/approval`,
+      ),
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify({ partId, ...result }),
+      },
+    )
+    if (!res.ok) {
+      throw new Error(`Server respondToApproval: ${res.status} ${await res.text()}`)
+    }
   }
 
   /**
@@ -106,7 +183,8 @@ export class NexusServerClient {
     content: string,
     mode: Mode,
     presetName?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options: { onRunId?: (runId: string) => void } = {},
   ): AsyncGenerator<AgentEvent> {
     const maxReconnects = 3
     let reconnectAttempt = 0
@@ -133,7 +211,7 @@ export class NexusServerClient {
     while (true) {
       let res: Response
       try {
-        res = await fetch(this.url(`/session/${sessionId}/message`, { directory: this.directory }), {
+        res = await fetch(this.url(`${this.sessionPath(sessionId)}/message`, { directory: this.directory }), {
           method: "POST",
           headers: this.headers(),
           body: JSON.stringify(
@@ -154,7 +232,7 @@ export class NexusServerClient {
           type: "remote_session_updated",
           remoteSession: {
             id: `remote-${sessionId}`,
-            url: this.url(`/session/${sessionId}`),
+            url: this.url(this.sessionPath(sessionId)),
             sessionId,
             runId: runId || clientRunId,
             status: "reconnecting",
@@ -173,6 +251,7 @@ export class NexusServerClient {
         return
       }
       runId = res.headers.get("x-nexus-run-id") ?? (runId || clientRunId)
+      options.onRunId?.(runId)
       const reader = res.body?.getReader()
       if (!reader) {
         yield { type: "error", error: "No response body" }
@@ -183,12 +262,10 @@ export class NexusServerClient {
       let completedNormally = false
       try {
         while (true) {
-          const chunk = await Promise.race([
-            reader.read(),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error("heartbeat timeout")), DEFAULT_HEARTBEAT_TIMEOUT_MS),
-            ),
-          ])
+          const chunk = await readStreamChunkWithTimeout(
+            reader,
+            DEFAULT_HEARTBEAT_TIMEOUT_MS,
+          )
           const { value, done } = chunk
           if (done) {
             completedNormally = true
@@ -209,13 +286,14 @@ export class NexusServerClient {
           if (parsed.event) yield parsed.event
         }
       } catch (error) {
+        await reader.cancel(error).catch(() => undefined)
         if (signal?.aborted) return
         if (!runId || reconnectAttempt >= maxReconnects) {
           yield {
             type: "remote_session_updated",
             remoteSession: {
               id: `remote-${sessionId}`,
-              url: this.url(`/session/${sessionId}`),
+              url: this.url(this.sessionPath(sessionId)),
               sessionId,
               runId,
               status: "error",
@@ -235,7 +313,7 @@ export class NexusServerClient {
           type: "remote_session_updated",
           remoteSession: {
             id: `remote-${sessionId}`,
-            url: this.url(`/session/${sessionId}`),
+            url: this.url(this.sessionPath(sessionId)),
             sessionId,
             runId,
             status: "reconnecting",
@@ -248,7 +326,12 @@ export class NexusServerClient {
         }
         continue
       } finally {
-        reader.releaseLock()
+        try {
+          reader.releaseLock()
+        } catch {
+          // A transport can reject while a pending read is unwinding. The
+          // response body is already abandoned and reconnect owns the next one.
+        }
       }
       if (reconnectAttempt > 0) {
         yield {
