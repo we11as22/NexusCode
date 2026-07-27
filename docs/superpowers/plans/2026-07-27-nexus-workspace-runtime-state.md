@@ -410,7 +410,7 @@ export class RuntimeRepository {
 }
 ```
 
-- [ ] **Step 1: Write lease and crash-state tests**
+- [x] **Step 1: Write lease and crash-state tests**
 
 Prove:
 
@@ -423,7 +423,7 @@ Prove:
 - unresolved approvals survive reopen;
 - projection cursors never move backwards or accept a mismatched checksum.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run:
 
@@ -433,13 +433,13 @@ corepack pnpm --filter @nexuscode/state test -- src/runtime-repository.test.ts
 
 Expected: FAIL because `RuntimeRepository` is missing.
 
-- [ ] **Step 3: Implement tables and repository**
+- [x] **Step 3: Implement tables and repository**
 
 Create `session_lease`, `run`, `approval`, and `rollout_projection` with unique
 partial indexes for active runs and unresolved approvals. Use epochs rather
 than trusting PIDs alone. Store no approval secret or unredacted environment.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run:
 
@@ -450,7 +450,7 @@ corepack pnpm --filter @nexuscode/state typecheck
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/state/src
@@ -772,7 +772,7 @@ git commit -m "refactor: share one Nexus runtime across every surface"
   handling are tested.
 - [x] Session input admission, steering, and queue promotion are durable and
   idempotent.
-- [ ] Session ownership, runs, approvals, leases, and projection cursors are
+- [x] Session ownership, runs, approvals, leases, and projection cursors are
   transactional.
 - [ ] One canonical workspace directory maps to one runtime per process.
 - [ ] A session has one active turn and a durable mailbox.

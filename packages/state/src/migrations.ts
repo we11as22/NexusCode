@@ -72,6 +72,59 @@ CREATE INDEX session_input_pending_idx
   WHERE promoted_sequence IS NULL;
 `
 
+const RUNTIME_OWNERSHIP_SQL = `
+CREATE TABLE session_lease (
+  session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL CHECK(epoch > 0),
+  expires_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE run (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL,
+  lease_epoch INTEGER NOT NULL CHECK(lease_epoch > 0),
+  status TEXT NOT NULL
+    CHECK(status IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+
+CREATE UNIQUE INDEX run_one_active_per_session_idx
+  ON run(session_id)
+  WHERE status = 'running';
+
+CREATE TABLE approval (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES run(id) ON DELETE SET NULL,
+  tool_name TEXT NOT NULL,
+  redacted_summary TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL,
+  status TEXT NOT NULL
+    CHECK(status IN ('pending', 'approved', 'denied', 'cancelled')),
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+
+CREATE UNIQUE INDEX approval_one_pending_dedupe_idx
+  ON approval(session_id, dedupe_key)
+  WHERE status = 'pending';
+
+CREATE INDEX approval_pending_session_idx
+  ON approval(session_id, created_at)
+  WHERE status = 'pending';
+
+CREATE TABLE rollout_projection (
+  session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK(sequence >= 0),
+  checksum TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+`
+
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   {
     version: 1,
@@ -82,6 +135,11 @@ export const STATE_MIGRATIONS: readonly StateMigration[] = [
     version: 2,
     name: "session_input",
     sql: SESSION_INPUT_SQL,
+  },
+  {
+    version: 3,
+    name: "runtime_ownership",
+    sql: RUNTIME_OWNERSHIP_SQL,
   },
 ]
 
