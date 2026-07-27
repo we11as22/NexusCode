@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Run vsce package on the repository-pinned Node 20 runtime.
+ * Run vsce package on the repository-pinned Node 24 runtime.
  */
 const { execSync } = require('child_process')
 const path = require('path')

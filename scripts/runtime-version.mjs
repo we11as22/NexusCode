@@ -1,4 +1,4 @@
-const REQUIRED_NODE_VERSION = "20.19.2"
+const REQUIRED_NODE_VERSION = "24.18.0"
 
 export function validateRuntimeVersion(version) {
   if (version === REQUIRED_NODE_VERSION) return { ok: true }
@@ -18,6 +18,16 @@ export function assertRuntimeVersion(version = process.versions.node) {
     process.exitCode = 1
   }
   return result.ok
+}
+
+export async function assertBuiltinSqlite() {
+  const sqlite = await import("node:sqlite")
+  if (typeof sqlite.DatabaseSync !== "function") {
+    throw new Error(
+      "NexusCode requires the built-in node:sqlite DatabaseSync API.",
+    )
+  }
+  return true
 }
 
 export { REQUIRED_NODE_VERSION }

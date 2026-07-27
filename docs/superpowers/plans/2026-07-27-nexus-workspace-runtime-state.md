@@ -117,7 +117,7 @@ through in-process or HTTP/NDJSON transports.
 - Produces: `assertBuiltinSqlite(): void`.
 - Preserves: prohibition on external native SQLite addons.
 
-- [ ] **Step 1: Change runtime tests first**
+- [x] **Step 1: Change runtime tests first**
 
 ```js
 test("accepts the pinned Node release", () => {
@@ -136,7 +136,7 @@ test("the pinned runtime exposes built-in SQLite", async () => {
 })
 ```
 
-- [ ] **Step 2: Run tests under Node 24.18.0 and verify RED**
+- [x] **Step 2: Run tests under Node 24.18.0 and verify RED**
 
 Run:
 
@@ -146,14 +146,14 @@ node --test scripts/runtime-version.test.mjs scripts/storage-portability.test.mj
 
 Expected: the old `20.19.2` expectation fails.
 
-- [ ] **Step 3: Pin Node 24.18.0 and keep addon portability**
+- [x] **Step 3: Pin Node 24.18.0 and keep addon portability**
 
 Set `.nvmrc` and `engines.node` to `24.18.0`. Update TypeScript Node types and
 tsup targets to Node 24. Change the portability test to reject
 `better-sqlite3`, `sqlite3`, and Electron rebuild scripts while requiring
 `node:sqlite` only inside `packages/state/src/sqlite-driver.ts`.
 
-- [ ] **Step 4: Verify runtime scripts**
+- [x] **Step 4: Verify runtime scripts**
 
 Run:
 
@@ -164,7 +164,7 @@ corepack pnpm typecheck
 
 Expected: PASS on the exact runtime with no external SQLite addon.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add .nvmrc package.json packages/*/package.json packages/core/tsup.config.ts scripts README.md DOCS.md pnpm-lock.yaml
@@ -767,7 +767,7 @@ git commit -m "refactor: share one Nexus runtime across every surface"
 
 ## Completion gate
 
-- [ ] Node 24.18.0 is pinned and `node:sqlite` loads without an external addon.
+- [x] Node 24.18.0 is pinned and `node:sqlite` loads without an external addon.
 - [ ] Database migrations, integrity checks, reopen, rollback, and corruption
   handling are tested.
 - [ ] Session input admission, steering, and queue promotion are durable and

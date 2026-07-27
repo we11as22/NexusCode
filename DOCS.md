@@ -34,7 +34,7 @@
 
 ### Требования
 
-- **Node.js 20.19.2** — закреплён в `.nvmrc` и проверяется скриптами CLI, сервера и упаковки VSIX.
+- **Node.js 24.18.0** — закреплён в `.nvmrc` и проверяется скриптами CLI, сервера и упаковки VSIX. Координационное состояние backend использует встроенный `node:sqlite`, без внешнего нативного addon.
 - **pnpm 10.8.1** — закреплён через `packageManager`; рекомендуется Corepack.
 
 ### Установка pnpm
@@ -367,7 +367,7 @@ Enter — отправить; Shift+Enter — новая строка; Shift+Tab
 
 ## Сервер NexusCode
 
-Запуск из корня: `pnpm build` затем **`pnpm serve`** (через `scripts/check-node.js`, Node 20+). Порт по умолчанию **4097**, хост **127.0.0.1**.
+Запуск из корня: `pnpm build` затем **`pnpm serve`** (через `scripts/check-node.js`, на закреплённом Node 24.18.0). Порт по умолчанию **4097**, хост **127.0.0.1**.
 
 API: поток сообщений **NDJSON** с heartbeat и replay по `runId + afterSeq`; health **GET /health** — см. ARCHITECTURE. Обычный обрыв соединения оставляет run доступным для reconnect. Явный Stop из CLI/VS Code вызывает аутентифицированный `POST /session/:id/abort` и действительно останавливает серверный run.
 

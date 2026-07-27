@@ -60,7 +60,7 @@ pnpm build
 pnpm package:vscode
 ```
 
-Output: **`packages/vscode/nexuscode-0.1.0.vsix`**. Install in VS Code: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**) → **Extensions: Install from VSIX...** → choose that file. Use the repository-pinned **Node 20.19.2** runtime for reproducible builds.
+Output: **`packages/vscode/nexuscode-0.1.0.vsix`**. Install in VS Code: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**) → **Extensions: Install from VSIX...** → choose that file. Use the repository-pinned **Node 24.18.0** runtime for reproducible builds.
 
 `pnpm package:vscode` already runs `pnpm build` internally; keeping both steps matches a clear “build, then package” flow and is safe if you ever run `pnpm build` alone first.
 
@@ -70,7 +70,7 @@ Output: **`packages/vscode/nexuscode-0.1.0.vsix`**. Install in VS Code: **Ctrl+S
 
 Clone the repo, then a **single command** installs everything; `nexus` can be run from anywhere afterward.
 
-**Important:** use the repository-pinned **Node 20.19.2** for install, build, and `nexus`. The CLI uses Ink on Node and does not require Bun or a native SQLite addon.
+**Important:** use the repository-pinned **Node 24.18.0** for install, build, and `nexus`. The CLI uses Ink on Node and does not require Bun or an external native SQLite addon; the managed backend uses the SQLite implementation built into Node.
 
 ```bash
 git clone <repo> NexusCode && cd NexusCode
@@ -153,10 +153,10 @@ Result: **CLI** — `nexus` is available globally; **extension** — `packages/v
 
 | Requirement | Version | Note |
 |-------------|---------|------|
-| **Node.js** | **20.19.2** | Pinned in `.nvmrc` and enforced by the repository scripts so CLI, server, and VSIX builds use one tested runtime. Nexus core has no native SQLite dependency. |
+| **Node.js** | **24.18.0** | Pinned in `.nvmrc` and enforced by the repository scripts so CLI, server, and VSIX builds use one tested runtime. Nexus has no external native SQLite dependency; backend coordination state uses Node's built-in SQLite implementation. |
 | **pnpm** | **10.8.1** | Pinned through `packageManager`; Corepack is recommended. |
 
-The repo has **`.nvmrc`** set to `20`. With nvm, run in the root: `nvm use`. Check Node: `node -v` (for .vsix packaging you need v20.x or higher). If Node &lt; 20: `nvm use 20` or install Node 20 from [nodejs.org](https://nodejs.org/).
+The repo has **`.nvmrc`** set to `24.18.0`. With nvm, run in the root: `nvm use`. Check Node: `node -v`; install the pinned version with `nvm install` when necessary.
 
 ---
 

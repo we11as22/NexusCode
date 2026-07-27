@@ -56,7 +56,7 @@ const ctx = await esbuild.context({
   ],
   format: "cjs",
   platform: "node",
-  target: "node20",
+  target: "node24",
   // Production VSIX packages must not ship the full extension source map.
   // Keep maps only for the local watch/debug loop.
   sourcemap: watch,

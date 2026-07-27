@@ -27,7 +27,7 @@ if find_node >/dev/null 2>&1; then
   NODE_BIN="$(find_node)"
 fi
 if [ -z "$NODE_BIN" ]; then
-  echo "Error: could not find Node.js 20.19.2." >&2
+  echo "Error: could not find Node.js 24.18.0." >&2
   exit 1
 fi
 

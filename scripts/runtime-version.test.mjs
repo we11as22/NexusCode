@@ -1,13 +1,22 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
-import { validateRuntimeVersion } from "./runtime-version.mjs"
+import {
+  assertBuiltinSqlite,
+  validateRuntimeVersion,
+} from "./runtime-version.mjs"
 
 test("accepts the pinned Node release", () => {
-  assert.deepEqual(validateRuntimeVersion("20.19.2"), { ok: true })
+  assert.deepEqual(validateRuntimeVersion("24.18.0"), { ok: true })
 })
 
-test("build and installer surfaces target the pinned Node 20 runtime", async () => {
+test("the pinned runtime exposes built-in SQLite", async () => {
+  const sqlite = await import("node:sqlite")
+  assert.equal(typeof sqlite.DatabaseSync, "function")
+  assert.equal(await assertBuiltinSqlite(), true)
+})
+
+test("build and installer surfaces target the pinned Node 24 runtime", async () => {
   const [cliBuild, vscodeBuild, installer, oneInstall, vsixPackager] = await Promise.all([
     readFile(new URL("../packages/cli/tsup.config.ts", import.meta.url), "utf8"),
     readFile(new URL("../packages/vscode/esbuild.mjs", import.meta.url), "utf8"),
@@ -19,8 +28,8 @@ test("build and installer surfaces target the pinned Node 20 runtime", async () 
     ),
   ])
 
-  assert.match(cliBuild, /target:\s*"node20"/)
-  assert.match(vscodeBuild, /target:\s*"node20"/)
+  assert.match(cliBuild, /target:\s*"node24"/)
+  assert.match(vscodeBuild, /target:\s*"node24"/)
   assert.match(installer, /corepack pnpm install/)
   assert.match(installer, /exec "\$NODE_BIN"/)
   assert.doesNotMatch(
@@ -37,10 +46,10 @@ test("build and installer surfaces target the pinned Node 20 runtime", async () 
   assert.doesNotMatch(vsixPackager, /node18|(?:^|\n)pnpm exec/)
 })
 
-test("rejects Node 18, older Node 20, and a different major", () => {
-  for (const version of ["18.20.8", "20.18.3", "21.7.3", "22.0.0", "25.8.1"]) {
+test("rejects every unpinned runtime", () => {
+  for (const version of ["20.19.2", "22.23.1", "24.17.0", "25.8.1"]) {
     const result = validateRuntimeVersion(version)
     assert.equal(result.ok, false)
-    assert.match(result.message, /Node\.js 20\.19\.2/)
+    assert.match(result.message, /Node\.js 24\.18\.0/)
   }
 })

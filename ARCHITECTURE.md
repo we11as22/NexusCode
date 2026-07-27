@@ -414,7 +414,7 @@ Mode tool matrix (`packages/core/src/agent/modes.ts`): `MODE_TOOL_GROUPS` + `MOD
 
 ## Version requirements
 
-- **Node.js**: `package.json`, `.nvmrc` и `scripts/check-node.js` закрепляют **20.19.2** для одинакового поведения CLI, сервера и упаковки VSIX. Core runtime не зависит от нативного SQLite addon.
+- **Node.js**: `package.json`, `.nvmrc` и `scripts/check-node.js` закрепляют **24.18.0** для одинакового поведения CLI, сервера и упаковки VSIX. Backend coordination state использует встроенный `node:sqlite`; внешнего нативного SQLite addon нет.
 - **pnpm**: **10.8.1**, закреплён через `packageManager`.
 
 ---

@@ -23,7 +23,7 @@ export default defineConfig({
   ],
   noExternal: [],
   treeshake: true,
-  target: "node20",
+  target: "node24",
   // ESM bundles have no `__dirname`; wasm-paths uses createRequire(path.join(__dirname, ...)).
   esbuildOptions(options, { format }) {
     if (format === "esm") {
