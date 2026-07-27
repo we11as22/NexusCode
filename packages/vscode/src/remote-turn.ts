@@ -11,6 +11,7 @@ import type {
 import {
   selectActiveTurnResumeCursor,
   SessionProtocolError,
+  SessionTurnTerminalError,
 } from "@nexuscode/core"
 
 export type VsCodeRemoteTurnClient = Pick<
@@ -67,6 +68,7 @@ export interface AttachVsCodeRemoteTurnOptions {
   turnId: string
   runId: string
   afterSequence?: number
+  followAcceptedTurn?: boolean
   signal: AbortSignal
   onSequence?: (sequence: number) => void | Promise<void>
 }
@@ -209,6 +211,9 @@ export class VsCodeRemoteTurn {
           ...(options.afterSequence === undefined
             ? {}
             : { afterSequence: options.afterSequence }),
+          ...(options.followAcceptedTurn
+            ? { followAcceptedTurn: true }
+            : {}),
           ...hooks,
           onSequence: options.onSequence,
         }),
@@ -285,7 +290,11 @@ export class VsCodeRemoteTurn {
       hasSourceFailure = true
     } finally {
       signal.removeEventListener("abort", onAbort)
-      if (!sourceCompleted && !signal.aborted) {
+      if (
+        !sourceCompleted &&
+        !signal.aborted &&
+        !(sourceFailure instanceof SessionTurnTerminalError)
+      ) {
         this.requestedInterruptReason ??=
           "client stopped consuming the turn"
         this.issueInterrupt()
@@ -355,23 +364,54 @@ export async function resumeVsCodeRemoteTurn(
   options: ResumeVsCodeRemoteTurnOptions,
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt++) {
+    const stored = await options.cursorStore.load(options.sessionId)
     const snapshot = await options.client.getSessionProtocolSnapshot(
       options.sessionId,
+      { includePendingTurns: true },
     )
-    const identity = activeTurnIdentity(snapshot)
+    const activeIdentity = activeTurnIdentity(snapshot)
+    const queued = stored
+      ? snapshot.pendingTurns?.find(
+          (turn) =>
+            turn.turnId === stored.turnId &&
+            turn.runId === stored.runId,
+        )
+      : undefined
+    const storedMatchesActive =
+      stored !== undefined &&
+      activeIdentity?.turnId === stored.turnId &&
+      activeIdentity.runId === stored.runId
+    const recoveringAcceptedTurn =
+      stored !== undefined &&
+      !storedMatchesActive &&
+      queued === undefined
+    const identity = stored
+      ? storedMatchesActive
+        ? activeIdentity
+        : queued
+          ? { turnId: queued.turnId, runId: queued.runId }
+          : { turnId: stored.turnId, runId: stored.runId }
+      : activeIdentity
     if (!identity) {
       await options.cursorStore.clear(options.sessionId)
       return false
     }
-    if (!snapshot.activeExecution) {
+    const execution = queued?.execution ??
+      (storedMatchesActive || stored === undefined
+        ? snapshot.activeExecution
+        : undefined)
+    if (!execution && !recoveringAcceptedTurn) {
       throw new Error(
-        "Active remote turn snapshot is missing its execution policy",
+        "Remote turn snapshot is missing its execution policy",
       )
     }
-    await options.onActiveExecution?.(snapshot.activeExecution)
+    if (execution) await options.onActiveExecution?.(execution)
 
-    const stored = await options.cursorStore.load(options.sessionId)
-    const afterSequence = selectActiveTurnResumeCursor(snapshot, stored)
+    const afterSequence = queued
+      ? snapshot.throughSequence
+      : recoveringAcceptedTurn
+        ? stored.afterSequence
+        : selectActiveTurnResumeCursor(snapshot, stored)
 
     let acknowledgedSequence = afterSequence
     await options.cursorStore.save(options.sessionId, {
@@ -388,6 +428,7 @@ export async function resumeVsCodeRemoteTurn(
       for await (const event of turn.attach({
         ...identity,
         afterSequence,
+        followAcceptedTurn: true,
         signal: options.signal,
         onSequence: async (sequence) => {
           acknowledgedSequence = Math.max(
@@ -415,6 +456,24 @@ export async function resumeVsCodeRemoteTurn(
       }
       return true
     } catch (error) {
+      if (
+        error instanceof SessionTurnTerminalError &&
+        error.turnId === identity.turnId &&
+        error.runId === identity.runId
+      ) {
+        await options.cursorStore.clear(options.sessionId)
+        throw error
+      }
+      if (
+        error instanceof SessionProtocolError &&
+        error.protocolError.code === "replay_gap"
+      ) {
+        await options.cursorStore.clear(options.sessionId)
+        throw new Error(
+          "Remote turn recovery replay window expired; the stale cursor was cleared so new turns are no longer blocked.",
+          { cause: error },
+        )
+      }
       if (isAttachRace(error, "no_active_turn")) {
         await options.cursorStore.clear(options.sessionId)
         return false

@@ -339,6 +339,41 @@ describe("session protocol v2 routes", () => {
     expect(snapshot).toHaveBeenCalledWith("session-1")
   })
 
+  it("exposes queued identities only to opt-in clients for v2 compatibility", async () => {
+    const pendingTurns = [{
+      inputId: "input-queued",
+      turnId: "turn-queued",
+      runId: "run-queued",
+      admittedSequence: 1,
+      execution: { mode: "review" as const },
+    }]
+    const { app } = setup({
+      snapshot: async (sessionId) => ({
+        version: PROTOCOL_VERSION,
+        sessionId,
+        phase: "streaming",
+        activeTurnId: "turn-active",
+        activeRunId: "run-active",
+        activeTurnFirstSequence: 1,
+        activeExecution: { mode: "agent" },
+        pendingApprovals: [],
+        pendingTurns,
+        pendingQueueCount: 1,
+        pendingSteerCount: 0,
+        earliestAvailableSequence: 1,
+        throughSequence: 4,
+      }),
+    })
+
+    const legacy = await app.request("/v2/session/session-1/snapshot")
+    expect(await legacy.json()).not.toHaveProperty("pendingTurns")
+
+    const optedIn = await app.request("/v2/session/session-1/snapshot", {
+      headers: { "x-nexus-include-pending-turns": "1" },
+    })
+    expect(await optedIn.json()).toMatchObject({ pendingTurns })
+  })
+
   it("serves a session-scoped bounded MCP prompt catalog", async () => {
     const catalog = buildRemoteMcpPromptCatalog([{
       serverName: "docs",

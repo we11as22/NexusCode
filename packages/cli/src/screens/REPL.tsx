@@ -316,6 +316,14 @@ export function REPL({
   >(null)
   /** Host from last completed Nexus run; used by /undo to revert file edits. */
   const lastNexusHostRef = useRef<import('../host.js').CliHost | null>(null)
+  /**
+   * An ambiguous durable undo must not be followed by another write from the
+   * same in-memory session. Starting a different session remains possible;
+   * restarting Nexus reloads the authoritative journal.
+   */
+  const [nexusUndoRecoveryBlock, setNexusUndoRecoveryBlock] = useState<
+    { sessionId: string; reason: string } | null
+  >(null)
   /** Banner above input (e.g. "Compacting…", "Loop detected…"). */
   const [nexusBannerText, setNexusBannerText] = useState('')
   const nexusBannerClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -436,10 +444,29 @@ export function REPL({
   const onNexusUndo = useCallback(async () => {
     const host = lastNexusHostRef.current
     const session = nexusBootstrap?.session
+    if (
+      session &&
+      nexusUndoRecoveryBlock?.sessionId === session.id
+    ) {
+      setMessages(prev => [
+        ...prev,
+        createAssistantMessage(nexusUndoRecoveryBlock.reason),
+      ])
+      return
+    }
     if (!host || !session || session.messages.length < 2) {
       setMessages(prev => [
         ...prev,
         createAssistantMessage('No reversible turn found. Make one more agent turn, then retry /undo.'),
+      ])
+      return
+    }
+    if (nexusBootstrap?.serverUrl) {
+      setMessages(prev => [
+        ...prev,
+        createAssistantMessage(
+          'Remote /undo is not available until the server owns a durable change set and conversation rewind command. No files or conversation history were changed.',
+        ),
       ])
       return
     }
@@ -460,15 +487,113 @@ export function REPL({
       ])
       return
     }
+    const fileRestore = await host.revertLastTurnFiles()
+    if (fileRestore.conflicts.length > 0) {
+      const details = fileRestore.conflicts
+        .map(({ path, reason }) => `${path}: ${reason}`)
+        .join('\n')
+      const partial = fileRestore.reverted.length > 0
+        ? `\nFiles left restored after a partial failure:\n${fileRestore.reverted.join('\n')}`
+        : ''
+      setMessages(prev => [
+        ...prev,
+        createAssistantMessage(
+          `Undo could not complete safely; conversation history was not rewound.\n${details}${partial}`,
+        ),
+      ])
+      return
+    }
+    const recoverySnapshot = session.captureRecoverySnapshot()
     session.rewindBeforeTimestamp(lastUserMessage.ts)
-    await host.revertLastTurnFiles()
-    await session.save().catch(() => {})
+    try {
+      await session.save()
+    } catch (saveError) {
+      try {
+        const loaded = await session.load()
+        if (!loaded) {
+          throw new Error("the durable session journal is missing")
+        }
+      } catch (loadError) {
+        session.restoreRecoverySnapshot(recoverySnapshot)
+        const fileRollback = await host.rollbackLastTurnFileRevert()
+        const rollbackDetails = fileRollback.conflicts.length > 0
+          ? '\nFile compensation conflicts:\n' +
+            fileRollback.conflicts
+              .map(({ path, reason }) => `${path}: ${reason}`)
+              .join('\n')
+          : '\nThe files were returned to the agent-written state.'
+        const partial = fileRollback.reverted.length > 0
+          ? '\nFiles still left in the restored state:\n' +
+            fileRollback.reverted.join('\n')
+          : ''
+        const reason =
+          'Nexus blocked new turns for this session because it could not verify the durable result of /undo. ' +
+          'Restart Nexus to reload this journal, or switch to another session before continuing. ' +
+          `Save error: ${saveError instanceof Error ? saveError.message : String(saveError)}. ` +
+          `Reload error: ${loadError instanceof Error ? loadError.message : String(loadError)}.` +
+          rollbackDetails +
+          partial
+        setNexusUndoRecoveryBlock({
+          sessionId: session.id,
+          reason,
+        })
+        setMessages([
+          ...replMessagesFromSession(session.messages),
+          createAssistantMessage(
+            reason,
+          ),
+        ])
+        return
+      }
+
+      const rewindWasPersisted = !session.messages.some(
+        message => message.id === lastUserMessage.id,
+      )
+      if (rewindWasPersisted) {
+        host.commitLastTurnFileRevert()
+        setSubagentsByPartId({})
+        setMessages([
+          ...replMessagesFromSession(session.messages),
+          createAssistantMessage(
+            'Reverted the last turn and restored edited files. ' +
+            'The save call reported an error, but the durable session confirms the rewind.',
+          ),
+        ])
+        return
+      }
+
+      const fileRollback = await host.rollbackLastTurnFileRevert()
+      const rollbackDetails = fileRollback.conflicts.length > 0
+        ? '\nFile compensation conflicts:\n' +
+          fileRollback.conflicts
+            .map(({ path, reason }) => `${path}: ${reason}`)
+            .join('\n')
+        : ''
+      const partial = fileRollback.reverted.length > 0
+        ? '\nFiles still left in the restored state:\n' +
+          fileRollback.reverted.join('\n')
+        : ''
+      setMessages([
+        ...replMessagesFromSession(session.messages),
+        createAssistantMessage(
+          'Undo was aborted because the conversation rewind could not be saved. ' +
+          (fileRollback.conflicts.length === 0
+            ? 'The files were returned to the agent-written state, so you can retry safely.'
+            : 'Nexus could not fully return the files to the agent-written state.') +
+          `\nSave error: ${saveError instanceof Error ? saveError.message : String(saveError)}.` +
+          rollbackDetails +
+          partial,
+        ),
+      ])
+      return
+    }
+    host.commitLastTurnFileRevert()
     setSubagentsByPartId({})
     setMessages([
       ...replMessagesFromSession(session.messages),
       createAssistantMessage('Reverted the last turn and restored edited files.'),
     ])
-  }, [nexusBootstrap])
+  }, [nexusBootstrap, nexusUndoRecoveryBlock])
 
   /** Restore from checkpoint (chat and/or workspace); syncs REPL messages from session. */
   const onNexusCheckpointRestore = useCallback(
@@ -478,6 +603,15 @@ export function REPL({
     ): Promise<{ ok: true } | { ok: false; error: string }> => {
       if (!nexusBootstrap || nexusSessionId == null) {
         return { ok: false, error: 'No active Nexus session.' }
+      }
+      if (
+        nexusUndoRecoveryBlock?.sessionId ===
+        nexusBootstrap.session.id
+      ) {
+        return {
+          ok: false,
+          error: nexusUndoRecoveryBlock.reason,
+        }
       }
       const result = await applyCheckpointRestore(
         nexusBootstrap.cwd,
@@ -505,12 +639,21 @@ export function REPL({
       ])
       return { ok: true }
     },
-    [nexusBootstrap, nexusSessionId],
+    [nexusBootstrap, nexusSessionId, nexusUndoRecoveryBlock],
   )
 
   /** Nexus-native /compact: run core compaction pipeline directly (no legacy Anthropic path). */
   const onNexusCompact = useCallback(async () => {
     if (!nexusBootstrap) return
+    if (
+      nexusUndoRecoveryBlock?.sessionId === nexusBootstrap.session.id
+    ) {
+      setMessages(prev => [
+        ...prev,
+        createAssistantMessage(nexusUndoRecoveryBlock.reason),
+      ])
+      return
+    }
     try {
       if (nexusBootstrap.serverUrl) {
         throw new Error(
@@ -557,7 +700,7 @@ export function REPL({
         ),
       ])
     }
-  }, [nexusBootstrap, applyNexusBanner])
+  }, [nexusBootstrap, nexusUndoRecoveryBlock, applyNexusBanner])
 
   const onSetNexusMode = useCallback((mode: string) => {
     setNexusModeOverride(mode)
@@ -1000,6 +1143,18 @@ export function REPL({
     newMessages: MessageType[],
     abortController: AbortController,
   ) {
+    if (
+      nexusBootstrap &&
+      nexusUndoRecoveryBlock?.sessionId === nexusBootstrap.session.id
+    ) {
+      setMessages(oldMessages => [
+        ...oldMessages,
+        createAssistantMessage(nexusUndoRecoveryBlock.reason),
+      ])
+      assignAbortController(null)
+      setIsLoading(false)
+      return
+    }
     setMessages(oldMessages => [...oldMessages, ...newMessages])
 
     // Mark onboarding as complete when any user message is sent

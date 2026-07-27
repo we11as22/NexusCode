@@ -292,4 +292,225 @@ describe("CliHost workspace filesystem authority", () => {
       code: "ENOENT",
     })
   })
+
+  it("rejects a save when the file drifted after the edit preview", async () => {
+    const workspace = await makeTempDirectory()
+    const file = path.join(workspace, "drift.txt")
+    await fs.writeFile(file, "original", "utf8")
+    const host = new CliHost(workspace, () => {}, true)
+
+    await host.openFileEdit(file, {
+      originalContent: "original",
+      newContent: "agent",
+      isNewFile: false,
+    })
+    await fs.writeFile(file, "manual", "utf8")
+
+    await expect(host.saveFileEdit(file)).rejects.toThrow(/conflict|changed/i)
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("manual")
+
+    // A failed compare-and-swap must retain the proposal for a deliberate retry.
+    await fs.writeFile(file, "original", "utf8")
+    await expect(host.saveFileEdit(file)).resolves.toBeUndefined()
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("agent")
+  })
+
+  it("coalesces repeated same-file edits so undo restores the true pre-turn content", async () => {
+    const workspace = await makeTempDirectory()
+    const file = path.join(workspace, "repeated.txt")
+    await fs.writeFile(file, "before", "utf8")
+    const host = new CliHost(workspace, () => {}, true)
+
+    await host.openFileEdit(file, {
+      originalContent: "before",
+      newContent: "middle",
+      isNewFile: false,
+    })
+    await host.saveFileEdit(file)
+    await host.openFileEdit(file, {
+      originalContent: "middle",
+      newContent: "after",
+      isNewFile: false,
+    })
+    await host.saveFileEdit(file)
+    host.startNewTurn()
+    const canonicalFile = path.join(await fs.realpath(workspace), "repeated.txt")
+
+    await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
+      reverted: [canonicalFile],
+      conflicts: [],
+    })
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("before")
+  })
+
+  it("keeps a successful file undo reversible until the conversation save commits", async () => {
+    const workspace = await makeTempDirectory()
+    const file = path.join(workspace, "two-phase.txt")
+    await fs.writeFile(file, "before", "utf8")
+    const host = new CliHost(workspace, () => {}, true)
+
+    await host.openFileEdit(file, {
+      originalContent: "before",
+      newContent: "agent",
+      isNewFile: false,
+    })
+    await host.saveFileEdit(file)
+    host.startNewTurn()
+
+    await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
+      conflicts: [],
+    })
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("before")
+
+    await expect(host.rollbackLastTurnFileRevert()).resolves.toMatchObject({
+      conflicts: [],
+    })
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("agent")
+    expect(host.getLastTurnFileEdits()).toHaveLength(1)
+
+    await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
+      conflicts: [],
+    })
+    host.commitLastTurnFileRevert()
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("before")
+    expect(host.getLastTurnFileEdits()).toHaveLength(0)
+  })
+
+  it("reports only files which remain restored when undo compensation conflicts", async () => {
+    const workspace = await makeTempDirectory()
+    const unchanged = path.join(workspace, "still-restored.txt")
+    const changed = path.join(workspace, "changed-after-restore.txt")
+    await fs.writeFile(unchanged, "unchanged-before", "utf8")
+    await fs.writeFile(changed, "changed-before", "utf8")
+    const host = new CliHost(workspace, () => {}, true)
+
+    for (const [file, before, after] of [
+      [unchanged, "unchanged-before", "unchanged-agent"],
+      [changed, "changed-before", "changed-agent"],
+    ] as const) {
+      await host.openFileEdit(file, {
+        originalContent: before,
+        newContent: after,
+        isNewFile: false,
+      })
+      await host.saveFileEdit(file)
+    }
+    host.startNewTurn()
+    await host.revertLastTurnFiles()
+    await fs.writeFile(changed, "manual-after-restore", "utf8")
+
+    const result = await host.rollbackLastTurnFileRevert()
+    const canonicalUnchanged = path.join(
+      await fs.realpath(workspace),
+      "still-restored.txt",
+    )
+    const canonicalChanged = path.join(
+      await fs.realpath(workspace),
+      "changed-after-restore.txt",
+    )
+    expect(result).toMatchObject({
+      reverted: [canonicalUnchanged],
+      conflicts: [expect.objectContaining({ path: canonicalChanged })],
+    })
+    await expect(fs.readFile(unchanged, "utf8")).resolves.toBe(
+      "unchanged-before",
+    )
+    await expect(fs.readFile(changed, "utf8")).resolves.toBe(
+      "manual-after-restore",
+    )
+  })
+
+  it("rejects a second same-turn edit after an interleaved manual change", async () => {
+    const workspace = await makeTempDirectory()
+    const file = path.join(workspace, "interleaved.txt")
+    await fs.writeFile(file, "before", "utf8")
+    const host = new CliHost(workspace, () => {}, true)
+
+    await host.openFileEdit(file, {
+      originalContent: "before",
+      newContent: "agent-one",
+      isNewFile: false,
+    })
+    await host.saveFileEdit(file)
+    await fs.writeFile(file, "manual", "utf8")
+    await host.openFileEdit(file, {
+      originalContent: "manual",
+      newContent: "agent-two",
+      isNewFile: false,
+    })
+
+    await expect(host.saveFileEdit(file)).rejects.toThrow(
+      /between agent edits|interleaved|conflict/i,
+    )
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("manual")
+  })
+
+  it("keeps undo state and refuses to overwrite a later manual edit", async () => {
+    const workspace = await makeTempDirectory()
+    const file = path.join(workspace, "manual-after.txt")
+    await fs.writeFile(file, "before", "utf8")
+    const host = new CliHost(workspace, () => {}, true)
+
+    await host.openFileEdit(file, {
+      originalContent: "before",
+      newContent: "agent",
+      isNewFile: false,
+    })
+    await host.saveFileEdit(file)
+    host.startNewTurn()
+    await fs.writeFile(file, "manual", "utf8")
+    const canonicalFile = path.join(
+      await fs.realpath(workspace),
+      "manual-after.txt",
+    )
+
+    await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
+      reverted: [],
+      conflicts: [expect.objectContaining({ path: canonicalFile })],
+    })
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("manual")
+    expect(host.getLastTurnFileEdits()).toHaveLength(1)
+  })
+
+  it("rolls back already-restored files when a later batch restore fails", async () => {
+    const workspace = await makeTempDirectory()
+    const first = path.join(workspace, "first.txt")
+    const second = path.join(workspace, "second.txt")
+    await fs.writeFile(first, "first-before", "utf8")
+    await fs.writeFile(second, "second-before", "utf8")
+    const host = new CliHost(workspace, () => {}, true)
+
+    for (const [file, before, after] of [
+      [first, "first-before", "first-agent"],
+      [second, "second-before", "second-agent"],
+    ] as const) {
+      await host.openFileEdit(file, {
+        originalContent: before,
+        newContent: after,
+        isNewFile: false,
+      })
+      await host.saveFileEdit(file)
+    }
+    host.startNewTurn()
+
+    const writeFile = host.writeFile.bind(host)
+    let injected = false
+    vi.spyOn(host, "writeFile").mockImplementation(async (file, content) => {
+      if (!injected && file.endsWith("first.txt") && content === "first-before") {
+        injected = true
+        throw new Error("injected restore failure")
+      }
+      await writeFile(file, content)
+    })
+
+    await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
+      reverted: [],
+      conflicts: [expect.objectContaining({
+        path: expect.stringMatching(/first\.txt$/),
+      })],
+    })
+    await expect(fs.readFile(first, "utf8")).resolves.toBe("first-agent")
+    await expect(fs.readFile(second, "utf8")).resolves.toBe("second-agent")
+    expect(host.getLastTurnFileEdits()).toHaveLength(2)
+  })
 })

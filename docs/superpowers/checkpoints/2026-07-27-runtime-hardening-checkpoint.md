@@ -46,13 +46,19 @@ audit/implementation session.
 
 ## Next high-priority slices
 
-1. Bound remote MCP response bodies before SDK parsing, including declared
+The MCP response-bound and post-receipt queued-turn items below were completed
+in the 2026-07-28 checkpoint. The stronger durable outbox and change-ownership
+work remains active there.
+
+1. ~~Bound remote MCP response bodies before SDK parsing, including declared
    `Content-Length`, chunked bodies, and per-frame/per-message limits for
-   long-lived SSE without imposing an incorrect lifetime cap.
+   long-lived SSE without imposing an incorrect lifetime cap.~~
 2. Add a durable delete tombstone/live-writer fence under the same session
    ownership transaction as active turns.
-3. Make queued remote turn identities recoverable after client restart and
-   expose a real exactly-once queue UI for local and remote runs.
+3. ~~Make post-receipt accepted remote turn identities recoverable after client
+   restart, including completion-before-snapshot, bounded pending projection,
+   terminal ACK, failed-terminal, and replay-expiry races.~~ Add the pre-request
+   durable outbox and exactly-once queue UI.
 4. Implement server-side atomic session fork, including transcript prefix,
    summary, todo, context metadata, and failure atomicity.
 5. Add server-owned scoped permission grants and redirect instructions, or

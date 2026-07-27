@@ -256,6 +256,215 @@ describe("authorized remote MCP fetch", () => {
     expect(() => streamController?.enqueue(new Uint8Array([1]))).toThrow()
   })
 
+  it("rejects an oversized declared finite response before reading its body", async () => {
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+    })
+    const fetch = createMcpAuthorizedFetch(
+      async ({ url }) => authorization(url),
+      {
+        maxResponseBytes: 4,
+        hop: async () =>
+          new Response(body, {
+            headers: {
+              "content-length": "5",
+              "content-type": "application/json",
+            },
+          }),
+      },
+    )
+
+    await expect(fetch("https://example.com/mcp")).rejects.toThrow(
+      /response body exceeds 4 bytes/i,
+    )
+    expect(cancelled).toBe(true)
+  })
+
+  it("bounds a chunked finite response while it is being consumed", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("123"))
+        controller.enqueue(new TextEncoder().encode("45"))
+        controller.close()
+      },
+    })
+    const fetch = createMcpAuthorizedFetch(
+      async ({ url }) => authorization(url),
+      {
+        maxResponseBytes: 4,
+        hop: async () =>
+          new Response(stream, {
+            headers: { "content-type": "application/json" },
+          }),
+      },
+    )
+
+    const response = await fetch("https://example.com/mcp")
+    await expect(response.text()).rejects.toThrow(
+      /response body exceeds 4 bytes/i,
+    )
+  })
+
+  it("treats Content-Length as an early hint but still counts streamed bytes", async () => {
+    const fetch = createMcpAuthorizedFetch(
+      async ({ url }) => authorization(url),
+      {
+        maxResponseBytes: 4,
+        hop: async () =>
+          new Response("12345", {
+            headers: {
+              "content-length": "4",
+              "content-type": "application/json",
+            },
+          }),
+      },
+    )
+
+    const response = await fetch("https://example.com/mcp")
+    await expect(response.text()).rejects.toThrow(
+      /response body exceeds 4 bytes/i,
+    )
+  })
+
+  it("accepts grammar-valid leading zeroes in Content-Length", async () => {
+    const fetch = createMcpAuthorizedFetch(
+      async ({ url }) => authorization(url),
+      {
+        maxResponseBytes: 4,
+        hop: async () =>
+          new Response("1", {
+            headers: {
+              "content-length": "01",
+              "content-type": "application/json",
+            },
+          }),
+      },
+    )
+
+    const response = await fetch("https://example.com/mcp")
+    await expect(response.text()).resolves.toBe("1")
+  })
+
+  it("bounds each SSE event even when its record spans chunks", async () => {
+    let cancelled = false
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: 12"))
+        controller.enqueue(new TextEncoder().encode("345\n\n"))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const fetch = createMcpAuthorizedFetch(
+      async ({ url }) => authorization(url),
+      {
+        maxSseEventBytes: 10,
+        hop: async () =>
+          new Response(stream, {
+            headers: { "content-type": "text/event-stream; charset=utf-8" },
+          }),
+      },
+    )
+
+    const response = await fetch("https://example.com/mcp")
+    await expect(response.text()).rejects.toThrow(
+      /SSE event exceeds 10 bytes/i,
+    )
+    expect(cancelled).toBe(true)
+  })
+
+  it("errors the consumer promptly even if upstream cancellation hangs", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("12345"))
+      },
+      cancel() {
+        return new Promise<void>(() => undefined)
+      },
+    })
+    const fetch = createMcpAuthorizedFetch(
+      async ({ url }) => authorization(url),
+      {
+        maxResponseBytes: 4,
+        hop: async () =>
+          new Response(stream, {
+            headers: { "content-type": "application/json" },
+          }),
+      },
+    )
+
+    const response = await fetch("https://example.com/mcp")
+    const outcome = await Promise.race([
+      response.text().then(
+        () => "resolved",
+        (error: unknown) =>
+          error instanceof Error ? error.message : String(error),
+      ),
+      new Promise<string>((resolve) => {
+        setTimeout(() => resolve("timed out"), 50)
+      }),
+    ])
+    expect(outcome).toMatch(/response body exceeds 4 bytes/i)
+  })
+
+  it("does not validate representation length for a bodyless response", async () => {
+    const fetch = createMcpAuthorizedFetch(
+      async ({ url }) => authorization(url),
+      {
+        maxResponseBytes: 4,
+        hop: async () =>
+          new Response(null, {
+            headers: { "content-length": "999" },
+          }),
+      },
+    )
+
+    await expect(fetch("https://example.com/mcp", {
+      method: "HEAD",
+    })).resolves.toBeInstanceOf(Response)
+  })
+
+  it("does not apply the finite response limit across separate SSE events", async () => {
+    const payload = "data: 1\n\ndata: 2\r\n\r\ndata: 3\r\r"
+    const fetch = createMcpAuthorizedFetch(
+      async ({ url }) => authorization(url),
+      {
+        maxResponseBytes: 4,
+        maxSseEventBytes: 12,
+        hop: async () =>
+          new Response(payload, {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      },
+    )
+
+    const response = await fetch("https://example.com/mcp")
+    await expect(response.text()).resolves.toBe(payload)
+  })
+
+  it("applies the finite response limit to a non-success SSE-labelled response", async () => {
+    const fetch = createMcpAuthorizedFetch(
+      async ({ url }) => authorization(url),
+      {
+        maxResponseBytes: 4,
+        hop: async () =>
+          new Response("12345", {
+            status: 500,
+            headers: { "content-type": "text/event-stream" },
+          }),
+      },
+    )
+
+    const response = await fetch("https://example.com/mcp")
+    await expect(response.text()).rejects.toThrow(
+      /response body exceeds 4 bytes/i,
+    )
+  })
+
   it("pins lookup results to the exact authorized addresses and hostname", async () => {
     const lookup = createMcpPinnedLookup(authorization(
       "https://example.com/mcp",

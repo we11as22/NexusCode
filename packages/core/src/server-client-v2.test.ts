@@ -5,7 +5,10 @@ import {
   type ProtocolEnvelope,
 } from "./protocol/v2.js"
 import { buildRemoteMcpPromptCatalog } from "./mcp/prompt-transport.js"
-import { NexusServerClient } from "./server-client.js"
+import {
+  NexusServerClient,
+  SessionTurnTerminalError,
+} from "./server-client.js"
 
 const persistence = {
   state: "committed" as const,
@@ -540,6 +543,494 @@ describe("NexusServerClient protocol v2", () => {
       sessionId: "session-test",
       ...turn,
       afterSequence: 8,
+    })) {
+      events.push(event)
+    }
+    expect(events).toEqual([])
+  })
+
+  it("waits for the exact queued turn without attaching the current active turn", async () => {
+    const active = { turnId: "turn-active", runId: "run-active" }
+    const queued = { turnId: "turn-queued", runId: "run-queued" }
+    const requestedCursors: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith("/snapshot")) {
+          return Response.json({
+            version: PROTOCOL_VERSION,
+            sessionId: "session-test",
+            phase: "streaming",
+            activeTurnId: active.turnId,
+            activeRunId: active.runId,
+            activeTurnFirstSequence: 2,
+            activeExecution: { mode: "agent" },
+            pendingApprovals: [],
+            pendingTurns: [{
+              inputId: "input-queued",
+              ...queued,
+              admittedSequence: 2,
+              execution: { mode: "review" },
+            }],
+            pendingQueueCount: 1,
+            pendingSteerCount: 0,
+            earliestAvailableSequence: 1,
+            throughSequence: 5,
+          })
+        }
+        requestedCursors.push(url)
+        return ndjson([
+          envelope(6, {
+            type: "turn_finished",
+            status: "completed",
+          }, active),
+          envelope(7, {
+            type: "turn_started",
+            ...queued,
+            configEpoch: 1,
+            contextEpoch: 1,
+            execution: { mode: "review" },
+          }, queued),
+          envelope(8, {
+            type: "agent_event",
+            event: {
+              type: "text_delta",
+              delta: "queued result",
+              messageId: "message-queued",
+            },
+          }, queued),
+          envelope(9, {
+            type: "turn_finished",
+            status: "completed",
+          }, queued),
+        ])
+      }),
+    )
+    const client = new NexusServerClient({
+      baseUrl: "http://127.0.0.1:4097",
+      directory: process.cwd(),
+      token: "secret-token",
+    })
+    const identities: unknown[] = []
+    const acknowledged: number[] = []
+    const events = []
+
+    for await (const event of client.attachSessionTurn({
+      sessionId: "session-test",
+      ...queued,
+      afterSequence: 0,
+      onTurn: (identity) => identities.push(identity),
+      onSequence: (sequence) => {
+        acknowledged.push(sequence)
+      },
+    })) {
+      events.push(event)
+    }
+
+    expect(requestedCursors).toHaveLength(1)
+    expect(requestedCursors[0]).toContain("afterSequence=5")
+    expect(identities).toEqual([queued])
+    expect(acknowledged).toEqual([6, 7, 8, 9])
+    expect(events).toEqual([{
+      type: "text_delta",
+      delta: "queued result",
+      messageId: "message-queued",
+    }])
+  })
+
+  it("replays an accepted queued turn that finishes between recovery snapshots", async () => {
+    const replacement = {
+      turnId: "turn-replacement",
+      runId: "run-replacement",
+    }
+    const queued = { turnId: "turn-queued", runId: "run-queued" }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith("/snapshot")) {
+          return Response.json({
+            version: PROTOCOL_VERSION,
+            sessionId: "session-test",
+            phase: "streaming",
+            activeTurnId: replacement.turnId,
+            activeRunId: replacement.runId,
+            activeTurnFirstSequence: 12,
+            activeExecution: { mode: "agent" },
+            pendingApprovals: [],
+            pendingTurns: [],
+            pendingQueueCount: 0,
+            pendingSteerCount: 0,
+            earliestAvailableSequence: 6,
+            throughSequence: 12,
+          })
+        }
+        expect(url).toContain("afterSequence=5")
+        return ndjson([
+          envelope(6, {
+            type: "turn_started",
+            ...queued,
+            configEpoch: 1,
+            contextEpoch: 1,
+            execution: { mode: "review" },
+          }, queued),
+          envelope(7, {
+            type: "approval_requested",
+            approvalId: "approval-already-resolved",
+            toolName: "Bash",
+            redactedSummary: "Already resolved before reconnect",
+          }, queued),
+          envelope(8, {
+            type: "agent_event",
+            event: {
+              type: "tool_approval_needed",
+              partId: "part-already-resolved",
+              action: {
+                type: "execute",
+                tool: "Bash",
+                description: "Already resolved before reconnect",
+              },
+            },
+          }, queued),
+          envelope(9, {
+            type: "approval_resolved",
+            approvalId: "approval-already-resolved",
+            status: "approved",
+          }, queued),
+          envelope(10, {
+            type: "agent_event",
+            event: {
+              type: "text_delta",
+              delta: "recovered result",
+              messageId: "message-recovered",
+            },
+          }, queued),
+          envelope(11, {
+            type: "turn_finished",
+            status: "completed",
+          }, queued),
+          envelope(12, {
+            type: "turn_started",
+            ...replacement,
+            configEpoch: 1,
+            contextEpoch: 1,
+            execution: { mode: "agent" },
+          }, replacement),
+        ])
+      }),
+    )
+    const client = new NexusServerClient({
+      baseUrl: "http://127.0.0.1:4097",
+      directory: process.cwd(),
+      token: "secret-token",
+    })
+    const events = []
+    const approvals: unknown[] = []
+
+    for await (const event of client.attachSessionTurn({
+      sessionId: "session-test",
+      ...queued,
+      afterSequence: 5,
+      followAcceptedTurn: true,
+      onApproval: (approval) => approvals.push(approval),
+    })) {
+      events.push(event)
+    }
+
+    expect(events).toEqual([{
+      type: "text_delta",
+      delta: "recovered result",
+      messageId: "message-recovered",
+    }])
+    expect(approvals).toEqual([])
+  })
+
+  it("recognizes an already-acknowledged terminal event while replaying an accepted turn", async () => {
+    const replacement = {
+      turnId: "turn-replacement",
+      runId: "run-replacement",
+    }
+    const accepted = { turnId: "turn-accepted", runId: "run-accepted" }
+    const requestedCursors: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith("/snapshot")) {
+          return Response.json({
+            version: PROTOCOL_VERSION,
+            sessionId: "session-test",
+            phase: "streaming",
+            activeTurnId: replacement.turnId,
+            activeRunId: replacement.runId,
+            activeTurnFirstSequence: 12,
+            activeExecution: { mode: "agent" },
+            pendingApprovals: [],
+            pendingTurns: [],
+            pendingQueueCount: 0,
+            pendingSteerCount: 0,
+            earliestAvailableSequence: 10,
+            throughSequence: 12,
+          })
+        }
+        requestedCursors.push(url)
+        return ndjson([
+          envelope(10, {
+            type: "agent_event",
+            event: {
+              type: "text_delta",
+              delta: "already acknowledged",
+              messageId: "message-accepted",
+            },
+          }, accepted),
+          envelope(11, {
+            type: "turn_finished",
+            status: "completed",
+          }, accepted),
+          envelope(12, {
+            type: "turn_started",
+            ...replacement,
+            configEpoch: 1,
+            contextEpoch: 1,
+            execution: { mode: "agent" },
+          }, replacement),
+        ])
+      }),
+    )
+    const client = new NexusServerClient({
+      baseUrl: "http://127.0.0.1:4097",
+      directory: process.cwd(),
+      token: "secret-token",
+    })
+    const events = []
+
+    for await (const event of client.attachSessionTurn({
+      sessionId: "session-test",
+      ...accepted,
+      afterSequence: 11,
+      followAcceptedTurn: true,
+    })) {
+      events.push(event)
+    }
+
+    expect(requestedCursors).toHaveLength(1)
+    expect(requestedCursors[0]).toContain("afterSequence=9")
+    expect(events).toEqual([])
+  })
+
+  it("surfaces an already-acknowledged failed terminal as an exact typed outcome", async () => {
+    const accepted = { turnId: "turn-failed", runId: "run-failed" }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith("/snapshot")) {
+          return Response.json({
+            version: PROTOCOL_VERSION,
+            sessionId: "session-test",
+            phase: "idle",
+            pendingApprovals: [],
+            pendingTurns: [],
+            pendingQueueCount: 0,
+            pendingSteerCount: 0,
+            earliestAvailableSequence: 10,
+            throughSequence: 11,
+          })
+        }
+        expect(url).toContain("afterSequence=9")
+        return ndjson([
+          envelope(10, {
+            type: "agent_event",
+            event: {
+              type: "text_delta",
+              delta: "partial",
+              messageId: "message-failed",
+            },
+          }, accepted),
+          envelope(11, {
+            type: "turn_finished",
+            status: "failed",
+            error: "provider failed",
+          }, accepted),
+        ])
+      }),
+    )
+    const client = new NexusServerClient({
+      baseUrl: "http://127.0.0.1:4097",
+      directory: process.cwd(),
+      token: "secret-token",
+    })
+
+    await expect(async () => {
+      for await (const _event of client.attachSessionTurn({
+        sessionId: "session-test",
+        ...accepted,
+        afterSequence: 11,
+        followAcceptedTurn: true,
+      })) {
+        // Consume the exact stream.
+      }
+    }).rejects.toMatchObject({
+      name: "SessionTurnTerminalError",
+      turnId: accepted.turnId,
+      runId: accepted.runId,
+      sequence: 11,
+      status: "failed",
+      message: "provider failed",
+    } satisfies Partial<SessionTurnTerminalError>)
+  })
+
+  it("fails historical recovery once the retained snapshot window proves the terminal is missing", async () => {
+    const accepted = { turnId: "turn-evicted", runId: "run-evicted" }
+    const replacement = {
+      turnId: "turn-replacement",
+      runId: "run-replacement",
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith("/snapshot")) {
+          return Response.json({
+            version: PROTOCOL_VERSION,
+            sessionId: "session-test",
+            phase: "streaming",
+            activeTurnId: replacement.turnId,
+            activeRunId: replacement.runId,
+            activeTurnFirstSequence: 10,
+            activeExecution: { mode: "agent" },
+            pendingApprovals: [],
+            pendingTurns: [],
+            pendingQueueCount: 0,
+            pendingSteerCount: 0,
+            earliestAvailableSequence: 10,
+            throughSequence: 12,
+          })
+        }
+        expect(url).toContain("afterSequence=9")
+        return ndjson([
+          envelope(10, {
+            type: "turn_started",
+            ...replacement,
+            configEpoch: 1,
+            contextEpoch: 1,
+            execution: { mode: "agent" },
+          }, replacement),
+          envelope(11, {
+            type: "agent_event",
+            event: {
+              type: "text_delta",
+              delta: "replacement",
+              messageId: "message-replacement",
+            },
+          }, replacement),
+          envelope(12, {
+            type: "turn_finished",
+            status: "completed",
+          }, replacement),
+        ])
+      }),
+    )
+    const client = new NexusServerClient({
+      baseUrl: "http://127.0.0.1:4097",
+      directory: process.cwd(),
+      token: "secret-token",
+    })
+
+    await expect(async () => {
+      for await (const _event of client.attachSessionTurn({
+        sessionId: "session-test",
+        ...accepted,
+        afterSequence: 9,
+        followAcceptedTurn: true,
+      })) {
+        // Consume the exact stream.
+      }
+    }).rejects.toMatchObject({
+      protocolError: {
+        code: "replay_gap",
+      },
+    })
+  })
+
+  it("does not require a terminal at high-water when the pending projection is truncated", async () => {
+    const hidden = { turnId: "turn-hidden", runId: "run-hidden" }
+    const active = { turnId: "turn-active", runId: "run-active" }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith("/snapshot")) {
+          return Response.json({
+            version: PROTOCOL_VERSION,
+            sessionId: "session-test",
+            phase: "streaming",
+            activeTurnId: active.turnId,
+            activeRunId: active.runId,
+            activeTurnFirstSequence: 10,
+            activeExecution: { mode: "agent" },
+            pendingApprovals: [],
+            pendingTurns: [{
+              inputId: "input-visible",
+              turnId: "turn-visible",
+              runId: "run-visible",
+              admittedSequence: 10,
+              execution: { mode: "review" },
+            }],
+            pendingQueueCount: 2,
+            pendingSteerCount: 0,
+            earliestAvailableSequence: 10,
+            throughSequence: 12,
+          })
+        }
+        expect(url).toContain("afterSequence=9")
+        return ndjson([
+          envelope(10, {
+            type: "turn_started",
+            ...active,
+            configEpoch: 1,
+            contextEpoch: 1,
+            execution: { mode: "agent" },
+          }, active),
+          envelope(11, {
+            type: "agent_event",
+            event: {
+              type: "text_delta",
+              delta: "active",
+              messageId: "message-active",
+            },
+          }, active),
+          envelope(12, {
+            type: "turn_finished",
+            status: "completed",
+          }, active),
+          envelope(13, {
+            type: "turn_started",
+            ...hidden,
+            configEpoch: 1,
+            contextEpoch: 1,
+            execution: { mode: "review" },
+          }, hidden),
+          envelope(14, {
+            type: "turn_finished",
+            status: "completed",
+          }, hidden),
+        ])
+      }),
+    )
+    const client = new NexusServerClient({
+      baseUrl: "http://127.0.0.1:4097",
+      directory: process.cwd(),
+      token: "secret-token",
+    })
+
+    const events = []
+    for await (const event of client.attachSessionTurn({
+      sessionId: "session-test",
+      ...hidden,
+      afterSequence: 9,
+      followAcceptedTurn: true,
     })) {
       events.push(event)
     }

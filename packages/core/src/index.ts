@@ -207,6 +207,7 @@ export {
   UnsafeSessionIdError,
   getSessionStorageDiagnostics,
 } from "./session/index.js"
+export type { SessionRecoverySnapshot } from "./session/index.js"
 export type {
   DeleteSessionOptions,
   PersistedToolOutputProtection,
@@ -229,6 +230,7 @@ export {
   getNexusServerTokenSecretKey,
   isLoopbackNexusServerDestination,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
+  SessionTurnTerminalError,
 } from "./server-client.js"
 export type {
   AttachSessionTurnOptions,

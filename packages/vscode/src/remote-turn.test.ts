@@ -6,7 +6,6 @@ import type {
 } from "@nexuscode/core"
 import {
   PROTOCOL_VERSION,
-  SessionProtocolError,
 } from "@nexuscode/core"
 import {
   VsCodeRemoteTurn,
@@ -134,8 +133,10 @@ describe("VS Code remote protocol-v2 turn", () => {
     ])
   })
 
-  it("does not start a duplicate when the snapshotted turn finishes before attach", async () => {
+  it("replays a snapshotted turn which finishes before attach", async () => {
     let starts = 0
+    let followedAcceptedTurn = false
+    const events: AgentEvent[] = []
     const client = {
       async getSessionProtocolSnapshot() {
         return {
@@ -153,12 +154,20 @@ describe("VS Code remote protocol-v2 turn", () => {
           throughSequence: 4,
         }
       },
-      async *attachSessionTurn() {
-        throw new SessionProtocolError({
-          code: "no_active_turn",
-          message: "finished",
-          retryable: false,
+      async *attachSessionTurn(options: Parameters<
+        NonNullable<VsCodeRemoteTurnClient["attachSessionTurn"]>
+      >[0]) {
+        followedAcceptedTurn = options.followAcceptedTurn === true
+        options.onTurn?.({
+          turnId: options.turnId,
+          runId: options.runId,
         })
+        yield {
+          type: "text_delta" as const,
+          messageId: "message-finish-race",
+          delta: "tail after snapshot",
+        }
+        await options.onSequence?.(6)
       },
       async *runSessionTurn() {
         starts++
@@ -175,10 +184,18 @@ describe("VS Code remote protocol-v2 turn", () => {
         sessionId: "session-finish-race",
         signal: new AbortController().signal,
         cursorStore: memoryCursorStore().store,
-        deliver: () => {},
+        deliver: (event) => {
+          events.push(event)
+        },
       }),
-    ).resolves.toBe(false)
+    ).resolves.toBe(true)
     expect(starts).toBe(0)
+    expect(followedAcceptedTurn).toBe(true)
+    expect(events).toEqual([{
+      type: "text_delta",
+      messageId: "message-finish-race",
+      delta: "tail after snapshot",
+    }])
   })
 
   it("resumes a streaming snapshot from its exact persisted cursor", async () => {
@@ -287,6 +304,180 @@ describe("VS Code remote protocol-v2 turn", () => {
       },
     ])
     expect(deliveryOrder).toEqual(["execution", "event"])
+  })
+
+  it("resumes its queued turn without attaching another active turn", async () => {
+    let attached:
+      | { turnId: string; runId: string; afterSequence?: number }
+      | undefined
+    const cursors = memoryCursorStore({
+      turnId: "turn-queued",
+      runId: "run-queued",
+      afterSequence: 0,
+    })
+    const client: VsCodeRemoteAttachClient = {
+      async getSessionProtocolSnapshot() {
+        return {
+          version: PROTOCOL_VERSION,
+          sessionId: "session-queued",
+          phase: "streaming",
+          activeTurnId: "turn-other",
+          activeRunId: "run-other",
+          activeTurnFirstSequence: 2,
+          activeExecution: { mode: "agent" },
+          pendingApprovals: [],
+          pendingTurns: [{
+            inputId: "input-queued",
+            turnId: "turn-queued",
+            runId: "run-queued",
+            admittedSequence: 2,
+            execution: { mode: "review" },
+          }],
+          pendingQueueCount: 1,
+          pendingSteerCount: 0,
+          earliestAvailableSequence: 1,
+          throughSequence: 8,
+        }
+      },
+      async *attachSessionTurn(options) {
+        attached = options
+        options.onTurn?.({
+          turnId: options.turnId,
+          runId: options.runId,
+        })
+        yield {
+          type: "text_delta",
+          messageId: "message-queued",
+          delta: "queued result",
+        }
+        await options.onSequence?.(12)
+      },
+      async *runSessionTurn() {
+        throw new Error("must not start")
+      },
+      async interruptSessionTurn() {
+        return true
+      },
+      async resolveSessionApproval() {},
+    }
+    const events: AgentEvent[] = []
+    const executionModes: string[] = []
+
+    await expect(resumeVsCodeRemoteTurn({
+      client,
+      sessionId: "session-queued",
+      signal: new AbortController().signal,
+      cursorStore: cursors.store,
+      onActiveExecution: (execution) => {
+        executionModes.push(execution.mode)
+      },
+      deliver: (event) => {
+        events.push(event)
+      },
+    })).resolves.toBe(true)
+
+    expect(attached).toMatchObject({
+      turnId: "turn-queued",
+      runId: "run-queued",
+      afterSequence: 8,
+      followAcceptedTurn: true,
+    })
+    expect(executionModes).toEqual(["review"])
+    expect(events).toEqual([{
+      type: "text_delta",
+      messageId: "message-queued",
+      delta: "queued result",
+    }])
+  })
+
+  it("trusts its accepted identity when the bounded pending list is not exhaustive", async () => {
+    let attached:
+      | {
+          turnId: string
+          runId: string
+          afterSequence?: number
+          followAcceptedTurn?: boolean
+        }
+      | undefined
+    const cursors = memoryCursorStore({
+      turnId: "turn-outside-window",
+      runId: "run-outside-window",
+      afterSequence: 21,
+    })
+    const client: VsCodeRemoteAttachClient = {
+      async getSessionProtocolSnapshot() {
+        return {
+          version: PROTOCOL_VERSION,
+          sessionId: "session-bounded-queue",
+          phase: "streaming",
+          activeTurnId: "turn-active",
+          activeRunId: "run-active",
+          activeTurnFirstSequence: 20,
+          activeExecution: { mode: "agent" },
+          pendingApprovals: [],
+          pendingTurns: [{
+            inputId: "input-visible",
+            turnId: "turn-visible",
+            runId: "run-visible",
+            admittedSequence: 21,
+            execution: { mode: "review" },
+          }],
+          pendingQueueCount: 2,
+          pendingSteerCount: 0,
+          earliestAvailableSequence: 1,
+          throughSequence: 24,
+        }
+      },
+      async *attachSessionTurn(options) {
+        attached = options
+        options.onTurn?.({
+          turnId: options.turnId,
+          runId: options.runId,
+        })
+        yield {
+          type: "text_delta",
+          messageId: "message-hidden-queued",
+          delta: "eventually admitted",
+        }
+        await options.onSequence?.(27)
+      },
+      async *runSessionTurn() {
+        throw new Error("must not start")
+      },
+      async interruptSessionTurn() {
+        return true
+      },
+      async resolveSessionApproval() {},
+    }
+    const executionModes: string[] = []
+    const events: AgentEvent[] = []
+
+    await expect(resumeVsCodeRemoteTurn({
+      client,
+      sessionId: "session-bounded-queue",
+      signal: new AbortController().signal,
+      cursorStore: cursors.store,
+      onActiveExecution: (execution) => {
+        executionModes.push(execution.mode)
+      },
+      deliver: (event) => {
+        events.push(event)
+      },
+    })).resolves.toBe(true)
+
+    expect(attached).toMatchObject({
+      turnId: "turn-outside-window",
+      runId: "run-outside-window",
+      afterSequence: 21,
+      followAcceptedTurn: true,
+    })
+    expect(executionModes).toEqual([])
+    expect(events).toEqual([{
+      type: "text_delta",
+      messageId: "message-hidden-queued",
+      delta: "eventually admitted",
+    }])
+    expect(cursors.clears).toEqual(["session-bounded-queue"])
   })
 
   it("reattaches the exact streaming turn and advances its persisted cursor without a start", async () => {

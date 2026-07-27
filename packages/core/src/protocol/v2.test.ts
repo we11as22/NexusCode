@@ -571,6 +571,76 @@ describe("protocol v2", () => {
     ).toBe(false)
   })
 
+  it("validates restart-safe queued turn identities without exposing prompts", () => {
+    const snapshot = {
+      version: PROTOCOL_VERSION,
+      sessionId: "session-queued",
+      phase: "streaming",
+      activeTurnId: "turn-active",
+      activeRunId: "run-active",
+      activeTurnFirstSequence: 2,
+      activeExecution: { mode: "agent" },
+      pendingApprovals: [],
+      pendingTurns: [
+        {
+          inputId: "input-queued",
+          turnId: "turn-queued",
+          runId: "run-queued",
+          admittedSequence: 2,
+          execution: {
+            mode: "review",
+            selection: {
+              profileId: "server-profile",
+              selectionEpoch: 9,
+            },
+          },
+        },
+      ],
+      pendingQueueCount: 1,
+      pendingSteerCount: 0,
+      earliestAvailableSequence: 1,
+      throughSequence: 8,
+    } as const
+
+    expect(SessionProtocolSnapshotSchema.parse(snapshot).pendingTurns).toEqual(
+      snapshot.pendingTurns,
+    )
+    expect(
+      SessionProtocolSnapshotSchema.safeParse({
+        ...snapshot,
+        pendingQueueCount: 0,
+      }).success,
+    ).toBe(false)
+    expect(
+      SessionProtocolSnapshotSchema.safeParse({
+        ...snapshot,
+        pendingQueueCount: 2,
+      }).success,
+    ).toBe(true)
+    expect(
+      SessionProtocolSnapshotSchema.safeParse({
+        ...snapshot,
+        pendingTurns: [
+          ...snapshot.pendingTurns,
+          {
+            ...snapshot.pendingTurns[0],
+            inputId: "input-other",
+          },
+        ],
+        pendingQueueCount: 2,
+      }).success,
+    ).toBe(false)
+    expect(
+      SessionProtocolSnapshotSchema.safeParse({
+        ...snapshot,
+        pendingTurns: [{
+          ...snapshot.pendingTurns[0],
+          turnId: "turn-active",
+        }],
+      }).success,
+    ).toBe(false)
+  })
+
   it("accepts steering requeues and bounds typed legacy agent events", () => {
     expect(
       ProtocolPayloadSchema.safeParse({

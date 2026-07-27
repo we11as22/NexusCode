@@ -14,6 +14,12 @@ import type { StoredContextUsage } from "./storage.js"
 
 const SESSION_TITLE_MAX_LEN = 80
 
+export interface SessionRecoverySnapshot {
+  readonly messages: readonly SessionMessage[]
+  readonly todo: string
+  readonly contextUsageSnapshot: StoredContextUsage | null
+}
+
 /** Derive session title from first user message. */
 export function deriveSessionTitle(messages: SessionMessage[]): string {
   const user = messages.find((m) => m.role === "user")
@@ -188,6 +194,25 @@ export class Session implements ISession {
     this.clearContextUsageSnapshot()
   }
 
+  captureRecoverySnapshot(): SessionRecoverySnapshot {
+    return {
+      messages: structuredClone(this._messages),
+      todo: this._todo,
+      contextUsageSnapshot: this._contextUsageSnapshot
+        ? { ...this._contextUsageSnapshot }
+        : null,
+    }
+  }
+
+  restoreRecoverySnapshot(snapshot: SessionRecoverySnapshot): void {
+    this._messages = structuredClone([...snapshot.messages])
+    this._todo = snapshot.todo
+    this._contextUsageSnapshot = snapshot.contextUsageSnapshot
+      ? { ...snapshot.contextUsageSnapshot }
+      : null
+    this.invalidateTokenEstimate()
+  }
+
   async save(): Promise<void> {
     if (this._ephemeral) return  // sub-agent sessions are never persisted
     const title = deriveSessionTitle(this._messages)
@@ -203,15 +228,15 @@ export class Session implements ISession {
     this._revision = await saveSession(stored, { expectedRevision: this._revision })
   }
 
-  async load(): Promise<void> {
+  async load(): Promise<boolean> {
     const stored = await loadSession(this.id, this.cwd)
-    if (stored) {
-      this._messages = stored.messages
-      this._todo = typeof stored.todo === "string" ? stored.todo : ""
-      this._contextUsageSnapshot = stored.contextUsage ?? null
-      this._revision = stored.revision ?? 0
-      this.invalidateTokenEstimate()
-    }
+    if (!stored) return false
+    this._messages = stored.messages
+    this._todo = typeof stored.todo === "string" ? stored.todo : ""
+    this._contextUsageSnapshot = stored.contextUsage ?? null
+    this._revision = stored.revision ?? 0
+    this.invalidateTokenEstimate()
+    return true
   }
 
   static create(cwd: string): Session {

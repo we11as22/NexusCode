@@ -501,7 +501,8 @@ export interface ISession {
   /** Rewind so that only messages strictly before the given message remain. */
   rewindBeforeMessageId(messageId: string): void
   save(): Promise<void>
-  load(): Promise<void>
+  /** Reload durable state; false means the journal does not exist. */
+  load(): Promise<boolean>
 }
 
 export type SessionRole = "user" | "assistant" | "system" | "tool"

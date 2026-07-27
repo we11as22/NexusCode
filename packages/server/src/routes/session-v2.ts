@@ -294,7 +294,14 @@ export function createSessionV2Routes(options: SessionV2RouteOptions) {
       if (snapshot.sessionId !== sessionId) {
         throw new Error("Runtime returned a snapshot for another session")
       }
-      return context.json(snapshot)
+      if (context.req.header("x-nexus-include-pending-turns") === "1") {
+        return context.json(snapshot)
+      }
+      // Protocol-v2 clients predating queued recovery use a strict schema.
+      // Keep their default response byte-for-byte shape-compatible and expose
+      // the additive identities only to clients which opt in explicitly.
+      const { pendingTurns: _pendingTurns, ...legacySnapshot } = snapshot
+      return context.json(legacySnapshot)
     } catch (error) {
       const mapped = protocolError(error)
       return context.json(protocolResponse(mapped), statusFor(mapped))

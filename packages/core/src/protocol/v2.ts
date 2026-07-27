@@ -73,6 +73,20 @@ const PendingSessionApprovalsSchema = z
   .array(PendingSessionApprovalSchema)
   .max(1024)
 
+export const PendingSessionTurnSchema = z
+  .object({
+    inputId: IdentifierSchema,
+    turnId: IdentifierSchema,
+    runId: IdentifierSchema,
+    admittedSequence: PositiveSafeIntegerSchema,
+    execution: TurnExecutionSnapshotSchema,
+  })
+  .strict()
+
+const PendingSessionTurnsSchema = z
+  .array(PendingSessionTurnSchema)
+  .max(1024)
+
 const LegacyAgentEventValueSchema = z.discriminatedUnion("type", [
   z
     .object({
@@ -793,6 +807,11 @@ export const SessionProtocolSnapshotSchema = z
     activeTurnFirstSequence: PositiveSafeIntegerSchema.optional(),
     activeExecution: TurnExecutionSnapshotSchema.optional(),
     pendingApprovals: PendingSessionApprovalsSchema,
+    /**
+     * Opaque identities only: queued prompts never cross this read surface.
+     * Optional so a new client can fail closed against an older v2 server.
+     */
+    pendingTurns: PendingSessionTurnsSchema.optional(),
     pendingQueueCount: NonnegativeSafeIntegerSchema,
     pendingSteerCount: NonnegativeSafeIntegerSchema,
     earliestAvailableSequence: PositiveSafeIntegerSchema,
@@ -801,6 +820,9 @@ export const SessionProtocolSnapshotSchema = z
   .strict()
   .superRefine((snapshot, context) => {
     const approvalIds = new Set<string>()
+    const pendingInputIds = new Set<string>()
+    const pendingTurnIds = new Set<string>()
+    const pendingRunIds = new Set<string>()
     if (
       (snapshot.activeTurnId === undefined) !==
       (snapshot.activeRunId === undefined)
@@ -864,6 +886,43 @@ export const SessionProtocolSnapshotSchema = z
         })
       }
     }
+    for (const [index, pending] of (snapshot.pendingTurns ?? []).entries()) {
+      const duplicate =
+        pendingInputIds.has(pending.inputId) ||
+        pendingTurnIds.has(pending.turnId) ||
+        pendingRunIds.has(pending.runId)
+      if (duplicate) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["pendingTurns", index],
+          message: "Snapshot pending turn identities must be unique",
+        })
+      }
+      pendingInputIds.add(pending.inputId)
+      pendingTurnIds.add(pending.turnId)
+      pendingRunIds.add(pending.runId)
+      if (
+        pending.turnId === snapshot.activeTurnId ||
+        pending.runId === snapshot.activeRunId
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["pendingTurns", index],
+          message: "Snapshot pending turns must not overlap the active turn",
+        })
+      }
+    }
+    if (
+      snapshot.pendingTurns !== undefined &&
+      snapshot.pendingTurns.length > snapshot.pendingQueueCount
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pendingTurns"],
+        message:
+          "Snapshot cannot expose more pending identities than pendingQueueCount",
+      })
+    }
     if (
       snapshot.earliestAvailableSequence >
       snapshot.throughSequence + 1
@@ -885,4 +944,7 @@ export type SessionProtocolSnapshot = z.infer<
 >
 export type PendingSessionApproval = z.infer<
   typeof PendingSessionApprovalSchema
+>
+export type PendingSessionTurn = z.infer<
+  typeof PendingSessionTurnSchema
 >

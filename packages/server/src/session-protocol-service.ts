@@ -306,6 +306,13 @@ export class SqliteSessionProtocolService implements SessionProtocolService {
             }
           : {}),
         pendingApprovals: current.pendingApprovals,
+        pendingTurns: current.pendingQueue.slice(0, 1024).map((pending) => ({
+          inputId: pending.id,
+          turnId: pending.reservedTurnId,
+          runId: pending.reservedRunId,
+          admittedSequence: pending.admittedSequence,
+          execution: pending.execution,
+        })),
         pendingQueueCount: current.pendingQueue.length,
         pendingSteerCount: current.pendingSteers.length,
         earliestAvailableSequence:

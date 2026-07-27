@@ -47,6 +47,27 @@ export interface SessionTurnIdentity {
   runId: string
 }
 
+export class SessionTurnTerminalError extends Error {
+  readonly turnId: string
+  readonly runId: string
+  readonly sequence: number
+  readonly status = "failed" as const
+
+  constructor(options: {
+    turnId: string
+    runId: string
+    sequence: number
+    status: "failed"
+    message: string
+  }) {
+    super(options.message)
+    this.name = "SessionTurnTerminalError"
+    this.turnId = options.turnId
+    this.runId = options.runId
+    this.sequence = options.sequence
+  }
+}
+
 export interface SessionApprovalIdentity extends SessionTurnIdentity {
   approvalId: string
   toolName: string
@@ -74,6 +95,12 @@ export interface AttachSessionTurnOptions extends SessionTurnIdentity {
    * complete active turn from its first durable envelope.
    */
   afterSequence?: number
+  /**
+   * Follow an exact reservation that a prior authoritative snapshot proved
+   * was queued. This permits replay when it finishes between snapshots; it
+   * never substitutes the session's current active turn.
+   */
+  followAcceptedTurn?: boolean
   signal?: AbortSignal
   onTurn?: (identity: SessionTurnIdentity) => void
   onApproval?: (identity: SessionApprovalIdentity) => void
@@ -282,10 +309,18 @@ export class NexusServerClient {
 
   async getSessionProtocolSnapshot(
     sessionId: string,
+    options: { includePendingTurns?: boolean } = {},
   ): Promise<SessionProtocolSnapshot> {
     const response = await this.request(
       this.url(`${this.sessionV2Path(sessionId)}/snapshot`),
-      { headers: this.headers() },
+      {
+        headers: {
+          ...this.headers(),
+          ...(options.includePendingTurns
+            ? { "x-nexus-include-pending-turns": "1" }
+            : {}),
+        },
+      },
     )
     if (!response.ok) return throwProtocolResponseError(response)
     const raw = await readBoundedResponseText(response)
@@ -513,29 +548,113 @@ export class NexusServerClient {
         "Nexus protocol cursor must be a non-negative safe integer",
       )
     }
-    const snapshot = await this.getSessionProtocolSnapshot(options.sessionId)
-    if (
-      snapshot.activeTurnId === undefined ||
-      snapshot.activeRunId === undefined ||
-      snapshot.activeTurnFirstSequence === undefined
-    ) {
+    const snapshot = await this.getSessionProtocolSnapshot(
+      options.sessionId,
+      { includePendingTurns: true },
+    )
+    const activeMatches =
+      snapshot.activeTurnId === options.turnId &&
+      snapshot.activeRunId === options.runId &&
+      snapshot.activeTurnFirstSequence !== undefined
+    const pending = snapshot.pendingTurns?.find(
+      (turn) =>
+        turn.turnId === options.turnId &&
+        turn.runId === options.runId,
+    )
+    const followHistorical =
+      !activeMatches &&
+      !pending &&
+      options.followAcceptedTurn === true &&
+      options.afterSequence !== undefined
+    if (!activeMatches && !pending && !followHistorical) {
+      if (snapshot.activeTurnId !== undefined) {
+        throw new SessionProtocolError({
+          code: "turn_conflict",
+          message:
+            "The active or queued Nexus turn does not match the attach identity",
+          retryable: false,
+        })
+      }
       throw new SessionProtocolError({
         code: "no_active_turn",
-        message: `Nexus session ${options.sessionId} has no active turn`,
+        message:
+          `Nexus session ${options.sessionId} has no matching active or queued turn`,
         retryable: false,
       })
     }
-    if (
-      snapshot.activeTurnId !== options.turnId ||
-      snapshot.activeRunId !== options.runId
-    ) {
-      throw new SessionProtocolError({
-        code: "turn_conflict",
-        message: "The active Nexus turn no longer matches the attach identity",
-        retryable: false,
-      })
+    const identity = {
+      turnId: options.turnId,
+      runId: options.runId,
     }
-    const minimumCursor = snapshot.activeTurnFirstSequence - 1
+
+    if (followHistorical) {
+      const afterSequence = options.afterSequence!
+      if (
+        afterSequence > snapshot.throughSequence ||
+        afterSequence < snapshot.earliestAvailableSequence - 1
+      ) {
+        throw new SessionProtocolError({
+          code: "replay_gap",
+          message:
+            "The accepted turn replay cursor is outside the durable event window",
+          retryable: true,
+        })
+      }
+      options.onTurn?.(identity)
+      yield* this.streamTurn(
+        options.sessionId,
+        identity,
+        {
+          // Re-read the bounded retained window so a terminal event which was
+          // acknowledged immediately before a client crash is still observed.
+          // Delivery remains cursor-gated below, so already-rendered output is
+          // not duplicated.
+          networkAfterSequence: snapshot.earliestAvailableSequence - 1,
+          deliverAfterSequence: afterSequence,
+          ...(
+            (snapshot.pendingTurns?.length ?? 0) >=
+              snapshot.pendingQueueCount
+              ? {
+                  terminalRequiredThroughSequence:
+                    snapshot.throughSequence,
+                }
+              : {}
+          ),
+          // Everything already committed in this fresh snapshot is history.
+          // Replay normal agent output, but do not resurrect an approval which
+          // was requested and resolved while the client was disconnected.
+          snapshotThroughSequence: snapshot.throughSequence,
+          pendingApprovals: [],
+          signal: options.signal,
+          onApproval: options.onApproval,
+          onSequence: options.onSequence,
+        },
+      )
+      return
+    }
+
+    if (pending) {
+      options.onTurn?.(identity)
+      yield* this.streamTurn(
+        options.sessionId,
+        identity,
+        {
+          // A queued turn has not emitted turn output yet. Start at the
+          // snapshot high-water mark so a concurrently active turn is
+          // acknowledged but never delivered as this caller's output.
+          networkAfterSequence: snapshot.throughSequence,
+          deliverAfterSequence: snapshot.throughSequence,
+          snapshotThroughSequence: snapshot.throughSequence,
+          pendingApprovals: [],
+          signal: options.signal,
+          onApproval: options.onApproval,
+          onSequence: options.onSequence,
+        },
+      )
+      return
+    }
+
+    const minimumCursor = snapshot.activeTurnFirstSequence! - 1
     const deliverAfterSequence =
       options.afterSequence === undefined
         ? minimumCursor
@@ -547,10 +666,6 @@ export class NexusServerClient {
           "The attach cursor is newer than the server snapshot replay window",
         retryable: true,
       })
-    }
-    const identity = {
-      turnId: snapshot.activeTurnId,
-      runId: snapshot.activeRunId,
     }
     options.onTurn?.(identity)
     for (const approval of snapshot.pendingApprovals) {
@@ -589,6 +704,7 @@ export class NexusServerClient {
       networkAfterSequence: number
       deliverAfterSequence: number
       snapshotThroughSequence: number
+      terminalRequiredThroughSequence?: number
       pendingApprovals: readonly PendingSessionApproval[]
       signal?: AbortSignal
       onApproval?: (identity: SessionApprovalIdentity) => void
@@ -626,11 +742,25 @@ export class NexusServerClient {
               throw error
             }
           }
+          const assertTerminalStillReachable = (): void => {
+            if (
+              options.terminalRequiredThroughSequence !== undefined &&
+              envelope.sequence >= options.terminalRequiredThroughSequence
+            ) {
+              throw new SessionProtocolError({
+                code: "replay_gap",
+                message:
+                  "The accepted turn terminal is no longer present in the durable replay window",
+                retryable: false,
+              })
+            }
+          }
           if (
             envelope.turnId !== identity.turnId ||
             envelope.runId !== identity.runId
           ) {
             await acknowledgeSequence()
+            assertTerminalStillReachable()
             continue
           }
           const payload = envelope.payload
@@ -650,6 +780,7 @@ export class NexusServerClient {
               })
             }
             await acknowledgeSequence()
+            assertTerminalStillReachable()
           } else if (payload.type === "agent_event") {
             const event = payload.event as AgentEvent
             const historical =
@@ -660,27 +791,35 @@ export class NexusServerClient {
               if (shouldReplay) {
                 yield event
                 await acknowledgeSequence()
+                assertTerminalStillReachable()
                 continue
               }
               await acknowledgeSequence()
+              assertTerminalStillReachable()
               continue
             }
             if (envelope.sequence > options.deliverAfterSequence) {
               yield event
             }
             await acknowledgeSequence()
+            assertTerminalStillReachable()
           } else if (payload.type === "turn_finished") {
             await acknowledgeSequence()
             if (payload.status === "failed") {
-              terminalFailure = new Error(
-                payload.error ?? `Nexus turn ${identity.turnId} failed`,
-              )
+              terminalFailure = new SessionTurnTerminalError({
+                ...identity,
+                sequence: envelope.sequence,
+                status: "failed",
+                message:
+                  payload.error ?? `Nexus turn ${identity.turnId} failed`,
+              })
               throw terminalFailure
             }
             completed = true
             return
           } else {
             await acknowledgeSequence()
+            assertTerminalStillReachable()
           }
         }
       } catch (error) {

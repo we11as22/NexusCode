@@ -25,6 +25,7 @@ import {
   getNexusServerTokenSecretKey,
   isLoopbackNexusServerDestination,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
+  SessionTurnTerminalError,
   type AgentEvent,
   type ToolDef,
 } from '@nexuscode/core'
@@ -438,38 +439,46 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
             | undefined
           let acknowledgedSequence = 0
           let admissionCursorWrite: Promise<void> = Promise.resolve()
-          await runRemoteCliTurn({
-            client: serverClient,
-            sessionId: sid,
-            input: [{ type: 'text', text: userPrompt }],
-            mode,
-            signal,
-            approvalRef: tuiApprovalRef,
-            deliver: deliverRemoteEvent,
-            onTurn: (identity) => {
-              liveIdentity = identity
-              admissionCursorWrite = cursorStore.save(sid, {
-                ...identity,
-                afterSequence: 0,
-              })
-            },
-            onSequence: async (sequence) => {
-              await admissionCursorWrite
-              if (!liveIdentity) {
-                throw new Error(
-                  'Remote sequence arrived before turn admission',
+          try {
+            await runRemoteCliTurn({
+              client: serverClient,
+              sessionId: sid,
+              input: [{ type: 'text', text: userPrompt }],
+              mode,
+              signal,
+              approvalRef: tuiApprovalRef,
+              deliver: deliverRemoteEvent,
+              onTurn: (identity) => {
+                liveIdentity = identity
+                admissionCursorWrite = cursorStore.save(sid, {
+                  ...identity,
+                  afterSequence: 0,
+                })
+              },
+              onSequence: async (sequence) => {
+                await admissionCursorWrite
+                if (!liveIdentity) {
+                  throw new Error(
+                    'Remote sequence arrived before turn admission',
+                  )
+                }
+                acknowledgedSequence = Math.max(
+                  acknowledgedSequence,
+                  sequence,
                 )
-              }
-              acknowledgedSequence = Math.max(
-                acknowledgedSequence,
-                sequence,
-              )
-              await cursorStore.save(sid, {
-                ...liveIdentity,
-                afterSequence: acknowledgedSequence,
-              })
-            },
-          })
+                await cursorStore.save(sid, {
+                  ...liveIdentity,
+                  afterSequence: acknowledgedSequence,
+                })
+              },
+            })
+          } catch (error) {
+            await admissionCursorWrite
+            if (error instanceof SessionTurnTerminalError) {
+              await cursorStore.clear(sid)
+            }
+            throw error
+          }
           await admissionCursorWrite
           if (!signal.aborted) await cursorStore.clear(sid)
         }

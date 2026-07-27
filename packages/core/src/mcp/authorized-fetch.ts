@@ -33,6 +33,10 @@ export interface McpAuthorizedFetchOptions {
   maxRequestHeaderBytes?: number
   maxResponseHeaders?: number
   maxResponseHeaderBytes?: number
+  /** Maximum bytes in a finite (for example JSON) response body. */
+  maxResponseBytes?: number
+  /** Maximum raw bytes in one SSE record; the stream lifetime is unbounded. */
+  maxSseEventBytes?: number
 }
 
 export type McpNodeRequestFactory = (
@@ -63,6 +67,10 @@ const DEFAULT_MAX_REQUEST_HEADERS = 128
 const DEFAULT_MAX_REQUEST_HEADER_BYTES = 64 * 1024
 const DEFAULT_MAX_RESPONSE_HEADERS = 256
 const DEFAULT_MAX_RESPONSE_HEADER_BYTES = 64 * 1024
+// One result may legitimately contain 16 MiB of decoded binary payload plus
+// base64 expansion, text, and its JSON-RPC envelope.
+const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+const DEFAULT_MAX_SSE_EVENT_BYTES = 32 * 1024 * 1024
 const MAX_URL_CHARACTERS = 16 * 1024
 const MAX_AUTHORIZED_ADDRESSES = 32
 
@@ -377,19 +385,112 @@ function withResponseMetadata(
   return response
 }
 
-function abortableResponse(
+function isSseResponse(response: Response): boolean {
+  return response.ok && response.headers
+    .get("content-type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase() === "text/event-stream"
+}
+
+function declaredContentLength(response: Response): number | undefined {
+  const raw = response.headers.get("content-length")
+  if (raw === null) return undefined
+  const normalized = raw.trim()
+  if (!/^\d+$/u.test(normalized)) {
+    throw new Error("Remote MCP response has an invalid Content-Length")
+  }
+  const length = Number(normalized)
+  if (!Number.isSafeInteger(length)) {
+    throw new Error("Remote MCP response has an invalid Content-Length")
+  }
+  return length
+}
+
+interface SseRecordCounter {
+  recordBytes: number
+  lineBytes: number
+  previousWasCr: boolean
+  previousCrEndedBlankLine: boolean
+}
+
+function sseChunkExceedsLimit(
+  bytes: Uint8Array,
+  state: SseRecordCounter,
+  maximum: number,
+): boolean {
+  for (const byte of bytes) {
+    state.recordBytes += 1
+
+    if (byte === 0x0a && state.previousWasCr) {
+      // CRLF is one line ending. If CR completed the blank separator, the
+      // following LF belongs to that separator rather than the next event.
+      state.previousWasCr = false
+      if (state.previousCrEndedBlankLine) {
+        state.recordBytes = 0
+      } else if (state.recordBytes > maximum) {
+        return true
+      }
+      state.previousCrEndedBlankLine = false
+      continue
+    }
+
+    if (byte === 0x0d || byte === 0x0a) {
+      if (state.recordBytes > maximum) return true
+      const blankLine = state.lineBytes === 0
+      state.lineBytes = 0
+      state.previousWasCr = byte === 0x0d
+      state.previousCrEndedBlankLine = blankLine && byte === 0x0d
+      if (blankLine) state.recordBytes = 0
+      continue
+    }
+
+    state.previousWasCr = false
+    state.previousCrEndedBlankLine = false
+    state.lineBytes += 1
+    if (state.recordBytes > maximum) return true
+  }
+  return false
+}
+
+async function boundedAbortableResponse(
   response: Response,
   url: string,
   redirected: boolean,
   signal: AbortSignal,
-): Response {
+  maxResponseBytes: number,
+  maxSseEventBytes: number,
+): Promise<Response> {
   if (signal.aborted) {
     void releaseResponse(response)
     throw abortReason(signal)
   }
   if (!response.body) return withResponseMetadata(response, url, redirected)
+  const sse = isSseResponse(response)
+  if (!sse) {
+    let declared: number | undefined
+    try {
+      declared = declaredContentLength(response)
+    } catch (error) {
+      void releaseResponse(response)
+      throw error
+    }
+    if (declared !== undefined && declared > maxResponseBytes) {
+      void releaseResponse(response)
+      throw new Error(
+        `Remote MCP response body exceeds ${maxResponseBytes} bytes`,
+      )
+    }
+  }
 
   const reader = response.body.getReader()
+  let responseBytes = 0
+  const sseCounter: SseRecordCounter = {
+    recordBytes: 0,
+    lineBytes: 0,
+    previousWasCr: false,
+    previousCrEndedBlankLine: false,
+  }
   let finished = false
   let outputController:
     | ReadableStreamDefaultController<Uint8Array>
@@ -422,6 +523,24 @@ function abortableResponse(
         if (item.done) {
           cleanup()
           controller.close()
+          return
+        }
+        const overLimit = sse
+          ? sseChunkExceedsLimit(
+              item.value,
+              sseCounter,
+              maxSseEventBytes,
+            )
+          : (responseBytes += item.value.byteLength) > maxResponseBytes
+        if (overLimit) {
+          const error = new Error(
+            sse
+              ? `Remote MCP SSE event exceeds ${maxSseEventBytes} bytes`
+              : `Remote MCP response body exceeds ${maxResponseBytes} bytes`,
+          )
+          cleanup()
+          controller.error(error)
+          void reader.cancel(error).catch(() => undefined)
           return
         }
         controller.enqueue(item.value)
@@ -709,6 +828,18 @@ export function createMcpAuthorizedFetch(
     1024,
     1024 * 1024,
   )
+  const maxResponseBytes = requireBoundedInteger(
+    "maxResponseBytes",
+    options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+    1,
+    128 * 1024 * 1024,
+  )
+  const maxSseEventBytes = requireBoundedInteger(
+    "maxSseEventBytes",
+    options.maxSseEventBytes ?? DEFAULT_MAX_SSE_EVENT_BYTES,
+    1,
+    128 * 1024 * 1024,
+  )
   const hop = options.hop ?? createNodePinnedMcpFetchHop({
     maxResponseHeaders,
     maxResponseHeaderBytes,
@@ -757,10 +888,24 @@ export function createMcpAuthorizedFetch(
         },
       )
       if (!REDIRECT_STATUSES.has(response.status)) {
-        return abortableResponse(response, url, redirectCount > 0, signal)
+        return boundedAbortableResponse(
+          response,
+          url,
+          redirectCount > 0,
+          signal,
+          maxResponseBytes,
+          maxSseEventBytes,
+        )
       }
       if (init.redirect === "manual") {
-        return abortableResponse(response, url, redirectCount > 0, signal)
+        return boundedAbortableResponse(
+          response,
+          url,
+          redirectCount > 0,
+          signal,
+          maxResponseBytes,
+          maxSseEventBytes,
+        )
       }
       if (init.redirect === "error") {
         await releaseResponse(response)
@@ -774,7 +919,14 @@ export function createMcpAuthorizedFetch(
       }
       const location = response.headers.get("location")
       if (!location) {
-        return abortableResponse(response, url, redirectCount > 0, signal)
+        return boundedAbortableResponse(
+          response,
+          url,
+          redirectCount > 0,
+          signal,
+          maxResponseBytes,
+          maxSseEventBytes,
+        )
       }
       const nextUrl = canonicalUrl(new URL(location, url).toString())
       if (new URL(nextUrl).origin !== new URL(url).origin) {

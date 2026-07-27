@@ -45,6 +45,18 @@ export function shouldAutoApprovePrint(
   return dangerouslySkipPermissions === true
 }
 
+export interface CliSavedFileEdit {
+  path: string
+  originalContent: string
+  newContent: string
+  isNewFile: boolean
+}
+
+export interface CliFileRevertResult {
+  reverted: string[]
+  conflicts: Array<{ path: string; reason: string }>
+}
+
 /**
  * CLI host adapter — terminal-based approvals, output, and security guards.
  * When tuiApprovalRef is provided, showApprovalDialog does NOT use readline (TUI handles input).
@@ -59,9 +71,15 @@ export class CliHost implements IHost {
   private nonInteractiveDiagnosticEmitted = false
   private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
   /** File edits from the current assistant turn (path → originalContent + isNewFile). Cleared on next assistant_message_started. */
-  private turnFileEdits: Array<{ path: string; originalContent: string; isNewFile: boolean }> = []
+  private turnFileEdits: CliSavedFileEdit[] = []
   /** Previous turn's edits; used by revertLastTurn to restore files. */
-  private previousTurnFileEdits: Array<{ path: string; originalContent: string; isNewFile: boolean }> = []
+  private previousTurnFileEdits: CliSavedFileEdit[] = []
+  /**
+   * A successfully restored file batch is held here until the matching
+   * conversation rewind is durably saved. This makes CLI undo a two-phase
+   * operation instead of silently splitting filesystem and chat state.
+   */
+  private pendingLastTurnFileRevert: CliSavedFileEdit[] = []
 
   constructor(
     cwd: string,
@@ -375,9 +393,56 @@ export class CliHost implements IHost {
     const key = filePath.replace(/\\/g, "/")
     const pending = this.pendingFileEdits.get(key)
     if (!pending) throw new Error(`No pending file edit for ${filePath}`)
-    this.turnFileEdits.push({ path: filePath, originalContent: pending.originalContent, isNewFile: pending.isNewFile })
+    const absolutePath = this.resolve(filePath)
+    this.checkPathSecurity(absolutePath, "write")
+    const existing = this.turnFileEdits.find(
+      (edit) => edit.path === absolutePath,
+    )
+    if (
+      existing &&
+      pending.originalContent !== existing.newContent
+    ) {
+      throw new Error(
+        `File edit conflict: ${absolutePath} changed between agent edits`,
+      )
+    }
+    let currentContent: string | undefined
+    try {
+      currentContent = await fs.readFile(absolutePath, "utf8")
+    } catch (error) {
+      if (
+        !error ||
+        typeof error !== "object" ||
+        !("code" in error) ||
+        error.code !== "ENOENT"
+      ) {
+        throw error
+      }
+    }
+    if (pending.isNewFile) {
+      if (currentContent !== undefined) {
+        throw new Error(
+          `File edit conflict: ${absolutePath} was created after the diff was prepared`,
+        )
+      }
+    } else if (currentContent !== pending.originalContent) {
+      throw new Error(
+        `File edit conflict: ${absolutePath} changed after the diff was prepared`,
+      )
+    }
+
+    await this.writeFile(absolutePath, pending.newContent)
+    if (existing) {
+      existing.newContent = pending.newContent
+    } else {
+      this.turnFileEdits.push({
+        path: absolutePath,
+        originalContent: pending.originalContent,
+        newContent: pending.newContent,
+        isNewFile: pending.isNewFile,
+      })
+    }
     this.pendingFileEdits.delete(key)
-    await this.writeFile(filePath, pending.newContent)
   }
 
   /** Call when a new assistant turn starts (e.g. on assistant_message_started). Moves current turn edits to previous. */
@@ -387,26 +452,211 @@ export class CliHost implements IHost {
   }
 
   /** Edits from the last completed assistant turn; used by revertLastTurn to restore files. */
-  getLastTurnFileEdits(): Array<{ path: string; originalContent: string; isNewFile: boolean }> {
+  getLastTurnFileEdits(): CliSavedFileEdit[] {
     return [...this.previousTurnFileEdits]
   }
 
-  /** Revert files from the last turn (write back originalContent, delete if was new file). Call after rewinding session. */
-  async revertLastTurnFiles(): Promise<void> {
-    for (const e of this.previousTurnFileEdits) {
-      const absPath = this.resolve(e.path)
-      try {
-        if (e.isNewFile) {
-          await fs.unlink(absPath)
-        } else {
-          await fs.writeFile(absPath, e.originalContent, "utf8")
-        }
-      } catch {
-        // Ignore per-file errors
+  /**
+   * Revert only while Nexus's last written bytes are still authoritative.
+   * Preflight every path before mutating any so a normal user edit cannot
+   * produce a half-reverted turn.
+   */
+  async revertLastTurnFiles(): Promise<CliFileRevertResult> {
+    if (this.pendingLastTurnFileRevert.length > 0) {
+      return {
+        reverted: this.pendingLastTurnFileRevert.map((edit) => edit.path),
+        conflicts: [{
+          path: this.pendingLastTurnFileRevert[0]!.path,
+          reason: "the previous file undo is still awaiting conversation commit",
+        }],
       }
     }
+    const conflicts: CliFileRevertResult["conflicts"] = []
+    for (const edit of this.previousTurnFileEdits) {
+      try {
+        const current = await fs.readFile(edit.path, "utf8")
+        if (current !== edit.newContent) {
+          conflicts.push({
+            path: edit.path,
+            reason: "file changed after the agent edit",
+          })
+        }
+      } catch (error) {
+        conflicts.push({
+          path: edit.path,
+          reason:
+            error instanceof Error
+              ? error.message
+              : "file is no longer readable",
+        })
+      }
+    }
+    if (conflicts.length > 0) return { reverted: [], conflicts }
+
+    const restored: CliSavedFileEdit[] = []
+    for (const edit of [...this.previousTurnFileEdits].reverse()) {
+      try {
+        if (edit.isNewFile) await fs.unlink(edit.path)
+        else await this.writeFile(edit.path, edit.originalContent)
+        restored.push(edit)
+      } catch (error) {
+        conflicts.push({
+          path: edit.path,
+          reason: error instanceof Error ? error.message : "restore failed",
+        })
+        break
+      }
+    }
+    if (conflicts.length > 0) {
+      const stillReverted: string[] = []
+      for (const edit of restored.reverse()) {
+        try {
+          if (edit.isNewFile) {
+            const exists = await fs.access(edit.path)
+              .then(() => true)
+              .catch(() => false)
+            if (exists) {
+              throw new Error(
+                "new file reappeared while rolling back a failed undo",
+              )
+            }
+          } else {
+            const current = await fs.readFile(edit.path, "utf8")
+            if (current !== edit.originalContent) {
+              throw new Error(
+                "file changed while rolling back a failed undo",
+              )
+            }
+          }
+          await this.writeFile(edit.path, edit.newContent)
+        } catch (error) {
+          stillReverted.push(edit.path)
+          conflicts.push({
+            path: edit.path,
+            reason:
+              `failed to roll back partial undo: ` +
+              (error instanceof Error ? error.message : "unknown failure"),
+          })
+        }
+      }
+      return { reverted: stillReverted, conflicts }
+    }
+
+    this.pendingLastTurnFileRevert = [...this.previousTurnFileEdits]
+    return {
+      reverted: restored.map((edit) => edit.path),
+      conflicts: [],
+    }
+  }
+
+  /** Commit the file half of a successful two-phase CLI undo. */
+  commitLastTurnFileRevert(): void {
+    if (this.pendingLastTurnFileRevert.length === 0) return
+    this.pendingLastTurnFileRevert = []
     this.previousTurnFileEdits = []
-    this.turnFileEdits = []
+  }
+
+  /**
+   * Put files back into the exact agent-written state when the conversation
+   * rewind could not be persisted. Compare-and-swap checks prevent this
+   * compensation from overwriting edits made during the failed save.
+   */
+  async rollbackLastTurnFileRevert(): Promise<CliFileRevertResult> {
+    const edits = [...this.pendingLastTurnFileRevert]
+    if (edits.length === 0) return { reverted: [], conflicts: [] }
+
+    const conflicts: CliFileRevertResult["conflicts"] = []
+    const stillReverted = new Set<string>()
+    for (const edit of edits) {
+      try {
+        if (edit.isNewFile) {
+          const exists = await fs.access(edit.path)
+            .then(() => true)
+            .catch((error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return false
+              throw error
+            })
+          if (exists) {
+            conflicts.push({
+              path: edit.path,
+              reason: "new file reappeared after the file undo",
+            })
+          } else {
+            stillReverted.add(edit.path)
+          }
+        } else {
+          const current = await fs.readFile(edit.path, "utf8")
+          if (current !== edit.originalContent) {
+            conflicts.push({
+              path: edit.path,
+              reason: "file changed after the file undo",
+            })
+          } else {
+            stillReverted.add(edit.path)
+          }
+        }
+      } catch (error) {
+        conflicts.push({
+          path: edit.path,
+          reason:
+            error instanceof Error
+              ? error.message
+              : "file is no longer readable",
+        })
+      }
+    }
+    if (conflicts.length > 0) {
+      return {
+        reverted: [...stillReverted],
+        conflicts,
+      }
+    }
+
+    const reapplied: CliSavedFileEdit[] = []
+    for (const edit of edits) {
+      try {
+        await this.writeFile(edit.path, edit.newContent)
+        reapplied.push(edit)
+      } catch (error) {
+        conflicts.push({
+          path: edit.path,
+          reason:
+            "failed to restore the agent-written state: " +
+            (error instanceof Error ? error.message : "unknown failure"),
+        })
+        break
+      }
+    }
+    if (conflicts.length > 0) {
+      const stillReverted = new Set(edits.map((edit) => edit.path))
+      for (const edit of [...reapplied].reverse()) {
+        try {
+          const current = await fs.readFile(edit.path, "utf8")
+          if (current !== edit.newContent) {
+            throw new Error(
+              "file changed while rolling back undo compensation",
+            )
+          }
+          if (edit.isNewFile) await fs.unlink(edit.path)
+          else await this.writeFile(edit.path, edit.originalContent)
+        } catch (error) {
+          stillReverted.delete(edit.path)
+          conflicts.push({
+            path: edit.path,
+            reason:
+              "failed to restore the compensated file undo: " +
+              (error instanceof Error ? error.message : "unknown failure"),
+          })
+        }
+      }
+      return {
+        reverted: [...stillReverted],
+        conflicts,
+      }
+    }
+
+    this.pendingLastTurnFileRevert = []
+    return { reverted: [], conflicts: [] }
   }
 
   async revertFileEdit(filePath: string): Promise<void> {

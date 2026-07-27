@@ -10,6 +10,7 @@ import type {
   ToolContext,
 } from "../../types.js"
 import { writeFileTool } from "../../tools/built-in/write-file.js"
+import { editTool } from "../../tools/built-in/replace-in-file.js"
 import { createNexusRunServices } from "../run-services.js"
 import { executeToolPipeline } from "../tool-pipeline.js"
 
@@ -86,6 +87,35 @@ async function runWrite(options: {
 }
 
 describe("file edit approval authority", () => {
+  it("rejects a non-unique exact replacement unless replace_all is explicit", async () => {
+    const cwd = process.cwd()
+    const host = createFakeHost({
+      cwd,
+      async readFile() {
+        return "same\nmiddle\nsame\n"
+      },
+    })
+    const context: ToolContext = {
+      cwd,
+      host,
+      session: createFakeSession(cwd),
+      config: createTestConfig(),
+      mode: "agent",
+      signal: new AbortController().signal,
+      services: createNexusRunServices(),
+    }
+
+    await expect(editTool.execute({
+      file_path: "src/repeated.ts",
+      old_string: "same",
+      new_string: "changed",
+    }, context)).resolves.toMatchObject({
+      success: false,
+      output: expect.stringMatching(/not unique|2 occurrences/i),
+    })
+    expect(host.approvals).toEqual([])
+  })
+
   it("lets an allow rule suppress the host prompt without bypassing staging", async () => {
     const { result, host, order } = await runWrite({ rule: "allow" })
 

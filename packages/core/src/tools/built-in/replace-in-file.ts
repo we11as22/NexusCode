@@ -142,6 +142,14 @@ When NOT to use:
             output: `Edit block #${i + 1}: old_string not found in ${filePath}.\nHint: Read the file first to verify the exact content (whitespace, quotes, and line endings must match; try Read again if the file changed).`,
           }
         }
+        if (content.indexOf(oldPrepared, idx + 1) !== -1) {
+          return {
+            success: false,
+            output:
+              `Edit block #${i + 1}: old_string is not unique in ${filePath}; ` +
+              "include more surrounding context or set replace_all=true.",
+          }
+        }
         content =
           content.slice(0, idx) +
           newPrepared +

@@ -7,6 +7,7 @@ import type {
 import {
   PROTOCOL_VERSION,
   SessionProtocolError,
+  SessionTurnTerminalError,
 } from "@nexuscode/core"
 import {
   assertRemoteCliSelectionSupported,
@@ -153,6 +154,170 @@ describe("remote CLI protocol-v2 turn", () => {
     expect(deliveryOrder).toEqual(["execution", "event"])
   })
 
+  it("resumes its queued turn without attaching another active turn", async () => {
+    let attachedIdentity:
+      | { turnId: string; runId: string; afterSequence?: number }
+      | undefined
+    const client: CliRemoteAttachClient = {
+      async getSessionProtocolSnapshot() {
+        return {
+          version: PROTOCOL_VERSION,
+          sessionId: "session-queued",
+          phase: "streaming",
+          activeTurnId: "turn-other",
+          activeRunId: "run-other",
+          activeTurnFirstSequence: 2,
+          activeExecution: { mode: "agent" },
+          pendingApprovals: [],
+          pendingTurns: [{
+            inputId: "input-queued",
+            turnId: "turn-queued",
+            runId: "run-queued",
+            admittedSequence: 2,
+            execution: { mode: "review" },
+          }],
+          pendingQueueCount: 1,
+          pendingSteerCount: 0,
+          earliestAvailableSequence: 1,
+          throughSequence: 8,
+        }
+      },
+      async *attachSessionTurn(options) {
+        attachedIdentity = options
+        options.onTurn?.({
+          turnId: options.turnId,
+          runId: options.runId,
+        })
+        yield {
+          type: "text_delta",
+          messageId: "message-queued",
+          delta: "queued result",
+        }
+        await options.onSequence?.(12)
+      },
+      async *runSessionTurn() {
+        throw new Error("must not start")
+      },
+      async interruptSessionTurn() {
+        return true
+      },
+      async resolveSessionApproval() {},
+    }
+    const cursors = memoryCursorStore({
+      turnId: "turn-queued",
+      runId: "run-queued",
+      afterSequence: 0,
+    })
+    const executionModes: string[] = []
+    const events: AgentEvent[] = []
+
+    await expect(resumeRemoteCliTurn({
+      client,
+      sessionId: "session-queued",
+      signal: new AbortController().signal,
+      cursorStore: cursors.store,
+      onActiveExecution: (execution) => {
+        executionModes.push(execution.mode)
+      },
+      deliver: (event) => events.push(event),
+    })).resolves.toBe(true)
+
+    expect(attachedIdentity).toMatchObject({
+      turnId: "turn-queued",
+      runId: "run-queued",
+      afterSequence: 8,
+      followAcceptedTurn: true,
+    })
+    expect(executionModes).toEqual(["review"])
+    expect(events).toEqual([{
+      type: "text_delta",
+      messageId: "message-queued",
+      delta: "queued result",
+    }])
+  })
+
+  it("replays its accepted turn when it completed before the first recovery snapshot", async () => {
+    let attached:
+      | {
+          turnId: string
+          runId: string
+          afterSequence?: number
+          followAcceptedTurn?: boolean
+        }
+      | undefined
+    const client: CliRemoteAttachClient = {
+      async getSessionProtocolSnapshot() {
+        return {
+          version: PROTOCOL_VERSION,
+          sessionId: "session-completed",
+          phase: "streaming",
+          activeTurnId: "turn-replacement",
+          activeRunId: "run-replacement",
+          activeTurnFirstSequence: 12,
+          activeExecution: { mode: "agent" },
+          pendingApprovals: [],
+          pendingTurns: [],
+          pendingQueueCount: 0,
+          pendingSteerCount: 0,
+          earliestAvailableSequence: 1,
+          throughSequence: 12,
+        }
+      },
+      async *attachSessionTurn(options) {
+        attached = options
+        options.onTurn?.({
+          turnId: options.turnId,
+          runId: options.runId,
+        })
+        yield {
+          type: "text_delta",
+          messageId: "message-completed",
+          delta: "recovered while offline",
+        }
+        await options.onSequence?.(11)
+      },
+      async *runSessionTurn() {
+        throw new Error("must not start")
+      },
+      async interruptSessionTurn() {
+        return true
+      },
+      async resolveSessionApproval() {},
+    }
+    const cursors = memoryCursorStore({
+      turnId: "turn-completed",
+      runId: "run-completed",
+      afterSequence: 5,
+    })
+    const executionModes: string[] = []
+    const events: AgentEvent[] = []
+
+    await expect(resumeRemoteCliTurn({
+      client,
+      sessionId: "session-completed",
+      signal: new AbortController().signal,
+      cursorStore: cursors.store,
+      onActiveExecution: (execution) => {
+        executionModes.push(execution.mode)
+      },
+      deliver: (event) => events.push(event),
+    })).resolves.toBe(true)
+
+    expect(attached).toMatchObject({
+      turnId: "turn-completed",
+      runId: "run-completed",
+      afterSequence: 5,
+      followAcceptedTurn: true,
+    })
+    expect(executionModes).toEqual([])
+    expect(events).toEqual([{
+      type: "text_delta",
+      messageId: "message-completed",
+      delta: "recovered while offline",
+    }])
+    expect(cursors.clears).toEqual(["session-completed"])
+  })
+
   it("restores a waiting approval and resolves its exact opaque identity", async () => {
     const approvalRef: {
       current: ((result: PermissionResult) => void) | null
@@ -235,8 +400,10 @@ describe("remote CLI protocol-v2 turn", () => {
     ])
   })
 
-  it("treats a turn finishing between snapshot and attach as a clean resume race", async () => {
+  it("replays a turn which finishes between the recovery snapshot and attach", async () => {
     let starts = 0
+    let followedAcceptedTurn = false
+    const delivered: AgentEvent[] = []
     const client: CliRemoteAttachClient = {
       async getSessionProtocolSnapshot() {
         return {
@@ -254,12 +421,18 @@ describe("remote CLI protocol-v2 turn", () => {
           throughSequence: 4,
         }
       },
-      async *attachSessionTurn() {
-        throw new SessionProtocolError({
-          code: "no_active_turn",
-          message: "finished",
-          retryable: false,
+      async *attachSessionTurn(options) {
+        followedAcceptedTurn = options.followAcceptedTurn === true
+        options.onTurn?.({
+          turnId: options.turnId,
+          runId: options.runId,
         })
+        yield {
+          type: "text_delta",
+          messageId: "message-race",
+          delta: "tail after snapshot",
+        }
+        await options.onSequence?.(6)
       },
       async *runSessionTurn() {
         starts++
@@ -276,13 +449,112 @@ describe("remote CLI protocol-v2 turn", () => {
         client,
         sessionId: "session-race",
         signal: new AbortController().signal,
-        deliver: () => {},
+        deliver: (event) => delivered.push(event),
         cursorStore: cursors.store,
       }),
-    ).resolves.toBe(false)
+    ).resolves.toBe(true)
 
     expect(starts).toBe(0)
+    expect(followedAcceptedTurn).toBe(true)
+    expect(delivered).toEqual([{
+      type: "text_delta",
+      messageId: "message-race",
+      delta: "tail after snapshot",
+    }])
     expect(cursors.clears).toEqual(["session-race"])
+  })
+
+  it("clears an exact failed terminal so recovery surfaces it only once", async () => {
+    const cursors = memoryCursorStore({
+      turnId: "turn-failed",
+      runId: "run-failed",
+      afterSequence: 11,
+    })
+    const terminal = new SessionTurnTerminalError({
+      turnId: "turn-failed",
+      runId: "run-failed",
+      sequence: 11,
+      status: "failed",
+      message: "provider failed",
+    })
+    const client: CliRemoteAttachClient = {
+      async getSessionProtocolSnapshot() {
+        return {
+          version: PROTOCOL_VERSION,
+          sessionId: "session-failed",
+          phase: "idle",
+          pendingApprovals: [],
+          pendingQueueCount: 0,
+          pendingSteerCount: 0,
+          earliestAvailableSequence: 10,
+          throughSequence: 11,
+        }
+      },
+      async *attachSessionTurn() {
+        throw terminal
+      },
+      async *runSessionTurn() {
+        throw new Error("must not start")
+      },
+      async interruptSessionTurn() {
+        return true
+      },
+      async resolveSessionApproval() {},
+    }
+
+    await expect(resumeRemoteCliTurn({
+      client,
+      sessionId: "session-failed",
+      signal: new AbortController().signal,
+      cursorStore: cursors.store,
+      deliver: () => {},
+    })).rejects.toBe(terminal)
+    expect(cursors.clears).toEqual(["session-failed"])
+  })
+
+  it("quarantines a cursor whose replay window expired instead of blocking every future turn", async () => {
+    const cursors = memoryCursorStore({
+      turnId: "turn-expired",
+      runId: "run-expired",
+      afterSequence: 3,
+    })
+    const client: CliRemoteAttachClient = {
+      async getSessionProtocolSnapshot() {
+        return {
+          version: PROTOCOL_VERSION,
+          sessionId: "session-expired",
+          phase: "idle",
+          pendingApprovals: [],
+          pendingQueueCount: 0,
+          pendingSteerCount: 0,
+          earliestAvailableSequence: 10,
+          throughSequence: 15,
+        }
+      },
+      async *attachSessionTurn() {
+        throw new SessionProtocolError({
+          code: "replay_gap",
+          message: "expired",
+          retryable: true,
+        })
+      },
+      async *runSessionTurn() {
+        throw new Error("must not start")
+      },
+      async interruptSessionTurn() {
+        return true
+      },
+      async resolveSessionApproval() {},
+    }
+
+    await expect(resumeRemoteCliTurn({
+      client,
+      sessionId: "session-expired",
+      signal: new AbortController().signal,
+      cursorStore: cursors.store,
+      deliver: () => {},
+    })).rejects.toThrow(/replay window.*expired|expired.*replay/i)
+    expect(cursors.clears).toEqual(["session-expired"])
   })
 
   it("rejects client-side model selection without a server selection epoch", () => {

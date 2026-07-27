@@ -73,6 +73,7 @@ import {
   getNexusServerTokenSecretKey,
   isLoopbackNexusServerDestination,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
+  SessionTurnTerminalError,
   INDEX_FILE_WATCHER_DEBOUNCE_MS,
   canonicalProjectRoot,
   computeContextUsageMetrics,
@@ -3846,53 +3847,61 @@ Return in this format:
           | undefined
         let acknowledgedSequence = 0
         let admissionCursorWrite: Promise<void> = Promise.resolve()
-        for await (const event of remoteTurn.run({
-          input: remoteInput,
-          mode: runMode,
-          signal: this.abortController!.signal,
-          onTurn: (identity) => {
-            liveIdentity = identity
-            remoteAdmitted = true
-            onAdmission?.(true)
+        try {
+          for await (const event of remoteTurn.run({
+            input: remoteInput,
+            mode: runMode,
+            signal: this.abortController!.signal,
+            onTurn: (identity) => {
+              liveIdentity = identity
+              remoteAdmitted = true
+              onAdmission?.(true)
+              if (
+                forcedRemoteModeForRun &&
+                this.forcedRemoteModeForNextRun ===
+                  forcedRemoteModeForRun
+              ) {
+                this.forcedRemoteModeForNextRun = null
+              }
+              admissionCursorWrite = remoteState.save(sid, {
+                ...identity,
+                afterSequence: 0,
+              })
+            },
+            onSequence: async (sequence) => {
+              await admissionCursorWrite
+              if (!liveIdentity) {
+                throw new Error(
+                  "Remote sequence arrived before turn admission",
+                )
+              }
+              acknowledgedSequence = Math.max(
+                acknowledgedSequence,
+                sequence,
+              )
+              await remoteState.save(sid, {
+                ...liveIdentity,
+                afterSequence: acknowledgedSequence,
+              })
+            },
+          })) {
+            if (this.abortController?.signal.aborted) break
             if (
-              forcedRemoteModeForRun &&
-              this.forcedRemoteModeForNextRun ===
-                forcedRemoteModeForRun
+              event.type === "tool_approval_needed" &&
+              !remoteTurn.bindApprovalPart(event.partId)
             ) {
-              this.forcedRemoteModeForNextRun = null
-            }
-            admissionCursorWrite = remoteState.save(sid, {
-              ...identity,
-              afterSequence: 0,
-            })
-          },
-          onSequence: async (sequence) => {
-            await admissionCursorWrite
-            if (!liveIdentity) {
               throw new Error(
-                "Remote sequence arrived before turn admission",
+                "Remote approval event is missing its protocol approval identity",
               )
             }
-            acknowledgedSequence = Math.max(
-              acknowledgedSequence,
-              sequence,
-            )
-            await remoteState.save(sid, {
-              ...liveIdentity,
-              afterSequence: acknowledgedSequence,
-            })
-          },
-        })) {
-          if (this.abortController?.signal.aborted) break
-          if (
-            event.type === "tool_approval_needed" &&
-            !remoteTurn.bindApprovalPart(event.partId)
-          ) {
-            throw new Error(
-              "Remote approval event is missing its protocol approval identity",
-            )
+            this.forwardServerEvent(event)
           }
-          this.forwardServerEvent(event)
+        } catch (error) {
+          await admissionCursorWrite
+          if (error instanceof SessionTurnTerminalError) {
+            await remoteState.clear(sid)
+          }
+          throw error
         }
         await admissionCursorWrite
         if (!this.abortController?.signal.aborted) {
