@@ -114,7 +114,7 @@ describe("NexusStateDatabase", () => {
     database.close()
 
     expect(() => NexusStateDatabase.open({ path })).toThrow(
-      /migration 1 checksum mismatch/i,
+      new RegExp(`migration ${CURRENT_SCHEMA_VERSION} checksum mismatch`, "i"),
     )
   })
 })

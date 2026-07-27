@@ -337,7 +337,7 @@ export class SessionInputRepository {
 }
 ```
 
-- [ ] **Step 1: Write admission and promotion tests**
+- [x] **Step 1: Write admission and promotion tests**
 
 Prove:
 
@@ -348,7 +348,7 @@ Prove:
 - concurrent database handles cannot allocate the same sequence;
 - text and image parts survive a close/reopen round trip.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run:
 
@@ -358,14 +358,14 @@ corepack pnpm --filter @nexuscode/state test -- src/session-input-repository.tes
 
 Expected: FAIL because the repository is missing.
 
-- [ ] **Step 3: Add schema and transactional repository**
+- [x] **Step 3: Add schema and transactional repository**
 
 Add `aggregate_sequence` and `session_input` tables. Every admission uses
 `BEGIN IMMEDIATE`, advances the session aggregate sequence, inserts a durable
 `input.admitted` event, and inserts the inbox row in the same transaction.
 Promotion updates `promoted_sequence` and inserts `input.promoted` atomically.
 
-- [ ] **Step 4: Verify repository behavior**
+- [x] **Step 4: Verify repository behavior**
 
 Run:
 
@@ -376,7 +376,7 @@ corepack pnpm --filter @nexuscode/state typecheck
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/state/src
@@ -768,9 +768,9 @@ git commit -m "refactor: share one Nexus runtime across every surface"
 ## Completion gate
 
 - [x] Node 24.18.0 is pinned and `node:sqlite` loads without an external addon.
-- [ ] Database migrations, integrity checks, reopen, rollback, and corruption
+- [x] Database migrations, integrity checks, reopen, rollback, and corruption
   handling are tested.
-- [ ] Session input admission, steering, and queue promotion are durable and
+- [x] Session input admission, steering, and queue promotion are durable and
   idempotent.
 - [ ] Session ownership, runs, approvals, leases, and projection cursors are
   transactional.

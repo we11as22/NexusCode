@@ -4,6 +4,15 @@ export {
   STATE_MIGRATIONS,
   type StateMigration,
 } from "./migrations.js"
+export {
+  InputConflictError,
+  SessionInputRepository,
+  type AdmitInput,
+  type AdmittedInput,
+  type InputDelivery,
+  type SessionInputRepositoryOptions,
+  type UserInputPartRecord,
+} from "./session-input-repository.js"
 export type {
   IntegrityCheckResult,
   NexusStateDatabaseOptions,

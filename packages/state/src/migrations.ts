@@ -49,11 +49,39 @@ CREATE INDEX durable_event_aggregate_sequence_idx
   ON durable_event(aggregate_id, sequence);
 `
 
+const SESSION_INPUT_SQL = `
+CREATE TABLE aggregate_sequence (
+  aggregate_id TEXT PRIMARY KEY,
+  last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0)
+);
+
+CREATE TABLE session_input (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+  delivery TEXT NOT NULL CHECK(delivery IN ('steer', 'queue')),
+  admitted_sequence INTEGER NOT NULL CHECK(admitted_sequence > 0),
+  promoted_sequence INTEGER CHECK(promoted_sequence > admitted_sequence),
+  payload_checksum TEXT NOT NULL,
+  parts_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(session_id, admitted_sequence)
+);
+
+CREATE INDEX session_input_pending_idx
+  ON session_input(session_id, delivery, admitted_sequence)
+  WHERE promoted_sequence IS NULL;
+`
+
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   {
     version: 1,
     name: "initial_state",
     sql: INITIAL_STATE_SQL,
+  },
+  {
+    version: 2,
+    name: "session_input",
+    sql: SESSION_INPUT_SQL,
   },
 ]
 
