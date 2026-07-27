@@ -23,6 +23,29 @@ test("managed runtime uses built-in SQLite without an external native addon", as
   assert.doesNotMatch(workspace, /(?:^|[\s/])sqlite3(?:@|[\s:])/m)
 })
 
+test("node:sqlite stays behind the state driver boundary", async () => {
+  const stateSources = [
+    "database.ts",
+    "index.ts",
+    "migrations.ts",
+    "schema.ts",
+    "sqlite-driver.ts",
+  ]
+  const contents = await Promise.all(
+    stateSources.map(async (file) => ({
+      file,
+      source: await readFile(`packages/state/src/${file}`, "utf8"),
+    })),
+  )
+
+  const driver = contents.find(({ file }) => file === "sqlite-driver.ts")
+  assert.match(driver.source, /from "node:sqlite"/)
+  for (const { file, source } of contents) {
+    if (file === "sqlite-driver.ts") continue
+    assert.doesNotMatch(source, /node:sqlite/, `${file} bypasses the driver boundary`)
+  }
+})
+
 test("workspace does not track machine-specific dependency links", async () => {
   const { stdout } = await execFileAsync("git", [
     "ls-files",

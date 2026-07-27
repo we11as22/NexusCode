@@ -207,7 +207,7 @@ export class NexusStateDatabase {
 }
 ```
 
-- [ ] **Step 1: Write real database lifecycle tests**
+- [x] **Step 1: Write real database lifecycle tests**
 
 Tests open a temporary file and prove:
 
@@ -221,7 +221,7 @@ expect(db.integrityCheck()).toEqual({ ok: true })
 Add a transaction test that inserts two rows and throws after the first;
 neither row may remain.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run:
 
@@ -231,7 +231,7 @@ corepack pnpm --filter @nexuscode/state test -- src/database.test.ts
 
 Expected: FAIL because the package and database class do not exist.
 
-- [ ] **Step 3: Implement the driver and embedded migrations**
+- [x] **Step 3: Implement the driver and embedded migrations**
 
 The driver imports `DatabaseSync` only in `sqlite-driver.ts`. `open()` sets:
 
@@ -284,7 +284,7 @@ CREATE TABLE durable_event (
 Migrations run inside `BEGIN EXCLUSIVE`, verify stored checksums, and refuse a
 modified previously applied migration.
 
-- [ ] **Step 4: Verify rollback, reopen, and checksum rejection**
+- [x] **Step 4: Verify rollback, reopen, and checksum rejection**
 
 Run:
 
@@ -296,7 +296,7 @@ corepack pnpm --filter @nexuscode/state build
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add package.json pnpm-workspace.yaml packages/state pnpm-lock.yaml
