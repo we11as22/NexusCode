@@ -1,3 +1,4 @@
+import { constants as fsConstants, type BigIntStats } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
@@ -6,15 +7,103 @@ import * as os from "node:os"
 const MAX_INCLUDE_DEPTH = 10
 export const MAX_INSTRUCTION_FILE_CHARS = 40_000
 
-export async function readInstructionFileRaw(absPath: string): Promise<string | null> {
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino
+}
+
+function sameFileVersion(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    sameFileIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  )
+}
+
+async function staysWithinAuthority(
+  absPath: string,
+  authorityRoot: string,
+): Promise<boolean> {
+  const lexicalRoot = path.resolve(authorityRoot)
+  const candidate = path.resolve(absPath)
+  if (!isWithin(lexicalRoot, candidate)) return false
+
+  const relative = path.relative(lexicalRoot, candidate)
+  let current = lexicalRoot
+  for (const component of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, component)
+    const stat = await fs.lstat(current)
+    if (stat.isSymbolicLink()) return false
+  }
+
+  const [realRoot, realCandidate] = await Promise.all([
+    fs.realpath(lexicalRoot),
+    fs.realpath(candidate),
+  ])
+  return isWithin(realRoot, realCandidate)
+}
+
+export async function readInstructionFileRaw(
+  absPath: string,
+  authorityRoot?: string,
+): Promise<string | null> {
   try {
-    const stat = await fs.stat(absPath)
-    if (!stat.isFile()) return null
-    let text = await fs.readFile(absPath, "utf8")
-    if (text.length > MAX_INSTRUCTION_FILE_CHARS) {
-      text = `${text.slice(0, MAX_INSTRUCTION_FILE_CHARS)}\n\n[truncated at ${MAX_INSTRUCTION_FILE_CHARS} chars]\n`
+    if (
+      authorityRoot &&
+      !(await staysWithinAuthority(absPath, authorityRoot))
+    ) {
+      return null
     }
-    return text
+
+    const before = await fs.lstat(absPath, { bigint: true })
+    if (!before.isFile() || before.isSymbolicLink()) return null
+    const noFollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW
+    const handle = await fs.open(
+      absPath,
+      fsConstants.O_RDONLY | noFollow,
+    )
+    try {
+      const opened = await handle.stat({ bigint: true })
+      if (!opened.isFile() || !sameFileIdentity(before, opened)) return null
+
+      const maxBytes = MAX_INSTRUCTION_FILE_CHARS * 4
+      const buffer = Buffer.alloc(maxBytes + 1)
+      let total = 0
+      while (total < buffer.length) {
+        const { bytesRead } = await handle.read(
+          buffer,
+          total,
+          buffer.length - total,
+          null,
+        )
+        if (bytesRead === 0) break
+        total += bytesRead
+      }
+
+      const after = await handle.stat({ bigint: true })
+      if (!sameFileVersion(opened, after)) return null
+      if (
+        authorityRoot &&
+        !(await staysWithinAuthority(absPath, authorityRoot))
+      ) {
+        return null
+      }
+      const pathAfter = await fs.lstat(absPath, { bigint: true })
+      if (!sameFileIdentity(opened, pathAfter)) return null
+
+      let text = buffer.subarray(0, Math.min(total, maxBytes)).toString("utf8")
+      if (
+        total > maxBytes ||
+        opened.size > BigInt(maxBytes) ||
+        text.length > MAX_INSTRUCTION_FILE_CHARS
+      ) {
+        text = text.slice(0, MAX_INSTRUCTION_FILE_CHARS)
+        text += `\n\n[truncated at ${MAX_INSTRUCTION_FILE_CHARS} chars]\n`
+      }
+      return text
+    } finally {
+      await handle.close()
+    }
   } catch {
     return null
   }
@@ -88,7 +177,7 @@ export async function expandInstructionIncludes(
       continue
     }
     seen.add(real)
-    const raw = await readInstructionFileRaw(real)
+    const raw = await readInstructionFileRaw(real, realRoot)
     if (!raw) continue
     const remaining = MAX_INSTRUCTION_FILE_CHARS * 4 - budget.chars
     if (remaining <= 0) {

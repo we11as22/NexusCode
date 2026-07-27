@@ -34,11 +34,33 @@ export {
   type StartRunInput,
   type TerminalRunStatus,
 } from "./runtime-repository.js"
+export { SessionRuntimeRepository } from "./session-runtime-repository.js"
+export {
+  SessionRuntimeConflictError,
+  type RuntimeAdmittedInput,
+  type RuntimeCommandReceipt,
+  type RuntimeDurableTurn,
+  type RuntimeEpochSnapshot,
+  type RuntimeExecutionSnapshot,
+  type RuntimeInputPart,
+  type RuntimeOwnershipFence,
+  type RuntimePendingApproval,
+  type RuntimeProtocolEnvelope,
+  type RuntimeReplayWindow,
+  type RuntimeSessionCommand,
+  type RuntimeSessionMode,
+  type RuntimeSessionPhase,
+  type RuntimeSessionProtocolSnapshot,
+  type RuntimeSessionSnapshot,
+  type RuntimeTurnResult,
+  type SessionRuntimeRepositoryOptions,
+} from "./session-runtime-types.js"
 export type {
   IntegrityCheckResult,
   NexusStateDatabaseOptions,
   StateConnection,
   StateInputValue,
   StateOutputValue,
+  StateReadConnection,
   StateRunResult,
 } from "./schema.js"

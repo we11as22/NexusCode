@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@nexuscode/core": "workspace:*",
+    "@nexuscode/state": "workspace:*",
     "@hono/node-server": "^1.13.0",
     "execa": "^9.5.0",
     "hono": "^4.6.0"

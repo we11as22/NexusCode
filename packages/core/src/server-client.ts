@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import type {
   AgentEvent,
   Mode,
@@ -6,6 +6,30 @@ import type {
   SessionMessage,
 } from "./types.js"
 import { canonicalProjectRoot } from "./session/storage.js"
+import {
+  MAX_AGENT_EVENT_JSON_CHARS,
+  PROTOCOL_VERSION,
+  ProtocolEnvelopeSchema,
+  ProtocolErrorSchema,
+  SessionCommandReceiptSchema,
+  SessionProtocolError,
+  SessionProtocolSnapshotSchema,
+  parseSessionCommand,
+  type ProtocolEnvelope,
+  type PendingSessionApproval,
+  type SessionCommandReceipt,
+  type SessionCommandV2,
+  type SessionProtocolSnapshot,
+  type UserInputPartV2,
+} from "./protocol/v2.js"
+import {
+  RemoteMcpPromptCatalogSchema,
+  RemoteMcpPromptResolveRequestSchema,
+  RemoteMcpPromptResolveResponseSchema,
+  type RemoteMcpPromptCatalog,
+  type RemoteMcpPromptResolveRequest,
+  type RemoteMcpPromptResolveResponse,
+} from "./mcp/prompt-transport.js"
 
 export interface NexusServerClientOptions {
   baseUrl: string
@@ -14,6 +38,155 @@ export interface NexusServerClientOptions {
 }
 
 export const NEXUS_SERVER_TOKEN_SECRET_KEY = "nexuscode_server_token"
+const MAX_PROTOCOL_RESPONSE_BYTES = 2 * 1024 * 1024
+const MAX_PROTOCOL_LINE_CHARACTERS = MAX_AGENT_EVENT_JSON_CHARS + 64 * 1024
+const MAX_PROTOCOL_RECONNECTS = 3
+
+export interface SessionTurnIdentity {
+  turnId: string
+  runId: string
+}
+
+export interface SessionApprovalIdentity extends SessionTurnIdentity {
+  approvalId: string
+  toolName: string
+  redactedSummary: string
+}
+
+export interface RunSessionTurnOptions {
+  sessionId: string
+  input: readonly UserInputPartV2[]
+  mode: Mode
+  selection?: {
+    profileId: string
+    selectionEpoch: number
+  }
+  signal?: AbortSignal
+  onTurn?: (identity: SessionTurnIdentity) => void
+  onApproval?: (identity: SessionApprovalIdentity) => void
+  onSequence?: (sequence: number) => void | Promise<void>
+}
+
+export interface AttachSessionTurnOptions extends SessionTurnIdentity {
+  sessionId: string
+  /**
+   * Last envelope durably applied by the caller. Omit it to rebuild the
+   * complete active turn from its first durable envelope.
+   */
+  afterSequence?: number
+  signal?: AbortSignal
+  onTurn?: (identity: SessionTurnIdentity) => void
+  onApproval?: (identity: SessionApprovalIdentity) => void
+  onSequence?: (sequence: number) => void | Promise<void>
+}
+
+function protocolIdentifier(prefix: string): string {
+  return `${prefix}-${randomUUID().replaceAll("-", "")}`
+}
+
+async function readBoundedResponseText(
+  response: Response,
+  maximumBytes = MAX_PROTOCOL_RESPONSE_BYTES,
+): Promise<string> {
+  const reader = response.body?.getReader()
+  if (!reader) return ""
+  const decoder = new TextDecoder()
+  let total = 0
+  let result = ""
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maximumBytes) {
+        await reader.cancel("Nexus protocol response exceeded its size limit")
+        throw new Error(
+          `Nexus protocol response exceeds ${maximumBytes} bytes`,
+        )
+      }
+      result += decoder.decode(value, { stream: true })
+    }
+    result += decoder.decode()
+    return result
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // The stream may already be errored or cancelled.
+    }
+  }
+}
+
+async function throwProtocolResponseError(response: Response): Promise<never> {
+  const text = await readBoundedResponseText(response)
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error(
+      `Nexus protocol request failed with HTTP ${response.status}`,
+    )
+  }
+  const candidate =
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    "error" in value
+      ? (value as { error: unknown }).error
+      : value
+  const parsed = ProtocolErrorSchema.safeParse(candidate)
+  if (parsed.success) throw new SessionProtocolError(parsed.data)
+  throw new Error(
+    `Nexus protocol request failed with HTTP ${response.status}`,
+  )
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "")
+  if (normalized === "localhost" || normalized === "::1") return true
+  const match = normalized.match(/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  return Boolean(
+    match &&
+      match.slice(1).every((octet) => Number(octet) >= 0 && Number(octet) <= 255),
+  )
+}
+
+export function isLoopbackNexusServerDestination(input: string): boolean {
+  const canonical = canonicalizeNexusServerBaseUrl(input)
+  return isLoopbackHostname(new URL(canonical).hostname)
+}
+
+export function canonicalizeNexusServerBaseUrl(input: string): string {
+  const trimmed = input.trim()
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error("NexusCode server URL must be an absolute HTTP(S) URL")
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("NexusCode server URL must use HTTP or HTTPS")
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("NexusCode server URL must not contain credentials")
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error("NexusCode server URL must not contain a query or fragment")
+  }
+  if (parsed.protocol === "http:" && !isLoopbackHostname(parsed.hostname)) {
+    throw new Error(
+      "HTTPS is required for a non-loopback NexusCode server destination",
+    )
+  }
+  const pathname = parsed.pathname.replace(/\/+$/, "")
+  return `${parsed.origin}${pathname === "/" ? "" : pathname}`
+}
+
+export function getNexusServerTokenSecretKey(baseUrl: string): string {
+  const canonical = canonicalizeNexusServerBaseUrl(baseUrl)
+  const digest = createHash("sha256").update(canonical).digest("hex")
+  return `${NEXUS_SERVER_TOKEN_SECRET_KEY}:${digest}`
+}
 
 async function readStreamChunkWithTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -45,7 +218,7 @@ export class NexusServerClient {
   private token: string
 
   constructor(opts: NexusServerClientOptions) {
-    this.baseUrl = opts.baseUrl.replace(/\/$/, "")
+    this.baseUrl = canonicalizeNexusServerBaseUrl(opts.baseUrl)
     this.directory = canonicalProjectRoot(opts.directory)
     this.token = opts.token.trim()
     if (!this.token) throw new Error("NexusCode server token is required")
@@ -68,12 +241,513 @@ export class NexusServerClient {
     return u
   }
 
+  private request(url: string, init: RequestInit = {}): Promise<Response> {
+    return fetch(url, {
+      ...init,
+      redirect: "error",
+    })
+  }
+
   private sessionPath(sessionId: string): string {
     return `/session/${encodeURIComponent(sessionId)}`
   }
 
+  private sessionV2Path(sessionId: string): string {
+    return `/v2/session/${encodeURIComponent(sessionId)}`
+  }
+
+  async dispatchSessionCommand(
+    command: SessionCommandV2,
+  ): Promise<SessionCommandReceipt> {
+    const parsed = parseSessionCommand(command)
+    if (!parsed.ok) throw new SessionProtocolError(parsed.error)
+    const response = await this.request(
+      this.url(`${this.sessionV2Path(command.sessionId)}/command`),
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(parsed.command),
+      },
+    )
+    if (!response.ok) return throwProtocolResponseError(response)
+    const raw = await readBoundedResponseText(response)
+    let value: unknown
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      throw new Error("Nexus protocol command response is not valid JSON")
+    }
+    return SessionCommandReceiptSchema.parse(value)
+  }
+
+  async getSessionProtocolSnapshot(
+    sessionId: string,
+  ): Promise<SessionProtocolSnapshot> {
+    const response = await this.request(
+      this.url(`${this.sessionV2Path(sessionId)}/snapshot`),
+      { headers: this.headers() },
+    )
+    if (!response.ok) return throwProtocolResponseError(response)
+    const raw = await readBoundedResponseText(response)
+    let value: unknown
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      throw new Error("Nexus protocol snapshot response is not valid JSON")
+    }
+    const snapshot = SessionProtocolSnapshotSchema.parse(value)
+    if (snapshot.sessionId !== sessionId) {
+      throw new Error("Nexus protocol returned a snapshot for another session")
+    }
+    return snapshot
+  }
+
+  async getMcpPromptCatalog(
+    sessionId: string,
+  ): Promise<RemoteMcpPromptCatalog> {
+    const response = await this.request(
+      this.url(`${this.sessionV2Path(sessionId)}/mcp/prompts`),
+      { headers: this.headers() },
+    )
+    if (!response.ok) return throwProtocolResponseError(response)
+    const raw = await readBoundedResponseText(response)
+    let value: unknown
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      throw new Error("Nexus MCP prompt catalog response is not valid JSON")
+    }
+    return RemoteMcpPromptCatalogSchema.parse(value)
+  }
+
+  async resolveMcpPrompt(
+    sessionId: string,
+    request: RemoteMcpPromptResolveRequest,
+    signal?: AbortSignal,
+  ): Promise<RemoteMcpPromptResolveResponse> {
+    const parsed = RemoteMcpPromptResolveRequestSchema.parse(request)
+    const response = await this.request(
+      this.url(`${this.sessionV2Path(sessionId)}/mcp/prompts/resolve`),
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(parsed),
+        ...(signal ? { signal } : {}),
+      },
+    )
+    if (!response.ok) return throwProtocolResponseError(response)
+    const raw = await readBoundedResponseText(response)
+    let value: unknown
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      throw new Error("Nexus MCP prompt resolution response is not valid JSON")
+    }
+    return RemoteMcpPromptResolveResponseSchema.parse(value)
+  }
+
+  async *streamSessionEvents(
+    sessionId: string,
+    afterSequence: number,
+    signal?: AbortSignal,
+  ): AsyncGenerator<ProtocolEnvelope> {
+    if (
+      !Number.isSafeInteger(afterSequence) ||
+      afterSequence < 0
+    ) {
+      throw new RangeError(
+        "Nexus protocol cursor must be a non-negative safe integer",
+      )
+    }
+    const response = await this.request(
+      this.url(`${this.sessionV2Path(sessionId)}/events`, {
+        afterSequence: String(afterSequence),
+      }),
+      {
+        headers: this.headers(),
+        signal,
+      },
+    )
+    if (!response.ok) return throwProtocolResponseError(response)
+    const reader = response.body?.getReader()
+    if (!reader) throw new Error("Nexus protocol event response has no body")
+
+    const decoder = new TextDecoder()
+    let cursor = afterSequence
+    let buffer = ""
+    let streamFinished = false
+    const parseLine = (line: string): ProtocolEnvelope | undefined => {
+      const trimmed = line.trim()
+      if (!trimmed) return undefined
+      if (trimmed.length > MAX_PROTOCOL_LINE_CHARACTERS) {
+        throw new Error("Nexus protocol event line exceeds its size limit")
+      }
+      let value: unknown
+      try {
+        value = JSON.parse(trimmed)
+      } catch {
+        throw new Error("Nexus protocol event line is not valid JSON")
+      }
+      const envelope = ProtocolEnvelopeSchema.parse(value)
+      if (envelope.sessionId !== sessionId) {
+        throw new Error(
+          "Nexus protocol event belongs to another session",
+        )
+      }
+      if (envelope.sequence !== cursor + 1) {
+        throw new Error(
+          `Nexus protocol event stream is not contiguous after sequence ${cursor}`,
+        )
+      }
+      cursor = envelope.sequence
+      return envelope
+    }
+
+    try {
+      while (!signal?.aborted) {
+        const { value, done } = await readStreamChunkWithTimeout(
+          reader,
+          DEFAULT_HEARTBEAT_TIMEOUT_MS,
+        )
+        if (done) {
+          streamFinished = true
+          break
+        }
+        buffer += decoder.decode(value, { stream: true })
+        if (buffer.length > MAX_PROTOCOL_LINE_CHARACTERS * 2) {
+          throw new Error("Nexus protocol event buffer exceeds its size limit")
+        }
+        const lines = buffer.split("\n")
+        buffer = lines.pop() ?? ""
+        for (const line of lines) {
+          const envelope = parseLine(line)
+          if (envelope) yield envelope
+        }
+      }
+      buffer += decoder.decode()
+      const envelope = parseLine(buffer)
+      if (envelope) yield envelope
+    } catch (error) {
+      await reader.cancel(error).catch(() => undefined)
+      throw error
+    } finally {
+      if (signal?.aborted || !streamFinished) {
+        await reader.cancel(signal?.reason).catch(() => undefined)
+      }
+      try {
+        reader.releaseLock()
+      } catch {
+        // A transport failure can release the lock while unwinding.
+      }
+    }
+  }
+
+  async *runSessionTurn(
+    options: RunSessionTurnOptions,
+  ): AsyncGenerator<AgentEvent> {
+    const snapshot = await this.getSessionProtocolSnapshot(options.sessionId)
+    const command: SessionCommandV2 = {
+      version: PROTOCOL_VERSION,
+      commandId: protocolIdentifier("command"),
+      sessionId: options.sessionId,
+      type: "start_turn",
+      inputId: protocolIdentifier("input"),
+      input: [...options.input],
+      mode: options.mode,
+      ...(options.selection ? { selection: options.selection } : {}),
+    }
+
+    let receipt: SessionCommandReceipt | undefined
+    let dispatchError: unknown
+    for (let attempt = 0; attempt <= MAX_PROTOCOL_RECONNECTS; attempt++) {
+      try {
+        receipt = await this.dispatchSessionCommand(command)
+        break
+      } catch (error) {
+        dispatchError = error
+        if (
+          options.signal?.aborted ||
+          (
+            error instanceof SessionProtocolError &&
+            !error.protocolError.retryable
+          ) ||
+          attempt === MAX_PROTOCOL_RECONNECTS
+        ) {
+          throw error
+        }
+      }
+    }
+    if (!receipt || receipt.type !== "start_turn") throw dispatchError
+    const identity = {
+      turnId: receipt.turnId,
+      runId: receipt.runId,
+    }
+    options.onTurn?.(identity)
+
+    yield* this.streamTurn(
+      options.sessionId,
+      identity,
+      {
+        networkAfterSequence: snapshot.throughSequence,
+        deliverAfterSequence: snapshot.throughSequence,
+        snapshotThroughSequence: snapshot.throughSequence,
+        pendingApprovals: [],
+        signal: options.signal,
+        onApproval: options.onApproval,
+        onSequence: options.onSequence,
+      },
+    )
+  }
+
+  async *attachSessionTurn(
+    options: AttachSessionTurnOptions,
+  ): AsyncGenerator<AgentEvent> {
+    if (
+      options.afterSequence !== undefined &&
+      (
+        !Number.isSafeInteger(options.afterSequence) ||
+        options.afterSequence < 0
+      )
+    ) {
+      throw new RangeError(
+        "Nexus protocol cursor must be a non-negative safe integer",
+      )
+    }
+    const snapshot = await this.getSessionProtocolSnapshot(options.sessionId)
+    if (
+      snapshot.activeTurnId === undefined ||
+      snapshot.activeRunId === undefined ||
+      snapshot.activeTurnFirstSequence === undefined
+    ) {
+      throw new SessionProtocolError({
+        code: "no_active_turn",
+        message: `Nexus session ${options.sessionId} has no active turn`,
+        retryable: false,
+      })
+    }
+    if (
+      snapshot.activeTurnId !== options.turnId ||
+      snapshot.activeRunId !== options.runId
+    ) {
+      throw new SessionProtocolError({
+        code: "turn_conflict",
+        message: "The active Nexus turn no longer matches the attach identity",
+        retryable: false,
+      })
+    }
+    const minimumCursor = snapshot.activeTurnFirstSequence - 1
+    const deliverAfterSequence =
+      options.afterSequence === undefined
+        ? minimumCursor
+        : Math.max(minimumCursor, options.afterSequence)
+    if (deliverAfterSequence > snapshot.throughSequence) {
+      throw new SessionProtocolError({
+        code: "replay_gap",
+        message:
+          "The attach cursor is newer than the server snapshot replay window",
+        retryable: true,
+      })
+    }
+    const identity = {
+      turnId: snapshot.activeTurnId,
+      runId: snapshot.activeRunId,
+    }
+    options.onTurn?.(identity)
+    for (const approval of snapshot.pendingApprovals) {
+      options.onApproval?.({
+        ...identity,
+        approvalId: approval.approvalId,
+        toolName: approval.toolName,
+        redactedSummary: approval.redactedSummary,
+      })
+    }
+    yield* this.streamTurn(
+      options.sessionId,
+      identity,
+      {
+        // Re-read the active turn from its origin so approval state can be
+        // reconstructed even when the caller's cursor falls between the
+        // durable approval identity and its legacy presentation event.
+        networkAfterSequence:
+          snapshot.pendingApprovals.length > 0
+            ? minimumCursor
+            : deliverAfterSequence,
+        deliverAfterSequence,
+        snapshotThroughSequence: snapshot.throughSequence,
+        pendingApprovals: snapshot.pendingApprovals,
+        signal: options.signal,
+        onApproval: options.onApproval,
+        onSequence: options.onSequence,
+      },
+    )
+  }
+
+  private async *streamTurn(
+    sessionId: string,
+    identity: SessionTurnIdentity,
+    options: {
+      networkAfterSequence: number
+      deliverAfterSequence: number
+      snapshotThroughSequence: number
+      pendingApprovals: readonly PendingSessionApproval[]
+      signal?: AbortSignal
+      onApproval?: (identity: SessionApprovalIdentity) => void
+      onSequence?: (sequence: number) => void | Promise<void>
+    },
+  ): AsyncGenerator<AgentEvent> {
+    const pendingApprovalIds = new Set(
+      options.pendingApprovals.map((approval) => approval.approvalId),
+    )
+    const announcedApprovalIds = new Set(pendingApprovalIds)
+    let cursor = options.networkAfterSequence
+    let historicalApproval:
+      | { approvalId: string; pending: boolean }
+      | undefined
+    let reconnects = 0
+    while (!options.signal?.aborted) {
+      let completed = false
+      let terminalFailure: Error | undefined
+      let sequenceFailure: unknown
+      try {
+        for await (const envelope of this.streamSessionEvents(
+          sessionId,
+          cursor,
+          options.signal,
+        )) {
+          cursor = envelope.sequence
+          let sequenceAcknowledged = false
+          const acknowledgeSequence = async (): Promise<void> => {
+            if (sequenceAcknowledged) return
+            try {
+              await options.onSequence?.(envelope.sequence)
+              sequenceAcknowledged = true
+            } catch (error) {
+              sequenceFailure = error
+              throw error
+            }
+          }
+          if (
+            envelope.turnId !== identity.turnId ||
+            envelope.runId !== identity.runId
+          ) {
+            await acknowledgeSequence()
+            continue
+          }
+          const payload = envelope.payload
+          if (payload.type === "approval_requested") {
+            if (envelope.sequence <= options.snapshotThroughSequence) {
+              historicalApproval = {
+                approvalId: payload.approvalId,
+                pending: pendingApprovalIds.has(payload.approvalId),
+              }
+            } else if (!announcedApprovalIds.has(payload.approvalId)) {
+              announcedApprovalIds.add(payload.approvalId)
+              options.onApproval?.({
+                ...identity,
+                approvalId: payload.approvalId,
+                toolName: payload.toolName,
+                redactedSummary: payload.redactedSummary,
+              })
+            }
+            await acknowledgeSequence()
+          } else if (payload.type === "agent_event") {
+            const event = payload.event as AgentEvent
+            const historical =
+              envelope.sequence <= options.snapshotThroughSequence
+            if (historical && event.type === "tool_approval_needed") {
+              const shouldReplay = historicalApproval?.pending === true
+              historicalApproval = undefined
+              if (shouldReplay) {
+                yield event
+                await acknowledgeSequence()
+                continue
+              }
+              await acknowledgeSequence()
+              continue
+            }
+            if (envelope.sequence > options.deliverAfterSequence) {
+              yield event
+            }
+            await acknowledgeSequence()
+          } else if (payload.type === "turn_finished") {
+            await acknowledgeSequence()
+            if (payload.status === "failed") {
+              terminalFailure = new Error(
+                payload.error ?? `Nexus turn ${identity.turnId} failed`,
+              )
+              throw terminalFailure
+            }
+            completed = true
+            return
+          } else {
+            await acknowledgeSequence()
+          }
+        }
+      } catch (error) {
+        if (error === terminalFailure) throw error
+        if (error === sequenceFailure) throw error
+        if (completed || options.signal?.aborted) return
+        if (
+          error instanceof SessionProtocolError &&
+          error.protocolError.code === "replay_gap"
+        ) {
+          throw error
+        }
+        if (reconnects >= MAX_PROTOCOL_RECONNECTS) throw error
+        reconnects += 1
+        continue
+      }
+      if (completed || options.signal?.aborted) return
+      if (reconnects >= MAX_PROTOCOL_RECONNECTS) {
+        throw new Error(
+          `Nexus protocol event stream ended before turn ${identity.turnId} finished`,
+        )
+      }
+      reconnects += 1
+    }
+  }
+
+  async interruptSessionTurn(
+    sessionId: string,
+    expectedTurnId: string,
+    reason?: string,
+  ): Promise<boolean> {
+    const receipt = await this.dispatchSessionCommand({
+      version: PROTOCOL_VERSION,
+      commandId: protocolIdentifier("command"),
+      sessionId,
+      type: "interrupt_turn",
+      expectedTurnId,
+      ...(reason?.trim() ? { reason: reason.trim() } : {}),
+    })
+    if (receipt.type !== "interrupt_turn") {
+      throw new Error("Nexus protocol returned the wrong interrupt receipt")
+    }
+    return receipt.interrupted
+  }
+
+  async resolveSessionApproval(
+    sessionId: string,
+    expectedTurnId: string,
+    approvalId: string,
+    result: Pick<PermissionResult, "approved">,
+  ): Promise<void> {
+    const receipt = await this.dispatchSessionCommand({
+      version: PROTOCOL_VERSION,
+      commandId: protocolIdentifier("command"),
+      sessionId,
+      type: "resolve_approval",
+      approvalId,
+      expectedTurnId,
+      status: result.approved ? "approved" : "denied",
+    })
+    if (receipt.type !== "resolve_approval") {
+      throw new Error("Nexus protocol returned the wrong approval receipt")
+    }
+  }
+
   async listSessions(): Promise<Array<{ id: string; ts: number; title?: string; messageCount: number; revision: number }>> {
-    const res = await fetch(this.url("/session", { directory: this.directory }), {
+    const res = await this.request(this.url("/session", { directory: this.directory }), {
       headers: this.headers(),
     })
     if (!res.ok) throw new Error(`Server listSessions: ${res.status} ${await res.text()}`)
@@ -81,7 +755,7 @@ export class NexusServerClient {
   }
 
   async createSession(): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }> {
-    const res = await fetch(this.url("/session"), {
+    const res = await this.request(this.url("/session"), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({}),
@@ -96,7 +770,7 @@ export class NexusServerClient {
   ): Promise<SessionMessage[]> {
     const limit = Math.min(200, Math.max(1, opts?.limit ?? 50))
     const offset = Math.max(0, opts?.offset ?? 0)
-    const res = await fetch(
+    const res = await this.request(
       this.url(`${this.sessionPath(sessionId)}/message`, {
         directory: this.directory,
         limit: String(limit),
@@ -109,7 +783,7 @@ export class NexusServerClient {
   }
 
   async getSession(sessionId: string): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }> {
-    const res = await fetch(this.url(this.sessionPath(sessionId), { directory: this.directory }), {
+    const res = await this.request(this.url(this.sessionPath(sessionId), { directory: this.directory }), {
       headers: this.headers(),
     })
     if (!res.ok) throw new Error(`Server getSession: ${res.status} ${await res.text()}`)
@@ -129,7 +803,7 @@ export class NexusServerClient {
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {
-    const res = await fetch(this.url(this.sessionPath(sessionId), { directory: this.directory }), {
+    const res = await this.request(this.url(this.sessionPath(sessionId), { directory: this.directory }), {
       method: "DELETE",
       headers: this.headers(),
     })
@@ -139,7 +813,7 @@ export class NexusServerClient {
   }
 
   async abortSession(sessionId: string): Promise<boolean> {
-    const res = await fetch(
+    const res = await this.request(
       this.url(`${this.sessionPath(sessionId)}/abort`),
       {
         method: "POST",
@@ -159,7 +833,7 @@ export class NexusServerClient {
     partId: string,
     result: PermissionResult,
   ): Promise<void> {
-    const res = await fetch(
+    const res = await this.request(
       this.url(
         `${this.sessionPath(sessionId)}/run/${encodeURIComponent(runId)}/approval`,
       ),
@@ -211,7 +885,7 @@ export class NexusServerClient {
     while (true) {
       let res: Response
       try {
-        res = await fetch(this.url(`${this.sessionPath(sessionId)}/message`, { directory: this.directory }), {
+        res = await this.request(this.url(`${this.sessionPath(sessionId)}/message`, { directory: this.directory }), {
           method: "POST",
           headers: this.headers(),
           body: JSON.stringify(

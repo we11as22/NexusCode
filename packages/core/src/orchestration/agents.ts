@@ -32,6 +32,10 @@ const BUILTIN_AGENTS: AgentDefinition[] = [
     builtin: true,
   },
 ]
+const BUILTIN_AGENT_TYPES = new Set(
+  BUILTIN_AGENTS.map((agent) => agent.agentType.toLowerCase()),
+)
+const MAX_AGENT_DEFINITION_BYTES = 80_000
 
 function splitFrontmatter(raw: string): { frontmatter: Record<string, unknown>; body: string } {
   const text = raw.replace(/^\uFEFF/, "")
@@ -53,7 +57,25 @@ function splitFrontmatter(raw: string): { frontmatter: Record<string, unknown>; 
 
 async function loadOne(filePath: string): Promise<AgentDefinition | null> {
   try {
+    const before = await fs.lstat(filePath)
+    if (
+      !before.isFile() ||
+      before.isSymbolicLink() ||
+      before.size > MAX_AGENT_DEFINITION_BYTES
+    ) {
+      return null
+    }
     const raw = await fs.readFile(filePath, "utf8")
+    const after = await fs.lstat(filePath)
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      Buffer.byteLength(raw, "utf8") !== after.size
+    ) {
+      return null
+    }
     const { frontmatter, body } = splitFrontmatter(raw)
     const agentType = String(
       frontmatter.agent_type ?? frontmatter.name ?? path.basename(filePath, path.extname(filePath)),
@@ -127,12 +149,12 @@ export async function loadAgentDefinitions(
     ...(compatibility?.includeGlobalDir && compatibility?.includeAgents
       ? (await glob(path.join(os.homedir(), ".claude", "agents", "**", "*.md"), { absolute: true }).catch(() => [] as string[])).map((file) => ({ file, priority: 1 }))
       : []),
+    ...(await glob(homeDir, { absolute: true }).catch(() => [] as string[])).map((file) => ({ file, priority: 2 })),
+    ...pluginAgents.map((file) => ({ file, priority: 3 })),
     ...(compatibility?.includeProjectDir && compatibility?.includeAgents
-      ? (await glob(path.join(path.resolve(cwd), ".claude", "agents", "**", "*.md"), { absolute: true }).catch(() => [] as string[])).map((file) => ({ file, priority: 2 }))
+      ? (await glob(path.join(path.resolve(cwd), ".claude", "agents", "**", "*.md"), { absolute: true }).catch(() => [] as string[])).map((file) => ({ file, priority: 4 }))
       : []),
-    ...(await glob(homeDir, { absolute: true }).catch(() => [] as string[])).map((file) => ({ file, priority: 3 })),
-    ...(await glob(projectDir, { absolute: true }).catch(() => [] as string[])).map((file) => ({ file, priority: 4 })),
-    ...pluginAgents.map((file) => ({ file, priority: 5 })),
+    ...(await glob(projectDir, { absolute: true }).catch(() => [] as string[])).map((file) => ({ file, priority: 5 })),
   ]
   const loaded = (await Promise.all(files.map(async ({ file, priority }) => {
     const item = await loadOne(file)
@@ -141,12 +163,20 @@ export async function loadAgentDefinitions(
     (entry): entry is { item: AgentDefinition; priority: number } => Boolean(entry),
   )
   const byType = new Map<string, AgentDefinition>()
-  for (const builtin of BUILTIN_AGENTS) byType.set(builtin.agentType, builtin)
+  for (const builtin of BUILTIN_AGENTS) {
+    byType.set(builtin.agentType.toLowerCase(), builtin)
+  }
   const priorities = new Map<string, number>()
   for (const { item, priority } of loaded) {
-    if ((priorities.get(item.agentType) ?? -1) <= priority) {
-      byType.set(item.agentType, item)
-      priorities.set(item.agentType, priority)
+    const key = item.agentType.toLowerCase()
+    // Built-in roles carry security-sensitive capability ceilings (Explore in
+    // particular is intentionally read-only). Repository and plugin files may
+    // add new roles, but cannot replace those reserved definitions by name or
+    // casing.
+    if (BUILTIN_AGENT_TYPES.has(key)) continue
+    if ((priorities.get(key) ?? -1) <= priority) {
+      byType.set(key, item)
+      priorities.set(key, priority)
     }
   }
   return Array.from(byType.values())

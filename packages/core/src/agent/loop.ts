@@ -11,7 +11,6 @@ import type {
   SkillDef,
   ApprovalAction,
   IIndexer,
-  PermissionResult,
   TextPart,
   ReasoningPart,
   ToolPart,
@@ -19,12 +18,23 @@ import type {
   SessionRole,
   MessagePart,
   DiagnosticItem,
+  AgentInputMailbox,
+  AgentMailboxMessage,
 } from "../types.js"
 import type { LLMStreamEvent, LLMMessage, LLMToolDef } from "../provider/types.js"
 import { buildSystemPrompt, type PromptContext } from "./prompts/components/index.js"
 import { getInitialProjectContext } from "./prompts/initial-context.js"
-import { READ_ONLY_TOOLS, getBuiltinToolsForMode, getAutoApproveActions, getBlockedToolsForMode, PLAN_MODE_BLOCKED_EXTENSIONS, PLAN_MODE_ALLOWED_WRITE_PATTERN, MANDATORY_END_TOOL } from "./modes.js"
-import { classifyMcpServers, classifySkills } from "./classifier.js"
+import {
+  READ_ONLY_TOOLS,
+  getBuiltinToolsForMode,
+  getAutoApproveActions,
+  getBlockedToolsForMode,
+  isDynamicToolAllowedInMode,
+  isKnownBuiltinToolName,
+  PLAN_MODE_BLOCKED_EXTENSIONS,
+  PLAN_MODE_ALLOWED_WRITE_PATTERN,
+  MANDATORY_END_TOOL,
+} from "./modes.js"
 import {
   formatToolValidationError,
   normalizeToolInputForParse,
@@ -37,13 +47,17 @@ import {
   buildUserMessageForInvalidSdkToolArgs,
   isAiSdkInvalidToolArgumentsError,
 } from "./tool-sdk-recovery.js"
-import { getBackgroundBashJobsForPrompt } from "../tools/built-in/execute-command.js"
 import { buildSkillToolDescriptionMerged, useSkillTool } from "../tools/built-in/use-skill.js"
-import { ftsTopSkills } from "../skills/fts.js"
 import { parseMentions } from "../context/mentions.js"
-import type { SessionCompaction } from "../session/compaction.js"
+import type {
+  CompactionResult,
+  SessionCompaction,
+} from "../session/compaction.js"
 import { planExitWriteGateSatisfied } from "../session/plan-write-gate.js"
-import { getMessagesForActiveContext } from "../session/active-context.js"
+import {
+  formatConversationSummaryForModel,
+  getMessagesForActiveContext,
+} from "../session/active-context.js"
 import {
   computeContextUsageMetrics,
   estimateToolsDefinitionsTokens,
@@ -58,7 +72,7 @@ import {
   getDefaultTopK,
   getDefaultTopP,
 } from "../provider/provider-options.js"
-import { getOrchestrationRuntime } from "../orchestration/runtime.js"
+import type { OrchestrationRuntime } from "../orchestration/runtime.js"
 import {
   filterPromptMemoryCandidates,
   selectRelevantMemories,
@@ -70,15 +84,18 @@ import {
   refreshSessionMemoryFile,
   appendCompactionSnippetToSessionMemory,
 } from "../session/session-memory.js"
-import { spillPathFromToolMetadata } from "./tool-spill.js"
+import {
+  artifactCapabilityFromToolMetadata,
+} from "./tool-spill.js"
 import { getToolOutputSpill } from "../context/tool-output-registry.js"
-import { runAutoMemoryDreamIfDue } from "../context/auto-dream.js"
+import { scheduleAutoMemoryDream } from "../context/auto-dream-scheduler.js"
 import { importLegacyMemoryFiles } from "../context/legacy-memory-import.js"
 import type { NexusRunServices } from "./run-services.js"
 import {
   executeToolPipeline,
   type ToolExecutionOrigin,
 } from "./tool-pipeline.js"
+import { requestHostApproval } from "./approval-coordinator.js"
 
 /** Generous tool budgets so multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
@@ -145,6 +162,27 @@ function getPreventContinuationReason(
   return blocked.stopReason?.trim() || `${blocked.pluginName} requested that the agent stop the current continuation.`
 }
 
+async function stopForBlockingHook(
+  session: ISession,
+  host: IHost,
+  hookResults: Array<{
+    preventContinuation?: boolean
+    stopReason?: string
+    pluginName: string
+  }>,
+): Promise<boolean> {
+  const reason = getPreventContinuationReason(hookResults)
+  if (!reason) return false
+  host.emit({
+    type: "error",
+    error: reason.slice(0, 2_000),
+    fatal: false,
+  })
+  await session.save()
+  host.emit({ type: "session_saved", sessionId: session.id })
+  return true
+}
+
 /** When a mandatory end tool (e.g. PlanExit) completes, set its output as user_message on the last text part of the message (so UI and context see it). */
 function setReportToUserMessage(session: ISession, messageId: string, userMessage: string): void {
   const msg = session.messages.find((m) => m.id === messageId)
@@ -173,6 +211,40 @@ function messageHasMandatoryEndTool(session: ISession, messageId: string, mode: 
   return parts.some((p) => p.type === "tool" && (p as ToolPart).tool === mandatory)
 }
 
+function activatedToolNamesFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): string[] | undefined {
+  const names = metadata?.activatedTools
+  if (!Array.isArray(names)) return undefined
+  const normalized = [
+    ...new Set(
+      names
+        .filter((name): name is string => typeof name === "string")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    ),
+  ].slice(0, 20)
+  return normalized.length > 0 ? normalized : undefined
+}
+
+function persistedToolActivationNames(session: ISession): Set<string> {
+  const names = new Set<string>()
+  for (const message of session.messages) {
+    if (!Array.isArray(message.content)) continue
+    for (const part of message.content as MessagePart[]) {
+      if (
+        part.type !== "tool" ||
+        part.tool !== "ToolSearch" ||
+        part.status !== "completed"
+      ) continue
+      for (const name of part.activatedToolNames ?? []) {
+        if (typeof name === "string" && name.trim()) names.add(name.trim())
+      }
+    }
+  }
+  return names
+}
+
 /** User message from plan-followup "revise" (extension/CLI); must match controller copy. */
 function lastUserMessageRequestsPlanRevision(session: ISession): boolean {
   for (let i = session.messages.length - 1; i >= 0; i--) {
@@ -195,6 +267,68 @@ function lastUserMessageRequestsPlanRevision(session: ISession): boolean {
   return false
 }
 
+const MAILBOX_BATCH_LIMIT = 32
+
+function formatAgentMailboxMessage(message: AgentMailboxMessage): string {
+  return (
+    `[Message from ${message.from} | id: ${message.id}]\n` +
+    message.message
+  )
+}
+
+/**
+ * Accept pending mail into the transcript exactly once. The mailbox adapter is
+ * responsible for durably checkpointing this transcript before it acks the
+ * queue records; existing markers handle crash-after-checkpoint/before-ack.
+ */
+async function acceptAgentMailboxMessages(
+  mailbox: AgentInputMailbox | undefined,
+  session: ISession,
+): Promise<number> {
+  if (!mailbox) return 0
+  const pending = await mailbox.readPending(MAILBOX_BATCH_LIMIT)
+  if (pending.length === 0) return 0
+  const acceptedIds = new Set(
+    session.messages
+      .map((message) => message.mailboxMessageId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+  )
+  for (const message of pending) {
+    if (acceptedIds.has(message.id)) continue
+    session.addMessage({
+      role: "user",
+      content: formatAgentMailboxMessage(message),
+      mailboxMessageId: message.id,
+      mailboxOwnerSessionId: message.ownerSessionId,
+      mailboxTargetAgentId: message.targetAgentId,
+      mailboxSender: message.from,
+    })
+    acceptedIds.add(message.id)
+  }
+  await mailbox.checkpointAndAcknowledge(pending, session)
+  return pending.length
+}
+
+function linkedProviderSignal(
+  rootSignal: AbortSignal,
+  localSignal: AbortSignal,
+): { signal: AbortSignal; dispose(): void } {
+  const controller = new AbortController()
+  const relayRoot = () => controller.abort(rootSignal.reason)
+  const relayLocal = () => controller.abort(localSignal.reason)
+  rootSignal.addEventListener("abort", relayRoot, { once: true })
+  localSignal.addEventListener("abort", relayLocal, { once: true })
+  if (rootSignal.aborted) relayRoot()
+  else if (localSignal.aborted) relayLocal()
+  return {
+    signal: controller.signal,
+    dispose() {
+      rootSignal.removeEventListener("abort", relayRoot)
+      localSignal.removeEventListener("abort", relayLocal)
+    },
+  }
+}
+
 export interface AgentLoopOptions {
   session: ISession
   client: LLMClient
@@ -213,6 +347,8 @@ export interface AgentLoopOptions {
   checkpoint?: { commit(description?: string): Promise<string> }
   /** When true, inject create-skill instructions; host must allow writes to .nexus/skills (and ~/.nexus/skills if applicable). */
   createSkillMode?: boolean
+  /** Durable delegated-agent input accepted only at provider boundaries. */
+  mailbox?: AgentInputMailbox
 }
 
 /**
@@ -223,10 +359,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const {
     session, client, host, config, services, mode,
     tools, skills, rulesContent, indexer, compaction,
-    signal, gitBranch, checkpoint, createSkillMode,
+    signal, gitBranch, checkpoint, createSkillMode, mailbox,
   } = opts
 
   const activeClient = client
+  const orchestrationRuntime = services.orchestrationRuntime
+  await acceptAgentMailboxMessages(mailbox, session)
 
   // 1. Resolve tools: built-ins by mode + dynamic (MCP/custom); blocked tools NEVER included in allowed set.
   //    System prompt (buildSystemPrompt) and tool set both use the same `mode` — promptCtx.mode and
@@ -238,7 +376,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     builtinToolNames.delete("CodebaseSearch")
   }
   const builtinTools = tools.filter(t => builtinToolNames.has(t.name) && !blockedTools.has(t.name))
-  const dynamicTools = tools.filter(t => !builtinToolNames.has(t.name) && !blockedTools.has(t.name))
+  const dynamicTools = tools.filter(
+    (tool) =>
+      !isKnownBuiltinToolName(tool.name) &&
+      !blockedTools.has(tool.name) &&
+      isDynamicToolAllowedInMode(tool, mode),
+  )
 
   const lastMessage = session.messages[session.messages.length - 1]
   const taskDesc = typeof lastMessage?.content === "string"
@@ -257,72 +400,39 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     },
   ).catch(() => [])
   await recordPluginHookOutputs(session, host, "user-prompt-submit-hook", promptSubmitHookResults)
+  if (await stopForBlockingHook(session, host, promptSubmitHookResults)) return
 
-  // Build MCP server list from explicit provenance. Tool names are user-controlled,
-  // so delimiters are not a reliable ownership boundary.
-  const serverToTools = new Map<string, ToolDef[]>()
-  const customDynamicTools: ToolDef[] = []
-  for (const t of dynamicTools) {
-    const server = t.integration?.kind === "mcp"
-      ? t.integration.serverName
-      : undefined
-    if (!server) {
-      customDynamicTools.push(t)
-    } else {
-      if (!serverToTools.has(server)) serverToTools.set(server, [])
-      serverToTools.get(server)!.push(t)
-    }
-  }
-  const mcpServerCount = serverToTools.size
-  const needClassifyMcpServers = config.tools.classifyToolsEnabled && mcpServerCount > config.tools.classifyThreshold
-  const needClassifySkills = config.skillClassifyEnabled && skills.length > config.skillClassifyThreshold
+  const instructionsLoadedHookResults = await runPluginHooks(
+    host.cwd,
+    host,
+    config,
+    "instructions_loaded",
+    {
+      sessionId: session.id,
+      mode,
+      rulesCharCount: rulesContent.length,
+      cwd: host.cwd,
+    },
+  ).catch(() => [])
+  await recordPluginHookOutputs(
+    session,
+    host,
+    "instructions-loaded-hook",
+    instructionsLoadedHookResults,
+  )
+  if (await stopForBlockingHook(
+    session,
+    host,
+    instructionsLoadedHookResults,
+  )) return
 
-  let resolvedDynamicTools: ToolDef[]
-  let resolvedSkills: SkillDef[]
-  if (needClassifyMcpServers && needClassifySkills) {
-    const serverInfos = [...serverToTools.entries()].map(([name, tools]) => ({
-      name,
-      toolCount: tools.length,
-      toolNames: tools.map(t => t.name),
-    }))
-    const [selectedServerNames, skillResults] = await Promise.all([
-      classifyMcpServers(serverInfos, taskDesc, activeClient),
-      (() => {
-        const candidates = ftsTopSkills(skills, taskDesc, 20)
-        return classifySkills(candidates, taskDesc, activeClient)
-      })(),
-    ])
-    const selectedServers = new Set(selectedServerNames)
-    resolvedDynamicTools = [
-      ...customDynamicTools,
-      ...([...serverToTools.entries()]
-        .filter(([server]) => selectedServers.has(server))
-        .flatMap(([, tools]) => tools)),
-    ]
-    resolvedSkills = skillResults
-  } else if (needClassifyMcpServers) {
-    const serverInfos = [...serverToTools.entries()].map(([name, tools]) => ({
-      name,
-      toolCount: tools.length,
-      toolNames: tools.map(t => t.name),
-    }))
-    const selectedServerNames = await classifyMcpServers(serverInfos, taskDesc, activeClient)
-    const selectedServers = new Set(selectedServerNames)
-    resolvedDynamicTools = [
-      ...customDynamicTools,
-      ...([...serverToTools.entries()]
-        .filter(([server]) => selectedServers.has(server))
-        .flatMap(([, tools]) => tools)),
-    ]
-    resolvedSkills = skills
-  } else if (needClassifySkills) {
-    resolvedDynamicTools = dynamicTools
-    const candidates = ftsTopSkills(skills, taskDesc, 20)
-    resolvedSkills = await classifySkills(candidates, taskDesc, activeClient)
-  } else {
-    resolvedDynamicTools = dynamicTools
-    resolvedSkills = skills
-  }
+  // Capability discovery must be deterministic. Older Nexus versions made a
+  // separate LLM call here to guess which MCP servers/skills the turn might
+  // need. A false negative silently removed capabilities and added latency.
+  // Keep every mode-authorized capability in the local catalog; ToolSearch is
+  // the sole run-local deferred-loading boundary.
+  const resolvedDynamicTools = dynamicTools
+  const resolvedSkills = skills
 
   const blockedFallbackTools: ToolDef[] = []
   for (const blockedName of blockedTools) {
@@ -332,6 +442,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     blockedFallbackTools.push({
       ...original,
       description: `${original.description} (disabled in ${mode} mode)`,
+      // Preserve a clear execution-time error for stale/textual calls without
+      // advertising the forbidden capability in either manifest or search.
+      hiddenFromAgent: true,
       execute: async () => ({
         success: false,
         output: `ERROR: Tool "${blockedName}" is disabled in ${mode} mode. Use only tools allowed in this mode.`,
@@ -339,36 +452,106 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     })
   }
 
-  const resolvedTools = [...builtinTools, ...resolvedDynamicTools, ...blockedFallbackTools]
+  const authorizedTools = [...builtinTools, ...resolvedDynamicTools]
+  const toolSearchAvailable = builtinTools.some(
+    (tool) => tool.name === "ToolSearch",
+  )
+  const deferredCandidates = authorizedTools.filter(
+    (tool) => tool.shouldDefer && !tool.alwaysLoad && !tool.hiddenFromAgent,
+  )
+  const deferredLoadingEnabled =
+    toolSearchAvailable &&
+    shouldUseDeferredLoading(
+      deferredCandidates,
+      activeClient.modelId,
+      config,
+    )
+  const previouslyActivatedToolNames = persistedToolActivationNames(session)
+  const inactiveToolNames = new Set(
+    deferredLoadingEnabled
+      ? deferredCandidates
+          .map((tool) => tool.name)
+          .filter((name) => !previouslyActivatedToolNames.has(name))
+      : [],
+  )
+  const resolvedTools = [
+    ...authorizedTools.filter((tool) => !inactiveToolNames.has(tool.name)),
+    ...blockedFallbackTools,
+  ]
+  const searchableTools = authorizedTools.filter(
+    (tool) => !tool.hiddenFromAgent,
+  )
+  const searchableToolByName = new Map(
+    searchableTools.map((tool) => [tool.name, tool]),
+  )
+  const activeToolNames = new Set(
+    resolvedTools.map((tool) => tool.name),
+  )
+  const pendingToolActivations = new Map<string, ToolDef>()
   const mcpToolNames = new Set(
-    resolvedDynamicTools
+    dynamicTools
       .filter((tool) => tool.integration?.kind === "mcp")
       .map((tool) => tool.name),
   )
 
   const skillToolDescription = await buildSkillToolDescriptionMerged(host.cwd, config).catch(() => useSkillTool.description)
-  const deferredTools = resolvedTools.filter((tool) => tool.shouldDefer && !tool.alwaysLoad)
-  const deferredLoadingEnabled = shouldUseDeferredLoading(
-    deferredTools,
-    activeClient.modelId,
-    config,
+  const getResolvedToolsForLlm = (): ToolDef[] =>
+    resolvedTools
+      .filter((tool) => !tool.hiddenFromAgent)
+      .map((tool) =>
+        tool.name === "Skill"
+          ? { ...tool, description: skillToolDescription }
+          : tool.name === "ToolSearch" && inactiveToolNames.size > 0
+            ? {
+                ...tool,
+                description: `${tool.description}\nUse this to discover deferred tools not listed in the current manifest. ${inactiveToolNames.size} tools remain deferred.`,
+              }
+            : tool,
+      )
+  let toolsDefinitionTokens = estimateToolsDefinitionsTokens(
+    getResolvedToolsForLlm(),
   )
-  const promptVisibleTools = resolvedTools.filter((tool) => {
-    if (tool.hiddenFromAgent) return false
-    if (tool.name === "ToolSearch") return true
-    if (!deferredLoadingEnabled) return true
-    return !tool.shouldDefer || tool.alwaysLoad
-  })
-  const resolvedToolsForLlm = promptVisibleTools.map((t) =>
-    t.name === "Skill"
-      ? { ...t, description: skillToolDescription }
-      : t.name === "ToolSearch" && deferredTools.length > 0
-        ? {
-            ...t,
-            description: `${t.description}\nUse this to discover deferred tools not listed in the initial tool manifest. ${deferredTools.length} tools are currently deferred.`,
-          }
-        : t,
-  )
+
+  const activateDeferredTools: NonNullable<
+    ToolContext["activateDeferredTools"]
+  > = (requestedNames) => {
+    const uniqueNames = [...new Set(requestedNames)]
+    const rejected = uniqueNames.filter(
+      (name) => !searchableToolByName.has(name),
+    )
+    // Validate the whole request before mutating the run-local capability set.
+    if (rejected.length > 0) {
+      return { activated: [], alreadyActive: [], rejected }
+    }
+
+    const activated: ToolDef[] = []
+    const alreadyActive: ToolDef[] = []
+    for (const name of uniqueNames) {
+      const tool = searchableToolByName.get(name)!
+      if (activeToolNames.has(name) || pendingToolActivations.has(name)) {
+        alreadyActive.push(tool)
+        continue
+      }
+      // Do not make a schema guessed in the same provider response executable.
+      // It becomes active only at the next request boundary.
+      pendingToolActivations.set(name, tool)
+      activated.push(tool)
+    }
+    return { activated, alreadyActive, rejected: [] }
+  }
+  const commitPendingToolActivations = (): void => {
+    if (pendingToolActivations.size === 0) return
+    for (const [name, tool] of pendingToolActivations) {
+      if (activeToolNames.has(name)) continue
+      resolvedTools.push(tool)
+      activeToolNames.add(name)
+      inactiveToolNames.delete(name)
+    }
+    pendingToolActivations.clear()
+    toolsDefinitionTokens = estimateToolsDefinitionsTokens(
+      getResolvedToolsForLlm(),
+    )
+  }
 
   /** After compaction, inject OpenClaude-style sparse plan reminder on the next system prompt (plan mode only). */
   let planSparseReminderAfterCompaction = false
@@ -377,6 +560,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     memoryCitations: [] as string[],
     taskIds: [] as string[],
   }
+  let compactionSuccessCount = 0
+  let compactedSinceLastProviderSuccess = false
 
   // Tool context
   const toolCtx: ToolContext = {
@@ -389,15 +574,35 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     indexer,
     signal,
     resolvedTools,
+    searchableTools,
+    activateDeferredTools,
     compactSession: async () => {
-      host.emit({ type: "compaction_start" })
-      await handleCompaction(session, activeClient, config, host, compaction, signal, {
-        systemPromptText: lastBuiltSystemPrompt,
-        toolsDefinitionTokens,
-        durableContext: durableRunContext,
-      })
+      const result = await runCompactionLifecycle(
+        session,
+        activeClient,
+        config,
+        host,
+        compaction,
+        signal,
+        {
+          trigger: "manual",
+          forceSummary: true,
+          fatalOnFailure: false,
+          systemPromptText: lastBuiltSystemPrompt,
+          toolsDefinitionTokens,
+          durableContext: durableRunContext,
+          orchestrationRuntime,
+        },
+      )
+      if (result.status === "failed") throw result.error
+      if (result.status !== "compacted") {
+        throw new Error(
+          `Manual compaction did not produce a summary (${result.reason}).`,
+        )
+      }
+      compactionSuccessCount += 1
+      compactedSinceLastProviderSuccess = true
       if (mode === "plan") planSparseReminderAfterCompaction = true
-      host.emit({ type: "compaction_end" })
     },
   }
 
@@ -433,12 +638,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   let executedToolCallsTotal = 0
   let sessionMemoryToolCallDebt = 0
   let sessionMemoryRefreshBusy = false
+  let sessionMemoryReadWarned = false
   let forceFinalAnswerNext = false
   let forceEmptyResponseRecoveryPromptNext = false
   let consecutiveEmptyFinalResponses = 0
   const maxEmptyFinalResponseRetries = 2
-  let contextOverflowRetries = 0
-  const MAX_CONTEXT_OVERFLOW_RETRIES = 3
   let lastAssistantMessageId = ""
   const doubleCheckCompletion = config.checkpoint?.doubleCheckCompletion === true
   const completionState = {
@@ -489,7 +693,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
   /** Full system prompt from the last completed loop iteration (for context bar + next iteration's pre-build estimate). */
   let lastBuiltSystemPrompt = ""
-  const toolsDefinitionTokens = estimateToolsDefinitionsTokens(resolvedToolsForLlm)
   const emitContextUsage = (systemPromptText?: string) => {
     const text = systemPromptText ?? lastBuiltSystemPrompt
     const metrics = computeContextUsageMetrics({
@@ -511,35 +714,129 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       percent: metrics.percent,
     })
   }
+  const continueForMailboxBeforeCompletion = async (): Promise<boolean> => {
+    if (!mailbox) return false
+    // Closing the accepting gate is synchronous. A concurrent enqueue either
+    // completed before this point and is observed by the read below, or it
+    // reports that an explicit resume is required.
+    mailbox.sealForCompletion()
+    const accepted = await acceptAgentMailboxMessages(mailbox, session)
+    if (accepted === 0) return false
+    await session.save()
+    emitContextUsage()
+    mailbox.reopenAfterCompletionCheck()
+    return true
+  }
 
   let lastToolName = ""
   let attemptedCompletionThisIteration = false
   let doneEmitted = false
+  let terminalError: Error | undefined
+  let requestedNextMode: Mode | undefined
+  const recoverFromContextOverflow = async (
+    value: unknown,
+  ): Promise<boolean> => {
+    if (signal.aborted) return false
+    const providerError = normalizeCompactionError(
+      value,
+      "Provider context window exceeded",
+    )
+    host.emit({
+      type: "error",
+      error: providerError.message,
+      fatal: false,
+    })
+
+    if (config.summarization?.auto === false) {
+      terminalError = new Error(
+        "The provider reported a context overflow, but automatic compaction is disabled. " +
+        "Run Condense manually, reduce the input, or start a new session.",
+        { cause: providerError },
+      )
+      host.emit({
+        type: "error",
+        error: terminalError.message,
+        fatal: true,
+      })
+      return false
+    }
+    if (compactedSinceLastProviderSuccess) {
+      terminalError = new Error(
+        "The provider still reports a context overflow after compaction. " +
+        "Nexus stopped before repeating the paid compaction call.",
+        { cause: providerError },
+      )
+      host.emit({
+        type: "error",
+        error: terminalError.message,
+        fatal: true,
+      })
+      return false
+    }
+
+    const result = await runCompactionLifecycle(
+      session,
+      activeClient,
+      config,
+      host,
+      compaction,
+      signal,
+      {
+        trigger: "context_overflow",
+        forceSummary: true,
+        fatalOnFailure: true,
+        systemPromptText: lastBuiltSystemPrompt,
+        toolsDefinitionTokens,
+        durableContext: durableRunContext,
+        orchestrationRuntime,
+      },
+    )
+    if (result.status === "failed") {
+      if (result.reason !== "aborted" || !signal.aborted) {
+        terminalError = result.error
+      }
+      return false
+    }
+    if (result.status !== "compacted") {
+      terminalError = new Error(
+        `Context-overflow compaction could not produce a summary (${result.reason}).`,
+        { cause: providerError },
+      )
+      host.emit({
+        type: "error",
+        error: terminalError.message,
+        fatal: true,
+      })
+      return false
+    }
+    compactionSuccessCount += 1
+    compactedSinceLastProviderSuccess = true
+    if (mode === "plan") planSparseReminderAfterCompaction = true
+    return true
+  }
   let lastRunContextFingerprint = ""
   const accessedMemoryIds = new Set<string>()
-  await getOrchestrationRuntime(host.cwd)
-    .then((runtime) => importLegacyMemoryFiles({ cwd: host.cwd, config, runtime }))
-    .catch((error) => {
+  await importLegacyMemoryFiles({
+    cwd: host.cwd,
+    config,
+    runtime: orchestrationRuntime,
+  }).catch((error) => {
       console.warn("[nexus] Legacy memory import failed:", error)
-    })
+  })
   while (!signal.aborted) {
     loopIterations++
+    await acceptAgentMailboxMessages(mailbox, session)
+    commitPendingToolActivations()
     const toolCallsAtStartOfIteration = executedToolCallsTotal
-
-    if (loopIterations === 1) {
-      void runPluginHooks(host.cwd, host, config, "instructions_loaded", {
-        sessionId: session.id,
-        mode,
-        rulesCharCount: rulesContent.length,
-        cwd: host.cwd,
-      }).catch(() => undefined)
-    }
 
     if (loopIterations > maxIterations) {
       if (!forceFinalAnswerNext) {
+        terminalError = new Error(
+          `Agent loop stopped after ${maxIterations} iterations in ${mode} mode (safety limit).`,
+        )
         host.emit({
           type: "error",
-          error: `Agent loop stopped after ${maxIterations} iterations in ${mode} mode (safety limit).`,
+          error: terminalError.message,
           fatal: true,
         })
         break
@@ -565,16 +862,20 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     const limitTokens = rollingCtx.limitTokens
     const usedTokens = rollingCtx.usedTokens
     const contextPercent = rollingCtx.percent
-    const runtime = await getOrchestrationRuntime(host.cwd)
+    const runtime = orchestrationRuntime
     const latestUserTaskText = getLatestUserTextForPrompt(session)
     const memoryQuery = [taskDesc, latestUserTaskText, mentionsContext ?? ""]
       .filter((item) => item.trim().length > 0)
       .join("\n")
     const memoryCandidates = await runtime.listMemories().catch(() => [])
+    const accessibleTeamNames = config.memory?.teamMemoryEnabled === false
+      ? []
+      : await runtime.listTeamNamesForSession(session.id).catch(() => [])
     const memories = selectRelevantMemories(
       filterPromptMemoryCandidates(memoryCandidates, {
         sessionId: session.id,
         includeTeam: config.memory?.teamMemoryEnabled !== false,
+        teamNames: accessibleTeamNames,
       }),
       memoryQuery,
       8,
@@ -587,7 +888,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       await runtime.recordMemoryAccess(newlyAccessedMemoryIds).catch(() => [])
     }
     const activeBackgroundTasks = await runtime.listBackgroundTasks()
-      .then((tasks) => tasks.filter((task) => task.status === "running" || task.status === "pending"))
+      .then((tasks) => tasks.filter(
+        (task) =>
+          task.sessionId === session.id &&
+          (task.status === "running" || task.status === "pending"),
+      ))
       .catch(() => [])
     const backgroundTaskSummary = activeBackgroundTasks
           .filter((task) => task.status === "running" || task.status === "pending")
@@ -620,12 +925,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       host.emit(runContext)
       lastRunContextFingerprint = runContextFingerprint
     }
-    const mergedBackgroundSummary = [getBackgroundBashJobsForPrompt(host.cwd), backgroundTaskSummary]
-      .filter((item) => item.trim().length > 0)
-      .join("\n")
+    const mergedBackgroundSummary = backgroundTaskSummary
     const sessionMemoryText =
       config.memory?.sessionMemoryEnabled !== false
-        ? await readSessionMemoryFile(session.id, host.cwd).catch(() => "")
+        ? await readSessionMemoryFile(session.id, host.cwd).catch((error) => {
+            if (!sessionMemoryReadWarned) {
+              console.warn("[nexus] Session memory read failed; continuing without it:", error)
+              sessionMemoryReadWarned = true
+            }
+            return ""
+          })
         : ""
     const promptCtx: PromptContext = {
       mode, // same mode used for tool resolution above; system prompt block and Environment "Current mode" come from this
@@ -683,7 +992,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     // same threshold as the UI — session-only estimates were too low and caused API 400s.
     const sumTh = config.summarization?.threshold ?? 0.8
     const limitCtx = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
-    if (limitCtx > 0) {
+    if (config.summarization?.auto !== false && limitCtx > 0) {
       const roll = computeContextUsageMetrics({
         sessionMessages: session.messages,
         systemPromptText: systemPrompt,
@@ -701,22 +1010,60 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           configuredContextWindow: config.model.contextWindow,
         })
         if (compaction.isOverflow(roll2.usedTokens, limitCtx, sumTh)) {
-          host.emit({ type: "compaction_start" })
-          await handleCompaction(session, activeClient, config, host, compaction, signal, {
-            systemPromptText: systemPrompt,
-            toolsDefinitionTokens,
-            durableContext: durableRunContext,
-          })
+          if (compactedSinceLastProviderSuccess) {
+            terminalError = new Error(
+              "Context remains above the automatic compaction threshold after a successful compaction. " +
+              "Nexus stopped before repeating the summarizer call.",
+            )
+            host.emit({
+              type: "error",
+              error: terminalError.message,
+              fatal: true,
+            })
+            break
+          }
+          const result = await runCompactionLifecycle(
+            session,
+            activeClient,
+            config,
+            host,
+            compaction,
+            signal,
+            {
+              trigger: "automatic",
+              forceSummary: true,
+              fatalOnFailure: true,
+              systemPromptText: systemPrompt,
+              toolsDefinitionTokens,
+              durableContext: durableRunContext,
+              orchestrationRuntime,
+            },
+          )
+          if (result.status === "failed") {
+            terminalError = result.error
+            break
+          }
+          if (result.status !== "compacted") {
+            terminalError = new Error(
+              `Automatic compaction could not reduce the overflowing context (${result.reason}).`,
+            )
+            host.emit({
+              type: "error",
+              error: terminalError.message,
+              fatal: true,
+            })
+            break
+          }
+          compactionSuccessCount += 1
+          compactedSinceLastProviderSuccess = true
           if (mode === "plan") planSparseReminderAfterCompaction = true
-          host.emit({ type: "compaction_end" })
-          loopIterations--
           continue
         }
       }
     }
 
     // 4. Build LLM tool definitions
-    const llmTools: LLMToolDef[] = (isFinalIteration ? [] : resolvedToolsForLlm).map(t => ({
+    const llmTools: LLMToolDef[] = (isFinalIteration ? [] : getResolvedToolsForLlm()).map(t => ({
       name: t.name,
       description: t.description,
       parameters: t.parameters,
@@ -764,6 +1111,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       forceEmptyResponseRecoveryPromptNext = false
     }
     // 6. Start streaming
+    const compactionSuccessCountAtProviderStart = compactionSuccessCount
     const newMessageId = session.addMessage({
       role: "assistant",
       content: "",
@@ -785,6 +1133,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     attemptedCompletionThisIteration = false
     let finishReason: string | undefined
     let fatalStreamError = false
+    let streamedContextOverflowError: Error | undefined
     /** When the AI SDK rejects tool-call args before execution, we inject a user hint and must not treat the turn as a normal text-only stop. */
     let sdkInvalidToolArgsRecovery = false
     let budgetExceededThisIteration = false
@@ -863,13 +1212,24 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
         // CRITICAL: update the tool part in the session with the result
         // This is what buildMessagesFromSession reads to include in the next LLM call
-        const spillFlush = spillPathFromToolMetadata(result.metadata)
+        const artifactFlush = artifactCapabilityFromToolMetadata(result.metadata)
         session.updateToolPart(newMessageId, partId, {
           status: result.success ? "completed" : "error",
           output: result.output,
           attachments: result.attachments,
           timeEnd: Date.now(),
-          ...(spillFlush ? { outputSpillPath: spillFlush } : {}),
+          ...(result.success && tc.toolName === "ToolSearch"
+            ? {
+                activatedToolNames:
+                  activatedToolNamesFromMetadata(result.metadata),
+              }
+            : {}),
+          ...(artifactFlush
+            ? {
+                outputArtifactId: artifactFlush.artifactId,
+                outputArtifactOwnerSessionId: artifactFlush.ownerSessionId,
+              }
+            : {}),
         })
 
         host.emit({
@@ -888,10 +1248,46 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         }
         executedToolThisIteration = true
         executedToolCallsTotal++
+        if ("stoppedByHook" in result && result.stoppedByHook) {
+          attemptedCompletionThisIteration = true
+        }
       }
 
       pendingReads.length = 0
     }
+
+    let mailboxInterrupted = false
+    let mailboxWatcherError: unknown
+    const providerMailboxAbort = new AbortController()
+    const providerSignal = linkedProviderSignal(
+      signal,
+      providerMailboxAbort.signal,
+    )
+    const mailboxWatcherAbort = new AbortController()
+    const mailboxWatcher = mailbox
+      ? Promise.resolve()
+          .then(() => mailbox.waitForInput(mailboxWatcherAbort.signal))
+          .then(() => {
+            if (
+              mailboxWatcherAbort.signal.aborted ||
+              signal.aborted
+            ) {
+              return
+            }
+            mailboxInterrupted = true
+            providerMailboxAbort.abort(
+              new DOMException(
+                "Provider sampling interrupted by delegated-agent input",
+                "AbortError",
+              ),
+            )
+          })
+          .catch((error) => {
+            if (mailboxWatcherAbort.signal.aborted) return
+            mailboxWatcherError = error
+            providerMailboxAbort.abort(error)
+          })
+      : undefined
 
     try {
       const maxTokens = 8192
@@ -908,7 +1304,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         messages,
         tools: llmTools,
         systemPrompt,
-        signal,
+        signal: providerSignal.signal,
         cacheableSystemBlocks: cacheableCount,
         promptCacheKey: session.id,
         maxTokens,
@@ -1059,23 +1455,20 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             if (await detectDoomLoop(session, toolName, toolInput)) {
               host.emit({ type: "doom_loop_detected", tool: toolName })
               const threshold = toolName === "Bash" ? DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND : DOOM_LOOP_THRESHOLD
-              const tty = typeof process !== "undefined" && process.stdin && process.stdin.isTTY
-              let proceed = false
-              if (tty) {
-                const doomAction: ApprovalAction = {
-                  type: "doom_loop",
-                  tool: toolName,
-                  description: `Potential infinite loop: "${toolName}" called ${threshold} times with same args. Continue anyway? [y]es [n]o (abort).`,
-                }
-                host.emit({ type: "tool_approval_needed", action: doomAction, partId })
-                const doomApproval = await Promise.race([
-                  host.showApprovalDialog(doomAction),
-                  new Promise<PermissionResult>((resolve) =>
-                    setTimeout(() => resolve({ approved: false }), 60_000)
-                  ),
-                ]).catch((): PermissionResult => ({ approved: false }))
-                proceed = doomApproval.approved
+              const doomAction: ApprovalAction = {
+                type: "doom_loop",
+                tool: toolName,
+                description: `Potential infinite loop: "${toolName}" called ${threshold} times with same args. Continue anyway?`,
               }
+              const proceed = await requestHostApproval(
+                host,
+                doomAction,
+                partId,
+                { signal },
+              ).then(
+                (approval) => approval.approved,
+                () => false,
+              )
               if (!proceed) {
                 const errMsg =
                   toolName === "Bash"
@@ -1111,6 +1504,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             } else {
               // Sequential: flush pending reads first
               await flushPendingReads()
+              if (attemptedCompletionThisIteration) break streamLoop
 
               // Plan mode: OpenClaude-style — plan must come from completed Write/Edit in this session (or same-turn write part).
               if (toolName === "PlanExit" && mode === "plan") {
@@ -1145,13 +1539,24 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 "native",
               )
 
-              const spillLoop = spillPathFromToolMetadata(result.metadata)
+              const artifactLoop = artifactCapabilityFromToolMetadata(result.metadata)
               session.updateToolPart(newMessageId, partId, {
                 status: result.success ? "completed" : "error",
                 output: result.output,
                 attachments: result.attachments,
                 timeEnd: Date.now(),
-                ...(spillLoop ? { outputSpillPath: spillLoop } : {}),
+                ...(result.success && toolName === "ToolSearch"
+                  ? {
+                      activatedToolNames:
+                        activatedToolNamesFromMetadata(result.metadata),
+                    }
+                  : {}),
+                ...(artifactLoop
+                  ? {
+                      outputArtifactId: artifactLoop.artifactId,
+                      outputArtifactOwnerSessionId: artifactLoop.ownerSessionId,
+                    }
+                  : {}),
                 ...(result.success && (toolName === "Write" || toolName === "Edit")
                   ? {
                       path: extractWriteTargetPath(toolName, toolInput),
@@ -1201,9 +1606,15 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               lastToolName = toolName
               executedToolThisIteration = true
               executedToolCallsTotal++
+              if (toolName === "EnterPlanMode" && result.success) {
+                requestedNextMode = "plan"
+                await flushPendingReads()
+                break streamLoop
+              }
               if (result.stoppedByHook) {
                 attemptedCompletionThisIteration = true
-                break
+                await flushPendingReads()
+                break streamLoop
               }
               if ((result.metadata as { questionRequest?: boolean } | undefined)?.questionRequest) {
                 attemptedCompletionThisIteration = true
@@ -1256,39 +1667,94 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 host.emit({ type: "error", error: message, fatal: false })
                 break
               }
+              if (!isRetrying && isContextOverflowError(message)) {
+                streamedContextOverflowError = err
+                break
+              }
               host.emit({ type: "error", error: message, fatal: !isRetrying })
               if (!isRetrying) {
                 fatalStreamError = true
+                terminalError = err
               }
             }
             break
         }
+        if (streamedContextOverflowError) {
+          await flushPendingReads()
+          break streamLoop
+        }
         if (budgetExceededThisIteration) {
+          await flushPendingReads()
+          break streamLoop
+        }
+        if (attemptedCompletionThisIteration) {
+          await flushPendingReads()
+          break streamLoop
+        }
+        if (mailboxInterrupted) {
+          // Tool executions receive the root signal, not the provider-only
+          // signal. Therefore a long tool reaches this boundary before mail is
+          // accepted, while sampling itself stops immediately.
           await flushPendingReads()
           break streamLoop
         }
       }
     } catch (err) {
       if (signal.aborted) break
-      const errMsg = err instanceof Error ? err.message : String(err)
-      host.emit({ type: "error", error: errMsg })
+      if (mailboxInterrupted) {
+        // The provider may throw its AbortError or simply close the stream.
+        // Either is an expected local sampling interruption.
+      } else {
+        const errMsg = err instanceof Error ? err.message : String(err)
 
-      // Check for context overflow error
-      if (isContextOverflowError(errMsg)) {
-        contextOverflowRetries++
-        if (contextOverflowRetries > MAX_CONTEXT_OVERFLOW_RETRIES) {
-          host.emit({ type: "error", error: "Context overflow could not be resolved after compaction. Stopping.", fatal: true })
+        // Check for context overflow error
+        if (isContextOverflowError(errMsg)) {
+          if (await recoverFromContextOverflow(err)) continue
           break
         }
-        host.emit({ type: "compaction_start" })
-        await handleCompaction(session, activeClient, config, host, compaction, signal, {
-          systemPromptText: lastBuiltSystemPrompt,
-          toolsDefinitionTokens,
-          aggressive: true,
-          durableContext: durableRunContext,
-        })
-        if (mode === "plan") planSparseReminderAfterCompaction = true
-        host.emit({ type: "compaction_end" })
+        terminalError =
+          err instanceof Error ? err : new Error(errMsg, { cause: err })
+        host.emit({ type: "error", error: errMsg, fatal: true })
+        break
+      }
+    } finally {
+      // Let a notification queued by the provider's final event win before
+      // closing the watcher; this seals the common final-response race.
+      await Promise.resolve()
+      mailboxWatcherAbort.abort()
+      await mailboxWatcher
+      providerSignal.dispose()
+    }
+
+    if (mailboxWatcherError) {
+      terminalError =
+        mailboxWatcherError instanceof Error
+          ? mailboxWatcherError
+          : new Error(String(mailboxWatcherError))
+      host.emit({
+        type: "error",
+        error: `Delegated-agent mailbox failed: ${terminalError.message}`,
+        fatal: true,
+      })
+      break
+    }
+
+    if (mailbox) {
+      // Parallel read calls and partial assistant content must be part of the
+      // checkpoint that precedes mailbox acknowledgement.
+      await flushPendingReads()
+      flushAssistantContent()
+      const acceptedMailboxMessages =
+        await acceptAgentMailboxMessages(mailbox, session)
+      if (mailboxInterrupted || acceptedMailboxMessages > 0) {
+        await session.save()
+        emitContextUsage()
+        continue
+      }
+    }
+
+    if (streamedContextOverflowError) {
+      if (await recoverFromContextOverflow(streamedContextOverflowError)) {
         continue
       }
       break
@@ -1357,13 +1823,24 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             "textual",
           )
 
-          const spillTextual = spillPathFromToolMetadata(result.metadata)
+          const artifactTextual = artifactCapabilityFromToolMetadata(result.metadata)
           session.updateToolPart(newMessageId, partId, {
             status: result.success ? "completed" : "error",
             output: result.output,
             attachments: result.attachments,
             timeEnd: Date.now(),
-            ...(spillTextual ? { outputSpillPath: spillTextual } : {}),
+            ...(result.success && call.toolName === "ToolSearch"
+              ? {
+                  activatedToolNames:
+                    activatedToolNamesFromMetadata(result.metadata),
+                }
+              : {}),
+            ...(artifactTextual
+              ? {
+                  outputArtifactId: artifactTextual.artifactId,
+                  outputArtifactOwnerSessionId: artifactTextual.ownerSessionId,
+                }
+              : {}),
             ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
               ? {
                   path: extractWriteTargetPath(call.toolName, call.toolInput),
@@ -1413,6 +1890,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           lastToolName = call.toolName
           executedToolThisIteration = true
           executedToolCallsTotal++
+          if (call.toolName === "EnterPlanMode" && result.success) {
+            requestedNextMode = "plan"
+            break
+          }
+          if (result.stoppedByHook) {
+            attemptedCompletionThisIteration = true
+            break
+          }
           if ((result.metadata as { questionRequest?: boolean } | undefined)?.questionRequest) {
             attemptedCompletionThisIteration = true
             break
@@ -1426,8 +1911,19 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       }
     }
 
+    if (!fatalStreamError) {
+      // A completed provider turn proves the current post-compaction context
+      // was accepted. Preserve the guard only when a manual Condense happened
+      // inside this very provider turn.
+      compactedSinceLastProviderSuccess =
+        compactionSuccessCount !== compactionSuccessCountAtProviderStart
+    }
+
     // Stop on fatal stream errors; without this the outer loop can repeat forever.
     if (fatalStreamError) {
+      break
+    }
+    if (requestedNextMode) {
       break
     }
     if (budgetExceededThisIteration) {
@@ -1470,8 +1966,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     if (
       attemptedCompletionThisIteration ||
       (mandatoryEnd && lastToolName === mandatoryEnd)
-    )
+    ) {
+      if (await continueForMailboxBeforeCompletion()) continue
       break
+    }
     if (finishReason === "stop" && !executedToolThisIteration) {
       if (sdkInvalidToolArgsRecovery) {
         flushAssistantContent()
@@ -1480,7 +1978,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         continue
       }
       let mandatoryTool = MANDATORY_END_TOOL[mode]
-      if (!mandatoryTool) break
+      if (!mandatoryTool) {
+        if (await continueForMailboxBeforeCompletion()) continue
+        break
+      }
       // Revision pass: user asked to change the plan — never inject PlanExit on a text-only stop; run another outer iteration so the model can edit .nexus/plans first.
       if (mode === "plan" && mandatoryTool === "PlanExit" && lastUserMessageRequestsPlanRevision(session)) {
         flushAssistantContent()
@@ -1548,6 +2049,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           attemptedCompletionThisIteration = true
         }
       }
+      if (await continueForMailboxBeforeCompletion()) continue
       break
     }
     if (signal.aborted) break
@@ -1561,18 +2063,60 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       configuredContextWindow: config.model.contextWindow,
     })
     const limitEnd = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
-    if (limitEnd > 0 && compaction.isOverflow(metricsEnd.usedTokens, limitEnd, sumThEnd)) {
-      host.emit({ type: "compaction_start" })
-      await handleCompaction(session, activeClient, config, host, compaction, signal, {
-        systemPromptText: lastBuiltSystemPrompt,
-        toolsDefinitionTokens,
-        durableContext: durableRunContext,
-      })
+    if (
+      config.summarization?.auto !== false &&
+      limitEnd > 0 &&
+      compaction.isOverflow(metricsEnd.usedTokens, limitEnd, sumThEnd)
+    ) {
+      if (compactedSinceLastProviderSuccess) {
+        terminalError = new Error(
+          "Context is still above the automatic compaction threshold after compaction. " +
+          "Nexus stopped before repeating the summarizer call.",
+        )
+        host.emit({
+          type: "error",
+          error: terminalError.message,
+          fatal: true,
+        })
+        break
+      }
+      const result = await runCompactionLifecycle(
+        session,
+        activeClient,
+        config,
+        host,
+        compaction,
+        signal,
+        {
+          trigger: "automatic",
+          forceSummary: true,
+          fatalOnFailure: true,
+          systemPromptText: lastBuiltSystemPrompt,
+          toolsDefinitionTokens,
+          durableContext: durableRunContext,
+          orchestrationRuntime,
+        },
+      )
+      if (result.status === "failed") {
+        terminalError = result.error
+        break
+      }
+      if (result.status !== "compacted") {
+        terminalError = new Error(
+          `Automatic compaction could not reduce the overflowing context (${result.reason}).`,
+        )
+        host.emit({
+          type: "error",
+          error: terminalError.message,
+          fatal: true,
+        })
+        break
+      }
+      compactionSuccessCount += 1
+      compactedSinceLastProviderSuccess = true
       if (mode === "plan") planSparseReminderAfterCompaction = true
-      host.emit({ type: "compaction_end" })
     }
 
-    contextOverflowRetries = 0
     await session.save()
     emitContextUsage()
 
@@ -1603,6 +2147,31 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
   }
 
+  // Error, abort, or mode-transition exits do not consume new input, but they
+  // must stop being advertised as live before the final save/hooks begin.
+  mailbox?.sealForCompletion()
+
+  if (terminalError) {
+    try {
+      await session.save()
+      host.emit({ type: "session_saved", sessionId: session.id })
+      emitContextUsage()
+    } catch (saveError) {
+      throw new AggregateError(
+        [terminalError, saveError],
+        "Agent run failed and its partial session could not be saved",
+      )
+    }
+    throw terminalError
+  }
+
+  if (signal.aborted) {
+    await session.save()
+    host.emit({ type: "session_saved", sessionId: session.id })
+    emitContextUsage()
+    return
+  }
+
   if (!signal.aborted && lastAssistantMessageId && !doneEmitted) {
     const turnCompleteHookResults = await runPluginHooks(
       host.cwd,
@@ -1613,25 +2182,34 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         mode,
         sessionId: session.id,
         messageId: lastAssistantMessageId,
-        completed: attemptedCompletionThisIteration || lastToolName === MANDATORY_END_TOOL[mode],
+        completed: true,
         lastToolName,
       },
     ).catch(() => [])
     await recordPluginHookOutputs(session, host, "turn-complete-hook", turnCompleteHookResults, {
       mode,
     })
-    void runAutoMemoryDreamIfDue({
-      cwd: host.cwd,
-      config,
-      client: activeClient,
-      signal,
-    }).catch(() => undefined)
-    doneEmitted = true
     // When mandatory end tool was executed, clear todo so it's removed from session.
-    if (attemptedCompletionThisIteration || lastToolName === MANDATORY_END_TOOL[mode]) {
+    const mandatoryEndTool = MANDATORY_END_TOOL[mode]
+    if (
+      attemptedCompletionThisIteration ||
+      (Boolean(mandatoryEndTool) && lastToolName === mandatoryEndTool)
+    ) {
       session.updateTodo("")
       host.emit({ type: "todo_updated", todo: "" })
     }
+    await session.save()
+    host.emit({ type: "session_saved", sessionId: session.id })
+    const autoDream = scheduleAutoMemoryDream({
+      cwd: host.cwd,
+      config,
+      client: activeClient,
+      services,
+    })
+    void autoDream?.promise.catch((error) => {
+      console.warn("[nexus] Auto-memory consolidation failed:", error)
+    })
+    doneEmitted = true
     emitContextUsage()
     host.emit({ type: "done", messageId: lastAssistantMessageId })
   }
@@ -1698,15 +2276,112 @@ function parseLooseValue(value: string): unknown {
 
 
 type HandleCompactionOpts = {
+  trigger: "manual" | "automatic" | "context_overflow"
+  /** Manual and overflow recovery must summarize even below the proactive threshold. */
+  forceSummary: boolean
+  /** Whether a failed lifecycle should be surfaced as a fatal run error. */
+  fatalOnFailure: boolean
   /** Full next-request size (session + system + tools); required for accurate overflow vs UI/API limits. */
   systemPromptText?: string
   toolsDefinitionTokens?: number
-  /** When true, force a full summary pass after prune/microcompact even if our local estimate is slightly under. */
-  aggressive?: boolean
   durableContext?: {
     mode: string
     memoryCitations: string[]
     taskIds: string[]
+  }
+  orchestrationRuntime: OrchestrationRuntime
+}
+
+type CompactionExecutionResult =
+  | CompactionResult
+  | {
+      status: "skipped"
+      reason: "auto_disabled" | "below_threshold"
+    }
+  | {
+      status: "failed"
+      reason:
+        | "persistence_error"
+        | "internal_error"
+        | "no_summary_candidate"
+      error: Error
+    }
+
+async function runCompactionLifecycle(
+  session: ISession,
+  client: LLMClient,
+  config: NexusConfig,
+  host: IHost,
+  compaction: SessionCompaction,
+  signal: AbortSignal,
+  opts: HandleCompactionOpts,
+): Promise<CompactionExecutionResult> {
+  if (
+    opts.trigger !== "manual" &&
+    config.summarization?.auto === false
+  ) {
+    return { status: "skipped", reason: "auto_disabled" }
+  }
+
+  host.emit({ type: "compaction_start" })
+  try {
+    let result: CompactionExecutionResult
+    try {
+      result = await handleCompaction(
+        session,
+        client,
+        config,
+        host,
+        compaction,
+        signal,
+        opts,
+      )
+    } catch (error) {
+      result = {
+        status: "failed",
+        reason: "internal_error",
+        error: normalizeCompactionError(
+          error,
+          "Compaction failed unexpectedly",
+        ),
+      }
+    }
+    if (
+      opts.forceSummary &&
+      result.status === "skipped" &&
+      result.reason !== "auto_disabled" &&
+      result.reason !== "below_threshold"
+    ) {
+      result = {
+        status: "failed",
+        reason: "no_summary_candidate",
+        error: new Error(
+          `Compaction could not produce a summary (${result.reason}).`,
+        ),
+      }
+    }
+
+    if (result.status === "failed") {
+      const label =
+        opts.trigger === "manual"
+          ? "Manual compaction"
+          : opts.trigger === "context_overflow"
+            ? "Context-overflow compaction"
+            : "Automatic compaction"
+      host.emit({
+        type: "error",
+        error: `${label} failed: ${result.error.message}`.slice(0, 2_000),
+        fatal:
+          result.reason === "aborted"
+            ? false
+            : opts.fatalOnFailure,
+      })
+    }
+    return result
+  } finally {
+    // `compaction_end` closes UI/runtime busy state even on failure. The
+    // paired error event above carries the actual outcome.
+    host.emit({ type: "compaction_end" })
   }
 }
 
@@ -1717,57 +2392,98 @@ async function handleCompaction(
   host: IHost,
   compaction: SessionCompaction,
   signal: AbortSignal,
-  opts?: HandleCompactionOpts,
-) {
-  try {
-    const previousSummaryCount = session.messages.filter((message) => message.summary).length
+  opts: HandleCompactionOpts,
+): Promise<CompactionExecutionResult> {
+  // First try prune (no LLM call needed).
+  compaction.prune(session)
+  compaction.microcompact(
+    session,
+    config.summarization?.keepRecentMessages ?? 8,
+  )
 
-    // First try prune (no LLM call needed)
-    compaction.prune(session)
-    compaction.microcompact(session, config.summarization?.keepRecentMessages ?? 8)
-
-    const contextLimit = getContextWindowLimit(client.modelId, config.model.contextWindow)
-    const threshold = config.summarization?.threshold ?? 0.8
-    const metrics = computeContextUsageMetrics({
-      sessionMessages: session.messages,
-      systemPromptText: opts?.systemPromptText,
-      toolsDefinitionTokens: opts?.toolsDefinitionTokens,
-      modelId: client.modelId,
-      configuredContextWindow: config.model.contextWindow,
-    })
-    const shouldForceSummary =
-      opts?.aggressive === true ||
-      (contextLimit > 0 && compaction.isOverflow(metrics.usedTokens, contextLimit, threshold))
-    if (shouldForceSummary) {
-      await compaction.compact(session, client, signal, {
-        keepRecentMessages: config.summarization?.keepRecentMessages ?? 8,
-        force: opts?.aggressive === true,
-        durableContext: opts?.durableContext,
-      })
-
-      const nextSummaryCount = session.messages.filter((message) => message.summary).length
-      if (nextSummaryCount > previousSummaryCount) {
-        const latestSummary = [...session.messages]
-          .reverse()
-          .find((message) => message.summary && typeof message.content === "string")
-        if (latestSummary && typeof latestSummary.content === "string") {
-          const runtime = await getOrchestrationRuntime(host.cwd)
-          const extracted = extractMemoriesFromCompactionSummary(latestSummary.content, session.id)
-          for (const memory of extracted) {
-            await runtime.upsertMemoryByTitle(memory).catch(() => null)
-          }
-          await appendCompactionSnippetToSessionMemory(
-            session.id,
-            host.cwd,
-            latestSummary.content,
-            config.memory?.sessionMemoryMaxChars ?? 48_000,
-          ).catch(() => null)
-        }
-      }
-    }
-  } catch (err) {
-    console.warn("[nexus] Compaction failed:", err)
+  const contextLimit = getContextWindowLimit(
+    client.modelId,
+    config.model.contextWindow,
+  )
+  const threshold = config.summarization?.threshold ?? 0.8
+  const metrics = computeContextUsageMetrics({
+    sessionMessages: session.messages,
+    systemPromptText: opts.systemPromptText,
+    toolsDefinitionTokens: opts.toolsDefinitionTokens,
+    modelId: client.modelId,
+    configuredContextWindow: config.model.contextWindow,
+  })
+  const shouldSummarize =
+    opts.forceSummary ||
+    (contextLimit > 0 &&
+      compaction.isOverflow(metrics.usedTokens, contextLimit, threshold))
+  if (!shouldSummarize) {
+    return { status: "skipped", reason: "below_threshold" }
   }
+
+  const result = await compaction.compact(session, client, signal, {
+    keepRecentMessages: config.summarization?.keepRecentMessages ?? 8,
+    // Once the caller has established pressure (or the user explicitly ran
+    // Condense), summarize even a short/one-message active window.
+    force: true,
+    durableContext: opts.durableContext,
+  })
+  if (result.status !== "compacted") return result
+
+  // The next provider attempt must never rely on a summary that exists only
+  // in RAM. Codex persists replacement history before resuming; Nexus keeps
+  // the evidence-preserving JSONL transcript and durably appends the summary.
+  try {
+    await session.save()
+  } catch (error) {
+    return {
+      status: "failed",
+      reason: "persistence_error",
+      error: normalizeCompactionError(
+        error,
+        "Compaction summary could not be persisted",
+      ),
+    }
+  }
+
+  const summaryMessage = session.messages.find(
+    (message) =>
+      message.id === result.summaryMessageId &&
+      message.summary &&
+      typeof message.content === "string",
+  )
+  if (summaryMessage && typeof summaryMessage.content === "string") {
+    const runtime = opts.orchestrationRuntime
+    const extracted = extractMemoriesFromCompactionSummary(
+      summaryMessage.content,
+      session.id,
+    )
+    for (const memory of extracted) {
+      await runtime.upsertMemoryByTitle(memory).catch((error) => {
+        console.warn("[nexus] Compaction memory projection failed:", error)
+        return null
+      })
+    }
+    await appendCompactionSnippetToSessionMemory(
+      session.id,
+      host.cwd,
+      summaryMessage.content,
+      config.memory?.sessionMemoryMaxChars ?? 48_000,
+    ).catch((error) => {
+      console.warn("[nexus] Compaction session-memory append failed:", error)
+      return null
+    })
+  }
+  return result
+}
+
+function normalizeCompactionError(
+  value: unknown,
+  fallbackMessage: string,
+): Error {
+  if (value instanceof Error) return value
+  if (typeof value === "string" && value.trim()) return new Error(value)
+  return new Error(fallbackMessage)
 }
 
 /**
@@ -1909,7 +2625,14 @@ function toolPartToLlmResult(
 } {
   let result: string
   if (tp.compacted) {
-    result = (tp.output ?? "").trim() || "[Old tool result content cleared]"
+    const artifactId =
+      tp.outputArtifactId ||
+      (opts?.sessionId
+        ? getToolOutputSpill(opts.sessionId, tp.id)?.artifactId
+        : undefined)
+    result = artifactId
+      ? `[Old tool result content cleared from active context. Use ToolOutputRead with artifact_id "${artifactId}".]`
+      : "[Old tool result content cleared from active context]"
   } else {
     result = tp.output ?? ""
   }
@@ -1920,12 +2643,15 @@ function toolPartToLlmResult(
     tp.status === "completed" &&
     !tp.compacted
   ) {
-    let spill = tp.outputSpillPath
-    if (!spill && opts?.sessionId) {
-      spill = getToolOutputSpill(opts.sessionId, tp.id)?.absolutePath
-    }
-    if (spill && !result.includes(spill)) {
-      result = `${result}\n\n[Full tool output on disk: ${spill}]`
+    const artifactId =
+      tp.outputArtifactId ||
+      (opts?.sessionId
+        ? getToolOutputSpill(opts.sessionId, tp.id)?.artifactId
+        : undefined)
+    if (artifactId && !result.includes(artifactId)) {
+      result =
+        `${result}\n\n` +
+        `[Full tool output is available through ToolOutputRead with artifact_id "${artifactId}".]`
     }
   }
   return {
@@ -2028,7 +2754,7 @@ function buildMessagesFromSession(session: ISession, llmOpts?: BuildSessionLlmOp
     if (msg.summary) {
       messages.push({
         role: "user",
-        content: `<conversation_summary>\n${typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)}\n</conversation_summary>`,
+        content: formatConversationSummaryForModel(msg.content),
       })
       continue
     }

@@ -1,5 +1,6 @@
 import type { IndexStatusKind, Mode, NexusConfigState, SessionMessage } from "../stores/chat.js"
 import type { MarketplaceItem, MarketplaceInstalledMetadata } from "./marketplace.js"
+import type { ApprovalActionView } from "./approval.js"
 
 /** Same shape as @nexuscode/core ModelsCatalog (used by extension host) */
 export interface ModelsCatalogFromCore {
@@ -39,6 +40,21 @@ export interface AutocompleteExtensionUiState {
   modelContextWindow: string
 }
 
+export interface SlashCommandCatalogItem {
+  name: string
+  description: string
+  kind: "custom" | "mcp"
+  argumentHint?: string
+}
+
+export interface ToolContributionDiagnosticView {
+  level: "warning" | "error"
+  code: string
+  source: string
+  message: string
+  toolName?: string
+}
+
 export interface WebviewState {
   /** Monotonically increasing sequence number for stateUpdate snapshots (ignore stale seq). */
   stateUpdateSeq?: number
@@ -61,6 +77,10 @@ export interface WebviewState {
   connectionState?: ServerConnectionState
   /** When connectionState === "error": message to show; user can retry by sending again. */
   serverConnectionError?: string
+  /** Persistent fail-closed workspace configuration error. */
+  configurationError?: string | null
+  /** Non-fatal diagnostics from the exact local custom/plugin tool generation. */
+  toolContributionDiagnostics?: ToolContributionDiagnosticView[]
   /** When true, server session has more messages above; show "Load older". */
   hasOlderMessages?: boolean
   /** True while older messages are being fetched. */
@@ -81,6 +101,11 @@ export interface WebviewState {
 
 export type ExtensionMessage = (
   | { type: "stateUpdate"; state: WebviewState }
+  | {
+      type: "messageSubmissionResult"
+      clientMessageId: string
+      accepted: boolean
+    }
   | { type: "agentEvent"; event: Record<string, unknown> }
   | { type: "sessionList"; sessions: Array<{ id: string; ts: number; title?: string; messageCount: number }> }
   | { type: "sessionListLoading"; loading: boolean }
@@ -89,7 +114,8 @@ export type ExtensionMessage = (
   | { type: "addToChatContent"; content: string }
   | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings"; settingsTab?: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"; settingsIntegTab?: "marketplace" | "rules-skills" | "mcp" | "rules-instructions" }
   | { type: "mcpServerStatus"; results: Array<{ name: string; status: "ok" | "error"; error?: string }> }
-  | { type: "pendingApproval"; partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } }
+  | { type: "slashCommandCatalog"; commands: SlashCommandCatalogItem[] }
+  | { type: "pendingApproval"; partId: string; action: ApprovalActionView }
   | { type: "confirmResult"; id: string; ok: boolean }
   | { type: "modelsCatalog"; catalog: ModelsCatalogFromCore }
   | { type: "agentPresets"; presets: AgentPresetFromCore[] }

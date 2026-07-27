@@ -1,9 +1,10 @@
 import { createOpenAI } from "@ai-sdk/openai"
 import type { ProviderConfig } from "../types.js"
 import { BaseLLMClient } from "./base.js"
+import { resolveProviderCredential } from "./credential-identity.js"
 
 export function createOpenAIClient(config: ProviderConfig) {
-  const apiKey = config.apiKey ?? process.env["OPENAI_API_KEY"] ?? ""
+  const apiKey = resolveProviderCredential(config).apiKey ?? ""
   const openai = createOpenAI({
     apiKey,
     baseURL: config.baseUrl,

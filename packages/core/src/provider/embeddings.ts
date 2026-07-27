@@ -4,6 +4,10 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google"
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock"
 import type { EmbeddingConfig } from "../types.js"
 import type { EmbeddingClient } from "./types.js"
+import {
+  normalizeAwsRegion,
+  resolveEmbeddingCredential,
+} from "./credential-identity.js"
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
@@ -12,47 +16,11 @@ const OPENROUTER_BASE = "https://openrouter.ai/api/v1"
  * When true, we should not create the embedding client (so nexus starts without vector; key can be added later).
  */
 export function isEmbeddingApiKeyMissing(config: EmbeddingConfig): boolean {
-  const hasKey = (...values: Array<string | undefined>) =>
-    values.some((value) => typeof value === "string" && value.trim() !== "")
-  switch (config.provider) {
-    case "ollama":
-    case "local":
-    case "bedrock":
-      return false
-    case "openai-compatible":
-      return !isLocalBaseUrl(config.baseUrl) && !hasKey(
-        config.apiKey,
-        process.env["OPENAI_API_KEY"],
-        process.env["OPENROUTER_API_KEY"],
-        process.env["NEXUS_API_KEY"],
-      )
-    case "openrouter":
-      return !hasKey(
-        config.apiKey,
-        process.env["OPENROUTER_API_KEY"],
-        process.env["NEXUS_API_KEY"],
-      )
-    case "openai":
-      return !hasKey(
-        config.apiKey,
-        process.env["OPENAI_API_KEY"],
-        process.env["NEXUS_API_KEY"],
-      )
-    case "google":
-      return !hasKey(
-        config.apiKey,
-        process.env["GOOGLE_GENERATIVE_AI_API_KEY"],
-        process.env["GEMINI_API_KEY"],
-        process.env["NEXUS_API_KEY"],
-      )
-    case "mistral":
-      return !hasKey(
-        config.apiKey,
-        process.env["MISTRAL_API_KEY"],
-        process.env["NEXUS_API_KEY"],
-      )
-    default:
-      return true
+  try {
+    resolveEmbeddingCredential(normalizeEmbeddingAlias(config))
+    return false
+  } catch {
+    return true
   }
 }
 
@@ -63,12 +31,9 @@ export function createEmbeddingClient(config: EmbeddingConfig): EmbeddingClient 
     case "openai-compatible":
       return new OpenAICompatibleEmbeddingClient(config)
     case "openrouter":
-      return new OpenAICompatibleEmbeddingClient({
+      return new OpenAICompatibleEmbeddingClient(normalizeEmbeddingAlias({
         ...config,
-        provider: "openai-compatible",
-        baseUrl: config.baseUrl ?? OPENROUTER_BASE,
-        apiKey: config.apiKey ?? process.env["OPENROUTER_API_KEY"] ?? config.apiKey,
-      })
+      }))
     case "ollama":
       return new OllamaEmbeddingClient(config)
     case "google":
@@ -89,11 +54,10 @@ class OpenAIEmbeddingClient implements EmbeddingClient {
   readonly dimensions: number
 
   constructor(config: EmbeddingConfig) {
+    const credential = resolveEmbeddingCredential(config)
     const openai = createOpenAI({
-      apiKey: config.apiKey
-        ?? process.env["OPENAI_API_KEY"]
-        ?? process.env["NEXUS_API_KEY"]
-        ?? "",
+      apiKey: credential.apiKey ?? "",
+      baseURL: config.baseUrl,
     })
     this.model = openai.embedding(config.model)
     this.dimensions = config.dimensions ?? 1536
@@ -110,18 +74,9 @@ class OpenAICompatibleEmbeddingClient implements EmbeddingClient {
   readonly dimensions: number
 
   constructor(config: EmbeddingConfig) {
-    const apiKey = config.apiKey
-      ?? process.env["OPENAI_API_KEY"]
-      ?? process.env["OPENROUTER_API_KEY"]
-      ?? process.env["NEXUS_API_KEY"]
-      ?? "dummy"
-    if (apiKey === "dummy" && !isLocalBaseUrl(config.baseUrl)) {
-      throw new Error(
-        "Missing API key for openai-compatible embeddings. Set embeddings.apiKey or OPENROUTER_API_KEY/NEXUS_API_KEY."
-      )
-    }
+    const credential = resolveEmbeddingCredential(config)
     const openai = createOpenAI({
-      apiKey,
+      apiKey: credential.apiKey ?? "",
       baseURL: config.baseUrl,
       compatibility: "compatible",
     })
@@ -140,9 +95,14 @@ class OllamaEmbeddingClient implements EmbeddingClient {
   readonly dimensions: number
 
   constructor(config: EmbeddingConfig) {
+    const baseUrl = normalizeOllamaBaseUrl(config.baseUrl)
+    const credential = resolveEmbeddingCredential({
+      ...config,
+      baseUrl,
+    })
     const openai = createOpenAI({
-      apiKey: "ollama",
-      baseURL: normalizeOllamaBaseUrl(config.baseUrl),
+      apiKey: credential.apiKey ?? "",
+      baseURL: baseUrl,
       compatibility: "compatible",
     })
     this.model = openai.embedding(config.model)
@@ -165,13 +125,10 @@ class GoogleEmbeddingClient implements EmbeddingClient {
   readonly dimensions: number
 
   constructor(config: EmbeddingConfig) {
+    const credential = resolveEmbeddingCredential(config)
     const google = createGoogleGenerativeAI({
-      apiKey:
-        config.apiKey ??
-        process.env["GOOGLE_GENERATIVE_AI_API_KEY"] ??
-        process.env["GEMINI_API_KEY"] ??
-        process.env["NEXUS_API_KEY"] ??
-        "",
+      apiKey: credential.apiKey ?? "",
+      baseURL: config.baseUrl,
     })
     this.model = google.embedding(config.model)
     this.dimensions = config.dimensions ?? 768
@@ -188,12 +145,9 @@ class MistralEmbeddingClient implements EmbeddingClient {
   readonly dimensions: number
 
   constructor(config: EmbeddingConfig) {
+    const credential = resolveEmbeddingCredential(config)
     const mistral = createOpenAI({
-      apiKey:
-        config.apiKey ??
-        process.env["MISTRAL_API_KEY"] ??
-        process.env["NEXUS_API_KEY"] ??
-        "",
+      apiKey: credential.apiKey ?? "",
       baseURL: config.baseUrl ?? "https://api.mistral.ai/v1",
       compatibility: "compatible",
     })
@@ -207,13 +161,27 @@ class MistralEmbeddingClient implements EmbeddingClient {
   }
 }
 
+function normalizeEmbeddingAlias(config: EmbeddingConfig): EmbeddingConfig {
+  if (config.provider !== "openrouter") return config
+  return {
+    ...config,
+    provider: "openai-compatible",
+    baseUrl: config.baseUrl ?? OPENROUTER_BASE,
+  }
+}
+
 class BedrockEmbeddingClient implements EmbeddingClient {
   private model: ReturnType<ReturnType<typeof createAmazonBedrock>["embedding"]>
   readonly dimensions: number
 
   constructor(config: EmbeddingConfig) {
+    const region = normalizeAwsRegion(
+      config.region ??
+        process.env["AWS_REGION"] ??
+        "us-east-1",
+    )
     const bedrock = createAmazonBedrock({
-      region: config.region ?? process.env["AWS_REGION"] ?? "us-east-1",
+      region,
     })
     this.model = bedrock.embedding(config.model)
     this.dimensions = config.dimensions ?? 1024
@@ -297,24 +265,4 @@ function featureHashEmbedding(text: string, dimensions: number): number[] {
   const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0))
   if (norm === 0) return vector
   return vector.map((value) => value / norm)
-}
-
-function isLocalBaseUrl(baseUrl: string | undefined): boolean {
-  if (!baseUrl) return false
-  try {
-    const parsed = new URL(
-      /^[a-z][a-z0-9+.-]*:\/\//i.test(baseUrl)
-        ? baseUrl
-        : `http://${baseUrl}`,
-    )
-    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "")
-    return (
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "::1" ||
-      hostname === "0.0.0.0"
-    )
-  } catch {
-    return false
-  }
 }

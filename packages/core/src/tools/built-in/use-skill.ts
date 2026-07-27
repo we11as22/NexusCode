@@ -6,6 +6,7 @@ import {
   loadSkillToolCatalogRows,
   resolveSkillBody,
   sampleSkillSiblingFiles,
+  SkillNameAmbiguityError,
 } from "../../skills/skill-tool-catalog.js"
 
 const schema = z.object({
@@ -27,7 +28,21 @@ export const useSkillTool: ToolDef<z.infer<typeof schema>> = {
   readOnly: true,
 
   async execute({ name }, ctx: ToolContext) {
-    const resolved = await resolveSkillBody(name, ctx.cwd, ctx.config)
+    let resolved
+    try {
+      resolved = await resolveSkillBody(name, ctx.cwd, ctx.config)
+    } catch (error) {
+      if (error instanceof SkillNameAmbiguityError) {
+        return {
+          success: false,
+          output: `${error.message} Use an exact skill name.`,
+          metadata: {
+            candidates: error.candidates,
+          },
+        }
+      }
+      throw error
+    }
     if (!resolved) {
       const rows = await loadSkillToolCatalogRows(ctx.cwd, ctx.config).catch(() => [])
       const available = rows.length > 0 ? rows.map((r) => r.name).slice(0, 30).join(", ") : "none discovered"
@@ -38,7 +53,11 @@ export const useSkillTool: ToolDef<z.infer<typeof schema>> = {
     }
 
     const base = pathToFileURL(resolved.skillDir).href
-    const files = await sampleSkillSiblingFiles(resolved.skillDir, ctx.signal)
+    const files = await sampleSkillSiblingFiles(
+      resolved.skillDir,
+      ctx.signal,
+      resolved.authority,
+    )
     const fileBlock = files.map((f) => `<file>${f}</file>`).join("\n")
 
     return {

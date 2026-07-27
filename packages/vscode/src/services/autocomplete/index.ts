@@ -1,7 +1,7 @@
 import * as vscode from "vscode"
 import { AutocompleteServiceManager } from "./AutocompleteServiceManager.js"
 import { ensureBackendForAutocomplete } from "./ensure-backend.js"
-import type { NexusConfig } from "@nexuscode/core"
+import type { NexusConfig, ProviderConfig } from "@nexuscode/core"
 
 /**
  * Register inline completion (ghost text) + status bar + code actions.
@@ -10,11 +10,16 @@ import type { NexusConfig } from "@nexuscode/core"
 export function registerAutocompleteProvider(
   context: vscode.ExtensionContext,
   getNexusConfig: () => NexusConfig | undefined,
+  resolveNexusModel?: () => Promise<ProviderConfig | undefined>,
 ): AutocompleteServiceManager {
   const dir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
   ensureBackendForAutocomplete(dir)
 
-  const autocompleteManager = new AutocompleteServiceManager(context, getNexusConfig)
+  const autocompleteManager = new AutocompleteServiceManager(
+    context,
+    getNexusConfig,
+    resolveNexusModel,
+  )
   context.subscriptions.push(autocompleteManager)
 
   context.subscriptions.push(

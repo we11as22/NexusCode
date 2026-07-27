@@ -55,13 +55,39 @@ export function createFakeHost(overrides: Partial<IHost> = {}): FakeHost {
     files,
     approvals,
     events,
-    async readFile(path) {
-      if (overrides.readFile) return overrides.readFile(path)
+    async resolvePath(requestedPath, access) {
+      if (overrides.resolvePath) {
+        return overrides.resolvePath(requestedPath, access)
+      }
+      return requestedPath.startsWith("/")
+        ? requestedPath
+        : `${cwd}/${requestedPath}`.replace(/\/+/g, "/")
+    },
+    async authorizeNetworkRequest(request) {
+      if (overrides.authorizeNetworkRequest) {
+        return overrides.authorizeNetworkRequest(request)
+      }
+      throw new Error(
+        `Fake host network authorization stub was not configured: ${request.url}`,
+      )
+    },
+    async readFile(path, options) {
+      if (overrides.readFile) return overrides.readFile(path, options)
       const content = files.get(path)
       if (content === undefined) {
         const error = new Error(`File not found: ${path}`) as NodeJS.ErrnoException
         error.code = "ENOENT"
         throw error
+      }
+      if (
+        typeof options?.maxBytes === "number" &&
+        Number.isSafeInteger(options.maxBytes) &&
+        options.maxBytes >= 0 &&
+        Buffer.byteLength(content, "utf8") > options.maxBytes
+      ) {
+        throw new Error(
+          `File exceeds the ${options.maxBytes}-byte fake-host read limit`,
+        )
       }
       return content
     },
@@ -89,10 +115,10 @@ export function createFakeHost(overrides: Partial<IHost> = {}): FakeHost {
         `Fake host command stub was not configured: ${command}`,
       )
     },
-    async showApprovalDialog(action): Promise<PermissionResult> {
+    async showApprovalDialog(action, signal): Promise<PermissionResult> {
       approvals.push(action)
       if (overrides.showApprovalDialog) {
-        return overrides.showApprovalDialog(action)
+        return overrides.showApprovalDialog(action, signal)
       }
       return { approved: false }
     },

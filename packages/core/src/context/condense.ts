@@ -4,9 +4,16 @@
  */
 export function estimateTokens(text: string): number {
   if (!text) return 0
-  // More accurate: average English word is ~1.3 tokens, average word length ~5 chars
-  // Simple approximation: chars / 4
-  return Math.ceil(text.length / 4)
+  // ASCII prose/code averages roughly four characters per token. Treat each
+  // non-ASCII code point as at least one token so CJK and emoji cannot make us
+  // compact only after the provider's hard context limit has already fired.
+  let ascii = 0
+  let nonAscii = 0
+  for (const codePoint of text) {
+    if (codePoint.codePointAt(0)! <= 0x7f) ascii += 1
+    else nonAscii += 1
+  }
+  return Math.ceil(ascii / 4 + nonAscii)
 }
 
 export function estimateMessagesTokens(messages: Array<{ content: string | unknown[] }>): number {

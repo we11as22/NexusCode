@@ -1,10 +1,9 @@
-import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
-import { glob } from "glob"
 import type { OrchestrationRuntime } from "../orchestration/runtime.js"
 import type { MemoryRecord, NexusConfig } from "../types.js"
 import { resolveAutoMemoryDirectory } from "./auto-memory.js"
+import { collectMemoryMarkdownFiles } from "./memory-files.js"
 
 const MAX_FILES = 100
 const MAX_FILE_CHARS = 24_000
@@ -13,6 +12,7 @@ const MAX_TOTAL_CHARS = 256_000
 export interface LegacyMemoryImportResult {
   imported: number
   unchanged: number
+  removed: number
   skipped: number
   truncated: boolean
 }
@@ -21,31 +21,15 @@ function safeTeamDirSegment(name: string): string {
   return encodeURIComponent(name.trim().slice(0, 120) || "default")
 }
 
-function within(base: string, candidate: string): boolean {
-  const relative = path.relative(base, candidate)
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
-}
-
-async function markdownFiles(base: string): Promise<string[]> {
-  const resolvedBase = await fs.realpath(base).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null
-    throw error
-  })
-  if (!resolvedBase) return []
-  const matches = await glob(path.join(resolvedBase, "**/*.md"), { nodir: true })
-  const files: string[] = []
-  for (const match of matches.sort()) {
-    const real = await fs.realpath(match).catch(() => null)
-    if (real && within(resolvedBase, real)) files.push(real)
-  }
-  return files
-}
-
 type Candidate = {
   scope: "project" | "team"
+  kind: MemoryRecord["kind"]
   title: string
   content: string
   source: MemoryRecord["source"]
+  author: MemoryRecord["author"]
+  trust: MemoryRecord["trust"]
+  confidence: number
   metadata: Record<string, unknown>
 }
 
@@ -61,31 +45,92 @@ export async function importLegacyMemoryFiles(input: {
   homeDir?: string
 }): Promise<LegacyMemoryImportResult> {
   const candidates: Candidate[] = []
-  const autoBase = resolveAutoMemoryDirectory(input.cwd, input.config)
-  if (autoBase) {
-    for (const file of await markdownFiles(autoBase)) {
-      candidates.push({
-        scope: "project",
-        title: `Legacy project memory: ${path.relative(autoBase, file).replaceAll("\\", "/")}`,
-        content: await fs.readFile(file, "utf8"),
-        source: { type: "legacy_file", uri: file, importedAt: Date.now() },
-        metadata: { legacyMemoryUri: file, legacyMemoryType: "auto" },
-      })
+  let scanTruncated = false
+  let scannedChars = 0
+  const addMemoryDirectory = async (
+    base: string,
+    build: (
+      file: Awaited<ReturnType<typeof collectMemoryMarkdownFiles>>["files"][number],
+    ) => Candidate,
+  ): Promise<boolean> => {
+    const remainingFiles = MAX_FILES - candidates.length
+    const remainingChars = MAX_TOTAL_CHARS - scannedChars
+    if (remainingFiles <= 0 || remainingChars <= 0) {
+      scanTruncated = true
+      return false
     }
+    const collection = await collectMemoryMarkdownFiles(base, {
+      maxDepth: 8,
+      maxFiles: remainingFiles,
+      maxEntries: 4_096,
+      maxFileBytes: MAX_FILE_CHARS,
+      maxTotalChars: remainingChars,
+    })
+    if (collection.omitted) scanTruncated = true
+    for (const file of collection.files) {
+      candidates.push(build(file))
+      scannedChars += file.content.length
+      if (file.truncated) scanTruncated = true
+    }
+    return !collection.omitted
   }
 
+  const autoBase = resolveAutoMemoryDirectory(input.cwd, input.config)
+  let autoScanComplete = input.config.memory?.autoMemoryEnabled === false
+  if (autoBase) {
+    autoScanComplete = await addMemoryDirectory(autoBase, (file) => {
+      const consolidated =
+        file.relativePath === "_nexus_consolidated_memory.md"
+      return {
+        scope: "project",
+        kind: consolidated ? "summary" : "fact",
+        title: consolidated
+          ? "Consolidated project memory"
+          : `Legacy project memory: ${file.relativePath}`,
+        content: file.content,
+        source: {
+          type: consolidated ? "compaction" : "legacy_file",
+          uri: file.path,
+          importedAt: Date.now(),
+        },
+        author: { type: consolidated ? "agent" : "external" },
+        trust: consolidated ? "agent" : "external",
+        confidence: consolidated ? 0.7 : 0.6,
+        metadata: { legacyMemoryUri: file.path, legacyMemoryType: "auto" },
+      }
+    })
+  }
+
+  let teamScanComplete = input.config.memory?.teamMemoryEnabled === false
   if (input.config.memory?.teamMemoryEnabled !== false) {
+    teamScanComplete = true
     const nexusHome = path.resolve(input.homeDir ?? path.join(os.homedir(), ".nexus"))
     for (const team of await input.runtime.listTeams()) {
       const base = path.join(nexusHome, "teams", safeTeamDirSegment(team.name), "memory")
-      for (const file of await markdownFiles(base)) {
-        candidates.push({
+      const complete = await addMemoryDirectory(base, (file) => ({
           scope: "team",
-          title: `Legacy team memory: ${team.name} / ${path.relative(base, file).replaceAll("\\", "/")}`,
-          content: await fs.readFile(file, "utf8"),
-          source: { type: "legacy_file", uri: file, importedAt: Date.now() },
-          metadata: { legacyMemoryUri: file, legacyMemoryType: "team", teamName: team.name },
-        })
+          kind: "fact",
+          title: `Legacy team memory: ${team.name} / ${file.relativePath}`,
+          content: file.content,
+          source: {
+            type: "legacy_file",
+            uri: file.path,
+            importedAt: Date.now(),
+          },
+          author: { type: "external" },
+          trust: "external",
+          confidence: 0.6,
+          metadata: {
+            legacyMemoryUri: file.path,
+            legacyMemoryType: "team",
+            teamName: team.name,
+          },
+        }))
+      if (!complete) teamScanComplete = false
+      if (candidates.length >= MAX_FILES || scannedChars >= MAX_TOTAL_CHARS) {
+        scanTruncated = true
+        teamScanComplete = false
+        break
       }
     }
   }
@@ -98,9 +143,10 @@ export async function importLegacyMemoryFiles(input: {
   )
   let imported = 0
   let unchanged = 0
+  let removed = 0
   let skipped = 0
   let totalChars = 0
-  let truncated = false
+  let truncated = scanTruncated
   for (const candidate of candidates) {
     if (imported + unchanged >= MAX_FILES) {
       skipped += 1
@@ -132,14 +178,48 @@ export async function importLegacyMemoryFiles(input: {
       scope: candidate.scope,
       title: candidate.title,
       content,
-      kind: "fact",
+      kind: candidate.kind,
       source: candidate.source,
-      author: { type: "external" },
-      trust: "external",
-      confidence: 0.6,
+      author: candidate.author,
+      trust: candidate.trust,
+      confidence: candidate.confidence,
       metadata: candidate.metadata,
     })
     imported += 1
   }
-  return { imported, unchanged, skipped, truncated }
+
+  const desiredUrisByType = {
+    auto: new Set<string>(),
+    team: new Set<string>(),
+  }
+  for (const candidate of candidates) {
+    const uri = candidate.source.uri
+    const type = candidate.metadata.legacyMemoryType
+    if (
+      uri &&
+      (type === "auto" || type === "team")
+    ) {
+      desiredUrisByType[type].add(uri)
+    }
+  }
+  for (const memory of existing) {
+    const type = memory.metadata?.legacyMemoryType
+    const uri = memory.metadata?.legacyMemoryUri
+    const projectionIsComplete =
+      type === "auto"
+        ? autoScanComplete
+        : type === "team"
+          ? teamScanComplete
+          : false
+    if (
+      projectionIsComplete &&
+      typeof uri === "string" &&
+      (type === "auto" || type === "team") &&
+      !desiredUrisByType[type].has(uri) &&
+      await input.runtime.deleteMemory(memory.id)
+    ) {
+      removed += 1
+    }
+  }
+  return { imported, unchanged, removed, skipped, truncated }
 }

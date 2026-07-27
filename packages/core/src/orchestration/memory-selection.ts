@@ -10,7 +10,16 @@ import { retrieveMemories, type RetrievedMemory } from "../memory/index.js"
 export function isMemoryAccessibleFromSession(
   memory: MemoryRecord,
   sessionId: string,
+  teamNames: readonly string[] = [],
 ): boolean {
+  if (memory.scope === "team") {
+    const teamName = memory.metadata?.teamName
+    return (
+      typeof teamName === "string" &&
+      teamName.length > 0 &&
+      teamNames.includes(teamName)
+    )
+  }
   if (!["session", "task", "agent"].includes(memory.scope)) return true
   return memory.metadata?.sessionId === sessionId
 }
@@ -20,12 +29,16 @@ export function filterPromptMemoryCandidates(
   options: {
     sessionId: string
     includeTeam: boolean
+    teamNames: readonly string[]
   },
 ): MemoryRecord[] {
   return memories.filter((memory) => {
-    if (!isMemoryAccessibleFromSession(memory, options.sessionId)) return false
-    if (memory.scope === "team") return options.includeTeam
-    return true
+    if (memory.scope === "team" && !options.includeTeam) return false
+    return isMemoryAccessibleFromSession(
+      memory,
+      options.sessionId,
+      options.teamNames,
+    )
   })
 }
 

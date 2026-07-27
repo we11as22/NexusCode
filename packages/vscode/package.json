@@ -268,6 +268,7 @@
         "nexuscode.serverUrl": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "NexusCode server URL (e.g. http://127.0.0.1:4097). When set, the extension uses the server for sessions and agent runs instead of running in-process."
         },
         "nexuscode.baseUrl": {
@@ -350,16 +351,6 @@
           "default": 0,
           "description": "Embeddings dimensions override (0 = provider default)"
         },
-        "nexuscode.toolClassifyThreshold": {
-          "type": "number",
-          "default": 20,
-          "description": "MCP server filtering threshold. When server count exceeds this, only selected servers are used. Higher = less filtering."
-        },
-        "nexuscode.skillClassifyThreshold": {
-          "type": "number",
-          "default": 20,
-          "description": "Skill filtering threshold. Higher = less filtering."
-        },
         "nexuscode.enableCheckpoints": {
           "type": "boolean",
           "default": true,
@@ -368,26 +359,31 @@
         "nexuscode.autoApproveRead": {
           "type": "boolean",
           "default": true,
+          "scope": "machine",
           "description": "Auto-approve file read operations (no dialog)"
         },
         "nexuscode.autoApproveWrite": {
           "type": "boolean",
           "default": false,
+          "scope": "machine",
           "description": "Auto-approve file write operations (no diff dialog)"
         },
         "nexuscode.autoApproveCommand": {
           "type": "boolean",
           "default": false,
+          "scope": "machine",
           "description": "Auto-approve terminal command execution"
         },
         "nexuscode.autoApproveMcp": {
           "type": "boolean",
           "default": false,
+          "scope": "machine",
           "description": "Auto-approve MCP tool calls"
         },
         "nexuscode.autoApproveBrowser": {
           "type": "boolean",
           "default": false,
+          "scope": "machine",
           "description": "Auto-approve browser/web actions"
         },
         "nexuscode.runCommandsInTerminal": {
@@ -398,26 +394,31 @@
         "nexuscode.autocomplete.enableAutoTrigger": {
           "type": "boolean",
           "default": true,
+          "scope": "machine",
           "description": "Show inline (ghost) code completions in the editor (Tab to accept). When off, inline autocomplete is fully disabled."
         },
         "nexuscode.autocomplete.useSeparateModel": {
           "type": "boolean",
           "default": false,
+          "scope": "machine",
           "description": "Use the autocomplete model fields below instead of the agent model from .nexus/nexus.yaml"
         },
         "nexuscode.autocomplete.provider": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "Provider for inline autocomplete when useSeparateModel is enabled (e.g. anthropic, openai, openai-compatible)"
         },
         "nexuscode.autocomplete.model": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "Model id for inline autocomplete when useSeparateModel is enabled"
         },
         "nexuscode.autocomplete.baseUrl": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "Base URL for openai-compatible / local autocomplete model"
         },
         "nexuscode.autocomplete.temperature": {

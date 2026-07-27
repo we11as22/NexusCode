@@ -15,22 +15,32 @@ import {
   runAgentLoop,
   DurableRunEventSink,
   createLLMClient,
-  loadConfig,
+  finalizeConfigCredentials,
+  getConfigEnvironment,
   loadAgentInstructionBundle,
   loadSkills,
   getClaudeCompatibilityOptions,
-  resolveConfiguredAndPluginMcpServers,
-  resolveBundledMcpServers,
   Session,
   isDelegatedAgentParentTool,
+  getNexusServerTokenSecretKey,
+  isLoopbackNexusServerDestination,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
   type AgentEvent,
   type ToolDef,
 } from '@nexuscode/core'
-import type { NexusBootstrapResult } from './nexus-bootstrap.js'
+import {
+  applyCliModelSelection,
+  loadCliWorkspaceConfig,
+  type NexusBootstrapResult,
+} from './nexus-bootstrap.js'
 import type { SubagentEvent } from './nexus-subagents.js'
 import { CliHost } from './host.js'
 import { NexusServerClient } from './server-client.js'
+import {
+  assertRemoteCliSelectionSupported,
+  resumeRemoteCliTurn,
+  runRemoteCliTurn,
+} from './remote-turn.js'
 import {
   createAssistantMessage,
   createAssistantAPIErrorMessage,
@@ -44,6 +54,10 @@ import type {
 import type { Tool } from './Tool.js'
 import type { ApprovalAction } from '@nexuscode/core'
 import type { AssistantAPIMessage as APIAssistantMessage } from './provider/message-schema.js'
+import {
+  nexusModeMessageFromAgentEvent,
+  type NexusModeMessage,
+} from './nexus-mode-transition.js'
 
 export type NexusApprovalMessage = { type: 'nexus_approval'; action: ApprovalAction; partId: string }
 /** Shown above input (e.g. Compacting…). text empty clears. clearAfterMs auto-clears success lines. */
@@ -187,6 +201,9 @@ export interface QueryNexusOptions {
   onSubagentEvent?: (partId: string, event: SubagentEvent) => void
   /** When set, called when a run completes with the host (for revert last turn /undo). */
   onRunComplete?: (host: import('./host.js').CliHost) => void
+  /** Attach to an already-active server turn instead of submitting input. */
+  remoteResume?: boolean
+  onRemoteResume?: (attached: boolean) => void
 }
 
 /**
@@ -194,7 +211,7 @@ export interface QueryNexusOptions {
  * Yields NexusApprovalMessage when tool_approval_needed so REPL can show the approval panel and resolve tuiApprovalRef.
  * Loads config from disk at start so that model/LLM settings saved in the CLI are applied.
  */
-export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage, void> {
+export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage | NexusModeMessage, void> {
   const {
     nexus,
     userPrompt,
@@ -206,8 +223,19 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     modeOverride,
     onSubagentEvent,
     onRunComplete,
+    remoteResume = false,
+    onRemoteResume,
   } = opts
-  const { session: bootstrapSession, mode: bootstrapMode, toolRegistry, compaction, indexer, serverUrl, services } = nexus
+  const {
+    session: bootstrapSession,
+    mode: bootstrapMode,
+    compaction,
+    indexer,
+    serverUrl,
+  } = nexus
+  if (remoteResume && !serverUrl) {
+    throw new Error('Remote turn resume requires NexusCode Server')
+  }
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug' | 'review'
 
   let session = bootstrapSession
@@ -216,7 +244,15 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     session.addMessage({ role: 'user', content: userPrompt })
   }
 
-  let config = await loadConfig(nexus.cwd, { secrets: nexus.secretsStore })
+  let config = await loadCliWorkspaceConfig(nexus.cwd, {
+    loadEnv: !serverUrl,
+    hostAuthority: !serverUrl,
+  })
+  const configEnvironment = getConfigEnvironment(config)
+  if (serverUrl) {
+    assertRemoteCliSelectionSupported(nexus.cliModelSelection)
+  }
+  applyCliModelSelection(config, nexus.cliModelSelection)
   if (autoApprovePermissions) {
     config = {
       ...config,
@@ -268,21 +304,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         config,
       ).catch(() => []),
     ])
-    const pluginMcp = await resolveConfiguredAndPluginMcpServers(nexus.cwd, config)
-    const resolvedMcp = resolveBundledMcpServers(pluginMcp.servers, {
-      cwd: nexus.cwd,
-      nexusRoot: nexus.nexusRoot,
-    })
-    const mcpFingerprint = JSON.stringify(resolvedMcp)
-    if (mcpFingerprint !== nexus.mcpConfigFingerprint) {
-      const statuses = await nexus.mcpClient.connectAll(resolvedMcp)
-      nexus.mcpConfigFingerprint = mcpFingerprint
-      for (const status of Object.values(statuses)) {
-        if (status.state !== 'connected' && status.state !== 'disabled') {
-          console.warn(`[nexus] MCP ${status.name}: ${status.error ?? status.state}`)
-        }
-      }
-    }
+    await nexus.reconcileMcpServers(config)
     nexus.rulesContent = rulesContent
     nexus.skills = skills
     nexus.config = config
@@ -294,6 +316,21 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       mcp: { servers: config.mcp.servers },
     }
   }
+  const runtimeConfig = serverUrl
+    ? config
+    : await finalizeConfigCredentials(
+        config as unknown as Record<string, unknown>,
+        nexus.secretsStore,
+        {
+          profileName: nexus.cliModelSelection.profileOverride,
+          environment: configEnvironment,
+        },
+      ) as unknown as typeof config
+  const runContext = await nexus.createRunContext(config, runtimeConfig)
+  for (const diagnostic of runContext.toolContributionDiagnostics) {
+    console.warn(`[nexus] ${diagnostic.sourceId}: ${diagnostic.message}`)
+  }
+  const runToolRegistry = runContext.toolRegistry
 
   const eventQueue: AgentEvent[] = []
   let resolveNext: (() => void) | null = null
@@ -337,23 +374,26 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   /** Start of this run: previous turn’s edits become revertable for /undo. */
   host.startNewTurn()
 
-  const client = createLLMClient(config.model)
-  const { builtin, dynamic } = toolRegistry.getForMode(mode)
-  const nonMcpDynamic = dynamic.filter((tool) => tool.integration?.kind !== 'mcp')
-  const tools: ToolDef[] = toolRegistry.mergeWithHiddenExecutionTools([
+  const { builtin, dynamic } = runToolRegistry.getForMode(mode)
+  const tools: ToolDef[] = runToolRegistry.mergeWithHiddenExecutionTools([
     ...builtin,
-    ...nonMcpDynamic,
-    ...nexus.mcpClient.getTools(),
+    ...dynamic,
   ])
 
   let runPromise: Promise<void>
+  let runSettled = false
   if (serverUrl) {
     const serverToken =
       process.env.NEXUS_SERVER_TOKEN?.trim() ||
-      await nexus.secretsStore.getSecret(NEXUS_SERVER_TOKEN_SECRET_KEY)
+      await nexus.secretsStore.getSecret(
+        getNexusServerTokenSecretKey(serverUrl),
+      ) ||
+      (isLoopbackNexusServerDestination(serverUrl)
+        ? await nexus.secretsStore.getSecret(NEXUS_SERVER_TOKEN_SECRET_KEY)
+        : null)
     if (!serverToken) {
       throw new Error(
-        "NexusCode server token is required. Set NEXUS_SERVER_TOKEN or store nexuscode_server_token in the Nexus secrets store.",
+        "NexusCode server token is required. Set NEXUS_SERVER_TOKEN or store a token bound to this server endpoint.",
       )
     }
     const serverClient = new NexusServerClient({
@@ -362,82 +402,93 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       token: serverToken,
     })
     const sid = bootstrapSession.id
-    let activeServerRunId = ""
-    let serverApprovalResolver: ((result: PermissionResult) => void) | null = null
-    const abortRemoteRun = () => {
-      void serverClient.abortSession(sid).catch((error: unknown) => {
-        deliverEvent({
-          type: 'error',
-          error: `Server abort failed: ${error instanceof Error ? error.message : String(error)}`,
-        })
-      })
-    }
-    signal.addEventListener('abort', abortRemoteRun, { once: true })
-    if (signal.aborted) abortRemoteRun()
     runPromise = (async () => {
       try {
-        for await (const event of serverClient.streamMessage(
-          sid,
-          userPrompt,
-          mode,
-          undefined,
-          signal,
-          { onRunId: (runId) => { activeServerRunId = runId } },
-        )) {
-          if (
-            event.type === 'tool_approval_needed' &&
-            activeServerRunId
-          ) {
-            const partId = event.partId
-            const respond = (result: PermissionResult) => {
-              void serverClient.respondToApproval(
-                sid,
-                activeServerRunId,
-                partId,
-                result,
-              ).catch((error: unknown) => {
-                deliverEvent({
-                  type: 'error',
-                  error: `Server approval failed: ${error instanceof Error ? error.message : String(error)}`,
-                })
-              })
-            }
-            if (tuiApprovalRef) {
-              serverApprovalResolver = respond
-              tuiApprovalRef.current = serverApprovalResolver
-            } else {
-              // Print/headless mode must fail closed instead of waiting forever
-              // for an approval UI that does not exist.
-              respond({ approved: false })
-            }
-          }
+        const cursorStore = nexus.remoteTurnCursorStore
+        if (!cursorStore) {
+          throw new Error('Remote turn cursor store is not configured')
+        }
+        const deliverRemoteEvent = async (event: AgentEvent) => {
           if (event.type === 'assistant_content_complete') {
             try {
               const msgs = await serverClient.getRecentMessages(sid)
               session = new Session(sid, nexus.cwd, msgs, undefined, true)
             } catch {
-              // keep current session
+              // Keep the last known session shadow.
             }
           }
-          eventQueue.push(event)
-          wakeWaitingConsumer()
+          deliverEvent(event)
+        }
+        if (remoteResume) {
+          const attached = await resumeRemoteCliTurn({
+            client: serverClient,
+            sessionId: sid,
+            signal,
+            approvalRef: tuiApprovalRef,
+            cursorStore,
+            onActiveExecution: (execution) => {
+              nexus.mode = execution.mode
+            },
+            deliver: deliverRemoteEvent,
+          })
+          onRemoteResume?.(attached)
+        } else {
+          let liveIdentity:
+            | { turnId: string; runId: string }
+            | undefined
+          let acknowledgedSequence = 0
+          let admissionCursorWrite: Promise<void> = Promise.resolve()
+          await runRemoteCliTurn({
+            client: serverClient,
+            sessionId: sid,
+            input: [{ type: 'text', text: userPrompt }],
+            mode,
+            signal,
+            approvalRef: tuiApprovalRef,
+            deliver: deliverRemoteEvent,
+            onTurn: (identity) => {
+              liveIdentity = identity
+              admissionCursorWrite = cursorStore.save(sid, {
+                ...identity,
+                afterSequence: 0,
+              })
+            },
+            onSequence: async (sequence) => {
+              await admissionCursorWrite
+              if (!liveIdentity) {
+                throw new Error(
+                  'Remote sequence arrived before turn admission',
+                )
+              }
+              acknowledgedSequence = Math.max(
+                acknowledgedSequence,
+                sequence,
+              )
+              await cursorStore.save(sid, {
+                ...liveIdentity,
+                afterSequence: acknowledgedSequence,
+              })
+            },
+          })
+          await admissionCursorWrite
+          if (!signal.aborted) await cursorStore.clear(sid)
         }
         try {
           const msgs = await serverClient.getRecentMessages(sid)
           session = new Session(sid, nexus.cwd, msgs, undefined, true)
         } catch {
-          /* keep session from last assistant_content_complete */
+          // Keep the session from the latest assistant_content_complete.
         }
       } catch (err) {
         runError = err instanceof Error ? err : new Error(String(err))
+        wakeWaitingConsumer()
       } finally {
-        signal.removeEventListener('abort', abortRemoteRun)
-        if (tuiApprovalRef?.current === serverApprovalResolver) {
-          tuiApprovalRef.current = null
-        }
+        runSettled = true
+        wakeWaitingConsumer()
       }
     })()
   } else {
+    const client = createLLMClient(runtimeConfig.model)
     runPromise = (async () => {
       let status: "completed" | "failed" | "aborted" = "completed"
       try {
@@ -446,7 +497,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           client,
           host,
           config,
-          services,
+          services: runContext.services,
           mode,
           tools,
           skills,
@@ -465,48 +516,17 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           runError ??= error instanceof Error ? error : new Error(String(error))
           wakeWaitingConsumer()
         })
+        runSettled = true
+        wakeWaitingConsumer()
       }
     })()
   }
 
   const consumed: MessageType[] = []
 
-  // Best-effort stream idempotency guard: server/transport may replay events on reconnect.
-  // We dedupe only the event types that create new rows or side panels.
-  const seen = new Set<string>()
-  const seenQueue: string[] = []
-  const SEEN_MAX = 1200
-  const seenRecently = (fp: string): boolean => {
-    if (seen.has(fp)) return true
-    seen.add(fp)
-    seenQueue.push(fp)
-    if (seenQueue.length > SEEN_MAX) {
-      const oldest = seenQueue.shift()
-      if (oldest) seen.delete(oldest)
-    }
-    return false
-  }
-
-  function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage, boolean, unknown> {
+  function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage | NexusModeMessage, boolean, unknown> {
     while (eventQueue.length > 0) {
       const event = eventQueue.shift()!
-      // Coarse fingerprint for duplicate suppression.
-      const et = (event as { type?: string }).type
-      if (typeof et === 'string') {
-        const e: any = event as any
-        let fp: string | null = null
-        if (et === 'assistant_content_complete') fp = `${et}|${String(e.messageId ?? '')}`
-        else if (et === 'tool_start' || et === 'tool_end' || et === 'tool_approval_needed') fp = `${et}|${String(e.messageId ?? '')}|${String(e.partId ?? '')}|${String(e.tool ?? '')}`
-        else if (et === 'question_request') fp = `${et}|${String(e.request?.requestId ?? '')}`
-        else if (et === 'todo_updated') fp = `${et}|${String((e.todo ?? '').length)}`
-        else if (et === 'subagent_start' || et === 'subagent_tool_start' || et === 'subagent_tool_end' || et === 'subagent_done') fp = `${et}|${String(e.subagentId ?? '')}|${String(e.parentPartId ?? '')}|${String(e.tool ?? '')}|${String(e.success ?? '')}`
-        else if (et === 'task_updated') fp = `${et}|${String(e.task?.id ?? '')}|${String(e.task?.status ?? '')}`
-        else if (et === 'team_updated') fp = `${et}|${String(e.team?.name ?? '')}`
-        else if (et === 'team_message') fp = `${et}|${String(e.message?.id ?? '')}`
-        else if (et === 'background_task_updated') fp = `${et}|${String(e.task?.id ?? '')}|${String(e.task?.status ?? '')}`
-        else if (et === 'done' || et === 'error') fp = `${et}|${String(e.error ?? '')}`
-        if (fp && seenRecently(fp)) continue
-      }
       if (event.type === 'todo_updated') {
         yield { type: 'nexus_todo', todo: event.todo ?? '' }
         continue
@@ -659,6 +679,8 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         yield pm
       } else if (event.type === 'tool_end') {
         if (TODO_TOOL_NAMES.has(event.tool)) continue
+        const modeMessage = nexusModeMessageFromAgentEvent(event)
+        if (modeMessage) nexus.mode = modeMessage.mode
         // Do not clear lastSpawnAgentPartId here: subagent_* events may arrive after the
         // parent spawn tool_end; they fall back to lastSpawnAgentPartId when parentPartId is absent.
         if (shouldHideSubagentToolDisplay(event.tool)) continue
@@ -694,6 +716,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         })
         consumed.push(userMsg)
         yield userMsg
+        if (modeMessage) yield modeMessage
       } else if (event.type === 'error') {
         const am = createAssistantAPIErrorMessage(event.error)
         consumed.push(am)
@@ -732,6 +755,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       yield createAssistantAPIErrorMessage((runError as Error).message)
       break
     }
+    if (runSettled) break
 
     await new Promise<void>((resolve) => {
       resolveNext = resolve

@@ -16,10 +16,14 @@ import {
   resolveConfiguredAndPluginMcpServers,
 } from "./capabilities.js"
 import { validatePluginManifestFile } from "./index.js"
+import { grantPluginTrust } from "./trust.js"
 
 const roots: string[] = []
+const originalDataHome = process.env["NEXUS_DATA_HOME"]
 
 afterEach(async () => {
+  if (originalDataHome === undefined) delete process.env["NEXUS_DATA_HOME"]
+  else process.env["NEXUS_DATA_HOME"] = originalDataHome
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
@@ -29,6 +33,7 @@ async function fixture(): Promise<{ root: string; pluginRoot: string; manifestPa
   const pluginRoot = path.join(root, ".nexus", "plugins", "demo")
   const manifestPath = path.join(pluginRoot, ".claude-plugin", "plugin.json")
   await mkdir(path.dirname(manifestPath), { recursive: true })
+  process.env["NEXUS_DATA_HOME"] = path.join(root, "host-data")
   return { root, pluginRoot, manifestPath }
 }
 
@@ -76,7 +81,9 @@ describe("trusted plugin capabilities", () => {
     expect((await loadAgentDefinitions(root, undefined, config())).some((item) => item.agentType === "Reviewer")).toBe(false)
     await expect(resolveConfiguredAndPluginMcpServers(root, config())).resolves.toMatchObject({ servers: [] })
 
-    const trusted = config(["demo"])
+    const validated = await validatePluginManifestFile(manifestPath)
+    await grantPluginTrust(validated.plugin!)
+    const trusted = config()
     const commands = await loadSlashCommands(root, undefined, trusted)
     expect(commands.map((item) => item.command)).toEqual(expect.arrayContaining([
       "plugin:demo:review",
@@ -86,6 +93,13 @@ describe("trusted plugin capabilities", () => {
     expect((await loadAgentDefinitions(root, undefined, trusted)).some((item) => item.agentType === "Reviewer")).toBe(true)
     await expect(resolveConfiguredAndPluginMcpServers(root, trusted)).resolves.toMatchObject({
       servers: [{ name: "docs", url: "https://example.test/mcp" }],
+      provenance: [{
+        serverName: "docs",
+        status: "active",
+        source: "plugin-inline",
+        pluginName: "demo",
+        trustBinding: "exact-content-grant",
+      }],
     })
   })
 
@@ -158,9 +172,10 @@ describe("trusted plugin capabilities", () => {
       },
     })
     const configured = NexusConfigSchema.parse({
-      plugins: { trusted: ["demo"] },
       mcp: { servers: [{ name: "valid", url: "https://override.test/mcp", transport: "http" }] },
     }) as NexusConfig
+    const validated = await validatePluginManifestFile(manifestPath)
+    await grantPluginTrust(validated.plugin!)
 
     const contributed = await loadPluginMcpServers(root, configured)
     const canonicalPluginRoot = await realpath(pluginRoot)
@@ -175,6 +190,40 @@ describe("trusted plugin capabilities", () => {
       { name: "valid", url: "https://override.test/mcp", transport: "http", enabled: true },
     ])
     expect(result.diagnostics.map((item) => item.serverName)).toEqual(expect.arrayContaining(["broken", "valid"]))
+  })
+
+  it("keeps project MCP definitions pending with explicit provenance", async () => {
+    const { root } = await fixture()
+    const configured = NexusConfigSchema.parse({
+      mcp: {
+        pendingProjectServers: [{
+          source: "project",
+          origin: "project-config",
+          status: "pending",
+          config: {
+            name: "project-docs",
+            url: "https://project.example.test/mcp",
+            transport: "http",
+          },
+        }],
+      },
+    }) as NexusConfig
+
+    const result = await resolveConfiguredAndPluginMcpServers(root, configured)
+
+    expect(result.servers).toEqual([])
+    expect(result.pendingServers).toMatchObject([{
+      server: { name: "project-docs" },
+      provenance: {
+        serverName: "project-docs",
+        status: "pending",
+        source: "project-config",
+      },
+    }])
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: "project-mcp-pending",
+      serverName: "project-docs",
+    }))
   })
 
   it("rejects a declared symlink that escapes the plugin root", async () => {

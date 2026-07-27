@@ -1,17 +1,20 @@
 import { createAzure } from "@ai-sdk/azure"
 import type { ProviderConfig } from "../types.js"
 import { BaseLLMClient } from "./base.js"
+import {
+  normalizeAzureResourceName,
+  resolveProviderCredential,
+} from "./credential-identity.js"
 
 export function createAzureClient(config: ProviderConfig) {
-  const apiKey =
-    config.apiKey ??
-    process.env["AZURE_OPENAI_API_KEY"] ??
-    process.env["AZURE_API_KEY"] ??
-    ""
+  const apiKey = resolveProviderCredential(config).apiKey ?? ""
+  const resourceName = config.baseUrl
+    ? undefined
+    : normalizeAzureResourceName(config.resourceName)
   const azure = createAzure({
     apiKey,
     baseURL: config.baseUrl,
-    resourceName: config.resourceName ?? "",
+    resourceName,
     apiVersion: config.apiVersion ?? "2025-01-01-preview",
   })
   const model = azure(config.deploymentId ?? config.id)

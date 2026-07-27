@@ -1,8 +1,15 @@
-import type { Session, NexusConfig, Mode } from "@nexuscode/core"
+import type {
+  Session,
+  NexusConfig,
+  Mode,
+  ModeChangeResult,
+} from "@nexuscode/core"
 import type {
   AgentEvent,
   ApprovalAction,
   CodebaseIndexer,
+  McpServerConfig,
+  NexusRunServices,
   PermissionResult,
 } from "@nexuscode/core"
 import { runAgentLoop } from "@nexuscode/core"
@@ -10,6 +17,8 @@ import {
   loadConfig,
   getGlobalConfigDir,
   createFileSecretsStore,
+  finalizeConfigCredentials,
+  getConfigEnvironment,
   createLLMClient,
   ToolRegistry,
   loadAgentInstructionBundle,
@@ -27,22 +36,54 @@ import {
   createTaskSnapshotTool,
   createSpawnAgentsParallelTool,
   createNexusRunServices,
-  ParallelAgentManager,
+  closeNexusRunServices,
+  scheduleToolOutputMaintenance,
+  OrchestrationRuntime,
   McpClient,
   resolveBundledMcpServers,
   resolveConfiguredAndPluginMcpServers,
   CheckpointTracker,
-  NexusConfigSchema,
   getClaudeCompatibilityOptions,
+  mergeModelPresetSelection,
+  selectProviderProfile,
+  hydrateWorkspaceAuthority,
+  type WorkspaceAuthorityStoreOptions,
 } from "@nexuscode/core"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { ServerHost } from "./host.js"
 import { serverIndexerCache } from "./indexer-cache.js"
+import {
+  createServerMcpClient,
+  prepareServerToolContributions,
+  registerServerMcpCapabilities,
+} from "./server-capabilities.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const NEXUS_ROOT = path.resolve(__dirname, "..", "..")
+export function resolveServerNexusRoot(moduleDirectory: string): string {
+  return path.resolve(moduleDirectory, "..", "..", "..")
+}
+const NEXUS_ROOT = resolveServerNexusRoot(__dirname)
+
+export async function resolveServerMcpServers(
+  cwd: string,
+  config: NexusConfig,
+): Promise<{
+  servers: McpServerConfig[]
+  diagnostics: Awaited<
+    ReturnType<typeof resolveConfiguredAndPluginMcpServers>
+  >["diagnostics"]
+}> {
+  const configured = await resolveConfiguredAndPluginMcpServers(cwd, config)
+  return {
+    servers: resolveBundledMcpServers(configured.servers, {
+      cwd,
+      nexusRoot: NEXUS_ROOT,
+    }),
+    diagnostics: configured.diagnostics,
+  }
+}
 
 /** Max ms to wait for each rules/skills dependency; startup continues in a degraded state after this deadline. */
 const RULES_SKILLS_LOAD_TIMEOUT_MS = 2000
@@ -101,8 +142,56 @@ export interface RunSessionOptions {
   signal: AbortSignal
   configOverride?: Record<string, unknown>
   requestApproval?: (action: ApprovalAction) => Promise<PermissionResult>
+  requestModeChange?: (
+    mode: Mode,
+    reason?: string,
+  ) => Promise<ModeChangeResult>
+  /**
+   * Workspace-owned live services. Server protocol turns must reuse this
+   * object so delegated agents and background process handles survive across
+   * messages and are drained only when the workspace runtime closes.
+   */
+  services?: NexusRunServices
   /** The transport durably admitted the user message before starting execution. */
   userMessageAdmitted?: boolean
+  /** Stable protocol-v2 profile selected for this immutable turn. */
+  profileName?: string
+}
+
+export async function loadServerWorkspaceConfig(
+  cwd: string,
+  options: {
+    loadEnv?: boolean
+    globalConfigPath?: string | false
+    authorityStoreOptions?: WorkspaceAuthorityStoreOptions
+  } = {},
+): Promise<NexusConfig> {
+  const config = await loadConfig(cwd, {
+    loadEnv: options.loadEnv ?? true,
+    ...(options.globalConfigPath !== undefined
+      ? { globalConfigPath: options.globalConfigPath }
+      : {}),
+  })
+  await hydrateWorkspaceAuthority(
+    config,
+    cwd,
+    options.authorityStoreOptions,
+  )
+  return config
+}
+
+export function assertSupportedRemoteConfigOverride(
+  configOverride: Record<string, unknown> | undefined,
+): void {
+  if (!configOverride) return
+  const unsupported = Object.keys(configOverride).filter(
+    (key) => key !== "presetName",
+  )
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Remote protocol v2 is required for config overrides: ${unsupported.join(", ")}`,
+    )
+  }
 }
 
 /**
@@ -156,24 +245,36 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     signal,
     configOverride,
     requestApproval,
+    requestModeChange,
+    services: workspaceServices,
     userMessageAdmitted = false,
+    profileName,
   } = opts
 
+  assertSupportedRemoteConfigOverride(configOverride)
   const secretsStore = createFileSecretsStore(getGlobalConfigDir())
-  let config = await loadConfig(cwd, { secrets: secretsStore }).catch(() => undefined)
-  if (!config) config = await loadConfig(process.cwd(), { secrets: secretsStore }).catch(() => undefined)
-  if (!config) config = NexusConfigSchema.parse({}) as NexusConfig
+  // A malformed workspace config must fail closed. Falling back to the
+  // server process cwd can silently run with another repository's model,
+  // integrations, permissions, and executable plugin declarations.
+  const config = await loadServerWorkspaceConfig(cwd)
+  const configEnvironment = getConfigEnvironment(config)
 
   const presetName =
     configOverride && typeof (configOverride as { presetName?: unknown }).presetName === "string"
       ? String((configOverride as { presetName?: string }).presetName).trim()
       : ""
-  const selectedConfig = presetName
+  const presetConfig = presetName
     ? await applyPresetForRun(config, cwd, presetName)
     : config
+  const selectedConfig = profileName?.trim()
+    ? applyProfileForRun(presetConfig, profileName)
+    : presetConfig
   const configForRun = enforceServerPermissionBoundary(selectedConfig)
 
-  const host = new ServerHost(cwd, onEvent, { requestApproval })
+  const host = new ServerHost(cwd, onEvent, {
+    requestApproval,
+    requestModeChange,
+  })
   if (!userMessageAdmitted) {
     session.addMessage({
       role: "user",
@@ -182,41 +283,51 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     })
   }
 
-  const client = createLLMClient(configForRun.model)
   const toolRegistry = new ToolRegistry()
 
-  let mcpClient: McpClient | undefined
-  const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, configForRun)
-  for (const diagnostic of pluginMcp.diagnostics) {
+  const configuredMcp = await resolveServerMcpServers(cwd, configForRun)
+  for (const diagnostic of configuredMcp.diagnostics) {
     onEvent({
       type: "error",
       error: `[plugin MCP ${diagnostic.pluginName}] ${diagnostic.message}`,
     })
   }
-  const mcpPromise = (async (): Promise<McpClient | undefined> => {
+  const runMcpClient =
+    workspaceServices?.mcpClient ?? createServerMcpClient(host)
+  const ownsMcpClient = workspaceServices?.mcpClient === undefined
+  const mcpPromise = (async (): Promise<{
+    client: McpClient
+    allowedServerNames: ReadonlySet<string>
+  }> => {
     try {
-      const mc = new McpClient()
-      await mc.disconnectAll().catch(() => {})
-      if (pluginMcp.servers.length > 0) {
-        const resolved = resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
+      const resolved = configuredMcp.servers
+      const allowedServerNames = new Set(
+        resolved.map((server) => server.name),
+      )
+      if (resolved.length > 0) {
         process.env.CLAUDE_PROJECT_DIR = cwd
-        const statuses = await mc.connectAll(resolved)
-        for (const status of Object.values(statuses)) {
-          if (status.state !== "connected" && status.state !== "disabled") {
-            onEvent({
-              type: "error",
-              error: `[MCP ${status.name}] ${status.error ?? status.state}`,
-            })
-          }
+      }
+      const statuses = workspaceServices?.mcpClient
+        ? await runMcpClient.ensureConnected(resolved)
+        : await runMcpClient.connectAll(resolved)
+      for (const status of Object.values(statuses)) {
+        if (status.state !== "connected" && status.state !== "disabled") {
+          onEvent({
+            type: "error",
+            error: `[MCP ${status.name}] ${status.error ?? status.state}`,
+          })
         }
       }
-      return mc
+      return { client: runMcpClient, allowedServerNames }
     } catch (error) {
       onEvent({
         type: "error",
         error: `[MCP runtime] ${error instanceof Error ? error.message : String(error)}`,
       })
-      return undefined
+      return {
+        client: runMcpClient,
+        allowedServerNames: new Set<string>(),
+      }
     }
   })()
 
@@ -255,34 +366,75 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     skillsPromise,
   ])
 
-  mcpClient = mcpResult ?? undefined
-  if (mcpClient) {
-    for (const tool of mcpClient.getTools()) {
-      toolRegistry.registerDynamicOrThrow(tool, "MCP")
-    }
+  const baseServices: NexusRunServices = workspaceServices
+    ? {
+        ...workspaceServices,
+        mcpClient: mcpResult.client,
+      }
+    : createNexusRunServices({
+        orchestrationRuntime: new OrchestrationRuntime(cwd),
+        mcpClient: mcpResult.client,
+      })
+  const contributionServices = await prepareServerToolContributions({
+    cwd,
+    config: configForRun,
+    services: baseServices,
+    registry: toolRegistry,
+    onDiagnostic: emitDependencyDiagnostic,
+  })
+  const mcpToolSnapshot = registerServerMcpCapabilities(
+    toolRegistry,
+    mcpResult.client,
+    mcpResult.allowedServerNames,
+  )
+  const services: NexusRunServices = {
+    ...contributionServices,
+    mcpToolSnapshot,
   }
 
-  const parallelManager = new ParallelAgentManager()
-  const services = createNexusRunServices({
-    parallelAgentManager: parallelManager,
-    ...(mcpClient ? { mcpClient } : {}),
-  })
+  const runtimeConfig = await finalizeConfigCredentials(
+    configForRun as unknown as Record<string, unknown>,
+    secretsStore,
+    {
+      environment: configEnvironment,
+      ...(profileName?.trim()
+        ? { profileName: profileName.trim() }
+        : {}),
+    },
+  ) as unknown as NexusConfig
+  const client = createLLMClient(runtimeConfig.model)
+
+  if (!workspaceServices) {
+    const maintenance = scheduleToolOutputMaintenance({
+      cwd,
+      services,
+      onResult(result) {
+        for (const diagnostic of result.errors) {
+          console.warn(`[nexus] tool-output maintenance: ${diagnostic}`)
+        }
+      },
+    })
+    void maintenance?.promise.catch((error) => {
+      console.warn("[nexus] tool-output maintenance failed:", error)
+    })
+  }
+  const parallelManager = services.parallelAgentManager
   for (const tool of [
-    createSpawnAgentTool(parallelManager, configForRun),
-    createSpawnAgentsAliasTool(parallelManager, configForRun),
+    createSpawnAgentTool(parallelManager, runtimeConfig),
+    createSpawnAgentsAliasTool(parallelManager, runtimeConfig),
     createSpawnAgentOutputTool(parallelManager),
     createSpawnAgentStopTool(parallelManager),
     createListAgentRunsTool(parallelManager),
     createAgentRunSnapshotTool(parallelManager),
-    createResumeAgentTool(parallelManager, configForRun),
-    createSpawnAgentsParallelTool(parallelManager, configForRun),
+    createResumeAgentTool(parallelManager, runtimeConfig),
+    createSpawnAgentsParallelTool(parallelManager, runtimeConfig),
   ]) {
     toolRegistry.registerDynamicOrThrow(tool, "manager compatibility")
   }
   for (const tool of [
-    createTaskCreateBatchTool(parallelManager, configForRun),
+    createTaskCreateBatchTool(parallelManager, runtimeConfig),
     createTaskSnapshotTool(parallelManager),
-    createTaskResumeTool(parallelManager, configForRun),
+    createTaskResumeTool(parallelManager, runtimeConfig),
   ]) {
     toolRegistry.registerBoundBuiltinOrThrow(tool)
   }
@@ -304,12 +456,13 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     configForRun.indexing.vector &&
     configForRun.vectorDb?.enabled
   ) {
-    indexer = await serverIndexerCache.get(cwd, configForRun, {
+    indexer = await serverIndexerCache.get(cwd, runtimeConfig, {
       onWarning: () => {},
       maxQdrantWaitMs: 2500,
     })
   }
 
+  let runError: unknown
   try {
     await runAgentLoop({
       session,
@@ -326,12 +479,61 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
       signal,
       checkpoint,
     })
-  } finally {
-    await mcpClient?.disconnectAll().catch(() => {})
+  } catch (error) {
+    runError = error
+  }
+
+  const cleanupErrors: unknown[] = []
+  if (!workspaceServices) {
+    try {
+      await closeNexusRunServices(services)
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+  }
+  if (ownsMcpClient) {
+    try {
+      await runMcpClient.disconnectAll()
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+  }
+
+  if (runError !== undefined) {
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [runError, ...cleanupErrors],
+        "Nexus server run and cleanup both failed",
+      )
+    }
+    throw runError
+  }
+  if (cleanupErrors.length === 1) throw cleanupErrors[0]
+  if (cleanupErrors.length > 1) {
+    throw new AggregateError(
+      cleanupErrors,
+      "Failed to close Nexus server run services",
+    )
   }
 }
 
-async function applyPresetForRun(base: NexusConfig, cwd: string, presetName: string): Promise<NexusConfig> {
+export function applyProfileForRun(
+  base: NexusConfig,
+  profileName: string,
+): NexusConfig {
+  const name = profileName.trim()
+  if (!name) return base
+  const profile = base.profiles[name]
+  if (!profile) {
+    throw new Error(`Unknown model profile "${name}"`)
+  }
+  return {
+    ...base,
+    model: selectProviderProfile(base.model, profile),
+  }
+}
+
+export async function applyPresetForRun(base: NexusConfig, cwd: string, presetName: string): Promise<NexusConfig> {
   const trimmed = presetName.trim()
   if (!trimmed || trimmed === "Default") return base
   const preset = await readPresetFromDisk(cwd, trimmed)
@@ -353,11 +555,11 @@ async function applyPresetForRun(base: NexusConfig, cwd: string, presetName: str
     rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["NEXUS.md", "AGENTS.md", "CLAUDE.md"] },
   }
   if (preset.modelProvider && preset.modelId) {
-    const provider =
-      preset.modelProvider === "openrouter"
-        ? "openai-compatible"
-        : (preset.modelProvider as NexusConfig["model"]["provider"])
-    next.model = { ...base.model, provider, id: preset.modelId }
+    next.model = mergeModelPresetSelection(
+      base.model,
+      preset.modelProvider,
+      preset.modelId,
+    )
   }
   return next
 }

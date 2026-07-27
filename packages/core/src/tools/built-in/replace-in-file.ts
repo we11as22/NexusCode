@@ -166,10 +166,12 @@ When NOT to use:
     const modeAutoApprove = new Set(
       (ctx.mode ? ctx.config.modes?.[ctx.mode]?.autoApprove : undefined) ?? []
     )
-    const skipApproval =
+    const skipApprovalByConfig =
       ctx.config.permissions.autoApproveWrite ||
       modeAutoApprove.has("write") ||
       isNexusPlansPath(filePath)
+    const approvalRequired =
+      ctx.fileEditApproval?.required ?? !skipApprovalByConfig
 
     if (useFileEditFlow) {
       const diffPreview = createDiffPreview(originalContent, content, filePath)
@@ -178,11 +180,11 @@ When NOT to use:
         newContent: content,
         isNewFile: false,
       })
-      if (!skipApproval) {
+      if (approvalRequired) {
         const approval = await requestHostApproval(ctx.host, {
           type: "write",
           tool: "Edit",
-          description: `Edit ${filePath}`,
+          description: `${ctx.fileEditApproval?.permissionRule ? "[Permission Rule] " : ""}Edit ${filePath}`,
           content,
           diff: diffPreview,
           diffStats,

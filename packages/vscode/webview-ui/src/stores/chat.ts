@@ -1,6 +1,12 @@
 import { create } from "zustand"
 import { postMessage } from "../vscode.js"
-import type { ModelsCatalogFromCore, AgentPresetFromCore, AutocompleteExtensionUiState } from "../types/messages.js"
+import type {
+  ModelsCatalogFromCore,
+  AgentPresetFromCore,
+  AutocompleteExtensionUiState,
+  SlashCommandCatalogItem,
+} from "../types/messages.js"
+import type { ApprovalActionView } from "../types/approval.js"
 import {
   ensureAssistantMessage as ensureAssistantMessageFromHelpers,
   findOpenReasoningReverseIndex as findOpenReasoningReverseIndexFromHelpers,
@@ -10,18 +16,17 @@ import {
   mergeStateMessagesForStream as mergeStateMessagesForStreamFromHelpers,
   reduceSubagentState as reduceSubagentStateFromHelpers,
   sanitizeAssistantText as sanitizeAssistantTextFromHelpers,
-  seenRecently as seenRecentlyFromHelpers,
 } from "../transcript/helpers.js"
 
 /** Detects a new plan snapshot so the full follow-up panel re-opens. */
 let planFollowupTextFingerprint: string | null = null
-
-// --- Stream idempotency guard ---
-// Some transports can replay events (reconnect, server shadow + snapshot merge). Without stable event ids,
-// we dedupe the most repeat-prone events via a small rolling fingerprint set.
-function seenRecently(fingerprint: string): boolean {
-  return seenRecentlyFromHelpers(fingerprint)
-}
+const pendingMessageSubmissions = new Map<
+  string,
+  {
+    content: string
+    images: Array<{ id: string; data: string; mimeType: string }>
+  }
+>()
 
 export type Mode = "agent" | "plan" | "ask" | "debug" | "review"
 export type AppView = "chat" | "sessions" | "settings"
@@ -125,13 +130,20 @@ export interface NexusConfigState {
     apiKey?: string
   }
   tools: {
+    /** @deprecated Compatibility-only; runtime uses deterministic ToolSearch. */
     classifyToolsEnabled?: boolean
+    /** @deprecated Compatibility-only; runtime uses deterministic ToolSearch. */
     classifyThreshold: number
     parallelReads: boolean
     maxParallelReads: number
     custom: string[]
+    deferredLoadingMode?: "auto" | "always" | "never"
+    deferredLoadingThresholdPercent?: number
+    deferredLoadingMinimumTools?: number
   }
+  /** @deprecated Compatibility-only; runtime uses deterministic skill lookup. */
   skillClassifyEnabled?: boolean
+  /** @deprecated Compatibility-only; runtime uses deterministic skill lookup. */
   skillClassifyThreshold: number
   mcp: {
     servers: Array<{
@@ -143,7 +155,40 @@ export interface NexusConfigState {
       transport?: "stdio" | "http" | "sse"
       enabled?: boolean
     }>
+    pendingProjectServers?: Array<{
+      source: "project"
+      origin: "project-config" | "project-mcp-json"
+      status: "pending"
+      config: {
+        name: string
+        command?: string
+        args?: string[]
+        env?: Record<string, string>
+        cwd?: string
+        url?: string
+        transport?: "stdio" | "http" | "sse"
+        enabled?: boolean
+      }
+    }>
   }
+  pendingProjectAuthority?: Array<{
+    source: "project"
+    origin: "project-config"
+    status: "pending"
+    kind:
+      | "model-endpoint"
+      | "embeddings-endpoint"
+      | "vector-db-endpoint"
+      | "remote-skills"
+      | "custom-tools"
+      | "profiles"
+      | "external-skill-paths"
+      | "external-rule-paths"
+      | "external-memory-path"
+      | "claude-global-directory"
+    fingerprint: string
+    payload: Record<string, unknown>
+  }>
   /** For UI: path + enabled. skills is derived (enabled only). */
   skillsConfig?: Array<{ path: string; enabled: boolean }>
   skills: string[]
@@ -346,10 +391,22 @@ interface ChatState {
   connectionState: "idle" | "connecting" | "streaming" | "error"
   /** When connectionState === "error": message to show; user can retry by sending again. */
   serverConnectionError: string | null
+  /** When set, agent execution stays disabled until an explicit config reload succeeds. */
+  configurationError: string | null
+  /** Non-fatal diagnostics from the exact custom/plugin tool snapshot used for the latest local run. */
+  toolContributionDiagnostics: Array<{
+    level: "warning" | "error"
+    code: string
+    source: string
+    message: string
+    toolName?: string
+  }>
   /** MCP server test results: name -> status (ok/error) and optional error message */
   mcpStatus: Array<{ name: string; status: "ok" | "error"; error?: string }>
+  /** Host-discovered custom and MCP prompt commands for the slash palette. */
+  slashCommandCatalog: SlashCommandCatalogItem[]
   /** When set, show in-webview approval bar (Allow / Deny) instead of only VS Code notification */
-  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
+  pendingApproval: { partId: string; action: ApprovalActionView } | null
 
   /** Checkpoint entries for rollback (Cline-style). */
   checkpointEntries: Array<{ hash: string; ts: number; description?: string; messageId?: string }>
@@ -460,11 +517,16 @@ interface ChatState {
   revertSessionEditFile: (path: string) => void
   acceptSessionEditFile: (path: string) => void
   handleStateUpdate: (state: Partial<ChatState>) => void
+  handleSubmissionResult: (
+    clientMessageId: string,
+    accepted: boolean,
+  ) => void
   handleConfigLoaded: (config: NexusConfigState) => void
   handleAgentEvent: (event: AgentEvent) => void
   handleIndexStatus: (status: IndexStatusKind) => void
   handleMcpServerStatus: (results: Array<{ name: string; status: "ok" | "error"; error?: string }>) => void
-  handlePendingApproval: (partId: string, action: { type: string; tool: string; description: string; content?: string }) => void
+  handleSlashCommandCatalog: (commands: SlashCommandCatalogItem[]) => void
+  handlePendingApproval: (partId: string, action: ApprovalActionView) => void
   resolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean, whatToDoInstead?: string) => void
   clearPendingQuestionRequest: () => void
   /** Collapse the plan follow-up block (user submitted dismiss/revise/implement or minimized). */
@@ -547,7 +609,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   serverUrl: "",
   connectionState: "idle",
   serverConnectionError: null,
+  configurationError: null,
+  toolContributionDiagnostics: [],
   mcpStatus: [],
+  slashCommandCatalog: [],
   pendingApproval: null,
 
   isInitialized: false,
@@ -678,11 +743,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendMessage: (content, options) => {
-    const { mode, isRunning, attachedImages, compact, activePresetName } = get()
-    if (isRunning) return
+    const {
+      mode,
+      isRunning,
+      attachedImages,
+      compact,
+      activePresetName,
+      configurationError,
+    } = get()
+    if (isRunning || configurationError) return
     const text = (typeof content === "string" ? content : "").trim()
-    if (!text) return
+    if (!text && attachedImages.length === 0) return
     const displayText = (options?.displayText ?? text).trim()
+    const optimisticDisplay =
+      displayText ||
+      `[Attached ${attachedImages.length} image${attachedImages.length === 1 ? "" : "s"}]`
     if (isSlashCommand(text, "compact")) {
       compact()
       set({ inputValue: "", attachedImages: [] })
@@ -691,6 +766,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const reviewRequested = isSlashCommand(text, "review")
     const runMode: Mode = reviewRequested ? "review" : mode
     const runContent = reviewRequested ? buildReviewPromptFromSlash(text) : text
+    const clientMessageId =
+      `local_user_${Date.now()}_${Math.random().toString(36).slice(2)}`
+    pendingMessageSubmissions.set(clientMessageId, {
+      content: text,
+      images: attachedImages.map((image) => ({ ...image })),
+    })
     set((prev) => ({
       inputValue: "",
       attachedImages: [],
@@ -699,20 +780,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: [
         ...prev.messages,
         {
-          id: `local_user_${Date.now()}`,
+          id: clientMessageId,
           ts: Date.now(),
           role: "user",
-          content: displayText || text,
+          content: optimisticDisplay,
           presetName: activePresetName,
         },
       ],
     }))
     postMessage({
       type: "newMessage",
+      clientMessageId,
       content: runContent,
       mode: runMode,
       images: attachedImages.length > 0 ? attachedImages.map((img) => ({ data: img.data, mimeType: img.mimeType })) : undefined,
       presetName: activePresetName,
+    })
+  },
+
+  handleSubmissionResult: (clientMessageId, accepted) => {
+    const pending = pendingMessageSubmissions.get(clientMessageId)
+    if (!pending) return
+    pendingMessageSubmissions.delete(clientMessageId)
+    if (accepted) return
+
+    set((prev) => {
+      const restoredText =
+        pending.content.length === 0
+          ? prev.inputValue
+          : prev.inputValue.trim().length === 0
+            ? pending.content
+            : `${pending.content}\n\n${prev.inputValue}`
+      const currentImageIds = new Set(
+        prev.attachedImages.map((image) => image.id),
+      )
+      return {
+        messages: prev.messages.filter(
+          (message) => message.id !== clientMessageId,
+        ),
+        inputValue: restoredText,
+        attachedImages: [
+          ...pending.images.filter(
+            (image) => !currentImageIds.has(image.id),
+          ),
+          ...prev.attachedImages,
+        ],
+        isRunning: false,
+      }
     })
   },
 
@@ -854,6 +968,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           inc.requestId === suppressedQuestionRequestId
         next.pendingQuestionRequest = hideStale ? null : inc
       }
+      if (state.configurationError) {
+        next.config = null
+      }
       if (
         state.messages != null &&
         Array.isArray(state.messages) &&
@@ -948,6 +1065,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ mcpStatus: results })
   },
 
+  handleSlashCommandCatalog: (commands) => {
+    set({ slashCommandCatalog: commands })
+  },
+
   handlePendingApproval: (partId, action) => {
     set({ pendingApproval: { partId, action }, awaitingApproval: true })
   },
@@ -977,54 +1098,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   handleAgentEvent: (event) => {
     const { messages } = get()
-
-    // Best-effort deduplication for repeated events (replay/stale merge).
-    // This is intentionally coarse: it targets the event types that create new rows/blocks.
-    const et = (event as { type?: string }).type
-    if (typeof et === "string") {
-      const e = event as any
-      let fp: string | null = null
-      switch (et) {
-        case "assistant_message_started":
-        case "assistant_content_complete":
-          fp = `${et}|${String(e.messageId ?? "")}`
-          break
-        case "text_delta": {
-          const d = typeof e.delta === "string" ? e.delta : ""
-          fp = `${et}|${String(e.messageId ?? "")}|${d.slice(0, 160)}|${d.length}`
-          break
-        }
-        case "reasoning_delta": {
-          const d = typeof e.delta === "string" ? e.delta : ""
-          fp = `${et}|${String(e.messageId ?? "")}|${String(e.reasoningId ?? "")}|${d.slice(0, 160)}|${d.length}`
-          break
-        }
-        case "tool_start":
-        case "tool_end":
-        case "tool_approval_needed":
-          fp = `${et}|${String(e.messageId ?? "")}|${String(e.partId ?? "")}|${String(e.tool ?? "")}`
-          break
-        case "subagent_start":
-        case "subagent_tool_start":
-        case "subagent_tool_end":
-        case "subagent_done":
-          fp = `${et}|${String(e.subagentId ?? "")}|${String(e.parentPartId ?? "")}|${String(e.tool ?? "")}|${String(e.success ?? "")}`
-          break
-        case "question_request":
-          fp = `${et}|${String(e.request?.requestId ?? "")}`
-          break
-        case "todo_updated":
-          fp = `${et}|${String((e.todo ?? "").length)}`
-          break
-        case "error":
-        case "done":
-          fp = `${et}|${String(e.error ?? "")}`
-          break
-        default:
-          fp = null
-      }
-      if (fp && seenRecently(fp)) return
-    }
 
     switch (event.type) {
       case "assistant_message_started": {
@@ -1576,28 +1649,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
 
       case "error":
-        set((state) => ({
-          ...state,
-          isRunning: false,
-          awaitingApproval: false,
-          pendingApproval: null,
-          reasoningStartTime: null,
-          activeReasoning: null,
-          subagents: [],
-          lastSpawnAgentPartId: null,
-        }))
-        if (event.error) {
-          const msgs = [
-            ...messages,
-            {
-              id: `error_${Date.now()}`,
-              ts: Date.now(),
-              role: "system" as const,
-              content: `Error: ${event.error}`,
-            },
-          ]
-          set({ messages: msgs })
-        }
+        set((state) => {
+          const nextMessages = event.error
+            ? [
+                ...state.messages,
+                {
+                  id: `error_${Date.now()}`,
+                  ts: Date.now(),
+                  role: "system" as const,
+                  content: `Error: ${event.error}`,
+                },
+              ]
+            : state.messages
+          if (!event.fatal) return { messages: nextMessages }
+          return {
+            messages: nextMessages,
+            isRunning: false,
+            awaitingApproval: false,
+            pendingApproval: null,
+            reasoningStartTime: null,
+            activeReasoning: null,
+            subagents: [],
+            lastSpawnAgentPartId: null,
+          }
+        })
         break
     }
   },

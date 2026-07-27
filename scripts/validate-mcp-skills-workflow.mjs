@@ -15,6 +15,11 @@ function assert(cond, msg) {
 }
 
 const { createMcpTransport, effectiveUrlTransport, loadSkills } = await import(coreEntry)
+const remoteRequestAuthorizer = async ({ url }) => ({
+  url,
+  hostname: new URL(url).hostname,
+  addresses: [{ address: "93.184.216.34", family: 4 }],
+})
 
 // --- effectiveUrlTransport
 assert(effectiveUrlTransport({ name: "x", url: "http://a" }) === "sse", "default URL → SSE")
@@ -28,22 +33,31 @@ assert(effectiveUrlTransport({ name: "x", url: "http://a", type: "sse" }) === "s
 const stdio = createMcpTransport({ name: "s", command: "node", args: ["-e", "0"] })
 assert(stdio.constructor.name === "StdioClientTransport", "stdio transport class")
 
-const sse = createMcpTransport({ name: "r", url: "http://127.0.0.1:9/mcp" })
+const sse = createMcpTransport(
+  { name: "r", url: "https://example.com/mcp" },
+  { remoteRequestAuthorizer },
+)
 assert(sse.constructor.name === "SSEClientTransport", "default remote → SSE")
 
-const stream = createMcpTransport({
-  name: "h",
-  url: "http://127.0.0.1:9/mcp",
-  transport: "http",
-})
+const stream = createMcpTransport(
+  {
+    name: "h",
+    url: "https://example.com/mcp",
+    transport: "http",
+  },
+  { remoteRequestAuthorizer },
+)
 assert(stream.constructor.name === "StreamableHTTPClientTransport", "transport http → Streamable HTTP")
 
-const stream2 = createMcpTransport({
-  name: "h2",
-  url: "http://127.0.0.1:9/mcp",
-  headers: { Authorization: "Bearer x" },
-  type: "streamable-http",
-})
+const stream2 = createMcpTransport(
+  {
+    name: "h2",
+    url: "https://example.com/mcp",
+    headers: { Authorization: "Bearer x" },
+    type: "streamable-http",
+  },
+  { remoteRequestAuthorizer },
+)
 assert(stream2.constructor.name === "StreamableHTTPClientTransport", "headers + type streamable-http")
 
 let threw = false
@@ -57,7 +71,9 @@ assert(threw, "unresolved bundle should throw")
 // --- loadSkills + YAML frontmatter
 const tmp = await mkdtemp(join(tmpdir(), "nexus-validate-skills-"))
 try {
-  const skillMd = join(tmp, "SKILL.md")
+  const skillDir = join(tmp, "yaml-named-skill")
+  const skillMd = join(skillDir, "SKILL.md")
+  await mkdir(skillDir, { recursive: true })
   await writeFile(
     skillMd,
     `---

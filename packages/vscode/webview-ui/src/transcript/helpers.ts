@@ -2,21 +2,6 @@ import type { Mode, MessagePart, ReasoningPart, SessionMessage, SubAgentState, T
 
 export const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
 
-const RECENT_EVENT_FINGERPRINTS_MAX = 800
-const recentEventFingerprints = new Set<string>()
-const recentEventFingerprintQueue: string[] = []
-
-export function seenRecently(fingerprint: string): boolean {
-  if (recentEventFingerprints.has(fingerprint)) return true
-  recentEventFingerprints.add(fingerprint)
-  recentEventFingerprintQueue.push(fingerprint)
-  if (recentEventFingerprintQueue.length > RECENT_EVENT_FINGERPRINTS_MAX) {
-    const oldest = recentEventFingerprintQueue.shift()
-    if (oldest) recentEventFingerprints.delete(oldest)
-  }
-  return false
-}
-
 export function shortenSubagentValue(value: unknown, max = 52): string {
   if (typeof value !== "string") return ""
   const one = value.replace(/\s+/g, " ").trim()
@@ -174,22 +159,55 @@ function messageTextContent(message: SessionMessage): string {
 }
 
 function mergeOptimisticUserMessages(previous: SessionMessage[], incoming: SessionMessage[]): SessionMessage[] {
-  const merged = [...incoming]
-  return merged.map((message) => {
-    if (message.role !== "user") return message
+  const optimistic = previous.filter(
+    (message) =>
+      message.role === "user" &&
+      message.id.startsWith("local_user_"),
+  )
+  if (optimistic.length === 0) return [...incoming]
+
+  const knownDurableIds = new Set(
+    previous
+      .filter((message) => !message.id.startsWith("local_user_"))
+      .map((message) => message.id),
+  )
+  let lastKnownIncomingIndex = -1
+  for (let index = 0; index < incoming.length; index += 1) {
+    if (knownDurableIds.has(incoming[index]!.id)) {
+      lastKnownIncomingIndex = index
+    }
+  }
+  const incomingUserIndexes = incoming
+    .map((message, index) => message.role === "user" ? index : -1)
+    .filter((index) => index >= 0)
+  const eligibleIndexes = new Set(
+    lastKnownIncomingIndex >= 0
+      ? incomingUserIndexes.filter((index) => index > lastKnownIncomingIndex)
+      : incomingUserIndexes.slice(-optimistic.length),
+  )
+  const consumedOptimisticIds = new Set<string>()
+
+  return incoming.map((message, index) => {
+    if (
+      message.role !== "user" ||
+      knownDurableIds.has(message.id) ||
+      !eligibleIndexes.has(index)
+    ) {
+      return message
+    }
     const text = messageTextContent(message)
-    const optimistic = previous.find(
+    const match = optimistic.find(
       (candidate) =>
-        candidate.role === "user" &&
-        candidate.id.startsWith("local_user_") &&
+        !consumedOptimisticIds.has(candidate.id) &&
         messageTextContent(candidate) === text,
     )
-    if (!optimistic) return message
+    if (!match) return message
+    consumedOptimisticIds.add(match.id)
     return {
       ...message,
-      id: optimistic.id,
-      ts: optimistic.ts,
-      content: optimistic.content,
+      id: match.id,
+      ts: match.ts,
+      content: match.content,
     }
   })
 }
@@ -428,13 +446,20 @@ export function mergeStateMessagesForStream(previous: SessionMessage[], incoming
     }
   }
 
+  const matchedOptimisticIds = new Set(
+    merged
+      .filter(
+        (message) =>
+          message.role === "user" &&
+          message.id.startsWith("local_user_"),
+      )
+      .map((message) => message.id),
+  )
   const optimisticUsersToKeep = previous.filter(
     (message) =>
       message.role === "user" &&
       message.id.startsWith("local_user_") &&
-      !merged.some(
-        (incomingMessage) => incomingMessage.role === "user" && messageTextContent(incomingMessage) === messageTextContent(message),
-      ),
+      !matchedOptimisticIds.has(message.id),
   )
   if (optimisticUsersToKeep.length > 0) {
     return collapseAdjacentDuplicateMessages([...merged, ...optimisticUsersToKeep])

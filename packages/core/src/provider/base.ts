@@ -67,16 +67,21 @@ export class BaseLLMClient implements LLMClient {
     const retryableStatuses = new Set(opts.retryOnStatus ?? DEFAULT_RETRYABLE_STATUS)
     while (true) {
       attempt++
+      let attemptYieldedEvent = false
       try {
-        yield* this._streamOnce(
+        for await (const event of this._streamOnce(
           opts,
           messages,
           baseTools,
           opts.providerOptions
-        )
+        )) {
+          attemptYieldedEvent = true
+          yield event
+        }
         return
       } catch (err) {
         if (opts.signal?.aborted) throw err
+        if (attemptYieldedEvent) throw err
         const status = getErrorStatus(err)
         const isRetryable =
           (status != null && retryableStatuses.has(status)) || isNetworkError(err)
@@ -92,12 +97,6 @@ export class BaseLLMClient implements LLMClient {
           maxDelay
         )
         const delay = retryAfterMs != null ? Math.min(retryAfterMs, maxDelay) : backoffDelay
-        yield {
-          type: "error",
-          error: new Error(
-            `Retrying after error (attempt ${attempt}/${maxAttempts}): ${String(err)}`
-          ),
-        }
         await sleep(delay, opts.signal)
       }
     }

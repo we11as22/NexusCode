@@ -12,6 +12,7 @@ import {
   formatQuestionnaireAnswersForAgent,
   type AgentEvent,
   type NexusConfig,
+  type ProviderConfig,
   type Mode,
   type SessionMessage,
   type IndexStatus,
@@ -23,12 +24,13 @@ import {
   type PermissionResult,
   type CheckpointEntry,
   type McpServerConfig,
+  type ToolContributionDiagnostic,
 } from "@nexuscode/core"
 import {
-  loadConfig,
-  writeConfig,
-  writeGlobalProfiles,
-  loadProjectSettings,
+  patchGlobalConfig,
+  patchProjectConfig,
+  finalizeConfigCredentials,
+  getConfigEnvironment,
   persistSecretsFromConfig,
   stripSecretsFromConfig,
   NEXUS_SECRETS_STORAGE_KEY,
@@ -41,12 +43,10 @@ import {
   ToolRegistry,
   loadSkills,
   loadAgentInstructionBundle,
-  McpClient,
+  type McpClient,
   resolveBundledMcpServers,
   resolveConfiguredAndPluginMcpServers,
-  testMcpServers,
   createCompaction,
-  ParallelAgentManager,
   createSpawnAgentTool,
   createSpawnAgentOutputTool,
   createSpawnAgentStopTool,
@@ -57,7 +57,6 @@ import {
   createTaskCreateBatchTool,
   createTaskResumeTool,
   createTaskSnapshotTool,
-  createNexusRunServices,
   runAgentLoop,
   DurableRunEventSink,
   CheckpointTracker,
@@ -65,12 +64,14 @@ import {
   createCodebaseIndexer,
   buildIndexWatcherGlobPattern,
   ensureQdrantRunning,
-  NexusConfigSchema,
   getModelsCatalog,
   hadPlanExit,
   getPlanContentForFollowup,
   NexusServerClient,
-  DEFAULT_HEARTBEAT_TIMEOUT_MS,
+  canonicalizeNexusServerBaseUrl,
+  UserInputPartSchema,
+  getNexusServerTokenSecretKey,
+  isLoopbackNexusServerDestination,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
   INDEX_FILE_WATCHER_DEBOUNCE_MS,
   canonicalProjectRoot,
@@ -83,9 +84,25 @@ import {
   loadSlashCommands,
   renderSlashCommandPrompt,
   resolveSlashCommand,
+  mergeModelPresetSelection,
+  mergeProviderConfigSafely,
+  selectProviderProfile,
+  settleRuntimeDependency,
 } from "@nexuscode/core"
-import { VsCodeHost, showSessionEditDiff, openReadonlyTextDiff } from "./host.js"
-import { applyExplicitConfigOverrides } from "./config-overrides.js"
+import {
+  VsCodeHost,
+  resolveWebviewApproval,
+  showSessionEditDiff,
+  openReadonlyTextDiff,
+  type WebviewApprovalResolverSlot,
+} from "./host.js"
+import {
+  applyExplicitConfigOverrides,
+  applyRepositoryAgentPreset,
+  getCredentialRemovalsForConfigPatch,
+  mergeConfigPatchSafely,
+  partitionConfigPatchForPersistence,
+} from "./config-overrides.js"
 import { MarketplaceService, type MarketplaceItem } from "./services/marketplace/index.js"
 import { listAbsolutePathsRipgrep } from "./services/indexing/list-absolute-paths-rg.js"
 import {
@@ -93,9 +110,77 @@ import {
   mergeLegacyNexusSecrets,
   selectLegacySetting,
 } from "./secret-settings.js"
+import {
+  approvePendingVsCodeProjectAuthority,
+  loadVsCodeWorkspaceConfig,
+} from "./workspace-authority-config.js"
+import {
+  VsCodeRemoteTurn,
+  assertRemoteHostSelectionSupported,
+  assertRemotePresetSupported,
+  resumeVsCodeRemoteTurn,
+} from "./remote-turn.js"
+import { VsCodeRemoteWorkspaceState } from "./remote-workspace-state.js"
+import { WorkspaceRunServicesRegistry } from "./workspace-run-services.js"
+import {
+  parseExternalHttpUrl,
+  resolveVectorDbRequest,
+  type WebviewMessage,
+} from "./webview-protocol.js"
+import {
+  createVsCodeMcpClient,
+  prepareVsCodeRunIntegrations,
+  testVsCodeMcpServers,
+} from "./local-run-context.js"
+import { WebviewPathCapabilities } from "./webview-path-capabilities.js"
+import {
+  getMcpPromptCommandCatalog,
+  getRemoteMcpPromptCommandCatalog,
+  isMcpPromptCommandName,
+  resolveMcpPromptCommand,
+  resolveRemoteMcpPromptCommand,
+} from "./mcp-prompts.js"
+import {
+  remoteModeTransitionFromAgentEvent,
+} from "./remote-mode-transition.js"
+
+export type { WebviewMessage } from "./webview-protocol.js"
 
 const MODE_REMINDER_REGEX = /^\[You are now in [^\]]+\.\]\s*\n?\n?/i
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
+const MAX_SLASH_COMMAND_CATALOG_ITEMS = 1_024
+const MAX_SLASH_COMMAND_NAME_CHARS = 2_048
+
+export interface SlashCommandCatalogItem {
+  name: string
+  description: string
+  kind: "custom" | "mcp"
+  argumentHint?: string
+}
+
+export interface ToolContributionDiagnosticView {
+  level: "warning" | "error"
+  code: string
+  source: string
+  message: string
+  toolName?: string
+}
+
+type PromptCommandResolution =
+  | { status: "resolved"; prompt: string }
+  | { status: "ambiguous"; candidates: string[] }
+  | { status: "not-found" }
+
+function parseSlashPromptInvocation(
+  input: string,
+): { name: string; args: string } | null {
+  const match = input.trim().match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/u)
+  if (!match) return null
+  return {
+    name: match[1]!,
+    args: match[2] ?? "",
+  }
+}
 
 function findOpenReasoningReverseIndexShadow(parts: MessagePart[], reasoningId: string): number {
   return [...parts].reverse().findIndex(
@@ -108,7 +193,6 @@ function findOpenReasoningReverseIndexShadow(parts: MessagePart[], reasoningId: 
 
 /** Number of messages to load when opening a server session (same as server RECENT_MESSAGES_FOR_RUN for agent context). */
 const INITIAL_SERVER_MESSAGES = 200
-const FILE_WRITE_TOOL_NAMES = new Set(["Write", "Edit", "write_to_file", "replace_in_file"])
 type ShadowSubAgentState = {
   id: string
   mode: Mode
@@ -225,99 +309,13 @@ function stripModeReminderFromMessages(messages: SessionMessage[]): SessionMessa
   })
 }
 
-export type WebviewMessage =
-  | { type: "newMessage"; content: string; mode: Mode; mentions?: string; images?: Array<{ data: string; mimeType: string }>; presetName?: string }
-  | { type: "abort" }
-  | { type: "compact" }
-  | { type: "clearChat" }
-  | { type: "setMode"; mode: Mode }
-  | { type: "setProfile"; profile: string }
-  | { type: "getState" }
-  | { type: "webviewDidLaunch" }
-  | { type: "openSettings" }
-  | { type: "saveConfig"; config: Partial<NexusConfig> }
-  | { type: "switchSession"; sessionId: string }
-  | { type: "createNewSession" }
-  | { type: "forkSession"; messageId: string }
-  | { type: "deleteSession"; sessionId: string }
-  | { type: "reindex" }
-  | { type: "clearIndex" }
-  | { type: "fullRebuildIndex" }
-  | { type: "pauseIndexing" }
-  | { type: "resumeIndexing" }
-  | { type: "openFileAtLocation"; path: string; line?: number; endLine?: number }
-  | { type: "showDiff"; path: string }
-  | { type: "setServerUrl"; url: string }
-  | { type: "setServerToken"; token: string }
-  | { type: "openNexusConfigFolder"; scope: "global" | "project" }
-  | { type: "openCursorignore" }
-  | { type: "openMcpConfig" }
-  | { type: "testMcpServers" }
-  | { type: "openSkillFolder"; path: string }
-  | { type: "approvalResponse"; partId: string; approved: boolean; alwaysApprove?: boolean; addToAllowedCommand?: string; skipAll?: boolean; whatToDoInstead?: string }
-  | { type: "openExternal"; url: string }
-  | { type: "showConfirm"; id: string; message: string }
-  | { type: "openNexusignore" }
-  | { type: "getModelsCatalog" }
-  | { type: "restoreCheckpoint"; hash: string; restoreType: "task" | "workspace" | "taskAndWorkspace" }
-  | { type: "showCheckpointDiff"; fromHash: string; toHash?: string }
-  | { type: "getAgentPresets" }
-  | { type: "getAgentPresetOptions" }
-  | { type: "createAgentPreset"; preset: { name: string; vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string } }
-  | { type: "deleteAgentPreset"; presetName: string }
-  | { type: "applyAgentPreset"; presetName: string }
-  | { type: "planFollowupChoice"; choice: "implement" | "revise" | "dismiss"; planText?: string; instruction?: string; newSession?: boolean }
-  | { type: "dismissQuestionnaire"; requestId: string }
-  | { type: "questionnaireResponse"; requestId: string; answers: UserQuestionAnswer[] }
-  | { type: "loadOlderMessages" }
-  | { type: "rollbackToBeforeMessage"; messageId: string }
-  | { type: "startOrConnectVectorDb"; url: string; autoStart?: boolean }
-  | { type: "openSessionEditDiff"; path: string }
-  | { type: "undoSessionEdits" }
-  | { type: "keepAllSessionEdits" }
-  | { type: "revertSessionEditFile"; path: string }
-  | { type: "acceptSessionEditFile"; path: string }
-  | { type: "slashCommand"; command: string }
-  | { type: "setChatPreset"; presetName: string }
-  | {
-      type: "fetchMarketplaceData"
-      /** When false, skip SkillNet (e.g. MCP-only tab). Default: fetch skills. */
-      includeSkills?: boolean
-      skillSearchQuery?: string
-      skillSearchMode?: "keyword" | "vector"
-      skillPage?: number
-      skillCategory?: string
-      skillVectorThreshold?: number
-      /** When true, skip extension cache and refetch catalogs (Refresh button). */
-      forceRefresh?: boolean
-    }
-  | {
-      type: "installMarketplaceItem"
-      mpItem: MarketplaceItem
-      mpInstallOptions: { target?: "global" | "project"; parameters?: Record<string, unknown> }
-    }
-  | {
-      type: "removeInstalledMarketplaceItem"
-      mpItem: MarketplaceItem
-      mpInstallOptions: { target: "global" | "project" }
-    }
-  | {
-      type: "setAutocompleteExtensionSettings"
-      patch: Partial<{
-        enableAutoTrigger: boolean
-        useSeparateModel: boolean
-        modelProvider: string
-        modelId: string
-        modelApiKey: string
-        modelBaseUrl: string
-        modelTemperature: string
-        modelReasoningEffort: string
-        modelContextWindow: string
-      }>
-    }
-
 export type ExtensionMessage = (
   | { type: "stateUpdate"; state: WebviewState }
+  | {
+      type: "messageSubmissionResult"
+      clientMessageId: string
+      accepted: boolean
+    }
   | { type: "agentEvent"; event: AgentEvent }
   | { type: "sessionList"; sessions: Array<{ id: string; ts: number; title?: string; messageCount: number }> }
   | { type: "sessionListLoading"; loading: boolean }
@@ -327,6 +325,7 @@ export type ExtensionMessage = (
   | { type: "addToChatContent"; content: string }
   | { type: "action"; action: "switchView"; view: "chat" | "sessions" | "settings"; settingsTab?: "llm" | "embeddings" | "index" | "tools" | "integrations" | "presets"; settingsIntegTab?: "rules-skills" | "mcp" | "rules-instructions" }
   | { type: "mcpServerStatus"; results: Array<{ name: string; status: "ok" | "error"; error?: string }> }
+  | { type: "slashCommandCatalog"; commands: SlashCommandCatalogItem[] }
   | { type: "pendingApproval"; partId: string; action: ApprovalAction }
   | { type: "confirmResult"; id: string; ok: boolean }
   | { type: "modelsCatalog"; catalog: import("@nexuscode/core").ModelsCatalog }
@@ -384,6 +383,10 @@ export interface WebviewState {
   connectionState?: ServerConnectionState
   /** When connectionState === "error": message to show and trigger retry. */
   serverConnectionError?: string
+  /** Persistent fail-closed workspace configuration error. */
+  configurationError?: string | null
+  /** Non-fatal diagnostics from the exact custom/plugin tool snapshot used by the latest local run. */
+  toolContributionDiagnostics?: ToolContributionDiagnosticView[]
   modelsCatalog?: import("@nexuscode/core").ModelsCatalog | null
   checkpointEnabled?: boolean
   checkpointEntries?: CheckpointEntry[]
@@ -416,11 +419,44 @@ function simpleDiffStats(originalContent: string, newContent: string): { added: 
   return { added, removed }
 }
 
+function projectToolContributionDiagnostics(
+  cwd: string,
+  diagnostics: readonly ToolContributionDiagnostic[],
+): ToolContributionDiagnosticView[] {
+  const canonicalCwd = path.resolve(cwd)
+  return diagnostics.slice(0, 100).map((diagnostic) => {
+    const absoluteSource = path.resolve(diagnostic.sourcePath)
+    const relativeSource = path.relative(canonicalCwd, absoluteSource)
+    const isWorkspaceSource =
+      relativeSource === "" ||
+      (!relativeSource.startsWith("..") &&
+        !path.isAbsolute(relativeSource))
+    const source = (
+      isWorkspaceSource
+        ? relativeSource || "."
+        : path.basename(absoluteSource) || "external contribution"
+    ).replace(/\\/g, "/")
+    return {
+      level: diagnostic.level,
+      code: diagnostic.code.slice(0, 128),
+      source: source.slice(0, 512),
+      message: diagnostic.message.slice(0, 2_048),
+      ...(diagnostic.toolName
+        ? { toolName: diagnostic.toolName.slice(0, 128) }
+        : {}),
+    }
+  })
+}
+
 export class Controller {
+  private disposed = false
   private session?: Session
   private config?: NexusConfig
+  private configurationError?: string
   private stateUpdateSeq = 0
   private defaultModelProfile?: NexusConfig["model"]
+  /** Stable profile binding replayed after every disk/config reload. */
+  private activeProfileName?: string
   /** Active preset for chat messages (per-message; does not persist to config). */
   private chatPresetName: string = "Default"
   /** Snapshot of skills/mcp/rules/indexing at first config load; used for "Default" preset. */
@@ -438,8 +474,23 @@ export class Controller {
   private checkpoint?: CheckpointTracker
   private indexer?: CodebaseIndexer
   private mcpClient?: McpClient
+  private readonly workspaceRunServices = new WorkspaceRunServicesRegistry()
   private serverSessionId?: string
-  private activeServerRunId?: string
+  private remoteSessionCreationPromise?: Promise<{
+    client: NexusServerClient
+    sessionId: string
+  }>
+  private activeRemoteTurn?: VsCodeRemoteTurn
+  /** Server-validated transition consumed only after the next remote turn is admitted. */
+  private forcedRemoteModeForNextRun: Mode | null = null
+  private remoteWorkspaceStateCache?: {
+    serverUrl: string
+    cwd: string
+    state: VsCodeRemoteWorkspaceState
+  }
+  private observedServerUrl = ""
+  private serverDestinationChangePromise?: Promise<void>
+  private remoteResumePromise?: Promise<boolean>
   /** For server sessions: offset of the oldest loaded message (0 = all loaded). Used for "Load older" pagination. */
   private serverSessionOldestLoadedOffset: number | undefined = undefined
   private loadingOlderMessages = false
@@ -459,9 +510,12 @@ export class Controller {
   private indexerWatcherDebounceTimer: ReturnType<typeof setTimeout> | undefined
   private disposables: vscode.Disposable[] = []
   private readonly marketplaceService = new MarketplaceService()
+  private readonly webviewPathCapabilities = new WebviewPathCapabilities()
+  private skillDefinitionsLoadGeneration = 0
+  private slashCommandCatalogGeneration = 0
   private onAutocompleteConfigReady?: () => void
   private autocompleteApiKeyConfigured = false
-  private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } = { current: null }
+  private approvalResolveRef: WebviewApprovalResolverSlot = { current: null }
   /** VS Code Secret Storage for API keys (keys not stored in YAML). */
   private readonly secretsStore = {
     getSecret: async (key: string) => this.context.secrets.get(key),
@@ -475,6 +529,8 @@ export class Controller {
   private streamLastSpawnAgentPartId: string | null = null
   /** Last context_usage from agent loop (includes system prompt tokens). Used in getStateToPostToWebview so stateUpdate does not overwrite with session-only count. */
   private lastContextUsage: { usedTokens: number; limitTokens: number; percent: number; sessionId: string } | null = null
+  /** Bounded, path-redacted diagnostics for the most recently prepared local integration snapshot. */
+  private toolContributionDiagnostics: ToolContributionDiagnosticView[] = []
   /** Coalesce frequent state snapshots during agent streaming to avoid UI thrash. */
   private statePostTimer: ReturnType<typeof setTimeout> | null = null
   /** True when a local session was opened as a recent-message window instead of fully loaded. */
@@ -484,16 +540,47 @@ export class Controller {
   private cwdOverride: string | null = null
 
   private normalizePathKey(filePath: string, cwd: string): string {
-    const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
-    return path.normalize(absPath).replace(/\\/g, "/")
+    return this.webviewPathCapabilities
+      .resolveWorkspacePath(cwd, filePath)
+      .replace(/\\/g, "/")
+  }
+
+  private workspaceUriForAuthorizedPath(
+    cwd: string,
+    authorizedPath: string,
+  ): vscode.Uri {
+    const canonicalCwd =
+      this.webviewPathCapabilities.resolveWorkspacePath(cwd, ".")
+    const workspaceFolder = vscode.workspace.workspaceFolders?.find((folder) => {
+      try {
+        return (
+          this.webviewPathCapabilities.resolveWorkspacePath(
+            canonicalCwd,
+            folder.uri.fsPath,
+          ) === canonicalCwd
+        )
+      } catch {
+        return false
+      }
+    })
+    if (!workspaceFolder) return vscode.Uri.file(authorizedPath)
+    const relativePath = path
+      .relative(canonicalCwd, authorizedPath)
+      .replace(/\\/g, "/")
+    return vscode.Uri.joinPath(workspaceFolder.uri, relativePath)
   }
 
   private async revertDirtyWorkspaceDocs(cwd: string): Promise<void> {
-    const cwdResolved = path.resolve(cwd)
     for (const doc of vscode.workspace.textDocuments) {
       if (doc.uri.scheme !== "file") continue
-      const rel = path.relative(cwdResolved, doc.uri.fsPath)
-      if (rel.startsWith("..") || path.isAbsolute(rel)) continue
+      try {
+        this.webviewPathCapabilities.resolveWorkspacePath(
+          cwd,
+          doc.uri.fsPath,
+        )
+      } catch {
+        continue
+      }
       if (!doc.isDirty) continue
       try {
         await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preserveFocus: false })
@@ -505,13 +592,17 @@ export class Controller {
   }
 
   private async openWorkspaceFile(cwd: string, filePath: string): Promise<void> {
-    const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
-    const wf = vscode.workspace.workspaceFolders?.[0]
-    const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
-    const uri =
-      wf && !(relPath.startsWith("..") || path.isAbsolute(relPath))
-        ? vscode.Uri.joinPath(wf.uri, relPath)
-        : vscode.Uri.file(absPath)
+    let authorizedPath: string
+    try {
+      authorizedPath =
+        this.webviewPathCapabilities.resolveWorkspacePath(cwd, filePath)
+    } catch {
+      vscode.window.showErrorMessage(
+        "NexusCode: Refusing to open a file outside the active workspace.",
+      )
+      return
+    }
+    const uri = this.workspaceUriForAuthorizedPath(cwd, authorizedPath)
     try {
       const doc = await vscode.workspace.openTextDocument(uri)
       await vscode.window.showTextDocument(doc, {
@@ -584,10 +675,6 @@ export class Controller {
     }
 
     return undefined
-  }
-
-  private isFileWriteTool(toolName: string): boolean {
-    return FILE_WRITE_TOOL_NAMES.has(toolName)
   }
 
   /**
@@ -969,12 +1056,24 @@ export class Controller {
     private readonly context: vscode.ExtensionContext,
     private readonly postMessageToWebview: (msg: ExtensionMessage) => void
   ) {
+    this.observedServerUrl = this.getServerUrl()
     this.disposables.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (!e.affectsConfiguration("nexuscode")) return
         if (this.config) {
-          this.applyVscodeOverrides(this.config)
+          const base: NexusConfig = {
+            ...this.config,
+            model: {
+              ...(this.defaultModelProfile ?? this.config.model),
+            },
+          }
+          this.applyHostSelections(base)
+          this.config = base
+          this.postConfigToWebview()
           this.postStateToWebview()
+        }
+        if (e.affectsConfiguration("nexuscode.serverUrl")) {
+          void this.handleServerDestinationChange()
         }
       })
     )
@@ -989,13 +1088,152 @@ export class Controller {
     return canonicalProjectRoot(process.cwd())
   }
 
+  private loadHostConfig(cwd = this.getCwd()): Promise<NexusConfig> {
+    const remoteRuntime = Boolean(this.getServerUrl())
+    return loadVsCodeWorkspaceConfig(cwd, {
+      loadEnv: !remoteRuntime,
+      hostAuthority: !remoteRuntime,
+    })
+  }
+
+  private setConfigurationLoadError(
+    error: unknown,
+    cwd = this.getCwd(),
+    notify = true,
+  ): void {
+    const detail = (
+      error instanceof Error ? error.message : String(error)
+    ).slice(0, 4_096)
+    const message =
+      `Failed to load NexusCode configuration for ${cwd}: ${detail}. ` +
+      "Agent execution is disabled until the configuration is fixed and reloaded."
+    const changed = this.configurationError !== message
+    this.abortController?.abort()
+    this.approvalResolveRef.current?.resolve({ approved: false })
+    void this.abortServerTask().catch(() => undefined)
+    this.configurationError = message
+    this.config = undefined
+    this.defaultModelProfile = undefined
+    this.activeProfileName = undefined
+    this.mcpReconnectPromise = Promise.resolve()
+    this.mcpConfigFingerprint = null
+    void this.mcpClient?.disconnectAll().catch(() => undefined)
+    this.mcpClient = undefined
+    this.toolContributionDiagnostics = []
+    this.forcedRemoteModeForNextRun = null
+    this.skillDefinitionsLoadGeneration += 1
+    this.webviewPathCapabilities.replaceKnownSkillPaths([])
+    this.postMessageToWebview({
+      type: "skillDefinitions",
+      definitions: [],
+    })
+    if (changed) {
+      this.postMessageToWebview({
+        type: "agentEvent",
+        event: { type: "error", error: message },
+      })
+      if (notify) {
+        void vscode.window.showErrorMessage(`NexusCode: ${message}`)
+      }
+    }
+    this.postStateToWebview()
+  }
+
+  private captureInitialConfigSnapshot(config: NexusConfig): void {
+    if (this.initialFullConfigSnapshot) return
+    this.initialFullConfigSnapshot = {
+      skills: [...(config.skills ?? [])],
+      mcp: { servers: [...(config.mcp?.servers ?? [])] },
+      rules: { files: [...(config.rules?.files ?? [])] },
+      indexing: { ...config.indexing },
+    }
+  }
+
+  private async reloadHostConfiguration(
+    notifySuccess = false,
+  ): Promise<boolean> {
+    if (this.isRunning) {
+      void vscode.window.showWarningMessage(
+        "NexusCode: Wait for the current run to stop before reloading configuration.",
+      )
+      return false
+    }
+    const cwd = this.getCwd()
+    let loaded: NexusConfig
+    try {
+      loaded = await this.loadHostConfig(cwd)
+    } catch (error) {
+      this.setConfigurationLoadError(error, cwd)
+      return false
+    }
+    this.configurationError = undefined
+    this.config = loaded
+    this.captureInitialConfigSnapshot(loaded)
+    this.applyHostSelections(loaded)
+    this.postConfigToWebview()
+    void this.loadAndSendSkillDefinitions()
+    this.postStateToWebview()
+    if (this.getServerUrl()) {
+      const restored =
+        this.serverSessionId
+          ? false
+          : await this.restoreSelectedRemoteSession(cwd)
+      await this.synchronizeRuntimeMode()
+      if (restored) {
+        void this.resumeRemoteTurnIfActive().catch(() => undefined)
+      }
+    } else {
+      this.mcpReconnectPromise = this.reconnectMcpServers(loaded).catch(
+        (error: unknown) => {
+          const message =
+            error instanceof Error ? error.message : String(error)
+          this.postMessageToWebview({
+            type: "agentEvent",
+            event: { type: "error", error: `[mcp] ${message}` },
+          })
+        },
+      )
+      void this.initializeIndexer(cwd).catch((error: unknown) => {
+        const message =
+          error instanceof Error ? error.message : String(error)
+        this.postMessageToWebview({
+          type: "agentEvent",
+          event: { type: "error", error: `[indexer] ${message}` },
+        })
+      })
+    }
+    this.onAutocompleteConfigReady?.()
+    if (notifySuccess) {
+      void vscode.window.showInformationMessage(
+        "NexusCode: Workspace configuration reloaded.",
+      )
+    }
+    return true
+  }
+
   private async applyHostWorkingDirectoryChange(cwd: string, _reason?: string): Promise<void> {
     this.cwdOverride = canonicalProjectRoot(cwd)
+    this.forcedRemoteModeForNextRun = null
     this.checkpoint = undefined
-    this.indexer = undefined
+    this.initialFullConfigSnapshot = undefined
     this.mcpConfigFingerprint = null
+    let loaded: NexusConfig
+    try {
+      loaded = await this.loadHostConfig(this.cwdOverride)
+    } catch (error) {
+      this.setConfigurationLoadError(error, this.cwdOverride)
+      throw error
+    }
+    this.configurationError = undefined
+    this.captureInitialConfigSnapshot(loaded)
+    this.applyHostSelections(loaded)
+    this.config = loaded
     this.sendIndexStatus()
     this.postStateToWebview()
+    if (this.getServerUrl()) {
+      await this.synchronizeRuntimeMode()
+      return
+    }
     void this.reconnectMcpServers().catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err)
       this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
@@ -1006,31 +1244,370 @@ export class Controller {
     })
   }
 
+  private handleServerDestinationChange(): Promise<void> {
+    if (this.serverDestinationChangePromise) {
+      return this.serverDestinationChangePromise.then(() =>
+        this.getServerUrl() === this.observedServerUrl
+          ? undefined
+          : this.handleServerDestinationChange(),
+      )
+    }
+    const nextServerUrl = this.getServerUrl()
+    if (nextServerUrl === this.observedServerUrl) {
+      return this.synchronizeRuntimeMode()
+    }
+    const previousServerUrl = this.observedServerUrl
+    this.observedServerUrl = nextServerUrl
+    const task = (async () => {
+      const cwd = this.getCwd()
+      const wasRunning = this.isRunning
+      if (wasRunning) {
+        this.setConfigurationLoadError(
+          new Error(
+            `NexusCode server destination changed from ${
+              previousServerUrl || "local mode"
+            } to ${nextServerUrl || "local mode"} during an active run`,
+          ),
+          cwd,
+        )
+      } else {
+        this.abortController?.abort()
+        this.approvalResolveRef.current?.resolve({ approved: false })
+      }
+      this.remoteSessionCreationPromise = undefined
+      this.remoteWorkspaceStateCache = undefined
+      this.serverSessionId = undefined
+      this.serverSessionOldestLoadedOffset = undefined
+      this.activeRemoteTurn = undefined
+      this.remoteResumePromise = undefined
+      this.forcedRemoteModeForNextRun = null
+      this.serverConnectionState = "idle"
+      this.serverConnectionError = undefined
+      this.pendingQuestionRequest = null
+      this.checkpoint = undefined
+      this.lastRunMode = null
+      this.initialFullConfigSnapshot = undefined
+      this.session = Session.create(cwd)
+      this.postStateToWebview()
+      void this.postSlashCommandCatalog().catch(() => undefined)
+      if (!wasRunning) {
+        await this.reloadHostConfiguration(false)
+      }
+    })()
+    const managed = task.finally(() => {
+      if (this.serverDestinationChangePromise === managed) {
+        this.serverDestinationChangePromise = undefined
+      }
+    })
+    this.serverDestinationChangePromise = managed
+    return managed
+  }
+
+  private async synchronizeRuntimeMode(): Promise<void> {
+    if (!this.initialized) return
+    const cwd = this.getCwd()
+    if (this.getServerUrl()) {
+      this.mcpReconnectPromise = Promise.resolve()
+      await this.mcpClient?.disconnectAll().catch(() => {})
+      this.mcpClient = undefined
+      this.mcpConfigFingerprint = null
+      await this.initializeIndexer(cwd)
+      void this.postSlashCommandCatalog().catch(() => undefined)
+      return
+    }
+    this.mcpReconnectPromise = this.reconnectMcpServers().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      this.postMessageToWebview({
+        type: "agentEvent",
+        event: { type: "error", error: `[mcp] ${message}` },
+      })
+    })
+    void this.initializeIndexer(cwd).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      this.postMessageToWebview({
+        type: "agentEvent",
+        event: { type: "error", error: `[indexer] ${message}` },
+      })
+    })
+  }
+
   getServerUrl(): string {
-    return vscode.workspace.getConfiguration("nexuscode").get<string>("serverUrl")?.trim() ?? ""
+    return vscode.workspace
+      .getConfiguration("nexuscode")
+      .inspect<string>("serverUrl")
+      ?.globalValue?.trim() ?? ""
   }
 
   private async createServerClient(cwd = this.getCwd()): Promise<NexusServerClient> {
+    const baseUrl = this.getServerUrl()
     const token =
       process.env.NEXUS_SERVER_TOKEN?.trim() ||
-      await this.context.secrets.get(NEXUS_SERVER_TOKEN_SECRET_KEY)
+      await this.context.secrets.get(getNexusServerTokenSecretKey(baseUrl)) ||
+      (isLoopbackNexusServerDestination(baseUrl)
+        ? await this.context.secrets.get(NEXUS_SERVER_TOKEN_SECRET_KEY)
+        : undefined)
     if (!token) {
       throw new Error(
         "NexusCode server token is missing. Set NEXUS_SERVER_TOKEN for the extension host or store nexuscode_server_token in VS Code Secret Storage.",
       )
     }
     return new NexusServerClient({
-      baseUrl: this.getServerUrl(),
+      baseUrl,
       directory: cwd,
       token,
     })
   }
 
-  private async abortServerTask(): Promise<void> {
-    if (!this.getServerUrl() || !this.serverSessionId) return
+  private ensureRemoteSession(): Promise<{
+    client: NexusServerClient
+    sessionId: string
+  }> {
+    if (this.disposed) {
+      return Promise.reject(new Error("NexusCode controller is disposed"))
+    }
+    if (this.configurationError) {
+      return Promise.reject(new Error(this.configurationError))
+    }
+    const serverUrl = this.getServerUrl()
+    if (!serverUrl) {
+      return Promise.reject(
+        new Error("NexusCode server URL is not configured"),
+      )
+    }
+    if (this.remoteSessionCreationPromise) {
+      return this.remoteSessionCreationPromise
+    }
+    const cwd = this.getCwd()
+    const task = (async () => {
+      const client = await this.createServerClient(cwd)
+      if (this.serverSessionId) {
+        return { client, sessionId: this.serverSessionId }
+      }
+      const created = await client.createSession()
+      if (
+        this.disposed ||
+        this.getServerUrl() !== serverUrl ||
+        this.getCwd() !== cwd
+      ) {
+        throw new Error(
+          "NexusCode server destination or workspace changed while creating the MCP prompt session",
+        )
+      }
+      await this.getRemoteWorkspaceState(cwd)
+        .setSelectedSessionId(created.id)
+      this.session = new Session(created.id, cwd, [], undefined, true)
+      this.serverSessionId = created.id
+      this.serverSessionOldestLoadedOffset = undefined
+      this.localSessionWindowed = false
+      this.pendingQuestionRequest = null
+      this.checkpoint = undefined
+      this.postStateToWebview()
+      void this.sendSessionList().catch(() => undefined)
+      return { client, sessionId: created.id }
+    })()
+    const managed = task.finally(() => {
+      if (this.remoteSessionCreationPromise === managed) {
+        this.remoteSessionCreationPromise = undefined
+      }
+    })
+    this.remoteSessionCreationPromise = managed
+    return managed
+  }
+
+  private getRemoteWorkspaceState(
+    cwd = this.getCwd(),
+  ): VsCodeRemoteWorkspaceState {
+    const serverUrl = this.getServerUrl()
+    if (!serverUrl) {
+      throw new Error("NexusCode server URL is not configured")
+    }
+    const cached = this.remoteWorkspaceStateCache
+    if (
+      cached &&
+      cached.serverUrl === serverUrl &&
+      cached.cwd === cwd
+    ) {
+      return cached.state
+    }
+    const state = new VsCodeRemoteWorkspaceState(
+      this.context.workspaceState,
+      serverUrl,
+      cwd,
+    )
+    this.remoteWorkspaceStateCache = { serverUrl, cwd, state }
+    return state
+  }
+
+  private async refreshRemoteSession(
+    client: NexusServerClient,
+    sessionId: string,
+    cwd = this.getCwd(),
+  ): Promise<void> {
+    const meta = await client.getSession(sessionId)
+    const offset = Math.max(
+      0,
+      meta.messageCount - INITIAL_SERVER_MESSAGES,
+    )
+    const messages = await client.getMessages(sessionId, {
+      limit: INITIAL_SERVER_MESSAGES,
+      offset,
+    })
+    if (this.serverSessionId !== sessionId) return
+    this.session = new Session(
+      sessionId,
+      cwd,
+      messages,
+      undefined,
+      true,
+    )
+    this.serverSessionOldestLoadedOffset = offset
+    this.localSessionWindowed = false
+  }
+
+  private forwardServerEvent(event: AgentEvent): void {
+    const nextMode =
+      remoteModeTransitionFromAgentEvent(event)
+    if (nextMode) {
+      this.mode = nextMode
+      this.forcedRemoteModeForNextRun = nextMode
+    }
+    if (event.type === "question_request") {
+      this.pendingQuestionRequest = event.request
+    }
+    if (event.type === "context_usage") {
+      this.lastContextUsage = {
+        usedTokens: event.usedTokens,
+        limitTokens: event.limitTokens,
+        percent: event.percent,
+        sessionId: this.session?.id ?? "",
+      }
+    }
+    this.applyAgentEventToSessionShadow(event)
+    this.postMessageToWebview({ type: "agentEvent", event })
+    if (event.type === "tool_approval_needed") {
+      this.postMessageToWebview({
+        type: "pendingApproval",
+        partId: event.partId,
+        action: event.action,
+      })
+    }
+    if (this.eventAffectsVisibleState(event)) {
+      this.postStateToWebview()
+    }
+    // Agent diagnostics (including fatal run failures) are not transport
+    // failures. Network/attach errors are handled by the surrounding remote
+    // turn boundary and alone may transition the connection to "error".
+  }
+
+  private async restoreSelectedRemoteSession(
+    cwd = this.getCwd(),
+  ): Promise<boolean> {
+    const state = this.getRemoteWorkspaceState(cwd)
+    const sessionId = await state.getSelectedSessionId()
+    if (!sessionId) return false
+
+    this.serverSessionId = sessionId
+    this.session = new Session(sessionId, cwd, [], undefined, true)
     try {
-      const client = await this.createServerClient()
-      await client.abortSession(this.serverSessionId)
+      await this.refreshRemoteSession(
+        await this.createServerClient(cwd),
+        sessionId,
+        cwd,
+      )
+      return true
+    } catch (error) {
+      // Keep the exact selected id on transient startup failures so a later
+      // reconnect cannot accidentally create a second server session.
+      this.reportServerError(error)
+      return false
+    }
+  }
+
+  private resumeRemoteTurnIfActive(): Promise<boolean> {
+    if (this.remoteResumePromise) return this.remoteResumePromise
+    const task = this.resumeRemoteTurnIfActiveImpl()
+    const managed = task.finally(() => {
+      if (this.remoteResumePromise === managed) {
+        this.remoteResumePromise = undefined
+      }
+    })
+    this.remoteResumePromise = managed
+    return managed
+  }
+
+  private async resumeRemoteTurnIfActiveImpl(): Promise<boolean> {
+    const serverUrl = this.getServerUrl()
+    const sessionId = this.serverSessionId
+    if (!serverUrl || !sessionId || this.isRunning) return false
+
+    const cwd = this.getCwd()
+    const abortController = new AbortController()
+    let attachedTurn: VsCodeRemoteTurn | undefined
+    this.abortController = abortController
+    this.isRunning = true
+    this.setServerConnectionState("connecting")
+    try {
+      const client = await this.createServerClient(cwd)
+      const attached = await resumeVsCodeRemoteTurn({
+        client,
+        sessionId,
+        signal: abortController.signal,
+        cursorStore: this.getRemoteWorkspaceState(cwd),
+        onActiveExecution: (execution) => {
+          this.mode = execution.mode
+          this.lastRunMode = execution.mode
+          this.forcedRemoteModeForNextRun = null
+          this.postStateToWebview()
+        },
+        onRemoteTurn: (turn) => {
+          if (turn) {
+            attachedTurn = turn
+            this.activeRemoteTurn = turn
+            this.setServerConnectionState("streaming")
+          } else if (this.activeRemoteTurn === attachedTurn) {
+            this.activeRemoteTurn = undefined
+            attachedTurn = undefined
+          }
+        },
+        deliver: (event) => {
+          if (!abortController.signal.aborted) {
+            this.forwardServerEvent(event)
+          }
+        },
+      })
+      if (attached && !abortController.signal.aborted) {
+        await this.refreshRemoteSession(client, sessionId, cwd).catch(
+          () => undefined,
+        )
+      }
+      return attached
+    } catch (error) {
+      if (!abortController.signal.aborted) {
+        this.reportServerError(error)
+      }
+      throw error
+    } finally {
+      if (this.activeRemoteTurn === attachedTurn) {
+        this.activeRemoteTurn = undefined
+      }
+      if (this.abortController === abortController) {
+        this.abortController = undefined
+      }
+      this.isRunning = false
+      if (this.serverConnectionState !== "error") {
+        this.serverConnectionState = "idle"
+        this.serverConnectionError = undefined
+      }
+      this.postStateToWebview()
+    }
+  }
+
+  private async abortServerTask(): Promise<void> {
+    if (!this.getServerUrl() || !this.activeRemoteTurn) return
+    const interrupt = this.activeRemoteTurn.interrupt("user requested stop")
+    this.abortController?.abort()
+    try {
+      await interrupt
     } catch (error) {
       this.reportServerError(error)
     }
@@ -1063,6 +1640,36 @@ export class Controller {
     return this.config
   }
 
+  async resolveAutocompleteModel(): Promise<ProviderConfig | undefined> {
+    if (this.getServerUrl() || this.configurationError) return undefined
+    let config: NexusConfig
+    try {
+      config = await this.loadHostConfig()
+    } catch (error) {
+      this.setConfigurationLoadError(error, this.getCwd(), false)
+      return undefined
+    }
+    this.applyVscodeOverrides(config)
+    const requestedProfileName = this.activeProfileName?.trim()
+    let profileName: string | undefined
+    if (requestedProfileName) {
+      const profile = config.profiles[requestedProfileName]
+      if (profile) {
+        config.model = selectProviderProfile(config.model, profile)
+        profileName = requestedProfileName
+      }
+    }
+    const runtime = await finalizeConfigCredentials(
+      config as unknown as Record<string, unknown>,
+      this.secretsStore,
+      {
+        profileName,
+        environment: getConfigEnvironment(config),
+      },
+    ) as unknown as NexusConfig
+    return runtime.model
+  }
+
   setAutocompleteConfigReady(fn: () => void): void {
     this.onAutocompleteConfigReady = fn
   }
@@ -1092,6 +1699,9 @@ export class Controller {
         serverUrl: this.getServerUrl(),
         connectionState: this.serverConnectionState,
         serverConnectionError: this.serverConnectionError,
+        configurationError: this.configurationError ?? null,
+        toolContributionDiagnostics:
+          this.toolContributionDiagnostics,
         modelsCatalog: this.modelsCatalogCache ?? null,
         sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
         pendingQuestionRequest: this.pendingQuestionRequest,
@@ -1150,6 +1760,9 @@ export class Controller {
       serverUrl: this.getServerUrl(),
       connectionState: this.serverConnectionState,
       serverConnectionError: this.serverConnectionError,
+      configurationError: this.configurationError ?? null,
+      toolContributionDiagnostics:
+        this.toolContributionDiagnostics,
       modelsCatalog: this.modelsCatalogCache ?? null,
       checkpointEnabled:
         !this.getServerUrl() &&
@@ -1180,11 +1793,38 @@ export class Controller {
 
   /** Add an edit to session unaccepted after saveFileEdit (called from host callback). */
   addSessionUnacceptedEdit(path: string, originalContent: string, newContent: string, isNewFile: boolean): void {
-    const key = path.replace(/\\/g, "/")
-    const existing = this.sessionUnacceptedEdits.findIndex((e) => e.path.replace(/\\/g, "/") === key)
-    if (existing >= 0) this.sessionUnacceptedEdits.splice(existing, 1)
+    const displayPath = path.replace(/\\/g, "/")
+    let key = displayPath
+    try {
+      key = this.normalizePathKey(path, this.getCwd())
+    } catch {
+      // The host already authorized this path. Keep a stable display fallback
+      // if the workspace disappears while the completion event is delivered.
+    }
+    const existing = this.sessionUnacceptedEdits.findIndex((edit) => {
+      try {
+        return this.normalizePathKey(edit.path, this.getCwd()) === key
+      } catch {
+        return edit.path.replace(/\\/g, "/") === displayPath
+      }
+    })
+    if (existing >= 0) {
+      const firstEdit = this.sessionUnacceptedEdits[existing]!
+      this.sessionUnacceptedEdits.splice(existing, 1)
+      if (!firstEdit.isNewFile && firstEdit.originalContent === newContent) {
+        return
+      }
+      this.sessionUnacceptedEdits.push({
+        path: firstEdit.path,
+        originalContent: firstEdit.originalContent,
+        newContent,
+        diffStats: simpleDiffStats(firstEdit.originalContent, newContent),
+        isNewFile: firstEdit.isNewFile,
+      })
+      return
+    }
     this.sessionUnacceptedEdits.push({
-      path: key,
+      path: displayPath,
       originalContent,
       newContent,
       diffStats: simpleDiffStats(originalContent, newContent),
@@ -1233,6 +1873,12 @@ export class Controller {
 
   /** Load skills from config paths, skillsUrls registries, Nexus skill dirs (.nexus/skills), Claude ~/.claude/skills, walk-up, send to webview Skills list. */
   private loadAndSendSkillDefinitions(): void {
+    const generation = ++this.skillDefinitionsLoadGeneration
+    if (this.getServerUrl()) {
+      this.webviewPathCapabilities.replaceKnownSkillPaths([])
+      this.postMessageToWebview({ type: "skillDefinitions", definitions: [] })
+      return
+    }
     const cwd = this.getCwd()
     const paths = this.config?.skills ?? []
     loadSkills(
@@ -1243,12 +1889,18 @@ export class Controller {
       this.config,
     )
       .then((skills) => {
+        if (generation !== this.skillDefinitionsLoadGeneration) return
+        this.webviewPathCapabilities.replaceKnownSkillPaths(
+          skills.map((skill) => skill.path),
+        )
         this.postMessageToWebview({
           type: "skillDefinitions",
           definitions: skills.map((s) => ({ name: s.name, path: s.path, summary: s.summary })),
         })
       })
       .catch(() => {
+        if (generation !== this.skillDefinitionsLoadGeneration) return
+        this.webviewPathCapabilities.replaceKnownSkillPaths([])
         this.postMessageToWebview({ type: "skillDefinitions", definitions: [] })
       })
   }
@@ -1256,34 +1908,50 @@ export class Controller {
   private async refreshAfterMarketplaceChange(): Promise<void> {
     const cwd = this.getCwd()
     try {
-      this.config = await loadConfig(cwd, { secrets: this.secretsStore })
-    } catch {
-      /* keep previous config */
+      const loaded = await this.loadHostConfig(cwd)
+      this.applyHostSelections(loaded)
+      this.config = loaded
+      this.configurationError = undefined
+    } catch (error) {
+      this.setConfigurationLoadError(error, cwd)
+      return
     }
     if (this.config) {
       this.postConfigToWebview()
       void this.loadAndSendSkillDefinitions()
-      void this.reconnectMcpServers().catch(() => {})
+      if (!this.getServerUrl()) {
+        void this.reconnectMcpServers().catch(() => {})
+      }
     }
     this.postStateToWebview()
   }
 
   /** Clear current task/session and reset run state. */
   async clearTask(): Promise<void> {
+    const remoteSessionId = this.serverSessionId
     await this.abortServerTask()
     this.abortController?.abort()
+    this.approvalResolveRef.current?.resolve({ approved: false })
+    if (this.getServerUrl()) {
+      const remoteState = this.getRemoteWorkspaceState()
+      if (remoteSessionId) await remoteState.clear(remoteSessionId)
+      await remoteState.setSelectedSessionId(undefined)
+    }
     this.session = undefined
     this.sessionUnacceptedEdits = []
     this.serverSessionOldestLoadedOffset = undefined
     this.checkpoint = undefined
     this.serverSessionId = undefined
+    this.forcedRemoteModeForNextRun = null
     this.postStateToWebview()
+    void this.postSlashCommandCatalog().catch(() => undefined)
   }
 
   /** Cancel running agent (abort + keep session, then post state). */
   async cancelTask(): Promise<void> {
     await this.abortServerTask()
     this.abortController?.abort()
+    this.approvalResolveRef.current?.resolve({ approved: false })
     this.postStateToWebview()
   }
 
@@ -1297,72 +1965,54 @@ export class Controller {
     this.initPromise = (async () => {
       this.initialized = true
       const cwd = this.getCwd()
-      await this.migrateLegacyPlaintextSecrets(cwd)
+      const remoteRuntime = Boolean(this.getServerUrl())
+      let restoredRemoteSession = false
+      if (!remoteRuntime) {
+        await this.migrateLegacyPlaintextSecrets(cwd).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error)
+          vscode.window.showErrorMessage(
+            `NexusCode: Secure credential migration was not applied — ${message}`,
+          )
+        })
+      }
       try {
-        this.config = await loadConfig(cwd, { secrets: this.secretsStore })
-      } catch {
-        this.config = undefined
+        this.config = await this.loadHostConfig(cwd)
+      } catch (error) {
+        this.setConfigurationLoadError(error, cwd)
+        this.session ??= Session.create(cwd)
+        this.postStateToWebview()
+        this.sendIndexStatus()
+        return
       }
-      if (!this.config) {
-        try {
-          this.config = await loadConfig(process.cwd(), { secrets: this.secretsStore })
-        } catch {}
-      }
-      if (!this.config) {
-        this.config = NexusConfigSchema.parse({}) as NexusConfig
-      }
-      if (!this.initialFullConfigSnapshot && this.config) {
-        this.initialFullConfigSnapshot = {
-          skills: [...(this.config.skills ?? [])],
-          mcp: { servers: [...(this.config.mcp?.servers ?? [])] },
-          rules: { files: [...(this.config.rules?.files ?? [])] },
-          indexing: { ...this.config.indexing },
-        }
-      }
+      this.configurationError = undefined
+      this.captureInitialConfigSnapshot(this.config)
+      this.applyHostSelections(this.config)
       this.postConfigToWebview()
       void this.loadAndSendSkillDefinitions()
-      try {
-        const allowPath = path.join(cwd, ".nexus", "allowed-commands.json")
-        const uri = vscode.Uri.file(allowPath)
-        const data = await vscode.workspace.fs.readFile(uri)
-        const parsed = JSON.parse(Buffer.from(data).toString("utf8")) as { commands?: string[] }
-        if (Array.isArray(parsed?.commands)) {
-          this.config.permissions.allowedCommands = parsed.commands
-        }
-      } catch {
-        // No file or invalid — keep default
+      if (remoteRuntime) {
+        restoredRemoteSession =
+          await this.restoreSelectedRemoteSession(cwd)
       }
-      try {
-        const settings = loadProjectSettings(cwd, this.config ? { compatibility: getClaudeCompatibilityOptions(this.config) } : undefined)
-        const perms = settings.permissions
-        if (perms) {
-          if (!this.config.permissions.allowCommandPatterns) this.config.permissions.allowCommandPatterns = []
-          if (!this.config.permissions.denyCommandPatterns) this.config.permissions.denyCommandPatterns = []
-          if (!this.config.permissions.askCommandPatterns) this.config.permissions.askCommandPatterns = []
-          if (!this.config.permissions.allowedMcpTools) this.config.permissions.allowedMcpTools = []
-          if (Array.isArray(perms.allow)) this.config.permissions.allowCommandPatterns = perms.allow
-          if (Array.isArray(perms.deny)) this.config.permissions.denyCommandPatterns = perms.deny
-          if (Array.isArray(perms.ask)) this.config.permissions.askCommandPatterns = perms.ask
-          if (Array.isArray(perms.allowedMcpTools)) this.config.permissions.allowedMcpTools = perms.allowedMcpTools
-        }
-      } catch {
-        // ignore
-      }
-      this.applyVscodeOverrides(this.config)
-      this.defaultModelProfile = { ...this.config.model }
-      this.session = Session.create(cwd)
+      this.session ??= Session.create(cwd)
       this.onAutocompleteConfigReady?.()
       this.postStateToWebview()
       this.sendIndexStatus()
       // Resolve init here so first message is not blocked. MCP/indexer/catalog/skills run in background.
-      this.mcpReconnectPromise = this.reconnectMcpServers().catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err)
-        this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
-      })
-      void this.initializeIndexer(cwd).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err)
-        this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[indexer] ${message}` } })
-      })
+      if (remoteRuntime) {
+        this.mcpReconnectPromise = Promise.resolve()
+        if (restoredRemoteSession) {
+          void this.resumeRemoteTurnIfActive().catch(() => undefined)
+        }
+      } else {
+        this.mcpReconnectPromise = this.reconnectMcpServers().catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err)
+          this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
+        })
+        void this.initializeIndexer(cwd).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err)
+          this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[indexer] ${message}` } })
+        })
+      }
       if (!this.modelsCatalogCache) {
         void getModelsCatalog()
           .then((cat) => {
@@ -1381,10 +2031,31 @@ export class Controller {
 
   async handleWebviewMessage(msg: WebviewMessage): Promise<void> {
     switch (msg.type) {
-      case "newMessage":
-        await this.ensureInitialized()
-        await this.runAgent(msg.content, msg.mode, msg.images, msg.presetName)
+      case "newMessage": {
+        let admissionReported = false
+        const reportAdmission = (accepted: boolean): void => {
+          if (admissionReported) return
+          admissionReported = true
+          this.postMessageToWebview({
+            type: "messageSubmissionResult",
+            clientMessageId: msg.clientMessageId,
+            accepted,
+          })
+        }
+        try {
+          await this.ensureInitialized()
+          await this.runAgent(
+            msg.content,
+            msg.mode,
+            msg.images,
+            msg.presetName,
+            reportAdmission,
+          )
+        } finally {
+          reportAdmission(false)
+        }
         break
+      }
       case "setChatPreset": {
         const name = (msg.presetName ?? "").trim() || "Default"
         this.chatPresetName = name
@@ -1392,9 +2063,7 @@ export class Controller {
         break
       }
       case "abort":
-        await this.abortServerTask()
-        this.abortController?.abort()
-        this.postStateToWebview()
+        await this.cancelTask()
         break
       case "compact":
         await this.compactHistory()
@@ -1404,11 +2073,13 @@ export class Controller {
         break
       case "setMode":
         this.mode = msg.mode
+        this.forcedRemoteModeForNextRun = null
         this.postStateToWebview()
         break
       case "setProfile":
         if (this.config) {
           if (!msg.profile) {
+            this.activeProfileName = undefined
             if (this.defaultModelProfile) {
               this.config.model = { ...this.defaultModelProfile }
             }
@@ -1419,7 +2090,11 @@ export class Controller {
           }
           const profile = this.config.profiles[msg.profile]
           if (!profile) break
-          this.config.model = { ...this.config.model, ...profile }
+          this.activeProfileName = msg.profile
+          this.config.model = selectProviderProfile(
+            this.defaultModelProfile ?? this.config.model,
+            profile,
+          )
           this.postConfigToWebview()
         void this.loadAndSendSkillDefinitions()
           this.postStateToWebview()
@@ -1428,6 +2103,7 @@ export class Controller {
       case "getState":
         this.postStateToWebview()
         this.sendIndexStatus()
+        void this.postSlashCommandCatalog().catch(() => undefined)
         if (this.config) {
           this.postConfigToWebview()
           void this.loadAndSendSkillDefinitions()
@@ -1454,9 +2130,30 @@ export class Controller {
           })
         break
       }
+      case "getSlashCommandCatalog": {
+        await this.ensureInitialized()
+        const remoteRuntime = Boolean(this.getServerUrl())
+        if (!remoteRuntime) {
+          await Promise.race([
+            this.mcpReconnectPromise?.catch(() => undefined) ??
+              Promise.resolve(),
+            new Promise<void>((resolve) => setTimeout(resolve, 2_500)),
+          ])
+        }
+        await this.postSlashCommandCatalog({
+          ensureRemoteSession: remoteRuntime,
+          reportRemoteError: true,
+        })
+        break
+      }
+      case "reloadConfiguration":
+        await this.ensureInitialized()
+        await this.reloadHostConfiguration(true)
+        break
       case "webviewDidLaunch":
         this.postStateToWebview()
         this.sendIndexStatus()
+        void this.postSlashCommandCatalog().catch(() => undefined)
         if (this.config) {
           this.postConfigToWebview()
           void this.loadAndSendSkillDefinitions()
@@ -1478,6 +2175,9 @@ export class Controller {
         break
       case "saveConfig":
         await this.handleSaveConfig(msg.config)
+        break
+      case "removeCredential":
+        await this.handleRemoveCredential(msg.target, msg.profileName)
         break
       case "switchSession":
         await this.switchSession(msg.sessionId)
@@ -1502,11 +2202,14 @@ export class Controller {
             )
             break
           }
-          this.session = this.session.fork(msg.messageId) as Session
           if (this.getServerUrl()) {
-            this.serverSessionId = undefined
-            this.serverSessionOldestLoadedOffset = undefined
+            vscode.window.showWarningMessage(
+              "NexusCode: Server-side session fork is not supported yet; the current remote session was left unchanged.",
+            )
+            break
           }
+          this.session = this.session.fork(msg.messageId) as Session
+          this.forcedRemoteModeForNextRun = null
           this.postStateToWebview()
         }
         break
@@ -1526,13 +2229,32 @@ export class Controller {
         this.indexer?.resumeIndexing?.()
         break
       case "startOrConnectVectorDb": {
-        const url = (msg as { url: string; autoStart?: boolean }).url?.trim() || "http://127.0.0.1:6333"
-        const autoStart = (msg as { autoStart?: boolean }).autoStart !== false
+        let request: ReturnType<typeof resolveVectorDbRequest>
+        try {
+          request = resolveVectorDbRequest(
+            msg.url,
+            msg.autoStart === true,
+            this.getServerUrl() ? "remote" : "local",
+          )
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          vscode.window.showErrorMessage(`NexusCode: ${message}`)
+          break
+        }
+        if (request.requiresConfirmation) {
+          const choice = await vscode.window.showWarningMessage(
+            `Allow NexusCode to start or reuse a local Qdrant process at ${request.url}?`,
+            { modal: true },
+            "Start local Qdrant",
+            "Cancel",
+          )
+          if (choice !== "Start local Qdrant") break
+        }
         void (async () => {
           try {
             const result = await ensureQdrantRunning({
-              url,
-              autoStart,
+              url: request.url,
+              autoStart: request.autoStart,
               onProgress: (message: string) => {
                 this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_progress", message } })
               },
@@ -1557,82 +2279,118 @@ export class Controller {
       }
       case "openFileAtLocation": {
         const cwd = this.getCwd()
-        const absPath = path.isAbsolute(msg.path) ? msg.path : path.join(cwd, msg.path)
-        const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
-        const wf = vscode.workspace.workspaceFolders?.[0]
-        const uri = wf ? vscode.Uri.joinPath(wf.uri, relPath) : vscode.Uri.file(absPath)
+        let authorizedPath: string
+        try {
+          authorizedPath =
+            this.webviewPathCapabilities.resolveWorkspacePath(cwd, msg.path)
+        } catch {
+          vscode.window.showErrorMessage(
+            "NexusCode: Refusing to open a file outside the active workspace.",
+          )
+          break
+        }
+        const uri = this.workspaceUriForAuthorizedPath(cwd, authorizedPath)
         const line = Math.max(0, (msg.line ?? 1) - 1)
         const endLine = msg.endLine != null ? Math.max(0, msg.endLine - 1) : line
-        const isPlanFile = absPath.replace(/\\/g, "/").includes(".nexus/plans")
-        void (async () => {
-          try {
-            const doc = await vscode.workspace.openTextDocument(uri)
-            const editor = await vscode.window.showTextDocument(doc, {
-              viewColumn: vscode.ViewColumn.Active,
-              selection: new vscode.Range(line, 0, endLine, 0),
-              preview: false,
-            })
-            if (doc.isDirty) await vscode.commands.executeCommand("workbench.action.files.revert")
-            editor.revealRange(new vscode.Range(line, 0, endLine, 0), vscode.TextEditorRevealType.InCenter)
-            if (isPlanFile && doc.getText().trim() === "") {
-              await new Promise((r) => setTimeout(r, 200))
-              await vscode.commands.executeCommand("workbench.action.files.revert")
-            }
-          } catch {
-            vscode.window.showErrorMessage(`NexusCode: Could not open ${msg.path}`)
-          }
-        })()
+        try {
+          const doc = await vscode.workspace.openTextDocument(uri)
+          const range = new vscode.Range(line, 0, endLine, 0)
+          const editor = await vscode.window.showTextDocument(doc, {
+            viewColumn: vscode.ViewColumn.Active,
+            selection: range,
+            preview: false,
+          })
+          editor.revealRange(range, vscode.TextEditorRevealType.InCenter)
+        } catch {
+          vscode.window.showErrorMessage(`NexusCode: Could not open ${msg.path}`)
+        }
         break
       }
       case "showDiff": {
         const cwd = this.getCwd()
-        const raw = msg.path?.trim() ?? ""
-        // Avoid using multi-line or huge strings as path (e.g. accidental content paste).
-        if (raw.length > 0 && raw.length < 2048 && !raw.includes("\n")) {
-          const key = this.normalizePathKey(raw, cwd)
-          const sessionEdit = this.sessionUnacceptedEdits.find((e) => this.normalizePathKey(e.path, cwd) === key)
-          if (sessionEdit) {
-            await showSessionEditDiff(cwd, raw, sessionEdit.originalContent, sessionEdit.newContent)
+        let authorizedPath: string
+        try {
+          authorizedPath =
+            this.webviewPathCapabilities.resolveWorkspacePath(cwd, msg.path)
+        } catch {
+          vscode.window.showErrorMessage(
+            "NexusCode: Refusing to show a diff outside the active workspace.",
+          )
+          break
+        }
+        const key = authorizedPath.replace(/\\/g, "/")
+        const sessionEdit = this.sessionUnacceptedEdits.find((entry) => {
+          try {
+            return this.normalizePathKey(entry.path, cwd) === key
+          } catch {
+            return false
+          }
+        })
+        if (sessionEdit) {
+          await showSessionEditDiff(
+            cwd,
+            authorizedPath,
+            sessionEdit.originalContent,
+            sessionEdit.newContent,
+          )
+        } else {
+          const pending = this.activeRunHost?.getPendingFileEdit(authorizedPath)
+          if (pending) {
+            await showSessionEditDiff(
+              cwd,
+              authorizedPath,
+              pending.originalContent,
+              pending.newContent,
+              { useWorkspaceAfterFile: false },
+            )
           } else {
-            const pending = this.activeRunHost?.getPendingFileEdit(raw)
-            if (pending) {
-              await showSessionEditDiff(cwd, raw, pending.originalContent, pending.newContent, {
-                useWorkspaceAfterFile: false,
-              })
-            } else {
-              await this.openWorkspaceFile(cwd, raw)
-            }
+            await this.openWorkspaceFile(cwd, authorizedPath)
           }
         }
         break
       }
       case "openSessionEditDiff": {
-        const raw = (msg as { path: string }).path?.trim() ?? ""
-        if (raw.length === 0 || raw.length >= 2048 || raw.includes("\n")) break
         const cwd = this.getCwd()
-        const key = this.normalizePathKey(raw, cwd)
-        const entry = this.sessionUnacceptedEdits.find((e) => this.normalizePathKey(e.path, cwd) === key)
+        let key: string
+        try {
+          key = this.normalizePathKey(msg.path, cwd)
+        } catch {
+          break
+        }
+        const entry = this.sessionUnacceptedEdits.find((candidate) => {
+          try {
+            return this.normalizePathKey(candidate.path, cwd) === key
+          } catch {
+            return false
+          }
+        })
         if (entry) {
-          await showSessionEditDiff(cwd, raw, entry.originalContent, entry.newContent)
+          await showSessionEditDiff(
+            cwd,
+            key,
+            entry.originalContent,
+            entry.newContent,
+          )
         }
         break
       }
       case "undoSessionEdits": {
         const cwd = this.getCwd()
+        const restoreHost = new VsCodeHost(cwd, () => {})
+        const remaining: typeof this.sessionUnacceptedEdits = []
         for (const e of [...this.sessionUnacceptedEdits]) {
-          const absPath = path.isAbsolute(e.path) ? e.path : path.join(cwd, e.path)
-          const uri = vscode.Uri.file(absPath)
           try {
-            if (e.isNewFile) {
-              await vscode.workspace.fs.delete(uri, { useTrash: true })
-            } else {
-              await vscode.workspace.fs.writeFile(uri, Buffer.from(e.originalContent, "utf8"))
-            }
-          } catch {
-            // Ignore per-file errors
+            await restoreHost.revertSavedFileEdit(e.path, e)
+          } catch (error) {
+            remaining.push(e)
+            const detail =
+              error instanceof Error ? error.message : String(error)
+            vscode.window.showErrorMessage(
+              `NexusCode: Could not undo ${e.path} — ${detail}`,
+            )
           }
         }
-        this.sessionUnacceptedEdits = []
+        this.sessionUnacceptedEdits = remaining
         this.postStateToWebview()
         break
       }
@@ -1641,52 +2399,104 @@ export class Controller {
         this.postStateToWebview()
         break
       case "revertSessionEditFile": {
-        const pathMsg = (msg as { path: string }).path?.trim() ?? ""
-        if (pathMsg.length === 0 || pathMsg.length >= 2048 || pathMsg.includes("\n")) break
         const cwd = this.getCwd()
-        const key = this.normalizePathKey(pathMsg, cwd)
-        const entry = this.sessionUnacceptedEdits.find((e) => this.normalizePathKey(e.path, cwd) === key)
-        if (entry) {
-          const absPath = path.isAbsolute(entry.path) ? entry.path : path.join(cwd, entry.path)
-          const uri = vscode.Uri.file(absPath)
+        let key: string
+        try {
+          key = this.normalizePathKey(msg.path, cwd)
+        } catch {
+          break
+        }
+        const entry = this.sessionUnacceptedEdits.find((candidate) => {
           try {
-            if (entry.isNewFile) {
-              await vscode.workspace.fs.delete(uri, { useTrash: true })
-            } else {
-              await vscode.workspace.fs.writeFile(uri, Buffer.from(entry.originalContent, "utf8"))
-            }
+            return this.normalizePathKey(candidate.path, cwd) === key
           } catch {
-            vscode.window.showErrorMessage(`NexusCode: Failed to revert ${entry.path}`)
+            return false
           }
-          this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter((e) => this.normalizePathKey(e.path, cwd) !== key)
+        })
+        if (entry) {
+          try {
+            await new VsCodeHost(cwd, () => {}).revertSavedFileEdit(
+              entry.path,
+              entry,
+            )
+          } catch (error) {
+            const detail =
+              error instanceof Error ? error.message : String(error)
+            vscode.window.showErrorMessage(
+              `NexusCode: Failed to revert ${entry.path} — ${detail}`,
+            )
+            break
+          }
+          this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter(
+            (candidate) => {
+              try {
+                return this.normalizePathKey(candidate.path, cwd) !== key
+              } catch {
+                return false
+              }
+            },
+          )
           this.postStateToWebview()
         }
         break
       }
       case "acceptSessionEditFile": {
-        const pathMsg = (msg as { path: string }).path?.trim() ?? ""
-        if (pathMsg.length === 0 || pathMsg.length >= 2048 || pathMsg.includes("\n")) break
         const cwd = this.getCwd()
-        const key = this.normalizePathKey(pathMsg, cwd)
-        this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter((e) => this.normalizePathKey(e.path, cwd) !== key)
+        let key: string
+        try {
+          key = this.normalizePathKey(msg.path, cwd)
+        } catch {
+          break
+        }
+        this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter(
+          (candidate) => {
+            try {
+              return this.normalizePathKey(candidate.path, cwd) !== key
+            } catch {
+              return false
+            }
+          },
+        )
         this.postStateToWebview()
         break
       }
       case "setServerUrl": {
+        if (this.isRunning) {
+          void vscode.window.showWarningMessage(
+            "NexusCode: Stop the current run before changing the server destination.",
+          )
+          break
+        }
         const url = typeof msg.url === "string" ? msg.url.trim() : ""
-        await vscode.workspace.getConfiguration("nexuscode").update("serverUrl", url || undefined, vscode.ConfigurationTarget.Global)
+        const canonical = url ? canonicalizeNexusServerBaseUrl(url) : undefined
+        await vscode.workspace
+          .getConfiguration("nexuscode")
+          .update(
+            "serverUrl",
+            canonical,
+            vscode.ConfigurationTarget.Global,
+          )
+        await this.handleServerDestinationChange()
         this.postStateToWebview()
         break
       }
       case "setServerToken": {
         const token = typeof msg.token === "string" ? msg.token.trim() : ""
+        const serverUrl = this.getServerUrl()
+        if (!serverUrl) {
+          vscode.window.showErrorMessage(
+            "NexusCode: Set and save the server URL before storing its token.",
+          )
+          break
+        }
+        const secretKey = getNexusServerTokenSecretKey(serverUrl)
         if (token) {
-          await this.context.secrets.store(NEXUS_SERVER_TOKEN_SECRET_KEY, token)
+          await this.context.secrets.store(secretKey, token)
           vscode.window.showInformationMessage(
             "NexusCode: Server token saved securely.",
           )
         } else {
-          await this.context.secrets.delete(NEXUS_SERVER_TOKEN_SECRET_KEY)
+          await this.context.secrets.delete(secretKey)
           vscode.window.showInformationMessage(
             "NexusCode: Stored server token removed.",
           )
@@ -1822,7 +2632,10 @@ export class Controller {
             this.postMessageToWebview({ type: "mcpServerStatus", results: [] })
             break
           }
-          const results = await testMcpServers(resolved)
+          const results = await testVsCodeMcpServers(
+            resolved,
+            new VsCodeHost(this.getCwd(), () => {}),
+          )
           this.postMessageToWebview({ type: "mcpServerStatus", results })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
@@ -1830,6 +2643,90 @@ export class Controller {
             type: "mcpServerStatus",
             results: this.config.mcp.servers.map((s) => ({ name: s.name, status: "error" as const, error: message })),
           })
+        }
+        break
+      }
+      case "approvePendingMcp": {
+        const pending = this.config?.mcp.pendingProjectServers?.find(
+          (entry) =>
+            entry.config.name === msg.name &&
+            entry.origin === msg.origin,
+        )
+        if (!pending) {
+          vscode.window.showErrorMessage(
+            `NexusCode: Pending MCP request not found: ${msg.name}`,
+          )
+          break
+        }
+        const nextServers = [
+          ...(this.config?.mcp.servers ?? []).filter(
+            (server) => server.name !== pending.config.name,
+          ),
+          {
+            ...pending.config,
+            enabled: true,
+          },
+        ]
+        await this.handleSaveConfig({
+          mcp: { servers: nextServers },
+        })
+        break
+      }
+      case "approvePendingProjectAuthority": {
+        if (this.getServerUrl()) {
+          vscode.window.showErrorMessage(
+            "NexusCode: Project authority must be approved on the runtime host.",
+          )
+          break
+        }
+        const fingerprint = msg.fingerprint.trim().toLowerCase()
+        const pending = this.config?.pendingProjectAuthority?.find(
+          (request) => request.fingerprint === fingerprint,
+        )
+        if (!pending) {
+          vscode.window.showErrorMessage(
+            "NexusCode: This project authority request is no longer pending.",
+          )
+          break
+        }
+        const choice = await vscode.window.showWarningMessage(
+          `Approve the exact ${pending.kind} request for this workspace?\n\n${JSON.stringify(pending.payload)}`,
+          { modal: true },
+          "Approve exact request",
+          "Cancel",
+        )
+        if (choice !== "Approve exact request") break
+        const cwd = this.getCwd()
+        try {
+          await approvePendingVsCodeProjectAuthority(
+            cwd,
+            fingerprint,
+            { loadEnv: true },
+          )
+          let loaded: NexusConfig
+          try {
+            loaded = await this.loadHostConfig(cwd)
+          } catch (error) {
+            this.setConfigurationLoadError(error, cwd)
+            break
+          }
+          this.configurationError = undefined
+          this.config = loaded
+          this.applyHostSelections(loaded)
+          this.postConfigToWebview()
+          void this.loadAndSendSkillDefinitions()
+          void this.reconnectMcpServers().catch(() => undefined)
+          void this.initializeIndexer(cwd).catch(() => undefined)
+          vscode.window.showInformationMessage(
+            `NexusCode: Approved exact ${pending.kind} request for this workspace.`,
+            { modal: false },
+          )
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error)
+          vscode.window.showErrorMessage(
+            `NexusCode: Project authority approval failed — ${message}`,
+          )
         }
         break
       }
@@ -1878,10 +2775,14 @@ export class Controller {
         const cwd = this.getCwd()
         const folders = vscode.workspace.workspaceFolders
         const ws = folders && folders.length > 0 ? cwd : undefined
-        const result = await this.marketplaceService.install(msg.mpItem, msg.mpInstallOptions, ws)
+        const result = await this.marketplaceService.install(
+          msg.item,
+          msg.options,
+          ws,
+        )
         this.postMessageToWebview({
           type: "marketplaceInstallResult",
-          slug: msg.mpItem.id,
+          slug: msg.item.id,
           success: result.success,
           error: result.error,
         })
@@ -1895,11 +2796,11 @@ export class Controller {
         const cwd = this.getCwd()
         const folders = vscode.workspace.workspaceFolders
         const ws = folders && folders.length > 0 ? cwd : undefined
-        const scope = msg.mpInstallOptions.target
-        const result = await this.marketplaceService.remove(msg.mpItem, scope, ws)
+        const scope = msg.options.target
+        const result = await this.marketplaceService.remove(msg.item, scope, ws)
         this.postMessageToWebview({
           type: "marketplaceRemoveResult",
-          slug: msg.mpItem.id,
+          slug: msg.item.id,
           success: result.success,
           error: result.error,
         })
@@ -1909,9 +2810,17 @@ export class Controller {
         break
       }
       case "openSkillFolder": {
-        const cwd = this.getCwd()
-        const absPath = path.isAbsolute(msg.path) ? msg.path : path.resolve(cwd, msg.path)
-        const uri = vscode.Uri.file(absPath)
+        let authorizedPath: string
+        try {
+          authorizedPath =
+            this.webviewPathCapabilities.resolveKnownSkillPath(msg.path)
+        } catch {
+          vscode.window.showErrorMessage(
+            "NexusCode: This skill path is not part of the current host-loaded skill catalog.",
+          )
+          break
+        }
+        const uri = vscode.Uri.file(authorizedPath)
         const stat = await Promise.resolve(vscode.workspace.fs.stat(uri)).catch(() => null)
         if (stat?.type === vscode.FileType.File) {
           const doc = await Promise.resolve(vscode.workspace.openTextDocument(uri)).catch(() => null)
@@ -1919,7 +2828,7 @@ export class Controller {
             await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false })
           }
         } else {
-          const skillMd = path.join(absPath, "SKILL.md")
+          const skillMd = path.join(authorizedPath, "SKILL.md")
           const skillUri = vscode.Uri.file(skillMd)
           const doc = await Promise.resolve(vscode.workspace.openTextDocument(skillUri)).catch(() => null)
           if (doc) {
@@ -1937,22 +2846,20 @@ export class Controller {
           skipAll: msg.skipAll,
           whatToDoInstead: msg.whatToDoInstead,
         }
-        const resolve = this.approvalResolveRef.current
-        if (resolve) {
-          resolve(result)
+        if (
+          resolveWebviewApproval(
+            this.approvalResolveRef,
+            msg.partId,
+            result,
+          )
+        ) {
+          // Exact local tool-part approval resolved.
         } else if (
           this.getServerUrl() &&
-          this.serverSessionId &&
-          this.activeServerRunId
+          this.activeRemoteTurn
         ) {
           try {
-            const client = await this.createServerClient()
-            await client.respondToApproval(
-              this.serverSessionId,
-              this.activeServerRunId,
-              msg.partId,
-              result,
-            )
+            await this.activeRemoteTurn.resolveApproval(msg.partId, result)
           } catch (error) {
             this.reportServerError(error)
           }
@@ -1960,8 +2867,13 @@ export class Controller {
         break
       }
       case "openExternal": {
-        if (typeof msg.url === "string" && msg.url.startsWith("http")) {
-          await vscode.env.openExternal(vscode.Uri.parse(msg.url))
+        try {
+          const url = parseExternalHttpUrl(msg.url)
+          await vscode.env.openExternal(vscode.Uri.parse(url.toString()))
+        } catch {
+          vscode.window.showErrorMessage(
+            "NexusCode: Refusing to open a non-HTTP(S) external URL.",
+          )
         }
         break
       }
@@ -2047,6 +2959,10 @@ export class Controller {
             this.checkpoint = undefined
             this.serverSessionId = undefined
             this.serverSessionOldestLoadedOffset = undefined
+            if (this.getServerUrl()) {
+              await this.getRemoteWorkspaceState(cwd)
+                .setSelectedSessionId(undefined)
+            }
             this.localSessionWindowed = false
             this.postStateToWebview()
             await this.runAgent(`Implement the following plan:\n\n${freshPlanText}`, "agent")
@@ -2176,28 +3092,23 @@ export class Controller {
             break
           }
           case "clear":
-            this.session = Session.create(cwd)
-            this.lastRunMode = null
-            this.sessionUnacceptedEdits = []
-            this.postStateToWebview()
+            await this.createNewSession()
             break
           default: {
-            const liveConfig = await loadConfig(cwd, { secrets: this.secretsStore })
-              .catch(() => this.config)
-            if (liveConfig) {
-              this.applyVscodeOverrides(liveConfig)
-              this.config = liveConfig
-            }
-            const compat = liveConfig ? getClaudeCompatibilityOptions(liveConfig) : undefined
-            const loaded = await loadSlashCommands(cwd, compat, liveConfig)
-            const resolved = resolveSlashCommand(loaded, name)
+            const resolved = await this.resolvePromptCommand(name, args)
             if (resolved.status === "resolved") {
-              await this.runAgent(renderSlashCommandPrompt(resolved.command, args), this.mode)
+              await this.runAgent(resolved.prompt, this.mode)
               break
             }
             if (resolved.status === "ambiguous") {
               vscode.window.showWarningMessage(
                 `NexusCode: /${name} is ambiguous. Use ${resolved.candidates.map((candidate) => `/${candidate}`).join(" or ")}.`,
+              )
+              break
+            }
+            if (isMcpPromptCommandName(name)) {
+              vscode.window.showWarningMessage(
+                `NexusCode: MCP prompt /${name} is not available from the connected ${this.getServerUrl() ? "NexusCode Server workspace" : "local MCP servers"}.`,
               )
               break
             }
@@ -2216,6 +3127,12 @@ export class Controller {
    */
   private async restoreCheckpointToHash(hash: string, restoreType: "task" | "workspace" | "taskAndWorkspace"): Promise<void> {
     if (!this.session || !this.config) return
+    if (this.isRunning) {
+      vscode.window.showWarningMessage(
+        "NexusCode: Stop the current run before restoring a checkpoint.",
+      )
+      return
+    }
     const cwd = this.getCwd()
     const tracker = await this.ensureCheckpointForCurrentSession(this.session.id, cwd, this.config)
     if (!tracker) {
@@ -2223,14 +3140,33 @@ export class Controller {
       return
     }
     const entry = tracker.getEntries().find((e) => e.hash === hash)
-    const checkpointTs = entry?.ts
+    if (!entry) {
+      vscode.window.showWarningMessage(
+        "NexusCode: Refusing to restore an unknown checkpoint.",
+      )
+      return
+    }
 
-    if (restoreType === "taskAndWorkspace" || restoreType === "workspace") {
+    const restoresWorkspace =
+      restoreType === "workspace" || restoreType === "taskAndWorkspace"
+    const confirmation = await vscode.window.showWarningMessage(
+      restoresWorkspace
+        ? "Restore this checkpoint? This will discard current workspace changes, including unsaved editor buffers."
+        : "Restore this checkpoint? This will discard chat messages created after it.",
+      { modal: true },
+      "Restore checkpoint",
+      "Cancel",
+    )
+    if (confirmation !== "Restore checkpoint") return
+
+    const checkpointTs = entry.ts
+
+    if (restoresWorkspace) {
       this.abortController?.abort()
       this.isRunning = false
     }
 
-    if (restoreType === "workspace" || restoreType === "taskAndWorkspace") {
+    if (restoresWorkspace) {
       try {
         await tracker.resetHead(hash)
       } catch (err) {
@@ -2240,12 +3176,12 @@ export class Controller {
       }
     }
 
-    if ((restoreType === "task" || restoreType === "taskAndWorkspace") && this.session && checkpointTs != null) {
+    if ((restoreType === "task" || restoreType === "taskAndWorkspace") && this.session) {
       this.session.rewindToTimestamp(checkpointTs)
       await this.session.save().catch(() => {})
     }
 
-    if (restoreType === "workspace" || restoreType === "taskAndWorkspace") {
+    if (restoresWorkspace) {
       await this.revertDirtyWorkspaceDocs(cwd)
       this.sessionUnacceptedEdits = []
     }
@@ -2266,6 +3202,18 @@ export class Controller {
     const tracker = await this.ensureCheckpointForCurrentSession(this.session.id, this.getCwd(), this.config)
     if (!tracker) {
       vscode.window.showWarningMessage("NexusCode: Checkpoints are not enabled.", { modal: false })
+      return
+    }
+    const knownHashes = new Set(
+      tracker.getEntries().map((entry) => entry.hash),
+    )
+    if (
+      !knownHashes.has(fromHash) ||
+      (toHash !== undefined && !knownHashes.has(toHash))
+    ) {
+      vscode.window.showWarningMessage(
+        "NexusCode: Refusing to compare an unknown checkpoint.",
+      )
       return
     }
     try {
@@ -2351,26 +3299,7 @@ export class Controller {
   }
 
   private applyPresetFields(base: NexusConfig, preset: { vector: boolean; skills: string[]; mcpServers: string[]; rulesFiles: string[]; modelProvider?: string; modelId?: string }): NexusConfig {
-    const current = base
-    const namedServers = (current.mcp?.servers ?? []).map((s) => ({ name: (s as McpServerConfig).name ?? "", server: s }))
-    const selectedServers = namedServers
-      .filter((item) => item.name && preset.mcpServers.includes(item.name))
-      .map((item) => item.server)
-    const next: NexusConfig = {
-      ...current,
-      indexing: { ...current.indexing, vector: preset.vector },
-      skills: preset.skills,
-      mcp: { servers: preset.mcpServers.length === 0 ? [] : selectedServers },
-      rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["NEXUS.md", "AGENTS.md", "CLAUDE.md"] },
-    }
-    if (preset.modelProvider && preset.modelId) {
-      const provider =
-        preset.modelProvider === "openrouter"
-          ? "openai-compatible"
-          : (preset.modelProvider as NexusConfig["model"]["provider"])
-      next.model = { ...current.model, provider, id: preset.modelId }
-    }
-    return next
+    return applyRepositoryAgentPreset(base, preset, this.getCwd())
   }
 
   /** Discover available skills, MCP server names, and rules files for preset builder. Uses same source as Skills tab (loadSkills) so ~/.nexus and all .md are included. */
@@ -2408,6 +3337,20 @@ export class Controller {
     modelId?: string
   }): Promise<void> {
     const cwd = this.getCwd()
+    const available = await this.getAgentPresetOptions()
+    const availableSkills = new Set(available.skills)
+    const availableMcpServers = new Set(available.mcpServers)
+    const availableRulesFiles = new Set(available.rulesFiles)
+    const containsUnknownSelection =
+      preset.skills.some((skill) => !availableSkills.has(skill)) ||
+      preset.mcpServers.some((server) => !availableMcpServers.has(server)) ||
+      preset.rulesFiles.some((file) => !availableRulesFiles.has(file))
+    if (containsUnknownSelection) {
+      vscode.window.showWarningMessage(
+        "NexusCode: Refusing to create a preset with skills, MCP servers, or rule files that were not discovered by the extension host.",
+      )
+      return
+    }
     const normalized = normalizeAgentPresetForExtension({
       ...preset,
       createdAt: Date.now(),
@@ -2475,11 +3418,19 @@ export class Controller {
       rules: { files: preset.rulesFiles.length > 0 ? preset.rulesFiles : ["NEXUS.md", "AGENTS.md", "CLAUDE.md"] },
     }
     if (preset.modelProvider && preset.modelId) {
-      const provider =
-        preset.modelProvider === "openrouter"
-          ? "openai-compatible"
-          : (preset.modelProvider as NexusConfig["model"]["provider"])
-      updates.model = { ...current.model, provider, id: preset.modelId }
+      try {
+        updates.model = mergeModelPresetSelection(
+          current.model,
+          preset.modelProvider,
+          preset.modelId,
+        )
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        vscode.window.showErrorMessage(
+          `NexusCode: Cannot apply preset "${trimmed}" — ${message}`,
+        )
+        return
+      }
     }
     await this.handleSaveConfig(updates)
     vscode.window.showInformationMessage(`NexusCode: Applied preset "${trimmed}".`, { modal: false })
@@ -2487,68 +3438,90 @@ export class Controller {
 
   private async handleSaveConfig(patch: Partial<NexusConfig>): Promise<void> {
     if (!this.config || !patch) return
-    const modelPatch = (patch as { model?: Record<string, unknown> }).model
-    if (modelPatch && (modelPatch.apiKey === "" || modelPatch.apiKey === undefined)) {
-      const existing = this.config.model as unknown as Record<string, unknown>
-      if (existing?.apiKey) modelPatch.apiKey = existing.apiKey
-    }
-    if (modelPatch && (modelPatch.baseUrl === "" || modelPatch.baseUrl === undefined)) {
-      const existing = this.config.model as unknown as Record<string, unknown>
-      if (existing?.baseUrl) modelPatch.baseUrl = existing.baseUrl
+    const current: NexusConfig = {
+      ...this.config,
+      model: {
+        ...(this.defaultModelProfile ?? this.config.model),
+      },
     }
     const indexBefore = JSON.stringify({
-      indexing: this.config.indexing,
-      vectorDb: this.config.vectorDb,
-      embeddings: this.config.embeddings,
+      indexing: current.indexing,
+      vectorDb: current.vectorDb,
+      embeddings: current.embeddings,
     })
-    const mcpBefore = JSON.stringify({ mcp: this.config.mcp })
-    deepMergeInto(
-      this.config as unknown as Record<string, unknown>,
-      patch as unknown as Partial<Record<string, unknown>>
+    const mcpBefore = JSON.stringify({ mcp: current.mcp })
+    const next = mergeConfigPatchSafely(current, patch)
+    const removals = getCredentialRemovalsForConfigPatch(
+      current,
+      next,
+      patch,
     )
-    this.defaultModelProfile = { ...this.config.model }
-    if (patch.profiles && typeof patch.profiles === "object") {
-      writeGlobalProfiles(patch.profiles as Record<string, unknown>)
-    }
+    const persistence = partitionConfigPatchForPersistence(current, patch)
+    const writesProjectConfig =
+      Object.keys(persistence.projectPatch).length > 0
+    const writesGlobalConfig =
+      Object.keys(persistence.globalPatch).length > 0
     const cwd = this.getCwd()
     const folders = vscode.workspace.workspaceFolders
-    if (!folders || folders.length === 0) {
+    if ((!folders || folders.length === 0) && writesProjectConfig) {
       vscode.window.showWarningMessage(
-        "NexusCode: Open a workspace folder first so settings can be saved to .nexus/nexus.yaml in the project.",
+        "NexusCode: Open a workspace folder first to save project preferences. Host-owned settings can still be saved globally.",
         { modal: false }
       )
-      this.postConfigToWebview()
-        void this.loadAndSendSkillDefinitions()
-      this.postStateToWebview()
-      return
     }
+
+    if (
+      hasExplicitCredentialInput(patch as unknown as Record<string, unknown>) ||
+      Object.keys(removals).length > 0
+    ) {
+      try {
+        await persistSecretsFromConfig(
+          next as unknown as Record<string, unknown>,
+          this.secretsStore,
+          { remove: removals },
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        vscode.window.showErrorMessage(`NexusCode: Failed to save API keys — ${message}`)
+        this.postMessageToWebview({
+          type: "agentEvent",
+          event: { type: "error", error: `Credential save failed: ${message}` },
+        })
+        return
+      }
+    }
+
     try {
-      await persistSecretsFromConfig(
-        this.config as unknown as Record<string, unknown>,
-        this.secretsStore
-      )
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      vscode.window.showErrorMessage(`NexusCode: Failed to save API keys — ${message}`)
-    }
-    const toWrite = { ...this.config } as unknown as Record<string, unknown>
-    if (Array.isArray((toWrite as { skillsConfig?: Array<{ path: string; enabled: boolean }> }).skillsConfig)) {
-      const skillsConfig = (toWrite as { skillsConfig: Array<{ path: string; enabled: boolean }> }).skillsConfig
-      toWrite.skills = skillsConfig.map((s) =>
-        s.enabled ? s.path : { path: s.path, enabled: false }
-      )
-      delete toWrite.skillsConfig
-    }
-    try {
-      writeConfig(toWrite as unknown as NexusConfig, cwd)
-      vscode.window.showInformationMessage("NexusCode: Settings saved.", { modal: false })
+      if (writesGlobalConfig) {
+        await patchGlobalConfig(persistence.globalPatch)
+      }
+      if (writesProjectConfig && folders && folders.length > 0) {
+        await patchProjectConfig(persistence.projectPatch, cwd)
+      }
+      if (writesGlobalConfig || writesProjectConfig) {
+        vscode.window.showInformationMessage(
+          writesProjectConfig && (!folders || folders.length === 0)
+            ? "NexusCode: Host settings saved; project preferences were not saved without an open workspace."
+            : "NexusCode: Settings saved.",
+          { modal: false },
+        )
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       vscode.window.showErrorMessage(`NexusCode: Failed to save settings — ${message}`)
       this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `Save failed: ${message}` } })
+      return
+    }
+    try {
+      this.config = await this.loadHostConfig(cwd)
+      this.applyHostSelections(this.config)
+      this.configurationError = undefined
+    } catch (err) {
+      this.setConfigurationLoadError(err, cwd)
+      return
     }
     const mcpAfter = JSON.stringify({ mcp: this.config.mcp })
-    if (mcpBefore !== mcpAfter) {
+    if (!this.getServerUrl() && mcpBefore !== mcpAfter) {
       void this.reconnectMcpServers().catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err)
         this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[mcp] ${message}` } })
@@ -2559,7 +3532,7 @@ export class Controller {
       vectorDb: this.config.vectorDb,
       embeddings: this.config.embeddings,
     })
-    if (indexBefore !== indexAfter) {
+    if (!this.getServerUrl() && indexBefore !== indexAfter) {
       void this.initializeIndexer(cwd).catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err)
         this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: `[indexer] ${message}` } })
@@ -2570,13 +3543,72 @@ export class Controller {
     this.postStateToWebview()
   }
 
+  private async handleRemoveCredential(
+    target: "model" | "embeddings" | "qdrant" | "profile",
+    profileName?: string,
+  ): Promise<void> {
+    if (!this.config) return
+    const baseConfig: NexusConfig = {
+      ...this.config,
+      model: {
+        ...(this.defaultModelProfile ?? this.config.model),
+      },
+    }
+    const trimmedProfileName = profileName?.trim()
+    if (target === "profile" && !trimmedProfileName) {
+      vscode.window.showWarningMessage(
+        "NexusCode: A profile name is required to remove its credential.",
+      )
+      return
+    }
+    await persistSecretsFromConfig(
+      baseConfig as unknown as Record<string, unknown>,
+      this.secretsStore,
+      {
+        remove: {
+          ...(target === "model" ? { model: true } : {}),
+          ...(target === "embeddings" ? { embeddings: true } : {}),
+          ...(target === "qdrant" ? { qdrant: true } : {}),
+          ...(target === "profile" && trimmedProfileName
+            ? { profileNames: [trimmedProfileName] }
+            : {}),
+        },
+      },
+    )
+    vscode.window.showInformationMessage(
+      target === "profile"
+        ? `NexusCode: Stored credential for profile "${trimmedProfileName}" removed.`
+        : `NexusCode: Stored ${target} credential removed.`,
+      { modal: false },
+    )
+    this.postConfigToWebview()
+  }
+
   private getModeReminder(_mode: Mode): string {
     // Not shown in UI; mode is enforced via system prompt and API mode parameter only.
     return ""
   }
 
-  private async runAgent(content: string, mode?: Mode, images?: Array<{ data: string; mimeType: string }>, presetName?: string): Promise<void> {
+  private async runAgent(
+    content: string,
+    mode?: Mode,
+    images?: Array<{ data: string; mimeType: string }>,
+    presetName?: string,
+    onAdmission?: (accepted: boolean) => void,
+  ): Promise<void> {
     if (this.isRunning) return
+    if (this.configurationError) {
+      this.postMessageToWebview({
+        type: "agentEvent",
+        event: {
+          type: "error",
+          error:
+            `${this.configurationError} Use “Reload configuration” after fixing the file.`,
+        },
+      })
+      this.postStateToWebview()
+      return
+    }
     if (!this.session || !this.config) {
       this.isRunning = false
       this.postMessageToWebview({
@@ -2587,6 +3619,18 @@ export class Controller {
       return
     }
     const trimmedInput = content.trim()
+    const serverUrl = this.getServerUrl()
+    if (serverUrl && this.serverSessionId) {
+      try {
+        if (await this.resumeRemoteTurnIfActive()) {
+          return
+        }
+      } catch {
+        // Starting a second turn after an inconclusive snapshot could duplicate
+        // an already-running server turn. Keep the reported connection error.
+        return
+      }
+    }
     this.pendingQuestionRequest = null
     if (!this.getServerUrl() && this.localSessionWindowed && this.session) {
       const fullSession = await Session.resume(this.session.id, this.getCwd())
@@ -2601,29 +3645,112 @@ export class Controller {
       return
     }
 
-    const liveConfig = await loadConfig(this.getCwd(), { secrets: this.secretsStore })
-      .catch(() => undefined)
-    if (liveConfig) {
-      this.applyVscodeOverrides(liveConfig)
-      this.config = liveConfig
+    let liveConfig: NexusConfig
+    try {
+      liveConfig = await this.loadHostConfig()
+    } catch (error) {
+      this.setConfigurationLoadError(error)
+      return
     }
+    this.configurationError = undefined
+    this.applyHostSelections(liveConfig)
+    this.config = liveConfig
 
     const reviewCommand = /^\/review(\s|$)/i.test(trimmedInput)
-    const requestedMode = mode ?? this.mode
+    const forcedRemoteModeForRun = serverUrl
+      ? this.forcedRemoteModeForNextRun
+      : null
+    const requestedMode =
+      forcedRemoteModeForRun ?? mode ?? this.mode
     this.mode = requestedMode
     const runMode: Mode = reviewCommand ? "review" : requestedMode
     this.lastRunMode = runMode
     this.abortController = new AbortController()
     this.isRunning = true
+    this.toolContributionDiagnostics = []
 
     let actualContent = content
     let createSkillMode = false
     const effectivePresetName = (presetName ?? this.chatPresetName).trim() || "Default"
     this.chatPresetName = effectivePresetName
+    if (serverUrl) {
+      try {
+        assertRemotePresetSupported(effectivePresetName)
+        assertRemoteHostSelectionSupported(this.activeProfileName)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.isRunning = false
+        this.postMessageToWebview({
+          type: "agentEvent",
+          event: { type: "error", error: message },
+        })
+        this.postStateToWebview()
+        return
+      }
+    }
+    const promptInvocation =
+      !reviewCommand &&
+      !/^\/create-skill(?:\s|$)/iu.test(trimmedInput)
+        ? parseSlashPromptInvocation(trimmedInput)
+        : null
+    if (promptInvocation) {
+      try {
+        const resolved = await this.resolvePromptCommand(
+          promptInvocation.name,
+          promptInvocation.args,
+          this.abortController!.signal,
+        )
+        if (resolved.status === "resolved") {
+          actualContent = resolved.prompt
+        } else if (resolved.status === "ambiguous") {
+          throw new Error(
+            `/${promptInvocation.name} is ambiguous. Use ${resolved.candidates
+              .map((candidate) => `/${candidate}`)
+              .join(" or ")}.`,
+          )
+        } else if (isMcpPromptCommandName(promptInvocation.name)) {
+          throw new Error(
+            `MCP prompt /${promptInvocation.name} is not available from the connected ${serverUrl ? "NexusCode Server workspace" : "local MCP servers"}.`,
+          )
+        }
+      } catch (error) {
+        this.isRunning = false
+        const message =
+          error instanceof Error ? error.message : String(error)
+        if (!this.abortController?.signal.aborted) {
+          this.postMessageToWebview({
+            type: "agentEvent",
+            event: { type: "error", error: message },
+          })
+        }
+        this.postStateToWebview()
+        return
+      }
+    }
+    const configEnvironment = getConfigEnvironment(this.config)
     let configForRun = this.resolveConfigForPreset(this.config, effectivePresetName)
+    let presetOverridesModel = false
     if (effectivePresetName !== "Default") {
       const preset = await this.getPresetByName(effectivePresetName)
-      if (preset) configForRun = this.applyPresetFields(configForRun, preset)
+      if (preset) {
+        try {
+          const previousModel = configForRun.model
+          configForRun = this.applyPresetFields(configForRun, preset)
+          presetOverridesModel =
+            configForRun.model.provider !== previousModel.provider ||
+            configForRun.model.id !== previousModel.id ||
+            configForRun.model.baseUrl !== previousModel.baseUrl
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          this.isRunning = false
+          this.postMessageToWebview({
+            type: "agentEvent",
+            event: { type: "error", error: `Invalid preset: ${message}` },
+          })
+          this.postStateToWebview()
+          return
+        }
+      }
     }
     if (reviewCommand) {
       const reviewArgs = trimmedInput.replace(/^\/review\s*/i, "").trim()
@@ -2645,17 +3772,31 @@ Return in this format:
       createSkillMode = true
       actualContent = content.replace(/^\/create-skill\s*/i, "").trim() || "Describe what you want the skill to do."
       configForRun = {
-        ...this.config,
+        ...configForRun,
         permissions: {
-          ...this.config.permissions,
+          ...configForRun.permissions,
           rules: [
-            ...this.config.permissions.rules,
+            ...configForRun.permissions.rules,
             { tool: "Write", pathPattern: ".nexus/skills/**", action: "allow" as const },
             { tool: "Edit", pathPattern: ".nexus/skills/**", action: "allow" as const },
             { tool: "write_to_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
             { tool: "replace_in_file", pathPattern: ".nexus/skills/**", action: "allow" as const },
           ],
         },
+      }
+    }
+
+    let remoteClientForRun: NexusServerClient | undefined
+    if (serverUrl) {
+      try {
+        const remote = await this.ensureRemoteSession()
+        remoteClientForRun = remote.client
+      } catch (error) {
+        this.isRunning = false
+        this.abortController = undefined
+        this.reportServerError(error)
+        this.postStateToWebview()
+        return
       }
     }
 
@@ -2668,112 +3809,116 @@ Return in this format:
           ]
         : actualContent
     const userMessage = this.session.addMessage({ role: "user", content: userContent, presetName: effectivePresetName })
+    if (!serverUrl) onAdmission?.(true)
     this.postStateToWebview()
 
     const cwd = this.getCwd()
-    const serverUrl = this.getServerUrl()
 
     if (serverUrl) {
-      this.activeServerRunId = undefined
       this.setServerConnectionState("connecting")
-      let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
-      const clearHeartbeat = () => {
-        if (heartbeatTimer != null) {
-          clearTimeout(heartbeatTimer)
-          heartbeatTimer = null
-        }
-      }
-      const resetHeartbeat = () => {
-        clearHeartbeat()
-        if (this.abortController?.signal.aborted) return
-        heartbeatTimer = setTimeout(() => {
-          heartbeatTimer = null
-          this.setServerConnectionState("error", "Connection lost (no response from server). You can retry by sending again.")
-          this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: "Connection lost: heartbeat timeout" } })
-          this.abortController?.abort()
-        }, DEFAULT_HEARTBEAT_TIMEOUT_MS)
-      }
+      let remoteTurn: VsCodeRemoteTurn | undefined
+      let remoteAdmitted = false
       try {
-        const client = await this.createServerClient(cwd)
+        const client =
+          remoteClientForRun ?? await this.createServerClient(cwd)
         let sid = this.serverSessionId
         if (!sid) {
           const created = await client.createSession()
           sid = created.id
           this.serverSessionId = sid
         }
+        const remoteState = this.getRemoteWorkspaceState(cwd)
+        await remoteState.setSelectedSessionId(sid)
+        void this.postSlashCommandCatalog().catch(() => undefined)
         this.setServerConnectionState("streaming")
-        const forwardServerEvent = (event: AgentEvent) => {
-          if (event.type === "question_request") {
-            this.pendingQuestionRequest = event.request
-          }
-          if (event.type === "context_usage") {
-            this.lastContextUsage = {
-              usedTokens: event.usedTokens,
-              limitTokens: event.limitTokens,
-              percent: event.percent,
-              sessionId: this.session?.id ?? "",
+        const remoteInput = (
+          Array.isArray(userContent)
+            ? userContent
+            : [{ type: "text" as const, text: userContent }]
+        ).map((part) => UserInputPartSchema.parse(part))
+        remoteTurn = new VsCodeRemoteTurn({
+          client,
+          sessionId: sid,
+        })
+        this.activeRemoteTurn = remoteTurn
+        let liveIdentity:
+          | { turnId: string; runId: string }
+          | undefined
+        let acknowledgedSequence = 0
+        let admissionCursorWrite: Promise<void> = Promise.resolve()
+        for await (const event of remoteTurn.run({
+          input: remoteInput,
+          mode: runMode,
+          signal: this.abortController!.signal,
+          onTurn: (identity) => {
+            liveIdentity = identity
+            remoteAdmitted = true
+            onAdmission?.(true)
+            if (
+              forcedRemoteModeForRun &&
+              this.forcedRemoteModeForNextRun ===
+                forcedRemoteModeForRun
+            ) {
+              this.forcedRemoteModeForNextRun = null
             }
-          }
-          this.applyAgentEventToSessionShadow(event)
-          this.postMessageToWebview({ type: "agentEvent", event })
-          if (this.eventAffectsVisibleState(event)) {
-            this.postStateToWebview()
-          }
-          if (event.type === "tool_end" && event.success && this.isFileWriteTool(event.tool) && event.path) {
-            const writtenContent = (event as AgentEvent & { writtenContent?: string }).writtenContent
-            if (typeof writtenContent === "string") {
-              const absPath = path.isAbsolute(event.path) ? event.path : path.join(cwd, event.path)
-              let dir = path.dirname(absPath)
-              const toCreate: string[] = []
-              while (dir !== cwd && dir.length > cwd.length) {
-                toCreate.push(dir)
-                dir = path.dirname(dir)
-              }
-              toCreate.reverse()
-              for (const p of toCreate) {
-                void vscode.workspace.fs.createDirectory(vscode.Uri.file(p)).then(undefined, () => {})
-              }
-              void vscode.workspace.fs.writeFile(vscode.Uri.file(absPath), new TextEncoder().encode(writtenContent)).then(undefined, () => {})
+            admissionCursorWrite = remoteState.save(sid, {
+              ...identity,
+              afterSequence: 0,
+            })
+          },
+          onSequence: async (sequence) => {
+            await admissionCursorWrite
+            if (!liveIdentity) {
+              throw new Error(
+                "Remote sequence arrived before turn admission",
+              )
             }
-          }
-          if (event.type === "error") {
-            this.setServerConnectionState("error", event.error)
-            this.postStateToWebview()
-          }
-        }
-        for await (const event of client.streamMessage(
-          sid,
-          actualContent,
-          runMode,
-          effectivePresetName,
-          this.abortController!.signal,
-          { onRunId: (runId) => { this.activeServerRunId = runId } },
-        )) {
+            acknowledgedSequence = Math.max(
+              acknowledgedSequence,
+              sequence,
+            )
+            await remoteState.save(sid, {
+              ...liveIdentity,
+              afterSequence: acknowledgedSequence,
+            })
+          },
+        })) {
           if (this.abortController?.signal.aborted) break
-          resetHeartbeat()
-          forwardServerEvent(event)
+          if (
+            event.type === "tool_approval_needed" &&
+            !remoteTurn.bindApprovalPart(event.partId)
+          ) {
+            throw new Error(
+              "Remote approval event is missing its protocol approval identity",
+            )
+          }
+          this.forwardServerEvent(event)
         }
-        try {
-          const meta = await client.getSession(sid)
-          const offset = Math.max(0, meta.messageCount - INITIAL_SERVER_MESSAGES)
-          const messages = await client.getMessages(sid, { limit: INITIAL_SERVER_MESSAGES, offset })
-          this.session = new Session(sid, cwd, messages, undefined, true)
-          this.serverSessionOldestLoadedOffset = offset
-        } catch {
-          // keep current session shadow
+        await admissionCursorWrite
+        if (!this.abortController?.signal.aborted) {
+          await remoteState.clear(sid)
         }
+        await this.refreshRemoteSession(client, sid, cwd).catch(
+          () => undefined,
+        )
       } catch (err) {
+        if (!remoteAdmitted) {
+          this.session?.rewindBeforeMessageId(userMessage.id)
+        }
         const msg = err instanceof Error ? err.message : String(err)
-        if (!msg.includes("abort")) {
+        if (!this.abortController?.signal.aborted) {
           this.setServerConnectionState("error", msg)
           this.postMessageToWebview({ type: "agentEvent", event: { type: "error", error: msg } })
         }
       } finally {
-        clearHeartbeat()
-        this.activeServerRunId = undefined
+        if (this.activeRemoteTurn === remoteTurn) {
+          this.activeRemoteTurn = undefined
+        }
         this.isRunning = false
-        this.serverConnectionState = "idle"
-        this.serverConnectionError = undefined
+        if (this.serverConnectionState !== "error") {
+          this.serverConnectionState = "idle"
+          this.serverConnectionError = undefined
+        }
         this.postStateToWebview()
       }
       return
@@ -2788,7 +3933,14 @@ Return in this format:
       console.warn("[nexus] Failed to commit message checkpoint:", err)
     })
 
+    let fatalRunErrorEmitted: string | undefined
+    const rememberFatalRunError = (event: AgentEvent): void => {
+      if (event.type === "error" && event.fatal) {
+        fatalRunErrorEmitted = event.error
+      }
+    }
     const deliverLocalEvent = (event: AgentEvent) => {
+      rememberFatalRunError(event)
       if (event.type === "question_request") {
         this.pendingQuestionRequest = event.request
       }
@@ -2822,7 +3974,10 @@ Return in this format:
       if (this.eventAffectsVisibleState(event)) {
         this.postStateToWebview()
       }
-      if (event.type === "tool_approval_needed") {
+      if (
+        event.type === "tool_approval_needed" &&
+        event.action.type !== "doom_loop"
+      ) {
         this.postMessageToWebview({
           type: "pendingApproval",
           partId: event.partId,
@@ -2832,27 +3987,9 @@ Return in this format:
       if (event.type === "error") {
         this.postStateToWebview()
       }
-      // Sync full state after tool_end so webview gets latest todo and messages
-      if (event.type === "tool_end") {
-        // Keep editor "memory" in sync with disk: after a successful file write, reload the doc if open so it's not dirty
-        if (
-          event.success &&
-          "path" in event &&
-          typeof (event as { path?: string }).path === "string" &&
-          ((event as { path?: string }).path as string).length > 0 &&
-          this.isFileWriteTool(event.tool)
-        ) {
-          const filePath = (event as { path: string }).path
-          const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
-          const uri = vscode.Uri.file(absPath)
-          const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === uri.fsPath)
-          if (doc?.isDirty) {
-            void vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preserveFocus: true }).then(() =>
-              vscode.commands.executeCommand("workbench.action.files.revert")
-            )
-          }
-        }
-      }
+      // VsCodeHost owns editor/disk synchronization. Never revert a dirty
+      // document in response to a tool event: that can discard user edits
+      // which arrived while an approved write was completing.
     }
     const durableEventSink = await DurableRunEventSink.create({
       cwd,
@@ -2861,6 +3998,9 @@ Return in this format:
       deliver: deliverLocalEvent,
     })
     const host = new VsCodeHost(cwd, (event: AgentEvent) => {
+      // Record before the durable sink's asynchronous flush. The core loop
+      // emits its terminal error and then rejects with that same error.
+      rememberFatalRunError(event)
       durableEventSink.emit(event)
     }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, runCommandsInTerminal: vscode.workspace.getConfiguration("nexuscode").get<boolean>("runCommandsInTerminal") ?? true, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onModeChangeRequested: async (nextMode) => {
       this.mode = nextMode
@@ -2891,70 +4031,119 @@ Return in this format:
     }, timeoutMs)
 
     try {
-      // MCP (started in ensureInitialized), rules, skills in parallel so first message is faster.
-      // Cap MCP wait so first message is not blocked when vector is off or MCP servers are slow.
+      // Capture one immutable integration generation for this turn. A loader
+      // deadline is an explicit degraded-mode diagnostic, never a silent
+      // disappearance of MCP, rules, or skills.
+      const emitDependencyDiagnostic = (error: string): void => {
+        durableEventSink.emit({ type: "error", error })
+      }
       const MCP_FIRST_MESSAGE_TIMEOUT_MS = 2500
-      const mcpP = Promise.race([
+      const mcpP = settleRuntimeDependency(
+        "MCP",
         (async () => {
           await this.mcpReconnectPromise
           await this.reconnectMcpServers(configForRun)
         })(),
-        new Promise<void>((r) => setTimeout(r, MCP_FIRST_MESSAGE_TIMEOUT_MS)),
-      ])
+        MCP_FIRST_MESSAGE_TIMEOUT_MS,
+        undefined,
+        emitDependencyDiagnostic,
+      )
       const claudeCompatibility = getClaudeCompatibilityOptions(configForRun)
-      const rulesP = loadAgentInstructionBundle(cwd, configForRun.rules.files, configForRun, claudeCompatibility)
-      const skillsP = loadSkills(
-        configForRun.skills,
-        cwd,
-        configForRun.skillsUrls,
-        claudeCompatibility,
-        configForRun,
-      )
-        .catch(() => [])
       const RULES_SKILLS_TIMEOUT_MS = 2000
-      const skillsWithTimeout = Promise.race([
-        skillsP.then((skills) => ({ type: "ok" as const, skills })),
-        new Promise<{ type: "timeout" }>((r) => setTimeout(() => r({ type: "timeout" }), RULES_SKILLS_TIMEOUT_MS)),
-      ])
-      const [, rulesContent, skillsResult] = await Promise.all([mcpP, rulesP, skillsWithTimeout])
-      const skills = skillsResult.type === "ok" ? skillsResult.skills : []
-
-      const client = createLLMClient(configForRun.model)
-      const toolRegistry = new ToolRegistry()
-      const configuredAndPluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, configForRun)
-      const allowedMcpServers = new Set(
-        configuredAndPluginMcp.servers
-          .map((s) => s.name)
-          .filter((n): n is string => typeof n === "string" && n.trim().length > 0),
+      const rulesP = settleRuntimeDependency(
+        "rules",
+        loadAgentInstructionBundle(
+          cwd,
+          configForRun.rules.files,
+          configForRun,
+          claudeCompatibility,
+        ),
+        RULES_SKILLS_TIMEOUT_MS,
+        "",
+        emitDependencyDiagnostic,
       )
-      if (this.mcpClient && allowedMcpServers.size > 0) {
-        for (const tool of this.mcpClient.getTools()) {
-          const serverName = tool.name.split("__", 1)[0] ?? ""
-          if (allowedMcpServers.has(serverName)) {
-            toolRegistry.registerDynamicOrThrow(tool, "MCP")
-          }
-        }
-      }
-      const parallelManager = new ParallelAgentManager()
-      const services = createNexusRunServices({
-        parallelAgentManager: parallelManager,
+      const skillsP = settleRuntimeDependency(
+        "skills",
+        loadSkills(
+          configForRun.skills,
+          cwd,
+          configForRun.skillsUrls,
+          claudeCompatibility,
+          configForRun,
+        ),
+        RULES_SKILLS_TIMEOUT_MS,
+        [],
+        emitDependencyDiagnostic,
+      )
+      const [, rulesContent, skills] = await Promise.all([
+        mcpP,
+        rulesP,
+        skillsP,
+      ])
+
+      const toolRegistry = new ToolRegistry()
+      const workspaceServices = this.workspaceRunServices.get(cwd)
+      const servicesWithMcp = {
+        ...workspaceServices,
         ...(this.mcpClient ? { mcpClient: this.mcpClient } : {}),
-      })
+      }
+      const resolvedMcpServers =
+        await this.getResolvedMcpServers(configForRun)
+      const allowedMcpServers = new Set(
+        resolvedMcpServers
+          .filter((server) => server.enabled !== false)
+          .map((server) => server.name)
+          .filter(
+            (name): name is string =>
+              typeof name === "string" &&
+              name.trim().length > 0,
+          ),
+      )
+      const preparedIntegrations =
+        await prepareVsCodeRunIntegrations({
+          cwd,
+          authorityConfig: configForRun,
+          services: servicesWithMcp,
+          registry: toolRegistry,
+          allowedMcpServerNames: allowedMcpServers,
+        })
+      this.toolContributionDiagnostics =
+        projectToolContributionDiagnostics(
+          cwd,
+          preparedIntegrations.diagnostics,
+        )
+      if (this.toolContributionDiagnostics.length > 0) {
+        this.postStateToWebview()
+      }
+
+      const runtimeConfig = await finalizeConfigCredentials(
+        configForRun as unknown as Record<string, unknown>,
+        this.secretsStore,
+        {
+          profileName: presetOverridesModel
+            ? undefined
+            : this.activeProfileName,
+          environment: configEnvironment,
+        },
+      ) as unknown as NexusConfig
+      const client = createLLMClient(runtimeConfig.model)
+      const parallelManager =
+        preparedIntegrations.services.parallelAgentManager
       for (const tool of [
-        createSpawnAgentTool(parallelManager, configForRun),
+        createSpawnAgentTool(parallelManager, runtimeConfig),
         createSpawnAgentOutputTool(parallelManager),
         createSpawnAgentStopTool(parallelManager),
-        createSpawnAgentsParallelTool(parallelManager, configForRun),
+        createSpawnAgentsParallelTool(parallelManager, runtimeConfig),
         createListAgentRunsTool(parallelManager),
         createAgentRunSnapshotTool(parallelManager),
-        createResumeAgentTool(parallelManager, configForRun),
+        createResumeAgentTool(parallelManager, runtimeConfig),
       ]) {
         toolRegistry.registerDynamicOrThrow(tool, "manager compatibility")
       }
       for (const tool of [
-        createTaskCreateBatchTool(parallelManager, configForRun),
+        createTaskCreateBatchTool(parallelManager, runtimeConfig),
         createTaskSnapshotTool(parallelManager),
-        createTaskResumeTool(parallelManager, configForRun),
+        createTaskResumeTool(parallelManager, runtimeConfig),
       ]) {
         toolRegistry.registerBoundBuiltinOrThrow(tool)
       }
@@ -2978,7 +4167,7 @@ Return in this format:
         client,
         host,
         config: configForRun,
-        services,
+        services: preparedIntegrations.services,
         mode: runMode,
         tools: allTools,
         skills,
@@ -2994,7 +4183,16 @@ Return in this format:
       durableRunStatus = this.abortController?.signal.aborted ? "aborted" : "failed"
       if (errMsg !== "AbortError" && !errMsg.includes("aborted")) {
         console.error("[nexus] Agent loop error:", err)
-        durableEventSink.emit({ type: "error", error: errMsg, fatal: true })
+        if (
+          !fatalRunErrorEmitted ||
+          fatalRunErrorEmitted !== errMsg
+        ) {
+          durableEventSink.emit({
+            type: "error",
+            error: errMsg,
+            fatal: true,
+          })
+        }
       }
     } finally {
       clearTimeout(timeout)
@@ -3041,8 +4239,175 @@ Return in this format:
     return resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot })
   }
 
+  private async getSlashCommandCatalog(
+    options: {
+      ensureRemoteSession?: boolean
+      reportRemoteError?: boolean
+    } = {},
+  ): Promise<SlashCommandCatalogItem[]> {
+    if (this.configurationError || this.disposed) return []
+    const cwd = this.getCwd()
+    const config = this.config
+    const compatibility = config
+      ? getClaudeCompatibilityOptions(config)
+      : undefined
+    const custom = await loadSlashCommands(
+      cwd,
+      compatibility,
+      config,
+    ).catch(() => [])
+    const customCommands: SlashCommandCatalogItem[] = custom.map((command) => ({
+      name: command.command,
+      description: command.description.slice(0, 512),
+      kind: "custom",
+    }))
+    let mcpCatalog: ReturnType<typeof getMcpPromptCommandCatalog> = []
+    const serverUrl = this.getServerUrl()
+    if (serverUrl) {
+      try {
+        const remote =
+          this.serverSessionId
+            ? {
+                client: await this.createServerClient(cwd),
+                sessionId: this.serverSessionId,
+              }
+            : options.ensureRemoteSession
+              ? await this.ensureRemoteSession()
+              : undefined
+        if (remote) {
+          const catalog = await remote.client.getMcpPromptCatalog(
+            remote.sessionId,
+          )
+          if (
+            this.getServerUrl() === serverUrl &&
+            this.getCwd() === cwd &&
+            this.serverSessionId === remote.sessionId
+          ) {
+            mcpCatalog = getRemoteMcpPromptCommandCatalog(catalog)
+          }
+        }
+      } catch (error) {
+        if (options.reportRemoteError) {
+          const message =
+            error instanceof Error ? error.message : String(error)
+          this.postMessageToWebview({
+            type: "agentEvent",
+            event: {
+              type: "error",
+              error: `[mcp] Failed to load server prompt catalog: ${message}`,
+            },
+          })
+        }
+      }
+    } else if (this.mcpClient) {
+      mcpCatalog = getMcpPromptCommandCatalog(this.mcpClient)
+    }
+    const mcpCommands: SlashCommandCatalogItem[] = mcpCatalog.map(
+      (command) => ({
+        name: command.name,
+        description: command.description.slice(0, 512),
+        kind: "mcp",
+        ...(command.argumentHint
+          ? { argumentHint: command.argumentHint.slice(0, 4_096) }
+          : {}),
+      }),
+    )
+    const unique = new Map<string, SlashCommandCatalogItem>()
+    const candidates = [...customCommands, ...mcpCommands].sort(
+      (left, right) =>
+        left.kind.localeCompare(right.kind) ||
+        left.name.localeCompare(right.name),
+    )
+    for (const command of candidates) {
+      if (
+        !command.name ||
+        command.name.length > MAX_SLASH_COMMAND_NAME_CHARS ||
+        unique.has(command.name)
+      ) {
+        continue
+      }
+      unique.set(command.name, command)
+      if (unique.size >= MAX_SLASH_COMMAND_CATALOG_ITEMS) break
+    }
+    return [...unique.values()]
+  }
+
+  private async postSlashCommandCatalog(
+    options: {
+      ensureRemoteSession?: boolean
+      reportRemoteError?: boolean
+    } = {},
+  ): Promise<void> {
+    const generation = ++this.slashCommandCatalogGeneration
+    const commands = await this.getSlashCommandCatalog(options)
+    if (generation !== this.slashCommandCatalogGeneration) return
+    this.postMessageToWebview({
+      type: "slashCommandCatalog",
+      commands,
+    })
+  }
+
+  private async resolvePromptCommand(
+    name: string,
+    args: string,
+    signal?: AbortSignal,
+  ): Promise<PromptCommandResolution> {
+    if (this.getServerUrl() && isMcpPromptCommandName(name)) {
+      const remote = await this.ensureRemoteSession()
+      return resolveRemoteMcpPromptCommand(
+        remote.client,
+        remote.sessionId,
+        name,
+        args,
+        signal,
+      )
+    }
+    if (!this.getServerUrl()) {
+      await this.mcpReconnectPromise?.catch(() => undefined)
+      await this.reconnectMcpServers(this.config)
+      if (this.mcpClient) {
+        const mcp = await resolveMcpPromptCommand(
+          this.mcpClient,
+          name,
+          args,
+          signal,
+        )
+        if (mcp.status !== "not-found") return mcp
+      }
+      if (isMcpPromptCommandName(name)) return { status: "not-found" }
+    }
+
+    const cwd = this.getCwd()
+    const liveConfig = await this.loadHostConfig(cwd)
+      .catch(() => this.config)
+    const compatibility = liveConfig
+      ? getClaudeCompatibilityOptions(liveConfig)
+      : undefined
+    const commands = await loadSlashCommands(
+      cwd,
+      compatibility,
+      liveConfig,
+    )
+    const resolved = resolveSlashCommand(commands, name)
+    if (resolved.status !== "resolved") return resolved
+    return {
+      status: "resolved",
+      prompt: renderSlashCommandPrompt(resolved.command, args),
+    }
+  }
+
   private async reconnectMcpServers(config = this.config): Promise<void> {
-    if (!config) return
+    if (this.getServerUrl()) {
+      await this.mcpClient?.disconnectAll().catch(() => {})
+      this.mcpClient = undefined
+      this.mcpConfigFingerprint = null
+      void this.postSlashCommandCatalog().catch(() => undefined)
+      return
+    }
+    if (!config) {
+      void this.postSlashCommandCatalog().catch(() => undefined)
+      return
+    }
     const resolved = await this.getResolvedMcpServers(config)
     const fingerprint = JSON.stringify(resolved)
     const currentStatuses = this.mcpClient?.getServerStatuses() ?? {}
@@ -3051,13 +4416,19 @@ Return in this format:
       Object.values(currentStatuses).every(
         (status) => status.state === "connected" || status.state === "disabled",
       )
-    if (this.mcpClient && this.mcpConfigFingerprint === fingerprint && healthy) return
+    if (this.mcpClient && this.mcpConfigFingerprint === fingerprint && healthy) {
+      void this.postSlashCommandCatalog().catch(() => undefined)
+      return
+    }
     if (!this.mcpClient) {
-      this.mcpClient = new McpClient()
+      this.mcpClient = createVsCodeMcpClient(
+        new VsCodeHost(this.getCwd(), () => {}),
+      )
     }
     if (resolved.length === 0) {
       await this.mcpClient.connectAll([])
       this.mcpConfigFingerprint = fingerprint
+      void this.postSlashCommandCatalog().catch(() => undefined)
       return
     }
     process.env.CLAUDE_PROJECT_DIR = this.getCwd()
@@ -3079,15 +4450,53 @@ Return in this format:
             : status[s.name]?.error ?? status[s.name]?.state ?? "Not connected",
       })),
     })
+    void this.postSlashCommandCatalog().catch(() => undefined)
   }
 
   private async compactHistory(): Promise<void> {
+    if (this.configurationError) {
+      this.postMessageToWebview({
+        type: "agentEvent",
+        event: { type: "error", error: this.configurationError },
+      })
+      return
+    }
     if (!this.session || !this.config) return
     if (this.getServerUrl()) {
       vscode.window.showInformationMessage("NexusCode: Compaction is not supported when using NexusCode Server.")
       return
     }
-    const client = createLLMClient(this.config.model)
+    let live: NexusConfig
+    try {
+      live = await this.loadHostConfig()
+    } catch (error) {
+      this.setConfigurationLoadError(error)
+      return
+    }
+    this.applyHostSelections(live)
+    let selected = live
+    let profileName = this.activeProfileName
+    const preset = await this.getPresetByName(this.chatPresetName)
+    if (preset) {
+      const previousModel = selected.model
+      selected = this.applyPresetFields(selected, preset)
+      if (
+        selected.model.provider !== previousModel.provider ||
+        selected.model.id !== previousModel.id ||
+        selected.model.baseUrl !== previousModel.baseUrl
+      ) {
+        profileName = undefined
+      }
+    }
+    const runtime = await finalizeConfigCredentials(
+      selected as unknown as Record<string, unknown>,
+      this.secretsStore,
+      {
+        profileName,
+        environment: getConfigEnvironment(live),
+      },
+    ) as unknown as NexusConfig
+    const client = createLLMClient(runtime.model)
     const compaction = createCompaction()
     this.postMessageToWebview({ type: "agentEvent", event: { type: "compaction_start" } })
     try {
@@ -3241,6 +4650,7 @@ Return in this format:
       return
     }
     this.lastRunMode = null
+    this.forcedRemoteModeForNextRun = null
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
     if (serverUrl) {
@@ -3254,11 +4664,15 @@ Return in this format:
         })
         this.session = new Session(sessionId, cwd, messages, undefined, true)
         this.serverSessionId = sessionId
+        await this.getRemoteWorkspaceState(cwd)
+          .setSelectedSessionId(sessionId)
         this.serverSessionOldestLoadedOffset = offset
         this.localSessionWindowed = false
         this.pendingQuestionRequest = null
         this.checkpoint = undefined
         this.postStateToWebview()
+        void this.postSlashCommandCatalog().catch(() => undefined)
+        void this.resumeRemoteTurnIfActive().catch(() => undefined)
       } catch (error) {
         this.reportServerError(error)
       }
@@ -3288,6 +4702,7 @@ Return in this format:
       return
     }
     this.lastRunMode = null
+    this.forcedRemoteModeForNextRun = null
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
     if (serverUrl) {
@@ -3295,6 +4710,8 @@ Return in this format:
         const created = await (await this.createServerClient(cwd)).createSession()
         this.session = new Session(created.id, cwd, [], undefined, true)
         this.serverSessionId = created.id
+        await this.getRemoteWorkspaceState(cwd)
+          .setSelectedSessionId(created.id)
         this.serverSessionOldestLoadedOffset = undefined
       } catch (error) {
         this.reportServerError(error)
@@ -3310,6 +4727,7 @@ Return in this format:
     this.pendingQuestionRequest = null
     this.checkpoint = undefined
     this.postStateToWebview()
+    void this.postSlashCommandCatalog().catch(() => undefined)
     await this.sendSessionList()
   }
 
@@ -3326,6 +4744,9 @@ Return in this format:
     if (serverUrl) {
       try {
         deleted = await (await this.createServerClient(cwd)).deleteSession(sessionId)
+        if (deleted) {
+          await this.getRemoteWorkspaceState(cwd).clear(sessionId)
+        }
       } catch (error) {
         this.reportServerError(error)
         return
@@ -3339,6 +4760,8 @@ Return in this format:
           const created = await (await this.createServerClient(cwd)).createSession()
           this.session = new Session(created.id, cwd, [], undefined, true)
           this.serverSessionId = created.id
+          await this.getRemoteWorkspaceState(cwd)
+            .setSelectedSessionId(created.id)
           this.serverSessionOldestLoadedOffset = undefined
         } catch (error) {
           this.reportServerError(error)
@@ -3350,6 +4773,7 @@ Return in this format:
       }
       this.checkpoint = undefined
       this.postStateToWebview()
+      void this.postSlashCommandCatalog().catch(() => undefined)
     }
     await this.sendSessionList()
   }
@@ -3365,7 +4789,28 @@ Return in this format:
         inspected.globalValue
       )
     }
-    applyExplicitConfigOverrides(config, getExplicitValue)
+    const getHostAuthorityValue = <T>(key: string): T | undefined => {
+      const inspected = cfg.inspect<T>(key)
+      return inspected?.globalValue
+    }
+    applyExplicitConfigOverrides(
+      config,
+      getExplicitValue,
+      getHostAuthorityValue,
+    )
+  }
+
+  private applyHostSelections(config: NexusConfig): void {
+    this.applyVscodeOverrides(config)
+    this.defaultModelProfile = { ...config.model }
+    const profileName = this.activeProfileName?.trim()
+    if (!profileName) return
+    const profile = config.profiles[profileName]
+    if (!profile) {
+      this.activeProfileName = undefined
+      return
+    }
+    config.model = selectProviderProfile(this.defaultModelProfile, profile)
   }
 
   private async migrateLegacyPlaintextSecrets(cwd: string): Promise<void> {
@@ -3483,6 +4928,10 @@ Return in this format:
     this.indexerFileWatcher = undefined
     await this.indexer?.closeAndWait()
     this.indexer = undefined
+    if (this.getServerUrl()) {
+      this.sendIndexStatus({ state: "idle" })
+      return
+    }
     if (
       !this.config?.indexing.enabled ||
       !this.config.indexing.vector ||
@@ -3491,10 +4940,18 @@ Return in this format:
       this.sendIndexStatus({ state: "idle" })
       return
     }
+    const runtimeConfig = await finalizeConfigCredentials(
+      this.config as unknown as Record<string, unknown>,
+      this.secretsStore,
+      {
+        profileName: this.activeProfileName,
+        environment: getConfigEnvironment(this.config),
+      },
+    ) as unknown as NexusConfig
     // Same as server run-session: short timeout so first message is not delayed (Qdrant default is 20s).
     const INDEXER_CREATE_TIMEOUT_MS = 2500
     this.indexer = await Promise.race([
-      createCodebaseIndexer(cwd, this.config, {
+      createCodebaseIndexer(cwd, runtimeConfig, {
         onWarning: (message: string) => console.warn(message),
         onProgress: (message: string) => {
           this.postMessageToWebview({ type: "agentEvent", event: { type: "vector_db_progress", message } })
@@ -3573,7 +5030,14 @@ Return in this format:
   }
 
   dispose(): void {
+    this.disposed = true
     this.abortController?.abort()
+    this.approvalResolveRef.current?.resolve({ approved: false })
+    this.skillDefinitionsLoadGeneration += 1
+    this.slashCommandCatalogGeneration += 1
+    void this.workspaceRunServices.close().catch((error: unknown) => {
+      console.error("[nexus] Failed to close workspace run services:", error)
+    })
     this.marketplaceService.dispose()
     this.indexerWatcherPending.clear()
     if (this.indexerWatcherDebounceTimer) {
@@ -3615,6 +5079,29 @@ function deepMergeInto<T extends Record<string, unknown>>(target: T, patch: Part
     }
   }
   return target
+}
+
+function hasExplicitCredentialInput(
+  patch: Record<string, unknown>,
+): boolean {
+  const visit = (value: unknown): boolean => {
+    if (!value || typeof value !== "object") return false
+    if (Array.isArray(value)) return value.some(visit)
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (
+        key.toLowerCase().replace(/[^a-z0-9]/g, "") === "apikey" &&
+        typeof entry === "string" &&
+        entry.trim()
+      ) {
+        return true
+      }
+      if (visit(entry)) return true
+    }
+    return false
+  }
+  return ["model", "embeddings", "vectorDb", "profiles"].some((section) =>
+    visit(patch[section]),
+  )
 }
 
 type AgentPresetForExtension = {

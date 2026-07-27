@@ -57,21 +57,25 @@ export function extractMemoriesFromCompactionSummary(
   summary: string,
   sessionId: string,
 ): ExtractedMemoryInput[] {
+  // A compaction summary is model-derived, even when its section is labelled
+  // "stable" or "durable". Keep every extracted item session-scoped. Verified
+  // facts/preferences may be promoted explicitly through MemoryCreate, where
+  // the agent/user action and provenance remain visible.
   const sections = parseSections(summary)
   const extracted: ExtractedMemoryInput[] = []
 
   const durable = sections.get("Durable Instructions and Preferences")
   if (durable) {
     extracted.push({
-      scope: "project",
+      scope: "session",
       kind: "preference",
-      title: "Project instructions and preferences",
+      title: "Instructions and preferences observed in this session",
       content: cap(toBulletLines(durable).join("\n")),
       source: { type: "compaction", sessionId },
       author: { type: "agent" },
       trust: "agent",
       confidence: 0.6,
-      metadata: { kind: "compaction.instructions" },
+      metadata: { kind: "compaction.instructions", sessionId },
     })
   }
 
@@ -79,7 +83,7 @@ export function extractMemoriesFromCompactionSummary(
   if (discoveries) {
     for (const line of toBulletLines(discoveries).slice(0, 4)) {
       extracted.push({
-        scope: "project",
+        scope: "session",
         kind: "fact",
         title: line.slice(0, 72),
         content: cap(line, 400),
@@ -87,7 +91,7 @@ export function extractMemoriesFromCompactionSummary(
         author: { type: "agent" },
         trust: "agent",
         confidence: 0.6,
-        metadata: { kind: "compaction.discovery" },
+        metadata: { kind: "compaction.discovery", sessionId },
       })
     }
   }
@@ -96,7 +100,7 @@ export function extractMemoriesFromCompactionSummary(
   if (stableFacts) {
     for (const line of toBulletLines(stableFacts).slice(0, 5)) {
       extracted.push({
-        scope: "project",
+        scope: "session",
         kind: line.toLowerCase().includes("command") ? "command" : "fact",
         title: line.slice(0, 72),
         content: cap(line, 420),
@@ -104,7 +108,7 @@ export function extractMemoriesFromCompactionSummary(
         author: { type: "agent" },
         trust: "agent",
         confidence: 0.65,
-        metadata: { kind: "compaction.stable_fact" },
+        metadata: { kind: "compaction.stable_fact", sessionId },
       })
     }
   }

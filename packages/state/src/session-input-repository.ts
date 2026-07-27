@@ -7,6 +7,8 @@ export type InputDelivery = "steer" | "queue"
 export type UserInputPartRecord =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string }
+  | { type: "mention"; name: string; path: string }
+  | { type: "skill"; name: string }
 
 export interface AdmitInput {
   id: string
@@ -52,10 +54,31 @@ type SessionInputRow = {
 
 type SequenceRow = { sequence: number }
 
+const INPUT_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
+const MAX_USER_INPUT_TEXT_CHARS = 1 << 20
+const MAX_IMAGE_BASE64_CHARS = 5 * 1_024 * 1_024
+const MAX_INPUT_PARTS = 64
+const MAX_IMAGES_PER_INPUT = 8
+const IMAGE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+])
+
 function assertIdentifier(value: string, label: string): void {
-  if (value.trim().length === 0) {
-    throw new Error(`${label} must not be empty`)
+  if (typeof value !== "string" || !INPUT_IDENTIFIER.test(value)) {
+    throw new Error(
+      `${label} must be a protocol-safe identifier of at most 128 characters`,
+    )
   }
+}
+
+function isCanonicalBase64(value: string): boolean {
+  if (value.length === 0 || value.length % 4 !== 0) return false
+  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
+    value,
+  )
 }
 
 function normalizeParts(
@@ -64,25 +87,107 @@ function normalizeParts(
   if (!Array.isArray(parts) || parts.length === 0) {
     throw new Error("Input must contain at least one part")
   }
+  if (parts.length > MAX_INPUT_PARTS) {
+    throw new Error(`Input must contain at most ${MAX_INPUT_PARTS} parts`)
+  }
 
-  return parts.map((part) => {
+  let textCharacters = 0
+  let imageCount = 0
+  const normalized = parts.map((part): UserInputPartRecord => {
+    if (typeof part !== "object" || part === null) {
+      throw new Error("Input parts must be objects")
+    }
     if (part.type === "text") {
-      if (typeof part.text !== "string") {
-        throw new Error("Text input parts require a string")
+      if (typeof part.text !== "string" || part.text.length === 0) {
+        throw new Error("Text input parts must not be empty")
       }
+      textCharacters += part.text.length
       return { type: "text", text: part.text }
+    }
+    if (part.type === "mention") {
+      if (
+        typeof part.name !== "string" ||
+        part.name.trim().length === 0 ||
+        part.name.length > 256 ||
+        typeof part.path !== "string" ||
+        part.path.length === 0 ||
+        part.path.length > 4_096 ||
+        part.path.includes("\0")
+      ) {
+        throw new Error(
+          "Mention input parts require a bounded name and NUL-free path",
+        )
+      }
+      return { type: "mention", name: part.name, path: part.path }
+    }
+    if (part.type === "skill") {
+      if (
+        typeof part.name !== "string" ||
+        part.name.trim().length === 0 ||
+        part.name.length > 256
+      ) {
+        throw new Error("Skill input parts require a bounded name")
+      }
+      return { type: "skill", name: part.name }
     }
     if (
       part.type !== "image" ||
       typeof part.data !== "string" ||
       part.data.length === 0 ||
+      part.data.length > MAX_IMAGE_BASE64_CHARS ||
+      !isCanonicalBase64(part.data) ||
       typeof part.mimeType !== "string" ||
-      part.mimeType.length === 0
+      !IMAGE_MIME_TYPES.has(part.mimeType)
     ) {
-      throw new Error("Image input parts require data and mimeType")
+      if (
+        part.type === "image" &&
+        typeof part.data === "string" &&
+        part.data.length > 0 &&
+        part.data.length <= MAX_IMAGE_BASE64_CHARS &&
+        !isCanonicalBase64(part.data)
+      ) {
+        throw new Error("Image input data must be canonical base64")
+      }
+      throw new Error(
+        "Image input parts require bounded base64 data and a supported image MIME type",
+      )
     }
+    imageCount += 1
     return { type: "image", data: part.data, mimeType: part.mimeType }
   })
+
+  if (textCharacters > MAX_USER_INPUT_TEXT_CHARS) {
+    throw new Error(
+      `Input text exceeds the ${MAX_USER_INPUT_TEXT_CHARS} character limit`,
+    )
+  }
+  if (imageCount > MAX_IMAGES_PER_INPUT) {
+    throw new Error(`Input must contain at most ${MAX_IMAGES_PER_INPUT} images`)
+  }
+  return normalized
+}
+
+function readInputTime(now: () => number): number {
+  const value = now()
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("Input clock must return a non-negative safe integer")
+  }
+  return value
+}
+
+function monotonicInputTime(
+  connection: StateConnection,
+  sessionId: string,
+  now: () => number,
+  floor = 0,
+): number {
+  const row = connection.get<{ created_at: number | null }>(
+    `SELECT MAX(created_at) AS created_at
+     FROM durable_event
+     WHERE aggregate_id = ?`,
+    [`session:${sessionId}`],
+  )
+  return Math.max(readInputTime(now), floor, row?.created_at ?? 0)
 }
 
 function parseParts(json: string): readonly UserInputPartRecord[] {
@@ -186,8 +291,12 @@ export class SessionInputRepository {
         return admittedInputFromRow(existing)
       }
 
+      const createdAt = monotonicInputTime(
+        connection,
+        input.sessionId,
+        this.#now,
+      )
       const admittedSequence = allocateSequence(connection, input.sessionId)
-      const createdAt = this.#now()
       const partsJson = JSON.stringify(parts)
       connection.run(
         `INSERT INTO session_input
@@ -305,8 +414,13 @@ export class SessionInputRepository {
     connection: StateConnection,
     row: SessionInputRow,
   ): AdmittedInput {
+    const promotedAt = monotonicInputTime(
+      connection,
+      row.session_id,
+      this.#now,
+      row.created_at,
+    )
     const promotedSequence = allocateSequence(connection, row.session_id)
-    const promotedAt = this.#now()
     const result = connection.run(
       `UPDATE session_input
        SET promoted_sequence = ?

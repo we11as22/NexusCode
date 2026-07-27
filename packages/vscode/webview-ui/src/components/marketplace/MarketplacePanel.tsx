@@ -379,8 +379,11 @@ export function MarketplacePanel() {
           onConfirm={() => {
             postMessage({
               type: "removeInstalledMarketplaceItem",
-              mpItem: removeTarget.item,
-              mpInstallOptions: { target: removeTarget.scope },
+              item: {
+                id: removeTarget.item.id,
+                type: removeTarget.item.type,
+              },
+              options: { target: removeTarget.scope },
             })
             setRemoveTarget(null)
           }}
@@ -557,12 +560,12 @@ function InstallModal({
   const doInstall = () => {
     setInstalling(true)
     setResult(null)
-    const paramValues: Record<string, unknown> = { ...params }
+    const paramValues: Record<string, string> = { ...params }
     if (method) paramValues.__method = method.name
     postMessage({
       type: "installMarketplaceItem",
-      mpItem: item,
-      mpInstallOptions: {
+      item: { id: item.id, type: item.type },
+      options: {
         target: scope,
         parameters: Object.keys(paramValues).length > 0 ? paramValues : undefined,
       },

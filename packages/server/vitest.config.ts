@@ -5,6 +5,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@nexuscode/core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
+      "@nexuscode/state": fileURLToPath(new URL("../state/src/index.ts", import.meta.url)),
     },
   },
   test: {

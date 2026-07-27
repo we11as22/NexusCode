@@ -14,7 +14,7 @@
 - **Parallel tool execution** (read operations run concurrently)
 - **Doom loop detection** — no artificial step limits
 - **Structured output** with JSON schema when supported by provider
-- **Skill & tool classification** — smart context selection from large sets
+- **Deterministic deferred discovery** — BM25 `ToolSearch` for large tool sets and exact skill activation, without a hidden LLM pre-classifier
 - **Unified task-first orchestration** for delegated agent work, shell jobs, and durable coordination
 - **OpenClaude-class delegated agent lifecycle** on top of the task runtime: delegated tasks can now carry named agent roles, model overrides, cwd/worktree isolation, snapshots, resume/fork, and richer live task telemetry
 - **Safer shell runtime** for both `Bash` and `PowerShell`: dedicated-tool guardrails for read/search/edit misuse, destructive-command warnings, blocked background sleep patterns, task-native background monitoring, and symmetric shell/background behavior in CLI, VS Code, and server
@@ -36,8 +36,8 @@
 - **Stronger prompt and tool guidance**: the core prompt now reinforces prompt-injection resistance, truthful reporting, reversible actions, and narrower tool selection, while tool descriptions give clearer "when to use / when not to use" guidance for `Task*`, `Bash`, `Read`, `Write`, `Edit`, `AskFollowupQuestion`, `TodoWrite`, `PlanExit`, and `LSP`
 - **Stateful plan workflow engine**: `PlanStartWorkflow`, `PlanAnswerWorkflow`, `PlanCreateResearchTasks`, `PlanDraftWorkflow`, and `PlanGetWorkflow` add an interview/research phase before final plan markdown
 - **Plan execution audit**: `PlanVerifyExecution` compares the written plan against task records before final completion
-- **MCP support** with tool classification plus resource listing/reading hooks
-- **Optional NexusCode Server**: HTTP agent + the **same JSONL session store** as the CLI/extension (canonical project root); connect for shared runs, session list parity, and paginated history (no OOM on long chats)
+- **MCP support** with deterministic deferred-tool discovery plus resource listing/reading hooks
+- **Optional NexusCode Server**: workspace-owned HTTP runtime with transactional SQLite coordination and the same portable JSONL transcript/audit history as local hosts
 - Webview UI: thought progress ("Thought for Xs"), loading states, todo checklist, diff-style tool output
 - CLI TUI: Home + prompt shell, slash command palette, `Vector index` + `/agent-config` in menu
 
@@ -354,7 +354,7 @@ See `.nexus/nexus.yaml` for the complete reference.
 
 ## NexusCode Server (optional)
 
-When you run the **NexusCode server**, sessions and messages use the **same JSONL store** as the local CLI and extension: `~/.nexus/sessions/<project-hash>/*.jsonl` via `@nexuscode/core` (see `packages/server/src/session-fs-store.ts`). There is **no** separate SQLite DB for sessions. The extension and CLI connect over HTTP for shared runs, paginated message loading, and long chats without loading full history into memory.
+When you run the **NexusCode server**, portable session transcript/audit history uses the same checksummed JSONL layout as local hosts: `~/.nexus/sessions/<project-hash>/*.jsonl`. The workspace runtime also owns a built-in SQLite control plane for idempotent input admission, active-turn ownership, leases, approvals, queues, replay events/cursors, and cleanup ledgers. The extension and CLI connect over protocol v2 for shared runs, resumable streams, and paginated history.
 
 ### 1. Start the server
 
@@ -383,7 +383,7 @@ The server listens on **http://127.0.0.1:4097** by default. Set `NEXUS_SERVER_PO
 When the server URL is set:
 - **Sessions** tab loads the session list from the server (with a loading indicator).
 - You can switch between sessions; messages load in a recent window first, with older turns fetched on demand (see server routes).
-- Each new message is sent to the server; replies are streamed back. Data is persisted to the same on-disk JSONL files as in local mode.
+- Each new message is durably admitted by the server before execution; committed protocol events are resumable, while the full transcript is checkpointed to the portable JSONL history.
 - Approval panels resolve the exact pending server action over an authenticated run/part endpoint; server runs never inherit local auto-approval grants.
 - **Stop** explicitly aborts the server-side run. A network disconnect alone keeps the run reconnectable and does not silently kill it.
 
@@ -528,7 +528,7 @@ your-project/
 ### Skills
 Place skill files in `.nexus/skills/skill-name/SKILL.md`. Skills provide domain-specific knowledge and patterns.
 
-When many skills are configured, NexusCode uses LLM classification to select only relevant ones for the task — keeping the context clean.
+Skills are exposed through a bounded catalog and activated by exact name/metadata. Large dynamic tool surfaces use deterministic `ToolSearch`; NexusCode does not spend an extra LLM call guessing which skills or MCP servers might be needed.
 
 ### Memory & Context Compaction
 NexusCode keeps explicit reusable memories in the orchestration runtime and prefetches relevant project/session memories into prompts. Manual tools (`MemoryCreate`, `MemoryList`, `MemoryGet`, `MemoryUpdate`, `MemoryDelete`) are available, and structured session compaction now also auto-extracts durable instructions, technical discoveries, stable project facts / reusable commands, delegation state, pending work, and next-step state into memory records.
@@ -553,7 +553,7 @@ mcp:
       bundle: context-mode
 ```
 
-When many **MCP servers** are configured, you can enable "Filter MCP servers when list is large" in Settings (Tools tab). The classifier then selects which **servers** to use for the task; all tools from selected servers are included. Built-in tools are always available.
+When the MCP surface becomes large, NexusCode keeps deferred schemas out of the initial provider manifest. The agent discovers them with deterministic BM25 `ToolSearch`; selected tools become prompt-visible at the next provider boundary. Built-in mode-allowed tools stay available, and mode-blocked tools are never searchable.
 
 ### Context Mode (optional)
 
@@ -582,18 +582,18 @@ For repo-wide text discovery without vectors, use **Grep** / **Glob** / **ListCo
 NexusCode/
 ├── packages/
 │   ├── core/              ← Provider-agnostic agent engine
-│   │   ├── agent/        ← Agent loop, modes, classifiers (MCP servers + skills), prompts
+│   │   ├── agent/        ← Agent loop, modes, deterministic deferred activation, prompts
 │   │   ├── tools/        ← Tool registry + built-in tools
 │   │   ├── session/     ← JSONL storage + compaction
 │   │   ├── indexer/     ← AST + Qdrant
 │   │   ├── provider/    ← All LLM providers + embeddings
 │   │   ├── checkpoint/  ← Shadow git
 │   │   ├── context/     ← @mentions, rules, condense
-│   │   ├── skills/      ← Skill loader + classifier
+│   │   ├── skills/      ← Skill loader + exact catalog activation
 │   │   └── mcp/         ← MCP client
 │   ├── vscode/          ← VS Code extension + React UI
 │   ├── cli/             ← CLI + TUI (OpenTUI/React)
-│   └── server/          ← Optional: HTTP API + streaming; same JSONL sessions as CLI/extension
+│   └── server/          ← Optional: protocol-v2 runtime; SQLite coordination + portable JSONL transcript
 └── .nexus/               ← Project config (nexus.yaml, agent-configs.json, rules, skills)
 ```
 
@@ -604,7 +604,7 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for details.
 ## Key Design Decisions
 
 1. **No step limits** — Doom loop detection (3 identical consecutive calls) prevents infinite loops
-2. **Built-in tools always active** — Mode permissions gate which tools are available; the classifier filters by **MCP server** (and by skill) when thresholds are exceeded, not by individual tools.
+2. **Mode authority before discovery** — Mode permissions gate tools before prompt exposure or search; deterministic `ToolSearch` activates deferred tools individually and exact skill metadata activates skills.
 3. **Parallel reads** — Multiple read-only tools execute concurrently with `Promise.all`
 4. **Cache-aware prompts** — Stable blocks (role, rules, skills) use `cache_control: ephemeral` on Anthropic
 5. **Multi-stage compaction** — Fast prune, microcompact old reasoning/text, then LLM compact only when still needed

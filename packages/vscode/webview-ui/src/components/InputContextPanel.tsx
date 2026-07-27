@@ -36,14 +36,81 @@ export function InputContextPanel() {
     sessionEditsForPanel.length > 0 &&
     !pendingApproval
 
-  // Pending approval: single file awaiting Allow/Deny
+  // Pending approval
   if (pendingApproval) {
     const { action } = pendingApproval
+
+    if (action.type !== "write") {
+      const approvalLabel =
+        action.type === "execute"
+          ? "Command approval"
+          : action.type === "browser"
+            ? "Network approval"
+            : action.type === "mcp"
+              ? "MCP tool approval"
+              : action.type === "plugin"
+                ? "Plugin approval"
+                : action.type === "doom_loop"
+                  ? "Loop safety check"
+                  : `${action.tool} approval`
+      const detail = action.shortDescription?.trim() || action.description
+
+      return (
+        <div className={`nexus-input-context-panel ${!expanded ? "nexus-input-context-panel-collapsed" : ""}`}>
+          <div className="nexus-input-context-panel-inner">
+            <div className="nexus-input-context-top-row">
+              <button
+                type="button"
+                className="nexus-input-context-files-toggle"
+                onClick={() => setExpanded((value) => !value)}
+                aria-expanded={expanded}
+              >
+                <span className="nexus-input-context-chevron">{expanded ? "▼" : "▶"}</span>
+                <span>{approvalLabel}</span>
+              </button>
+              <div className="nexus-input-context-actions">
+                <button
+                  type="button"
+                  className="nexus-input-context-btn"
+                  onClick={() => resolveApproval(false)}
+                >
+                  Deny
+                </button>
+                <button
+                  type="button"
+                  className="nexus-input-context-btn nexus-input-context-btn-active"
+                  onClick={() => resolveApproval(true)}
+                >
+                  Allow
+                </button>
+              </div>
+            </div>
+            {expanded && (
+              <div className="px-3 pb-2 text-xs text-[var(--vscode-descriptionForeground)]">
+                <div className="break-words text-[var(--vscode-foreground)]" title={action.description}>
+                  {detail}
+                </div>
+                {action.content && action.content !== detail && (
+                  <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-all rounded bg-[var(--vscode-textCodeBlock-background)] px-2 py-1 font-mono text-[11px]">
+                    {action.content}
+                  </pre>
+                )}
+                {action.warning && (
+                  <div className="mt-1 text-[var(--vscode-editorWarning-foreground)]">
+                    {action.warning}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    // Pending file approval
     const pendingPath = extractPathFromApprovalDescription(action.description)
     const fileLabel =
-      action.type === "write"
-        ? (action.description?.split(/[/\\]/).pop() ?? action.description ?? "File")
-        : action.description?.slice(0, 40) ?? "Change"
+      action.description?.split(/[/\\]/).pop() ?? action.description ?? "File"
     const diffStats = action.diffStats
     const hasDiff = diffStats != null && (diffStats.added > 0 || diffStats.removed > 0)
 

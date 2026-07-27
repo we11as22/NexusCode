@@ -1,6 +1,7 @@
 import { createAnthropic } from "@ai-sdk/anthropic"
 import type { ProviderConfig } from "../types.js"
 import { BaseLLMClient } from "./base.js"
+import { resolveProviderCredential } from "./credential-identity.js"
 
 function toMiniMaxAnthropicBaseUrl(baseUrl?: string): string {
   const raw = (baseUrl ?? "https://api.minimax.io/anthropic").trim()
@@ -10,14 +11,15 @@ function toMiniMaxAnthropicBaseUrl(baseUrl?: string): string {
 }
 
 export function createMiniMaxClient(config: ProviderConfig) {
-  const apiKey =
-    config.apiKey ??
-    process.env["MINIMAX_API_KEY"] ??
-    ""
+  const baseURL = toMiniMaxAnthropicBaseUrl(config.baseUrl)
+  const apiKey = resolveProviderCredential({
+    ...config,
+    baseUrl: baseURL,
+  }).apiKey ?? ""
 
   const anthropic = createAnthropic({
     apiKey,
-    baseURL: toMiniMaxAnthropicBaseUrl(config.baseUrl),
+    baseURL,
   })
 
   const model = anthropic(config.id, {

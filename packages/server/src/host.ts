@@ -1,7 +1,21 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { execa } from "execa"
-import type { IHost, AgentEvent, ApprovalAction, PermissionResult, McpAuthRequest, McpAuthResult } from "@nexuscode/core"
+import { authorizeNetworkRequest as authorizePublicNetworkRequest } from "@nexuscode/core"
+import type {
+  AgentEvent,
+  ApprovalAction,
+  AuthorizedNetworkRequest,
+  HostNetworkRequest,
+  HostPathAccess,
+  HostReadFileOptions,
+  IHost,
+  McpAuthRequest,
+  McpAuthResult,
+  Mode,
+  ModeChangeResult,
+  PermissionResult,
+} from "@nexuscode/core"
 import { resolveWorkspaceRoot } from "./security.js"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
@@ -16,17 +30,41 @@ export class ServerHost implements IHost {
   readonly cwd: string
   private onEvent: (event: AgentEvent) => void
   private requestApproval?: (action: ApprovalAction) => Promise<PermissionResult>
+  private persistModeChange?: (
+    mode: Mode,
+    reason?: string,
+  ) => Promise<ModeChangeResult>
 
   constructor(
     cwd: string,
     onEvent: (event: AgentEvent) => void,
     options: {
       requestApproval?: (action: ApprovalAction) => Promise<PermissionResult>
+      requestModeChange?: (
+        mode: Mode,
+        reason?: string,
+      ) => Promise<ModeChangeResult>
     } = {},
   ) {
     this.cwd = cwd
     this.onEvent = onEvent
     this.requestApproval = options.requestApproval
+    this.persistModeChange = options.requestModeChange
+  }
+
+  async resolvePath(
+    filePath: string,
+    access: HostPathAccess,
+  ): Promise<string> {
+    const absPath = this.resolve(filePath)
+    this.checkPathSecurity(absPath, access === "list" ? "read" : access)
+    return absPath
+  }
+
+  async authorizeNetworkRequest(
+    request: HostNetworkRequest,
+  ): Promise<AuthorizedNetworkRequest> {
+    return authorizePublicNetworkRequest(request)
   }
 
   private resolve(filePath: string): string {
@@ -49,9 +87,26 @@ export class ServerHost implements IHost {
     }
   }
 
-  async readFile(filePath: string): Promise<string> {
+  async readFile(
+    filePath: string,
+    options: HostReadFileOptions = {},
+  ): Promise<string> {
     const absPath = this.resolve(filePath)
     this.checkPathSecurity(absPath, "read")
+    const stat = await fs.stat(absPath)
+    if (stat.isDirectory()) {
+      throw new Error(`Path is a directory: ${filePath}`)
+    }
+    if (
+      typeof options.maxBytes === "number" &&
+      Number.isSafeInteger(options.maxBytes) &&
+      options.maxBytes >= 0 &&
+      stat.size > options.maxBytes
+    ) {
+      throw new Error(
+        `File exceeds the ${options.maxBytes}-byte host read limit`,
+      )
+    }
     return fs.readFile(absPath, "utf8")
   }
 
@@ -93,8 +148,27 @@ export class ServerHost implements IHost {
     }
   }
 
-  async showApprovalDialog(action: ApprovalAction): Promise<PermissionResult> {
+  async showApprovalDialog(
+    action: ApprovalAction,
+    signal?: AbortSignal,
+  ): Promise<PermissionResult> {
+    if (signal?.aborted) return { approved: false }
     return this.requestApproval?.(action) ?? { approved: false }
+  }
+
+  async requestModeChange(
+    mode: Mode,
+    reason?: string,
+  ): Promise<ModeChangeResult> {
+    if (!this.persistModeChange) {
+      return {
+        success: false,
+        mode,
+        message:
+          "The server runtime cannot persist a mode transition for this turn.",
+      }
+    }
+    return this.persistModeChange(mode, reason)
   }
 
   emit(event: AgentEvent): void {
@@ -103,7 +177,8 @@ export class ServerHost implements IHost {
 
   async requestMcpAuthentication(request: McpAuthRequest): Promise<McpAuthResult> {
     return {
-      success: Boolean(request.startUrl),
+      success: false,
+      ...(request.startUrl ? { pending: true } : {}),
       message: request.message?.trim() || (request.startUrl
         ? `Authenticate MCP server "${request.server}" at ${request.startUrl}`
         : `MCP server "${request.server}" requires manual authentication.`),

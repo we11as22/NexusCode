@@ -2,36 +2,139 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
 import { NexusConfigSchema, type NexusConfigInput } from "./schema.js"
-import type { NexusConfig } from "../types.js"
+import type { McpServerConfig, NexusConfig } from "../types.js"
+import type { EmbeddingConfig, ProviderConfig, ProviderName } from "../types.js"
 import type { ClaudeCompatibilityOptions } from "../compat/claude.js"
 import {
-  applySecretsToConfig,
+  canonicalizeCredentialDestination,
+  mergeEmbeddingConfigSafely,
+  mergeProviderConfigSafely,
+  mergeProviderConfigPartialSafely,
+} from "../provider/credential-identity.js"
+import {
   stripSecretsFromConfig,
   stripProfileSecrets,
   type NexusSecretsStore,
 } from "./secrets.js"
-
-import * as yaml from "js-yaml"
-function getYaml() { return yaml }
+import {
+  ConfigFileError,
+  ConfigSubstitutionError,
+  loadScopedEnvironment,
+  patchRawConfigFile,
+  readConfigLayerFile,
+  readRawConfigFile,
+  writeAtomicTextFileSync,
+  writeRawConfigFileSync,
+} from "./layered-io.js"
+import {
+  createPendingProjectAuthorityRequest,
+  getPendingProjectAuthorityRequests,
+  partitionProjectAuthority,
+  type ProjectAuthorityPayloadByKind,
+} from "./project-authority.js"
 
 const CONFIG_FILE_NAMES = [".nexus/nexus.yaml", ".nexus/nexus.yml", ".nexusrc.yaml", ".nexusrc.yml"]
 const GLOBAL_CONFIG_DIR = path.join(os.homedir(), ".nexus")
 const GLOBAL_CONFIG_PATH = path.join(GLOBAL_CONFIG_DIR, "nexus.yaml")
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 const DEFAULT_FREE_MODELS_BASE_URL = "https://api.kilo.ai/api/openrouter"
+const EFFECTIVE_CONFIG_MARKER = Symbol("nexus.effective-config")
+const SCOPED_ENVIRONMENT_MARKER = Symbol.for(
+  "@nexuscode/config/scoped-environment",
+)
 
-function readMcpServersFromJsonFile(filePath: string): Record<string, unknown>[] {
+type MarkedEffectiveConfig = NexusConfig & {
+  [EFFECTIVE_CONFIG_MARKER]?: true
+  [SCOPED_ENVIRONMENT_MARKER]?: Readonly<
+    Record<string, string | undefined>
+  >
+}
+
+export class UnsafeConfigWriteError extends Error {
+  constructor() {
+    super(
+      "Refusing to write a resolved/effective config. Use patchProjectConfig() with an explicit raw project-layer patch.",
+    )
+    this.name = "UnsafeConfigWriteError"
+  }
+}
+
+export class ConfigValidationError extends Error {
+  readonly issues: readonly {
+    path: readonly (string | number)[]
+    message: string
+  }[]
+
+  constructor(
+    readonly sources: readonly string[],
+    issues: readonly {
+      path: readonly (string | number)[]
+      message: string
+    }[],
+  ) {
+    super(
+      `Config validation failed${
+        sources.length > 0 ? ` (${sources.join(", ")})` : ""
+      }: ${issues
+        .map((issue) =>
+          `${issue.path.length > 0 ? issue.path.join(".") : "<root>"}: ${issue.message}`,
+        )
+        .join("; ")}`,
+    )
+    this.name = "ConfigValidationError"
+    this.issues = issues
+  }
+}
+
+function readMcpServersFromJsonFile(
+  filePath: string,
+  workspaceRoot?: string,
+): Record<string, unknown>[] {
+  if (!fs.existsSync(filePath)) return []
   try {
-    if (!fs.existsSync(filePath)) return []
-    const mcpData = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown
+    const canonicalPath = fs.realpathSync(filePath)
+    if (workspaceRoot) {
+      const canonicalRoot = fs.realpathSync(workspaceRoot)
+      const relative = path.relative(canonicalRoot, canonicalPath)
+      if (
+        path.isAbsolute(relative) ||
+        relative === ".." ||
+        relative.startsWith(`..${path.sep}`)
+      ) {
+        throw new ConfigFileError(
+          filePath,
+          "project MCP config resolves outside the canonical workspace",
+        )
+      }
+    }
+    const mcpData = JSON.parse(fs.readFileSync(canonicalPath, "utf8")) as unknown
     const servers = Array.isArray(mcpData)
       ? mcpData
       : (mcpData as { servers?: unknown; mcp?: { servers?: unknown } })?.servers ??
         (mcpData as { mcp?: { servers?: unknown } })?.mcp?.servers
-    if (!Array.isArray(servers)) return []
-    return servers.filter((s): s is Record<string, unknown> => s !== null && typeof s === "object" && !Array.isArray(s))
-  } catch {
-    return []
+    if (!Array.isArray(servers)) {
+      throw new ConfigFileError(
+        filePath,
+        "MCP config must contain a server array",
+      )
+    }
+    if (
+      servers.some(
+        (server) =>
+          server === null ||
+          typeof server !== "object" ||
+          Array.isArray(server),
+      )
+    ) {
+      throw new ConfigFileError(
+        filePath,
+        "MCP server entries must be objects",
+      )
+    }
+    return servers as Record<string, unknown>[]
+  } catch (error) {
+    if (error instanceof ConfigFileError) throw error
+    throw new ConfigFileError(filePath, "MCP config is malformed", error)
   }
 }
 
@@ -47,33 +150,124 @@ function mergeMcpServerLayers(...layers: Record<string, unknown>[][]): Record<st
   return [...byName.values()]
 }
 
+export interface PendingProjectMcpServer {
+  source: "project"
+  origin: "project-config" | "project-mcp-json"
+  status: "pending"
+  config: McpServerConfig
+}
+
+function asRecordArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (entry): entry is Record<string, unknown> =>
+          entry !== null &&
+          typeof entry === "object" &&
+          !Array.isArray(entry),
+      )
+    : []
+}
+
+function asPendingProjectMcpServers(
+  value: unknown,
+): PendingProjectMcpServer[] {
+  if (!Array.isArray(value)) return []
+  return value.filter(
+    (entry): entry is PendingProjectMcpServer =>
+      asRecord(entry)?.["source"] === "project" &&
+      (
+        asRecord(entry)?.["origin"] === "project-config" ||
+        asRecord(entry)?.["origin"] === "project-mcp-json"
+      ) &&
+      asRecord(entry)?.["status"] === "pending" &&
+      asRecord(asRecord(entry)?.["config"]) !== null,
+  )
+}
+
+function mergePendingProjectMcpServers(
+  ...layers: PendingProjectMcpServer[][]
+): PendingProjectMcpServer[] {
+  const byName = new Map<string, PendingProjectMcpServer>()
+  for (const layer of layers) {
+    for (const request of layer) {
+      const name =
+        typeof request.config["name"] === "string"
+          ? request.config["name"].trim()
+          : ""
+      if (name) byName.set(name, request)
+    }
+  }
+  return [...byName.values()]
+}
+
+export function getPendingProjectMcpServers(
+  config: NexusConfig,
+): readonly PendingProjectMcpServer[] {
+  const mcp = config.mcp as unknown as Record<string, unknown>
+  return asPendingProjectMcpServers(mcp["pendingProjectServers"])
+}
+
 /**
  * Load config by walking up from cwd.
  * Merges project config over global config.
- * Applies env overrides, then optional secrets store (API keys).
+ * Applies non-secret environment selection overrides. Secure-store credentials
+ * are deliberately resolved later by the host, after its final selection.
  */
 export async function loadConfig(
   cwd?: string,
-  options?: { secrets?: NexusSecretsStore }
+  options?: {
+    /** @deprecated Secure credentials are finalized by the host. */
+    secrets?: NexusSecretsStore
+    /**
+     * Remote hosts set false to load metadata without consulting the local
+     * environment or resolving `{env:...}` / `{file:...}` substitutions.
+     */
+    loadEnv?: boolean
+    /**
+     * Override the global config path for embedded hosts/tests. `false`
+     * explicitly disables the global layer.
+     */
+    globalConfigPath?: string | false
+  }
 ): Promise<NexusConfig> {
-  const startDir = cwd ?? process.cwd()
-  loadEnvFileFromTree(startDir)
+  const startDir = path.resolve(cwd ?? process.cwd())
+  const useLocalEnvironment = options?.loadEnv !== false
+  const ambientEnvironment = Object.freeze({ ...process.env })
+  const scopedEnvironment = useLocalEnvironment
+    ? loadScopedEnvironment(startDir, ambientEnvironment)
+    : ambientEnvironment
 
   // 1. Load global config
-  const globalRaw = readConfigFile(GLOBAL_CONFIG_PATH)
+  const globalConfigPath =
+    options?.globalConfigPath === false
+      ? null
+      : options?.globalConfigPath ?? GLOBAL_CONFIG_PATH
+  const globalRaw = globalConfigPath
+    ? readConfigLayerFile(globalConfigPath, {
+        layer: "global",
+        resolveExternalValues: useLocalEnvironment,
+        environment: ambientEnvironment,
+      })
+    : null
 
   // 2. Walk up and find project config
   let projectRaw: NexusConfigInput | null = null
   let projectDir: string | null = null
+  let projectConfigPath: string | null = null
   let dir = startDir
   let maxUp = 20
   while (maxUp-- > 0) {
     for (const name of CONFIG_FILE_NAMES) {
       const candidate = path.join(dir, name)
-      const raw = readConfigFile(candidate)
-      if (raw) {
-        projectRaw = raw
+      if (fs.existsSync(candidate)) {
+        projectRaw = readConfigLayerFile(candidate, {
+          layer: "project",
+          resolveExternalValues: useLocalEnvironment,
+          environment: scopedEnvironment,
+          workspaceRoot: dir,
+        })
         projectDir = dir
+        projectConfigPath = candidate
         break
       }
     }
@@ -84,39 +278,100 @@ export async function loadConfig(
   }
 
   // 3. Merge global + project
-  const merged = deepMerge(globalRaw ?? {}, projectRaw ?? {})
+  let merged: Record<string, unknown>
+  try {
+    merged = mergeNexusConfigLayers(
+      globalRaw ?? {},
+      projectRaw ?? {},
+      { projectRoot: projectDir ?? undefined },
+    )
+  } catch (error) {
+    const issues = (
+      error &&
+      typeof error === "object" &&
+      Array.isArray((error as { issues?: unknown }).issues)
+    )
+      ? (error as {
+          issues: Array<{
+            path?: Array<string | number>
+            message?: string
+          }>
+        }).issues
+      : null
+    if (issues) {
+      throw new ConfigValidationError(
+        [globalRaw === null ? null : globalConfigPath, projectConfigPath]
+          .filter((source): source is string => source !== null),
+        issues.map((issue) => ({
+          path: issue.path ?? [],
+          message: issue.message ?? "Invalid project authority request",
+        })),
+      )
+    }
+    throw error
+  }
 
-  // 3b. Merge MCP servers: nexus.yaml + ~/.nexus/mcp-servers.json + <project>/.nexus/mcp-servers.json (later wins by name)
-  const yamlMcp = (merged.mcp as { servers?: unknown } | undefined)?.servers
-  const yamlServers = Array.isArray(yamlMcp)
-    ? yamlMcp.filter((s): s is Record<string, unknown> => s !== null && typeof s === "object" && !Array.isArray(s))
+  // 3b. Global MCP definitions are trusted configuration. Project definitions
+  // are retained as pending requests and never enter the auto-start list.
+  const mergedMcp = asRecord(merged.mcp) ?? {}
+  const yamlServers = asRecordArray(mergedMcp["servers"])
+  const yamlPendingServers = asPendingProjectMcpServers(
+    mergedMcp["pendingProjectServers"],
+  )
+  const globalMcpPath = globalConfigPath
+    ? path.join(path.dirname(globalConfigPath), "mcp-servers.json")
+    : null
+  const globalServers = globalMcpPath
+    ? readMcpServersFromJsonFile(globalMcpPath)
     : []
-  const globalMcpPath = path.join(GLOBAL_CONFIG_DIR, "mcp-servers.json")
-  const globalServers = readMcpServersFromJsonFile(globalMcpPath)
   const projectMcpPath = projectDir ? path.join(projectDir, ".nexus", "mcp-servers.json") : ""
-  const projectServers = projectMcpPath ? readMcpServersFromJsonFile(projectMcpPath) : []
-  const mergedMcpServers = mergeMcpServerLayers(yamlServers, globalServers, projectServers)
-  if (mergedMcpServers.length > 0) {
-    const prevMcp = (merged.mcp as Record<string, unknown> | undefined) ?? {}
-    ;(merged as Record<string, unknown>).mcp = { ...prevMcp, servers: mergedMcpServers }
+  const projectServers = projectMcpPath
+    ? readMcpServersFromJsonFile(projectMcpPath, projectDir ?? undefined)
+    : []
+  const mergedMcpServers = mergeMcpServerLayers(yamlServers, globalServers)
+  const pendingProjectServers = mergePendingProjectMcpServers(
+    yamlPendingServers,
+    projectServers.map((config) => ({
+      source: "project" as const,
+      origin: "project-mcp-json" as const,
+      status: "pending" as const,
+      config: config as unknown as McpServerConfig,
+    })),
+  )
+  ;(merged as Record<string, unknown>).mcp = {
+    ...mergedMcp,
+    servers: mergedMcpServers,
+    pendingProjectServers,
   }
 
   // 4. Apply env overrides
-  applyEnvOverrides(merged)
-  normalizeProviderAliases(merged)
-
-  // 5. Apply secrets store (API keys) if provided — after env so env takes precedence
-  if (options?.secrets) {
-    await applySecretsToConfig(merged as Record<string, unknown>, options.secrets)
+  if (useLocalEnvironment) {
+    applyEnvOverrides(merged, scopedEnvironment, ambientEnvironment)
   }
+  normalizeProviderAliases(
+    merged,
+    useLocalEnvironment ? scopedEnvironment : undefined,
+  )
+  const sanitized = stripSecretsFromConfig(merged)
 
-  // 6. Parse and validate
-  const result = NexusConfigSchema.safeParse(merged)
+  // 5. Parse a completely non-secret configuration.
+  const result = NexusConfigSchema.safeParse(sanitized)
   if (!result.success) {
-    console.warn("[nexus] Config validation warnings:", result.error.issues.map(i => i.message).join(", "))
-    return normalizeToNexusConfig(NexusConfigSchema.parse({}) as Record<string, unknown>)
+    throw new ConfigValidationError(
+      [globalRaw === null ? null : globalConfigPath, projectConfigPath].filter(
+        (source): source is string => source !== null,
+      ),
+      result.error.issues.map((issue) => ({
+        path: issue.path,
+        message: issue.message,
+      })),
+    )
   }
-  return normalizeToNexusConfig(result.data as Record<string, unknown>)
+
+  return markEffectiveConfig(
+    normalizeToNexusConfig(result.data as Record<string, unknown>),
+    useLocalEnvironment ? scopedEnvironment : Object.freeze({}),
+  )
 }
 
 function normalizeToNexusConfig(parsed: Record<string, unknown>): NexusConfig {
@@ -128,113 +383,101 @@ function normalizeToNexusConfig(parsed: Record<string, unknown>): NexusConfig {
     }
   )
   const skills = skillsConfig.filter((s) => s.enabled).map((s) => s.path)
+  const parsedMcp =
+    (parsed.mcp as NexusConfig["mcp"]) ?? { servers: [] }
+  const activeMcpFingerprints = new Set(
+    parsedMcp.servers.map((server) => stableConfigValue(server)),
+  )
+  const pendingProjectServers = (
+    parsedMcp.pendingProjectServers ?? []
+  ).filter(
+    (pending) =>
+      !activeMcpFingerprints.has(stableConfigValue(pending.config)),
+  )
   return {
     ...parsed,
     skillsConfig,
     skills,
-    mcp: (parsed.mcp as NexusConfig["mcp"]) ?? { servers: [] },
-  } as NexusConfig
+    mcp: {
+      ...parsedMcp,
+      pendingProjectServers,
+    },
+  } as unknown as NexusConfig
 }
 
-function loadEnvFileFromTree(startDir: string): void {
-  let dir = startDir
-  let maxUp = 20
-  while (maxUp-- > 0) {
-    const envPath = path.join(dir, ".env")
-    if (fs.existsSync(envPath)) {
-      loadEnvFile(envPath)
-      return
-    }
-    const parent = path.dirname(dir)
-    if (parent === dir) break
-    dir = parent
+function stableConfigValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableConfigValue).join(",")}]`
   }
-}
-
-function loadEnvFile(filePath: string): void {
-  try {
-    const content = fs.readFileSync(filePath, "utf8")
-    for (const rawLine of content.split(/\r?\n/)) {
-      const line = rawLine.trim()
-      if (!line || line.startsWith("#")) continue
-      const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/)
-      if (!m) continue
-      const key = m[1]!
-      if (process.env[key] !== undefined) continue
-      let value = m[2] ?? ""
-      if (
-        (value.startsWith("\"") && value.endsWith("\"")) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1)
-      }
-      process.env[key] = value
-    }
-  } catch {
-    // Ignore malformed or unreadable .env
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableConfigValue(child)}`)
+      .join(",")}}`
   }
+  return JSON.stringify(value)
 }
 
-function readConfigFile(filePath: string): NexusConfigInput | null {
-  try {
-    if (!fs.existsSync(filePath)) return null
-    let content = fs.readFileSync(filePath, "utf8")
-    // KiloCode-style env substitution: {env:VAR_NAME} → process.env.VAR_NAME
-    content = content.replace(/\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, varName: string) => {
-      return process.env[varName] ?? ""
+function markEffectiveConfig(
+  config: NexusConfig,
+  scopedEnvironment?: Readonly<Record<string, string | undefined>>,
+): NexusConfig {
+  Object.defineProperty(config, EFFECTIVE_CONFIG_MARKER, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  })
+  if (scopedEnvironment) {
+    Object.defineProperty(config, SCOPED_ENVIRONMENT_MARKER, {
+      configurable: false,
+      enumerable: false,
+      value: scopedEnvironment,
+      writable: false,
     })
-    // KiloCode-style file substitution: {file:path} → contents of file (path relative to config dir or ~/...)
-    const fileMatches = content.match(/\{file:[^}]+\}/g)
-    if (fileMatches) {
-      const configDir = path.dirname(filePath)
-      for (const match of fileMatches) {
-        let filePathRel = match.replace(/^\{file:/, "").replace(/\}$/, "").trim()
-        if (filePathRel.startsWith("~/")) {
-          filePathRel = path.join(os.homedir(), filePathRel.slice(2))
-        } else if (!path.isAbsolute(filePathRel)) {
-          filePathRel = path.resolve(configDir, filePathRel)
-        }
-        try {
-          const fileContent = fs.readFileSync(filePathRel, "utf8").trim()
-          const escaped = JSON.stringify(fileContent).slice(1, -1)
-          content = content.replace(match, () => escaped)
-        } catch {
-          content = content.replace(match, "")
-        }
-      }
-    }
-    if (filePath.endsWith(".json")) {
-      return JSON.parse(content)
-    }
-    return getYaml().load(content) as NexusConfigInput
-  } catch {
-    return null
   }
+  return config
 }
 
-// Map of provider name → env var name for API keys
-const PROVIDER_API_KEY_ENV: Record<string, string[]> = {
-  anthropic:    ["ANTHROPIC_API_KEY"],
-  openai:       ["OPENAI_API_KEY"],
-  "openai-compatible": ["OPENAI_API_KEY", "OPENROUTER_API_KEY"],
-  google:       ["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
-  openrouter:   ["OPENROUTER_API_KEY"],
-  azure:        ["AZURE_OPENAI_API_KEY"],
-  bedrock:      ["AWS_ACCESS_KEY_ID"],
-  groq:         ["GROQ_API_KEY"],
-  mistral:      ["MISTRAL_API_KEY"],
-  xai:          ["XAI_API_KEY"],
-  deepinfra:    ["DEEPINFRA_API_KEY"],
-  cerebras:     ["CEREBRAS_API_KEY"],
-  cohere:       ["COHERE_API_KEY"],
-  togetherai:   ["TOGETHER_AI_API_KEY", "TOGETHERAI_API_KEY"],
-  perplexity:   ["PERPLEXITY_API_KEY"],
-  minimax:      ["MINIMAX_API_KEY"],
+export function getConfigEnvironment(
+  config: NexusConfig,
+): Readonly<Record<string, string | undefined>> | undefined {
+  return (config as MarkedEffectiveConfig)[SCOPED_ENVIRONMENT_MARKER]
+}
+
+function assertRawConfigWrite(config: Record<string, unknown>): void {
+  const marked = (config as unknown as MarkedEffectiveConfig)[
+    EFFECTIVE_CONFIG_MARKER
+  ]
+  // `skillsConfig` is a runtime-only derived field added by loadConfig. The
+  // structural check deliberately survives object spread and structuredClone,
+  // both of which may discard the non-enumerable symbol marker.
+  const normalizedEffectiveFields = [
+    "modes",
+    "indexing",
+    "permissions",
+    "retry",
+    "checkpoint",
+    "mcp",
+    "skills",
+    "tools",
+    "summarization",
+    "parallelAgents",
+  ]
+  const looksLikeNormalizedEffectiveConfig = normalizedEffectiveFields.every(
+    (field) => Object.prototype.hasOwnProperty.call(config, field),
+  )
+  if (
+    marked === true ||
+    Object.prototype.hasOwnProperty.call(config, "skillsConfig") ||
+    looksLikeNormalizedEffectiveConfig
+  ) {
+    throw new UnsafeConfigWriteError()
+  }
 }
 
 // Map of provider name → env var for model ID (e.g. OPENROUTER_MODEL)
 const PROVIDER_MODEL_ENV: Record<string, string[]> = {
-  "openai-compatible": ["OPENAI_MODEL", "OPENROUTER_MODEL"],
   openrouter:   ["OPENROUTER_MODEL"],
   anthropic:    ["ANTHROPIC_MODEL"],
   openai:       ["OPENAI_MODEL"],
@@ -246,7 +489,11 @@ const PROVIDER_MODEL_ENV: Record<string, string[]> = {
   minimax:      ["MINIMAX_MODEL"],
 }
 
-function applyEnvOverrides(config: Record<string, unknown>) {
+function applyEnvOverrides(
+  config: Record<string, unknown>,
+  environment: Readonly<Record<string, string | undefined>>,
+  hostEnvironment: Readonly<Record<string, string | undefined>>,
+) {
   if (!config.model || typeof config.model !== "object") config.model = {}
   const model = config.model as Record<string, unknown>
 
@@ -258,80 +505,151 @@ function applyEnvOverrides(config: Record<string, unknown>) {
     model["baseUrl"] = DEFAULT_FREE_MODELS_BASE_URL
   }
 
-  // Universal NEXUS_API_KEY
-  const nexusKey = process.env["NEXUS_API_KEY"]
-  if (nexusKey && !model["apiKey"]) model["apiKey"] = nexusKey
-
-  // Provider-specific API key from env
-  if (!model["apiKey"]) {
-    const provider = String(model["provider"] ?? "")
-    const envVars = PROVIDER_API_KEY_ENV[provider] ?? []
-    for (const envVar of envVars) {
-      const v = process.env[envVar]
-      if (v) { model["apiKey"] = v; break }
-    }
-  }
-
   // Provider-specific model from env (e.g. OPENROUTER_MODEL=qwen/qwen3-coder-next)
   if (!model["id"] || model["id"] === "") {
     const provider = String(model["provider"] ?? "")
-    const envVars = PROVIDER_MODEL_ENV[provider] ?? []
+    const envVars = modelEnvironmentKeys(provider, model["baseUrl"])
     for (const envVar of envVars) {
-      const v = process.env[envVar]
+      const v = environment[envVar]
       if (v) { model["id"] = v; break }
+    }
+    if (
+      !isNonEmptyString(model["id"]) &&
+      provider === "openai-compatible" &&
+      isKiloBaseUrl(model["baseUrl"])
+    ) {
+      model["id"] = "minimax/minimax-m2.5:free"
     }
   }
 
   // NEXUS_MODEL override: provider/model-name or just model-name
-  const nexusModel = process.env["NEXUS_MODEL"]
+  const nexusModel = environment["NEXUS_MODEL"]
   if (nexusModel) {
     const slashIdx = nexusModel.indexOf("/")
     if (slashIdx > 0) {
-      model["provider"] = nexusModel.slice(0, slashIdx)
-      model["id"] = nexusModel.slice(slashIdx + 1)
+      const requestedProvider = nexusModel.slice(0, slashIdx)
+      const id = nexusModel.slice(slashIdx + 1)
+      if (environmentValueComesFromProject(
+        "NEXUS_MODEL",
+        environment,
+        hostEnvironment,
+      )) {
+        model["id"] = id
+        const endpoint =
+          requestedProvider === "openrouter"
+            ? {
+                provider: "openai-compatible" as const,
+                baseUrl: OPENROUTER_BASE_URL,
+              }
+            : { provider: requestedProvider as ProviderName }
+        replacePendingModelEndpoint(config, endpoint)
+      } else {
+        replaceModelSelection(config, {
+          provider: requestedProvider as ProviderName,
+          id,
+        })
+      }
     } else {
       model["id"] = nexusModel
     }
   }
 
   // NEXUS_BASE_URL override
-  if (process.env["NEXUS_BASE_URL"]) {
-    model["baseUrl"] = process.env["NEXUS_BASE_URL"]
+  if (environment["NEXUS_BASE_URL"]) {
+    if (environmentValueComesFromProject(
+      "NEXUS_BASE_URL",
+      environment,
+      hostEnvironment,
+    )) {
+      replacePendingModelEndpoint(config, {
+        baseUrl: environment["NEXUS_BASE_URL"],
+      })
+    } else {
+      replaceModelSelection(config, {
+        baseUrl: environment["NEXUS_BASE_URL"],
+      })
+    }
   }
 
   // NEXUS_TEMPERATURE override
-  const tempRaw = process.env["NEXUS_TEMPERATURE"]
+  const tempRaw = environment["NEXUS_TEMPERATURE"]
   if (tempRaw) {
     const t = Number(tempRaw)
     if (Number.isFinite(t) && t >= 0 && t <= 2) {
-      model["temperature"] = t
+      const effectiveModel = asRecord(config["model"])
+      if (effectiveModel) effectiveModel["temperature"] = t
     }
   }
 
   // NEXUS_MAX_MODE / NEXUS_MAX_TOKEN_MULTIPLIER removed (max mode feature removed)
 }
 
-function normalizeProviderAliases(config: Record<string, unknown>): void {
+function environmentValueComesFromProject(
+  key: string,
+  effective: Readonly<Record<string, string | undefined>>,
+  host: Readonly<Record<string, string | undefined>>,
+): boolean {
+  return effective[key] !== undefined && effective[key] !== host[key]
+}
+
+function replacePendingModelEndpoint(
+  config: Record<string, unknown>,
+  patch: ProjectAuthorityPayloadByKind["model-endpoint"]["model"],
+): void {
+  const pending = Array.isArray(config["pendingProjectAuthority"])
+    ? config["pendingProjectAuthority"]
+    : []
+  const existing = pending.find(
+    (entry) =>
+      asRecord(entry)?.["kind"] === "model-endpoint",
+  )
+  const existingModel = asRecord(asRecord(existing)?.["payload"])?.["model"]
+  const previous = asRecord(existingModel) ?? {}
+  const providerChanged =
+    patch.provider !== undefined &&
+    patch.provider !== previous["provider"]
+  const nextModel = providerChanged
+    ? { provider: patch.provider }
+    : { ...previous }
+  Object.assign(nextModel, patch)
+  const request = createPendingProjectAuthorityRequest(
+    "model-endpoint",
+    { model: nextModel },
+  )
+  config["pendingProjectAuthority"] = [
+    ...pending.filter(
+      (entry) => asRecord(entry)?.["kind"] !== "model-endpoint",
+    ),
+    request,
+  ]
+}
+
+function normalizeProviderAliases(
+  config: Record<string, unknown>,
+  environment?: Readonly<Record<string, string | undefined>>,
+): void {
   const model = asRecord(config["model"])
   if (model) {
     const provider = String(model["provider"] ?? "")
     if (provider === "openrouter") {
       model["provider"] = "openai-compatible"
       if (!isNonEmptyString(model["baseUrl"])) model["baseUrl"] = OPENROUTER_BASE_URL
-      if (!isNonEmptyString(model["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
-        model["apiKey"] = process.env["OPENROUTER_API_KEY"]
-      }
-      if (!isNonEmptyString(model["id"]) && process.env["OPENROUTER_MODEL"]) {
-        model["id"] = process.env["OPENROUTER_MODEL"]
+      if (
+        environment &&
+        !isNonEmptyString(model["id"]) &&
+        environment["OPENROUTER_MODEL"]
+      ) {
+        model["id"] = environment["OPENROUTER_MODEL"]
       }
     }
 
     if (provider === "openai-compatible" && isOpenRouterBaseUrl(model["baseUrl"])) {
-      if (!isNonEmptyString(model["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
-        model["apiKey"] = process.env["OPENROUTER_API_KEY"]
-      }
-      if (!isNonEmptyString(model["id"]) && process.env["OPENROUTER_MODEL"]) {
-        model["id"] = process.env["OPENROUTER_MODEL"]
+      if (
+        environment &&
+        !isNonEmptyString(model["id"]) &&
+        environment["OPENROUTER_MODEL"]
+      ) {
+        model["id"] = environment["OPENROUTER_MODEL"]
       }
     }
     const normalizedProvider = String(model["provider"] ?? "")
@@ -342,7 +660,7 @@ function normalizeProviderAliases(config: Record<string, unknown>): void {
       normalizedId.endsWith(":free") &&
       (!isNonEmptyString(baseUrl) || isOpenRouterBaseUrl(baseUrl))
     ) {
-      model["baseUrl"] = DEFAULT_FREE_MODELS_BASE_URL
+      replaceModelSelection(config, { baseUrl: DEFAULT_FREE_MODELS_BASE_URL })
     }
   }
 
@@ -350,25 +668,6 @@ function normalizeProviderAliases(config: Record<string, unknown>): void {
   if (embeddings) {
     if (String(embeddings["provider"] ?? "") === "openrouter") {
       if (!isNonEmptyString(embeddings["baseUrl"])) embeddings["baseUrl"] = OPENROUTER_BASE_URL
-      if (!isNonEmptyString(embeddings["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
-        embeddings["apiKey"] = process.env["OPENROUTER_API_KEY"]
-      }
-    }
-    if (String(embeddings["provider"] ?? "") === "openai-compatible" && isOpenRouterBaseUrl(embeddings["baseUrl"])) {
-      if (!isNonEmptyString(embeddings["apiKey"]) && process.env["OPENROUTER_API_KEY"]) {
-        embeddings["apiKey"] = process.env["OPENROUTER_API_KEY"]
-      }
-    }
-  }
-
-  const envQdrant = process.env["QDRANT_API_KEY"]
-  if (isNonEmptyString(envQdrant)) {
-    if (!config["vectorDb"] || typeof config["vectorDb"] !== "object" || Array.isArray(config["vectorDb"])) {
-      config["vectorDb"] = {}
-    }
-    const vectorDb = config["vectorDb"] as Record<string, unknown>
-    if (!isNonEmptyString(vectorDb["apiKey"])) {
-      vectorDb["apiKey"] = envQdrant
     }
   }
 
@@ -396,7 +695,52 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isOpenRouterBaseUrl(value: unknown): boolean {
   if (!isNonEmptyString(value)) return false
-  return value.toLowerCase().includes("openrouter.ai")
+  try {
+    return canonicalizeCredentialDestination(value) === OPENROUTER_BASE_URL
+  } catch {
+    return false
+  }
+}
+
+function isKiloBaseUrl(value: unknown): boolean {
+  if (!isNonEmptyString(value)) return false
+  try {
+    const url = new URL(canonicalizeCredentialDestination(value))
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "api.kilo.ai" &&
+      (
+        url.pathname === "/api/openrouter" ||
+        url.pathname.startsWith("/api/organizations/")
+      )
+    )
+  } catch {
+    return false
+  }
+}
+
+function modelEnvironmentKeys(
+  provider: string,
+  baseUrl: unknown,
+): string[] {
+  if (provider === "openai-compatible") {
+    if (isKiloBaseUrl(baseUrl)) return ["KILO_MODEL"]
+    if (isOpenRouterBaseUrl(baseUrl)) return ["OPENROUTER_MODEL"]
+    if (isNonEmptyString(baseUrl)) {
+      try {
+        if (
+          canonicalizeCredentialDestination(baseUrl) ===
+          "https://api.openai.com/v1"
+        ) {
+          return ["OPENAI_MODEL"]
+        }
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
+  return PROVIDER_MODEL_ENV[provider] ?? []
 }
 
 function deepMerge(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
@@ -411,6 +755,270 @@ function deepMerge(base: Record<string, unknown>, override: Record<string, unkno
   return result
 }
 
+const PROJECT_PERMISSION_GRANT_KEYS = new Set([
+  "allowedCommands",
+  "allowCommandPatterns",
+  "allowedMcpTools",
+])
+
+function neutralizeProjectAuthority(
+  project: Record<string, unknown>,
+  options: {
+    projectRoot?: string
+    hostAllowsClaudeGlobalDirectory?: boolean
+  } = {},
+): Record<string, unknown> {
+  const partitioned = partitionProjectAuthority(
+    stripSecretsFromConfig(deepMerge({}, project)),
+    options,
+  )
+  const safe = partitioned.safeProject
+  safe["pendingProjectAuthority"] = partitioned.pending
+
+  const permissions = asRecord(safe["permissions"])
+  if (permissions) {
+    for (const key of Object.keys(permissions)) {
+      const value = permissions[key]
+      const isExplicitRestriction =
+        value === false || (Array.isArray(value) && value.length === 0)
+      if (
+        (key.startsWith("autoApprove") ||
+          PROJECT_PERMISSION_GRANT_KEYS.has(key)) &&
+        !isExplicitRestriction
+      ) {
+        delete permissions[key]
+      }
+    }
+    if (Array.isArray(permissions["rules"])) {
+      permissions["rules"] = permissions["rules"].filter((rule) => {
+        const action = asRecord(rule)?.["action"]
+        return action === "deny" || action === "ask"
+      })
+    }
+  }
+
+  const modes = asRecord(safe["modes"])
+  if (modes) {
+    for (const value of Object.values(modes)) {
+      const mode = asRecord(value)
+      if (
+        mode &&
+        Array.isArray(mode["autoApprove"]) &&
+        mode["autoApprove"].length > 0
+      ) {
+        delete mode["autoApprove"]
+      }
+    }
+  }
+
+  const plugins = asRecord(safe["plugins"])
+  if (
+    plugins &&
+    Array.isArray(plugins["trusted"]) &&
+    plugins["trusted"].length > 0
+  ) {
+    delete plugins["trusted"]
+  }
+  if (plugins?.["enabled"] === true) {
+    delete plugins["enabled"]
+  }
+  if (plugins?.["enableHooks"] === true) {
+    delete plugins["enableHooks"]
+  }
+
+  const mcp = asRecord(safe["mcp"])
+  if (mcp) {
+    const projectServers = asRecordArray(mcp["servers"])
+    delete mcp["servers"]
+    delete mcp["pendingProjectServers"]
+    mcp["pendingProjectServers"] = projectServers.map((config) => ({
+      source: "project",
+      origin: "project-config",
+      status: "pending",
+      config,
+    }))
+  }
+
+  return safe
+}
+
+function mergeUniqueArrayValues(
+  base: unknown,
+  project: unknown,
+): unknown[] {
+  const combined = [
+    ...(Array.isArray(base) ? base : []),
+    ...(Array.isArray(project) ? project : []),
+  ]
+  return [...new Set(combined)]
+}
+
+function mergeProjectRestrictions(
+  result: Record<string, unknown>,
+  base: Record<string, unknown>,
+  project: Record<string, unknown>,
+): void {
+  const resultPermissions = asRecord(result["permissions"])
+  const basePermissions = asRecord(base["permissions"])
+  const projectPermissions = asRecord(project["permissions"])
+  if (resultPermissions && (basePermissions || projectPermissions)) {
+    for (const key of [
+      "denyCommandPatterns",
+      "askCommandPatterns",
+      "denyPatterns",
+    ]) {
+      if (
+        Array.isArray(basePermissions?.[key]) ||
+        Array.isArray(projectPermissions?.[key])
+      ) {
+        resultPermissions[key] = mergeUniqueArrayValues(
+          basePermissions?.[key],
+          projectPermissions?.[key],
+        )
+      }
+    }
+    if (
+      Array.isArray(basePermissions?.["rules"]) ||
+      Array.isArray(projectPermissions?.["rules"])
+    ) {
+      const markAuthority = (
+        rules: unknown,
+        authority: "host" | "project",
+      ): unknown[] => (
+        Array.isArray(rules)
+          ? rules.map((rule) => {
+              const record = asRecord(rule)
+              return record ? { ...record, authority } : rule
+            })
+          : []
+      )
+      resultPermissions["rules"] = [
+        ...markAuthority(projectPermissions?.["rules"], "project"),
+        ...markAuthority(basePermissions?.["rules"], "host"),
+      ]
+    }
+  }
+
+  const resultPlugins = asRecord(result["plugins"])
+  const basePlugins = asRecord(base["plugins"])
+  const projectPlugins = asRecord(project["plugins"])
+  if (
+    resultPlugins &&
+    (Array.isArray(basePlugins?.["blocked"]) ||
+      Array.isArray(projectPlugins?.["blocked"]))
+  ) {
+    resultPlugins["blocked"] = mergeUniqueArrayValues(
+      basePlugins?.["blocked"],
+      projectPlugins?.["blocked"],
+    )
+  }
+}
+
+/**
+ * Merge config layers without allowing a secret or provider-specific field to
+ * hitchhike when the higher layer changes provider or destination.
+ */
+export function mergeNexusConfigLayers(
+  base: Record<string, unknown>,
+  override: Record<string, unknown>,
+  options: { projectRoot?: string } = {},
+): Record<string, unknown> {
+  const trustedBase = deepMerge({}, base)
+  if (!asProviderConfig(trustedBase["model"])) {
+    trustedBase["model"] = {
+      provider: "openai-compatible",
+      id: "minimax/minimax-m2.5:free",
+      baseUrl: DEFAULT_FREE_MODELS_BASE_URL,
+    }
+  }
+  const trustedClaude = asRecord(
+    asRecord(trustedBase["compatibility"])?.["claude"],
+  )
+  const safeOverride = neutralizeProjectAuthority(override, {
+    ...options,
+    hostAllowsClaudeGlobalDirectory:
+      trustedClaude?.["enabled"] === true &&
+      trustedClaude["includeGlobalDir"] !== false,
+  })
+  const result = deepMerge(trustedBase, safeOverride)
+  const trustedVectorDb = asRecord(trustedBase["vectorDb"])
+  const resultVectorDb = asRecord(result["vectorDb"])
+  if (
+    !trustedVectorDb &&
+    resultVectorDb &&
+    !Object.prototype.hasOwnProperty.call(resultVectorDb, "autoStart")
+  ) {
+    resultVectorDb["autoStart"] = false
+  }
+  mergeProjectRestrictions(result, trustedBase, safeOverride)
+  const baseModel = asProviderConfig(trustedBase["model"])
+  const modelPatch = asRecord(safeOverride["model"])
+  if (baseModel && modelPatch) {
+    result["model"] = mergeProviderConfigSafely(
+      baseModel,
+      modelPatch as Partial<ProviderConfig>,
+    ) as unknown as Record<string, unknown>
+  }
+
+  const baseEmbeddings = asEmbeddingConfig(trustedBase["embeddings"])
+  const embeddingPatch = asRecord(safeOverride["embeddings"])
+  if (baseEmbeddings && embeddingPatch) {
+    result["embeddings"] = mergeEmbeddingConfigSafely(
+      baseEmbeddings,
+      embeddingPatch as Partial<EmbeddingConfig>,
+    ) as unknown as Record<string, unknown>
+  }
+
+  const baseProfiles = asRecord(trustedBase["profiles"])
+  const overrideProfiles = asRecord(safeOverride["profiles"])
+  if (baseProfiles && overrideProfiles) {
+    const profiles = { ...baseProfiles }
+    for (const [name, value] of Object.entries(overrideProfiles)) {
+      const current = asRecord(baseProfiles[name])
+      const patch = asRecord(value)
+      profiles[name] = current && patch
+        ? mergeProviderConfigPartialSafely(
+            current,
+            patch as Partial<ProviderConfig>,
+          ) as unknown as Record<string, unknown>
+        : value
+    }
+    result["profiles"] = profiles
+  }
+  return result
+}
+
+function replaceModelSelection(
+  config: Record<string, unknown>,
+  patch: Partial<ProviderConfig>,
+): void {
+  const current = asProviderConfig(config["model"])
+  if (!current) {
+    const model = asRecord(config["model"]) ?? {}
+    config["model"] = { ...model, ...patch }
+    return
+  }
+  config["model"] = mergeProviderConfigSafely(current, patch)
+}
+
+function asProviderConfig(value: unknown): ProviderConfig | null {
+  const record = asRecord(value)
+  return record &&
+    isNonEmptyString(record["provider"]) &&
+    isNonEmptyString(record["id"])
+    ? record as unknown as ProviderConfig
+    : null
+}
+
+function asEmbeddingConfig(value: unknown): EmbeddingConfig | null {
+  const record = asRecord(value)
+  return record &&
+    isNonEmptyString(record["provider"]) &&
+    isNonEmptyString(record["model"])
+    ? record as unknown as EmbeddingConfig
+    : null
+}
+
 /**
  * Write config to project .nexus/nexus.yaml.
  * By default strips API keys so they are never persisted to YAML (use secrets store instead).
@@ -420,15 +1028,88 @@ export function writeConfig(
   cwd?: string,
   options?: { stripSecrets?: boolean }
 ): void {
-  const stripSecrets = options?.stripSecrets !== false
-  const toWrite = stripSecrets
-    ? stripSecretsFromConfig(config as Record<string, unknown>)
-    : (config as Record<string, unknown>)
+  assertRawConfigWrite(config as Record<string, unknown>)
+  if (options?.stripSecrets === false) {
+    throw new UnsafeConfigWriteError()
+  }
+  const toWrite = stripSecretsFromConfig(config as Record<string, unknown>)
   const dir = path.join(cwd ?? process.cwd(), ".nexus")
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, "nexus.yaml")
-  const content = getYaml().dump(toWrite, { indent: 2, lineWidth: 120 })
-  fs.writeFileSync(filePath, content, "utf8")
+  writeRawConfigFileSync(filePath, toWrite)
+}
+
+function stripSecretsFromConfigPatch(
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const undefinedPaths: string[][] = []
+  const visit = (value: unknown, currentPath: string[]): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return
+    for (const [key, child] of Object.entries(
+      value as Record<string, unknown>,
+    )) {
+      const childPath = [...currentPath, key]
+      if (child === undefined) undefinedPaths.push(childPath)
+      else visit(child, childPath)
+    }
+  }
+  visit(patch, [])
+
+  const sanitized = stripSecretsFromConfig(patch)
+  for (const valuePath of undefinedPaths) {
+    let target = sanitized
+    for (const segment of valuePath.slice(0, -1)) {
+      const child = target[segment]
+      if (!child || typeof child !== "object" || Array.isArray(child)) {
+        target[segment] = {}
+      }
+      target = target[segment] as Record<string, unknown>
+    }
+    target[valuePath.at(-1)!] = undefined
+  }
+  return sanitized
+}
+
+/**
+ * Atomically merge an explicit patch into the raw project layer.
+ *
+ * Existing unknown fields and substitution tokens stay as raw values. Only the
+ * supplied patch is credential-sanitized; no global/default/effective config is
+ * ever serialized into the project file.
+ */
+export async function patchProjectConfig(
+  patch: Record<string, unknown>,
+  cwd?: string,
+): Promise<void> {
+  assertRawConfigWrite(patch)
+  const projectDirectory = path.resolve(cwd ?? process.cwd())
+  const configPath = path.join(projectDirectory, ".nexus", "nexus.yaml")
+  const safePatch = stripSecretsFromConfigPatch(patch)
+  await patchRawConfigFile(configPath, safePatch)
+}
+
+export interface GlobalConfigPatchOptions {
+  /**
+   * Override the host-owned global config path for an embedded host/test.
+   * Production callers normally omit this and use ~/.nexus/nexus.yaml.
+   */
+  configPath?: string
+}
+
+/**
+ * Atomically patch the host-owned global layer.
+ *
+ * Unlike project patches, authority-bearing permissions, trusted plugins and
+ * MCP servers are allowed here because this file is outside repository
+ * control. Credentials are still stripped and effective configs are rejected.
+ */
+export async function patchGlobalConfig(
+  patch: Record<string, unknown>,
+  options: GlobalConfigPatchOptions = {},
+): Promise<void> {
+  assertRawConfigWrite(patch)
+  const configPath = path.resolve(options.configPath ?? GLOBAL_CONFIG_PATH)
+  const safePatch = stripSecretsFromConfigPatch(patch)
+  await patchRawConfigFile(configPath, safePatch)
 }
 
 /**
@@ -437,10 +1118,11 @@ export function writeConfig(
  */
 export function writeGlobalProfiles(profiles: Record<string, unknown>): void {
   ensureGlobalConfigDir()
-  const current = (readConfigFile(GLOBAL_CONFIG_PATH) ?? {}) as Record<string, unknown>
+  const current = stripSecretsFromConfig(
+    readRawConfigFile(GLOBAL_CONFIG_PATH) ?? {},
+  )
   current["profiles"] = stripProfileSecrets(profiles)
-  const content = getYaml().dump(current, { indent: 2, lineWidth: 120 })
-  fs.writeFileSync(GLOBAL_CONFIG_PATH, content, "utf8")
+  writeRawConfigFileSync(GLOBAL_CONFIG_PATH, current)
 }
 
 /**
@@ -470,15 +1152,43 @@ export function ensureGlobalConfigDir() {
 export { NexusConfigSchema }
 export type { NexusConfig }
 export {
+  createPendingProjectAuthorityRequest,
+  fingerprintProjectAuthorityPayload,
+  getPendingProjectAuthorityRequests,
+  isValidPendingProjectAuthorityRequest,
+  PROJECT_AUTHORITY_REQUEST_KINDS,
+} from "./project-authority.js"
+export type {
+  PendingProjectAuthorityRequest,
+  ProjectAuthorityPayloadByKind,
+  ProjectAuthorityRequestKind,
+} from "./project-authority.js"
+export {
+  ConfigFileError,
+  ConfigSubstitutionError,
+} from "./layered-io.js"
+export {
   applySecretsToConfig,
+  finalizeConfigCredentials,
   stripSecretsFromConfig,
   stripProfileSecrets,
   getSecretsPayloadFromConfig,
   persistSecretsFromConfig,
   createFileSecretsStore,
   NEXUS_SECRETS_STORAGE_KEY,
+  ProfileCredentialCollisionError,
+  SecretsCorruptionError,
+  UnsupportedSecretsVersionError,
 } from "./secrets.js"
-export type { NexusSecretsStore, NexusSecretsPayload } from "./secrets.js"
+export type {
+  FinalizeConfigCredentialsOptions,
+  NexusSecretsStore,
+  NexusSecretsPayload,
+  PersistSecretsOptions,
+  ProfileCredentialRemoval,
+  SecretsCorruptionReason,
+  SecretsRemoval,
+} from "./secrets.js"
 
 /** Format like .claude: { permissions: { allow: string[], deny: string[], ask: string[] } } */
 export interface ProjectSettings {
@@ -499,14 +1209,17 @@ function uniqueNonEmpty(values: string[]): string[] {
 }
 
 function readSettingsFile(filePath: string): ProjectSettings {
+  if (!fs.existsSync(filePath)) return {}
   try {
-    if (!fs.existsSync(filePath)) return {}
     const raw = JSON.parse(fs.readFileSync(filePath, "utf8"))
-    if (raw && typeof raw === "object") return raw as ProjectSettings
-  } catch {
-    // ignore
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      return raw as ProjectSettings
+    }
+    throw new ConfigFileError(filePath, "settings root must be an object")
+  } catch (error) {
+    if (error instanceof ConfigFileError) throw error
+    throw new ConfigFileError(filePath, "settings document is malformed", error)
   }
-  return {}
 }
 
 function mergeSettings(...layers: ProjectSettings[]): ProjectSettings {
@@ -526,6 +1239,17 @@ function mergeSettings(...layers: ProjectSettings[]): ProjectSettings {
       deny: uniqueNonEmpty(deny),
       ask: uniqueNonEmpty(ask),
       allowedMcpTools: uniqueNonEmpty(allowedMcpTools),
+    },
+  }
+}
+
+function projectSettingsRestrictionsOnly(
+  settings: ProjectSettings,
+): ProjectSettings {
+  return {
+    permissions: {
+      deny: settings.permissions?.deny ?? [],
+      ask: settings.permissions?.ask ?? [],
     },
   }
 }
@@ -555,7 +1279,12 @@ export function loadProjectSettings(cwd: string, options?: { compatibility?: Cla
   const projectBase = readSettingsFile(path.join(cwd, ".nexus", "settings.json"))
   const projectLocal = readSettingsFile(path.join(cwd, ".nexus", "settings.local.json"))
   if (!shouldLoadClaudeCompatibility(options)) {
-    return mergeSettings(globalBase, globalLocal, projectBase, projectLocal)
+    return mergeSettings(
+      globalBase,
+      globalLocal,
+      projectSettingsRestrictionsOnly(projectBase),
+      projectSettingsRestrictionsOnly(projectLocal),
+    )
   }
   const claudeGlobalBase = readSettingsFile(path.join(os.homedir(), ".claude", "settings.json"))
   const claudeGlobalLocal = readSettingsFile(path.join(os.homedir(), ".claude", "settings.local.json"))
@@ -566,10 +1295,10 @@ export function loadProjectSettings(cwd: string, options?: { compatibility?: Cla
     globalLocal,
     claudeGlobalBase,
     claudeGlobalLocal,
-    projectBase,
-    projectLocal,
-    claudeProjectBase,
-    claudeProjectLocal,
+    projectSettingsRestrictionsOnly(projectBase),
+    projectSettingsRestrictionsOnly(projectLocal),
+    projectSettingsRestrictionsOnly(claudeProjectBase),
+    projectSettingsRestrictionsOnly(claudeProjectLocal),
   )
 }
 
@@ -577,9 +1306,10 @@ export function loadProjectSettings(cwd: string, options?: { compatibility?: Cla
  * Write project settings to .nexus/settings.json.
  */
 export function writeProjectSettings(cwd: string, settings: ProjectSettings): void {
-  const dir = path.join(cwd, ".nexus")
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify(settings, null, 2), "utf8")
+  writeAtomicTextFileSync(
+    path.join(cwd, ".nexus", "settings.json"),
+    `${JSON.stringify(settings, null, 2)}\n`,
+  )
 }
 
 /**
@@ -587,5 +1317,8 @@ export function writeProjectSettings(cwd: string, settings: ProjectSettings): vo
  */
 export function writeGlobalSettings(settings: ProjectSettings): void {
   ensureGlobalConfigDir()
-  fs.writeFileSync(path.join(GLOBAL_CONFIG_DIR, "settings.json"), JSON.stringify(settings, null, 2), "utf8")
+  writeAtomicTextFileSync(
+    path.join(GLOBAL_CONFIG_DIR, "settings.json"),
+    `${JSON.stringify(settings, null, 2)}\n`,
+  )
 }

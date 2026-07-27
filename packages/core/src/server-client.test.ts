@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { NexusServerClient } from "./server-client.js"
+import {
+  getNexusServerTokenSecretKey,
+  NexusServerClient,
+} from "./server-client.js"
 
 afterEach(() => {
   vi.useRealTimers()
@@ -9,6 +12,51 @@ afterEach(() => {
 })
 
 describe("NexusServerClient authorization", () => {
+  it("allows plaintext HTTP only for exact loopback destinations", () => {
+    expect(
+      () =>
+        new NexusServerClient({
+          baseUrl: "http://example.com:4097",
+          directory: process.cwd(),
+          token: "secret-token",
+        }),
+    ).toThrow(/HTTPS.*non-loopback/i)
+    expect(
+      () =>
+        new NexusServerClient({
+          baseUrl: "http://localhost.evil.test:4097",
+          directory: process.cwd(),
+          token: "secret-token",
+        }),
+    ).toThrow(/HTTPS.*non-loopback/i)
+
+    expect(
+      () =>
+        new NexusServerClient({
+          baseUrl: "http://127.0.0.1:4097/",
+          directory: process.cwd(),
+          token: "secret-token",
+        }),
+    ).not.toThrow()
+    expect(
+      () =>
+        new NexusServerClient({
+          baseUrl: "https://nexus.example.test/api/",
+          directory: process.cwd(),
+          token: "secret-token",
+        }),
+    ).not.toThrow()
+  })
+
+  it("binds persisted server tokens to the canonical endpoint", () => {
+    expect(
+      getNexusServerTokenSecretKey("https://nexus.example.test/api/"),
+    ).toBe(getNexusServerTokenSecretKey("https://nexus.example.test/api"))
+    expect(
+      getNexusServerTokenSecretKey("https://other.example.test/api"),
+    ).not.toBe(getNexusServerTokenSecretKey("https://nexus.example.test/api"))
+  })
+
   it("requires a token before making requests", () => {
     expect(
       () =>
@@ -70,6 +118,9 @@ describe("NexusServerClient authorization", () => {
         (value) => value.get("authorization") === "Bearer secret-token",
       ),
     ).toBe(true)
+    const calls = vi.mocked(fetch).mock.calls
+    expect(calls).toHaveLength(5)
+    expect(calls.every(([, init]) => init?.redirect === "error")).toBe(true)
   })
 
   it("retains authorization when a stream reconnects", async () => {

@@ -4,15 +4,15 @@ import { getTheme } from '../utils/theme.js'
 import { PRODUCT_NAME } from '../constants/product.js'
 import { isDefaultApiKey, getAnthropicApiKey } from '../utils/config.js'
 import { getCwd } from '../utils/state.js'
-import type { WrappedClient } from '../services/mcpClient.js'
+import type { McpDisplayStatus } from '../mcp-display.js'
 
 export const MIN_LOGO_WIDTH = 46
 
 export function Logo({
-  mcpClients,
+  mcpStatuses,
   isDefaultModel = false,
 }: {
-  mcpClients: WrappedClient[]
+  mcpStatuses: McpDisplayStatus[]
   isDefaultModel?: boolean
 }): React.ReactNode {
   const width = Math.max(MIN_LOGO_WIDTH, getCwd().length + 12)
@@ -113,7 +113,7 @@ export function Logo({
             </Box>
           )}
         </>
-        {mcpClients.length ? (
+        {mcpStatuses.length ? (
           <Box
             borderColor={theme.secondaryBorder}
             borderStyle="single"
@@ -129,17 +129,23 @@ export function Logo({
             <Box marginBottom={1}>
               <Text color={theme.secondaryText}>MCP Servers:</Text>
             </Box>
-            {mcpClients.map((client, idx) => (
-              <Box key={idx} width={width - 6}>
-                <Text color={theme.secondaryText}>• {client.name}</Text>
+            {mcpStatuses.map((server) => (
+              <Box key={server.name} width={width - 6}>
+                <Text color={theme.secondaryText}>• {server.name}</Text>
                 <Box flexGrow={1} />
                 <Text
                   bold
                   color={
-                    client.type === 'connected' ? theme.success : theme.error
+                    server.state === 'connected'
+                      ? theme.success
+                      : server.state === 'connecting'
+                        ? theme.warning
+                        : server.state === 'disabled' || server.state === 'disconnected'
+                          ? theme.secondaryText
+                          : theme.error
                   }
                 >
-                  {client.type === 'connected' ? 'connected' : 'failed'}
+                  {server.state.replace('_', ' ')}
                 </Text>
               </Box>
             ))}

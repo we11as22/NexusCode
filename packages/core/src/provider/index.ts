@@ -57,5 +57,25 @@ export function createLLMClient(config: ProviderConfig): LLMClient {
 }
 
 export { createEmbeddingClient, isEmbeddingApiKeyMissing }
+export {
+  canonicalizeCredentialDestination,
+  credentialIdentityKey,
+  getEmbeddingCredentialIdentity,
+  getProviderCredentialIdentity,
+  mergeEmbeddingConfigSafely,
+  mergeModelPresetSelection,
+  mergeProviderConfigSafely,
+  mergeProviderConfigPartialSafely,
+  normalizeAwsRegion,
+  normalizeAzureResourceName,
+  resolveEmbeddingCredential,
+  resolveProviderCredential,
+  selectProviderProfile,
+} from "./credential-identity.js"
+export type {
+  CredentialIdentity,
+  CredentialPurpose,
+  ResolvedCredential,
+} from "./credential-identity.js"
 export type { LLMClient, EmbeddingClient }
 export * from "./types.js"

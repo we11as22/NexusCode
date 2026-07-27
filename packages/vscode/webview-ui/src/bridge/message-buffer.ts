@@ -1,14 +1,23 @@
 import type { ExtensionMessage } from "../types/messages.js"
-import type { AgentPresetFromCore, ModelsCatalogFromCore } from "../types/messages.js"
+import type {
+  AgentPresetFromCore,
+  ModelsCatalogFromCore,
+  SlashCommandCatalogItem,
+} from "../types/messages.js"
 
 type ChatStoreApi = {
   handleStateUpdate: (state: any) => void
+  handleSubmissionResult: (
+    clientMessageId: string,
+    accepted: boolean,
+  ) => void
   handleAgentEvent: (event: any) => void
   handleIndexStatus: (status: any) => void
   handleSessionList: (sessions: Array<{ id: string; ts: number; title?: string; messageCount: number }>) => void
   handleSessionListLoading: (loading: boolean) => void
   handleConfigLoaded: (config: any) => void
   handleMcpServerStatus: (results: Array<{ name: string; status: "ok" | "error"; error?: string }>) => void
+  handleSlashCommandCatalog: (commands: SlashCommandCatalogItem[]) => void
   handlePendingApproval: (partId: string, action: any) => void
   appendToInput: (content: string) => void
   handleModelsCatalog: (catalog: ModelsCatalogFromCore) => void
@@ -24,6 +33,8 @@ type ChatStoreApi = {
   ) => void
 }
 
+const MAX_DELIVERED_SEQUENCES = 4_096
+
 function messageSeq(message: ExtensionMessage): number {
   const candidate = (message as { seq?: unknown }).seq
   return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : Number.MAX_SAFE_INTEGER
@@ -33,6 +44,12 @@ function dispatchExtensionMessage(store: ChatStoreApi, msg: ExtensionMessage): v
   switch (msg.type) {
     case "stateUpdate":
       store.handleStateUpdate(msg.state)
+      break
+    case "messageSubmissionResult":
+      store.handleSubmissionResult(
+        msg.clientMessageId,
+        msg.accepted,
+      )
       break
     case "agentEvent":
       store.handleAgentEvent(msg.event as any)
@@ -51,6 +68,9 @@ function dispatchExtensionMessage(store: ChatStoreApi, msg: ExtensionMessage): v
       break
     case "mcpServerStatus":
       store.handleMcpServerStatus(msg.results)
+      break
+    case "slashCommandCatalog":
+      store.handleSlashCommandCatalog(msg.commands)
       break
     case "pendingApproval":
       store.handlePendingApproval(msg.partId, msg.action)
@@ -87,7 +107,36 @@ function dispatchExtensionMessage(store: ChatStoreApi, msg: ExtensionMessage): v
 
 export function createExtensionMessageBuffer(store: ChatStoreApi) {
   const pending: ExtensionMessage[] = []
+  const deliveredSequences = new Set<number>()
+  const deliveredSequenceOrder: number[] = []
   let frame: number | null = null
+
+  const rememberDelivered = (message: ExtensionMessage) => {
+    const sequence = (message as { seq?: unknown }).seq
+    if (
+      typeof sequence !== "number" ||
+      !Number.isSafeInteger(sequence) ||
+      sequence < 0
+    ) {
+      return
+    }
+    deliveredSequences.add(sequence)
+    deliveredSequenceOrder.push(sequence)
+    if (deliveredSequenceOrder.length > MAX_DELIVERED_SEQUENCES) {
+      const oldest = deliveredSequenceOrder.shift()
+      if (oldest !== undefined) deliveredSequences.delete(oldest)
+    }
+  }
+
+  const wasDelivered = (message: ExtensionMessage): boolean => {
+    const sequence = (message as { seq?: unknown }).seq
+    return (
+      typeof sequence === "number" &&
+      Number.isSafeInteger(sequence) &&
+      sequence >= 0 &&
+      deliveredSequences.has(sequence)
+    )
+  }
 
   const flush = () => {
     frame = null
@@ -95,7 +144,12 @@ export function createExtensionMessageBuffer(store: ChatStoreApi) {
     const queued = pending.splice(0, pending.length)
     queued.sort((a, b) => messageSeq(a) - messageSeq(b))
     for (const msg of queued) {
+      // The host stamps one identity on a concrete outbound delivery and
+      // preserves it across retries. Only that exact retry is a duplicate;
+      // equal event payloads at different sequences are legitimate chunks.
+      if (wasDelivered(msg)) continue
       dispatchExtensionMessage(store, msg)
+      rememberDelivered(msg)
     }
   }
 
@@ -123,6 +177,8 @@ export function createExtensionMessageBuffer(store: ChatStoreApi) {
         frame = null
       }
       pending.length = 0
+      deliveredSequences.clear()
+      deliveredSequenceOrder.length = 0
     },
   }
 }

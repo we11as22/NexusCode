@@ -12,6 +12,7 @@ interface RuntimeEntry {
   runtime?: WorkspaceRuntime
   references: number
   closing?: Promise<void>
+  needsClose?: boolean
 }
 
 export class WorkspaceRuntimeRegistry {
@@ -43,7 +44,9 @@ export class WorkspaceRuntimeRegistry {
       return undefined
     }
     const entry = this.#entries.get(canonicalDirectory)
-    return entry && !entry.closing ? entry.runtime : undefined
+    return entry && !entry.closing && !entry.needsClose
+      ? entry.runtime
+      : undefined
   }
 
   async close(directory: string): Promise<boolean> {
@@ -57,7 +60,7 @@ export class WorkspaceRuntimeRegistry {
   closeAll(): Promise<void> {
     if (this.#closingAll) return this.#closingAll
     this.#closed = true
-    this.#closingAll = (async () => {
+    const closeAttempt = (async () => {
       const entries = [...this.#entries.values()]
       const results = await Promise.allSettled(
         entries.map((entry) => this.#closeEntry(entry)),
@@ -72,6 +75,10 @@ export class WorkspaceRuntimeRegistry {
         throw new AggregateError(errors, "Failed to close all workspace runtimes")
       }
     })()
+    this.#closingAll = closeAttempt.catch((error) => {
+      this.#closingAll = undefined
+      throw error
+    })
     return this.#closingAll
   }
 
@@ -85,6 +92,10 @@ export class WorkspaceRuntimeRegistry {
       let entry = this.#entries.get(canonicalDirectory)
       if (entry?.closing) {
         await entry.closing
+        continue
+      }
+      if (entry?.needsClose) {
+        await this.#closeEntry(entry)
         continue
       }
       if (!entry) {
@@ -102,6 +113,7 @@ export class WorkspaceRuntimeRegistry {
       let runtime: WorkspaceRuntime
       try {
         runtime = entry.runtime ?? (await entry.creation)
+        entry.runtime = runtime
         let validationError: Error | undefined
         if (runtime.canonicalDirectory !== canonicalDirectory) {
           validationError = new Error(
@@ -115,7 +127,7 @@ export class WorkspaceRuntimeRegistry {
         }
         if (validationError) {
           try {
-            await runtime.close()
+            await this.#closeEntry(entry)
           } catch (closeError) {
             throw new AggregateError(
               [validationError, closeError],
@@ -124,9 +136,12 @@ export class WorkspaceRuntimeRegistry {
           }
           throw validationError
         }
-        entry.runtime = runtime
       } catch (error) {
-        if (this.#entries.get(canonicalDirectory) === entry) {
+        if (
+          this.#entries.get(canonicalDirectory) === entry &&
+          !entry.needsClose &&
+          !entry.closing
+        ) {
           this.#entries.delete(canonicalDirectory)
         }
         throw error
@@ -143,20 +158,35 @@ export class WorkspaceRuntimeRegistry {
 
       entry.references += 1
       let released = false
+      let ownsCleanup = false
+      let releaseAttempt: Promise<void> | undefined
       const handle: WorkspaceRuntimeHandle = {
         canonicalDirectory,
         runtime,
         get released() {
           return released
         },
-        release: async () => {
-          if (released) return
-          released = true
-          if (this.#entries.get(canonicalDirectory) !== entry) return
-          entry.references -= 1
-          if (entry.references === 0) {
-            await this.#closeEntry(entry)
+        release: () => {
+          if (releaseAttempt) return releaseAttempt
+          if (!released) {
+            released = true
+            if (this.#entries.get(canonicalDirectory) !== entry) {
+              return Promise.resolve()
+            }
+            entry.references -= 1
+            ownsCleanup = entry.references === 0
           }
+          if (
+            !ownsCleanup ||
+            this.#entries.get(canonicalDirectory) !== entry
+          ) {
+            return Promise.resolve()
+          }
+          releaseAttempt = this.#closeEntry(entry).catch((error: unknown) => {
+            releaseAttempt = undefined
+            throw error
+          })
+          return releaseAttempt
         },
       }
       return handle
@@ -165,17 +195,35 @@ export class WorkspaceRuntimeRegistry {
 
   #closeEntry(entry: RuntimeEntry): Promise<void> {
     if (entry.closing) return entry.closing
-    entry.closing = Promise.resolve()
-      .then(async () => {
-        const runtime = entry.runtime ?? (await entry.creation)
-        entry.runtime = runtime
-        await runtime.close()
-      })
-      .finally(() => {
+    const closeAttempt = Promise.resolve().then(async () => {
+      const runtime = entry.runtime ?? (await entry.creation)
+      entry.runtime = runtime
+      await runtime.close()
+      if (!runtime.closed) {
+        throw new Error(
+          `Workspace runtime did not finish closing: ${entry.canonicalDirectory}`,
+        )
+      }
+    })
+    entry.closing = closeAttempt.then(
+      () => {
+        entry.needsClose = false
         if (this.#entries.get(entry.canonicalDirectory) === entry) {
           this.#entries.delete(entry.canonicalDirectory)
         }
-      })
+      },
+      (error: unknown) => {
+        entry.closing = undefined
+        if (this.#entries.get(entry.canonicalDirectory) === entry) {
+          if (entry.runtime && !entry.runtime.closed) {
+            entry.needsClose = true
+          } else {
+            this.#entries.delete(entry.canonicalDirectory)
+          }
+        }
+        throw error
+      },
+    )
     return entry.closing
   }
 }

@@ -3,7 +3,8 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@nexuscode/core": ["../core/src/index.ts"]
+      "@nexuscode/core": ["../core/src/index.ts"],
+      "@nexuscode/state": ["../state/src/index.ts"]
     },
     "module": "NodeNext",
     "moduleResolution": "NodeNext",

@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import type { McpServerConfig, NexusConfig, PluginManifestRecord } from "../types.js"
 import { McpServerConfigSchema } from "../config/schema.js"
+import { getPendingProjectMcpServers } from "../config/index.js"
 import { resolvePluginDeclaredPath } from "./index.js"
 import { loadTrustedPluginRuntimeRecords } from "./runtime.js"
 
@@ -12,16 +13,43 @@ export interface PluginCapabilityDiagnostic {
     | "plugin-mcp-server-invalid"
     | "plugin-mcp-server-shadowed"
     | "plugin-mcp-cwd-escape"
+    | "project-mcp-pending"
+    | "project-mcp-pending-invalid"
   pluginName: string
   path: string
   serverName?: string
   message: string
 }
 
+export interface McpServerCapabilityProvenance {
+  serverName: string
+  status: "active" | "pending" | "shadowed"
+  source:
+    | "plugin-inline"
+    | "plugin-file"
+    | "trusted-runtime-config"
+    | "project-config"
+    | "project-mcp-json"
+  path: string
+  pluginName?: string
+  pluginRoot?: string
+  trustBinding?: "exact-content-grant"
+  message?: string
+}
+
+export interface PendingMcpServerCapability {
+  server: McpServerConfig
+  provenance: McpServerCapabilityProvenance
+}
+
 export interface PluginMcpCapabilityResult {
   servers: McpServerConfig[]
   diagnostics: PluginCapabilityDiagnostic[]
+  provenance: McpServerCapabilityProvenance[]
+  pendingServers: PendingMcpServerCapability[]
 }
+
+type ParsedPluginMcpResult = Pick<PluginMcpCapabilityResult, "servers" | "diagnostics">
 
 function isPathInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate)
@@ -126,7 +154,7 @@ async function normalizePluginServer(
 async function parsePluginMcpFile(
   plugin: PluginManifestRecord,
   filePath: string,
-): Promise<PluginMcpCapabilityResult> {
+): Promise<ParsedPluginMcpResult> {
   const diagnostics: PluginCapabilityDiagnostic[] = []
   let parsed: unknown
   try {
@@ -177,7 +205,7 @@ async function parsePluginMcpFile(
 
 async function parseInlinePluginMcpServers(
   plugin: PluginManifestRecord,
-): Promise<PluginMcpCapabilityResult> {
+): Promise<ParsedPluginMcpResult> {
   if (!plugin.inlineMcpServers) return { servers: [], diagnostics: [] }
   const servers: McpServerConfig[] = []
   const diagnostics: PluginCapabilityDiagnostic[] = []
@@ -210,37 +238,80 @@ export async function loadPluginMcpServers(
 ): Promise<PluginMcpCapabilityResult> {
   const plugins = await loadTrustedPluginRuntimeRecords(cwd, config)
   const diagnostics: PluginCapabilityDiagnostic[] = []
-  const byName = new Map<string, { plugin: PluginManifestRecord; server: McpServerConfig; path: string }>()
+  const shadowedProvenance: McpServerCapabilityProvenance[] = []
+  const byName = new Map<string, {
+    plugin: PluginManifestRecord
+    server: McpServerConfig
+    path: string
+    source: "plugin-inline" | "plugin-file"
+  }>()
+  const addServer = (
+    plugin: PluginManifestRecord,
+    server: McpServerConfig,
+    sourcePath: string,
+    source: "plugin-inline" | "plugin-file",
+  ): void => {
+    const existing = byName.get(server.name)
+    if (existing) {
+      const message = `Server is shadowed by plugin ${existing.plugin.name} (${existing.path}).`
+      diagnostics.push({
+        level: "warning",
+        code: "plugin-mcp-server-shadowed",
+        pluginName: plugin.name,
+        path: sourcePath,
+        serverName: server.name,
+        message,
+      })
+      shadowedProvenance.push({
+        serverName: server.name,
+        status: "shadowed",
+        source,
+        path: sourcePath,
+        pluginName: plugin.name,
+        pluginRoot: plugin.rootDir,
+        trustBinding: "exact-content-grant",
+        message,
+      })
+      return
+    }
+    byName.set(server.name, {
+      plugin,
+      server,
+      path: sourcePath,
+      source,
+    })
+  }
   for (const plugin of plugins) {
     const inline = await parseInlinePluginMcpServers(plugin)
     diagnostics.push(...inline.diagnostics)
     for (const server of inline.servers) {
-      byName.set(server.name, { plugin, server, path: plugin.sourcePath })
+      addServer(plugin, server, plugin.sourcePath, "plugin-inline")
     }
     for (const declared of plugin.mcpServers) {
       const filePath = resolvePluginDeclaredPath(plugin, declared)
       const result = await parsePluginMcpFile(plugin, filePath)
       diagnostics.push(...result.diagnostics)
       for (const server of result.servers) {
-        const existing = byName.get(server.name)
-        if (existing) {
-          diagnostics.push({
-            level: "warning",
-            code: "plugin-mcp-server-shadowed",
-            pluginName: plugin.name,
-            path: filePath,
-            serverName: server.name,
-            message: `Server is shadowed by plugin ${existing.plugin.name} (${existing.path}).`,
-          })
-          continue
-        }
-        byName.set(server.name, { plugin, server, path: filePath })
+        addServer(plugin, server, filePath, "plugin-file")
       }
     }
   }
   return {
     servers: Array.from(byName.values(), (item) => item.server),
     diagnostics,
+    provenance: [
+      ...Array.from(byName.values(), (item): McpServerCapabilityProvenance => ({
+        serverName: item.server.name,
+        status: "active",
+        source: item.source,
+        path: item.path,
+        pluginName: item.plugin.name,
+        pluginRoot: item.plugin.rootDir,
+        trustBinding: "exact-content-grant",
+      })),
+      ...shadowedProvenance,
+    ],
+    pendingServers: [],
   }
 }
 
@@ -251,6 +322,56 @@ export async function resolveConfiguredAndPluginMcpServers(
 ): Promise<PluginMcpCapabilityResult> {
   const plugin = await loadPluginMcpServers(cwd, config)
   const explicitNames = new Set(config.mcp.servers.map((server) => server.name))
+  const pendingServers: PendingMcpServerCapability[] = []
+  const pendingDiagnostics: PluginCapabilityDiagnostic[] = []
+  for (const request of getPendingProjectMcpServers(config)) {
+    const parsed = McpServerConfigSchema.safeParse(request.config)
+    const name = typeof request.config["name"] === "string"
+      ? request.config["name"]
+      : "(unnamed)"
+    if (!parsed.success) {
+      pendingDiagnostics.push({
+        level: "error",
+        code: "project-mcp-pending-invalid",
+        pluginName: "project-config",
+        path: request.origin === "project-config"
+          ? ".nexus/nexus.yaml"
+          : ".nexus/mcp-servers.json",
+        serverName: name,
+        message: parsed.error.issues
+          .map((issue) => `${issue.path.join(".") || "root"}: ${issue.message}`)
+          .join("; "),
+      })
+      continue
+    }
+    const provenance: McpServerCapabilityProvenance = {
+      serverName: parsed.data.name,
+      status: "pending",
+      source: request.origin,
+      path: request.origin === "project-config"
+        ? ".nexus/nexus.yaml"
+        : ".nexus/mcp-servers.json",
+      message: "Project MCP definitions require explicit host promotion before startup.",
+    }
+    pendingServers.push({ server: parsed.data, provenance })
+    pendingDiagnostics.push({
+      level: "warning",
+      code: "project-mcp-pending",
+      pluginName: "project-config",
+      path: provenance.path,
+      serverName: parsed.data.name,
+      message: provenance.message!,
+    })
+  }
+  const pluginProvenance = plugin.provenance.map((item) =>
+    item.status === "active" && explicitNames.has(item.serverName)
+      ? {
+          ...item,
+          status: "shadowed" as const,
+          message: `Trusted runtime MCP server ${item.serverName} overrides the plugin contribution.`,
+        }
+      : item
+  )
   return {
     servers: [
       ...plugin.servers.filter((server) => !explicitNames.has(server.name)),
@@ -268,6 +389,18 @@ export async function resolveConfiguredAndPluginMcpServers(
           serverName: server.name,
           message: `Explicit MCP server ${server.name} overrides the plugin contribution.`,
         })),
+      ...pendingDiagnostics,
     ],
+    provenance: [
+      ...pluginProvenance,
+      ...config.mcp.servers.map((server): McpServerCapabilityProvenance => ({
+        serverName: server.name,
+        status: "active",
+        source: "trusted-runtime-config",
+        path: "host-owned configuration",
+      })),
+      ...pendingServers.map((item) => item.provenance),
+    ],
+    pendingServers,
   }
 }

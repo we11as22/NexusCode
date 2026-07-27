@@ -5,11 +5,10 @@ import { extractSymbols } from "../../indexer/ast-extractor.js"
 import {
   loadDefinitionQueryParsers,
   parseDefinitionsForFile,
-  parseDefinitionsTopLevelDirectory,
   isDefinitionQueryExtension,
   type DefinitionQueryParsersByExt,
 } from "../../indexer/definition-queries/index.js"
-import type { SymbolEntry, ToolDef, ToolContext } from "../../types.js"
+import type { IHost, SymbolEntry, ToolDef, ToolContext } from "../../types.js"
 
 /** Same language coverage as the codebase indexer (symbolExtract path), minus markdown sections. */
 const WALK_EXTENSIONS = new Set([
@@ -111,6 +110,7 @@ async function extractFromFile(
 async function collectFiles(
   absDir: string,
   cwd: string,
+  host: IHost,
   opts: { shallow: boolean; maxDepth: number; maxFiles: number },
 ): Promise<string[]> {
   const out: string[] = []
@@ -134,20 +134,29 @@ async function collectFiles(
     for (const item of items.sort()) {
       if (out.length >= opts.maxFiles) return
       const fullPath = path.join(dir, item)
-      const relPath = path.relative(cwd, fullPath)
+      const authorizedPath = await host.resolvePath(fullPath, "read").catch(() => null)
+      if (!authorizedPath) continue
+      const workspaceRelative = path.relative(cwd, authorizedPath)
+      const relPath = (
+        workspaceRelative === ".." ||
+          workspaceRelative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(workspaceRelative)
+          ? path.relative(absDir, authorizedPath)
+          : workspaceRelative
+      ).replace(/\\/g, "/")
       if (ig.ignores(relPath)) continue
 
-      const st = await fs.stat(fullPath).catch(() => null)
+      const st = await fs.stat(authorizedPath).catch(() => null)
       if (!st) continue
 
       if (st.isDirectory()) {
         if (!opts.shallow) {
-          await processDir(fullPath, depth + 1)
+          await processDir(authorizedPath, depth + 1)
         }
       } else {
         const ext = path.extname(item).toLowerCase()
         if (WALK_EXTENSIONS.has(ext)) {
-          out.push(fullPath)
+          out.push(authorizedPath)
         }
       }
     }
@@ -191,7 +200,6 @@ When NOT to use: semantic search → CodebaseSearch; exact text → Grep.`,
     },
     ctx: ToolContext,
   ) {
-    const absPath = path.resolve(ctx.cwd, targetPath)
     const maxDepth = maxDepthArg ?? DEFAULT_MAX_DEPTH
     const maxFiles = maxFilesArg ?? DEFAULT_MAX_FILES
     const maxOut = maxOutArg ?? DEFAULT_MAX_OUTPUT_CHARS
@@ -203,17 +211,11 @@ When NOT to use: semantic search → CodebaseSearch; exact text → Grep.`,
     }
 
     try {
+      const absPath = await ctx.host.resolvePath(targetPath, "read")
       const stat = await fs.stat(absPath)
-      if (stat.isDirectory() && shallow) {
-        const body = await parseDefinitionsTopLevelDirectory(absPath)
-        return {
-          success: true,
-          output: truncateOutput(body + indexerNote, maxOut, 1, 1),
-        }
-      }
 
       if (stat.isDirectory()) {
-        const files = await collectFiles(absPath, ctx.cwd, {
+        const files = await collectFiles(absPath, ctx.cwd, ctx.host, {
           shallow,
           maxDepth,
           maxFiles,

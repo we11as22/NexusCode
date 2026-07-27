@@ -1,7 +1,5 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import * as os from "node:os"
-import { execa } from "execa"
 import type { McpServerConfig } from "@nexuscode/core"
 import type {
   MarketplaceItem,
@@ -14,6 +12,12 @@ import type {
 } from "./types.js"
 import { MarketplacePaths } from "./paths.js"
 import { extractGithubSkillFromBlobUrl } from "./github-skill.js"
+import {
+  DEFAULT_SAFE_ARCHIVE_LIMITS,
+  extractArchivePlanAtomically,
+  preflightTarGzArchive,
+  readResponseBodyWithLimit,
+} from "./safe-archive.js"
 
 export class MarketplaceInstaller {
   constructor(private paths: MarketplacePaths) {}
@@ -113,56 +117,25 @@ export class MarketplaceInstaller {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
     }
 
-    const base = skillsBase
-    const stamp = Date.now()
-    const tarball = path.join(os.tmpdir(), `nexus-skill-${item.id}-${stamp}.tar.gz`)
-    await fs.mkdir(base, { recursive: true })
-    const staging = path.join(base, `.staging-${item.id}-${stamp}`)
-
     try {
       const response = await fetch(item.content)
       if (!response.ok) {
         return { success: false, slug: item.id, error: `Download failed: ${response.status}` }
       }
-      const buffer = Buffer.from(await response.arrayBuffer())
-      await fs.writeFile(tarball, buffer)
-
-      await fs.mkdir(staging, { recursive: true })
-      const tarResult = await execa("tar", ["-xzf", tarball, "--strip-components=1", "-C", staging], {
-        reject: false,
-      })
-      if (tarResult.exitCode !== 0) {
-        throw new Error(tarResult.stderr || `tar exited ${tarResult.exitCode}`)
-      }
-
-      const escaped = await findEscapedPaths(staging)
-      if (escaped.length > 0) {
-        await fs.rm(staging, { recursive: true })
-        return { success: false, slug: item.id, error: "Skill archive contains unsafe paths" }
-      }
-
-      try {
-        await fs.access(path.join(staging, "SKILL.md"))
-      } catch {
-        await fs.rm(staging, { recursive: true })
+      const archive = await readResponseBodyWithLimit(
+        response,
+        DEFAULT_SAFE_ARCHIVE_LIMITS.maxDownloadBytes,
+      )
+      const plan = await preflightTarGzArchive(archive)
+      if (!plan.entries.some((entry) => entry.path === "SKILL.md" && entry.kind === "file")) {
         return { success: false, slug: item.id, error: "Extracted archive missing SKILL.md" }
       }
-
-      await fs.rename(staging, dir)
+      await extractArchivePlanAtomically(plan, dir, {
+        containmentRoot: scope === "project" ? workspace : undefined,
+      })
       return { success: true, slug: item.id, filePath: path.join(dir, "SKILL.md"), line: 1 }
     } catch (err) {
-      try {
-        await fs.rm(staging, { recursive: true })
-      } catch {
-        /* */
-      }
       return { success: false, slug: item.id, error: String(err) }
-    } finally {
-      try {
-        await fs.unlink(tarball)
-      } catch {
-        /* */
-      }
     }
   }
 
@@ -197,17 +170,12 @@ export class MarketplaceInstaller {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
     }
 
-    await fs.mkdir(skillsBase, { recursive: true })
-
     try {
-      await extractGithubSkillFromBlobUrl(url, dir)
+      await extractGithubSkillFromBlobUrl(url, dir, {
+        containmentRoot: scope === "project" ? workspace : undefined,
+      })
       return { success: true, slug: item.id, filePath: path.join(dir, "SKILL.md"), line: 1 }
     } catch (err) {
-      try {
-        await fs.rm(dir, { recursive: true })
-      } catch {
-        /* */
-      }
       return { success: false, slug: item.id, error: String(err) }
     }
   }
@@ -343,33 +311,4 @@ export function substituteParams(template: string, params: Record<string, unknow
     result = result.replaceAll(`\${${key}}`, escaped)
   }
   return result
-}
-
-async function findEscapedPaths(dir: string): Promise<string[]> {
-  const resolved = path.resolve(dir)
-  const escaped: string[] = []
-
-  async function walk(current: string): Promise<void> {
-    const entries = await fs.readdir(current, { withFileTypes: true })
-    for (const entry of entries) {
-      const full = path.resolve(current, entry.name)
-      if (!full.startsWith(resolved + path.sep) && full !== resolved) {
-        escaped.push(full)
-        continue
-      }
-      if (entry.isSymbolicLink()) {
-        const target = await fs.realpath(full)
-        if (!target.startsWith(resolved + path.sep) && target !== resolved) {
-          escaped.push(full)
-          continue
-        }
-      }
-      if (entry.isDirectory()) {
-        await walk(full)
-      }
-    }
-  }
-
-  await walk(dir)
-  return escaped
 }

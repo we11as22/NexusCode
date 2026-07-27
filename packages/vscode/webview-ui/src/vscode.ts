@@ -1,7 +1,7 @@
-// Type-safe VS Code webview API bridge
+import type { WebviewMessage } from "../../src/webview-protocol-types.js"
 
 declare function acquireVsCodeApi(): {
-  postMessage(message: unknown): void
+  postMessage(message: WebviewMessage): void
   getState(): unknown
   setState(state: unknown): void
 }
@@ -28,7 +28,7 @@ export function getVsCode() {
     } else {
       // Dev mode mock
       vscodeApi = {
-        postMessage: (msg: unknown) => console.log("[dev] postMessage:", msg),
+        postMessage: (msg: WebviewMessage) => console.log("[dev] postMessage:", msg),
         getState: () => null,
         setState: () => {},
       }
@@ -37,7 +37,7 @@ export function getVsCode() {
   return vscodeApi
 }
 
-export function postMessage(msg: unknown): void {
+export function postMessage(msg: WebviewMessage): void {
   getVsCode().postMessage(msg)
 }
 

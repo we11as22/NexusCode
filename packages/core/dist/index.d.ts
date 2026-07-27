@@ -1,1653 +1,37 @@
 import { z } from 'zod';
-import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
+import { Transport, FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { ToolListChangedNotificationSchema, PromptListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { LanguageModelV1 } from 'ai';
+import * as http from 'node:http';
+import { LookupFunction } from 'node:net';
 
 declare function getNexusDataDir(): string;
 declare function getToolOutputDir(): string;
 declare function getRunLogsDir(): string;
 
-declare const McpServerConfigSchema: z.ZodEffects<z.ZodObject<{
-    name: z.ZodString;
-    command: z.ZodOptional<z.ZodString>;
-    args: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
-    env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
-    cwd: z.ZodOptional<z.ZodString>;
-    url: z.ZodOptional<z.ZodString>;
-    transport: z.ZodOptional<z.ZodEnum<["stdio", "http", "sse"]>>;
-    type: z.ZodOptional<z.ZodEnum<["stdio", "sse", "streamable-http", "http"]>>;
-    headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
-    enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
-    startupTimeoutMs: z.ZodOptional<z.ZodNumber>;
-    toolTimeoutMs: z.ZodOptional<z.ZodNumber>;
-    /** Optional bundle id (e.g. "context-mode"); resolved by host to command/args/env when installed. */
-    bundle: z.ZodOptional<z.ZodString>;
-    auth: z.ZodOptional<z.ZodObject<{
-        type: z.ZodOptional<z.ZodEnum<["oauth", "url", "manual"]>>;
-        startUrl: z.ZodOptional<z.ZodString>;
-        message: z.ZodOptional<z.ZodString>;
-    }, "strip", z.ZodTypeAny, {
-        message?: string | undefined;
-        type?: "url" | "oauth" | "manual" | undefined;
-        startUrl?: string | undefined;
-    }, {
-        message?: string | undefined;
-        type?: "url" | "oauth" | "manual" | undefined;
-        startUrl?: string | undefined;
-    }>>;
-}, "strip", z.ZodTypeAny, {
-    name: string;
-    enabled: boolean;
-    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-    command?: string | undefined;
-    args?: string[] | undefined;
-    env?: Record<string, string> | undefined;
-    cwd?: string | undefined;
-    url?: string | undefined;
-    transport?: "stdio" | "http" | "sse" | undefined;
-    headers?: Record<string, string> | undefined;
-    startupTimeoutMs?: number | undefined;
-    toolTimeoutMs?: number | undefined;
-    bundle?: string | undefined;
-    auth?: {
-        message?: string | undefined;
-        type?: "url" | "oauth" | "manual" | undefined;
-        startUrl?: string | undefined;
-    } | undefined;
-}, {
-    name: string;
-    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-    command?: string | undefined;
-    args?: string[] | undefined;
-    env?: Record<string, string> | undefined;
-    cwd?: string | undefined;
-    url?: string | undefined;
-    transport?: "stdio" | "http" | "sse" | undefined;
-    headers?: Record<string, string> | undefined;
-    enabled?: boolean | undefined;
-    startupTimeoutMs?: number | undefined;
-    toolTimeoutMs?: number | undefined;
-    bundle?: string | undefined;
-    auth?: {
-        message?: string | undefined;
-        type?: "url" | "oauth" | "manual" | undefined;
-        startUrl?: string | undefined;
-    } | undefined;
-}>, {
-    name: string;
-    enabled: boolean;
-    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-    command?: string | undefined;
-    args?: string[] | undefined;
-    env?: Record<string, string> | undefined;
-    cwd?: string | undefined;
-    url?: string | undefined;
-    transport?: "stdio" | "http" | "sse" | undefined;
-    headers?: Record<string, string> | undefined;
-    startupTimeoutMs?: number | undefined;
-    toolTimeoutMs?: number | undefined;
-    bundle?: string | undefined;
-    auth?: {
-        message?: string | undefined;
-        type?: "url" | "oauth" | "manual" | undefined;
-        startUrl?: string | undefined;
-    } | undefined;
-}, {
-    name: string;
-    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-    command?: string | undefined;
-    args?: string[] | undefined;
-    env?: Record<string, string> | undefined;
-    cwd?: string | undefined;
-    url?: string | undefined;
-    transport?: "stdio" | "http" | "sse" | undefined;
-    headers?: Record<string, string> | undefined;
-    enabled?: boolean | undefined;
-    startupTimeoutMs?: number | undefined;
-    toolTimeoutMs?: number | undefined;
-    bundle?: string | undefined;
-    auth?: {
-        message?: string | undefined;
-        type?: "url" | "oauth" | "manual" | undefined;
-        startUrl?: string | undefined;
-    } | undefined;
-}>;
-declare const NexusConfigSchema: z.ZodObject<{
-    model: z.ZodDefault<z.ZodObject<{
-        provider: z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity", "minimax"]>;
-        id: z.ZodString;
-        apiKey: z.ZodOptional<z.ZodString>;
-        baseUrl: z.ZodOptional<z.ZodString>;
-        temperature: z.ZodOptional<z.ZodNumber>;
-        /** Reasoning effort hint for reasoning-capable models. "auto" (default) enables thinking only for known reasoning models. */
-        reasoningEffort: z.ZodDefault<z.ZodString>;
-        /**
-         * How stored assistant reasoning is sent on the next request (KiloCode-style).
-         * `auto` hoists to `reasoning_content` for e.g. DeepSeek; otherwise keeps native `reasoning` parts in message content.
-         */
-        reasoningHistoryMode: z.ZodDefault<z.ZodEnum<["auto", "inline", "reasoning_content", "reasoning_details"]>>;
-        /** Optional explicit context window size override (tokens). */
-        contextWindow: z.ZodOptional<z.ZodNumber>;
-        resourceName: z.ZodOptional<z.ZodString>;
-        deploymentId: z.ZodOptional<z.ZodString>;
-        apiVersion: z.ZodOptional<z.ZodString>;
-        extra: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
-    }, "strip", z.ZodTypeAny, {
-        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
-        id: string;
-        reasoningEffort: string;
-        reasoningHistoryMode: "auto" | "inline" | "reasoning_content" | "reasoning_details";
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        temperature?: number | undefined;
-        contextWindow?: number | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
-    }, {
-        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
-        id: string;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        temperature?: number | undefined;
-        reasoningEffort?: string | undefined;
-        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
-        contextWindow?: number | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
-    }>>;
-    embeddings: z.ZodOptional<z.ZodObject<{
-        provider: z.ZodEnum<["openai", "openai-compatible", "openrouter", "ollama", "google", "mistral", "bedrock", "local"]>;
-        model: z.ZodString;
-        baseUrl: z.ZodOptional<z.ZodString>;
-        apiKey: z.ZodOptional<z.ZodString>;
-        dimensions: z.ZodOptional<z.ZodNumber>;
-        /** AWS region for Bedrock */
-        region: z.ZodOptional<z.ZodString>;
-    }, "strip", z.ZodTypeAny, {
-        provider: "openai" | "google" | "ollama" | "openai-compatible" | "bedrock" | "mistral" | "openrouter" | "local";
-        model: string;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        dimensions?: number | undefined;
-        region?: string | undefined;
-    }, {
-        provider: "openai" | "google" | "ollama" | "openai-compatible" | "bedrock" | "mistral" | "openrouter" | "local";
-        model: string;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        dimensions?: number | undefined;
-        region?: string | undefined;
-    }>>;
-    vectorDb: z.ZodOptional<z.ZodObject<{
-        /** Disabled by default. Set to true to enable vector codebase search (requires Qdrant + embeddings). */
-        enabled: z.ZodDefault<z.ZodBoolean>;
-        url: z.ZodDefault<z.ZodString>;
-        collection: z.ZodDefault<z.ZodString>;
-        autoStart: z.ZodDefault<z.ZodBoolean>;
-        /** Qdrant API key (e.g. Qdrant Cloud). Also read from env `QDRANT_API_KEY` when unset. */
-        apiKey: z.ZodOptional<z.ZodString>;
-        /** Wait for Qdrant to persist upserts/deletes (recommended). */
-        upsertWait: z.ZodDefault<z.ZodBoolean>;
-        /** Minimum similarity score (0–1 for cosine) for search hits. Omit for no threshold (legacy behavior). */
-        searchMinScore: z.ZodOptional<z.ZodNumber>;
-        /** HNSW `ef` at query time (higher → better recall, slower). Default 128. */
-        searchHnswEf: z.ZodOptional<z.ZodNumber>;
-        /** Exhaustive/exact vector search (slower). */
-        searchExact: z.ZodOptional<z.ZodBoolean>;
-    }, "strip", z.ZodTypeAny, {
-        url: string;
-        enabled: boolean;
-        collection: string;
-        autoStart: boolean;
-        upsertWait: boolean;
-        apiKey?: string | undefined;
-        searchMinScore?: number | undefined;
-        searchHnswEf?: number | undefined;
-        searchExact?: boolean | undefined;
-    }, {
-        apiKey?: string | undefined;
-        url?: string | undefined;
-        enabled?: boolean | undefined;
-        collection?: string | undefined;
-        autoStart?: boolean | undefined;
-        upsertWait?: boolean | undefined;
-        searchMinScore?: number | undefined;
-        searchHnswEf?: number | undefined;
-        searchExact?: boolean | undefined;
-    }>>;
-    modes: z.ZodDefault<z.ZodObject<{
-        agent: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        plan: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        ask: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        debug: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        review: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-    }, "strip", z.ZodOptional<z.ZodObject<{
-        autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-        systemPrompt: z.ZodOptional<z.ZodString>;
-        customInstructions: z.ZodOptional<z.ZodString>;
-    }, "strip", z.ZodTypeAny, {
-        autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-        systemPrompt?: string | undefined;
-        customInstructions?: string | undefined;
-    }, {
-        autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-        systemPrompt?: string | undefined;
-        customInstructions?: string | undefined;
-    }>>, z.objectOutputType<{
-        agent: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        plan: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        ask: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        debug: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        review: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-    }, z.ZodOptional<z.ZodObject<{
-        autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-        systemPrompt: z.ZodOptional<z.ZodString>;
-        customInstructions: z.ZodOptional<z.ZodString>;
-    }, "strip", z.ZodTypeAny, {
-        autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-        systemPrompt?: string | undefined;
-        customInstructions?: string | undefined;
-    }, {
-        autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-        systemPrompt?: string | undefined;
-        customInstructions?: string | undefined;
-    }>>, "strip">, z.objectInputType<{
-        agent: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        plan: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        ask: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        debug: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        review: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-    }, z.ZodOptional<z.ZodObject<{
-        autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-        systemPrompt: z.ZodOptional<z.ZodString>;
-        customInstructions: z.ZodOptional<z.ZodString>;
-    }, "strip", z.ZodTypeAny, {
-        autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-        systemPrompt?: string | undefined;
-        customInstructions?: string | undefined;
-    }, {
-        autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-        systemPrompt?: string | undefined;
-        customInstructions?: string | undefined;
-    }>>, "strip">>>;
-    indexing: z.ZodDefault<z.ZodObject<{
-        enabled: z.ZodDefault<z.ZodBoolean>;
-        excludePatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        symbolExtract: z.ZodDefault<z.ZodBoolean>;
-        /** Disabled by default. Set to true with vectorDb.enabled to use semantic codebase_search. */
-        vector: z.ZodDefault<z.ZodBoolean>;
-        batchSize: z.ZodDefault<z.ZodNumber>;
-        /** Min semantic segments per embed/upsert batch (Roo-style segment threshold). */
-        embeddingBatchSize: z.ZodDefault<z.ZodNumber>;
-        embeddingConcurrency: z.ZodDefault<z.ZodNumber>;
-        /** Max embed batches in flight while parsing (backpressure / memory). */
-        maxPendingEmbedBatches: z.ZodDefault<z.ZodNumber>;
-        /** Parallel embed/upsert pipelines (batches). */
-        batchProcessingConcurrency: z.ZodDefault<z.ZodNumber>;
-        /**
-         * Max indexable files per workspace. Roo parity: **0 = scan nothing** (same as `listFiles(..., 0)`).
-         * Use a large positive value if you need an effectively unlimited tree. Default 50_000 matches Roo.
-         */
-        maxIndexedFiles: z.ZodDefault<z.ZodNumber>;
-        /**
-         * Allow CodebaseSearch while indexing is in progress when Qdrant already has points (partial results).
-         * Default true. Set false to wait until `markIndexingComplete` (strict consistency).
-         */
-        searchWhileIndexing: z.ZodDefault<z.ZodBoolean>;
-        /**
-         * If >0, indexing is treated as failed when more than this fraction of chunks could not be embedded
-         * (after retries). Triggers index + tracker reset (Roo-style).
-         */
-        maxIndexingFailureRate: z.ZodDefault<z.ZodNumber>;
-        debounceMs: z.ZodDefault<z.ZodNumber>;
-        /** Max characters of each hit’s code snippet in CodebaseSearch output (indexed payload is capped separately). */
-        codebaseSearchSnippetMaxChars: z.ZodDefault<z.ZodNumber>;
-    }, "strip", z.ZodTypeAny, {
-        enabled: boolean;
-        excludePatterns: string[];
-        symbolExtract: boolean;
-        vector: boolean;
-        batchSize: number;
-        embeddingBatchSize: number;
-        embeddingConcurrency: number;
-        maxPendingEmbedBatches: number;
-        batchProcessingConcurrency: number;
-        maxIndexedFiles: number;
-        searchWhileIndexing: boolean;
-        maxIndexingFailureRate: number;
-        debounceMs: number;
-        codebaseSearchSnippetMaxChars: number;
-    }, {
-        enabled?: boolean | undefined;
-        excludePatterns?: string[] | undefined;
-        symbolExtract?: boolean | undefined;
-        vector?: boolean | undefined;
-        batchSize?: number | undefined;
-        embeddingBatchSize?: number | undefined;
-        embeddingConcurrency?: number | undefined;
-        maxPendingEmbedBatches?: number | undefined;
-        batchProcessingConcurrency?: number | undefined;
-        maxIndexedFiles?: number | undefined;
-        searchWhileIndexing?: boolean | undefined;
-        maxIndexingFailureRate?: number | undefined;
-        debounceMs?: number | undefined;
-        codebaseSearchSnippetMaxChars?: number | undefined;
-    }>>;
-    permissions: z.ZodDefault<z.ZodObject<{
-        autoApproveRead: z.ZodDefault<z.ZodBoolean>;
-        autoApproveWrite: z.ZodDefault<z.ZodBoolean>;
-        autoApproveCommand: z.ZodDefault<z.ZodBoolean>;
-        autoApproveMcp: z.ZodDefault<z.ZodBoolean>;
-        autoApproveBrowser: z.ZodDefault<z.ZodBoolean>;
-        /** When false, loading a skill via `Skill` shows an approval dialog (Kilo-style). Default true = no prompt. */
-        autoApproveSkillLoad: z.ZodDefault<z.ZodBoolean>;
-        autoApproveReadPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
-        allowedCommands: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        /** Command patterns from .nexus/settings.json + settings.local.json */
-        allowCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        /** MCP tool names allowed without approval for this project (e.g. ["codex - codex"]) */
-        allowedMcpTools: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        denyCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        askCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        denyPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        rules: z.ZodDefault<z.ZodArray<z.ZodObject<{
-            tool: z.ZodOptional<z.ZodString>;
-            pathPattern: z.ZodOptional<z.ZodString>;
-            commandPattern: z.ZodOptional<z.ZodString>;
-            action: z.ZodEnum<["allow", "deny", "ask"]>;
-            reason: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            action: "ask" | "allow" | "deny";
-            tool?: string | undefined;
-            pathPattern?: string | undefined;
-            commandPattern?: string | undefined;
-            reason?: string | undefined;
-        }, {
-            action: "ask" | "allow" | "deny";
-            tool?: string | undefined;
-            pathPattern?: string | undefined;
-            commandPattern?: string | undefined;
-            reason?: string | undefined;
-        }>, "many">>;
-    }, "strip", z.ZodTypeAny, {
-        autoApproveRead: boolean;
-        autoApproveWrite: boolean;
-        autoApproveCommand: boolean;
-        autoApproveMcp: boolean;
-        autoApproveBrowser: boolean;
-        autoApproveSkillLoad: boolean;
-        autoApproveReadPatterns: string[];
-        allowedCommands: string[];
-        allowCommandPatterns: string[];
-        allowedMcpTools: string[];
-        denyCommandPatterns: string[];
-        askCommandPatterns: string[];
-        denyPatterns: string[];
-        rules: {
-            action: "ask" | "allow" | "deny";
-            tool?: string | undefined;
-            pathPattern?: string | undefined;
-            commandPattern?: string | undefined;
-            reason?: string | undefined;
-        }[];
-    }, {
-        autoApproveRead?: boolean | undefined;
-        autoApproveWrite?: boolean | undefined;
-        autoApproveCommand?: boolean | undefined;
-        autoApproveMcp?: boolean | undefined;
-        autoApproveBrowser?: boolean | undefined;
-        autoApproveSkillLoad?: boolean | undefined;
-        autoApproveReadPatterns?: string[] | undefined;
-        allowedCommands?: string[] | undefined;
-        allowCommandPatterns?: string[] | undefined;
-        allowedMcpTools?: string[] | undefined;
-        denyCommandPatterns?: string[] | undefined;
-        askCommandPatterns?: string[] | undefined;
-        denyPatterns?: string[] | undefined;
-        rules?: {
-            action: "ask" | "allow" | "deny";
-            tool?: string | undefined;
-            pathPattern?: string | undefined;
-            commandPattern?: string | undefined;
-            reason?: string | undefined;
-        }[] | undefined;
-    }>>;
-    retry: z.ZodDefault<z.ZodObject<{
-        enabled: z.ZodDefault<z.ZodBoolean>;
-        maxAttempts: z.ZodDefault<z.ZodNumber>;
-        initialDelayMs: z.ZodDefault<z.ZodNumber>;
-        maxDelayMs: z.ZodDefault<z.ZodNumber>;
-        retryOnStatus: z.ZodDefault<z.ZodArray<z.ZodNumber, "many">>;
-    }, "strip", z.ZodTypeAny, {
-        enabled: boolean;
-        maxAttempts: number;
-        initialDelayMs: number;
-        maxDelayMs: number;
-        retryOnStatus: number[];
-    }, {
-        enabled?: boolean | undefined;
-        maxAttempts?: number | undefined;
-        initialDelayMs?: number | undefined;
-        maxDelayMs?: number | undefined;
-        retryOnStatus?: number[] | undefined;
-    }>>;
-    checkpoint: z.ZodDefault<z.ZodObject<{
-        enabled: z.ZodDefault<z.ZodBoolean>;
-        timeoutMs: z.ZodDefault<z.ZodNumber>;
-        createOnWrite: z.ZodDefault<z.ZodBoolean>;
-        doubleCheckCompletion: z.ZodDefault<z.ZodBoolean>;
-    }, "strip", z.ZodTypeAny, {
-        enabled: boolean;
-        timeoutMs: number;
-        createOnWrite: boolean;
-        doubleCheckCompletion: boolean;
-    }, {
-        enabled?: boolean | undefined;
-        timeoutMs?: number | undefined;
-        createOnWrite?: boolean | undefined;
-        doubleCheckCompletion?: boolean | undefined;
-    }>>;
-    /** UI preferences (e.g. chat pane). */
-    ui: z.ZodDefault<z.ZodObject<{
-        /** When true, streamed text_delta is shown in chat as muted/small "reasoning"; when false, only final assistant text is shown. */
-        showReasoningInChat: z.ZodDefault<z.ZodBoolean>;
-    }, "strip", z.ZodTypeAny, {
-        showReasoningInChat: boolean;
-    }, {
-        showReasoningInChat?: boolean | undefined;
-    }>>;
-    mcp: z.ZodDefault<z.ZodObject<{
-        servers: z.ZodDefault<z.ZodArray<z.ZodEffects<z.ZodObject<{
-            name: z.ZodString;
-            command: z.ZodOptional<z.ZodString>;
-            args: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
-            env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
-            cwd: z.ZodOptional<z.ZodString>;
-            url: z.ZodOptional<z.ZodString>;
-            transport: z.ZodOptional<z.ZodEnum<["stdio", "http", "sse"]>>;
-            type: z.ZodOptional<z.ZodEnum<["stdio", "sse", "streamable-http", "http"]>>;
-            headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
-            enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
-            startupTimeoutMs: z.ZodOptional<z.ZodNumber>;
-            toolTimeoutMs: z.ZodOptional<z.ZodNumber>;
-            /** Optional bundle id (e.g. "context-mode"); resolved by host to command/args/env when installed. */
-            bundle: z.ZodOptional<z.ZodString>;
-            auth: z.ZodOptional<z.ZodObject<{
-                type: z.ZodOptional<z.ZodEnum<["oauth", "url", "manual"]>>;
-                startUrl: z.ZodOptional<z.ZodString>;
-                message: z.ZodOptional<z.ZodString>;
-            }, "strip", z.ZodTypeAny, {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            }, {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            }>>;
-        }, "strip", z.ZodTypeAny, {
-            name: string;
-            enabled: boolean;
-            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-            command?: string | undefined;
-            args?: string[] | undefined;
-            env?: Record<string, string> | undefined;
-            cwd?: string | undefined;
-            url?: string | undefined;
-            transport?: "stdio" | "http" | "sse" | undefined;
-            headers?: Record<string, string> | undefined;
-            startupTimeoutMs?: number | undefined;
-            toolTimeoutMs?: number | undefined;
-            bundle?: string | undefined;
-            auth?: {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            } | undefined;
-        }, {
-            name: string;
-            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-            command?: string | undefined;
-            args?: string[] | undefined;
-            env?: Record<string, string> | undefined;
-            cwd?: string | undefined;
-            url?: string | undefined;
-            transport?: "stdio" | "http" | "sse" | undefined;
-            headers?: Record<string, string> | undefined;
-            enabled?: boolean | undefined;
-            startupTimeoutMs?: number | undefined;
-            toolTimeoutMs?: number | undefined;
-            bundle?: string | undefined;
-            auth?: {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            } | undefined;
-        }>, {
-            name: string;
-            enabled: boolean;
-            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-            command?: string | undefined;
-            args?: string[] | undefined;
-            env?: Record<string, string> | undefined;
-            cwd?: string | undefined;
-            url?: string | undefined;
-            transport?: "stdio" | "http" | "sse" | undefined;
-            headers?: Record<string, string> | undefined;
-            startupTimeoutMs?: number | undefined;
-            toolTimeoutMs?: number | undefined;
-            bundle?: string | undefined;
-            auth?: {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            } | undefined;
-        }, {
-            name: string;
-            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-            command?: string | undefined;
-            args?: string[] | undefined;
-            env?: Record<string, string> | undefined;
-            cwd?: string | undefined;
-            url?: string | undefined;
-            transport?: "stdio" | "http" | "sse" | undefined;
-            headers?: Record<string, string> | undefined;
-            enabled?: boolean | undefined;
-            startupTimeoutMs?: number | undefined;
-            toolTimeoutMs?: number | undefined;
-            bundle?: string | undefined;
-            auth?: {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            } | undefined;
-        }>, "many">>;
-    }, "strip", z.ZodTypeAny, {
-        servers: {
-            name: string;
-            enabled: boolean;
-            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-            command?: string | undefined;
-            args?: string[] | undefined;
-            env?: Record<string, string> | undefined;
-            cwd?: string | undefined;
-            url?: string | undefined;
-            transport?: "stdio" | "http" | "sse" | undefined;
-            headers?: Record<string, string> | undefined;
-            startupTimeoutMs?: number | undefined;
-            toolTimeoutMs?: number | undefined;
-            bundle?: string | undefined;
-            auth?: {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            } | undefined;
-        }[];
-    }, {
-        servers?: {
-            name: string;
-            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-            command?: string | undefined;
-            args?: string[] | undefined;
-            env?: Record<string, string> | undefined;
-            cwd?: string | undefined;
-            url?: string | undefined;
-            transport?: "stdio" | "http" | "sse" | undefined;
-            headers?: Record<string, string> | undefined;
-            enabled?: boolean | undefined;
-            startupTimeoutMs?: number | undefined;
-            toolTimeoutMs?: number | undefined;
-            bundle?: string | undefined;
-            auth?: {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            } | undefined;
-        }[] | undefined;
-    }>>;
-    skills: z.ZodDefault<z.ZodArray<z.ZodUnion<[z.ZodString, z.ZodObject<{
-        path: z.ZodString;
-        enabled: z.ZodOptional<z.ZodBoolean>;
-    }, "strip", z.ZodTypeAny, {
-        path: string;
-        enabled?: boolean | undefined;
-    }, {
-        path: string;
-        enabled?: boolean | undefined;
-    }>]>, "many">>;
-    /** Remote skill registries (base URL → index.json + files), cached under ~/.nexus/cache/skills/. */
-    skillsUrls: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
-    tools: z.ZodDefault<z.ZodObject<{
-        custom: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        /** When true, use LLM to filter which MCP servers to use when server count > classifyThreshold. Default off. */
-        classifyToolsEnabled: z.ZodDefault<z.ZodBoolean>;
-        /** Threshold: when MCP server count exceeds this, classifier selects which servers to use. Default 20. */
-        classifyThreshold: z.ZodDefault<z.ZodNumber>;
-        parallelReads: z.ZodDefault<z.ZodBoolean>;
-        maxParallelReads: z.ZodDefault<z.ZodNumber>;
-        /** Deferred tool loading strategy for MCP/custom heavy tools. */
-        deferredLoadingMode: z.ZodDefault<z.ZodEnum<["auto", "always", "never"]>>;
-        /** In auto mode, switch to ToolSearch when deferred tools exceed this fraction of context. */
-        deferredLoadingThresholdPercent: z.ZodDefault<z.ZodNumber>;
-        /** In auto mode, always defer once this many tools are marked shouldDefer. */
-        deferredLoadingMinimumTools: z.ZodDefault<z.ZodNumber>;
-    }, "strip", z.ZodTypeAny, {
-        custom: string[];
-        classifyToolsEnabled: boolean;
-        classifyThreshold: number;
-        parallelReads: boolean;
-        maxParallelReads: number;
-        deferredLoadingMode: "never" | "auto" | "always";
-        deferredLoadingThresholdPercent: number;
-        deferredLoadingMinimumTools: number;
-    }, {
-        custom?: string[] | undefined;
-        classifyToolsEnabled?: boolean | undefined;
-        classifyThreshold?: number | undefined;
-        parallelReads?: boolean | undefined;
-        maxParallelReads?: number | undefined;
-        deferredLoadingMode?: "never" | "auto" | "always" | undefined;
-        deferredLoadingThresholdPercent?: number | undefined;
-        deferredLoadingMinimumTools?: number | undefined;
-    }>>;
-    /** When true, use LLM to filter skills by task when count > skillClassifyThreshold. Default off. */
-    skillClassifyEnabled: z.ZodDefault<z.ZodBoolean>;
-    /** Threshold for skill classification. Default 20. */
-    skillClassifyThreshold: z.ZodDefault<z.ZodNumber>;
-    structuredOutput: z.ZodDefault<z.ZodEnum<["auto", "always", "never"]>>;
-    summarization: z.ZodDefault<z.ZodObject<{
-        auto: z.ZodDefault<z.ZodBoolean>;
-        threshold: z.ZodDefault<z.ZodNumber>;
-        keepRecentMessages: z.ZodDefault<z.ZodNumber>;
-        model: z.ZodDefault<z.ZodString>;
-    }, "strip", z.ZodTypeAny, {
-        auto: boolean;
-        model: string;
-        threshold: number;
-        keepRecentMessages: number;
-    }, {
-        auto?: boolean | undefined;
-        model?: string | undefined;
-        threshold?: number | undefined;
-        keepRecentMessages?: number | undefined;
-    }>>;
-    parallelAgents: z.ZodDefault<z.ZodObject<{
-        maxParallel: z.ZodDefault<z.ZodNumber>;
-        /** Deprecated: old SpawnAgents multi-task setting. Parallel sub-agent batching now uses Parallel + SpawnAgent calls. */
-        maxTasksPerCall: z.ZodDefault<z.ZodNumber>;
-        maxDepth: z.ZodDefault<z.ZodNumber>;
-    }, "strip", z.ZodTypeAny, {
-        maxParallel: number;
-        maxTasksPerCall: number;
-        maxDepth: number;
-    }, {
-        maxParallel?: number | undefined;
-        maxTasksPerCall?: number | undefined;
-        maxDepth?: number | undefined;
-    }>>;
-    compatibility: z.ZodDefault<z.ZodObject<{
-        claude: z.ZodDefault<z.ZodObject<{
-            enabled: z.ZodDefault<z.ZodBoolean>;
-            includeGlobalDir: z.ZodDefault<z.ZodBoolean>;
-            includeProjectDir: z.ZodDefault<z.ZodBoolean>;
-            includeLocalInstructions: z.ZodDefault<z.ZodBoolean>;
-            includeRules: z.ZodDefault<z.ZodBoolean>;
-            includeSettings: z.ZodDefault<z.ZodBoolean>;
-            includeCommands: z.ZodDefault<z.ZodBoolean>;
-            includeSkills: z.ZodDefault<z.ZodBoolean>;
-            includeAgents: z.ZodDefault<z.ZodBoolean>;
-            includePlugins: z.ZodDefault<z.ZodBoolean>;
-        }, "strip", z.ZodTypeAny, {
-            enabled: boolean;
-            includeGlobalDir: boolean;
-            includeProjectDir: boolean;
-            includeLocalInstructions: boolean;
-            includeRules: boolean;
-            includeSettings: boolean;
-            includeCommands: boolean;
-            includeSkills: boolean;
-            includeAgents: boolean;
-            includePlugins: boolean;
-        }, {
-            enabled?: boolean | undefined;
-            includeGlobalDir?: boolean | undefined;
-            includeProjectDir?: boolean | undefined;
-            includeLocalInstructions?: boolean | undefined;
-            includeRules?: boolean | undefined;
-            includeSettings?: boolean | undefined;
-            includeCommands?: boolean | undefined;
-            includeSkills?: boolean | undefined;
-            includeAgents?: boolean | undefined;
-            includePlugins?: boolean | undefined;
-        }>>;
-    }, "strip", z.ZodTypeAny, {
-        claude: {
-            enabled: boolean;
-            includeGlobalDir: boolean;
-            includeProjectDir: boolean;
-            includeLocalInstructions: boolean;
-            includeRules: boolean;
-            includeSettings: boolean;
-            includeCommands: boolean;
-            includeSkills: boolean;
-            includeAgents: boolean;
-            includePlugins: boolean;
-        };
-    }, {
-        claude?: {
-            enabled?: boolean | undefined;
-            includeGlobalDir?: boolean | undefined;
-            includeProjectDir?: boolean | undefined;
-            includeLocalInstructions?: boolean | undefined;
-            includeRules?: boolean | undefined;
-            includeSettings?: boolean | undefined;
-            includeCommands?: boolean | undefined;
-            includeSkills?: boolean | undefined;
-            includeAgents?: boolean | undefined;
-            includePlugins?: boolean | undefined;
-        } | undefined;
-    }>>;
-    plugins: z.ZodDefault<z.ZodObject<{
-        enabled: z.ZodDefault<z.ZodBoolean>;
-        trusted: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        blocked: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-        enableHooks: z.ZodDefault<z.ZodBoolean>;
-        hookTimeoutMs: z.ZodDefault<z.ZodNumber>;
-        options: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
-    }, "strip", z.ZodTypeAny, {
-        options: Record<string, Record<string, unknown>>;
-        enabled: boolean;
-        trusted: string[];
-        blocked: string[];
-        enableHooks: boolean;
-        hookTimeoutMs: number;
-    }, {
-        options?: Record<string, Record<string, unknown>> | undefined;
-        enabled?: boolean | undefined;
-        trusted?: string[] | undefined;
-        blocked?: string[] | undefined;
-        enableHooks?: boolean | undefined;
-        hookTimeoutMs?: number | undefined;
-    }>>;
-    /** Optional overrides for agent loop limits (OpenCode-style: allow enough tools/iterations to finish). */
-    agentLoop: z.ZodDefault<z.ZodObject<{
-        toolCallBudget: z.ZodOptional<z.ZodObject<{
-            ask: z.ZodOptional<z.ZodNumber>;
-            plan: z.ZodOptional<z.ZodNumber>;
-            agent: z.ZodOptional<z.ZodNumber>;
-            debug: z.ZodOptional<z.ZodNumber>;
-            review: z.ZodOptional<z.ZodNumber>;
-        }, "strip", z.ZodTypeAny, {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        }, {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        }>>;
-        maxIterations: z.ZodOptional<z.ZodObject<{
-            ask: z.ZodOptional<z.ZodNumber>;
-            plan: z.ZodOptional<z.ZodNumber>;
-            agent: z.ZodOptional<z.ZodNumber>;
-            debug: z.ZodOptional<z.ZodNumber>;
-            review: z.ZodOptional<z.ZodNumber>;
-        }, "strip", z.ZodTypeAny, {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        }, {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        }>>;
-    }, "strip", z.ZodTypeAny, {
-        toolCallBudget?: {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        } | undefined;
-        maxIterations?: {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        } | undefined;
-    }, {
-        toolCallBudget?: {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        } | undefined;
-        maxIterations?: {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        } | undefined;
-    }>>;
-    rules: z.ZodDefault<z.ZodObject<{
-        files: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
-    }, "strip", z.ZodTypeAny, {
-        files: string[];
-    }, {
-        files?: string[] | undefined;
-    }>>;
-    /**
-     * OpenClaude-class memory: auto-memory dir, session scrolling notes file, tool spill hints.
-     * Session file lives next to JSONL under .nexus/sessions (per project hash).
-     */
-    memory: z.ZodDefault<z.ZodObject<{
-        /** Load project auto-memory markdown into the rules block (OpenClaude auto-memory parity). */
-        autoMemoryEnabled: z.ZodDefault<z.ZodBoolean>;
-        /** Override directory; tilde expanded for home. When unset, uses default project memory dir. */
-        autoMemoryDirectory: z.ZodOptional<z.ZodString>;
-        /** Maintain session-memory.md next to JSONL and inject into system prompt. */
-        sessionMemoryEnabled: z.ZodDefault<z.ZodBoolean>;
-        /** Background LLM refresh after this many tool results in the outer loop (approximate). */
-        sessionMemoryMinToolCallsBetweenUpdates: z.ZodDefault<z.ZodNumber>;
-        /** Max stored characters for the session memory file. */
-        sessionMemoryMaxChars: z.ZodDefault<z.ZodNumber>;
-        /** When compacting tool results, keep spill path in model-facing text (stronger OpenClaude parity). */
-        emphasizeToolSpillPaths: z.ZodDefault<z.ZodBoolean>;
-        /** Load team markdown from ~/.nexus/teams/{encoded name}/memory/ for runtime teams. */
-        teamMemoryEnabled: z.ZodDefault<z.ZodBoolean>;
-        /** Periodically consolidate auto-memory dir into _nexus_consolidated_memory.md via LLM. */
-        autoDreamEnabled: z.ZodDefault<z.ZodBoolean>;
-        /** Min milliseconds between auto-dream runs. */
-        autoDreamMinIntervalMs: z.ZodDefault<z.ZodNumber>;
-    }, "strip", z.ZodTypeAny, {
-        autoMemoryEnabled: boolean;
-        sessionMemoryEnabled: boolean;
-        sessionMemoryMinToolCallsBetweenUpdates: number;
-        sessionMemoryMaxChars: number;
-        emphasizeToolSpillPaths: boolean;
-        teamMemoryEnabled: boolean;
-        autoDreamEnabled: boolean;
-        autoDreamMinIntervalMs: number;
-        autoMemoryDirectory?: string | undefined;
-    }, {
-        autoMemoryEnabled?: boolean | undefined;
-        autoMemoryDirectory?: string | undefined;
-        sessionMemoryEnabled?: boolean | undefined;
-        sessionMemoryMinToolCallsBetweenUpdates?: number | undefined;
-        sessionMemoryMaxChars?: number | undefined;
-        emphasizeToolSpillPaths?: boolean | undefined;
-        teamMemoryEnabled?: boolean | undefined;
-        autoDreamEnabled?: boolean | undefined;
-        autoDreamMinIntervalMs?: number | undefined;
-    }>>;
-    profiles: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
-        provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity", "minimax"]>>;
-        id: z.ZodOptional<z.ZodString>;
-        apiKey: z.ZodOptional<z.ZodOptional<z.ZodString>>;
-        baseUrl: z.ZodOptional<z.ZodOptional<z.ZodString>>;
-        temperature: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
-        reasoningEffort: z.ZodOptional<z.ZodDefault<z.ZodString>>;
-        reasoningHistoryMode: z.ZodOptional<z.ZodDefault<z.ZodEnum<["auto", "inline", "reasoning_content", "reasoning_details"]>>>;
-        contextWindow: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
-        resourceName: z.ZodOptional<z.ZodOptional<z.ZodString>>;
-        deploymentId: z.ZodOptional<z.ZodOptional<z.ZodString>>;
-        apiVersion: z.ZodOptional<z.ZodOptional<z.ZodString>>;
-        extra: z.ZodOptional<z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
-    }, "strip", z.ZodTypeAny, {
-        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
-        id?: string | undefined;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        temperature?: number | undefined;
-        reasoningEffort?: string | undefined;
-        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
-        contextWindow?: number | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
-    }, {
-        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
-        id?: string | undefined;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        temperature?: number | undefined;
-        reasoningEffort?: string | undefined;
-        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
-        contextWindow?: number | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
-    }>>>;
-}, "strip", z.ZodTypeAny, {
-    model: {
-        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
-        id: string;
-        reasoningEffort: string;
-        reasoningHistoryMode: "auto" | "inline" | "reasoning_content" | "reasoning_details";
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        temperature?: number | undefined;
-        contextWindow?: number | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
-    };
-    mcp: {
-        servers: {
-            name: string;
-            enabled: boolean;
-            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-            command?: string | undefined;
-            args?: string[] | undefined;
-            env?: Record<string, string> | undefined;
-            cwd?: string | undefined;
-            url?: string | undefined;
-            transport?: "stdio" | "http" | "sse" | undefined;
-            headers?: Record<string, string> | undefined;
-            startupTimeoutMs?: number | undefined;
-            toolTimeoutMs?: number | undefined;
-            bundle?: string | undefined;
-            auth?: {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            } | undefined;
-        }[];
-    };
-    modes: {
-        agent?: {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        } | undefined;
-        plan?: {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        } | undefined;
-        ask?: {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        } | undefined;
-        debug?: {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        } | undefined;
-        review?: {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        } | undefined;
-    } & {
-        [k: string]: {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        } | undefined;
-    };
-    indexing: {
-        enabled: boolean;
-        excludePatterns: string[];
-        symbolExtract: boolean;
-        vector: boolean;
-        batchSize: number;
-        embeddingBatchSize: number;
-        embeddingConcurrency: number;
-        maxPendingEmbedBatches: number;
-        batchProcessingConcurrency: number;
-        maxIndexedFiles: number;
-        searchWhileIndexing: boolean;
-        maxIndexingFailureRate: number;
-        debounceMs: number;
-        codebaseSearchSnippetMaxChars: number;
-    };
-    rules: {
-        files: string[];
-    };
-    permissions: {
-        autoApproveRead: boolean;
-        autoApproveWrite: boolean;
-        autoApproveCommand: boolean;
-        autoApproveMcp: boolean;
-        autoApproveBrowser: boolean;
-        autoApproveSkillLoad: boolean;
-        autoApproveReadPatterns: string[];
-        allowedCommands: string[];
-        allowCommandPatterns: string[];
-        allowedMcpTools: string[];
-        denyCommandPatterns: string[];
-        askCommandPatterns: string[];
-        denyPatterns: string[];
-        rules: {
-            action: "ask" | "allow" | "deny";
-            tool?: string | undefined;
-            pathPattern?: string | undefined;
-            commandPattern?: string | undefined;
-            reason?: string | undefined;
-        }[];
-    };
-    retry: {
-        enabled: boolean;
-        maxAttempts: number;
-        initialDelayMs: number;
-        maxDelayMs: number;
-        retryOnStatus: number[];
-    };
-    checkpoint: {
-        enabled: boolean;
-        timeoutMs: number;
-        createOnWrite: boolean;
-        doubleCheckCompletion: boolean;
-    };
-    ui: {
-        showReasoningInChat: boolean;
-    };
-    skills: (string | {
-        path: string;
-        enabled?: boolean | undefined;
-    })[];
-    tools: {
-        custom: string[];
-        classifyToolsEnabled: boolean;
-        classifyThreshold: number;
-        parallelReads: boolean;
-        maxParallelReads: number;
-        deferredLoadingMode: "never" | "auto" | "always";
-        deferredLoadingThresholdPercent: number;
-        deferredLoadingMinimumTools: number;
-    };
-    skillClassifyEnabled: boolean;
-    skillClassifyThreshold: number;
-    structuredOutput: "never" | "auto" | "always";
-    summarization: {
-        auto: boolean;
-        model: string;
-        threshold: number;
-        keepRecentMessages: number;
-    };
-    parallelAgents: {
-        maxParallel: number;
-        maxTasksPerCall: number;
-        maxDepth: number;
-    };
-    compatibility: {
-        claude: {
-            enabled: boolean;
-            includeGlobalDir: boolean;
-            includeProjectDir: boolean;
-            includeLocalInstructions: boolean;
-            includeRules: boolean;
-            includeSettings: boolean;
-            includeCommands: boolean;
-            includeSkills: boolean;
-            includeAgents: boolean;
-            includePlugins: boolean;
-        };
-    };
-    plugins: {
-        options: Record<string, Record<string, unknown>>;
-        enabled: boolean;
-        trusted: string[];
-        blocked: string[];
-        enableHooks: boolean;
-        hookTimeoutMs: number;
-    };
-    agentLoop: {
-        toolCallBudget?: {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        } | undefined;
-        maxIterations?: {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        } | undefined;
-    };
-    memory: {
-        autoMemoryEnabled: boolean;
-        sessionMemoryEnabled: boolean;
-        sessionMemoryMinToolCallsBetweenUpdates: number;
-        sessionMemoryMaxChars: number;
-        emphasizeToolSpillPaths: boolean;
-        teamMemoryEnabled: boolean;
-        autoDreamEnabled: boolean;
-        autoDreamMinIntervalMs: number;
-        autoMemoryDirectory?: string | undefined;
-    };
-    profiles: Record<string, {
-        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
-        id?: string | undefined;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        temperature?: number | undefined;
-        reasoningEffort?: string | undefined;
-        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
-        contextWindow?: number | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
-    }>;
-    embeddings?: {
-        provider: "openai" | "google" | "ollama" | "openai-compatible" | "bedrock" | "mistral" | "openrouter" | "local";
-        model: string;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        dimensions?: number | undefined;
-        region?: string | undefined;
-    } | undefined;
-    vectorDb?: {
-        url: string;
-        enabled: boolean;
-        collection: string;
-        autoStart: boolean;
-        upsertWait: boolean;
-        apiKey?: string | undefined;
-        searchMinScore?: number | undefined;
-        searchHnswEf?: number | undefined;
-        searchExact?: boolean | undefined;
-    } | undefined;
-    skillsUrls?: string[] | undefined;
-}, {
-    model?: {
-        provider: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax";
-        id: string;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        temperature?: number | undefined;
-        reasoningEffort?: string | undefined;
-        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
-        contextWindow?: number | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
-    } | undefined;
-    mcp?: {
-        servers?: {
-            name: string;
-            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
-            command?: string | undefined;
-            args?: string[] | undefined;
-            env?: Record<string, string> | undefined;
-            cwd?: string | undefined;
-            url?: string | undefined;
-            transport?: "stdio" | "http" | "sse" | undefined;
-            headers?: Record<string, string> | undefined;
-            enabled?: boolean | undefined;
-            startupTimeoutMs?: number | undefined;
-            toolTimeoutMs?: number | undefined;
-            bundle?: string | undefined;
-            auth?: {
-                message?: string | undefined;
-                type?: "url" | "oauth" | "manual" | undefined;
-                startUrl?: string | undefined;
-            } | undefined;
-        }[] | undefined;
-    } | undefined;
-    embeddings?: {
-        provider: "openai" | "google" | "ollama" | "openai-compatible" | "bedrock" | "mistral" | "openrouter" | "local";
-        model: string;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        dimensions?: number | undefined;
-        region?: string | undefined;
-    } | undefined;
-    vectorDb?: {
-        apiKey?: string | undefined;
-        url?: string | undefined;
-        enabled?: boolean | undefined;
-        collection?: string | undefined;
-        autoStart?: boolean | undefined;
-        upsertWait?: boolean | undefined;
-        searchMinScore?: number | undefined;
-        searchHnswEf?: number | undefined;
-        searchExact?: boolean | undefined;
-    } | undefined;
-    modes?: z.objectInputType<{
-        agent: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        plan: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        ask: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        debug: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-        review: z.ZodOptional<z.ZodObject<{
-            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-            systemPrompt: z.ZodOptional<z.ZodString>;
-            customInstructions: z.ZodOptional<z.ZodString>;
-        }, "strip", z.ZodTypeAny, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }, {
-            autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-            systemPrompt?: string | undefined;
-            customInstructions?: string | undefined;
-        }>>;
-    }, z.ZodOptional<z.ZodObject<{
-        autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
-        systemPrompt: z.ZodOptional<z.ZodString>;
-        customInstructions: z.ZodOptional<z.ZodString>;
-    }, "strip", z.ZodTypeAny, {
-        autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-        systemPrompt?: string | undefined;
-        customInstructions?: string | undefined;
-    }, {
-        autoApprove?: ("read" | "write" | "execute" | "mcp" | "browser" | "search")[] | undefined;
-        systemPrompt?: string | undefined;
-        customInstructions?: string | undefined;
-    }>>, "strip"> | undefined;
-    indexing?: {
-        enabled?: boolean | undefined;
-        excludePatterns?: string[] | undefined;
-        symbolExtract?: boolean | undefined;
-        vector?: boolean | undefined;
-        batchSize?: number | undefined;
-        embeddingBatchSize?: number | undefined;
-        embeddingConcurrency?: number | undefined;
-        maxPendingEmbedBatches?: number | undefined;
-        batchProcessingConcurrency?: number | undefined;
-        maxIndexedFiles?: number | undefined;
-        searchWhileIndexing?: boolean | undefined;
-        maxIndexingFailureRate?: number | undefined;
-        debounceMs?: number | undefined;
-        codebaseSearchSnippetMaxChars?: number | undefined;
-    } | undefined;
-    rules?: {
-        files?: string[] | undefined;
-    } | undefined;
-    permissions?: {
-        autoApproveRead?: boolean | undefined;
-        autoApproveWrite?: boolean | undefined;
-        autoApproveCommand?: boolean | undefined;
-        autoApproveMcp?: boolean | undefined;
-        autoApproveBrowser?: boolean | undefined;
-        autoApproveSkillLoad?: boolean | undefined;
-        autoApproveReadPatterns?: string[] | undefined;
-        allowedCommands?: string[] | undefined;
-        allowCommandPatterns?: string[] | undefined;
-        allowedMcpTools?: string[] | undefined;
-        denyCommandPatterns?: string[] | undefined;
-        askCommandPatterns?: string[] | undefined;
-        denyPatterns?: string[] | undefined;
-        rules?: {
-            action: "ask" | "allow" | "deny";
-            tool?: string | undefined;
-            pathPattern?: string | undefined;
-            commandPattern?: string | undefined;
-            reason?: string | undefined;
-        }[] | undefined;
-    } | undefined;
-    retry?: {
-        enabled?: boolean | undefined;
-        maxAttempts?: number | undefined;
-        initialDelayMs?: number | undefined;
-        maxDelayMs?: number | undefined;
-        retryOnStatus?: number[] | undefined;
-    } | undefined;
-    checkpoint?: {
-        enabled?: boolean | undefined;
-        timeoutMs?: number | undefined;
-        createOnWrite?: boolean | undefined;
-        doubleCheckCompletion?: boolean | undefined;
-    } | undefined;
-    ui?: {
-        showReasoningInChat?: boolean | undefined;
-    } | undefined;
-    skills?: (string | {
-        path: string;
-        enabled?: boolean | undefined;
-    })[] | undefined;
-    skillsUrls?: string[] | undefined;
-    tools?: {
-        custom?: string[] | undefined;
-        classifyToolsEnabled?: boolean | undefined;
-        classifyThreshold?: number | undefined;
-        parallelReads?: boolean | undefined;
-        maxParallelReads?: number | undefined;
-        deferredLoadingMode?: "never" | "auto" | "always" | undefined;
-        deferredLoadingThresholdPercent?: number | undefined;
-        deferredLoadingMinimumTools?: number | undefined;
-    } | undefined;
-    skillClassifyEnabled?: boolean | undefined;
-    skillClassifyThreshold?: number | undefined;
-    structuredOutput?: "never" | "auto" | "always" | undefined;
-    summarization?: {
-        auto?: boolean | undefined;
-        model?: string | undefined;
-        threshold?: number | undefined;
-        keepRecentMessages?: number | undefined;
-    } | undefined;
-    parallelAgents?: {
-        maxParallel?: number | undefined;
-        maxTasksPerCall?: number | undefined;
-        maxDepth?: number | undefined;
-    } | undefined;
-    compatibility?: {
-        claude?: {
-            enabled?: boolean | undefined;
-            includeGlobalDir?: boolean | undefined;
-            includeProjectDir?: boolean | undefined;
-            includeLocalInstructions?: boolean | undefined;
-            includeRules?: boolean | undefined;
-            includeSettings?: boolean | undefined;
-            includeCommands?: boolean | undefined;
-            includeSkills?: boolean | undefined;
-            includeAgents?: boolean | undefined;
-            includePlugins?: boolean | undefined;
-        } | undefined;
-    } | undefined;
-    plugins?: {
-        options?: Record<string, Record<string, unknown>> | undefined;
-        enabled?: boolean | undefined;
-        trusted?: string[] | undefined;
-        blocked?: string[] | undefined;
-        enableHooks?: boolean | undefined;
-        hookTimeoutMs?: number | undefined;
-    } | undefined;
-    agentLoop?: {
-        toolCallBudget?: {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        } | undefined;
-        maxIterations?: {
-            agent?: number | undefined;
-            plan?: number | undefined;
-            ask?: number | undefined;
-            debug?: number | undefined;
-            review?: number | undefined;
-        } | undefined;
-    } | undefined;
-    memory?: {
-        autoMemoryEnabled?: boolean | undefined;
-        autoMemoryDirectory?: string | undefined;
-        sessionMemoryEnabled?: boolean | undefined;
-        sessionMemoryMinToolCallsBetweenUpdates?: number | undefined;
-        sessionMemoryMaxChars?: number | undefined;
-        emphasizeToolSpillPaths?: boolean | undefined;
-        teamMemoryEnabled?: boolean | undefined;
-        autoDreamEnabled?: boolean | undefined;
-        autoDreamMinIntervalMs?: number | undefined;
-    } | undefined;
-    profiles?: Record<string, {
-        provider?: "anthropic" | "openai" | "google" | "ollama" | "openai-compatible" | "azure" | "bedrock" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | "minimax" | undefined;
-        id?: string | undefined;
-        apiKey?: string | undefined;
-        baseUrl?: string | undefined;
-        temperature?: number | undefined;
-        reasoningEffort?: string | undefined;
-        reasoningHistoryMode?: "auto" | "inline" | "reasoning_content" | "reasoning_details" | undefined;
-        contextWindow?: number | undefined;
-        resourceName?: string | undefined;
-        deploymentId?: string | undefined;
-        apiVersion?: string | undefined;
-        extra?: Record<string, unknown> | undefined;
-    }> | undefined;
-}>;
-
+interface McpRequestOptions {
+    signal?: AbortSignal;
+}
 interface McpProtocolClient {
     onclose?: () => void;
     onerror?: (error: Error) => void;
-    connect(transport: Transport): Promise<void>;
+    connect(transport: Transport, options?: McpRequestOptions): Promise<void>;
     close(): Promise<void>;
+    getServerCapabilities?(): {
+        prompts?: {
+            listChanged?: boolean;
+        };
+        resources?: {
+            listChanged?: boolean;
+            subscribe?: boolean;
+        };
+        tools?: {
+            listChanged?: boolean;
+        };
+    } | undefined;
     listTools(params?: {
         cursor?: string;
-    }): Promise<{
+    }, options?: McpRequestOptions): Promise<{
         tools: Array<{
             name: string;
             description?: string;
@@ -1664,14 +48,14 @@ interface McpProtocolClient {
     callTool(params: {
         name: string;
         arguments: Record<string, unknown>;
-    }): Promise<{
+    }, resultSchema?: unknown, options?: McpRequestOptions): Promise<{
         content?: unknown[];
         structuredContent?: unknown;
         isError?: boolean;
     }>;
     listResources(params?: {
         cursor?: string;
-    }): Promise<{
+    }, options?: McpRequestOptions): Promise<{
         resources?: Array<{
             uri: string;
             name: string;
@@ -1682,7 +66,7 @@ interface McpProtocolClient {
     }>;
     listResourceTemplates(params?: {
         cursor?: string;
-    }): Promise<{
+    }, options?: McpRequestOptions): Promise<{
         resourceTemplates?: Array<{
             uriTemplate: string;
             name: string;
@@ -1693,7 +77,7 @@ interface McpProtocolClient {
     }>;
     readResource(params: {
         uri: string;
-    }): Promise<{
+    }, options?: McpRequestOptions): Promise<{
         contents?: Array<{
             uri: string;
             mimeType?: string;
@@ -1701,13 +85,50 @@ interface McpProtocolClient {
             blob?: string;
         }>;
     }>;
-    setNotificationHandler(schema: typeof ToolListChangedNotificationSchema, handler: () => void | Promise<void>): void;
+    listPrompts(params?: {
+        cursor?: string;
+    }, options?: McpRequestOptions): Promise<{
+        prompts: Array<{
+            name: string;
+            title?: string;
+            description?: string;
+            arguments?: Array<{
+                name: string;
+                description?: string;
+                required?: boolean;
+            }>;
+        }>;
+        nextCursor?: string;
+    }>;
+    getPrompt(params: {
+        name: string;
+        arguments?: Record<string, string>;
+    }, options?: McpRequestOptions): Promise<{
+        description?: string;
+        messages: Array<{
+            role: "user" | "assistant";
+            content: unknown;
+        }>;
+    }>;
+    setNotificationHandler(schema: typeof ToolListChangedNotificationSchema | typeof PromptListChangedNotificationSchema, handler: () => void | Promise<void>): void;
+}
+
+interface McpRemoteAuthorizationRequest {
+    /** Canonical HTTP(S) URL for exactly one outbound hop. */
+    url: string;
+    /** Aborted when the SDK request no longer needs this authorization. */
+    signal: AbortSignal;
+}
+type McpRemoteRequestAuthorizer = (request: McpRemoteAuthorizationRequest) => Promise<AuthorizedNetworkRequest>;
+interface McpTransportFactoryOptions {
+    remoteRequestAuthorizer?: McpRemoteRequestAuthorizer;
 }
 interface McpClientOptions {
     startupTimeoutMs?: number;
     toolTimeoutMs?: number;
     reconnectAttempts?: number;
     reconnectBaseDelayMs?: number;
+    remoteRequestAuthorizer?: McpRemoteRequestAuthorizer;
     clientFactory?: () => McpProtocolClient;
     transportFactory?: (config: McpServerConfig) => Transport;
 }
@@ -1720,6 +141,59 @@ interface McpServerStatus {
     connectedAt?: number;
     error?: string;
     transport?: "stdio" | "http" | "sse";
+}
+interface McpTool {
+    name: string;
+    originalName: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+    serverName: string;
+    readOnly: boolean;
+}
+interface McpPromptArgument {
+    name: string;
+    description?: string;
+    required: boolean;
+}
+interface McpPromptRef {
+    serverName: string;
+    name: string;
+    title?: string;
+    description?: string;
+    arguments: readonly McpPromptArgument[];
+}
+type McpPromptContent = {
+    type: "text";
+    text: string;
+} | {
+    type: "image" | "audio";
+    data: string;
+    mimeType: string;
+} | {
+    type: "resource";
+    uri: string;
+    mimeType?: string;
+    text?: string;
+    blob?: string;
+} | {
+    type: "resource_link";
+    uri: string;
+    name?: string;
+    description?: string;
+    mimeType?: string;
+} | {
+    type: "unsupported";
+    originalType: string;
+};
+interface McpPromptMessage {
+    role: "user" | "assistant";
+    content: McpPromptContent;
+}
+interface McpPromptResult {
+    serverName: string;
+    name: string;
+    description?: string;
+    messages: readonly McpPromptMessage[];
 }
 interface McpResourceRef {
     serverName: string;
@@ -1742,30 +216,55 @@ interface McpResourceTemplateRef {
     description?: string;
     mimeType?: string;
 }
+
 declare function buildMcpToolSchema(inputSchema: Record<string, unknown>): z.ZodTypeAny;
+
 /**
  * Stateful MCP runtime with deterministic reconnects, explicit health, bounded
  * requests, paginated discovery, and list-changed refresh.
  */
 declare class McpClient {
     private clients;
+    private serverLifecycles;
     private tools;
+    private prompts;
     private configs;
     private statuses;
     private refreshes;
+    private promptRefreshes;
     private reconnects;
+    private ensureConnects;
+    private configFingerprints;
+    private serverEpochs;
     private lifecycleEpoch;
     private readonly options;
     constructor(options?: McpClientOptions);
     private createClient;
     private createTransport;
+    private nextServerEpoch;
+    private isCurrentServerEpoch;
+    private currentStatus;
     private setStatus;
     private deleteServerTools;
+    private promptKey;
+    private deleteServerPrompts;
+    private abortServerRequests;
     private closeServer;
     private handleTransportLoss;
     private listAllTools;
     private refreshTools;
+    private listAllPrompts;
+    private refreshPrompts;
     connect(config: McpServerConfig): Promise<McpServerStatus>;
+    /**
+     * Additively reconcile a workspace-owned MCP runtime.
+     *
+     * Unlike connectAll(), servers omitted by one turn are retained for other
+     * concurrent sessions and background agents. Callers still filter the
+     * exposed ToolDef snapshot by the current turn's allowed server names.
+     */
+    ensureConnected(configs: McpServerConfig[]): Promise<Record<string, McpServerStatus>>;
+    private connectAtEpoch;
     connectAll(configs: McpServerConfig[]): Promise<Record<string, McpServerStatus>>;
     testServers(configs: McpServerConfig[]): Promise<Array<{
         name: string;
@@ -1773,24 +272,512 @@ declare class McpClient {
         error?: string;
     }>>;
     getTools(): ToolDef[];
+    getPromptCatalog(serverName?: string): McpPromptRef[];
+    getPrompt(serverName: string, promptName: string, args: Record<string, string>, signal?: AbortSignal): Promise<McpPromptResult>;
     /** Backward-compatible coarse state for existing hosts. */
     getStatus(): Record<string, "connected" | "disconnected">;
     getServerStatuses(): Record<string, McpServerStatus>;
     disconnectAll(): Promise<void>;
-    listResources(serverName?: string): Promise<McpResourceRef[]>;
-    listResourceTemplates(serverName?: string): Promise<McpResourceTemplateRef[]>;
-    readResource(serverName: string, uri: string): Promise<McpResourceContent[]>;
+    close(): Promise<void>;
+    listResources(serverName?: string, signal?: AbortSignal): Promise<McpResourceRef[]>;
+    listResourceTemplates(serverName?: string, signal?: AbortSignal): Promise<McpResourceTemplateRef[]>;
+    readResource(serverName: string, uri: string, signal?: AbortSignal): Promise<McpResourceContent[]>;
     authenticate(serverName: string, host?: IHost): Promise<{
         success: boolean;
+        pending?: boolean;
         message: string;
     }>;
 }
+declare function renderMcpPromptResult(result: McpPromptResult): string;
 /** Standalone test of MCP server configs (does not keep connections). */
 declare function testMcpServers(configs: McpServerConfig[]): Promise<Array<{
     name: string;
     status: "ok" | "error";
     error?: string;
 }>>;
+
+declare function canonicalProjectRoot(cwd: string): string;
+type StoredContextUsage = {
+    usedTokens: number;
+    limitTokens: number;
+    percent: number;
+};
+interface StoredSession {
+    id: string;
+    cwd: string;
+    ts: number;
+    title?: string;
+    todo?: string;
+    contextUsage?: StoredContextUsage;
+    messages: SessionMessage[];
+    /** Monotonic durable journal revision. Legacy v1 files load as revision 0. */
+    revision?: number;
+}
+interface StoredSessionMeta {
+    id: string;
+    cwd: string;
+    ts: number;
+    title?: string;
+    todo?: string;
+    messageCount: number;
+    revision: number;
+}
+type SessionStorageDiagnosticCode = "corrupt-journal-tail" | "journal-backup-recovered" | "legacy-session-detected" | "legacy-session-migrated" | "session-corrupt";
+interface SessionStorageDiagnostic {
+    code: SessionStorageDiagnosticCode;
+    path: string;
+    message: string;
+}
+interface SessionStoreOptions {
+    /** Nexus home containing sessions/. Defaults to ~/.nexus. */
+    homeDir?: string;
+    compactAfterRecords?: number;
+    compactAfterBytes?: number;
+    /** Bounded artifact cleanup batch; primarily configurable for embedded hosts/tests. */
+    toolOutputDeleteBatchSize?: number;
+    onDiagnostic?: (diagnostic: SessionStorageDiagnostic) => void;
+}
+interface SaveSessionOptions {
+    expectedRevision?: number;
+}
+interface PersistedToolOutputProtection {
+    sessionDirectories: Set<string>;
+    artifactPaths: Set<string>;
+    protectAll: boolean;
+}
+interface DeleteSessionOptions {
+    /** Internal/embedded-host seam; defaults to the process-wide store. */
+    store?: SessionStore;
+    /** Runtime projection coordinator. Defaults to the workspace runtime. */
+    runtime?: {
+        deleteSessionRecords(sessionId: string): Promise<unknown>;
+    };
+}
+declare class UnsafeSessionIdError extends Error {
+    readonly sessionId: string;
+    constructor(sessionId: string);
+}
+declare class SessionConflictError extends Error {
+    readonly sessionId: string;
+    readonly expectedRevision: number;
+    readonly actualRevision: number;
+    constructor(sessionId: string, expectedRevision: number, actualRevision: number);
+}
+declare class SessionCorruptionError extends Error {
+    readonly journalPath: string;
+    constructor(journalPath: string, message: string);
+}
+declare class SessionStore {
+    private readonly homeDir;
+    private readonly compactAfterRecords;
+    private readonly compactAfterBytes;
+    private readonly toolOutputDeleteBatchSize;
+    private readonly onDiagnostic?;
+    private readonly diagnostics;
+    constructor(options?: SessionStoreOptions);
+    getSessionsDir(cwd: string): string;
+    getSessionPath(sessionId: string, cwd: string): string;
+    private diagnostic;
+    getDiagnostics(): readonly SessionStorageDiagnostic[];
+    private parseJournal;
+    private quarantineTail;
+    private writeLocked;
+    saveSession(session: StoredSession, options?: SaveSessionOptions): Promise<number>;
+    mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>): Promise<StoredSession | null>;
+    loadSession(sessionId: string, cwd: string): Promise<StoredSession | null>;
+    getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
+    loadSessionMessages(sessionId: string, cwd: string, limit: number, offset: number): Promise<{
+        meta: StoredSessionMeta;
+        messages: SessionMessage[];
+    } | null>;
+    listSessions(cwd: string): Promise<Array<{
+        id: string;
+        ts: number;
+        title?: string;
+        messageCount: number;
+        revision: number;
+    }>>;
+    deleteSession(sessionId: string, cwd: string): Promise<boolean>;
+    collectToolOutputProtection(cwd: string, excludeSessionId?: string): Promise<PersistedToolOutputProtection>;
+}
+declare function getSessionStorageDiagnostics(): readonly SessionStorageDiagnostic[];
+declare function saveSession(session: StoredSession, options?: SaveSessionOptions): Promise<number>;
+declare function mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>): Promise<StoredSession | null>;
+declare function loadSession(sessionId: string, cwd: string): Promise<StoredSession | null>;
+declare function getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
+declare function loadSessionMessages(sessionId: string, cwd: string, limit: number, offset: number): Promise<{
+    meta: StoredSessionMeta;
+    messages: SessionMessage[];
+} | null>;
+declare function listSessions(cwd: string): Promise<Array<{
+    id: string;
+    ts: number;
+    title?: string;
+    messageCount: number;
+    revision: number;
+}>>;
+declare function deleteSession(sessionId: string, cwd: string, options?: DeleteSessionOptions): Promise<boolean>;
+declare function generateSessionId(): string;
+
+/** Derive session title from first user message. */
+declare function deriveSessionTitle(messages: SessionMessage[]): string;
+/**
+ * In-memory session implementation backed by JSONL storage.
+ */
+declare class Session implements ISession {
+    readonly id: string;
+    private _messages;
+    private _todo;
+    private cwd;
+    /** Ephemeral sessions are never persisted to disk (used for sub-agents). */
+    private _ephemeral;
+    /** Cached token estimate for the active context; invalidated on every session mutation. */
+    private _tokenEstimateCache;
+    /** Last context_usage from agent (full formula). Cleared when messages change. */
+    private _contextUsageSnapshot;
+    /** Last verified durable journal revision used for optimistic concurrency. */
+    private _revision;
+    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean, contextUsageSnapshot?: StoredContextUsage | null, revision?: number);
+    get messages(): SessionMessage[];
+    invalidateTokenEstimate(): void;
+    private clearContextUsageSnapshot;
+    addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage;
+    updateMessage(id: string, updates: Partial<SessionMessage>): void;
+    addToolPart(messageId: string, part: ToolPart): void;
+    updateToolPart(messageId: string, partId: string, updates: Partial<ToolPart>): void;
+    updateTodo(markdown: string): void;
+    getTodo(): string;
+    getTokenEstimate(): number;
+    getLastContextUsageSnapshot(): StoredContextUsage | undefined;
+    recordContextUsage(snapshot: StoredContextUsage): void;
+    fork(messageId: string): ISession;
+    /** Rewind chat to timestamp. Keeps only messages with ts <= timestamp. */
+    rewindToTimestamp(timestamp: number): void;
+    /** Rewind so that only messages strictly before this timestamp remain (used for rollback before a given message). */
+    rewindBeforeTimestamp(timestamp: number): void;
+    /** Rewind so that only messages strictly before a specific message remain. */
+    rewindBeforeMessageId(messageId: string): void;
+    save(): Promise<void>;
+    load(): Promise<void>;
+    static create(cwd: string): Session;
+    /**
+     * Create a session that is never saved to disk (for sub-agents).
+     * An optional transcript is defensively cloned so resume/fork cannot mutate
+     * the durable source snapshot.
+     */
+    static createEphemeral(cwd: string, messages?: readonly SessionMessage[]): Session;
+    static resume(sessionId: string, cwd: string): Promise<Session | null>;
+    static resumeWindow(sessionId: string, cwd: string, limit: number, offset: number): Promise<Session | null>;
+    static getMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
+}
+
+type RegistrationResult = {
+    ok: true;
+    replaced: false;
+} | {
+    ok: false;
+    reason: "reserved-name" | "duplicate";
+};
+/**
+ * Tool registry — manages built-in, MCP, and custom tools.
+ * Static, manager-bound, and dynamic tools use separate registration paths so
+ * a reserved name cannot be silently discarded or replaced.
+ */
+declare class ToolRegistry {
+    private tools;
+    private static staticBuiltinNames;
+    private static reservedBuiltinNames;
+    private static canonicalReservedBuiltinNames;
+    private static getStaticBuiltinNames;
+    private static getReservedBuiltinNames;
+    private static isReservedBuiltinName;
+    constructor();
+    registerDynamic(tool: ToolDef): RegistrationResult;
+    registerBoundBuiltin(tool: ToolDef): RegistrationResult;
+    registerDynamicOrThrow(tool: ToolDef, source?: string): void;
+    registerBoundBuiltinOrThrow(tool: ToolDef, source?: string): void;
+    /** @deprecated Use registerDynamic or registerBoundBuiltin explicitly. */
+    register(tool: ToolDef): RegistrationResult;
+    getAll(): ToolDef[];
+    get(name: string): ToolDef | undefined;
+    getByNames(names: string[]): ToolDef[];
+    /**
+     * Get tools for a given mode.
+     * Built-in tools for the mode are always included.
+     * Additional MCP/custom tools are returned separately for optional classification.
+     */
+    getForMode(mode: Mode): {
+        builtin: ToolDef[];
+        dynamic: ToolDef[];
+    };
+    /**
+     * Append tools with `hiddenFromAgent` (e.g. legacy Spawn*, BashOutput) so old transcript tool
+     * names still execute, while {@link getForMode} keeps them out of the LLM manifest.
+     */
+    mergeWithHiddenExecutionTools(visibleTools: ToolDef[]): ToolDef[];
+    /**
+     * Load custom tools from JS/TS files.
+     * Custom tools export a default ToolDef or array of ToolDef.
+     */
+    loadFromDirectory(dir: string): Promise<void>;
+    private warnOnRegistrationFailure;
+    private throwOnRegistrationFailure;
+}
+
+type OrchestrationDiagnosticCode = "corrupt-journal-tail" | "snapshot-backup-recovered" | "journal-recovered" | "legacy-state-detected" | "legacy-state-migrated" | "stale-run-reconciled";
+interface OrchestrationDiagnostic {
+    code: OrchestrationDiagnosticCode;
+    path: string;
+    message: string;
+}
+interface OrchestrationRuntimeOptions {
+    homeDir?: string;
+    compactAfterRecords?: number;
+    compactAfterBytes?: number;
+    reconcileStaleRuns?: boolean;
+    onDiagnostic?: (diagnostic: OrchestrationDiagnostic) => void;
+}
+interface SessionRecordDeletionResult {
+    removedTasks: number;
+    removedBackgroundTasks: number;
+    removedRemoteSessions: number;
+    removedAgentMessages: number;
+    removedMemories: number;
+    removedTeams: number;
+    updatedTeams: number;
+    removedSnapshots: number;
+    retainedSnapshots: number;
+}
+declare class OrchestrationCorruptionError extends Error {
+    readonly statePath: string;
+    constructor(statePath: string, message: string);
+}
+declare class OrchestrationInvariantError extends Error {
+    constructor(message: string);
+}
+declare function getRuntimeDir(cwd: string, homeDir?: string): string;
+declare class OrchestrationRuntime {
+    readonly cwd: string;
+    private readonly root;
+    private readonly stateFile;
+    private readonly journalFile;
+    private readonly writer;
+    private readonly compactAfterRecords;
+    private readonly compactAfterBytes;
+    private readonly reconcileStaleRuns;
+    private readonly onDiagnostic?;
+    private readonly diagnostics;
+    private tasks;
+    private teams;
+    private worktrees;
+    private backgroundTasks;
+    private memories;
+    private remoteSessions;
+    private agentMessages;
+    constructor(cwd: string, options?: OrchestrationRuntimeOptions);
+    getStatePath(): string;
+    getRuntimeDirectory(): string;
+    getJournalPath(): string;
+    getDiagnostics(): readonly OrchestrationDiagnostic[];
+    private diagnostic;
+    private applyState;
+    private captureState;
+    private parseSnapshot;
+    private parseJournal;
+    private reconcileState;
+    private loadDurableState;
+    private quarantineJournalTail;
+    private persistLoaded;
+    private ensureLoaded;
+    private mutate;
+    private assertCanComplete;
+    private assertValidTaskDependencies;
+    private synchronizeTaskEdges;
+    private bindTeamToSession;
+    private assertValidTaskTransition;
+    createTask(input: {
+        id?: string;
+        kind?: TaskKind;
+        subject: string;
+        description: string;
+        status?: TaskStatus;
+        activeForm?: string;
+        owner?: string;
+        teamName?: string;
+        metadata?: Record<string, unknown>;
+        blocks?: string[];
+        blockedBy?: string[];
+        command?: string;
+        shellRunner?: "bash" | "powershell";
+        processId?: number;
+        exitCode?: number;
+        sessionId?: string;
+        output?: string;
+        outputFile?: string;
+        snapshotFile?: string;
+        error?: string;
+        parentTaskId?: string;
+        resumeOf?: string;
+        forkOf?: string;
+        agentType?: string;
+        toolUseId?: string;
+    }): Promise<TaskRecord>;
+    getTask(taskId: string): Promise<TaskRecord | null>;
+    listTasks(filters?: {
+        kind?: TaskKind | TaskKind[];
+        teamName?: string;
+        owner?: string;
+        status?: TaskStatus | TaskStatus[];
+        includeDeleted?: boolean;
+    }): Promise<TaskRecord[]>;
+    updateTask(taskId: string, updates: Partial<Pick<TaskRecord, "status" | "subject" | "description" | "activeForm" | "owner" | "teamName" | "command" | "shellRunner" | "processId" | "exitCode" | "sessionId" | "output" | "outputFile" | "snapshotFile" | "error" | "parentTaskId" | "resumeOf" | "forkOf" | "agentType">> & {
+        metadata?: Record<string, unknown | null>;
+        addBlocks?: string[];
+        addBlockedBy?: string[];
+    }): Promise<TaskRecord | null>;
+    createTeam(input: {
+        teamName: string;
+        description: string;
+        members?: TeamMemberRecord[];
+        sessionId?: string;
+    }): Promise<TeamRecord>;
+    getTeam(teamName: string): Promise<TeamRecord | null>;
+    listTeams(): Promise<TeamRecord[]>;
+    listTeamNamesForSession(sessionId: string): Promise<string[]>;
+    /**
+     * Transactionally remove session-bound orchestration projections.
+     *
+     * Running work is an ownership conflict, matching Codex thread deletion:
+     * callers must stop it first. Snapshot paths are treated as untrusted
+     * metadata and are unlinked only when they remain regular files inside this
+     * workspace runtime's private `agent-runs` directory.
+     */
+    deleteSessionRecords(sessionId: string): Promise<SessionRecordDeletionResult>;
+    private deleteOwnedSessionSnapshots;
+    deleteTeam(teamName: string): Promise<boolean>;
+    addTeamMember(teamName: string, member: TeamMemberRecord): Promise<TeamRecord | null>;
+    updateTeamMember(teamName: string, memberName: string, updates: Partial<Omit<TeamMemberRecord, "name" | "joinedAt" | "note">> & {
+        note?: string | null;
+    }): Promise<TeamRecord | null>;
+    sendMessage(input: {
+        from: string;
+        to: string;
+        message: string;
+        teamName?: string;
+    }): Promise<TeamMessageRecord>;
+    private assertOwnedAgentTarget;
+    private pruneAcknowledgedAgentMessages;
+    /**
+     * Resolve only inside one root-session authority. Display names are useful
+     * for model calls, but must be unique among that owner's persisted tasks.
+     */
+    resolveAgentMessageTarget(input: {
+        ownerSessionId: string;
+        target: string;
+    }): Promise<string | null>;
+    /**
+     * Durably enqueue a message. The explicit id makes retries idempotent; a
+     * reused id with different content is rejected rather than overwritten.
+     */
+    enqueueAgentMessage(input: {
+        id?: string;
+        ownerSessionId: string;
+        targetAgentId: string;
+        from: string;
+        message: string;
+    }): Promise<AgentMailboxMessage>;
+    listPendingAgentMessages(input: {
+        ownerSessionId: string;
+        targetAgentId: string;
+        limit?: number;
+    }): Promise<AgentMailboxMessage[]>;
+    /**
+     * Acknowledge only the next FIFO prefix. Already-acknowledged ids from the
+     * same worker are accepted so crash/retry after a durable checkpoint is safe.
+     */
+    acknowledgeAgentMessages(input: {
+        ownerSessionId: string;
+        targetAgentId: string;
+        messageIds: readonly string[];
+        acknowledgedBySessionId: string;
+    }): Promise<AgentMailboxMessage[]>;
+    registerBackgroundTask(task: Omit<BackgroundTaskRecord, "createdAt" | "updatedAt">): Promise<BackgroundTaskRecord>;
+    updateBackgroundTask(taskId: string, updates: Partial<Omit<BackgroundTaskRecord, "id" | "kind" | "createdAt">>): Promise<BackgroundTaskRecord | null>;
+    setBackgroundTaskStatus(taskId: string, status: BackgroundTaskStatus, extra?: Partial<BackgroundTaskRecord>): Promise<BackgroundTaskRecord | null>;
+    getBackgroundTask(taskId: string): Promise<BackgroundTaskRecord | null>;
+    listBackgroundTasks(): Promise<BackgroundTaskRecord[]>;
+    createWorktreeSession(input: {
+        originalCwd: string;
+        worktreePath: string;
+        branch: string;
+        metadata?: Record<string, unknown>;
+    }): Promise<WorktreeSession>;
+    findActiveWorktree(worktreePath?: string): Promise<WorktreeSession | null>;
+    updateWorktreeSession(worktreeId: string, updates: Partial<Pick<WorktreeSession, "status" | "metadata">>): Promise<WorktreeSession | null>;
+    createMemory(input: {
+        scope: MemoryRecord["scope"];
+        title: string;
+        content: string;
+        kind?: MemoryRecord["kind"];
+        source?: MemoryRecord["source"];
+        author?: MemoryRecord["author"];
+        trust?: MemoryRecord["trust"];
+        confidence?: number;
+        expiresAt?: number;
+        supersedes?: string[];
+        contradicts?: string[];
+        metadata?: Record<string, unknown>;
+    }): Promise<MemoryRecord>;
+    getMemory(memoryId: string): Promise<MemoryRecord | null>;
+    listMemories(filters?: {
+        scope?: MemoryRecord["scope"] | MemoryRecord["scope"][];
+        limit?: number;
+        metadataMatch?: Record<string, string | number | boolean>;
+    }): Promise<MemoryRecord[]>;
+    recordMemoryAccess(memoryIds: readonly string[], accessedAt?: number): Promise<MemoryRecord[]>;
+    updateMemory(memoryId: string, updates: Partial<Pick<MemoryRecord, "title" | "content">> & {
+        kind?: MemoryRecord["kind"];
+        confidence?: number;
+        expiresAt?: number | null;
+        supersedes?: string[];
+        contradicts?: string[];
+        metadata?: Record<string, unknown | null>;
+    }): Promise<MemoryRecord | null>;
+    upsertMemoryByTitle(input: {
+        scope: MemoryRecord["scope"];
+        title: string;
+        content: string;
+        kind?: MemoryRecord["kind"];
+        source?: MemoryRecord["source"];
+        author?: MemoryRecord["author"];
+        trust?: MemoryRecord["trust"];
+        confidence?: number;
+        expiresAt?: number;
+        supersedes?: string[];
+        contradicts?: string[];
+        metadata?: Record<string, unknown>;
+    }): Promise<MemoryRecord>;
+    deleteMemory(memoryId: string): Promise<boolean>;
+    createRemoteSession(input: {
+        url: string;
+        sessionId?: string;
+        runId?: string;
+        status?: RemoteSessionRecord["status"];
+        viewerOnly?: boolean;
+        reconnectable?: boolean;
+        metadata?: Record<string, unknown>;
+    }): Promise<RemoteSessionRecord>;
+    getRemoteSession(remoteSessionId: string): Promise<RemoteSessionRecord | null>;
+    listRemoteSessions(filters?: {
+        sessionId?: string;
+        runId?: string;
+        status?: RemoteSessionRecord["status"] | RemoteSessionRecord["status"][];
+    }): Promise<RemoteSessionRecord[]>;
+    updateRemoteSession(remoteSessionId: string, updates: Partial<Omit<RemoteSessionRecord, "id" | "createdAt" | "url">> & {
+        metadata?: Record<string, unknown | null>;
+    }): Promise<RemoteSessionRecord | null>;
+}
+declare function getOrchestrationRuntime(cwd: string): Promise<OrchestrationRuntime>;
 
 interface SubAgentResult {
     subagentId: string;
@@ -1809,11 +796,32 @@ interface ResumeAgentOptions {
 interface AgentSpawnOptions {
     modelOverride?: string;
     taskName?: string;
+    resumeSeed?: {
+        sourceSubagentId: string;
+        lineage: "resume" | "fork";
+        messages: SessionMessage[];
+        followupInstruction: string;
+        /** Logical inboxes inherited from the resumed/forked lineage. */
+        mailboxTargetIds?: string[];
+    };
 }
 interface SubAgentRuntimeContext {
     host: IHost;
     services: NexusRunServices;
+    /** Session that owns and may observe/control the delegated run. */
+    ownerSessionId: string;
 }
+/**
+ * A restrictive parent may delegate analysis, but it must never resume a
+ * previously more-privileged agent/debug worker with write/execute access.
+ */
+declare function restrictDelegatedMode(parentMode: Mode, requestedMode: Mode): Mode;
+/**
+ * Register only immutable integration capabilities selected for the owning
+ * root turn. Reading the live workspace MCP catalog here could leak tools
+ * connected for another concurrent session or a newer config generation.
+ */
+declare function registerInheritedRunTools(registry: ToolRegistry, services: NexusRunServices): void;
 type SubAgentStatus = "running" | "completed" | "error" | "killed";
 interface SubAgentSnapshot {
     subagentId: string;
@@ -1838,12 +846,17 @@ declare class ParallelAgentManager {
     private statusById;
     private errorById;
     private controllers;
-    private liveSessions;
-    private aliases;
+    private ownerSessionById;
+    private mailboxWaiters;
+    private mailboxWorkerByTarget;
+    private acceptingMailboxWorkers;
     private history;
     private acceptingTasks;
     private shutdownPromise;
     private static readonly HISTORY_CAP;
+    readonly orchestrationRuntime: OrchestrationRuntime;
+    constructor(orchestrationRuntime?: OrchestrationRuntime);
+    private getRuntime;
     private assertAcceptingTasks;
     private rememberId;
     private startTask;
@@ -1851,14 +864,37 @@ declare class ParallelAgentManager {
     spawnInBackground(description: string, mode: Mode, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, contextSummary?: string, parentPartId?: string, agentType?: string, spawnOptions?: AgentSpawnOptions, runtimeContext?: SubAgentRuntimeContext): Promise<{
         subagentId: string;
     }>;
-    getSnapshot(subagentId: string): SubAgentSnapshot | null;
-    waitFor(subagentId: string): Promise<SubAgentSnapshot | null>;
-    stop(subagentId: string): boolean;
+    getSnapshot(subagentId: string, ownerSessionId: string): SubAgentSnapshot | null;
+    waitFor(subagentId: string, ownerSessionId: string): Promise<SubAgentSnapshot | null>;
+    stop(subagentId: string, ownerSessionId: string): boolean;
     shutdown(): Promise<void>;
-    /** Inject a queued user message into a currently running delegated agent. */
-    deliverMessage(target: string, message: string, from?: string): boolean;
-    listRuns(cwd: string): Promise<BackgroundTaskRecord[]>;
-    resume(subagentId: string, options: ResumeAgentOptions, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, parentPartId?: string, runtimeContext?: SubAgentRuntimeContext): Promise<SubAgentResult | {
+    private mailboxKey;
+    private claimMailboxTargets;
+    private setMailboxWorkerAccepting;
+    private releaseMailboxWorker;
+    private registerMailboxWorker;
+    private unregisterMailboxWorker;
+    private isMailboxTargetAccepting;
+    private notifyMailbox;
+    /**
+     * Resolve and persist before notifying the live run. No mutable child
+     * transcript is touched here; the child accepts input only at loop-owned
+     * provider boundaries.
+     */
+    queueMessage(input: {
+        target: string;
+        message: string;
+        from?: string;
+        ownerSessionId: string;
+        id?: string;
+    }): Promise<{
+        targetAgentId: string;
+        record: AgentMailboxMessage;
+        running: boolean;
+    }>;
+    private waitForMailboxInput;
+    listRuns(cwd: string, ownerSessionId: string): Promise<BackgroundTaskRecord[]>;
+    resume(subagentId: string, options: ResumeAgentOptions, config: NexusConfig, cwd: string, signal: AbortSignal, maxParallel: number, emit?: (event: AgentEvent) => void, parentPartId?: string, runtimeContext?: SubAgentRuntimeContext, parentMode?: Mode): Promise<SubAgentResult | {
         subagentId: string;
         background: true;
     }>;
@@ -1923,13 +959,13 @@ declare const taskResumeSchema: z.ZodObject<{
     block: z.ZodOptional<z.ZodBoolean>;
 }, "strip", z.ZodTypeAny, {
     task_id: string;
-    block?: boolean | undefined;
     instruction?: string | undefined;
+    block?: boolean | undefined;
     fork?: boolean | undefined;
 }, {
     task_id: string;
-    block?: boolean | undefined;
     instruction?: string | undefined;
+    block?: boolean | undefined;
     fork?: boolean | undefined;
 }>;
 declare const taskSnapshotSchema: z.ZodObject<{
@@ -1997,9 +1033,318 @@ declare function createSpawnAgentsParallelTool(manager: ParallelAgentManager, co
  */
 declare function createSpawnAgentsAliasTool(manager: ParallelAgentManager, config: NexusConfig): ToolDef;
 
+type BackgroundProcessStopReason = "requested" | "owner_shutdown";
+interface BackgroundProcessRecord {
+    readonly taskId: string;
+    readonly pid: number;
+    /** Opaque per-spawn identity. A persisted PID alone is never sufficient. */
+    readonly processIdentity: string;
+    readonly logPath: string;
+    readonly workspace: string;
+    readonly sessionId: string;
+    /** Live child/process-group terminator. Never reconstructed from a stored PID. */
+    readonly terminate?: (signal: NodeJS.Signals) => boolean;
+    /** Await process exit and durable terminal-state publication. */
+    readonly stop: (reason: BackgroundProcessStopReason) => Promise<void>;
+}
+/**
+ * Workspace-runtime-owned live process projection.
+ *
+ * Durable task state remains authoritative across process restarts. This
+ * supervisor only owns live process handles in the current runtime and refuses
+ * lookup without the exact workspace + session capability.
+ */
+declare class BackgroundProcessSupervisor {
+    #private;
+    register(record: BackgroundProcessRecord): void;
+    get(taskId: string, owner: {
+        workspace: string;
+        sessionId: string;
+    }): BackgroundProcessRecord | undefined;
+    remove(taskId: string, owner: {
+        workspace: string;
+        sessionId: string;
+    }): boolean;
+    terminate(taskId: string, owner: {
+        workspace: string;
+        sessionId: string;
+    }, signal?: NodeJS.Signals): boolean;
+    stop(taskId: string, owner: {
+        workspace: string;
+        sessionId: string;
+    }, options: {
+        processIdentity: string;
+        reason?: BackgroundProcessStopReason;
+    }): Promise<boolean>;
+    list(owner: {
+        workspace: string;
+        sessionId: string;
+    }): BackgroundProcessRecord[];
+    /** Protect active logs from retention cleanup across sessions/workspaces. */
+    ownsLogPath(logPath: string): boolean;
+    /**
+     * Stop every owner-bound process and wait until each task has published a
+     * durable terminal outcome. Handles are retained until the full drain
+     * finishes so a partial shutdown can never masquerade as successful.
+     */
+    close(): Promise<void>;
+}
+
+interface WorkspaceTaskHandle {
+    readonly started: boolean;
+    readonly promise: Promise<void>;
+}
+/**
+ * Owns non-turn background work (memory consolidation, maintenance, refresh)
+ * for exactly one workspace runtime.
+ */
+declare class WorkspaceTaskSupervisor {
+    #private;
+    start(key: string, task: (signal: AbortSignal) => Promise<void>): WorkspaceTaskHandle;
+    close(): Promise<void>;
+}
+
+declare const pluginTrustGrantSchema: z.ZodObject<{
+    id: z.ZodString;
+    pluginName: z.ZodString;
+    declaredRootPath: z.ZodString;
+    declaredSourcePath: z.ZodString;
+    canonicalRootPath: z.ZodString;
+    canonicalSourcePath: z.ZodString;
+    rootDevice: z.ZodString;
+    rootInode: z.ZodString;
+    sourceDevice: z.ZodString;
+    sourceInode: z.ZodString;
+    fingerprint: z.ZodString;
+    grantedAt: z.ZodNumber;
+}, "strict", z.ZodTypeAny, {
+    id: string;
+    fingerprint: string;
+    pluginName: string;
+    declaredRootPath: string;
+    declaredSourcePath: string;
+    canonicalRootPath: string;
+    canonicalSourcePath: string;
+    rootDevice: string;
+    rootInode: string;
+    sourceDevice: string;
+    sourceInode: string;
+    grantedAt: number;
+}, {
+    id: string;
+    fingerprint: string;
+    pluginName: string;
+    declaredRootPath: string;
+    declaredSourcePath: string;
+    canonicalRootPath: string;
+    canonicalSourcePath: string;
+    rootDevice: string;
+    rootInode: string;
+    sourceDevice: string;
+    sourceInode: string;
+    grantedAt: number;
+}>;
+type PluginTrustGrant = z.infer<typeof pluginTrustGrantSchema>;
+interface PluginFingerprintLimits {
+    maxEntries: number;
+    maxFileBytes: number;
+    maxTotalBytes: number;
+    maxDepth: number;
+    maxRelativePathBytes: number;
+}
+interface PluginTrustStoreOptions {
+    storePath?: string;
+    limits?: Partial<PluginFingerprintLimits>;
+    now?: () => number;
+}
+type PluginTrustReason = "trusted" | "not-granted" | "content-changed" | "identity-changed" | "unsafe-plugin" | "store-corrupt" | "store-unavailable";
+interface PluginTrustEvaluation {
+    trusted: boolean;
+    reason: PluginTrustReason;
+    fingerprint?: string;
+    grantId?: string;
+    revoked?: boolean;
+    message?: string;
+}
+declare const DEFAULT_PLUGIN_FINGERPRINT_LIMITS: Readonly<PluginFingerprintLimits>;
+declare class PluginTrustStoreCorruptionError extends Error {
+    readonly storePath: string;
+    constructor(storePath: string, message: string, options?: ErrorOptions);
+}
+declare class UnsafePluginContentError extends Error {
+    readonly pluginPath: string;
+    constructor(pluginPath: string, message: string);
+}
+declare function getPluginTrustStorePath(options?: Pick<PluginTrustStoreOptions, "storePath">): string;
+declare function grantPluginTrust(plugin: PluginManifestRecord, options?: PluginTrustStoreOptions): Promise<PluginTrustGrant>;
+declare function revokePluginTrust(plugin: PluginManifestRecord, options?: PluginTrustStoreOptions): Promise<boolean>;
+declare function listPluginTrustGrants(options?: PluginTrustStoreOptions): Promise<PluginTrustGrant[]>;
+declare function evaluatePluginTrust(plugin: PluginManifestRecord, options?: PluginTrustStoreOptions): Promise<PluginTrustEvaluation>;
+
+declare const trustGrantSchema: z.ZodObject<{
+    id: z.ZodString;
+    declaredPath: z.ZodString;
+    canonicalPath: z.ZodString;
+    device: z.ZodString;
+    inode: z.ZodString;
+    kind: z.ZodEnum<["directory", "file"]>;
+    fingerprint: z.ZodString;
+    grantedAt: z.ZodNumber;
+}, "strict", z.ZodTypeAny, {
+    id: string;
+    kind: "file" | "directory";
+    fingerprint: string;
+    grantedAt: number;
+    declaredPath: string;
+    canonicalPath: string;
+    device: string;
+    inode: string;
+}, {
+    id: string;
+    kind: "file" | "directory";
+    fingerprint: string;
+    grantedAt: number;
+    declaredPath: string;
+    canonicalPath: string;
+    device: string;
+    inode: string;
+}>;
+interface ExecutableTreeLimits {
+    maxEntries: number;
+    maxFileBytes: number;
+    maxTotalBytes: number;
+    maxDepth: number;
+    maxRelativePathBytes: number;
+}
+declare const DEFAULT_EXECUTABLE_TREE_LIMITS: Readonly<ExecutableTreeLimits>;
+interface ExecutableTreeSnapshot {
+    declaredPath: string;
+    canonicalPath: string;
+    device: string;
+    inode: string;
+    kind: "directory" | "file";
+    fingerprint: string;
+    entries: number;
+    totalBytes: number;
+}
+type CustomToolTrustGrant = z.infer<typeof trustGrantSchema>;
+type CustomToolTrustReason = "trusted" | "not-granted" | "content-changed" | "identity-changed" | "unsafe-source" | "store-unavailable";
+interface CustomToolTrustEvaluation {
+    trusted: boolean;
+    reason: CustomToolTrustReason;
+    fingerprint?: string;
+    grantId?: string;
+    message?: string;
+    snapshot?: ExecutableTreeSnapshot;
+}
+interface CustomToolTrustStoreOptions {
+    storePath?: string;
+    limits?: Partial<ExecutableTreeLimits>;
+    now?: () => number;
+}
+interface SnapshotOptions {
+    limits?: Partial<ExecutableTreeLimits>;
+    /**
+     * Kept internal to the executable-content boundary. Plugin tools use the
+     * plugin tree version so their staged bytes can be compared to PluginTrust.
+     */
+    fingerprintVersion?: string;
+    stagingRoot?: string;
+}
+declare class UnsafeCustomToolSourceError extends Error {
+    readonly sourcePath: string;
+    constructor(sourcePath: string, message: string);
+}
+declare class CustomToolTrustStoreError extends Error {
+    constructor(message: string, options?: ErrorOptions);
+}
+declare function fingerprintExecutableTree(sourcePath: string, options?: Omit<SnapshotOptions, "stagingRoot">): Promise<ExecutableTreeSnapshot>;
+declare class CustomToolTrustStore {
+    readonly storePath: string;
+    private readonly options;
+    constructor(options?: CustomToolTrustStoreOptions);
+    grant(sourcePath: string): Promise<CustomToolTrustGrant>;
+    evaluate(sourcePath: string): Promise<CustomToolTrustEvaluation>;
+    evaluateSnapshot(snapshot: ExecutableTreeSnapshot): Promise<CustomToolTrustEvaluation>;
+    list(): Promise<CustomToolTrustGrant[]>;
+    revoke(sourcePath: string): Promise<boolean>;
+}
+
+type ToolContributionDiagnosticCode = "source-unsafe" | "source-untrusted" | "plugin-trust-missing" | "plugin-content-mismatch" | "no-entry-modules" | "too-many-entry-modules" | "bundler-unavailable" | "module-compile-failed" | "module-load-failed" | "invalid-name" | "reserved-name" | "duplicate-name" | "invalid-description" | "invalid-search-hint" | "invalid-modes" | "invalid-schema";
+interface ToolContributionDiagnostic {
+    level: "warning" | "error";
+    code: ToolContributionDiagnosticCode;
+    sourceId: string;
+    sourcePath: string;
+    message: string;
+    toolName?: string;
+    modulePath?: string;
+}
+interface ToolContributionSnapshot {
+    readonly generation: string;
+    readonly fingerprint: string;
+    readonly tools: readonly ToolDef[];
+    readonly diagnostics: readonly ToolContributionDiagnostic[];
+}
+interface WorkspaceToolContributionManagerOptions {
+    runtimeRoot?: string;
+    trustStore?: CustomToolTrustStore;
+    trustStoreOptions?: CustomToolTrustStoreOptions;
+    pluginTrustOptions?: PluginTrustStoreOptions;
+    treeLimits?: Partial<ExecutableTreeLimits>;
+    loadTimeoutMs?: number;
+    callTimeoutMs?: number;
+    loadPlugins?: (cwd: string, config: NexusConfig) => Promise<PluginManifestRecord[]>;
+}
+/** Attach one already-materialized generation without re-reading live files. */
+declare function registerToolContributionSnapshot(registry: ToolRegistry, snapshot: ToolContributionSnapshot, source?: string): void;
+declare class WorkspaceToolContributionManagerClosedError extends Error {
+    constructor();
+}
+declare class WorkspaceToolContributionManager {
+    readonly runtimeRoot: string;
+    readonly trustStore: CustomToolTrustStore;
+    private readonly pluginTrustOptions;
+    private readonly treeLimits;
+    private readonly loadTimeoutMs;
+    private readonly callTimeoutMs;
+    private readonly loadPlugins;
+    private readonly generations;
+    private currentSourceKey;
+    private current;
+    private closed;
+    private materializationTail;
+    private closePromise;
+    constructor(options?: WorkspaceToolContributionManagerOptions);
+    /**
+     * Force the next turn to rematerialize even when source bytes are unchanged.
+     * Existing snapshots remain executable until workspace shutdown.
+     */
+    invalidate(): void;
+    materialize(cwd: string, config: NexusConfig): Promise<ToolContributionSnapshot>;
+    private materializeOnce;
+    private validateEntryCount;
+    private validateDescriptor;
+    private toolFromCandidate;
+    close(): Promise<void>;
+}
+
 interface NexusRunServices {
     parallelAgentManager: ParallelAgentManager;
     mcpClient?: McpClient;
+    /**
+     * Immutable root-turn MCP/resource capability snapshot. Delegated agents
+     * inherit this exact list rather than reading the mutable workspace client.
+     */
+    mcpToolSnapshot?: readonly ToolDef[];
+    backgroundProcesses: BackgroundProcessSupervisor;
+    workspaceTasks: WorkspaceTaskSupervisor;
+    /** Workspace-owned loader/runtime for exact-content trusted custom/plugin tools. */
+    toolContributionManager: WorkspaceToolContributionManager;
+    /** Immutable root-turn generation inherited by every delegated agent. */
+    toolContributionSnapshot?: ToolContributionSnapshot;
+    /** Workspace-owned durable task/team/memory projection. */
+    orchestrationRuntime: OrchestrationRuntime;
     /** Root run is 0; incremented for every delegated-agent generation. */
     subagentDepth: number;
     /** Current delegated run id; absent for the root run. */
@@ -2008,9 +1353,22 @@ interface NexusRunServices {
 declare function createNexusRunServices(input?: {
     parallelAgentManager?: ParallelAgentManager;
     mcpClient?: McpClient;
+    mcpToolSnapshot?: readonly ToolDef[];
+    backgroundProcesses?: BackgroundProcessSupervisor;
+    workspaceTasks?: WorkspaceTaskSupervisor;
+    toolContributionManager?: WorkspaceToolContributionManager;
+    toolContributionSnapshot?: ToolContributionSnapshot;
+    orchestrationRuntime?: OrchestrationRuntime;
+    cwd?: string;
     subagentDepth?: number;
     subagentId?: string;
 }): NexusRunServices;
+/**
+ * Drain the workspace-owned live services that are common to every host.
+ * Host-specific integrations (MCP, indexers, state databases) remain owned by
+ * the host and must be closed after this dependency barrier.
+ */
+declare function closeNexusRunServices(services: NexusRunServices): Promise<void>;
 
 type Mode = "agent" | "plan" | "ask" | "debug" | "review";
 declare const MODES: Mode[];
@@ -2029,6 +1387,54 @@ interface PermissionResult {
     /** For MCP: add this tool name to allowed list so it is not asked again in this folder (e.g. "codex - codex"). */
     addToAllowedMcpTool?: string;
 }
+type ToolApprovalCapability = "read" | "write" | "execute" | "mcp" | "plugin" | "browser";
+/**
+ * Declarative approval metadata owned by the tool definition.
+ *
+ * The execution pipeline remains the sole authority that interprets this
+ * metadata against host/config permissions. Dynamic tools describe only the
+ * capability and user-facing action derived from their input.
+ */
+interface ToolApprovalPolicy<TArgs = Record<string, unknown>> {
+    capability: ToolApprovalCapability;
+    /** Return false when this invocation has no side effect requiring approval. */
+    when?(args: TArgs): boolean;
+    /** Command used by execute allow/ask/deny matching. */
+    command?(args: TArgs): string | undefined;
+    /** Human-readable action presented to the user. */
+    description(args: TArgs): string;
+    /** Optional full command/path/payload shown in the approval surface. */
+    content?(args: TArgs): string | undefined;
+    /** Optional concise explanation supplied by the model/tool input. */
+    shortDescription?(args: TArgs): string | undefined;
+    /** Optional capability-specific warning. */
+    warning?(args: TArgs): string | undefined;
+    /**
+     * Require a prompt even when this capability is otherwise auto-approved.
+     * Reserved for irreversible/destructive actions such as killing a task.
+     */
+    alwaysPrompt?: boolean;
+}
+type ToolIntegrationProvenance = {
+    kind: "mcp";
+    serverName: string;
+    originalName: string;
+} | {
+    kind: "custom";
+    sourceId: string;
+    sourcePath: string;
+    fingerprint: string;
+    bundleFingerprint: string;
+    generation: string;
+} | {
+    kind: "plugin";
+    pluginName: string;
+    sourceId: string;
+    sourcePath: string;
+    fingerprint: string;
+    bundleFingerprint: string;
+    generation: string;
+};
 interface ToolDef<TArgs = Record<string, unknown>> {
     name: string;
     description: string;
@@ -2044,15 +1450,20 @@ interface ToolDef<TArgs = Record<string, unknown>> {
     /** If true, can be executed in parallel with other read-only tools */
     readOnly?: boolean;
     /** Stable integration provenance; never infer ownership from a tool-name delimiter. */
-    integration?: {
-        kind: "mcp";
-        serverName: string;
-        originalName: string;
-    };
+    integration?: ToolIntegrationProvenance;
     /** Which modes this tool is available in. undefined = all modes */
     modes?: Mode[];
-    /** If true, always show approval dialog */
+    /**
+     * Legacy marker that this tool participates in approval. Prefer `approval`
+     * for capability-aware behavior and `approval.alwaysPrompt` when the prompt
+     * must not be bypassed by an auto-approve setting.
+     */
     requiresApproval?: boolean;
+    /**
+     * Capability policy for this tool. Prefer this over name-based approval
+     * inference, especially when approval depends on invocation arguments.
+     */
+    approval?: ToolApprovalPolicy<TArgs>;
     /**
      * Optional: produce a human-readable validation error from a ZodError.
      * Return value is sent back to the LLM as the tool result so it can self-correct.
@@ -2074,6 +1485,22 @@ interface ToolAttachment {
     content: string;
     mimeType?: string;
 }
+interface NestedToolExecutionRequest {
+    /** Resolved tool name. The authoritative pipeline still performs its own lookup. */
+    toolName: string;
+    /** Raw arguments. Normalization and schema validation belong to the pipeline. */
+    input: Record<string, unknown>;
+    /** Stable zero-based position inside the parent batch. */
+    ordinal: number;
+}
+interface ToolActivationResult {
+    /** Tools added to the active execution/manifest set by this operation. */
+    activated: ToolDef[];
+    /** Requested tools which were already active. */
+    alreadyActive: ToolDef[];
+    /** Names outside the authoritative searchable set. No activation occurs when this is non-empty. */
+    rejected: string[];
+}
 interface ToolContext {
     cwd: string;
     host: IHost;
@@ -2090,8 +1517,35 @@ interface ToolContext {
     partId?: string;
     /** Assistant message id for the in-flight tool call (loop); used e.g. to merge sub-agent file edits when part id lookup fails. */
     toolExecutionMessageId?: string;
-    /** All resolved tools for this run (set by loop). Used e.g. by Parallel to run multiple tools in one call. */
+    /**
+     * One-shot decision from the authoritative policy stage for a staged
+     * Write/Edit operation. The tool owns diff construction; it must not
+     * independently reinterpret config/rules when this decision is present.
+     */
+    fileEditApproval?: {
+        required: boolean;
+        permissionRule: boolean;
+    };
+    /** Currently active tools for this run. Composite tools may only execute this set. */
     resolvedTools?: ToolDef[];
+    /**
+     * Mode-authorized discovery universe. This may include tools intentionally
+     * omitted from the current model manifest by deferred loading/classification.
+     */
+    searchableTools?: ToolDef[];
+    /**
+     * Atomically activate exact names from searchableTools for subsequent model
+     * requests and nested execution. Unknown/forbidden names reject the batch.
+     */
+    activateDeferredTools?: (toolNames: string[]) => ToolActivationResult;
+    /**
+     * Execute a child call through the same validation, policy, approval, hook,
+     * spill, and cancellation boundary as a direct model tool call.
+     *
+     * Composite tools must fail closed when this capability is absent; directly
+     * invoking another ToolDef.execute() would bypass the runtime policy.
+     */
+    executeNestedTool?: (request: NestedToolExecutionRequest) => Promise<ToolResult>;
 }
 interface ApprovalAction {
     type: "write" | "execute" | "mcp" | "plugin" | "browser" | "read" | "doom_loop";
@@ -2204,12 +1658,61 @@ interface McpAuthRequest {
     startUrl?: string;
 }
 interface McpAuthResult {
+    /**
+     * True only after credentials have actually been completed and the caller
+     * may reconnect. Merely opening an external URL is not completion.
+     */
     success: boolean;
+    /** Authentication was handed off and still requires user/browser action. */
+    pending?: boolean;
     message: string;
+}
+interface HostReadFileOptions {
+    /**
+     * Reject before loading the file when the host can determine that its byte
+     * size exceeds this limit. Model-facing tools must still bound their output.
+     */
+    maxBytes?: number;
+}
+type HostPathAccess = "read" | "list" | "write" | "delete" | "execute";
+type NetworkRequestPurpose = "web_fetch" | "web_search" | "mcp" | "remote_session";
+interface HostNetworkRequest {
+    /** Fully-qualified URL for the next outbound hop. */
+    url: string;
+    /** Capability purpose, used by hosts for policy and audit decisions. */
+    purpose: NetworkRequestPurpose;
+}
+interface ResolvedNetworkAddress {
+    address: string;
+    family: 4 | 6;
+}
+/**
+ * Host authorization for exactly one outbound HTTP hop.
+ *
+ * The request transport must connect through one of `addresses` without
+ * performing a second uncontrolled DNS lookup. Redirects require a fresh
+ * authorization.
+ */
+interface AuthorizedNetworkRequest {
+    url: string;
+    hostname: string;
+    addresses: readonly ResolvedNetworkAddress[];
 }
 interface IHost {
     readonly cwd: string;
-    readFile(path: string): Promise<string>;
+    /**
+     * Resolve and authorize a caller-controlled path before a core service uses
+     * a lower-level filesystem/process API. Remote hosts must enforce their
+     * canonical workspace capability here, including symlink escapes.
+     */
+    resolvePath(path: string, access: HostPathAccess): Promise<string>;
+    /**
+     * Validate and resolve a model/user-controlled outbound URL. Implementations
+     * must fail closed for non-public destinations and return every allowed DNS
+     * answer so the transport can pin the subsequent connection.
+     */
+    authorizeNetworkRequest(request: HostNetworkRequest): Promise<AuthorizedNetworkRequest>;
+    readFile(path: string, options?: HostReadFileOptions): Promise<string>;
     writeFile(path: string, content: string): Promise<void>;
     deleteFile(path: string): Promise<void>;
     exists(path: string): Promise<boolean>;
@@ -2219,7 +1722,7 @@ interface IHost {
         stderr: string;
         exitCode: number;
     }>;
-    showApprovalDialog(action: ApprovalAction): Promise<PermissionResult>;
+    showApprovalDialog(action: ApprovalAction, signal?: AbortSignal): Promise<PermissionResult>;
     emit(event: AgentEvent): void;
     /** Persist command to .nexus/allowed-commands.json for this cwd so it is not asked for approval again */
     addAllowedCommand?(cwd: string, command: string): Promise<void>;
@@ -2305,6 +1808,14 @@ interface SessionMessage {
     ts: number;
     role: SessionRole;
     content: string | MessagePart[];
+    /** Durable delegated-agent inbox id accepted into this transcript. */
+    mailboxMessageId?: string;
+    /** Exact root session that owns the delegated-agent inbox. */
+    mailboxOwnerSessionId?: string;
+    /** Logical delegated-agent inbox from which this message was accepted. */
+    mailboxTargetAgentId?: string;
+    /** Display-only sender label copied from the durable inbox record. */
+    mailboxSender?: string;
     /**
      * Optional per-user-message preset name (extension/server may attach).
      * Used to scope skills + MCP/tool visibility for the run that produced the assistant reply.
@@ -2356,10 +1867,14 @@ interface ToolPart {
     /** If true, output has been pruned for compaction */
     compacted?: boolean;
     /**
-     * Absolute path to full tool output when truncated to disk (~/.nexus/data/tool-output/).
-     * Preserved for model hints after prune/compaction (OpenClaude-style spill registry).
+     * Legacy absolute path retained only for migration of older transcripts.
+     * New model-facing capabilities use outputArtifactId and never expose paths.
      */
     outputSpillPath?: string;
+    /** Opaque handle accepted only by ToolOutputRead. */
+    outputArtifactId?: string;
+    /** Exact session whose private artifact directory owns this output. */
+    outputArtifactOwnerSessionId?: string;
     /** Set when tool is Write/Edit and completed; used for session diff (e.g. CLI "N files" block). */
     path?: string;
     diffStats?: {
@@ -2368,6 +1883,11 @@ interface ToolPart {
     };
     /** Copied from sub-agent session into parent for diff; omit from chat tool rows (CLI). */
     mergedFromSubagent?: boolean;
+    /**
+     * Exact mode-authorized tools exposed by a successful ToolSearch call.
+     * Persisted so deferred discovery survives compaction and session resume.
+     */
+    activatedToolNames?: string[];
 }
 type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart;
 type TaskStatus = "pending" | "in_progress" | "completed" | "failed" | "killed" | "cancelled" | "deleted";
@@ -2409,6 +1929,40 @@ interface TeamMessageRecord {
     message: string;
     teamName?: string;
 }
+/**
+ * Durable, owner-scoped input for a delegated agent.
+ *
+ * A record remains pending until its target transcript has been checkpointed
+ * with `mailboxMessageId`; acknowledgement is deliberately a separate step.
+ */
+interface AgentMailboxMessage {
+    id: string;
+    ownerSessionId: string;
+    targetAgentId: string;
+    sequence: number;
+    from: string;
+    message: string;
+    createdAt: number;
+    ackedAt?: number;
+    acknowledgedBySessionId?: string;
+}
+/**
+ * Turn-boundary port used by the agent loop. Implementations must checkpoint
+ * the supplied session durably before acknowledging `messages`.
+ */
+interface AgentInputMailbox {
+    readPending(limit?: number): Promise<AgentMailboxMessage[]>;
+    waitForInput(signal: AbortSignal): Promise<void>;
+    /**
+     * Synchronously stop advertising this worker as an active consumer before
+     * its final durable inbox check. Enqueues that finish after this call must
+     * report that an explicit resume is required.
+     */
+    sealForCompletion(): void;
+    /** Re-advertise the worker after the completion check found more input. */
+    reopenAfterCompletionCheck(): void;
+    checkpointAndAcknowledge(messages: readonly AgentMailboxMessage[], session: ISession): Promise<void>;
+}
 interface TeamMemberRecord {
     name: string;
     agentId?: string;
@@ -2425,6 +1979,8 @@ interface TeamRecord {
     createdAt: number;
     members: TeamMemberRecord[];
     messages: TeamMessageRecord[];
+    /** Sessions that explicitly created or used this team. */
+    sessionIds?: string[];
 }
 interface AgentDefinition {
     agentType: string;
@@ -2528,6 +2084,8 @@ interface PluginManifestRecord {
     }>;
     agents: string[];
     skills: string[];
+    /** Executable tool modules or directories relative to the plugin root. */
+    tools?: string[];
     hooks: string[];
     inlineHookConfigs?: Record<string, unknown>[];
     mcpServers: string[];
@@ -2539,6 +2097,9 @@ interface PluginManifestRecord {
     settingsSchema?: Record<string, unknown>;
     warnings?: string[];
     trusted?: boolean;
+    /** Exact tree fingerprint evaluated by the host-owned plugin trust store. */
+    trustFingerprint?: string;
+    trustGrantId?: string;
     runtimeEnabled?: boolean;
     options?: Record<string, unknown>;
 }
@@ -2889,7 +2450,10 @@ interface NexusConfig {
         /** Command patterns that always ask (ask list) */
         askCommandPatterns: string[];
         denyPatterns: string[];
-        /** Fine-grained permission rules evaluated in order, first match wins */
+        /**
+         * Fine-grained permission rules. First match wins inside each authority
+         * layer; decisions from separate layers combine restrictively.
+         */
         rules: PermissionRule[];
     };
     retry: RetryConfig;
@@ -2907,7 +2471,16 @@ interface NexusConfig {
     };
     mcp: {
         servers: McpServerConfig[];
+        /** Repository-provided definitions awaiting exact host promotion. */
+        pendingProjectServers?: Array<{
+            source: "project";
+            origin: "project-config" | "project-mcp-json";
+            status: "pending";
+            config: McpServerConfig;
+        }>;
     };
+    /** Repository endpoint/path/executable requests awaiting exact host approval. */
+    pendingProjectAuthority?: PendingProjectAuthorityRequest[];
     /** Normalized list for UI: path + enabled. skills is derived (enabled only). */
     skillsConfig?: Array<{
         path: string;
@@ -2918,7 +2491,9 @@ interface NexusConfig {
     skillsUrls?: string[];
     tools: {
         custom: string[];
+        /** @deprecated Parsed for old configs; ignored by the runtime. */
         classifyToolsEnabled: boolean;
+        /** @deprecated Parsed for old configs; ignored by the runtime. */
         classifyThreshold: number;
         parallelReads: boolean;
         maxParallelReads: number;
@@ -2929,7 +2504,9 @@ interface NexusConfig {
         /** In auto mode, always defer once at least this many tools are marked shouldDefer. */
         deferredLoadingMinimumTools?: number;
     };
+    /** @deprecated Parsed for old configs; ignored by the runtime. */
     skillClassifyEnabled: boolean;
+    /** @deprecated Parsed for old configs; ignored by the runtime. */
     skillClassifyThreshold: number;
     structuredOutput: "auto" | "always" | "never";
     summarization: {
@@ -2995,6 +2572,11 @@ interface ModeConfig {
 }
 type PermissionRuleAction = "allow" | "deny" | "ask";
 interface PermissionRule {
+    /**
+     * Runtime provenance assigned while trusted host and untrusted project
+     * layers are merged. Project input cannot promote itself to host authority.
+     */
+    authority?: "host" | "project";
     /** Tool name or glob pattern matching tool names */
     tool?: string;
     /** Path pattern (glob) to match against file args */
@@ -3044,12 +2626,18 @@ interface McpServerConfig {
         message?: string;
     };
 }
+interface SkillAuthority {
+    lexicalRoot: string;
+    realRoot: string;
+}
 interface SkillDef {
     name: string;
     path: string;
     /** Short description (YAML `description` or first heading / line). */
     summary: string;
     content: string;
+    /** Captured discovery authority used by post-load skill operations. */
+    authority?: SkillAuthority;
 }
 interface CheckpointEntry {
     hash: string;
@@ -3063,6 +2651,2095 @@ interface ChangedFile {
     after: string;
     status: "added" | "modified" | "deleted";
 }
+
+declare const modelEndpointPayloadSchema: z.ZodObject<{
+    model: z.ZodEffects<z.ZodObject<{
+        provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity", "minimax"]>>;
+        baseUrl: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+        resourceName: z.ZodOptional<z.ZodString>;
+        deploymentId: z.ZodOptional<z.ZodString>;
+        apiVersion: z.ZodOptional<z.ZodString>;
+        extra: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, "strict", z.ZodTypeAny, {
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        baseUrl?: string | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }, {
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        baseUrl?: string | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }>, {
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        baseUrl?: string | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }, {
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        baseUrl?: string | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }>;
+}, "strict", z.ZodTypeAny, {
+    model: {
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        baseUrl?: string | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    };
+}, {
+    model: {
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        baseUrl?: string | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    };
+}>;
+declare const embeddingsEndpointPayloadSchema: z.ZodObject<{
+    embeddings: z.ZodObject<{
+        provider: z.ZodEnum<["openai", "openai-compatible", "openrouter", "ollama", "google", "mistral", "bedrock", "local"]>;
+        model: z.ZodString;
+        baseUrl: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+        dimensions: z.ZodOptional<z.ZodNumber>;
+        region: z.ZodOptional<z.ZodString>;
+    }, "strict", z.ZodTypeAny, {
+        model: string;
+        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
+        baseUrl?: string | undefined;
+        dimensions?: number | undefined;
+        region?: string | undefined;
+    }, {
+        model: string;
+        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
+        baseUrl?: string | undefined;
+        dimensions?: number | undefined;
+        region?: string | undefined;
+    }>;
+}, "strict", z.ZodTypeAny, {
+    embeddings: {
+        model: string;
+        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
+        baseUrl?: string | undefined;
+        dimensions?: number | undefined;
+        region?: string | undefined;
+    };
+}, {
+    embeddings: {
+        model: string;
+        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
+        baseUrl?: string | undefined;
+        dimensions?: number | undefined;
+        region?: string | undefined;
+    };
+}>;
+declare const vectorDbEndpointPayloadSchema: z.ZodObject<{
+    vectorDb: z.ZodEffects<z.ZodObject<{
+        url: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+        autoStart: z.ZodOptional<z.ZodBoolean>;
+    }, "strict", z.ZodTypeAny, {
+        url?: string | undefined;
+        autoStart?: boolean | undefined;
+    }, {
+        url?: string | undefined;
+        autoStart?: boolean | undefined;
+    }>, {
+        url?: string | undefined;
+        autoStart?: boolean | undefined;
+    }, {
+        url?: string | undefined;
+        autoStart?: boolean | undefined;
+    }>;
+}, "strict", z.ZodTypeAny, {
+    vectorDb: {
+        url?: string | undefined;
+        autoStart?: boolean | undefined;
+    };
+}, {
+    vectorDb: {
+        url?: string | undefined;
+        autoStart?: boolean | undefined;
+    };
+}>;
+declare const PROJECT_AUTHORITY_REQUEST_KINDS: readonly ["model-endpoint", "embeddings-endpoint", "vector-db-endpoint", "remote-skills", "custom-tools", "profiles", "external-skill-paths", "external-rule-paths", "external-memory-path", "claude-global-directory"];
+type ProjectAuthorityRequestKind = typeof PROJECT_AUTHORITY_REQUEST_KINDS[number];
+interface ProjectAuthorityPayloadByKind {
+    "model-endpoint": z.infer<typeof modelEndpointPayloadSchema>;
+    "embeddings-endpoint": z.infer<typeof embeddingsEndpointPayloadSchema>;
+    "vector-db-endpoint": z.infer<typeof vectorDbEndpointPayloadSchema>;
+    "remote-skills": {
+        skillsUrls: string[];
+    };
+    "custom-tools": {
+        tools: {
+            custom: string[];
+        };
+    };
+    "profiles": {
+        profiles: Record<string, Partial<ProviderConfig>>;
+    };
+    "external-skill-paths": {
+        skills: Array<string | {
+            path: string;
+            enabled?: boolean;
+        }>;
+    };
+    "external-rule-paths": {
+        rules: {
+            files: string[];
+        };
+    };
+    "external-memory-path": {
+        memory: {
+            autoMemoryDirectory: string;
+        };
+    };
+    "claude-global-directory": {
+        compatibility: {
+            claude: {
+                includeGlobalDir: true;
+            };
+        };
+    };
+}
+interface PendingProjectAuthorityRequest<K extends ProjectAuthorityRequestKind = ProjectAuthorityRequestKind> {
+    source: "project";
+    origin: "project-config";
+    status: "pending";
+    kind: K;
+    fingerprint: string;
+    payload: ProjectAuthorityPayloadByKind[K];
+}
+declare function fingerprintProjectAuthorityPayload(kind: ProjectAuthorityRequestKind, payload: unknown): string;
+declare function createPendingProjectAuthorityRequest<K extends ProjectAuthorityRequestKind>(kind: K, payload: ProjectAuthorityPayloadByKind[K]): PendingProjectAuthorityRequest<K>;
+declare function isValidPendingProjectAuthorityRequest(value: unknown): value is PendingProjectAuthorityRequest;
+declare function getPendingProjectAuthorityRequests(config: NexusConfig): readonly PendingProjectAuthorityRequest[];
+
+declare const McpServerConfigSchema: z.ZodEffects<z.ZodObject<{
+    name: z.ZodString;
+    command: z.ZodOptional<z.ZodString>;
+    args: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    cwd: z.ZodOptional<z.ZodString>;
+    url: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+    transport: z.ZodOptional<z.ZodEnum<["stdio", "http", "sse"]>>;
+    type: z.ZodOptional<z.ZodEnum<["stdio", "sse", "streamable-http", "http"]>>;
+    headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
+    startupTimeoutMs: z.ZodOptional<z.ZodNumber>;
+    toolTimeoutMs: z.ZodOptional<z.ZodNumber>;
+    /** Optional bundle id (e.g. "context-mode"); resolved by host to command/args/env when installed. */
+    bundle: z.ZodOptional<z.ZodString>;
+    auth: z.ZodOptional<z.ZodObject<{
+        type: z.ZodOptional<z.ZodEnum<["oauth", "url", "manual"]>>;
+        startUrl: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+        message: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        type?: "url" | "manual" | "oauth" | undefined;
+        message?: string | undefined;
+        startUrl?: string | undefined;
+    }, {
+        type?: "url" | "manual" | "oauth" | undefined;
+        message?: string | undefined;
+        startUrl?: string | undefined;
+    }>>;
+}, "strip", z.ZodTypeAny, {
+    name: string;
+    enabled: boolean;
+    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+    url?: string | undefined;
+    headers?: Record<string, string> | undefined;
+    startupTimeoutMs?: number | undefined;
+    toolTimeoutMs?: number | undefined;
+    transport?: "stdio" | "http" | "sse" | undefined;
+    auth?: {
+        type?: "url" | "manual" | "oauth" | undefined;
+        message?: string | undefined;
+        startUrl?: string | undefined;
+    } | undefined;
+    command?: string | undefined;
+    cwd?: string | undefined;
+    bundle?: string | undefined;
+    args?: string[] | undefined;
+    env?: Record<string, string> | undefined;
+}, {
+    name: string;
+    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+    url?: string | undefined;
+    headers?: Record<string, string> | undefined;
+    startupTimeoutMs?: number | undefined;
+    toolTimeoutMs?: number | undefined;
+    transport?: "stdio" | "http" | "sse" | undefined;
+    enabled?: boolean | undefined;
+    auth?: {
+        type?: "url" | "manual" | "oauth" | undefined;
+        message?: string | undefined;
+        startUrl?: string | undefined;
+    } | undefined;
+    command?: string | undefined;
+    cwd?: string | undefined;
+    bundle?: string | undefined;
+    args?: string[] | undefined;
+    env?: Record<string, string> | undefined;
+}>, {
+    name: string;
+    enabled: boolean;
+    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+    url?: string | undefined;
+    headers?: Record<string, string> | undefined;
+    startupTimeoutMs?: number | undefined;
+    toolTimeoutMs?: number | undefined;
+    transport?: "stdio" | "http" | "sse" | undefined;
+    auth?: {
+        type?: "url" | "manual" | "oauth" | undefined;
+        message?: string | undefined;
+        startUrl?: string | undefined;
+    } | undefined;
+    command?: string | undefined;
+    cwd?: string | undefined;
+    bundle?: string | undefined;
+    args?: string[] | undefined;
+    env?: Record<string, string> | undefined;
+}, {
+    name: string;
+    type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+    url?: string | undefined;
+    headers?: Record<string, string> | undefined;
+    startupTimeoutMs?: number | undefined;
+    toolTimeoutMs?: number | undefined;
+    transport?: "stdio" | "http" | "sse" | undefined;
+    enabled?: boolean | undefined;
+    auth?: {
+        type?: "url" | "manual" | "oauth" | undefined;
+        message?: string | undefined;
+        startUrl?: string | undefined;
+    } | undefined;
+    command?: string | undefined;
+    cwd?: string | undefined;
+    bundle?: string | undefined;
+    args?: string[] | undefined;
+    env?: Record<string, string> | undefined;
+}>;
+declare const NexusConfigSchema: z.ZodObject<{
+    model: z.ZodDefault<z.ZodObject<{
+        provider: z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity", "minimax"]>;
+        id: z.ZodString;
+        apiKey: z.ZodOptional<z.ZodString>;
+        baseUrl: z.ZodOptional<z.ZodString>;
+        temperature: z.ZodOptional<z.ZodNumber>;
+        /** Reasoning effort hint for reasoning-capable models. "auto" (default) enables thinking only for known reasoning models. */
+        reasoningEffort: z.ZodDefault<z.ZodString>;
+        /**
+         * How stored assistant reasoning is sent on the next request (KiloCode-style).
+         * `auto` hoists to `reasoning_content` for e.g. DeepSeek; otherwise keeps native `reasoning` parts in message content.
+         */
+        reasoningHistoryMode: z.ZodDefault<z.ZodEnum<["auto", "inline", "reasoning_content", "reasoning_details"]>>;
+        /** Optional explicit context window size override (tokens). */
+        contextWindow: z.ZodOptional<z.ZodNumber>;
+        resourceName: z.ZodOptional<z.ZodString>;
+        deploymentId: z.ZodOptional<z.ZodString>;
+        apiVersion: z.ZodOptional<z.ZodString>;
+        extra: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, "strip", z.ZodTypeAny, {
+        id: string;
+        provider: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        reasoningEffort: string;
+        reasoningHistoryMode: "inline" | "auto" | "reasoning_content" | "reasoning_details";
+        temperature?: number | undefined;
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        contextWindow?: number | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }, {
+        id: string;
+        provider: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        temperature?: number | undefined;
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "inline" | "auto" | "reasoning_content" | "reasoning_details" | undefined;
+        contextWindow?: number | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }>>;
+    embeddings: z.ZodOptional<z.ZodObject<{
+        provider: z.ZodEnum<["openai", "openai-compatible", "openrouter", "ollama", "google", "mistral", "bedrock", "local"]>;
+        model: z.ZodString;
+        baseUrl: z.ZodOptional<z.ZodString>;
+        apiKey: z.ZodOptional<z.ZodString>;
+        dimensions: z.ZodOptional<z.ZodNumber>;
+        /** AWS region for Bedrock */
+        region: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        model: string;
+        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        dimensions?: number | undefined;
+        region?: string | undefined;
+    }, {
+        model: string;
+        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        dimensions?: number | undefined;
+        region?: string | undefined;
+    }>>;
+    vectorDb: z.ZodOptional<z.ZodObject<{
+        /** Disabled by default. Set to true to enable vector codebase search (requires Qdrant + embeddings). */
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        url: z.ZodDefault<z.ZodString>;
+        collection: z.ZodDefault<z.ZodString>;
+        autoStart: z.ZodDefault<z.ZodBoolean>;
+        /** Qdrant API key (e.g. Qdrant Cloud). Also read from env `QDRANT_API_KEY` when unset. */
+        apiKey: z.ZodOptional<z.ZodString>;
+        /** Wait for Qdrant to persist upserts/deletes (recommended). */
+        upsertWait: z.ZodDefault<z.ZodBoolean>;
+        /** Minimum similarity score (0–1 for cosine) for search hits. Omit for no threshold (legacy behavior). */
+        searchMinScore: z.ZodOptional<z.ZodNumber>;
+        /** HNSW `ef` at query time (higher → better recall, slower). Default 128. */
+        searchHnswEf: z.ZodOptional<z.ZodNumber>;
+        /** Exhaustive/exact vector search (slower). */
+        searchExact: z.ZodOptional<z.ZodBoolean>;
+    }, "strip", z.ZodTypeAny, {
+        url: string;
+        enabled: boolean;
+        autoStart: boolean;
+        collection: string;
+        upsertWait: boolean;
+        apiKey?: string | undefined;
+        searchMinScore?: number | undefined;
+        searchHnswEf?: number | undefined;
+        searchExact?: boolean | undefined;
+    }, {
+        url?: string | undefined;
+        enabled?: boolean | undefined;
+        apiKey?: string | undefined;
+        autoStart?: boolean | undefined;
+        collection?: string | undefined;
+        upsertWait?: boolean | undefined;
+        searchMinScore?: number | undefined;
+        searchHnswEf?: number | undefined;
+        searchExact?: boolean | undefined;
+    }>>;
+    modes: z.ZodDefault<z.ZodObject<{
+        agent: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        plan: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        ask: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        debug: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        review: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+    }, "strip", z.ZodOptional<z.ZodObject<{
+        autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+        systemPrompt: z.ZodOptional<z.ZodString>;
+        customInstructions: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        systemPrompt?: string | undefined;
+        autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+        customInstructions?: string | undefined;
+    }, {
+        systemPrompt?: string | undefined;
+        autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+        customInstructions?: string | undefined;
+    }>>, z.objectOutputType<{
+        agent: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        plan: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        ask: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        debug: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        review: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+    }, z.ZodOptional<z.ZodObject<{
+        autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+        systemPrompt: z.ZodOptional<z.ZodString>;
+        customInstructions: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        systemPrompt?: string | undefined;
+        autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+        customInstructions?: string | undefined;
+    }, {
+        systemPrompt?: string | undefined;
+        autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+        customInstructions?: string | undefined;
+    }>>, "strip">, z.objectInputType<{
+        agent: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        plan: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        ask: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        debug: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        review: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+    }, z.ZodOptional<z.ZodObject<{
+        autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+        systemPrompt: z.ZodOptional<z.ZodString>;
+        customInstructions: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        systemPrompt?: string | undefined;
+        autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+        customInstructions?: string | undefined;
+    }, {
+        systemPrompt?: string | undefined;
+        autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+        customInstructions?: string | undefined;
+    }>>, "strip">>>;
+    indexing: z.ZodDefault<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        excludePatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        symbolExtract: z.ZodDefault<z.ZodBoolean>;
+        /** Disabled by default. Set to true with vectorDb.enabled to use semantic codebase_search. */
+        vector: z.ZodDefault<z.ZodBoolean>;
+        batchSize: z.ZodDefault<z.ZodNumber>;
+        /** Min semantic segments per embed/upsert batch (Roo-style segment threshold). */
+        embeddingBatchSize: z.ZodDefault<z.ZodNumber>;
+        embeddingConcurrency: z.ZodDefault<z.ZodNumber>;
+        /** Max embed batches in flight while parsing (backpressure / memory). */
+        maxPendingEmbedBatches: z.ZodDefault<z.ZodNumber>;
+        /** Parallel embed/upsert pipelines (batches). */
+        batchProcessingConcurrency: z.ZodDefault<z.ZodNumber>;
+        /**
+         * Max indexable files per workspace. Roo parity: **0 = scan nothing** (same as `listFiles(..., 0)`).
+         * Use a large positive value if you need an effectively unlimited tree. Default 50_000 matches Roo.
+         */
+        maxIndexedFiles: z.ZodDefault<z.ZodNumber>;
+        /**
+         * Allow CodebaseSearch while indexing is in progress when Qdrant already has points (partial results).
+         * Default true. Set false to wait until `markIndexingComplete` (strict consistency).
+         */
+        searchWhileIndexing: z.ZodDefault<z.ZodBoolean>;
+        /**
+         * If >0, indexing is treated as failed when more than this fraction of chunks could not be embedded
+         * (after retries). Triggers index + tracker reset (Roo-style).
+         */
+        maxIndexingFailureRate: z.ZodDefault<z.ZodNumber>;
+        debounceMs: z.ZodDefault<z.ZodNumber>;
+        /** Max characters of each hit’s code snippet in CodebaseSearch output (indexed payload is capped separately). */
+        codebaseSearchSnippetMaxChars: z.ZodDefault<z.ZodNumber>;
+    }, "strip", z.ZodTypeAny, {
+        enabled: boolean;
+        excludePatterns: string[];
+        symbolExtract: boolean;
+        vector: boolean;
+        batchSize: number;
+        embeddingBatchSize: number;
+        embeddingConcurrency: number;
+        maxPendingEmbedBatches: number;
+        batchProcessingConcurrency: number;
+        maxIndexedFiles: number;
+        searchWhileIndexing: boolean;
+        maxIndexingFailureRate: number;
+        debounceMs: number;
+        codebaseSearchSnippetMaxChars: number;
+    }, {
+        enabled?: boolean | undefined;
+        excludePatterns?: string[] | undefined;
+        symbolExtract?: boolean | undefined;
+        vector?: boolean | undefined;
+        batchSize?: number | undefined;
+        embeddingBatchSize?: number | undefined;
+        embeddingConcurrency?: number | undefined;
+        maxPendingEmbedBatches?: number | undefined;
+        batchProcessingConcurrency?: number | undefined;
+        maxIndexedFiles?: number | undefined;
+        searchWhileIndexing?: boolean | undefined;
+        maxIndexingFailureRate?: number | undefined;
+        debounceMs?: number | undefined;
+        codebaseSearchSnippetMaxChars?: number | undefined;
+    }>>;
+    permissions: z.ZodDefault<z.ZodObject<{
+        autoApproveRead: z.ZodDefault<z.ZodBoolean>;
+        autoApproveWrite: z.ZodDefault<z.ZodBoolean>;
+        autoApproveCommand: z.ZodDefault<z.ZodBoolean>;
+        autoApproveMcp: z.ZodDefault<z.ZodBoolean>;
+        autoApproveBrowser: z.ZodDefault<z.ZodBoolean>;
+        /** When false, loading a skill via `Skill` shows an approval dialog (Kilo-style). Default true = no prompt. */
+        autoApproveSkillLoad: z.ZodDefault<z.ZodBoolean>;
+        autoApproveReadPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        /** Commands allowed without approval for this project (stored in .nexus/allowed-commands.json) */
+        allowedCommands: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        /** Command patterns from .nexus/settings.json + settings.local.json */
+        allowCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        /** MCP tool names allowed without approval for this project (e.g. ["codex - codex"]) */
+        allowedMcpTools: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        denyCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        askCommandPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        denyPatterns: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        rules: z.ZodDefault<z.ZodArray<z.ZodObject<{
+            authority: z.ZodOptional<z.ZodEnum<["host", "project"]>>;
+            tool: z.ZodOptional<z.ZodString>;
+            pathPattern: z.ZodOptional<z.ZodString>;
+            commandPattern: z.ZodOptional<z.ZodString>;
+            action: z.ZodEnum<["allow", "deny", "ask"]>;
+            reason: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            action: "allow" | "ask" | "deny";
+            tool?: string | undefined;
+            authority?: "host" | "project" | undefined;
+            reason?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+        }, {
+            action: "allow" | "ask" | "deny";
+            tool?: string | undefined;
+            authority?: "host" | "project" | undefined;
+            reason?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+        }>, "many">>;
+    }, "strip", z.ZodTypeAny, {
+        rules: {
+            action: "allow" | "ask" | "deny";
+            tool?: string | undefined;
+            authority?: "host" | "project" | undefined;
+            reason?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+        }[];
+        autoApproveRead: boolean;
+        autoApproveWrite: boolean;
+        autoApproveCommand: boolean;
+        autoApproveMcp: boolean;
+        autoApproveBrowser: boolean;
+        autoApproveSkillLoad: boolean;
+        autoApproveReadPatterns: string[];
+        allowedCommands: string[];
+        allowCommandPatterns: string[];
+        allowedMcpTools: string[];
+        denyCommandPatterns: string[];
+        askCommandPatterns: string[];
+        denyPatterns: string[];
+    }, {
+        rules?: {
+            action: "allow" | "ask" | "deny";
+            tool?: string | undefined;
+            authority?: "host" | "project" | undefined;
+            reason?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+        }[] | undefined;
+        autoApproveRead?: boolean | undefined;
+        autoApproveWrite?: boolean | undefined;
+        autoApproveCommand?: boolean | undefined;
+        autoApproveMcp?: boolean | undefined;
+        autoApproveBrowser?: boolean | undefined;
+        autoApproveSkillLoad?: boolean | undefined;
+        autoApproveReadPatterns?: string[] | undefined;
+        allowedCommands?: string[] | undefined;
+        allowCommandPatterns?: string[] | undefined;
+        allowedMcpTools?: string[] | undefined;
+        denyCommandPatterns?: string[] | undefined;
+        askCommandPatterns?: string[] | undefined;
+        denyPatterns?: string[] | undefined;
+    }>>;
+    retry: z.ZodDefault<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        maxAttempts: z.ZodDefault<z.ZodNumber>;
+        initialDelayMs: z.ZodDefault<z.ZodNumber>;
+        maxDelayMs: z.ZodDefault<z.ZodNumber>;
+        retryOnStatus: z.ZodDefault<z.ZodArray<z.ZodNumber, "many">>;
+    }, "strip", z.ZodTypeAny, {
+        enabled: boolean;
+        maxAttempts: number;
+        initialDelayMs: number;
+        maxDelayMs: number;
+        retryOnStatus: number[];
+    }, {
+        enabled?: boolean | undefined;
+        maxAttempts?: number | undefined;
+        initialDelayMs?: number | undefined;
+        maxDelayMs?: number | undefined;
+        retryOnStatus?: number[] | undefined;
+    }>>;
+    checkpoint: z.ZodDefault<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        timeoutMs: z.ZodDefault<z.ZodNumber>;
+        createOnWrite: z.ZodDefault<z.ZodBoolean>;
+        doubleCheckCompletion: z.ZodDefault<z.ZodBoolean>;
+    }, "strip", z.ZodTypeAny, {
+        enabled: boolean;
+        timeoutMs: number;
+        createOnWrite: boolean;
+        doubleCheckCompletion: boolean;
+    }, {
+        enabled?: boolean | undefined;
+        timeoutMs?: number | undefined;
+        createOnWrite?: boolean | undefined;
+        doubleCheckCompletion?: boolean | undefined;
+    }>>;
+    /** UI preferences (e.g. chat pane). */
+    ui: z.ZodDefault<z.ZodObject<{
+        /** When true, streamed text_delta is shown in chat as muted/small "reasoning"; when false, only final assistant text is shown. */
+        showReasoningInChat: z.ZodDefault<z.ZodBoolean>;
+    }, "strip", z.ZodTypeAny, {
+        showReasoningInChat: boolean;
+    }, {
+        showReasoningInChat?: boolean | undefined;
+    }>>;
+    mcp: z.ZodDefault<z.ZodObject<{
+        servers: z.ZodDefault<z.ZodArray<z.ZodEffects<z.ZodObject<{
+            name: z.ZodString;
+            command: z.ZodOptional<z.ZodString>;
+            args: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+            env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+            cwd: z.ZodOptional<z.ZodString>;
+            url: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+            transport: z.ZodOptional<z.ZodEnum<["stdio", "http", "sse"]>>;
+            type: z.ZodOptional<z.ZodEnum<["stdio", "sse", "streamable-http", "http"]>>;
+            headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+            enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
+            startupTimeoutMs: z.ZodOptional<z.ZodNumber>;
+            toolTimeoutMs: z.ZodOptional<z.ZodNumber>;
+            /** Optional bundle id (e.g. "context-mode"); resolved by host to command/args/env when installed. */
+            bundle: z.ZodOptional<z.ZodString>;
+            auth: z.ZodOptional<z.ZodObject<{
+                type: z.ZodOptional<z.ZodEnum<["oauth", "url", "manual"]>>;
+                startUrl: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+                message: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            }, {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            }>>;
+        }, "strip", z.ZodTypeAny, {
+            name: string;
+            enabled: boolean;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            url?: string | undefined;
+            headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            auth?: {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+            command?: string | undefined;
+            cwd?: string | undefined;
+            bundle?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+        }, {
+            name: string;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            url?: string | undefined;
+            headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            enabled?: boolean | undefined;
+            auth?: {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+            command?: string | undefined;
+            cwd?: string | undefined;
+            bundle?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+        }>, {
+            name: string;
+            enabled: boolean;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            url?: string | undefined;
+            headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            auth?: {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+            command?: string | undefined;
+            cwd?: string | undefined;
+            bundle?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+        }, {
+            name: string;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            url?: string | undefined;
+            headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            enabled?: boolean | undefined;
+            auth?: {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+            command?: string | undefined;
+            cwd?: string | undefined;
+            bundle?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+        }>, "many">>;
+        /**
+         * Repository-provided MCP definitions are data, not startup authority.
+         * A host may present these requests and promote one only after an explicit
+         * trusted approval flow.
+         */
+        pendingProjectServers: z.ZodDefault<z.ZodArray<z.ZodObject<{
+            source: z.ZodLiteral<"project">;
+            origin: z.ZodEnum<["project-config", "project-mcp-json"]>;
+            status: z.ZodLiteral<"pending">;
+            config: z.ZodEffects<z.ZodObject<{
+                name: z.ZodString;
+                command: z.ZodOptional<z.ZodString>;
+                args: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+                env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+                cwd: z.ZodOptional<z.ZodString>;
+                url: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+                transport: z.ZodOptional<z.ZodEnum<["stdio", "http", "sse"]>>;
+                type: z.ZodOptional<z.ZodEnum<["stdio", "sse", "streamable-http", "http"]>>;
+                headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+                enabled: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
+                startupTimeoutMs: z.ZodOptional<z.ZodNumber>;
+                toolTimeoutMs: z.ZodOptional<z.ZodNumber>;
+                /** Optional bundle id (e.g. "context-mode"); resolved by host to command/args/env when installed. */
+                bundle: z.ZodOptional<z.ZodString>;
+                auth: z.ZodOptional<z.ZodObject<{
+                    type: z.ZodOptional<z.ZodEnum<["oauth", "url", "manual"]>>;
+                    startUrl: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+                    message: z.ZodOptional<z.ZodString>;
+                }, "strip", z.ZodTypeAny, {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                }, {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                }>>;
+            }, "strip", z.ZodTypeAny, {
+                name: string;
+                enabled: boolean;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            }, {
+                name: string;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                enabled?: boolean | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            }>, {
+                name: string;
+                enabled: boolean;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            }, {
+                name: string;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                enabled?: boolean | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            }>;
+        }, "strip", z.ZodTypeAny, {
+            status: "pending";
+            origin: "project-config" | "project-mcp-json";
+            config: {
+                name: string;
+                enabled: boolean;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            };
+            source: "project";
+        }, {
+            status: "pending";
+            origin: "project-config" | "project-mcp-json";
+            config: {
+                name: string;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                enabled?: boolean | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            };
+            source: "project";
+        }>, "many">>;
+    }, "strip", z.ZodTypeAny, {
+        servers: {
+            name: string;
+            enabled: boolean;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            url?: string | undefined;
+            headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            auth?: {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+            command?: string | undefined;
+            cwd?: string | undefined;
+            bundle?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+        }[];
+        pendingProjectServers: {
+            status: "pending";
+            origin: "project-config" | "project-mcp-json";
+            config: {
+                name: string;
+                enabled: boolean;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            };
+            source: "project";
+        }[];
+    }, {
+        servers?: {
+            name: string;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            url?: string | undefined;
+            headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            enabled?: boolean | undefined;
+            auth?: {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+            command?: string | undefined;
+            cwd?: string | undefined;
+            bundle?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+        }[] | undefined;
+        pendingProjectServers?: {
+            status: "pending";
+            origin: "project-config" | "project-mcp-json";
+            config: {
+                name: string;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                enabled?: boolean | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            };
+            source: "project";
+        }[] | undefined;
+    }>>;
+    /**
+     * Normalized repository requests which are inert until the exact workspace
+     * host store approves their content fingerprint.
+     */
+    pendingProjectAuthority: z.ZodDefault<z.ZodArray<z.ZodType<PendingProjectAuthorityRequest<"profiles" | "custom-tools" | "model-endpoint" | "embeddings-endpoint" | "vector-db-endpoint" | "remote-skills" | "external-skill-paths" | "external-rule-paths" | "external-memory-path" | "claude-global-directory">, z.ZodTypeDef, PendingProjectAuthorityRequest<"profiles" | "custom-tools" | "model-endpoint" | "embeddings-endpoint" | "vector-db-endpoint" | "remote-skills" | "external-skill-paths" | "external-rule-paths" | "external-memory-path" | "claude-global-directory">>, "many">>;
+    skills: z.ZodDefault<z.ZodArray<z.ZodUnion<[z.ZodString, z.ZodObject<{
+        path: z.ZodString;
+        enabled: z.ZodOptional<z.ZodBoolean>;
+    }, "strip", z.ZodTypeAny, {
+        path: string;
+        enabled?: boolean | undefined;
+    }, {
+        path: string;
+        enabled?: boolean | undefined;
+    }>]>, "many">>;
+    /** Remote skill registries (base URL → index.json + files), cached under ~/.nexus/cache/skills/. */
+    skillsUrls: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    tools: z.ZodDefault<z.ZodObject<{
+        custom: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        /**
+         * @deprecated Parsed only so older configuration files remain valid.
+         * Runtime capability discovery is deterministic and never invokes an LLM
+         * pre-classifier.
+         */
+        classifyToolsEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** @deprecated Compatibility-only companion to classifyToolsEnabled. */
+        classifyThreshold: z.ZodDefault<z.ZodNumber>;
+        parallelReads: z.ZodDefault<z.ZodBoolean>;
+        maxParallelReads: z.ZodDefault<z.ZodNumber>;
+        /** Deferred tool loading strategy for MCP/custom heavy tools. */
+        deferredLoadingMode: z.ZodDefault<z.ZodEnum<["auto", "always", "never"]>>;
+        /** In auto mode, switch to ToolSearch when deferred tools exceed this fraction of context. */
+        deferredLoadingThresholdPercent: z.ZodDefault<z.ZodNumber>;
+        /** In auto mode, always defer once this many tools are marked shouldDefer. */
+        deferredLoadingMinimumTools: z.ZodDefault<z.ZodNumber>;
+    }, "strip", z.ZodTypeAny, {
+        custom: string[];
+        classifyToolsEnabled: boolean;
+        classifyThreshold: number;
+        parallelReads: boolean;
+        maxParallelReads: number;
+        deferredLoadingMode: "never" | "always" | "auto";
+        deferredLoadingThresholdPercent: number;
+        deferredLoadingMinimumTools: number;
+    }, {
+        custom?: string[] | undefined;
+        classifyToolsEnabled?: boolean | undefined;
+        classifyThreshold?: number | undefined;
+        parallelReads?: boolean | undefined;
+        maxParallelReads?: number | undefined;
+        deferredLoadingMode?: "never" | "always" | "auto" | undefined;
+        deferredLoadingThresholdPercent?: number | undefined;
+        deferredLoadingMinimumTools?: number | undefined;
+    }>>;
+    /** @deprecated Compatibility-only; skill discovery is deterministic. */
+    skillClassifyEnabled: z.ZodDefault<z.ZodBoolean>;
+    /** @deprecated Compatibility-only companion to skillClassifyEnabled. */
+    skillClassifyThreshold: z.ZodDefault<z.ZodNumber>;
+    structuredOutput: z.ZodDefault<z.ZodEnum<["auto", "always", "never"]>>;
+    summarization: z.ZodDefault<z.ZodObject<{
+        auto: z.ZodDefault<z.ZodBoolean>;
+        threshold: z.ZodDefault<z.ZodNumber>;
+        keepRecentMessages: z.ZodDefault<z.ZodNumber>;
+        model: z.ZodDefault<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        model: string;
+        auto: boolean;
+        threshold: number;
+        keepRecentMessages: number;
+    }, {
+        model?: string | undefined;
+        auto?: boolean | undefined;
+        threshold?: number | undefined;
+        keepRecentMessages?: number | undefined;
+    }>>;
+    parallelAgents: z.ZodDefault<z.ZodObject<{
+        maxParallel: z.ZodDefault<z.ZodNumber>;
+        /** Deprecated: old SpawnAgents multi-task setting. Parallel sub-agent batching now uses Parallel + SpawnAgent calls. */
+        maxTasksPerCall: z.ZodDefault<z.ZodNumber>;
+        maxDepth: z.ZodDefault<z.ZodNumber>;
+    }, "strip", z.ZodTypeAny, {
+        maxDepth: number;
+        maxTasksPerCall: number;
+        maxParallel: number;
+    }, {
+        maxDepth?: number | undefined;
+        maxTasksPerCall?: number | undefined;
+        maxParallel?: number | undefined;
+    }>>;
+    compatibility: z.ZodDefault<z.ZodObject<{
+        claude: z.ZodDefault<z.ZodObject<{
+            enabled: z.ZodDefault<z.ZodBoolean>;
+            includeGlobalDir: z.ZodDefault<z.ZodBoolean>;
+            includeProjectDir: z.ZodDefault<z.ZodBoolean>;
+            includeLocalInstructions: z.ZodDefault<z.ZodBoolean>;
+            includeRules: z.ZodDefault<z.ZodBoolean>;
+            includeSettings: z.ZodDefault<z.ZodBoolean>;
+            includeCommands: z.ZodDefault<z.ZodBoolean>;
+            includeSkills: z.ZodDefault<z.ZodBoolean>;
+            includeAgents: z.ZodDefault<z.ZodBoolean>;
+            includePlugins: z.ZodDefault<z.ZodBoolean>;
+        }, "strip", z.ZodTypeAny, {
+            enabled: boolean;
+            includeGlobalDir: boolean;
+            includeProjectDir: boolean;
+            includeLocalInstructions: boolean;
+            includeRules: boolean;
+            includeSettings: boolean;
+            includeCommands: boolean;
+            includeSkills: boolean;
+            includeAgents: boolean;
+            includePlugins: boolean;
+        }, {
+            enabled?: boolean | undefined;
+            includeGlobalDir?: boolean | undefined;
+            includeProjectDir?: boolean | undefined;
+            includeLocalInstructions?: boolean | undefined;
+            includeRules?: boolean | undefined;
+            includeSettings?: boolean | undefined;
+            includeCommands?: boolean | undefined;
+            includeSkills?: boolean | undefined;
+            includeAgents?: boolean | undefined;
+            includePlugins?: boolean | undefined;
+        }>>;
+    }, "strip", z.ZodTypeAny, {
+        claude: {
+            enabled: boolean;
+            includeGlobalDir: boolean;
+            includeProjectDir: boolean;
+            includeLocalInstructions: boolean;
+            includeRules: boolean;
+            includeSettings: boolean;
+            includeCommands: boolean;
+            includeSkills: boolean;
+            includeAgents: boolean;
+            includePlugins: boolean;
+        };
+    }, {
+        claude?: {
+            enabled?: boolean | undefined;
+            includeGlobalDir?: boolean | undefined;
+            includeProjectDir?: boolean | undefined;
+            includeLocalInstructions?: boolean | undefined;
+            includeRules?: boolean | undefined;
+            includeSettings?: boolean | undefined;
+            includeCommands?: boolean | undefined;
+            includeSkills?: boolean | undefined;
+            includeAgents?: boolean | undefined;
+            includePlugins?: boolean | undefined;
+        } | undefined;
+    }>>;
+    plugins: z.ZodDefault<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        trusted: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        blocked: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+        enableHooks: z.ZodDefault<z.ZodBoolean>;
+        hookTimeoutMs: z.ZodDefault<z.ZodNumber>;
+        options: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
+    }, "strip", z.ZodTypeAny, {
+        options: Record<string, Record<string, unknown>>;
+        enabled: boolean;
+        trusted: string[];
+        enableHooks: boolean;
+        blocked: string[];
+        hookTimeoutMs: number;
+    }, {
+        options?: Record<string, Record<string, unknown>> | undefined;
+        enabled?: boolean | undefined;
+        trusted?: string[] | undefined;
+        enableHooks?: boolean | undefined;
+        blocked?: string[] | undefined;
+        hookTimeoutMs?: number | undefined;
+    }>>;
+    /** Optional overrides for agent loop limits (OpenCode-style: allow enough tools/iterations to finish). */
+    agentLoop: z.ZodDefault<z.ZodObject<{
+        toolCallBudget: z.ZodOptional<z.ZodObject<{
+            ask: z.ZodOptional<z.ZodNumber>;
+            plan: z.ZodOptional<z.ZodNumber>;
+            agent: z.ZodOptional<z.ZodNumber>;
+            debug: z.ZodOptional<z.ZodNumber>;
+            review: z.ZodOptional<z.ZodNumber>;
+        }, "strip", z.ZodTypeAny, {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        }, {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        }>>;
+        maxIterations: z.ZodOptional<z.ZodObject<{
+            ask: z.ZodOptional<z.ZodNumber>;
+            plan: z.ZodOptional<z.ZodNumber>;
+            agent: z.ZodOptional<z.ZodNumber>;
+            debug: z.ZodOptional<z.ZodNumber>;
+            review: z.ZodOptional<z.ZodNumber>;
+        }, "strip", z.ZodTypeAny, {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        }, {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        }>>;
+    }, "strip", z.ZodTypeAny, {
+        toolCallBudget?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        } | undefined;
+        maxIterations?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        } | undefined;
+    }, {
+        toolCallBudget?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        } | undefined;
+        maxIterations?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        } | undefined;
+    }>>;
+    rules: z.ZodDefault<z.ZodObject<{
+        files: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+    }, "strip", z.ZodTypeAny, {
+        files: string[];
+    }, {
+        files?: string[] | undefined;
+    }>>;
+    /**
+     * OpenClaude-class memory: auto-memory dir, session scrolling notes file, tool spill hints.
+     * Session file lives next to JSONL under .nexus/sessions (per project hash).
+     */
+    memory: z.ZodDefault<z.ZodObject<{
+        /** Load project auto-memory markdown into the rules block (OpenClaude auto-memory parity). */
+        autoMemoryEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** Override directory; tilde expanded for home. When unset, uses default project memory dir. */
+        autoMemoryDirectory: z.ZodOptional<z.ZodString>;
+        /** Maintain session-memory.md next to JSONL and inject into system prompt. */
+        sessionMemoryEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** Background LLM refresh after this many tool results in the outer loop (approximate). */
+        sessionMemoryMinToolCallsBetweenUpdates: z.ZodDefault<z.ZodNumber>;
+        /** Max stored characters for the session memory file. */
+        sessionMemoryMaxChars: z.ZodDefault<z.ZodNumber>;
+        /** When compacting tool results, keep spill path in model-facing text (stronger OpenClaude parity). */
+        emphasizeToolSpillPaths: z.ZodDefault<z.ZodBoolean>;
+        /** Load team markdown from ~/.nexus/teams/{encoded name}/memory/ for runtime teams. */
+        teamMemoryEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** Periodically consolidate auto-memory dir into _nexus_consolidated_memory.md via LLM. */
+        autoDreamEnabled: z.ZodDefault<z.ZodBoolean>;
+        /** Min milliseconds between auto-dream runs. */
+        autoDreamMinIntervalMs: z.ZodDefault<z.ZodNumber>;
+    }, "strip", z.ZodTypeAny, {
+        sessionMemoryEnabled: boolean;
+        autoMemoryEnabled: boolean;
+        autoDreamEnabled: boolean;
+        teamMemoryEnabled: boolean;
+        emphasizeToolSpillPaths: boolean;
+        sessionMemoryMinToolCallsBetweenUpdates: number;
+        sessionMemoryMaxChars: number;
+        autoDreamMinIntervalMs: number;
+        autoMemoryDirectory?: string | undefined;
+    }, {
+        sessionMemoryEnabled?: boolean | undefined;
+        autoMemoryEnabled?: boolean | undefined;
+        autoDreamEnabled?: boolean | undefined;
+        teamMemoryEnabled?: boolean | undefined;
+        emphasizeToolSpillPaths?: boolean | undefined;
+        autoMemoryDirectory?: string | undefined;
+        sessionMemoryMinToolCallsBetweenUpdates?: number | undefined;
+        sessionMemoryMaxChars?: number | undefined;
+        autoDreamMinIntervalMs?: number | undefined;
+    }>>;
+    profiles: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
+        provider: z.ZodOptional<z.ZodEnum<["anthropic", "openai", "google", "ollama", "openai-compatible", "azure", "bedrock", "groq", "mistral", "xai", "deepinfra", "cerebras", "cohere", "togetherai", "perplexity", "minimax"]>>;
+        id: z.ZodOptional<z.ZodString>;
+        apiKey: z.ZodOptional<z.ZodOptional<z.ZodString>>;
+        baseUrl: z.ZodOptional<z.ZodOptional<z.ZodString>>;
+        temperature: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
+        reasoningEffort: z.ZodOptional<z.ZodDefault<z.ZodString>>;
+        reasoningHistoryMode: z.ZodOptional<z.ZodDefault<z.ZodEnum<["auto", "inline", "reasoning_content", "reasoning_details"]>>>;
+        contextWindow: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
+        resourceName: z.ZodOptional<z.ZodOptional<z.ZodString>>;
+        deploymentId: z.ZodOptional<z.ZodOptional<z.ZodString>>;
+        apiVersion: z.ZodOptional<z.ZodOptional<z.ZodString>>;
+        extra: z.ZodOptional<z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
+    }, "strip", z.ZodTypeAny, {
+        id?: string | undefined;
+        temperature?: number | undefined;
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "inline" | "auto" | "reasoning_content" | "reasoning_details" | undefined;
+        contextWindow?: number | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }, {
+        id?: string | undefined;
+        temperature?: number | undefined;
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "inline" | "auto" | "reasoning_content" | "reasoning_details" | undefined;
+        contextWindow?: number | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }>>>;
+}, "strip", z.ZodTypeAny, {
+    tools: {
+        custom: string[];
+        classifyToolsEnabled: boolean;
+        classifyThreshold: number;
+        parallelReads: boolean;
+        maxParallelReads: number;
+        deferredLoadingMode: "never" | "always" | "auto";
+        deferredLoadingThresholdPercent: number;
+        deferredLoadingMinimumTools: number;
+    };
+    mcp: {
+        servers: {
+            name: string;
+            enabled: boolean;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            url?: string | undefined;
+            headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            auth?: {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+            command?: string | undefined;
+            cwd?: string | undefined;
+            bundle?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+        }[];
+        pendingProjectServers: {
+            status: "pending";
+            origin: "project-config" | "project-mcp-json";
+            config: {
+                name: string;
+                enabled: boolean;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            };
+            source: "project";
+        }[];
+    };
+    memory: {
+        sessionMemoryEnabled: boolean;
+        autoMemoryEnabled: boolean;
+        autoDreamEnabled: boolean;
+        teamMemoryEnabled: boolean;
+        emphasizeToolSpillPaths: boolean;
+        sessionMemoryMinToolCallsBetweenUpdates: number;
+        sessionMemoryMaxChars: number;
+        autoDreamMinIntervalMs: number;
+        autoMemoryDirectory?: string | undefined;
+    };
+    model: {
+        id: string;
+        provider: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        reasoningEffort: string;
+        reasoningHistoryMode: "inline" | "auto" | "reasoning_content" | "reasoning_details";
+        temperature?: number | undefined;
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        contextWindow?: number | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    };
+    compatibility: {
+        claude: {
+            enabled: boolean;
+            includeGlobalDir: boolean;
+            includeProjectDir: boolean;
+            includeLocalInstructions: boolean;
+            includeRules: boolean;
+            includeSettings: boolean;
+            includeCommands: boolean;
+            includeSkills: boolean;
+            includeAgents: boolean;
+            includePlugins: boolean;
+        };
+    };
+    modes: {
+        agent?: {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        } | undefined;
+        plan?: {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        } | undefined;
+        ask?: {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        } | undefined;
+        debug?: {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        } | undefined;
+        review?: {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        } | undefined;
+    } & {
+        [k: string]: {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        } | undefined;
+    };
+    indexing: {
+        enabled: boolean;
+        excludePatterns: string[];
+        symbolExtract: boolean;
+        vector: boolean;
+        batchSize: number;
+        embeddingBatchSize: number;
+        embeddingConcurrency: number;
+        maxPendingEmbedBatches: number;
+        batchProcessingConcurrency: number;
+        maxIndexedFiles: number;
+        searchWhileIndexing: boolean;
+        maxIndexingFailureRate: number;
+        debounceMs: number;
+        codebaseSearchSnippetMaxChars: number;
+    };
+    permissions: {
+        rules: {
+            action: "allow" | "ask" | "deny";
+            tool?: string | undefined;
+            authority?: "host" | "project" | undefined;
+            reason?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+        }[];
+        autoApproveRead: boolean;
+        autoApproveWrite: boolean;
+        autoApproveCommand: boolean;
+        autoApproveMcp: boolean;
+        autoApproveBrowser: boolean;
+        autoApproveSkillLoad: boolean;
+        autoApproveReadPatterns: string[];
+        allowedCommands: string[];
+        allowCommandPatterns: string[];
+        allowedMcpTools: string[];
+        denyCommandPatterns: string[];
+        askCommandPatterns: string[];
+        denyPatterns: string[];
+    };
+    retry: {
+        enabled: boolean;
+        maxAttempts: number;
+        initialDelayMs: number;
+        maxDelayMs: number;
+        retryOnStatus: number[];
+    };
+    checkpoint: {
+        enabled: boolean;
+        timeoutMs: number;
+        createOnWrite: boolean;
+        doubleCheckCompletion: boolean;
+    };
+    ui: {
+        showReasoningInChat: boolean;
+    };
+    pendingProjectAuthority: PendingProjectAuthorityRequest<"profiles" | "custom-tools" | "model-endpoint" | "embeddings-endpoint" | "vector-db-endpoint" | "remote-skills" | "external-skill-paths" | "external-rule-paths" | "external-memory-path" | "claude-global-directory">[];
+    skills: (string | {
+        path: string;
+        enabled?: boolean | undefined;
+    })[];
+    skillClassifyEnabled: boolean;
+    skillClassifyThreshold: number;
+    structuredOutput: "never" | "always" | "auto";
+    summarization: {
+        model: string;
+        auto: boolean;
+        threshold: number;
+        keepRecentMessages: number;
+    };
+    parallelAgents: {
+        maxDepth: number;
+        maxTasksPerCall: number;
+        maxParallel: number;
+    };
+    plugins: {
+        options: Record<string, Record<string, unknown>>;
+        enabled: boolean;
+        trusted: string[];
+        enableHooks: boolean;
+        blocked: string[];
+        hookTimeoutMs: number;
+    };
+    agentLoop: {
+        toolCallBudget?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        } | undefined;
+        maxIterations?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        } | undefined;
+    };
+    rules: {
+        files: string[];
+    };
+    profiles: Record<string, {
+        id?: string | undefined;
+        temperature?: number | undefined;
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "inline" | "auto" | "reasoning_content" | "reasoning_details" | undefined;
+        contextWindow?: number | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }>;
+    embeddings?: {
+        model: string;
+        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        dimensions?: number | undefined;
+        region?: string | undefined;
+    } | undefined;
+    vectorDb?: {
+        url: string;
+        enabled: boolean;
+        autoStart: boolean;
+        collection: string;
+        upsertWait: boolean;
+        apiKey?: string | undefined;
+        searchMinScore?: number | undefined;
+        searchHnswEf?: number | undefined;
+        searchExact?: boolean | undefined;
+    } | undefined;
+    skillsUrls?: string[] | undefined;
+}, {
+    tools?: {
+        custom?: string[] | undefined;
+        classifyToolsEnabled?: boolean | undefined;
+        classifyThreshold?: number | undefined;
+        parallelReads?: boolean | undefined;
+        maxParallelReads?: number | undefined;
+        deferredLoadingMode?: "never" | "always" | "auto" | undefined;
+        deferredLoadingThresholdPercent?: number | undefined;
+        deferredLoadingMinimumTools?: number | undefined;
+    } | undefined;
+    mcp?: {
+        servers?: {
+            name: string;
+            type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+            url?: string | undefined;
+            headers?: Record<string, string> | undefined;
+            startupTimeoutMs?: number | undefined;
+            toolTimeoutMs?: number | undefined;
+            transport?: "stdio" | "http" | "sse" | undefined;
+            enabled?: boolean | undefined;
+            auth?: {
+                type?: "url" | "manual" | "oauth" | undefined;
+                message?: string | undefined;
+                startUrl?: string | undefined;
+            } | undefined;
+            command?: string | undefined;
+            cwd?: string | undefined;
+            bundle?: string | undefined;
+            args?: string[] | undefined;
+            env?: Record<string, string> | undefined;
+        }[] | undefined;
+        pendingProjectServers?: {
+            status: "pending";
+            origin: "project-config" | "project-mcp-json";
+            config: {
+                name: string;
+                type?: "stdio" | "http" | "sse" | "streamable-http" | undefined;
+                url?: string | undefined;
+                headers?: Record<string, string> | undefined;
+                startupTimeoutMs?: number | undefined;
+                toolTimeoutMs?: number | undefined;
+                transport?: "stdio" | "http" | "sse" | undefined;
+                enabled?: boolean | undefined;
+                auth?: {
+                    type?: "url" | "manual" | "oauth" | undefined;
+                    message?: string | undefined;
+                    startUrl?: string | undefined;
+                } | undefined;
+                command?: string | undefined;
+                cwd?: string | undefined;
+                bundle?: string | undefined;
+                args?: string[] | undefined;
+                env?: Record<string, string> | undefined;
+            };
+            source: "project";
+        }[] | undefined;
+    } | undefined;
+    memory?: {
+        sessionMemoryEnabled?: boolean | undefined;
+        autoMemoryEnabled?: boolean | undefined;
+        autoDreamEnabled?: boolean | undefined;
+        teamMemoryEnabled?: boolean | undefined;
+        emphasizeToolSpillPaths?: boolean | undefined;
+        autoMemoryDirectory?: string | undefined;
+        sessionMemoryMinToolCallsBetweenUpdates?: number | undefined;
+        sessionMemoryMaxChars?: number | undefined;
+        autoDreamMinIntervalMs?: number | undefined;
+    } | undefined;
+    model?: {
+        id: string;
+        provider: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        temperature?: number | undefined;
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "inline" | "auto" | "reasoning_content" | "reasoning_details" | undefined;
+        contextWindow?: number | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    } | undefined;
+    compatibility?: {
+        claude?: {
+            enabled?: boolean | undefined;
+            includeGlobalDir?: boolean | undefined;
+            includeProjectDir?: boolean | undefined;
+            includeLocalInstructions?: boolean | undefined;
+            includeRules?: boolean | undefined;
+            includeSettings?: boolean | undefined;
+            includeCommands?: boolean | undefined;
+            includeSkills?: boolean | undefined;
+            includeAgents?: boolean | undefined;
+            includePlugins?: boolean | undefined;
+        } | undefined;
+    } | undefined;
+    embeddings?: {
+        model: string;
+        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        dimensions?: number | undefined;
+        region?: string | undefined;
+    } | undefined;
+    vectorDb?: {
+        url?: string | undefined;
+        enabled?: boolean | undefined;
+        apiKey?: string | undefined;
+        autoStart?: boolean | undefined;
+        collection?: string | undefined;
+        upsertWait?: boolean | undefined;
+        searchMinScore?: number | undefined;
+        searchHnswEf?: number | undefined;
+        searchExact?: boolean | undefined;
+    } | undefined;
+    modes?: z.objectInputType<{
+        agent: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        plan: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        ask: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        debug: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+        review: z.ZodOptional<z.ZodObject<{
+            autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+            systemPrompt: z.ZodOptional<z.ZodString>;
+            customInstructions: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }, {
+            systemPrompt?: string | undefined;
+            autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+            customInstructions?: string | undefined;
+        }>>;
+    }, z.ZodOptional<z.ZodObject<{
+        autoApprove: z.ZodOptional<z.ZodArray<z.ZodEnum<["read", "write", "execute", "mcp", "browser", "search"]>, "many">>;
+        systemPrompt: z.ZodOptional<z.ZodString>;
+        customInstructions: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        systemPrompt?: string | undefined;
+        autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+        customInstructions?: string | undefined;
+    }, {
+        systemPrompt?: string | undefined;
+        autoApprove?: ("mcp" | "search" | "write" | "execute" | "browser" | "read")[] | undefined;
+        customInstructions?: string | undefined;
+    }>>, "strip"> | undefined;
+    indexing?: {
+        enabled?: boolean | undefined;
+        excludePatterns?: string[] | undefined;
+        symbolExtract?: boolean | undefined;
+        vector?: boolean | undefined;
+        batchSize?: number | undefined;
+        embeddingBatchSize?: number | undefined;
+        embeddingConcurrency?: number | undefined;
+        maxPendingEmbedBatches?: number | undefined;
+        batchProcessingConcurrency?: number | undefined;
+        maxIndexedFiles?: number | undefined;
+        searchWhileIndexing?: boolean | undefined;
+        maxIndexingFailureRate?: number | undefined;
+        debounceMs?: number | undefined;
+        codebaseSearchSnippetMaxChars?: number | undefined;
+    } | undefined;
+    permissions?: {
+        rules?: {
+            action: "allow" | "ask" | "deny";
+            tool?: string | undefined;
+            authority?: "host" | "project" | undefined;
+            reason?: string | undefined;
+            pathPattern?: string | undefined;
+            commandPattern?: string | undefined;
+        }[] | undefined;
+        autoApproveRead?: boolean | undefined;
+        autoApproveWrite?: boolean | undefined;
+        autoApproveCommand?: boolean | undefined;
+        autoApproveMcp?: boolean | undefined;
+        autoApproveBrowser?: boolean | undefined;
+        autoApproveSkillLoad?: boolean | undefined;
+        autoApproveReadPatterns?: string[] | undefined;
+        allowedCommands?: string[] | undefined;
+        allowCommandPatterns?: string[] | undefined;
+        allowedMcpTools?: string[] | undefined;
+        denyCommandPatterns?: string[] | undefined;
+        askCommandPatterns?: string[] | undefined;
+        denyPatterns?: string[] | undefined;
+    } | undefined;
+    retry?: {
+        enabled?: boolean | undefined;
+        maxAttempts?: number | undefined;
+        initialDelayMs?: number | undefined;
+        maxDelayMs?: number | undefined;
+        retryOnStatus?: number[] | undefined;
+    } | undefined;
+    checkpoint?: {
+        enabled?: boolean | undefined;
+        timeoutMs?: number | undefined;
+        createOnWrite?: boolean | undefined;
+        doubleCheckCompletion?: boolean | undefined;
+    } | undefined;
+    ui?: {
+        showReasoningInChat?: boolean | undefined;
+    } | undefined;
+    pendingProjectAuthority?: PendingProjectAuthorityRequest<"profiles" | "custom-tools" | "model-endpoint" | "embeddings-endpoint" | "vector-db-endpoint" | "remote-skills" | "external-skill-paths" | "external-rule-paths" | "external-memory-path" | "claude-global-directory">[] | undefined;
+    skills?: (string | {
+        path: string;
+        enabled?: boolean | undefined;
+    })[] | undefined;
+    skillsUrls?: string[] | undefined;
+    skillClassifyEnabled?: boolean | undefined;
+    skillClassifyThreshold?: number | undefined;
+    structuredOutput?: "never" | "always" | "auto" | undefined;
+    summarization?: {
+        model?: string | undefined;
+        auto?: boolean | undefined;
+        threshold?: number | undefined;
+        keepRecentMessages?: number | undefined;
+    } | undefined;
+    parallelAgents?: {
+        maxDepth?: number | undefined;
+        maxTasksPerCall?: number | undefined;
+        maxParallel?: number | undefined;
+    } | undefined;
+    plugins?: {
+        options?: Record<string, Record<string, unknown>> | undefined;
+        enabled?: boolean | undefined;
+        trusted?: string[] | undefined;
+        enableHooks?: boolean | undefined;
+        blocked?: string[] | undefined;
+        hookTimeoutMs?: number | undefined;
+    } | undefined;
+    agentLoop?: {
+        toolCallBudget?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        } | undefined;
+        maxIterations?: {
+            agent?: number | undefined;
+            plan?: number | undefined;
+            ask?: number | undefined;
+            debug?: number | undefined;
+            review?: number | undefined;
+        } | undefined;
+    } | undefined;
+    rules?: {
+        files?: string[] | undefined;
+    } | undefined;
+    profiles?: Record<string, {
+        id?: string | undefined;
+        temperature?: number | undefined;
+        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        apiKey?: string | undefined;
+        baseUrl?: string | undefined;
+        reasoningEffort?: string | undefined;
+        reasoningHistoryMode?: "inline" | "auto" | "reasoning_content" | "reasoning_details" | undefined;
+        contextWindow?: number | undefined;
+        resourceName?: string | undefined;
+        deploymentId?: string | undefined;
+        apiVersion?: string | undefined;
+        extra?: Record<string, unknown> | undefined;
+    }> | undefined;
+}>;
 
 interface ClaudeCompatibilityOptions {
     enabled: boolean;
@@ -3078,33 +4755,151 @@ interface ClaudeCompatibilityOptions {
 }
 declare function getClaudeCompatibilityOptions(config?: Pick<NexusConfig, "compatibility"> | null): ClaudeCompatibilityOptions;
 
+type CredentialPurpose = "chat" | "embeddings";
+interface CredentialIdentity {
+    purpose: CredentialPurpose;
+    provider: string;
+    destination: string;
+}
+interface ResolvedCredential {
+    identity: CredentialIdentity;
+    apiKey?: string;
+    source: "explicit" | "environment" | "local" | "kilo-free" | "native";
+}
+/**
+ * Canonical credential destinations deliberately retain the complete base path:
+ * credentials for two tenants on one host are not interchangeable.
+ */
+declare function canonicalizeCredentialDestination(baseUrl: string): string;
+declare function getProviderCredentialIdentity(config: ProviderConfig): CredentialIdentity;
+declare function getEmbeddingCredentialIdentity(config: EmbeddingConfig): CredentialIdentity;
+declare function credentialIdentityKey(identity: CredentialIdentity): string;
+declare function resolveProviderCredential(config: ProviderConfig, env?: NodeJS.ProcessEnv): ResolvedCredential;
+declare function resolveEmbeddingCredential(config: EmbeddingConfig, env?: NodeJS.ProcessEnv): ResolvedCredential;
+declare function mergeProviderConfigSafely(current: ProviderConfig, patch: Partial<ProviderConfig>): ProviderConfig;
+declare function mergeProviderConfigPartialSafely(current: Partial<ProviderConfig>, patch: Partial<ProviderConfig>): Partial<ProviderConfig>;
+/**
+ * Apply a preset's model selector as one endpoint-aware transaction.
+ * `openrouter` is an alias with a fixed trusted endpoint. A generic compatible
+ * preset must reuse an already explicit compatible endpoint; provider+model
+ * alone is not a complete or safe selection.
+ */
+declare function mergeModelPresetSelection(current: ProviderConfig, provider: string, modelId: string): ProviderConfig;
+/**
+ * Profile activation is a new credential binding even when provider and
+ * destination match the active profile. Never inherit the active key.
+ */
+declare function selectProviderProfile(base: ProviderConfig, profile: Partial<ProviderConfig>): ProviderConfig;
+declare function mergeEmbeddingConfigSafely(current: EmbeddingConfig, patch: Partial<EmbeddingConfig>): EmbeddingConfig;
+declare function normalizeAzureResourceName(value: unknown): string;
+declare function normalizeAwsRegion(value: unknown): string;
+
 /**
  * Secrets store abstraction for hosts that support it.
  * API keys are never written to YAML; they are stored in a secure store and
  * applied at load time after env overrides.
  */
+
 /** Key used in secrets store (VS Code secretStorage or file) for API keys payload. */
 declare const NEXUS_SECRETS_STORAGE_KEY = "nexuscode_api";
-interface NexusSecretsPayload {
+interface NexusBoundSecret extends CredentialIdentity {
+    secret: string;
+}
+interface NexusLegacyUnboundSecrets {
     model?: string;
     embeddings?: string;
+    profiles?: Record<string, string>;
+}
+interface NexusSecretsPayload {
+    version: 2;
+    credentials: Record<string, NexusBoundSecret>;
+    /**
+     * Compatibility binding for named local profiles. The remote protocol still
+     * needs stable profile IDs; names are never treated as credential identity.
+     */
+    profileCredentials?: Record<string, NexusBoundSecret>;
+    /**
+     * V1 values had no destination identity. They remain available for explicit
+     * migration UI, but are never attached to a request automatically.
+     */
+    legacyUnbound?: NexusLegacyUnboundSecrets;
     /** Qdrant / vector DB API key (same store as other keys; never written to YAML). */
     qdrantApiKey?: string;
-    /** API keys per profile name (global profiles in ~/.nexus/nexus.yaml). */
-    profiles?: Record<string, string>;
 }
 interface NexusSecretsStore {
     getSecret(key: string): Promise<string | undefined>;
     setSecret(key: string, value: string): Promise<void>;
+    /**
+     * Optional atomic read-modify-write primitive. File-backed stores implement
+     * this under one cross-process lock; hosts without it are serialized by an
+     * in-process per-store queue.
+     */
+    updateSecret?(key: string, update: (current: string | undefined) => string | undefined | Promise<string | undefined>): Promise<void>;
+}
+interface FinalizeConfigCredentialsOptions {
+    /**
+     * A named profile has an independent credential binding even when it points
+     * at the same provider destination as another profile or the base model.
+     */
+    profileName?: string;
+    /**
+     * Immutable host-scoped environment captured while loading config. Passing
+     * it avoids relying on global process mutation for project-local `.env`.
+     */
+    environment?: Readonly<Record<string, string | undefined>>;
+}
+interface ProfileCredentialRemoval {
+    name: string;
+    /** The previously resolved profile model whose binding must be removed. */
+    model: ProviderConfig;
+}
+interface SecretsRemoval {
+    /** `true` targets config.model; a config value can target an old scope. */
+    model?: true | ProviderConfig;
+    /** `true` targets config.embeddings; a config value can target an old scope. */
+    embeddings?: true | EmbeddingConfig;
+    /**
+     * Remove a named binding only when it still matches this old identity.
+     * This lets an endpoint change replace the key atomically.
+     */
+    profileBindings?: ProfileCredentialRemoval[];
+    /** Unconditional user-requested deletion by profile name. */
+    profileNames?: string[];
+    qdrant?: boolean;
+}
+interface PersistSecretsOptions {
+    remove?: SecretsRemoval;
+}
+declare class UnsupportedSecretsVersionError extends Error {
+    readonly version: unknown;
+    constructor(version: unknown);
+}
+type SecretsCorruptionReason = "invalid-json" | "invalid-root" | "missing-credentials" | "invalid-credentials" | "invalid-credential" | "credential-key-mismatch" | "invalid-profile-credentials" | "invalid-profile-credential" | "profile-name-collision" | "invalid-legacy-payload" | "invalid-qdrant-key";
+declare class SecretsCorruptionError extends Error {
+    readonly reason: SecretsCorruptionReason;
+    constructor(reason: SecretsCorruptionReason, cause?: unknown);
+}
+declare class ProfileCredentialCollisionError extends Error {
+    readonly canonicalName: string;
+    constructor(canonicalName: string);
 }
 /**
- * Apply secrets from store into config (in-place).
- * Only sets model.apiKey, embeddings.apiKey, vectorDb.apiKey, and profiles[name].apiKey if not already set (env/config takes precedence).
+ * Resolve secure-store credentials only after a host has finished selecting the
+ * effective model, endpoint, profile, preset and embedding configuration.
+ *
+ * The input is never mutated. Raw profiles remain secretless: only the final
+ * runtime model receives a named profile credential.
+ */
+declare function finalizeConfigCredentials<T extends Record<string, unknown>>(config: T, store: NexusSecretsStore, options?: FinalizeConfigCredentialsOptions): Promise<T>;
+/**
+ * Backward-compatible in-place finalization for older hosts. New host code
+ * should use finalizeConfigCredentials after all selection overrides.
  */
 declare function applySecretsToConfig(config: Record<string, unknown>, store: NexusSecretsStore): Promise<void>;
 /**
- * Strip secret fields from config for persisting to YAML (never write apiKey to repo).
- * Returns a deep copy with model.apiKey, embeddings.apiKey, vectorDb.apiKey, and each profiles[name].apiKey removed.
+ * Strip all known provider credentials from credential-bearing config sections.
+ * MCP environment/header values are deliberately outside this sanitizer because
+ * they have their own secure integration lifecycle.
  */
 declare function stripSecretsFromConfig<T extends Record<string, unknown>>(config: T): T;
 /**
@@ -3120,21 +4915,74 @@ declare function getSecretsPayloadFromConfig(config: Record<string, unknown>): N
  * Persist model and embeddings API keys from config into the secrets store.
  * Call after merging user config; then persist config with stripSecretsFromConfig.
  */
-declare function persistSecretsFromConfig(config: Record<string, unknown>, store: NexusSecretsStore): Promise<void>;
+declare function persistSecretsFromConfig(config: Record<string, unknown>, store: NexusSecretsStore, options?: PersistSecretsOptions): Promise<void>;
 /**
  * File-based secrets store for CLI (single file with mode 0o600).
  * Path: {globalConfigDir}/secrets.json
  */
 declare function createFileSecretsStore(globalConfigDir: string): NexusSecretsStore;
 
+type ConfigSubstitutionErrorCode = "project-env-forbidden" | "missing-env" | "missing-file" | "unreadable-file" | "project-file-outside-workspace" | "file-changed-during-read";
+declare class ConfigSubstitutionError extends Error {
+    readonly code: ConfigSubstitutionErrorCode;
+    readonly configPath: string;
+    readonly reference: string;
+    constructor(code: ConfigSubstitutionErrorCode, configPath: string, reference: string, cause?: unknown);
+}
+declare class ConfigFileError extends Error {
+    readonly configPath: string;
+    constructor(configPath: string, message: string, cause?: unknown);
+}
+
+declare class UnsafeConfigWriteError extends Error {
+    constructor();
+}
+declare class ConfigValidationError extends Error {
+    readonly sources: readonly string[];
+    readonly issues: readonly {
+        path: readonly (string | number)[];
+        message: string;
+    }[];
+    constructor(sources: readonly string[], issues: readonly {
+        path: readonly (string | number)[];
+        message: string;
+    }[]);
+}
+interface PendingProjectMcpServer {
+    source: "project";
+    origin: "project-config" | "project-mcp-json";
+    status: "pending";
+    config: McpServerConfig;
+}
+declare function getPendingProjectMcpServers(config: NexusConfig): readonly PendingProjectMcpServer[];
 /**
  * Load config by walking up from cwd.
  * Merges project config over global config.
- * Applies env overrides, then optional secrets store (API keys).
+ * Applies non-secret environment selection overrides. Secure-store credentials
+ * are deliberately resolved later by the host, after its final selection.
  */
 declare function loadConfig(cwd?: string, options?: {
+    /** @deprecated Secure credentials are finalized by the host. */
     secrets?: NexusSecretsStore;
+    /**
+     * Remote hosts set false to load metadata without consulting the local
+     * environment or resolving `{env:...}` / `{file:...}` substitutions.
+     */
+    loadEnv?: boolean;
+    /**
+     * Override the global config path for embedded hosts/tests. `false`
+     * explicitly disables the global layer.
+     */
+    globalConfigPath?: string | false;
 }): Promise<NexusConfig>;
+declare function getConfigEnvironment(config: NexusConfig): Readonly<Record<string, string | undefined>> | undefined;
+/**
+ * Merge config layers without allowing a secret or provider-specific field to
+ * hitchhike when the higher layer changes provider or destination.
+ */
+declare function mergeNexusConfigLayers(base: Record<string, unknown>, override: Record<string, unknown>, options?: {
+    projectRoot?: string;
+}): Record<string, unknown>;
 /**
  * Write config to project .nexus/nexus.yaml.
  * By default strips API keys so they are never persisted to YAML (use secrets store instead).
@@ -3142,6 +4990,29 @@ declare function loadConfig(cwd?: string, options?: {
 declare function writeConfig(config: Partial<NexusConfig>, cwd?: string, options?: {
     stripSecrets?: boolean;
 }): void;
+/**
+ * Atomically merge an explicit patch into the raw project layer.
+ *
+ * Existing unknown fields and substitution tokens stay as raw values. Only the
+ * supplied patch is credential-sanitized; no global/default/effective config is
+ * ever serialized into the project file.
+ */
+declare function patchProjectConfig(patch: Record<string, unknown>, cwd?: string): Promise<void>;
+interface GlobalConfigPatchOptions {
+    /**
+     * Override the host-owned global config path for an embedded host/test.
+     * Production callers normally omit this and use ~/.nexus/nexus.yaml.
+     */
+    configPath?: string;
+}
+/**
+ * Atomically patch the host-owned global layer.
+ *
+ * Unlike project patches, authority-bearing permissions, trusted plugins and
+ * MCP servers are allowed here because this file is outside repository
+ * control. Credentials are still stripped and effective configs are rejected.
+ */
+declare function patchGlobalConfig(patch: Record<string, unknown>, options?: GlobalConfigPatchOptions): Promise<void>;
 /**
  * Persist profiles to global ~/.nexus/nexus.yaml so they are available across all projects.
  * Strips apiKey from each profile so keys are never written to YAML (use secrets store).
@@ -3188,8 +5059,183 @@ declare function writeProjectSettings(cwd: string, settings: ProjectSettings): v
  */
 declare function writeGlobalSettings(settings: ProjectSettings): void;
 
+type NetworkPolicyErrorCode = "invalid_url" | "invalid_purpose" | "unsupported_protocol" | "url_credentials" | "blocked_hostname" | "dns_failed" | "blocked_address" | "invalid_dns_result";
+declare class NetworkPolicyError extends Error {
+    readonly code: NetworkPolicyErrorCode;
+    constructor(code: NetworkPolicyErrorCode, message: string, cause?: unknown);
+}
+type NetworkResolver = (hostname: string) => Promise<readonly ResolvedNetworkAddress[]>;
+interface NetworkPolicyOptions {
+    resolve?: NetworkResolver;
+}
+/**
+ * True only for a syntactically valid, globally routable IP address.
+ * Reserved, private, loopback, link-local, multicast, documentation and
+ * unspecified ranges are rejected for both address families.
+ */
+declare function isPublicNetworkAddress(address: string): boolean;
+declare function authorizeNetworkRequest(request: HostNetworkRequest, options?: NetworkPolicyOptions): Promise<AuthorizedNetworkRequest>;
+
+type NetworkRequestErrorCode = "invalid_options" | "invalid_url" | "unsupported_protocol" | "url_credentials" | "authorization_unavailable" | "invalid_authorization" | "request_too_large" | "response_too_large" | "too_many_redirects" | "invalid_redirect" | "timeout" | "aborted" | "request_failed";
+declare class NetworkRequestError extends Error {
+    readonly code: NetworkRequestErrorCode;
+    constructor(code: NetworkRequestErrorCode, message: string, cause?: unknown);
+}
+interface NetworkTransportRequest {
+    url: string;
+    authorization: AuthorizedNetworkRequest;
+    method: string;
+    headers: Readonly<Record<string, string>>;
+    body?: Uint8Array;
+    maxResponseBytes: number;
+    signal: AbortSignal;
+}
+interface NetworkTransportResponse {
+    status: number;
+    statusText: string;
+    headers: Readonly<Record<string, string>>;
+    body: Uint8Array;
+}
+type NetworkTransport = (request: NetworkTransportRequest) => Promise<NetworkTransportResponse>;
+interface NetworkRequestOptions {
+    purpose: NetworkRequestPurpose;
+    method?: string;
+    headers?: Readonly<Record<string, string>>;
+    body?: string | Uint8Array;
+    maxRedirects?: number;
+    maxRequestBytes?: number;
+    maxResponseBytes?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    /** Injectable transport for deterministic, network-free tests. */
+    transport?: NetworkTransport;
+}
+interface NetworkResourceResponse extends NetworkTransportResponse {
+    /** Final URL after authorized redirects. */
+    url: string;
+    redirectCount: number;
+}
+declare function requestNetworkResource(host: IHost, rawUrl: string, options: NetworkRequestOptions): Promise<NetworkResourceResponse>;
+/**
+ * Node transport with DNS pinning. The host resolves and authorizes every
+ * address first; this lookup callback returns only those exact addresses to
+ * the socket, closing the DNS-rebinding window between validation and connect.
+ * A fresh, non-pooled connection is used for every hop.
+ */
+declare const nodePinnedTransport: NetworkTransport;
+
+/**
+ * Session-scoped "always allow" grants must not widen one approved command
+ * into blanket authority for every invocation of the same shell tool.
+ */
+declare function approvalGrantKey(action: ApprovalAction): string;
+
+type WorkspacePathAuthorizationErrorCode = "invalid_workspace_root" | "invalid_requested_path" | "path_outside_workspace" | "unresolvable_path";
+/**
+ * Raised when a host filesystem capability cannot be safely confined to its
+ * workspace. Keeping this distinct from ordinary ENOENT/permission errors lets
+ * adapters fail closed without treating a policy denial as a missing file.
+ */
+declare class WorkspacePathAuthorizationError extends Error {
+    readonly code: WorkspacePathAuthorizationErrorCode;
+    readonly name = "WorkspacePathAuthorizationError";
+    constructor(code: WorkspacePathAuthorizationErrorCode, message: string);
+}
+/**
+ * Resolve a host path and prove that its canonical target is the workspace
+ * root or one of its descendants.
+ *
+ * The returned path is canonicalized rather than merely validated, so callers
+ * do not subsequently operate through a known symlink alias.
+ */
+declare function resolveAuthorizedWorkspacePath(workspaceRoot: string, requestedPath: string): string;
+
+declare const WORKSPACE_AUTHORITY_STORE_VERSION: 2;
+type WorkspaceAuthorityGrant = {
+    kind: "command";
+    value: string;
+} | {
+    kind: "command-pattern";
+    value: string;
+} | {
+    kind: "mcp-tool";
+    value: string;
+};
+interface WorkspaceAuthorityIdentity {
+    canonicalPath: string;
+    device: string;
+    inode: string;
+    digest: string;
+}
+interface WorkspaceAuthorityGrants {
+    commands: string[];
+    commandPatterns: string[];
+    mcpTools: string[];
+}
+interface WorkspaceProjectAuthorityApproval {
+    kind: ProjectAuthorityRequestKind;
+    fingerprint: string;
+}
+interface WorkspaceAuthorityRecord {
+    version: typeof WORKSPACE_AUTHORITY_STORE_VERSION;
+    identity: WorkspaceAuthorityIdentity;
+    grants: WorkspaceAuthorityGrants;
+    projectConfigApprovals: WorkspaceProjectAuthorityApproval[];
+    updatedAt: string;
+}
+interface WorkspaceAuthorityStoreOptions {
+    /**
+     * Override the complete store filename. Intended for an embedding host or a
+     * temporary test directory; production defaults to the Nexus host data dir.
+     */
+    storePath?: string;
+}
+type WorkspaceAuthorityStoreErrorCode = "invalid_workspace" | "invalid_grant" | "unsafe_store" | "corrupt_store" | "unsupported_version" | "store_too_large";
+declare class WorkspaceAuthorityStoreError extends Error {
+    readonly code: WorkspaceAuthorityStoreErrorCode;
+    readonly name = "WorkspaceAuthorityStoreError";
+    constructor(code: WorkspaceAuthorityStoreErrorCode, message: string);
+}
+type AuthorityConfig = {
+    permissions: {
+        allowedCommands: string[];
+        allowCommandPatterns: string[];
+        allowedMcpTools?: string[];
+    };
+    pendingProjectAuthority?: PendingProjectAuthorityRequest[];
+};
+declare function getWorkspaceAuthorityStorePath(options?: WorkspaceAuthorityStoreOptions): string;
+declare function getWorkspaceAuthorityIdentity(workspacePath: string): Promise<WorkspaceAuthorityIdentity>;
+declare function loadWorkspaceAuthority(workspacePath: string, options?: WorkspaceAuthorityStoreOptions): Promise<WorkspaceAuthorityRecord | null>;
+declare function grantWorkspaceAuthority(workspacePath: string, grant: WorkspaceAuthorityGrant, options?: WorkspaceAuthorityStoreOptions): Promise<WorkspaceAuthorityRecord>;
+declare function revokeWorkspaceAuthority(workspacePath: string, grant?: WorkspaceAuthorityGrant, options?: WorkspaceAuthorityStoreOptions): Promise<boolean>;
+declare function listWorkspaceAuthorities(options?: WorkspaceAuthorityStoreOptions): Promise<WorkspaceAuthorityRecord[]>;
+declare function approveWorkspaceProjectAuthority(workspacePath: string, request: PendingProjectAuthorityRequest, options?: WorkspaceAuthorityStoreOptions): Promise<WorkspaceAuthorityRecord>;
+declare function revokeWorkspaceProjectAuthority(workspacePath: string, approval: WorkspaceProjectAuthorityApproval, options?: WorkspaceAuthorityStoreOptions): Promise<boolean>;
+/**
+ * Add host-owned grants to a loaded config in place. Mutation is intentional:
+ * loadConfig attaches non-enumerable credential-environment provenance which
+ * must survive authority hydration.
+ */
+declare function applyWorkspaceAuthorityGrants<T extends AuthorityConfig>(config: T, authority: WorkspaceAuthorityRecord | null): T;
+declare function hydrateWorkspaceAuthority<T extends AuthorityConfig>(config: T, workspacePath: string, options?: WorkspaceAuthorityStoreOptions): Promise<T>;
+
 declare const MEMORY_SCHEMA_VERSION: 2;
+declare const MAX_MEMORY_TITLE_CHARS = 4096;
+declare const MAX_MEMORY_CONTENT_CHARS: number;
+declare const MAX_MEMORY_IDENTIFIER_CHARS = 512;
+declare const MAX_MEMORY_SOURCE_URI_CHARS: number;
+declare const MAX_MEMORY_RELATION_IDS = 256;
 type LegacyMemoryRecord = Pick<MemoryRecord, "id" | "scope" | "title" | "content" | "createdAt" | "updatedAt"> & Partial<Omit<MemoryRecord, "id" | "scope" | "title" | "content" | "createdAt" | "updatedAt">>;
+declare function assertMemoryWriteInput(input: {
+    title?: unknown;
+    content?: unknown;
+    source?: unknown;
+    author?: unknown;
+    metadata?: unknown;
+    supersedes?: unknown;
+    contradicts?: unknown;
+}): void;
 /**
  * Upgrade a persisted v1 memory in-memory. The next orchestration mutation
  * writes the upgraded record, so old checksummed snapshots remain readable.
@@ -3227,10 +5273,29 @@ interface MemoryRetrievalOptions {
 declare function tokenizeMemoryText(text: string): string[];
 declare function retrieveMemories(options: MemoryRetrievalOptions): MemoryRetrievalResult;
 
+declare class MemoryValueLimitError extends Error {
+    constructor(message: string);
+}
 declare function redactMemorySecrets(input: string): {
     text: string;
     redacted: boolean;
 };
+interface SanitizedMemoryValue<T = unknown> {
+    value: T;
+    redacted: boolean;
+}
+/**
+ * Convert memory metadata/source payloads into bounded JSON while removing
+ * credentials from both values and credential-named fields.
+ *
+ * Strict mode is for new writes and rejects lossy coercion. Tolerant mode is
+ * for legacy reads: it deterministically bounds malformed historic values so
+ * one old record cannot grow prompts or snapshots without limit.
+ */
+declare function sanitizeMemoryValue<T>(input: T, options?: {
+    strict?: boolean;
+    label?: string;
+}): SanitizedMemoryValue<T>;
 
 type RunStatus = "running" | "completed" | "failed" | "aborted" | "interrupted";
 interface RunToolArtifact {
@@ -3454,160 +5519,6 @@ declare function createEmbeddingClient(config: EmbeddingConfig): EmbeddingClient
 
 declare function createLLMClient(config: ProviderConfig): LLMClient;
 
-declare function canonicalProjectRoot(cwd: string): string;
-type StoredContextUsage = {
-    usedTokens: number;
-    limitTokens: number;
-    percent: number;
-};
-interface StoredSession {
-    id: string;
-    cwd: string;
-    ts: number;
-    title?: string;
-    todo?: string;
-    contextUsage?: StoredContextUsage;
-    messages: SessionMessage[];
-    /** Monotonic durable journal revision. Legacy v1 files load as revision 0. */
-    revision?: number;
-}
-interface StoredSessionMeta {
-    id: string;
-    cwd: string;
-    ts: number;
-    title?: string;
-    todo?: string;
-    messageCount: number;
-    revision: number;
-}
-type SessionStorageDiagnosticCode = "corrupt-journal-tail" | "journal-backup-recovered" | "legacy-session-detected" | "legacy-session-migrated" | "session-corrupt";
-interface SessionStorageDiagnostic {
-    code: SessionStorageDiagnosticCode;
-    path: string;
-    message: string;
-}
-interface SessionStoreOptions {
-    /** Nexus home containing sessions/. Defaults to ~/.nexus. */
-    homeDir?: string;
-    compactAfterRecords?: number;
-    compactAfterBytes?: number;
-    onDiagnostic?: (diagnostic: SessionStorageDiagnostic) => void;
-}
-interface SaveSessionOptions {
-    expectedRevision?: number;
-}
-declare class UnsafeSessionIdError extends Error {
-    readonly sessionId: string;
-    constructor(sessionId: string);
-}
-declare class SessionConflictError extends Error {
-    readonly sessionId: string;
-    readonly expectedRevision: number;
-    readonly actualRevision: number;
-    constructor(sessionId: string, expectedRevision: number, actualRevision: number);
-}
-declare class SessionCorruptionError extends Error {
-    readonly journalPath: string;
-    constructor(journalPath: string, message: string);
-}
-declare class SessionStore {
-    private readonly homeDir;
-    private readonly compactAfterRecords;
-    private readonly compactAfterBytes;
-    private readonly onDiagnostic?;
-    private readonly diagnostics;
-    constructor(options?: SessionStoreOptions);
-    getSessionsDir(cwd: string): string;
-    getSessionPath(sessionId: string, cwd: string): string;
-    private diagnostic;
-    getDiagnostics(): readonly SessionStorageDiagnostic[];
-    private parseJournal;
-    private quarantineTail;
-    private writeLocked;
-    saveSession(session: StoredSession, options?: SaveSessionOptions): Promise<number>;
-    mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>): Promise<StoredSession | null>;
-    loadSession(sessionId: string, cwd: string): Promise<StoredSession | null>;
-    getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
-    loadSessionMessages(sessionId: string, cwd: string, limit: number, offset: number): Promise<{
-        meta: StoredSessionMeta;
-        messages: SessionMessage[];
-    } | null>;
-    listSessions(cwd: string): Promise<Array<{
-        id: string;
-        ts: number;
-        title?: string;
-        messageCount: number;
-        revision: number;
-    }>>;
-    deleteSession(sessionId: string, cwd: string): Promise<boolean>;
-}
-declare function getSessionStorageDiagnostics(): readonly SessionStorageDiagnostic[];
-declare function saveSession(session: StoredSession, options?: SaveSessionOptions): Promise<number>;
-declare function mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>): Promise<StoredSession | null>;
-declare function loadSession(sessionId: string, cwd: string): Promise<StoredSession | null>;
-declare function getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
-declare function loadSessionMessages(sessionId: string, cwd: string, limit: number, offset: number): Promise<{
-    meta: StoredSessionMeta;
-    messages: SessionMessage[];
-} | null>;
-declare function listSessions(cwd: string): Promise<Array<{
-    id: string;
-    ts: number;
-    title?: string;
-    messageCount: number;
-    revision: number;
-}>>;
-declare function deleteSession(sessionId: string, cwd: string): Promise<boolean>;
-declare function generateSessionId(): string;
-
-/** Derive session title from first user message. */
-declare function deriveSessionTitle(messages: SessionMessage[]): string;
-/**
- * In-memory session implementation backed by JSONL storage.
- */
-declare class Session implements ISession {
-    readonly id: string;
-    private _messages;
-    private _todo;
-    private cwd;
-    /** Ephemeral sessions are never persisted to disk (used for sub-agents). */
-    private _ephemeral;
-    /** Cached token estimate for the active context; invalidated on every session mutation. */
-    private _tokenEstimateCache;
-    /** Last context_usage from agent (full formula). Cleared when messages change. */
-    private _contextUsageSnapshot;
-    /** Last verified durable journal revision used for optimistic concurrency. */
-    private _revision;
-    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean, contextUsageSnapshot?: StoredContextUsage | null, revision?: number);
-    get messages(): SessionMessage[];
-    invalidateTokenEstimate(): void;
-    private clearContextUsageSnapshot;
-    addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage;
-    updateMessage(id: string, updates: Partial<SessionMessage>): void;
-    addToolPart(messageId: string, part: ToolPart): void;
-    updateToolPart(messageId: string, partId: string, updates: Partial<ToolPart>): void;
-    updateTodo(markdown: string): void;
-    getTodo(): string;
-    getTokenEstimate(): number;
-    getLastContextUsageSnapshot(): StoredContextUsage | undefined;
-    recordContextUsage(snapshot: StoredContextUsage): void;
-    fork(messageId: string): ISession;
-    /** Rewind chat to timestamp. Keeps only messages with ts <= timestamp. */
-    rewindToTimestamp(timestamp: number): void;
-    /** Rewind so that only messages strictly before this timestamp remain (used for rollback before a given message). */
-    rewindBeforeTimestamp(timestamp: number): void;
-    /** Rewind so that only messages strictly before a specific message remain. */
-    rewindBeforeMessageId(messageId: string): void;
-    save(): Promise<void>;
-    load(): Promise<void>;
-    static create(cwd: string): Session;
-    /** Create a session that is never saved to disk (for sub-agents). */
-    static createEphemeral(cwd: string): Session;
-    static resume(sessionId: string, cwd: string): Promise<Session | null>;
-    static resumeWindow(sessionId: string, cwd: string, limit: number, offset: number): Promise<Session | null>;
-    static getMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
-}
-
 /**
  * Kilocode-style: detect if the last assistant message completed plan_exit,
  * so the host can show "Ready to implement?" (New session / Continue here).
@@ -3619,6 +5530,17 @@ declare function hadPlanExit(session: ISession): boolean;
  */
 declare function getPlanContentForFollowup(session: ISession, cwd: string): Promise<string>;
 
+type CompactionResult = {
+    status: "compacted";
+    summaryMessageId: string;
+} | {
+    status: "skipped";
+    reason: "insufficient_history" | "no_new_messages";
+} | {
+    status: "failed";
+    reason: "summarizer_error" | "empty_summary" | "incomplete_summary" | "aborted" | "internal_error";
+    error: Error;
+};
 interface SessionCompaction {
     prune(session: ISession): void;
     microcompact(session: ISession, keepRecentMessages?: number): number;
@@ -3626,7 +5548,7 @@ interface SessionCompaction {
         keepRecentMessages?: number;
         force?: boolean;
         durableContext?: CompactionDurableContext;
-    }): Promise<void>;
+    }): Promise<CompactionResult>;
     isOverflow(tokenCount: number, contextLimit: number, threshold: number): boolean;
 }
 interface CompactionDurableContext {
@@ -3636,12 +5558,7199 @@ interface CompactionDurableContext {
 }
 declare function createCompaction(): SessionCompaction;
 
+declare const PROTOCOL_VERSION: 2;
+declare const MAX_USER_INPUT_TEXT_CHARS: number;
+declare const MAX_IMAGE_BASE64_CHARS: number;
+declare const MAX_INPUT_PARTS = 64;
+declare const MAX_IMAGES_PER_INPUT = 8;
+declare const UserInputPartSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+    type: z.ZodLiteral<"text">;
+    text: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "text";
+    text: string;
+}, {
+    type: "text";
+    text: string;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"image">;
+    mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
+    data: z.ZodEffects<z.ZodString, string, string>;
+}, "strict", z.ZodTypeAny, {
+    data: string;
+    type: "image";
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+}, {
+    data: string;
+    type: "image";
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"mention">;
+    name: z.ZodString;
+    path: z.ZodEffects<z.ZodString, string, string>;
+}, "strict", z.ZodTypeAny, {
+    type: "mention";
+    path: string;
+    name: string;
+}, {
+    type: "mention";
+    path: string;
+    name: string;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"skill">;
+    name: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "skill";
+    name: string;
+}, {
+    type: "skill";
+    name: string;
+}>]>;
+declare const ModeSchema: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+declare const ModelSelectionSchema: z.ZodObject<{
+    profileId: z.ZodString;
+    selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+}, "strict", z.ZodTypeAny, {
+    profileId: string;
+    selectionEpoch: number;
+}, {
+    profileId: string;
+    selectionEpoch: number;
+}>;
+declare const TurnExecutionSnapshotSchema: z.ZodObject<{
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    selection: z.ZodOptional<z.ZodObject<{
+        profileId: z.ZodString;
+        selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        profileId: string;
+        selectionEpoch: number;
+    }, {
+        profileId: string;
+        selectionEpoch: number;
+    }>>;
+}, "strict", z.ZodTypeAny, {
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}, {
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}>;
+declare const StartTurnCommandSchema: z.ZodObject<{
+    type: z.ZodLiteral<"start_turn">;
+    inputId: z.ZodString;
+    input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+        type: z.ZodLiteral<"text">;
+        text: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "text";
+        text: string;
+    }, {
+        type: "text";
+        text: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"image">;
+        mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
+        data: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"mention">;
+        name: z.ZodString;
+        path: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        type: "mention";
+        path: string;
+        name: string;
+    }, {
+        type: "mention";
+        path: string;
+        name: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"skill">;
+        name: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "skill";
+        name: string;
+    }, {
+        type: "skill";
+        name: string;
+    }>]>, "many">, ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[], ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[]>;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    selection: z.ZodOptional<z.ZodObject<{
+        profileId: z.ZodString;
+        selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        profileId: string;
+        selectionEpoch: number;
+    }, {
+        profileId: string;
+        selectionEpoch: number;
+    }>>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "start_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}, {
+    type: "start_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}>;
+declare const QueueTurnCommandSchema: z.ZodObject<{
+    type: z.ZodLiteral<"queue_turn">;
+    inputId: z.ZodString;
+    input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+        type: z.ZodLiteral<"text">;
+        text: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "text";
+        text: string;
+    }, {
+        type: "text";
+        text: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"image">;
+        mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
+        data: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"mention">;
+        name: z.ZodString;
+        path: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        type: "mention";
+        path: string;
+        name: string;
+    }, {
+        type: "mention";
+        path: string;
+        name: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"skill">;
+        name: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "skill";
+        name: string;
+    }, {
+        type: "skill";
+        name: string;
+    }>]>, "many">, ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[], ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[]>;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    selection: z.ZodOptional<z.ZodObject<{
+        profileId: z.ZodString;
+        selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        profileId: string;
+        selectionEpoch: number;
+    }, {
+        profileId: string;
+        selectionEpoch: number;
+    }>>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "queue_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}, {
+    type: "queue_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}>;
+declare const SteerTurnCommandSchema: z.ZodObject<{
+    type: z.ZodLiteral<"steer_turn">;
+    inputId: z.ZodString;
+    expectedTurnId: z.ZodString;
+    input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+        type: z.ZodLiteral<"text">;
+        text: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "text";
+        text: string;
+    }, {
+        type: "text";
+        text: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"image">;
+        mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
+        data: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"mention">;
+        name: z.ZodString;
+        path: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        type: "mention";
+        path: string;
+        name: string;
+    }, {
+        type: "mention";
+        path: string;
+        name: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"skill">;
+        name: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "skill";
+        name: string;
+    }, {
+        type: "skill";
+        name: string;
+    }>]>, "many">, ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[], ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[]>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "steer_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    expectedTurnId: string;
+}, {
+    type: "steer_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    expectedTurnId: string;
+}>;
+declare const InterruptTurnCommandSchema: z.ZodObject<{
+    type: z.ZodLiteral<"interrupt_turn">;
+    expectedTurnId: z.ZodString;
+    reason: z.ZodOptional<z.ZodString>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "interrupt_turn";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    reason?: string | undefined;
+}, {
+    type: "interrupt_turn";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    reason?: string | undefined;
+}>;
+declare const ResolveApprovalCommandSchema: z.ZodObject<{
+    type: z.ZodLiteral<"resolve_approval">;
+    approvalId: z.ZodString;
+    expectedTurnId: z.ZodString;
+    status: z.ZodEnum<["approved", "denied"]>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "resolve_approval";
+    status: "approved" | "denied";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    approvalId: string;
+}, {
+    type: "resolve_approval";
+    status: "approved" | "denied";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    approvalId: string;
+}>;
+declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+    type: z.ZodLiteral<"start_turn">;
+    inputId: z.ZodString;
+    input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+        type: z.ZodLiteral<"text">;
+        text: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "text";
+        text: string;
+    }, {
+        type: "text";
+        text: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"image">;
+        mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
+        data: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"mention">;
+        name: z.ZodString;
+        path: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        type: "mention";
+        path: string;
+        name: string;
+    }, {
+        type: "mention";
+        path: string;
+        name: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"skill">;
+        name: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "skill";
+        name: string;
+    }, {
+        type: "skill";
+        name: string;
+    }>]>, "many">, ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[], ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[]>;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    selection: z.ZodOptional<z.ZodObject<{
+        profileId: z.ZodString;
+        selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        profileId: string;
+        selectionEpoch: number;
+    }, {
+        profileId: string;
+        selectionEpoch: number;
+    }>>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "start_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}, {
+    type: "start_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"queue_turn">;
+    inputId: z.ZodString;
+    input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+        type: z.ZodLiteral<"text">;
+        text: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "text";
+        text: string;
+    }, {
+        type: "text";
+        text: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"image">;
+        mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
+        data: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"mention">;
+        name: z.ZodString;
+        path: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        type: "mention";
+        path: string;
+        name: string;
+    }, {
+        type: "mention";
+        path: string;
+        name: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"skill">;
+        name: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "skill";
+        name: string;
+    }, {
+        type: "skill";
+        name: string;
+    }>]>, "many">, ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[], ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[]>;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    selection: z.ZodOptional<z.ZodObject<{
+        profileId: z.ZodString;
+        selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        profileId: string;
+        selectionEpoch: number;
+    }, {
+        profileId: string;
+        selectionEpoch: number;
+    }>>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "queue_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}, {
+    type: "queue_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    mode: "agent" | "plan" | "ask" | "debug" | "review";
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    } | undefined;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"steer_turn">;
+    inputId: z.ZodString;
+    expectedTurnId: z.ZodString;
+    input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+        type: z.ZodLiteral<"text">;
+        text: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "text";
+        text: string;
+    }, {
+        type: "text";
+        text: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"image">;
+        mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
+        data: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }, {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"mention">;
+        name: z.ZodString;
+        path: z.ZodEffects<z.ZodString, string, string>;
+    }, "strict", z.ZodTypeAny, {
+        type: "mention";
+        path: string;
+        name: string;
+    }, {
+        type: "mention";
+        path: string;
+        name: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"skill">;
+        name: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "skill";
+        name: string;
+    }, {
+        type: "skill";
+        name: string;
+    }>]>, "many">, ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[], ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[]>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "steer_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    expectedTurnId: string;
+}, {
+    type: "steer_turn";
+    input: ({
+        type: "text";
+        text: string;
+    } | {
+        data: string;
+        type: "image";
+        mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    } | {
+        type: "mention";
+        path: string;
+        name: string;
+    } | {
+        type: "skill";
+        name: string;
+    })[];
+    version: 2;
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    expectedTurnId: string;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"interrupt_turn">;
+    expectedTurnId: z.ZodString;
+    reason: z.ZodOptional<z.ZodString>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "interrupt_turn";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    reason?: string | undefined;
+}, {
+    type: "interrupt_turn";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    reason?: string | undefined;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"resolve_approval">;
+    approvalId: z.ZodString;
+    expectedTurnId: z.ZodString;
+    status: z.ZodEnum<["approved", "denied"]>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "resolve_approval";
+    status: "approved" | "denied";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    approvalId: string;
+}, {
+    type: "resolve_approval";
+    status: "approved" | "denied";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    approvalId: string;
+}>]>;
+declare const ProtocolErrorCodeSchema: z.ZodEnum<["invalid_command", "input_too_large", "unsupported_version", "idempotency_conflict", "no_active_turn", "turn_conflict", "approval_conflict", "selection_conflict", "replay_gap", "not_found", "runtime_unavailable", "internal_error"]>;
+declare const ProtocolErrorSchema: z.ZodObject<{
+    code: z.ZodEnum<["invalid_command", "input_too_large", "unsupported_version", "idempotency_conflict", "no_active_turn", "turn_conflict", "approval_conflict", "selection_conflict", "replay_gap", "not_found", "runtime_unavailable", "internal_error"]>;
+    message: z.ZodString;
+    retryable: z.ZodBoolean;
+    details: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, "strict", z.ZodTypeAny, {
+    code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+    message: string;
+    retryable: boolean;
+    details?: Record<string, unknown> | undefined;
+}, {
+    code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+    message: string;
+    retryable: boolean;
+    details?: Record<string, unknown> | undefined;
+}>;
+type UserInputPartV2 = z.infer<typeof UserInputPartSchema>;
+type SessionCommandV2 = z.infer<typeof SessionCommandSchema>;
+type ProtocolError = z.infer<typeof ProtocolErrorSchema>;
+declare class SessionProtocolError extends Error {
+    readonly protocolError: ProtocolError;
+    constructor(error: ProtocolError);
+}
+type ParseSessionCommandResult = {
+    ok: true;
+    command: SessionCommandV2;
+} | {
+    ok: false;
+    error: ProtocolError;
+};
+declare function parseSessionCommand(value: unknown): ParseSessionCommandResult;
+
+declare const MAX_AGENT_EVENT_JSON_CHARS: number;
+declare const PendingSessionApprovalSchema: z.ZodObject<{
+    approvalId: z.ZodString;
+    turnId: z.ZodString;
+    toolName: z.ZodString;
+    redactedSummary: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    toolName: string;
+    approvalId: string;
+    turnId: string;
+    redactedSummary: string;
+}, {
+    toolName: string;
+    approvalId: string;
+    turnId: string;
+    redactedSummary: string;
+}>;
+declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+    type: z.ZodLiteral<"assistant_message_started">;
+    messageId: z.ZodString;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"assistant_message_started">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"assistant_message_started">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"assistant_content_complete">;
+    messageId: z.ZodString;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"assistant_content_complete">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"assistant_content_complete">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"text_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    user_message_delta: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"text_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    user_message_delta: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"text_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    user_message_delta: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"reasoning_start">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodString;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"reasoning_start">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodString;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"reasoning_start">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodString;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"reasoning_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"reasoning_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"reasoning_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"reasoning_end">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"reasoning_end">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"reasoning_end">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"tool_start">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"tool_start">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"tool_start">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"tool_end">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    success: z.ZodBoolean;
+    output: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+    compacted: z.ZodOptional<z.ZodBoolean>;
+    path: z.ZodOptional<z.ZodString>;
+    writtenContent: z.ZodOptional<z.ZodString>;
+    diffStats: z.ZodOptional<z.ZodObject<{
+        added: z.ZodEffects<z.ZodNumber, number, number>;
+        removed: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        removed: number;
+        added: number;
+    }, {
+        removed: number;
+        added: number;
+    }>>;
+    diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        type: z.ZodString;
+        lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+        line: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }>, "many">>;
+    appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        oldSnippet: z.ZodString;
+        newSnippet: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        oldSnippet: string;
+        newSnippet: string;
+    }, {
+        oldSnippet: string;
+        newSnippet: string;
+    }>, "many">>;
+    metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"tool_end">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    success: z.ZodBoolean;
+    output: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+    compacted: z.ZodOptional<z.ZodBoolean>;
+    path: z.ZodOptional<z.ZodString>;
+    writtenContent: z.ZodOptional<z.ZodString>;
+    diffStats: z.ZodOptional<z.ZodObject<{
+        added: z.ZodEffects<z.ZodNumber, number, number>;
+        removed: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        removed: number;
+        added: number;
+    }, {
+        removed: number;
+        added: number;
+    }>>;
+    diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        type: z.ZodString;
+        lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+        line: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }>, "many">>;
+    appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        oldSnippet: z.ZodString;
+        newSnippet: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        oldSnippet: string;
+        newSnippet: string;
+    }, {
+        oldSnippet: string;
+        newSnippet: string;
+    }>, "many">>;
+    metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"tool_end">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    success: z.ZodBoolean;
+    output: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+    compacted: z.ZodOptional<z.ZodBoolean>;
+    path: z.ZodOptional<z.ZodString>;
+    writtenContent: z.ZodOptional<z.ZodString>;
+    diffStats: z.ZodOptional<z.ZodObject<{
+        added: z.ZodEffects<z.ZodNumber, number, number>;
+        removed: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        removed: number;
+        added: number;
+    }, {
+        removed: number;
+        added: number;
+    }>>;
+    diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        type: z.ZodString;
+        lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+        line: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }>, "many">>;
+    appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        oldSnippet: z.ZodString;
+        newSnippet: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        oldSnippet: string;
+        newSnippet: string;
+    }, {
+        oldSnippet: string;
+        newSnippet: string;
+    }>, "many">>;
+    metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"subagent_start">;
+    subagentId: z.ZodString;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    task: z.ZodString;
+    parentPartId: z.ZodOptional<z.ZodString>;
+    depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    parentSubagentId: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"subagent_start">;
+    subagentId: z.ZodString;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    task: z.ZodString;
+    parentPartId: z.ZodOptional<z.ZodString>;
+    depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    parentSubagentId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"subagent_start">;
+    subagentId: z.ZodString;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    task: z.ZodString;
+    parentPartId: z.ZodOptional<z.ZodString>;
+    depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    parentSubagentId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"subagent_tool_start">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"subagent_tool_start">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"subagent_tool_start">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"subagent_tool_end">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"subagent_tool_end">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"subagent_tool_end">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"subagent_done">;
+    subagentId: z.ZodString;
+    success: z.ZodBoolean;
+    outputPreview: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"subagent_done">;
+    subagentId: z.ZodString;
+    success: z.ZodBoolean;
+    outputPreview: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"subagent_done">;
+    subagentId: z.ZodString;
+    success: z.ZodBoolean;
+    outputPreview: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"tool_approval_needed">;
+    action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodString;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"tool_approval_needed">;
+    action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"tool_approval_needed">;
+    action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"question_request">;
+    request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"question_request">;
+    request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"question_request">;
+    request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"compaction_start">;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"compaction_start">;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"compaction_start">;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"compaction_end">;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"compaction_end">;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"compaction_end">;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"run_context">;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    memoryCitations: z.ZodArray<z.ZodString, "many">;
+    taskIds: z.ZodArray<z.ZodString, "many">;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"run_context">;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    memoryCitations: z.ZodArray<z.ZodString, "many">;
+    taskIds: z.ZodArray<z.ZodString, "many">;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"run_context">;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    memoryCitations: z.ZodArray<z.ZodString, "many">;
+    taskIds: z.ZodArray<z.ZodString, "many">;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"index_update">;
+    status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"index_update">;
+    status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"index_update">;
+    status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"vector_db_progress">;
+    message: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"vector_db_progress">;
+    message: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"vector_db_progress">;
+    message: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"vector_db_ready">;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"vector_db_ready">;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"vector_db_ready">;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"session_saved">;
+    sessionId: z.ZodString;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"session_saved">;
+    sessionId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"session_saved">;
+    sessionId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"context_usage">;
+    usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    percent: z.ZodEffects<z.ZodNumber, number, number>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"context_usage">;
+    usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    percent: z.ZodEffects<z.ZodNumber, number, number>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"context_usage">;
+    usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    percent: z.ZodEffects<z.ZodNumber, number, number>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"error">;
+    error: z.ZodString;
+    fatal: z.ZodOptional<z.ZodBoolean>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"error">;
+    error: z.ZodString;
+    fatal: z.ZodOptional<z.ZodBoolean>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"error">;
+    error: z.ZodString;
+    fatal: z.ZodOptional<z.ZodBoolean>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"done">;
+    messageId: z.ZodString;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"done">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"done">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"todo_updated">;
+    todo: z.ZodString;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"todo_updated">;
+    todo: z.ZodString;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"todo_updated">;
+    todo: z.ZodString;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"doom_loop_detected">;
+    tool: z.ZodString;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"doom_loop_detected">;
+    tool: z.ZodString;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"doom_loop_detected">;
+    tool: z.ZodString;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"plan_followup_ask">;
+    planText: z.ZodString;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"plan_followup_ask">;
+    planText: z.ZodString;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"plan_followup_ask">;
+    planText: z.ZodString;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"task_created">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"task_created">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"task_created">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"task_progress">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"task_progress">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"task_progress">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"task_tool_start">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"task_tool_start">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"task_tool_start">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"task_tool_end">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"task_tool_end">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"task_tool_end">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"task_completed">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"task_completed">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"task_completed">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"team_updated">;
+    team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"team_updated">;
+    team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"team_updated">;
+    team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"team_message">;
+    message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"team_message">;
+    message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"team_message">;
+    message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"background_task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"background_task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"background_task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"remote_session_updated">;
+    remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"remote_session_updated">;
+    remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"remote_session_updated">;
+    remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+    type: z.ZodLiteral<"plugin_hook">;
+    pluginName: z.ZodString;
+    hookEvent: z.ZodString;
+    output: z.ZodString;
+    success: z.ZodBoolean;
+}, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+    type: z.ZodLiteral<"plugin_hook">;
+    pluginName: z.ZodString;
+    hookEvent: z.ZodString;
+    output: z.ZodString;
+    success: z.ZodBoolean;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"plugin_hook">;
+    pluginName: z.ZodString;
+    hookEvent: z.ZodString;
+    output: z.ZodString;
+    success: z.ZodBoolean;
+}, z.ZodTypeAny, "passthrough">>]>, z.objectOutputType<{
+    type: z.ZodLiteral<"assistant_message_started">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"assistant_content_complete">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"text_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    user_message_delta: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"reasoning_start">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodString;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"reasoning_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"reasoning_end">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"tool_start">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"tool_end">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    success: z.ZodBoolean;
+    output: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+    compacted: z.ZodOptional<z.ZodBoolean>;
+    path: z.ZodOptional<z.ZodString>;
+    writtenContent: z.ZodOptional<z.ZodString>;
+    diffStats: z.ZodOptional<z.ZodObject<{
+        added: z.ZodEffects<z.ZodNumber, number, number>;
+        removed: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        removed: number;
+        added: number;
+    }, {
+        removed: number;
+        added: number;
+    }>>;
+    diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        type: z.ZodString;
+        lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+        line: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }>, "many">>;
+    appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        oldSnippet: z.ZodString;
+        newSnippet: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        oldSnippet: string;
+        newSnippet: string;
+    }, {
+        oldSnippet: string;
+        newSnippet: string;
+    }>, "many">>;
+    metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"subagent_start">;
+    subagentId: z.ZodString;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    task: z.ZodString;
+    parentPartId: z.ZodOptional<z.ZodString>;
+    depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    parentSubagentId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"subagent_tool_start">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"subagent_tool_end">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"subagent_done">;
+    subagentId: z.ZodString;
+    success: z.ZodBoolean;
+    outputPreview: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"tool_approval_needed">;
+    action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"question_request">;
+    request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"compaction_start">;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"compaction_end">;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"run_context">;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    memoryCitations: z.ZodArray<z.ZodString, "many">;
+    taskIds: z.ZodArray<z.ZodString, "many">;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"index_update">;
+    status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"vector_db_progress">;
+    message: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"vector_db_ready">;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"session_saved">;
+    sessionId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"context_usage">;
+    usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    percent: z.ZodEffects<z.ZodNumber, number, number>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"error">;
+    error: z.ZodString;
+    fatal: z.ZodOptional<z.ZodBoolean>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"done">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"todo_updated">;
+    todo: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"doom_loop_detected">;
+    tool: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"plan_followup_ask">;
+    planText: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"task_created">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"task_progress">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"task_tool_start">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"task_tool_end">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"task_completed">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"team_updated">;
+    team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"team_message">;
+    message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"background_task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"remote_session_updated">;
+    remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+    type: z.ZodLiteral<"plugin_hook">;
+    pluginName: z.ZodString;
+    hookEvent: z.ZodString;
+    output: z.ZodString;
+    success: z.ZodBoolean;
+}, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+    type: z.ZodLiteral<"assistant_message_started">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"assistant_content_complete">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"text_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    user_message_delta: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"reasoning_start">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodString;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"reasoning_delta">;
+    delta: z.ZodString;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"reasoning_end">;
+    messageId: z.ZodString;
+    reasoningId: z.ZodOptional<z.ZodString>;
+    providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"tool_start">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"tool_end">;
+    tool: z.ZodString;
+    partId: z.ZodString;
+    messageId: z.ZodString;
+    success: z.ZodBoolean;
+    output: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+    compacted: z.ZodOptional<z.ZodBoolean>;
+    path: z.ZodOptional<z.ZodString>;
+    writtenContent: z.ZodOptional<z.ZodString>;
+    diffStats: z.ZodOptional<z.ZodObject<{
+        added: z.ZodEffects<z.ZodNumber, number, number>;
+        removed: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        removed: number;
+        added: number;
+    }, {
+        removed: number;
+        added: number;
+    }>>;
+    diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        type: z.ZodString;
+        lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+        line: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }, {
+        type: string;
+        line: string;
+        lineNum: number;
+    }>, "many">>;
+    appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        oldSnippet: z.ZodString;
+        newSnippet: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        oldSnippet: string;
+        newSnippet: string;
+    }, {
+        oldSnippet: string;
+        newSnippet: string;
+    }>, "many">>;
+    metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"subagent_start">;
+    subagentId: z.ZodString;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    task: z.ZodString;
+    parentPartId: z.ZodOptional<z.ZodString>;
+    depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    parentSubagentId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"subagent_tool_start">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"subagent_tool_end">;
+    subagentId: z.ZodString;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"subagent_done">;
+    subagentId: z.ZodString;
+    success: z.ZodBoolean;
+    outputPreview: z.ZodOptional<z.ZodString>;
+    error: z.ZodOptional<z.ZodString>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"tool_approval_needed">;
+    action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"question_request">;
+    request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    partId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"compaction_start">;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"compaction_end">;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"run_context">;
+    mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+    memoryCitations: z.ZodArray<z.ZodString, "many">;
+    taskIds: z.ZodArray<z.ZodString, "many">;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"index_update">;
+    status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"vector_db_progress">;
+    message: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"vector_db_ready">;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"session_saved">;
+    sessionId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"context_usage">;
+    usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+    percent: z.ZodEffects<z.ZodNumber, number, number>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"error">;
+    error: z.ZodString;
+    fatal: z.ZodOptional<z.ZodBoolean>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"done">;
+    messageId: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"todo_updated">;
+    todo: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"doom_loop_detected">;
+    tool: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"plan_followup_ask">;
+    planText: z.ZodString;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"task_created">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"task_progress">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"task_tool_start">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"task_tool_end">;
+    taskId: z.ZodString;
+    taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+    tool: z.ZodString;
+    success: z.ZodBoolean;
+    parentPartId: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"task_completed">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    outputPreview: z.ZodOptional<z.ZodString>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"team_updated">;
+    team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"team_message">;
+    message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"background_task_updated">;
+    task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"remote_session_updated">;
+    remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+}, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+    type: z.ZodLiteral<"plugin_hook">;
+    pluginName: z.ZodString;
+    hookEvent: z.ZodString;
+    output: z.ZodString;
+    success: z.ZodBoolean;
+}, z.ZodTypeAny, "passthrough">>;
+declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+    type: z.ZodLiteral<"input_admitted">;
+    inputId: z.ZodString;
+    reservedTurnId: z.ZodString;
+    reservedRunId: z.ZodString;
+    delivery: z.ZodEnum<["steer", "queue"]>;
+    expectedTurnId: z.ZodOptional<z.ZodString>;
+    admittedSequence: z.ZodEffects<z.ZodNumber, number, number>;
+    execution: z.ZodObject<{
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        selection: z.ZodOptional<z.ZodObject<{
+            profileId: z.ZodString;
+            selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            profileId: string;
+            selectionEpoch: number;
+        }, {
+            profileId: string;
+            selectionEpoch: number;
+        }>>;
+    }, "strict", z.ZodTypeAny, {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    }, {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    }>;
+}, "strict", z.ZodTypeAny, {
+    type: "input_admitted";
+    inputId: string;
+    reservedTurnId: string;
+    reservedRunId: string;
+    delivery: "steer" | "queue";
+    admittedSequence: number;
+    execution: {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    };
+    expectedTurnId?: string | undefined;
+}, {
+    type: "input_admitted";
+    inputId: string;
+    reservedTurnId: string;
+    reservedRunId: string;
+    delivery: "steer" | "queue";
+    admittedSequence: number;
+    execution: {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    };
+    expectedTurnId?: string | undefined;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"turn_started">;
+    turnId: z.ZodString;
+    runId: z.ZodString;
+    configEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+    contextEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+    execution: z.ZodObject<{
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        selection: z.ZodOptional<z.ZodObject<{
+            profileId: z.ZodString;
+            selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            profileId: string;
+            selectionEpoch: number;
+        }, {
+            profileId: string;
+            selectionEpoch: number;
+        }>>;
+    }, "strict", z.ZodTypeAny, {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    }, {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    }>;
+}, "strict", z.ZodTypeAny, {
+    type: "turn_started";
+    runId: string;
+    turnId: string;
+    execution: {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    };
+    configEpoch: number;
+    contextEpoch: number;
+}, {
+    type: "turn_started";
+    runId: string;
+    turnId: string;
+    execution: {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    };
+    configEpoch: number;
+    contextEpoch: number;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"phase_changed">;
+    phase: z.ZodEnum<["idle", "preparing", "streaming", "waiting_approval", "executing_tools", "compacting", "settling", "failed", "interrupted"]>;
+}, "strict", z.ZodTypeAny, {
+    type: "phase_changed";
+    phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+}, {
+    type: "phase_changed";
+    phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"steering_promoted">;
+    inputIds: z.ZodArray<z.ZodString, "many">;
+}, "strict", z.ZodTypeAny, {
+    type: "steering_promoted";
+    inputIds: string[];
+}, {
+    type: "steering_promoted";
+    inputIds: string[];
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"steering_requeued">;
+    inputIds: z.ZodArray<z.ZodString, "many">;
+}, "strict", z.ZodTypeAny, {
+    type: "steering_requeued";
+    inputIds: string[];
+}, {
+    type: "steering_requeued";
+    inputIds: string[];
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"interrupt_requested">;
+    reason: z.ZodOptional<z.ZodString>;
+}, "strict", z.ZodTypeAny, {
+    type: "interrupt_requested";
+    reason?: string | undefined;
+}, {
+    type: "interrupt_requested";
+    reason?: string | undefined;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"approval_requested">;
+    approvalId: z.ZodString;
+    toolName: z.ZodString;
+    redactedSummary: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    type: "approval_requested";
+    toolName: string;
+    approvalId: string;
+    redactedSummary: string;
+}, {
+    type: "approval_requested";
+    toolName: string;
+    approvalId: string;
+    redactedSummary: string;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"approval_resolved">;
+    approvalId: z.ZodString;
+    status: z.ZodEnum<["approved", "denied", "cancelled"]>;
+}, "strict", z.ZodTypeAny, {
+    type: "approval_resolved";
+    status: "cancelled" | "approved" | "denied";
+    approvalId: string;
+}, {
+    type: "approval_resolved";
+    status: "cancelled" | "approved" | "denied";
+    approvalId: string;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"agent_event">;
+    event: z.ZodEffects<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+        type: z.ZodLiteral<"assistant_message_started">;
+        messageId: z.ZodString;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"assistant_message_started">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"assistant_message_started">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"assistant_content_complete">;
+        messageId: z.ZodString;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"assistant_content_complete">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"assistant_content_complete">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"text_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        user_message_delta: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"text_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        user_message_delta: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"text_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        user_message_delta: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"reasoning_start">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodString;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"reasoning_start">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodString;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"reasoning_start">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodString;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"reasoning_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"reasoning_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"reasoning_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"reasoning_end">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"reasoning_end">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"reasoning_end">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"tool_start">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"tool_start">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"tool_start">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"tool_end">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        success: z.ZodBoolean;
+        output: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+        compacted: z.ZodOptional<z.ZodBoolean>;
+        path: z.ZodOptional<z.ZodString>;
+        writtenContent: z.ZodOptional<z.ZodString>;
+        diffStats: z.ZodOptional<z.ZodObject<{
+            added: z.ZodEffects<z.ZodNumber, number, number>;
+            removed: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            removed: number;
+            added: number;
+        }, {
+            removed: number;
+            added: number;
+        }>>;
+        diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            type: z.ZodString;
+            lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+            line: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }>, "many">>;
+        appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            oldSnippet: z.ZodString;
+            newSnippet: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            oldSnippet: string;
+            newSnippet: string;
+        }, {
+            oldSnippet: string;
+            newSnippet: string;
+        }>, "many">>;
+        metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"tool_end">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        success: z.ZodBoolean;
+        output: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+        compacted: z.ZodOptional<z.ZodBoolean>;
+        path: z.ZodOptional<z.ZodString>;
+        writtenContent: z.ZodOptional<z.ZodString>;
+        diffStats: z.ZodOptional<z.ZodObject<{
+            added: z.ZodEffects<z.ZodNumber, number, number>;
+            removed: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            removed: number;
+            added: number;
+        }, {
+            removed: number;
+            added: number;
+        }>>;
+        diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            type: z.ZodString;
+            lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+            line: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }>, "many">>;
+        appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            oldSnippet: z.ZodString;
+            newSnippet: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            oldSnippet: string;
+            newSnippet: string;
+        }, {
+            oldSnippet: string;
+            newSnippet: string;
+        }>, "many">>;
+        metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"tool_end">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        success: z.ZodBoolean;
+        output: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+        compacted: z.ZodOptional<z.ZodBoolean>;
+        path: z.ZodOptional<z.ZodString>;
+        writtenContent: z.ZodOptional<z.ZodString>;
+        diffStats: z.ZodOptional<z.ZodObject<{
+            added: z.ZodEffects<z.ZodNumber, number, number>;
+            removed: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            removed: number;
+            added: number;
+        }, {
+            removed: number;
+            added: number;
+        }>>;
+        diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            type: z.ZodString;
+            lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+            line: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }>, "many">>;
+        appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            oldSnippet: z.ZodString;
+            newSnippet: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            oldSnippet: string;
+            newSnippet: string;
+        }, {
+            oldSnippet: string;
+            newSnippet: string;
+        }>, "many">>;
+        metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"subagent_start">;
+        subagentId: z.ZodString;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        task: z.ZodString;
+        parentPartId: z.ZodOptional<z.ZodString>;
+        depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        parentSubagentId: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_start">;
+        subagentId: z.ZodString;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        task: z.ZodString;
+        parentPartId: z.ZodOptional<z.ZodString>;
+        depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        parentSubagentId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"subagent_start">;
+        subagentId: z.ZodString;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        task: z.ZodString;
+        parentPartId: z.ZodOptional<z.ZodString>;
+        depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        parentSubagentId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"subagent_tool_start">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_tool_start">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"subagent_tool_start">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"subagent_tool_end">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_tool_end">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"subagent_tool_end">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"subagent_done">;
+        subagentId: z.ZodString;
+        success: z.ZodBoolean;
+        outputPreview: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_done">;
+        subagentId: z.ZodString;
+        success: z.ZodBoolean;
+        outputPreview: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"subagent_done">;
+        subagentId: z.ZodString;
+        success: z.ZodBoolean;
+        outputPreview: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"tool_approval_needed">;
+        action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodString;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"tool_approval_needed">;
+        action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"tool_approval_needed">;
+        action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"question_request">;
+        request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"question_request">;
+        request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"question_request">;
+        request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"compaction_start">;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"compaction_start">;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"compaction_start">;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"compaction_end">;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"compaction_end">;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"compaction_end">;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"run_context">;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        memoryCitations: z.ZodArray<z.ZodString, "many">;
+        taskIds: z.ZodArray<z.ZodString, "many">;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"run_context">;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        memoryCitations: z.ZodArray<z.ZodString, "many">;
+        taskIds: z.ZodArray<z.ZodString, "many">;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"run_context">;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        memoryCitations: z.ZodArray<z.ZodString, "many">;
+        taskIds: z.ZodArray<z.ZodString, "many">;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"index_update">;
+        status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"index_update">;
+        status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"index_update">;
+        status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"vector_db_progress">;
+        message: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"vector_db_progress">;
+        message: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"vector_db_progress">;
+        message: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"vector_db_ready">;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"vector_db_ready">;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"vector_db_ready">;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"session_saved">;
+        sessionId: z.ZodString;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"session_saved">;
+        sessionId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"session_saved">;
+        sessionId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"context_usage">;
+        usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        percent: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"context_usage">;
+        usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        percent: z.ZodEffects<z.ZodNumber, number, number>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"context_usage">;
+        usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        percent: z.ZodEffects<z.ZodNumber, number, number>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"error">;
+        error: z.ZodString;
+        fatal: z.ZodOptional<z.ZodBoolean>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"error">;
+        error: z.ZodString;
+        fatal: z.ZodOptional<z.ZodBoolean>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"error">;
+        error: z.ZodString;
+        fatal: z.ZodOptional<z.ZodBoolean>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"done">;
+        messageId: z.ZodString;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"done">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"done">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"todo_updated">;
+        todo: z.ZodString;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"todo_updated">;
+        todo: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"todo_updated">;
+        todo: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"doom_loop_detected">;
+        tool: z.ZodString;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"doom_loop_detected">;
+        tool: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"doom_loop_detected">;
+        tool: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"plan_followup_ask">;
+        planText: z.ZodString;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"plan_followup_ask">;
+        planText: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"plan_followup_ask">;
+        planText: z.ZodString;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"task_created">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"task_created">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"task_created">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"task_progress">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"task_progress">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"task_progress">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"task_tool_start">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"task_tool_start">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"task_tool_start">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"task_tool_end">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"task_tool_end">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"task_tool_end">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"task_completed">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"task_completed">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"task_completed">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"team_updated">;
+        team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"team_updated">;
+        team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"team_updated">;
+        team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"team_message">;
+        message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"team_message">;
+        message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"team_message">;
+        message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"background_task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"background_task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"background_task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"remote_session_updated">;
+        remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"remote_session_updated">;
+        remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"remote_session_updated">;
+        remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+        type: z.ZodLiteral<"plugin_hook">;
+        pluginName: z.ZodString;
+        hookEvent: z.ZodString;
+        output: z.ZodString;
+        success: z.ZodBoolean;
+    }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+        type: z.ZodLiteral<"plugin_hook">;
+        pluginName: z.ZodString;
+        hookEvent: z.ZodString;
+        output: z.ZodString;
+        success: z.ZodBoolean;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"plugin_hook">;
+        pluginName: z.ZodString;
+        hookEvent: z.ZodString;
+        output: z.ZodString;
+        success: z.ZodBoolean;
+    }, z.ZodTypeAny, "passthrough">>]>, z.objectOutputType<{
+        type: z.ZodLiteral<"assistant_message_started">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"assistant_content_complete">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"text_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        user_message_delta: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"reasoning_start">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodString;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"reasoning_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"reasoning_end">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"tool_start">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"tool_end">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        success: z.ZodBoolean;
+        output: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+        compacted: z.ZodOptional<z.ZodBoolean>;
+        path: z.ZodOptional<z.ZodString>;
+        writtenContent: z.ZodOptional<z.ZodString>;
+        diffStats: z.ZodOptional<z.ZodObject<{
+            added: z.ZodEffects<z.ZodNumber, number, number>;
+            removed: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            removed: number;
+            added: number;
+        }, {
+            removed: number;
+            added: number;
+        }>>;
+        diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            type: z.ZodString;
+            lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+            line: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }>, "many">>;
+        appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            oldSnippet: z.ZodString;
+            newSnippet: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            oldSnippet: string;
+            newSnippet: string;
+        }, {
+            oldSnippet: string;
+            newSnippet: string;
+        }>, "many">>;
+        metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_start">;
+        subagentId: z.ZodString;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        task: z.ZodString;
+        parentPartId: z.ZodOptional<z.ZodString>;
+        depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        parentSubagentId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_tool_start">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_tool_end">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_done">;
+        subagentId: z.ZodString;
+        success: z.ZodBoolean;
+        outputPreview: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"tool_approval_needed">;
+        action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"question_request">;
+        request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"compaction_start">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"compaction_end">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"run_context">;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        memoryCitations: z.ZodArray<z.ZodString, "many">;
+        taskIds: z.ZodArray<z.ZodString, "many">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"index_update">;
+        status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"vector_db_progress">;
+        message: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"vector_db_ready">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"session_saved">;
+        sessionId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"context_usage">;
+        usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        percent: z.ZodEffects<z.ZodNumber, number, number>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"error">;
+        error: z.ZodString;
+        fatal: z.ZodOptional<z.ZodBoolean>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"done">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"todo_updated">;
+        todo: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"doom_loop_detected">;
+        tool: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"plan_followup_ask">;
+        planText: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_created">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_progress">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_tool_start">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_tool_end">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_completed">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"team_updated">;
+        team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"team_message">;
+        message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"background_task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"remote_session_updated">;
+        remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"plugin_hook">;
+        pluginName: z.ZodString;
+        hookEvent: z.ZodString;
+        output: z.ZodString;
+        success: z.ZodBoolean;
+    }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+        type: z.ZodLiteral<"assistant_message_started">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"assistant_content_complete">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"text_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        user_message_delta: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"reasoning_start">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodString;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"reasoning_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"reasoning_end">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"tool_start">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"tool_end">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        success: z.ZodBoolean;
+        output: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+        compacted: z.ZodOptional<z.ZodBoolean>;
+        path: z.ZodOptional<z.ZodString>;
+        writtenContent: z.ZodOptional<z.ZodString>;
+        diffStats: z.ZodOptional<z.ZodObject<{
+            added: z.ZodEffects<z.ZodNumber, number, number>;
+            removed: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            removed: number;
+            added: number;
+        }, {
+            removed: number;
+            added: number;
+        }>>;
+        diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            type: z.ZodString;
+            lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+            line: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }>, "many">>;
+        appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            oldSnippet: z.ZodString;
+            newSnippet: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            oldSnippet: string;
+            newSnippet: string;
+        }, {
+            oldSnippet: string;
+            newSnippet: string;
+        }>, "many">>;
+        metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"subagent_start">;
+        subagentId: z.ZodString;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        task: z.ZodString;
+        parentPartId: z.ZodOptional<z.ZodString>;
+        depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        parentSubagentId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"subagent_tool_start">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"subagent_tool_end">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"subagent_done">;
+        subagentId: z.ZodString;
+        success: z.ZodBoolean;
+        outputPreview: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"tool_approval_needed">;
+        action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"question_request">;
+        request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"compaction_start">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"compaction_end">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"run_context">;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        memoryCitations: z.ZodArray<z.ZodString, "many">;
+        taskIds: z.ZodArray<z.ZodString, "many">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"index_update">;
+        status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"vector_db_progress">;
+        message: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"vector_db_ready">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"session_saved">;
+        sessionId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"context_usage">;
+        usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        percent: z.ZodEffects<z.ZodNumber, number, number>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"error">;
+        error: z.ZodString;
+        fatal: z.ZodOptional<z.ZodBoolean>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"done">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"todo_updated">;
+        todo: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"doom_loop_detected">;
+        tool: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"plan_followup_ask">;
+        planText: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_created">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_progress">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_tool_start">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_tool_end">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_completed">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"team_updated">;
+        team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"team_message">;
+        message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"background_task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"remote_session_updated">;
+        remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"plugin_hook">;
+        pluginName: z.ZodString;
+        hookEvent: z.ZodString;
+        output: z.ZodString;
+        success: z.ZodBoolean;
+    }, z.ZodTypeAny, "passthrough">>;
+}, "strict", z.ZodTypeAny, {
+    type: "agent_event";
+    event: z.objectOutputType<{
+        type: z.ZodLiteral<"assistant_message_started">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"assistant_content_complete">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"text_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        user_message_delta: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"reasoning_start">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodString;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"reasoning_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"reasoning_end">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"tool_start">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"tool_end">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        success: z.ZodBoolean;
+        output: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+        compacted: z.ZodOptional<z.ZodBoolean>;
+        path: z.ZodOptional<z.ZodString>;
+        writtenContent: z.ZodOptional<z.ZodString>;
+        diffStats: z.ZodOptional<z.ZodObject<{
+            added: z.ZodEffects<z.ZodNumber, number, number>;
+            removed: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            removed: number;
+            added: number;
+        }, {
+            removed: number;
+            added: number;
+        }>>;
+        diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            type: z.ZodString;
+            lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+            line: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }>, "many">>;
+        appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            oldSnippet: z.ZodString;
+            newSnippet: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            oldSnippet: string;
+            newSnippet: string;
+        }, {
+            oldSnippet: string;
+            newSnippet: string;
+        }>, "many">>;
+        metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_start">;
+        subagentId: z.ZodString;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        task: z.ZodString;
+        parentPartId: z.ZodOptional<z.ZodString>;
+        depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        parentSubagentId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_tool_start">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_tool_end">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"subagent_done">;
+        subagentId: z.ZodString;
+        success: z.ZodBoolean;
+        outputPreview: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"tool_approval_needed">;
+        action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"question_request">;
+        request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"compaction_start">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"compaction_end">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"run_context">;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        memoryCitations: z.ZodArray<z.ZodString, "many">;
+        taskIds: z.ZodArray<z.ZodString, "many">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"index_update">;
+        status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"vector_db_progress">;
+        message: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"vector_db_ready">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"session_saved">;
+        sessionId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"context_usage">;
+        usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        percent: z.ZodEffects<z.ZodNumber, number, number>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"error">;
+        error: z.ZodString;
+        fatal: z.ZodOptional<z.ZodBoolean>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"done">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"todo_updated">;
+        todo: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"doom_loop_detected">;
+        tool: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"plan_followup_ask">;
+        planText: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_created">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_progress">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_tool_start">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_tool_end">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"task_completed">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"team_updated">;
+        team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"team_message">;
+        message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"background_task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"remote_session_updated">;
+        remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+        type: z.ZodLiteral<"plugin_hook">;
+        pluginName: z.ZodString;
+        hookEvent: z.ZodString;
+        output: z.ZodString;
+        success: z.ZodBoolean;
+    }, z.ZodTypeAny, "passthrough">;
+}, {
+    type: "agent_event";
+    event: z.objectInputType<{
+        type: z.ZodLiteral<"assistant_message_started">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"assistant_content_complete">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"text_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        user_message_delta: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"reasoning_start">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodString;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"reasoning_delta">;
+        delta: z.ZodString;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"reasoning_end">;
+        messageId: z.ZodString;
+        reasoningId: z.ZodOptional<z.ZodString>;
+        providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"tool_start">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"tool_end">;
+        tool: z.ZodString;
+        partId: z.ZodString;
+        messageId: z.ZodString;
+        success: z.ZodBoolean;
+        output: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+        compacted: z.ZodOptional<z.ZodBoolean>;
+        path: z.ZodOptional<z.ZodString>;
+        writtenContent: z.ZodOptional<z.ZodString>;
+        diffStats: z.ZodOptional<z.ZodObject<{
+            added: z.ZodEffects<z.ZodNumber, number, number>;
+            removed: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            removed: number;
+            added: number;
+        }, {
+            removed: number;
+            added: number;
+        }>>;
+        diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            type: z.ZodString;
+            lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+            line: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }, {
+            type: string;
+            line: string;
+            lineNum: number;
+        }>, "many">>;
+        appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            oldSnippet: z.ZodString;
+            newSnippet: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            oldSnippet: string;
+            newSnippet: string;
+        }, {
+            oldSnippet: string;
+            newSnippet: string;
+        }>, "many">>;
+        metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"subagent_start">;
+        subagentId: z.ZodString;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        task: z.ZodString;
+        parentPartId: z.ZodOptional<z.ZodString>;
+        depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        parentSubagentId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"subagent_tool_start">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"subagent_tool_end">;
+        subagentId: z.ZodString;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"subagent_done">;
+        subagentId: z.ZodString;
+        success: z.ZodBoolean;
+        outputPreview: z.ZodOptional<z.ZodString>;
+        error: z.ZodOptional<z.ZodString>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"tool_approval_needed">;
+        action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"question_request">;
+        request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        partId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"compaction_start">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"compaction_end">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"run_context">;
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        memoryCitations: z.ZodArray<z.ZodString, "many">;
+        taskIds: z.ZodArray<z.ZodString, "many">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"index_update">;
+        status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"vector_db_progress">;
+        message: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"vector_db_ready">;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"session_saved">;
+        sessionId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"context_usage">;
+        usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+        percent: z.ZodEffects<z.ZodNumber, number, number>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"error">;
+        error: z.ZodString;
+        fatal: z.ZodOptional<z.ZodBoolean>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"done">;
+        messageId: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"todo_updated">;
+        todo: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"doom_loop_detected">;
+        tool: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"plan_followup_ask">;
+        planText: z.ZodString;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_created">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_progress">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_tool_start">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_tool_end">;
+        taskId: z.ZodString;
+        taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+        tool: z.ZodString;
+        success: z.ZodBoolean;
+        parentPartId: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"task_completed">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        outputPreview: z.ZodOptional<z.ZodString>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"team_updated">;
+        team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"team_message">;
+        message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"background_task_updated">;
+        task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"remote_session_updated">;
+        remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+    }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+        type: z.ZodLiteral<"plugin_hook">;
+        pluginName: z.ZodString;
+        hookEvent: z.ZodString;
+        output: z.ZodString;
+        success: z.ZodBoolean;
+    }, z.ZodTypeAny, "passthrough">;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"turn_finished">;
+    status: z.ZodEnum<["completed", "failed", "interrupted"]>;
+    error: z.ZodOptional<z.ZodString>;
+}, "strict", z.ZodTypeAny, {
+    type: "turn_finished";
+    status: "failed" | "completed" | "interrupted";
+    error?: string | undefined;
+}, {
+    type: "turn_finished";
+    status: "failed" | "completed" | "interrupted";
+    error?: string | undefined;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"command_error">;
+    commandId: z.ZodString;
+    error: z.ZodObject<{
+        code: z.ZodEnum<["invalid_command", "input_too_large", "unsupported_version", "idempotency_conflict", "no_active_turn", "turn_conflict", "approval_conflict", "selection_conflict", "replay_gap", "not_found", "runtime_unavailable", "internal_error"]>;
+        message: z.ZodString;
+        retryable: z.ZodBoolean;
+        details: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    }, "strict", z.ZodTypeAny, {
+        code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+        message: string;
+        retryable: boolean;
+        details?: Record<string, unknown> | undefined;
+    }, {
+        code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+        message: string;
+        retryable: boolean;
+        details?: Record<string, unknown> | undefined;
+    }>;
+}, "strict", z.ZodTypeAny, {
+    type: "command_error";
+    error: {
+        code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+        message: string;
+        retryable: boolean;
+        details?: Record<string, unknown> | undefined;
+    };
+    commandId: string;
+}, {
+    type: "command_error";
+    error: {
+        code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+        message: string;
+        retryable: boolean;
+        details?: Record<string, unknown> | undefined;
+    };
+    commandId: string;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"snapshot">;
+    phase: z.ZodEnum<["idle", "preparing", "streaming", "waiting_approval", "executing_tools", "compacting", "settling", "failed", "interrupted"]>;
+    activeTurnId: z.ZodOptional<z.ZodString>;
+    activeRunId: z.ZodOptional<z.ZodString>;
+    activeTurnFirstSequence: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    pendingApprovals: z.ZodArray<z.ZodObject<{
+        approvalId: z.ZodString;
+        turnId: z.ZodString;
+        toolName: z.ZodString;
+        redactedSummary: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }, {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }>, "many">;
+    pendingQueueCount: z.ZodEffects<z.ZodNumber, number, number>;
+    pendingSteerCount: z.ZodEffects<z.ZodNumber, number, number>;
+    earliestAvailableSequence: z.ZodEffects<z.ZodNumber, number, number>;
+    throughSequence: z.ZodEffects<z.ZodNumber, number, number>;
+}, "strict", z.ZodTypeAny, {
+    type: "snapshot";
+    pendingApprovals: {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }[];
+    phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    pendingQueueCount: number;
+    pendingSteerCount: number;
+    earliestAvailableSequence: number;
+    throughSequence: number;
+    activeTurnId?: string | undefined;
+    activeRunId?: string | undefined;
+    activeTurnFirstSequence?: number | undefined;
+}, {
+    type: "snapshot";
+    pendingApprovals: {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }[];
+    phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    pendingQueueCount: number;
+    pendingSteerCount: number;
+    earliestAvailableSequence: number;
+    throughSequence: number;
+    activeTurnId?: string | undefined;
+    activeRunId?: string | undefined;
+    activeTurnFirstSequence?: number | undefined;
+}>]>;
+declare const ProtocolPersistenceSchema: z.ZodObject<{
+    state: z.ZodLiteral<"committed">;
+    rollout: z.ZodEnum<["pending", "projected", "not_applicable"]>;
+}, "strict", z.ZodTypeAny, {
+    state: "committed";
+    rollout: "pending" | "projected" | "not_applicable";
+}, {
+    state: "committed";
+    rollout: "pending" | "projected" | "not_applicable";
+}>;
+declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
+    version: z.ZodLiteral<2>;
+    eventId: z.ZodString;
+    runId: z.ZodOptional<z.ZodString>;
+    sequence: z.ZodEffects<z.ZodNumber, number, number>;
+    sessionId: z.ZodString;
+    turnId: z.ZodOptional<z.ZodString>;
+    parentEventId: z.ZodOptional<z.ZodString>;
+    emittedAt: z.ZodEffects<z.ZodNumber, number, number>;
+    persistence: z.ZodObject<{
+        state: z.ZodLiteral<"committed">;
+        rollout: z.ZodEnum<["pending", "projected", "not_applicable"]>;
+    }, "strict", z.ZodTypeAny, {
+        state: "committed";
+        rollout: "pending" | "projected" | "not_applicable";
+    }, {
+        state: "committed";
+        rollout: "pending" | "projected" | "not_applicable";
+    }>;
+    payload: z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+        type: z.ZodLiteral<"input_admitted">;
+        inputId: z.ZodString;
+        reservedTurnId: z.ZodString;
+        reservedRunId: z.ZodString;
+        delivery: z.ZodEnum<["steer", "queue"]>;
+        expectedTurnId: z.ZodOptional<z.ZodString>;
+        admittedSequence: z.ZodEffects<z.ZodNumber, number, number>;
+        execution: z.ZodObject<{
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            selection: z.ZodOptional<z.ZodObject<{
+                profileId: z.ZodString;
+                selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                profileId: string;
+                selectionEpoch: number;
+            }, {
+                profileId: string;
+                selectionEpoch: number;
+            }>>;
+        }, "strict", z.ZodTypeAny, {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        }, {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        }>;
+    }, "strict", z.ZodTypeAny, {
+        type: "input_admitted";
+        inputId: string;
+        reservedTurnId: string;
+        reservedRunId: string;
+        delivery: "steer" | "queue";
+        admittedSequence: number;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        expectedTurnId?: string | undefined;
+    }, {
+        type: "input_admitted";
+        inputId: string;
+        reservedTurnId: string;
+        reservedRunId: string;
+        delivery: "steer" | "queue";
+        admittedSequence: number;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        expectedTurnId?: string | undefined;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"turn_started">;
+        turnId: z.ZodString;
+        runId: z.ZodString;
+        configEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+        contextEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+        execution: z.ZodObject<{
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            selection: z.ZodOptional<z.ZodObject<{
+                profileId: z.ZodString;
+                selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                profileId: string;
+                selectionEpoch: number;
+            }, {
+                profileId: string;
+                selectionEpoch: number;
+            }>>;
+        }, "strict", z.ZodTypeAny, {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        }, {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        }>;
+    }, "strict", z.ZodTypeAny, {
+        type: "turn_started";
+        runId: string;
+        turnId: string;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        configEpoch: number;
+        contextEpoch: number;
+    }, {
+        type: "turn_started";
+        runId: string;
+        turnId: string;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        configEpoch: number;
+        contextEpoch: number;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"phase_changed">;
+        phase: z.ZodEnum<["idle", "preparing", "streaming", "waiting_approval", "executing_tools", "compacting", "settling", "failed", "interrupted"]>;
+    }, "strict", z.ZodTypeAny, {
+        type: "phase_changed";
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    }, {
+        type: "phase_changed";
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"steering_promoted">;
+        inputIds: z.ZodArray<z.ZodString, "many">;
+    }, "strict", z.ZodTypeAny, {
+        type: "steering_promoted";
+        inputIds: string[];
+    }, {
+        type: "steering_promoted";
+        inputIds: string[];
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"steering_requeued">;
+        inputIds: z.ZodArray<z.ZodString, "many">;
+    }, "strict", z.ZodTypeAny, {
+        type: "steering_requeued";
+        inputIds: string[];
+    }, {
+        type: "steering_requeued";
+        inputIds: string[];
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"interrupt_requested">;
+        reason: z.ZodOptional<z.ZodString>;
+    }, "strict", z.ZodTypeAny, {
+        type: "interrupt_requested";
+        reason?: string | undefined;
+    }, {
+        type: "interrupt_requested";
+        reason?: string | undefined;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"approval_requested">;
+        approvalId: z.ZodString;
+        toolName: z.ZodString;
+        redactedSummary: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "approval_requested";
+        toolName: string;
+        approvalId: string;
+        redactedSummary: string;
+    }, {
+        type: "approval_requested";
+        toolName: string;
+        approvalId: string;
+        redactedSummary: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"approval_resolved">;
+        approvalId: z.ZodString;
+        status: z.ZodEnum<["approved", "denied", "cancelled"]>;
+    }, "strict", z.ZodTypeAny, {
+        type: "approval_resolved";
+        status: "cancelled" | "approved" | "denied";
+        approvalId: string;
+    }, {
+        type: "approval_resolved";
+        status: "cancelled" | "approved" | "denied";
+        approvalId: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"agent_event">;
+        event: z.ZodEffects<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">>]>, z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">>;
+    }, "strict", z.ZodTypeAny, {
+        type: "agent_event";
+        event: z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">;
+    }, {
+        type: "agent_event";
+        event: z.objectInputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"turn_finished">;
+        status: z.ZodEnum<["completed", "failed", "interrupted"]>;
+        error: z.ZodOptional<z.ZodString>;
+    }, "strict", z.ZodTypeAny, {
+        type: "turn_finished";
+        status: "failed" | "completed" | "interrupted";
+        error?: string | undefined;
+    }, {
+        type: "turn_finished";
+        status: "failed" | "completed" | "interrupted";
+        error?: string | undefined;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"command_error">;
+        commandId: z.ZodString;
+        error: z.ZodObject<{
+            code: z.ZodEnum<["invalid_command", "input_too_large", "unsupported_version", "idempotency_conflict", "no_active_turn", "turn_conflict", "approval_conflict", "selection_conflict", "replay_gap", "not_found", "runtime_unavailable", "internal_error"]>;
+            message: z.ZodString;
+            retryable: z.ZodBoolean;
+            details: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, "strict", z.ZodTypeAny, {
+            code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+            message: string;
+            retryable: boolean;
+            details?: Record<string, unknown> | undefined;
+        }, {
+            code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+            message: string;
+            retryable: boolean;
+            details?: Record<string, unknown> | undefined;
+        }>;
+    }, "strict", z.ZodTypeAny, {
+        type: "command_error";
+        error: {
+            code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+            message: string;
+            retryable: boolean;
+            details?: Record<string, unknown> | undefined;
+        };
+        commandId: string;
+    }, {
+        type: "command_error";
+        error: {
+            code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+            message: string;
+            retryable: boolean;
+            details?: Record<string, unknown> | undefined;
+        };
+        commandId: string;
+    }>, z.ZodObject<{
+        type: z.ZodLiteral<"snapshot">;
+        phase: z.ZodEnum<["idle", "preparing", "streaming", "waiting_approval", "executing_tools", "compacting", "settling", "failed", "interrupted"]>;
+        activeTurnId: z.ZodOptional<z.ZodString>;
+        activeRunId: z.ZodOptional<z.ZodString>;
+        activeTurnFirstSequence: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        pendingApprovals: z.ZodArray<z.ZodObject<{
+            approvalId: z.ZodString;
+            turnId: z.ZodString;
+            toolName: z.ZodString;
+            redactedSummary: z.ZodString;
+        }, "strict", z.ZodTypeAny, {
+            toolName: string;
+            approvalId: string;
+            turnId: string;
+            redactedSummary: string;
+        }, {
+            toolName: string;
+            approvalId: string;
+            turnId: string;
+            redactedSummary: string;
+        }>, "many">;
+        pendingQueueCount: z.ZodEffects<z.ZodNumber, number, number>;
+        pendingSteerCount: z.ZodEffects<z.ZodNumber, number, number>;
+        earliestAvailableSequence: z.ZodEffects<z.ZodNumber, number, number>;
+        throughSequence: z.ZodEffects<z.ZodNumber, number, number>;
+    }, "strict", z.ZodTypeAny, {
+        type: "snapshot";
+        pendingApprovals: {
+            toolName: string;
+            approvalId: string;
+            turnId: string;
+            redactedSummary: string;
+        }[];
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+        pendingQueueCount: number;
+        pendingSteerCount: number;
+        earliestAvailableSequence: number;
+        throughSequence: number;
+        activeTurnId?: string | undefined;
+        activeRunId?: string | undefined;
+        activeTurnFirstSequence?: number | undefined;
+    }, {
+        type: "snapshot";
+        pendingApprovals: {
+            toolName: string;
+            approvalId: string;
+            turnId: string;
+            redactedSummary: string;
+        }[];
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+        pendingQueueCount: number;
+        pendingSteerCount: number;
+        earliestAvailableSequence: number;
+        throughSequence: number;
+        activeTurnId?: string | undefined;
+        activeRunId?: string | undefined;
+        activeTurnFirstSequence?: number | undefined;
+    }>]>;
+}, "strict", z.ZodTypeAny, {
+    version: 2;
+    sessionId: string;
+    sequence: number;
+    payload: {
+        type: "input_admitted";
+        inputId: string;
+        reservedTurnId: string;
+        reservedRunId: string;
+        delivery: "steer" | "queue";
+        admittedSequence: number;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        expectedTurnId?: string | undefined;
+    } | {
+        type: "turn_started";
+        runId: string;
+        turnId: string;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        configEpoch: number;
+        contextEpoch: number;
+    } | {
+        type: "phase_changed";
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    } | {
+        type: "steering_promoted";
+        inputIds: string[];
+    } | {
+        type: "steering_requeued";
+        inputIds: string[];
+    } | {
+        type: "interrupt_requested";
+        reason?: string | undefined;
+    } | {
+        type: "approval_requested";
+        toolName: string;
+        approvalId: string;
+        redactedSummary: string;
+    } | {
+        type: "approval_resolved";
+        status: "cancelled" | "approved" | "denied";
+        approvalId: string;
+    } | {
+        type: "agent_event";
+        event: z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">;
+    } | {
+        type: "turn_finished";
+        status: "failed" | "completed" | "interrupted";
+        error?: string | undefined;
+    } | {
+        type: "command_error";
+        error: {
+            code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+            message: string;
+            retryable: boolean;
+            details?: Record<string, unknown> | undefined;
+        };
+        commandId: string;
+    } | {
+        type: "snapshot";
+        pendingApprovals: {
+            toolName: string;
+            approvalId: string;
+            turnId: string;
+            redactedSummary: string;
+        }[];
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+        pendingQueueCount: number;
+        pendingSteerCount: number;
+        earliestAvailableSequence: number;
+        throughSequence: number;
+        activeTurnId?: string | undefined;
+        activeRunId?: string | undefined;
+        activeTurnFirstSequence?: number | undefined;
+    };
+    eventId: string;
+    emittedAt: number;
+    persistence: {
+        state: "committed";
+        rollout: "pending" | "projected" | "not_applicable";
+    };
+    runId?: string | undefined;
+    turnId?: string | undefined;
+    parentEventId?: string | undefined;
+}, {
+    version: 2;
+    sessionId: string;
+    sequence: number;
+    payload: {
+        type: "input_admitted";
+        inputId: string;
+        reservedTurnId: string;
+        reservedRunId: string;
+        delivery: "steer" | "queue";
+        admittedSequence: number;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        expectedTurnId?: string | undefined;
+    } | {
+        type: "turn_started";
+        runId: string;
+        turnId: string;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        configEpoch: number;
+        contextEpoch: number;
+    } | {
+        type: "phase_changed";
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    } | {
+        type: "steering_promoted";
+        inputIds: string[];
+    } | {
+        type: "steering_requeued";
+        inputIds: string[];
+    } | {
+        type: "interrupt_requested";
+        reason?: string | undefined;
+    } | {
+        type: "approval_requested";
+        toolName: string;
+        approvalId: string;
+        redactedSummary: string;
+    } | {
+        type: "approval_resolved";
+        status: "cancelled" | "approved" | "denied";
+        approvalId: string;
+    } | {
+        type: "agent_event";
+        event: z.objectInputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">;
+    } | {
+        type: "turn_finished";
+        status: "failed" | "completed" | "interrupted";
+        error?: string | undefined;
+    } | {
+        type: "command_error";
+        error: {
+            code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+            message: string;
+            retryable: boolean;
+            details?: Record<string, unknown> | undefined;
+        };
+        commandId: string;
+    } | {
+        type: "snapshot";
+        pendingApprovals: {
+            toolName: string;
+            approvalId: string;
+            turnId: string;
+            redactedSummary: string;
+        }[];
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+        pendingQueueCount: number;
+        pendingSteerCount: number;
+        earliestAvailableSequence: number;
+        throughSequence: number;
+        activeTurnId?: string | undefined;
+        activeRunId?: string | undefined;
+        activeTurnFirstSequence?: number | undefined;
+    };
+    eventId: string;
+    emittedAt: number;
+    persistence: {
+        state: "committed";
+        rollout: "pending" | "projected" | "not_applicable";
+    };
+    runId?: string | undefined;
+    turnId?: string | undefined;
+    parentEventId?: string | undefined;
+}>, {
+    version: 2;
+    sessionId: string;
+    sequence: number;
+    payload: {
+        type: "input_admitted";
+        inputId: string;
+        reservedTurnId: string;
+        reservedRunId: string;
+        delivery: "steer" | "queue";
+        admittedSequence: number;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        expectedTurnId?: string | undefined;
+    } | {
+        type: "turn_started";
+        runId: string;
+        turnId: string;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        configEpoch: number;
+        contextEpoch: number;
+    } | {
+        type: "phase_changed";
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    } | {
+        type: "steering_promoted";
+        inputIds: string[];
+    } | {
+        type: "steering_requeued";
+        inputIds: string[];
+    } | {
+        type: "interrupt_requested";
+        reason?: string | undefined;
+    } | {
+        type: "approval_requested";
+        toolName: string;
+        approvalId: string;
+        redactedSummary: string;
+    } | {
+        type: "approval_resolved";
+        status: "cancelled" | "approved" | "denied";
+        approvalId: string;
+    } | {
+        type: "agent_event";
+        event: z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">;
+    } | {
+        type: "turn_finished";
+        status: "failed" | "completed" | "interrupted";
+        error?: string | undefined;
+    } | {
+        type: "command_error";
+        error: {
+            code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+            message: string;
+            retryable: boolean;
+            details?: Record<string, unknown> | undefined;
+        };
+        commandId: string;
+    } | {
+        type: "snapshot";
+        pendingApprovals: {
+            toolName: string;
+            approvalId: string;
+            turnId: string;
+            redactedSummary: string;
+        }[];
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+        pendingQueueCount: number;
+        pendingSteerCount: number;
+        earliestAvailableSequence: number;
+        throughSequence: number;
+        activeTurnId?: string | undefined;
+        activeRunId?: string | undefined;
+        activeTurnFirstSequence?: number | undefined;
+    };
+    eventId: string;
+    emittedAt: number;
+    persistence: {
+        state: "committed";
+        rollout: "pending" | "projected" | "not_applicable";
+    };
+    runId?: string | undefined;
+    turnId?: string | undefined;
+    parentEventId?: string | undefined;
+}, {
+    version: 2;
+    sessionId: string;
+    sequence: number;
+    payload: {
+        type: "input_admitted";
+        inputId: string;
+        reservedTurnId: string;
+        reservedRunId: string;
+        delivery: "steer" | "queue";
+        admittedSequence: number;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        expectedTurnId?: string | undefined;
+    } | {
+        type: "turn_started";
+        runId: string;
+        turnId: string;
+        execution: {
+            mode: "agent" | "plan" | "ask" | "debug" | "review";
+            selection?: {
+                profileId: string;
+                selectionEpoch: number;
+            } | undefined;
+        };
+        configEpoch: number;
+        contextEpoch: number;
+    } | {
+        type: "phase_changed";
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    } | {
+        type: "steering_promoted";
+        inputIds: string[];
+    } | {
+        type: "steering_requeued";
+        inputIds: string[];
+    } | {
+        type: "interrupt_requested";
+        reason?: string | undefined;
+    } | {
+        type: "approval_requested";
+        toolName: string;
+        approvalId: string;
+        redactedSummary: string;
+    } | {
+        type: "approval_resolved";
+        status: "cancelled" | "approved" | "denied";
+        approvalId: string;
+    } | {
+        type: "agent_event";
+        event: z.objectInputType<{
+            type: z.ZodLiteral<"assistant_message_started">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"assistant_content_complete">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"text_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            user_message_delta: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_start">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodString;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_delta">;
+            delta: z.ZodString;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"reasoning_end">;
+            messageId: z.ZodString;
+            reasoningId: z.ZodOptional<z.ZodString>;
+            providerMetadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_start">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_end">;
+            tool: z.ZodString;
+            partId: z.ZodString;
+            messageId: z.ZodString;
+            success: z.ZodBoolean;
+            output: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            attachments: z.ZodOptional<z.ZodArray<z.ZodUnknown, "many">>;
+            compacted: z.ZodOptional<z.ZodBoolean>;
+            path: z.ZodOptional<z.ZodString>;
+            writtenContent: z.ZodOptional<z.ZodString>;
+            diffStats: z.ZodOptional<z.ZodObject<{
+                added: z.ZodEffects<z.ZodNumber, number, number>;
+                removed: z.ZodEffects<z.ZodNumber, number, number>;
+            }, "strict", z.ZodTypeAny, {
+                removed: number;
+                added: number;
+            }, {
+                removed: number;
+                added: number;
+            }>>;
+            diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                type: z.ZodString;
+                lineNum: z.ZodEffects<z.ZodNumber, number, number>;
+                line: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }, {
+                type: string;
+                line: string;
+                lineNum: number;
+            }>, "many">>;
+            appliedReplacements: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                oldSnippet: z.ZodString;
+                newSnippet: z.ZodString;
+            }, "strict", z.ZodTypeAny, {
+                oldSnippet: string;
+                newSnippet: string;
+            }, {
+                oldSnippet: string;
+                newSnippet: string;
+            }>, "many">>;
+            metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_start">;
+            subagentId: z.ZodString;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            task: z.ZodString;
+            parentPartId: z.ZodOptional<z.ZodString>;
+            depth: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            parentSubagentId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_start">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_tool_end">;
+            subagentId: z.ZodString;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"subagent_done">;
+            subagentId: z.ZodString;
+            success: z.ZodBoolean;
+            outputPreview: z.ZodOptional<z.ZodString>;
+            error: z.ZodOptional<z.ZodString>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"tool_approval_needed">;
+            action: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"question_request">;
+            request: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            partId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"compaction_start">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"compaction_end">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"run_context">;
+            mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+            memoryCitations: z.ZodArray<z.ZodString, "many">;
+            taskIds: z.ZodArray<z.ZodString, "many">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"index_update">;
+            status: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_progress">;
+            message: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"vector_db_ready">;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"session_saved">;
+            sessionId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"context_usage">;
+            usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
+            percent: z.ZodEffects<z.ZodNumber, number, number>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"error">;
+            error: z.ZodString;
+            fatal: z.ZodOptional<z.ZodBoolean>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"done">;
+            messageId: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"todo_updated">;
+            todo: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"doom_loop_detected">;
+            tool: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"plan_followup_ask">;
+            planText: z.ZodString;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_created">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_progress">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_start">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            input: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_tool_end">;
+            taskId: z.ZodString;
+            taskKind: z.ZodEnum<["agent", "shell", "tracking", "workflow", "external"]>;
+            tool: z.ZodString;
+            success: z.ZodBoolean;
+            parentPartId: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"task_completed">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+            outputPreview: z.ZodOptional<z.ZodString>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"team_updated">;
+            team: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"team_message">;
+            message: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"background_task_updated">;
+            task: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"remote_session_updated">;
+            remoteSession: z.ZodEffects<z.ZodUnknown, {} | null, unknown>;
+        }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
+            type: z.ZodLiteral<"plugin_hook">;
+            pluginName: z.ZodString;
+            hookEvent: z.ZodString;
+            output: z.ZodString;
+            success: z.ZodBoolean;
+        }, z.ZodTypeAny, "passthrough">;
+    } | {
+        type: "turn_finished";
+        status: "failed" | "completed" | "interrupted";
+        error?: string | undefined;
+    } | {
+        type: "command_error";
+        error: {
+            code: "internal_error" | "unsupported_version" | "invalid_command" | "input_too_large" | "idempotency_conflict" | "no_active_turn" | "turn_conflict" | "approval_conflict" | "selection_conflict" | "replay_gap" | "not_found" | "runtime_unavailable";
+            message: string;
+            retryable: boolean;
+            details?: Record<string, unknown> | undefined;
+        };
+        commandId: string;
+    } | {
+        type: "snapshot";
+        pendingApprovals: {
+            toolName: string;
+            approvalId: string;
+            turnId: string;
+            redactedSummary: string;
+        }[];
+        phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+        pendingQueueCount: number;
+        pendingSteerCount: number;
+        earliestAvailableSequence: number;
+        throughSequence: number;
+        activeTurnId?: string | undefined;
+        activeRunId?: string | undefined;
+        activeTurnFirstSequence?: number | undefined;
+    };
+    eventId: string;
+    emittedAt: number;
+    persistence: {
+        state: "committed";
+        rollout: "pending" | "projected" | "not_applicable";
+    };
+    runId?: string | undefined;
+    turnId?: string | undefined;
+    parentEventId?: string | undefined;
+}>;
+declare const SessionCommandReceiptSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
+    type: z.ZodLiteral<"start_turn">;
+    inputId: z.ZodString;
+    turnId: z.ZodString;
+    runId: z.ZodString;
+    started: z.ZodBoolean;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+    accepted: z.ZodLiteral<true>;
+}, "strict", z.ZodTypeAny, {
+    type: "start_turn";
+    version: 2;
+    sessionId: string;
+    runId: string;
+    inputId: string;
+    commandId: string;
+    turnId: string;
+    started: boolean;
+    accepted: true;
+}, {
+    type: "start_turn";
+    version: 2;
+    sessionId: string;
+    runId: string;
+    inputId: string;
+    commandId: string;
+    turnId: string;
+    started: boolean;
+    accepted: true;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"queue_turn">;
+    inputId: z.ZodString;
+    turnId: z.ZodString;
+    runId: z.ZodString;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+    accepted: z.ZodLiteral<true>;
+}, "strict", z.ZodTypeAny, {
+    type: "queue_turn";
+    version: 2;
+    sessionId: string;
+    runId: string;
+    inputId: string;
+    commandId: string;
+    turnId: string;
+    accepted: true;
+}, {
+    type: "queue_turn";
+    version: 2;
+    sessionId: string;
+    runId: string;
+    inputId: string;
+    commandId: string;
+    turnId: string;
+    accepted: true;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"steer_turn">;
+    inputId: z.ZodString;
+    expectedTurnId: z.ZodString;
+    reservedTurnId: z.ZodString;
+    reservedRunId: z.ZodString;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+    accepted: z.ZodLiteral<true>;
+}, "strict", z.ZodTypeAny, {
+    type: "steer_turn";
+    version: 2;
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    expectedTurnId: string;
+    reservedTurnId: string;
+    reservedRunId: string;
+    accepted: true;
+}, {
+    type: "steer_turn";
+    version: 2;
+    sessionId: string;
+    inputId: string;
+    commandId: string;
+    expectedTurnId: string;
+    reservedTurnId: string;
+    reservedRunId: string;
+    accepted: true;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"interrupt_turn">;
+    expectedTurnId: z.ZodString;
+    interrupted: z.ZodBoolean;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+    accepted: z.ZodLiteral<true>;
+}, "strict", z.ZodTypeAny, {
+    type: "interrupt_turn";
+    version: 2;
+    sessionId: string;
+    interrupted: boolean;
+    commandId: string;
+    expectedTurnId: string;
+    accepted: true;
+}, {
+    type: "interrupt_turn";
+    version: 2;
+    sessionId: string;
+    interrupted: boolean;
+    commandId: string;
+    expectedTurnId: string;
+    accepted: true;
+}>, z.ZodObject<{
+    type: z.ZodLiteral<"resolve_approval">;
+    approvalId: z.ZodString;
+    expectedTurnId: z.ZodString;
+    status: z.ZodEnum<["approved", "denied"]>;
+    version: z.ZodLiteral<2>;
+    commandId: z.ZodString;
+    sessionId: z.ZodString;
+    accepted: z.ZodLiteral<true>;
+}, "strict", z.ZodTypeAny, {
+    type: "resolve_approval";
+    status: "approved" | "denied";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    approvalId: string;
+    accepted: true;
+}, {
+    type: "resolve_approval";
+    status: "approved" | "denied";
+    version: 2;
+    sessionId: string;
+    commandId: string;
+    expectedTurnId: string;
+    approvalId: string;
+    accepted: true;
+}>]>;
+declare const SessionProtocolSnapshotSchema: z.ZodEffects<z.ZodObject<{
+    version: z.ZodLiteral<2>;
+    sessionId: z.ZodString;
+    phase: z.ZodEnum<["idle", "preparing", "streaming", "waiting_approval", "executing_tools", "compacting", "settling", "failed", "interrupted"]>;
+    activeTurnId: z.ZodOptional<z.ZodString>;
+    activeRunId: z.ZodOptional<z.ZodString>;
+    activeTurnFirstSequence: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    activeExecution: z.ZodOptional<z.ZodObject<{
+        mode: z.ZodEnum<["agent", "plan", "ask", "debug", "review"]>;
+        selection: z.ZodOptional<z.ZodObject<{
+            profileId: z.ZodString;
+            selectionEpoch: z.ZodEffects<z.ZodNumber, number, number>;
+        }, "strict", z.ZodTypeAny, {
+            profileId: string;
+            selectionEpoch: number;
+        }, {
+            profileId: string;
+            selectionEpoch: number;
+        }>>;
+    }, "strict", z.ZodTypeAny, {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    }, {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    }>>;
+    pendingApprovals: z.ZodArray<z.ZodObject<{
+        approvalId: z.ZodString;
+        turnId: z.ZodString;
+        toolName: z.ZodString;
+        redactedSummary: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }, {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }>, "many">;
+    pendingQueueCount: z.ZodEffects<z.ZodNumber, number, number>;
+    pendingSteerCount: z.ZodEffects<z.ZodNumber, number, number>;
+    earliestAvailableSequence: z.ZodEffects<z.ZodNumber, number, number>;
+    throughSequence: z.ZodEffects<z.ZodNumber, number, number>;
+}, "strict", z.ZodTypeAny, {
+    version: 2;
+    sessionId: string;
+    pendingApprovals: {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }[];
+    phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    pendingQueueCount: number;
+    pendingSteerCount: number;
+    earliestAvailableSequence: number;
+    throughSequence: number;
+    activeTurnId?: string | undefined;
+    activeRunId?: string | undefined;
+    activeTurnFirstSequence?: number | undefined;
+    activeExecution?: {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    } | undefined;
+}, {
+    version: 2;
+    sessionId: string;
+    pendingApprovals: {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }[];
+    phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    pendingQueueCount: number;
+    pendingSteerCount: number;
+    earliestAvailableSequence: number;
+    throughSequence: number;
+    activeTurnId?: string | undefined;
+    activeRunId?: string | undefined;
+    activeTurnFirstSequence?: number | undefined;
+    activeExecution?: {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    } | undefined;
+}>, {
+    version: 2;
+    sessionId: string;
+    pendingApprovals: {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }[];
+    phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    pendingQueueCount: number;
+    pendingSteerCount: number;
+    earliestAvailableSequence: number;
+    throughSequence: number;
+    activeTurnId?: string | undefined;
+    activeRunId?: string | undefined;
+    activeTurnFirstSequence?: number | undefined;
+    activeExecution?: {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    } | undefined;
+}, {
+    version: 2;
+    sessionId: string;
+    pendingApprovals: {
+        toolName: string;
+        approvalId: string;
+        turnId: string;
+        redactedSummary: string;
+    }[];
+    phase: "failed" | "idle" | "interrupted" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling";
+    pendingQueueCount: number;
+    pendingSteerCount: number;
+    earliestAvailableSequence: number;
+    throughSequence: number;
+    activeTurnId?: string | undefined;
+    activeRunId?: string | undefined;
+    activeTurnFirstSequence?: number | undefined;
+    activeExecution?: {
+        mode: "agent" | "plan" | "ask" | "debug" | "review";
+        selection?: {
+            profileId: string;
+            selectionEpoch: number;
+        } | undefined;
+    } | undefined;
+}>;
+type ProtocolEnvelope = z.infer<typeof ProtocolEnvelopeSchema>;
+type SessionCommandReceipt = z.infer<typeof SessionCommandReceiptSchema>;
+type SessionProtocolSnapshot = z.infer<typeof SessionProtocolSnapshotSchema>;
+type PendingSessionApproval = z.infer<typeof PendingSessionApprovalSchema>;
+
+declare const MAX_REMOTE_MCP_PROMPT_COMMANDS = 256;
+declare const MAX_REMOTE_MCP_PROMPT_ARGUMENTS = 32;
+declare const MAX_REMOTE_MCP_PROMPT_CATALOG_CHARS: number;
+declare const MAX_REMOTE_MCP_PROMPT_ARGUMENT_VALUE_CHARS: number;
+declare const RemoteMcpPromptArgumentSchema: z.ZodObject<{
+    name: z.ZodString;
+    description: z.ZodOptional<z.ZodString>;
+    required: z.ZodBoolean;
+}, "strict", z.ZodTypeAny, {
+    required: boolean;
+    name: string;
+    description?: string | undefined;
+}, {
+    required: boolean;
+    name: string;
+    description?: string | undefined;
+}>;
+declare const RemoteMcpPromptCommandSchema: z.ZodObject<{
+    promptId: z.ZodString;
+    commandName: z.ZodString;
+    serverName: z.ZodString;
+    name: z.ZodString;
+    title: z.ZodOptional<z.ZodString>;
+    description: z.ZodOptional<z.ZodString>;
+    arguments: z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        description: z.ZodOptional<z.ZodString>;
+        required: z.ZodBoolean;
+    }, "strict", z.ZodTypeAny, {
+        required: boolean;
+        name: string;
+        description?: string | undefined;
+    }, {
+        required: boolean;
+        name: string;
+        description?: string | undefined;
+    }>, "many">;
+}, "strict", z.ZodTypeAny, {
+    name: string;
+    serverName: string;
+    arguments: {
+        required: boolean;
+        name: string;
+        description?: string | undefined;
+    }[];
+    promptId: string;
+    commandName: string;
+    description?: string | undefined;
+    title?: string | undefined;
+}, {
+    name: string;
+    serverName: string;
+    arguments: {
+        required: boolean;
+        name: string;
+        description?: string | undefined;
+    }[];
+    promptId: string;
+    commandName: string;
+    description?: string | undefined;
+    title?: string | undefined;
+}>;
+declare const RemoteMcpPromptCatalogSchema: z.ZodObject<{
+    revision: z.ZodString;
+    commands: z.ZodArray<z.ZodObject<{
+        promptId: z.ZodString;
+        commandName: z.ZodString;
+        serverName: z.ZodString;
+        name: z.ZodString;
+        title: z.ZodOptional<z.ZodString>;
+        description: z.ZodOptional<z.ZodString>;
+        arguments: z.ZodArray<z.ZodObject<{
+            name: z.ZodString;
+            description: z.ZodOptional<z.ZodString>;
+            required: z.ZodBoolean;
+        }, "strict", z.ZodTypeAny, {
+            required: boolean;
+            name: string;
+            description?: string | undefined;
+        }, {
+            required: boolean;
+            name: string;
+            description?: string | undefined;
+        }>, "many">;
+    }, "strict", z.ZodTypeAny, {
+        name: string;
+        serverName: string;
+        arguments: {
+            required: boolean;
+            name: string;
+            description?: string | undefined;
+        }[];
+        promptId: string;
+        commandName: string;
+        description?: string | undefined;
+        title?: string | undefined;
+    }, {
+        name: string;
+        serverName: string;
+        arguments: {
+            required: boolean;
+            name: string;
+            description?: string | undefined;
+        }[];
+        promptId: string;
+        commandName: string;
+        description?: string | undefined;
+        title?: string | undefined;
+    }>, "many">;
+}, "strict", z.ZodTypeAny, {
+    revision: string;
+    commands: {
+        name: string;
+        serverName: string;
+        arguments: {
+            required: boolean;
+            name: string;
+            description?: string | undefined;
+        }[];
+        promptId: string;
+        commandName: string;
+        description?: string | undefined;
+        title?: string | undefined;
+    }[];
+}, {
+    revision: string;
+    commands: {
+        name: string;
+        serverName: string;
+        arguments: {
+            required: boolean;
+            name: string;
+            description?: string | undefined;
+        }[];
+        promptId: string;
+        commandName: string;
+        description?: string | undefined;
+        title?: string | undefined;
+    }[];
+}>;
+declare const RemoteMcpPromptResolveRequestSchema: z.ZodObject<{
+    revision: z.ZodString;
+    promptId: z.ZodString;
+    arguments: z.ZodEffects<z.ZodRecord<z.ZodString, z.ZodString>, Record<string, string>, Record<string, string>>;
+}, "strict", z.ZodTypeAny, {
+    arguments: Record<string, string>;
+    revision: string;
+    promptId: string;
+}, {
+    arguments: Record<string, string>;
+    revision: string;
+    promptId: string;
+}>;
+declare const RemoteMcpPromptResolveResponseSchema: z.ZodObject<{
+    input: z.ZodArray<z.ZodObject<{
+        type: z.ZodLiteral<"text">;
+        text: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        type: "text";
+        text: string;
+    }, {
+        type: "text";
+        text: string;
+    }>, "many">;
+}, "strict", z.ZodTypeAny, {
+    input: {
+        type: "text";
+        text: string;
+    }[];
+}, {
+    input: {
+        type: "text";
+        text: string;
+    }[];
+}>;
+type RemoteMcpPromptArgument = z.infer<typeof RemoteMcpPromptArgumentSchema>;
+type RemoteMcpPromptCommand = z.infer<typeof RemoteMcpPromptCommandSchema>;
+type RemoteMcpPromptCatalog = z.infer<typeof RemoteMcpPromptCatalogSchema>;
+type RemoteMcpPromptResolveRequest = z.infer<typeof RemoteMcpPromptResolveRequestSchema>;
+type RemoteMcpPromptResolveResponse = z.infer<typeof RemoteMcpPromptResolveResponseSchema>;
+declare function mcpPromptCommandName(serverName: string, promptName: string): string;
+declare function mcpPromptOpaqueId(serverName: string, promptName: string): string;
+/**
+ * Create a deterministic bounded projection. Oversized catalogs fail closed
+ * instead of being silently truncated, because a truncated catalog would make
+ * its revision ambiguous across clients.
+ */
+declare function buildRemoteMcpPromptCatalog(prompts: readonly McpPromptRef[]): RemoteMcpPromptCatalog;
+
 interface NexusServerClientOptions {
     baseUrl: string;
     directory: string;
     token: string;
 }
 declare const NEXUS_SERVER_TOKEN_SECRET_KEY = "nexuscode_server_token";
+interface SessionTurnIdentity {
+    turnId: string;
+    runId: string;
+}
+interface SessionApprovalIdentity extends SessionTurnIdentity {
+    approvalId: string;
+    toolName: string;
+    redactedSummary: string;
+}
+interface RunSessionTurnOptions {
+    sessionId: string;
+    input: readonly UserInputPartV2[];
+    mode: Mode;
+    selection?: {
+        profileId: string;
+        selectionEpoch: number;
+    };
+    signal?: AbortSignal;
+    onTurn?: (identity: SessionTurnIdentity) => void;
+    onApproval?: (identity: SessionApprovalIdentity) => void;
+    onSequence?: (sequence: number) => void | Promise<void>;
+}
+interface AttachSessionTurnOptions extends SessionTurnIdentity {
+    sessionId: string;
+    /**
+     * Last envelope durably applied by the caller. Omit it to rebuild the
+     * complete active turn from its first durable envelope.
+     */
+    afterSequence?: number;
+    signal?: AbortSignal;
+    onTurn?: (identity: SessionTurnIdentity) => void;
+    onApproval?: (identity: SessionApprovalIdentity) => void;
+    onSequence?: (sequence: number) => void | Promise<void>;
+}
+declare function isLoopbackNexusServerDestination(input: string): boolean;
+declare function canonicalizeNexusServerBaseUrl(input: string): string;
+declare function getNexusServerTokenSecretKey(baseUrl: string): string;
 /**
  * Client for NexusCode server — list/create sessions, get messages, stream agent events.
  * Shared by extension and CLI when serverUrl is set.
@@ -3653,7 +12762,19 @@ declare class NexusServerClient {
     constructor(opts: NexusServerClientOptions);
     private headers;
     private url;
+    private request;
     private sessionPath;
+    private sessionV2Path;
+    dispatchSessionCommand(command: SessionCommandV2): Promise<SessionCommandReceipt>;
+    getSessionProtocolSnapshot(sessionId: string): Promise<SessionProtocolSnapshot>;
+    getMcpPromptCatalog(sessionId: string): Promise<RemoteMcpPromptCatalog>;
+    resolveMcpPrompt(sessionId: string, request: RemoteMcpPromptResolveRequest, signal?: AbortSignal): Promise<RemoteMcpPromptResolveResponse>;
+    streamSessionEvents(sessionId: string, afterSequence: number, signal?: AbortSignal): AsyncGenerator<ProtocolEnvelope>;
+    runSessionTurn(options: RunSessionTurnOptions): AsyncGenerator<AgentEvent>;
+    attachSessionTurn(options: AttachSessionTurnOptions): AsyncGenerator<AgentEvent>;
+    private streamTurn;
+    interruptSessionTurn(sessionId: string, expectedTurnId: string, reason?: string): Promise<boolean>;
+    resolveSessionApproval(sessionId: string, expectedTurnId: string, approvalId: string, result: Pick<PermissionResult, "approved">): Promise<void>;
     listSessions(): Promise<Array<{
         id: string;
         ts: number;
@@ -3714,6 +12835,8 @@ interface AgentLoopOptions {
     };
     /** When true, inject create-skill instructions; host must allow writes to .nexus/skills (and ~/.nexus/skills if applicable). */
     createSkillMode?: boolean;
+    /** Durable delegated-agent input accepted only at provider boundaries. */
+    mailbox?: AgentInputMailbox;
 }
 /**
  * Main agent loop — runs until completion, abort, or doom loop.
@@ -3740,20 +12863,15 @@ declare const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]>;
  */
 declare const READ_ONLY_TOOLS: Set<string>;
 /**
+ * Read-only in scheduling terms, but capable of sending model/user-controlled
+ * data to the public network. These use the separate browser permission and
+ * must never inherit ordinary filesystem-read auto approval.
+ */
+declare const BROWSER_TOOLS: Set<string>;
+/**
  * Get all built-in tool names available for a given mode.
  */
 declare function getBuiltinToolsForMode(mode: Mode): string[];
-
-/**
- * Classify which MCP/custom tools are relevant for the given task (legacy; prefer classifyMcpServers).
- * Returns the selected tool names. Built-in mode tools are NOT filtered here.
- */
-declare function classifyTools(tools: ToolDef[], taskDescription: string, client: LLMClient): Promise<string[]>;
-/**
- * Classify which skills are relevant for the given task.
- * Returns selected skill names.
- */
-declare function classifySkills(skills: SkillDef[], taskDescription: string, client: LLMClient): Promise<SkillDef[]>;
 
 interface PromptContext {
     mode: Mode;
@@ -3806,199 +12924,6 @@ declare function buildSystemPrompt(ctx: PromptContext): {
     blocks: string[];
     cacheableCount: number;
 };
-
-type OrchestrationDiagnosticCode = "corrupt-journal-tail" | "snapshot-backup-recovered" | "journal-recovered" | "legacy-state-detected" | "legacy-state-migrated" | "stale-run-reconciled";
-interface OrchestrationDiagnostic {
-    code: OrchestrationDiagnosticCode;
-    path: string;
-    message: string;
-}
-interface OrchestrationRuntimeOptions {
-    homeDir?: string;
-    compactAfterRecords?: number;
-    compactAfterBytes?: number;
-    reconcileStaleRuns?: boolean;
-    onDiagnostic?: (diagnostic: OrchestrationDiagnostic) => void;
-}
-declare class OrchestrationCorruptionError extends Error {
-    readonly statePath: string;
-    constructor(statePath: string, message: string);
-}
-declare class OrchestrationInvariantError extends Error {
-    constructor(message: string);
-}
-declare function getRuntimeDir(cwd: string, homeDir?: string): string;
-declare class OrchestrationRuntime {
-    readonly cwd: string;
-    private readonly root;
-    private readonly stateFile;
-    private readonly journalFile;
-    private readonly writer;
-    private readonly compactAfterRecords;
-    private readonly compactAfterBytes;
-    private readonly reconcileStaleRuns;
-    private readonly onDiagnostic?;
-    private readonly diagnostics;
-    private tasks;
-    private teams;
-    private worktrees;
-    private backgroundTasks;
-    private memories;
-    private remoteSessions;
-    constructor(cwd: string, options?: OrchestrationRuntimeOptions);
-    getStatePath(): string;
-    getJournalPath(): string;
-    getDiagnostics(): readonly OrchestrationDiagnostic[];
-    private diagnostic;
-    private applyState;
-    private captureState;
-    private parseSnapshot;
-    private parseJournal;
-    private reconcileState;
-    private loadDurableState;
-    private quarantineJournalTail;
-    private persistLoaded;
-    private ensureLoaded;
-    private mutate;
-    private assertCanComplete;
-    private assertValidTaskDependencies;
-    private synchronizeTaskEdges;
-    private assertValidTaskTransition;
-    createTask(input: {
-        id?: string;
-        kind?: TaskKind;
-        subject: string;
-        description: string;
-        status?: TaskStatus;
-        activeForm?: string;
-        owner?: string;
-        teamName?: string;
-        metadata?: Record<string, unknown>;
-        blocks?: string[];
-        blockedBy?: string[];
-        command?: string;
-        shellRunner?: "bash" | "powershell";
-        processId?: number;
-        exitCode?: number;
-        sessionId?: string;
-        output?: string;
-        outputFile?: string;
-        snapshotFile?: string;
-        error?: string;
-        parentTaskId?: string;
-        resumeOf?: string;
-        forkOf?: string;
-        agentType?: string;
-        toolUseId?: string;
-    }): Promise<TaskRecord>;
-    getTask(taskId: string): Promise<TaskRecord | null>;
-    listTasks(filters?: {
-        kind?: TaskKind | TaskKind[];
-        teamName?: string;
-        owner?: string;
-        status?: TaskStatus | TaskStatus[];
-        includeDeleted?: boolean;
-    }): Promise<TaskRecord[]>;
-    updateTask(taskId: string, updates: Partial<Pick<TaskRecord, "status" | "subject" | "description" | "activeForm" | "owner" | "teamName" | "command" | "shellRunner" | "processId" | "exitCode" | "sessionId" | "output" | "outputFile" | "snapshotFile" | "error" | "parentTaskId" | "resumeOf" | "forkOf" | "agentType">> & {
-        metadata?: Record<string, unknown | null>;
-        addBlocks?: string[];
-        addBlockedBy?: string[];
-    }): Promise<TaskRecord | null>;
-    createTeam(input: {
-        teamName: string;
-        description: string;
-        members?: TeamMemberRecord[];
-    }): Promise<TeamRecord>;
-    getTeam(teamName: string): Promise<TeamRecord | null>;
-    listTeams(): Promise<TeamRecord[]>;
-    deleteTeam(teamName: string): Promise<boolean>;
-    addTeamMember(teamName: string, member: TeamMemberRecord): Promise<TeamRecord | null>;
-    updateTeamMember(teamName: string, memberName: string, updates: Partial<Omit<TeamMemberRecord, "name" | "joinedAt" | "note">> & {
-        note?: string | null;
-    }): Promise<TeamRecord | null>;
-    sendMessage(input: {
-        from: string;
-        to: string;
-        message: string;
-        teamName?: string;
-    }): Promise<TeamMessageRecord>;
-    registerBackgroundTask(task: Omit<BackgroundTaskRecord, "createdAt" | "updatedAt">): Promise<BackgroundTaskRecord>;
-    updateBackgroundTask(taskId: string, updates: Partial<Omit<BackgroundTaskRecord, "id" | "kind" | "createdAt">>): Promise<BackgroundTaskRecord | null>;
-    setBackgroundTaskStatus(taskId: string, status: BackgroundTaskStatus, extra?: Partial<BackgroundTaskRecord>): Promise<BackgroundTaskRecord | null>;
-    getBackgroundTask(taskId: string): Promise<BackgroundTaskRecord | null>;
-    listBackgroundTasks(): Promise<BackgroundTaskRecord[]>;
-    createWorktreeSession(input: {
-        originalCwd: string;
-        worktreePath: string;
-        branch: string;
-        metadata?: Record<string, unknown>;
-    }): Promise<WorktreeSession>;
-    findActiveWorktree(worktreePath?: string): Promise<WorktreeSession | null>;
-    updateWorktreeSession(worktreeId: string, updates: Partial<Pick<WorktreeSession, "status" | "metadata">>): Promise<WorktreeSession | null>;
-    createMemory(input: {
-        scope: MemoryRecord["scope"];
-        title: string;
-        content: string;
-        kind?: MemoryRecord["kind"];
-        source?: MemoryRecord["source"];
-        author?: MemoryRecord["author"];
-        trust?: MemoryRecord["trust"];
-        confidence?: number;
-        expiresAt?: number;
-        supersedes?: string[];
-        contradicts?: string[];
-        metadata?: Record<string, unknown>;
-    }): Promise<MemoryRecord>;
-    getMemory(memoryId: string): Promise<MemoryRecord | null>;
-    listMemories(filters?: {
-        scope?: MemoryRecord["scope"] | MemoryRecord["scope"][];
-        limit?: number;
-        metadataMatch?: Record<string, string | number | boolean>;
-    }): Promise<MemoryRecord[]>;
-    recordMemoryAccess(memoryIds: readonly string[], accessedAt?: number): Promise<MemoryRecord[]>;
-    updateMemory(memoryId: string, updates: Partial<Pick<MemoryRecord, "title" | "content">> & {
-        kind?: MemoryRecord["kind"];
-        confidence?: number;
-        expiresAt?: number | null;
-        supersedes?: string[];
-        contradicts?: string[];
-        metadata?: Record<string, unknown | null>;
-    }): Promise<MemoryRecord | null>;
-    upsertMemoryByTitle(input: {
-        scope: MemoryRecord["scope"];
-        title: string;
-        content: string;
-        kind?: MemoryRecord["kind"];
-        source?: MemoryRecord["source"];
-        author?: MemoryRecord["author"];
-        trust?: MemoryRecord["trust"];
-        confidence?: number;
-        expiresAt?: number;
-        supersedes?: string[];
-        contradicts?: string[];
-        metadata?: Record<string, unknown>;
-    }): Promise<MemoryRecord>;
-    deleteMemory(memoryId: string): Promise<boolean>;
-    createRemoteSession(input: {
-        url: string;
-        sessionId?: string;
-        runId?: string;
-        status?: RemoteSessionRecord["status"];
-        viewerOnly?: boolean;
-        reconnectable?: boolean;
-        metadata?: Record<string, unknown>;
-    }): Promise<RemoteSessionRecord>;
-    getRemoteSession(remoteSessionId: string): Promise<RemoteSessionRecord | null>;
-    listRemoteSessions(filters?: {
-        sessionId?: string;
-        runId?: string;
-        status?: RemoteSessionRecord["status"] | RemoteSessionRecord["status"][];
-    }): Promise<RemoteSessionRecord[]>;
-    updateRemoteSession(remoteSessionId: string, updates: Partial<Omit<RemoteSessionRecord, "id" | "createdAt" | "url">> & {
-        metadata?: Record<string, unknown | null>;
-    }): Promise<RemoteSessionRecord | null>;
-}
-declare function getOrchestrationRuntime(cwd: string): Promise<OrchestrationRuntime>;
 
 type StorageDiagnosticCode = "primary-corrupt" | "backup-corrupt" | "recovered-from-backup" | "stale-lock-recovered";
 interface StorageDiagnostic {
@@ -4054,6 +12979,7 @@ declare function ensureTeamMemberForTask(args: {
     task: TaskRecord;
     agentId?: string;
     agentType?: string;
+    runtime?: OrchestrationRuntime;
 }): Promise<void>;
 declare function handleCompletedTaskSideEffects(args: {
     cwd: string;
@@ -4061,6 +12987,7 @@ declare function handleCompletedTaskSideEffects(args: {
     config: NexusConfig;
     task: TaskRecord;
     outputPreview?: string;
+    runtime?: OrchestrationRuntime;
 }): Promise<void>;
 
 interface ExtractedMemoryInput {
@@ -4109,10 +13036,10 @@ interface PluginHookExecution {
 type PluginHookEvent = "user_prompt_submit" | "before_tool" | "after_tool" | "turn_complete" | "task_completed" | "subagent_start" | "subagent_stop" | "teammate_idle"
 /** Fired once per agent run when the instruction bundle is active (observability; OpenClaude instructions_loaded parity). */
  | "instructions_loaded";
-declare function applyPluginRuntimeSettings(plugin: PluginManifestRecord, config: NexusConfig): PluginManifestRecord;
-declare function loadPluginRuntimeRecords(cwd: string, config: NexusConfig): Promise<PluginManifestRecord[]>;
+declare function applyPluginRuntimeSettings(plugin: PluginManifestRecord, config: NexusConfig, trust?: PluginTrustEvaluation): PluginManifestRecord;
+declare function loadPluginRuntimeRecords(cwd: string, config: NexusConfig, trustOptions?: PluginTrustStoreOptions): Promise<PluginManifestRecord[]>;
 /** Capabilities from project-controlled plugins are active only after explicit trust. */
-declare function loadTrustedPluginRuntimeRecords(cwd: string, config: NexusConfig): Promise<PluginManifestRecord[]>;
+declare function loadTrustedPluginRuntimeRecords(cwd: string, config: NexusConfig, trustOptions?: PluginTrustStoreOptions): Promise<PluginManifestRecord[]>;
 declare function runPluginHooks(cwd: string, host: IHost, config: NexusConfig, hookEvent: PluginHookEvent, payload: Record<string, unknown>): Promise<PluginHookExecution[]>;
 declare function runScopedHooks(cwd: string, host: IHost, hookEvent: PluginHookEvent, payload: Record<string, unknown>, items: Array<{
     name: string;
@@ -4122,15 +13049,31 @@ declare function runScopedHooks(cwd: string, host: IHost, hookEvent: PluginHookE
 
 interface PluginCapabilityDiagnostic {
     level: "warning" | "error";
-    code: "plugin-mcp-file-invalid" | "plugin-mcp-server-invalid" | "plugin-mcp-server-shadowed" | "plugin-mcp-cwd-escape";
+    code: "plugin-mcp-file-invalid" | "plugin-mcp-server-invalid" | "plugin-mcp-server-shadowed" | "plugin-mcp-cwd-escape" | "project-mcp-pending" | "project-mcp-pending-invalid";
     pluginName: string;
     path: string;
     serverName?: string;
     message: string;
 }
+interface McpServerCapabilityProvenance {
+    serverName: string;
+    status: "active" | "pending" | "shadowed";
+    source: "plugin-inline" | "plugin-file" | "trusted-runtime-config" | "project-config" | "project-mcp-json";
+    path: string;
+    pluginName?: string;
+    pluginRoot?: string;
+    trustBinding?: "exact-content-grant";
+    message?: string;
+}
+interface PendingMcpServerCapability {
+    server: McpServerConfig;
+    provenance: McpServerCapabilityProvenance;
+}
 interface PluginMcpCapabilityResult {
     servers: McpServerConfig[];
     diagnostics: PluginCapabilityDiagnostic[];
+    provenance: McpServerCapabilityProvenance[];
+    pendingServers: PendingMcpServerCapability[];
 }
 /**
  * Load MCP server definitions contributed by explicitly trusted and enabled
@@ -4166,59 +13109,6 @@ declare function loadSlashCommands(cwd: string, compatibility?: ClaudeCompatibil
  */
 declare function resolveSlashCommand(commands: LoadedSlashCommand[], requestedName: string): SlashCommandResolution;
 declare function renderSlashCommandPrompt(command: LoadedSlashCommand, args: string): string;
-
-type RegistrationResult = {
-    ok: true;
-    replaced: false;
-} | {
-    ok: false;
-    reason: "reserved-name" | "duplicate";
-};
-/**
- * Tool registry — manages built-in, MCP, and custom tools.
- * Static, manager-bound, and dynamic tools use separate registration paths so
- * a reserved name cannot be silently discarded or replaced.
- */
-declare class ToolRegistry {
-    private tools;
-    private static staticBuiltinNames;
-    private static reservedBuiltinNames;
-    private static canonicalReservedBuiltinNames;
-    private static getStaticBuiltinNames;
-    private static getReservedBuiltinNames;
-    private static isReservedBuiltinName;
-    constructor();
-    registerDynamic(tool: ToolDef): RegistrationResult;
-    registerBoundBuiltin(tool: ToolDef): RegistrationResult;
-    registerDynamicOrThrow(tool: ToolDef, source?: string): void;
-    registerBoundBuiltinOrThrow(tool: ToolDef, source?: string): void;
-    /** @deprecated Use registerDynamic or registerBoundBuiltin explicitly. */
-    register(tool: ToolDef): RegistrationResult;
-    getAll(): ToolDef[];
-    get(name: string): ToolDef | undefined;
-    getByNames(names: string[]): ToolDef[];
-    /**
-     * Get tools for a given mode.
-     * Built-in tools for the mode are always included.
-     * Additional MCP/custom tools are returned separately for optional classification.
-     */
-    getForMode(mode: Mode): {
-        builtin: ToolDef[];
-        dynamic: ToolDef[];
-    };
-    /**
-     * Append tools with `hiddenFromAgent` (e.g. legacy Spawn*, BashOutput) so old transcript tool
-     * names still execute, while {@link getForMode} keeps them out of the LLM manifest.
-     */
-    mergeWithHiddenExecutionTools(visibleTools: ToolDef[]): ToolDef[];
-    /**
-     * Load custom tools from JS/TS files.
-     * Custom tools export a default ToolDef or array of ToolDef.
-     */
-    loadFromDirectory(dir: string): Promise<void>;
-    private warnOnRegistrationFailure;
-    private throwOnRegistrationFailure;
-}
 
 type CompletionState = {
     doubleCheckEnabled: boolean;
@@ -4256,7 +13146,6 @@ interface ToolExecutionOutcome extends ToolResult {
     normalizedInput: Record<string, unknown>;
     denied?: boolean;
     stoppedByHook?: boolean;
-    outputSpillPath?: string;
     beforeHookResults?: PluginHookExecution[];
     afterHookResults?: PluginHookExecution[];
 }
@@ -4499,10 +13388,12 @@ declare function resolveAutoMemoryDirectory(cwd: string, config: NexusConfig): s
 /**
  * Load all `*.md` under the auto-memory directory (project-scoped notes, agent-written memory).
  */
-declare function loadAutoMemoryMarkdown(cwd: string, config: NexusConfig): Promise<string>;
+declare function loadAutoMemoryMarkdown(cwd: string, config: NexusConfig, options?: {
+    excludeBasenames?: readonly string[];
+}): Promise<string>;
 
 declare function getSessionMemoryFilePath(sessionId: string, cwd: string, homeDir?: string): string;
-declare function readSessionMemoryFile(sessionId: string, cwd: string): Promise<string>;
+declare function readSessionMemoryFile(sessionId: string, cwd: string, homeDir?: string): Promise<string>;
 /**
  * Background refresh: merge conversation tail into the session memory file (OpenClaude Session Memory parity).
  */
@@ -4515,23 +13406,27 @@ declare function refreshSessionMemoryFile(opts: {
 }): Promise<void>;
 declare function appendCompactionSnippetToSessionMemory(sessionId: string, cwd: string, summaryText: string, maxChars: number, homeDir?: string): Promise<void>;
 
-/**
- * Process-wide registry of spilled tool outputs (OpenClaude-style toolResultStorage parity).
- * Survives in memory for the process lifetime so hooks and compaction can resolve paths even if
- * a ToolPart was rebuilt before outputSpillPath was persisted.
- */
 type ToolSpillRegistryEntry = {
     absolutePath: string;
+    artifactId: string;
     toolName: string;
+    workspaceCwd: string;
+    /** Session whose output directory physically owns the file. */
+    ownerSessionId: string;
+    /** Session whose transcript currently references the file. */
     sessionId: string;
     partId: string;
     createdAt: number;
 };
 declare function registerToolOutputSpill(args: {
+    cwd: string;
     sessionId: string;
     partId: string;
     absolutePath: string;
+    artifactId?: string;
     toolName: string;
+    /** Used only when an owned subagent artifact is projected into its parent. */
+    ownerSessionId?: string;
 }): void;
 declare function getToolOutputSpill(sessionId: string, partId: string): ToolSpillRegistryEntry | undefined;
 /**
@@ -4539,12 +13434,15 @@ declare function getToolOutputSpill(sessionId: string, partId: string): ToolSpil
  * Uses {@link ToolPart.outputSpillPath} if set, else looks up the subagent session + source part id.
  */
 declare function inheritSpillRegistryForMergedToolPart(args: {
+    cwd: string;
     parentSessionId: string;
     newPartId: string;
     subagentSessionId: string;
     sourcePartId: string;
     toolName: string;
     outputSpillPath?: string;
+    outputArtifactId?: string;
+    outputArtifactOwnerSessionId?: string;
 }): string | undefined;
 declare function clearToolSpillsForSession(sessionId: string): void;
 /** All spills for a session (e.g. auto-dream / diagnostics). */
@@ -4553,11 +13451,12 @@ declare function listToolSpillsForSession(sessionId: string): ToolSpillRegistryE
 /**
  * Optional team-scoped markdown under ~/.nexus/teams/{name}/memory/ (recursive .md files).
  */
-declare function loadTeamMemoryMarkdown(cwd: string, config: NexusConfig): Promise<string>;
+declare function loadTeamMemoryMarkdown(cwd: string, config: NexusConfig, ownedRuntime?: OrchestrationRuntime): Promise<string>;
 
 interface LegacyMemoryImportResult {
     imported: number;
     unchanged: number;
+    removed: number;
     skipped: number;
     truncated: boolean;
 }
@@ -4582,6 +13481,30 @@ declare function runAutoMemoryDreamIfDue(opts: {
     client: LLMClient;
     signal: AbortSignal;
 }): Promise<void>;
+
+interface ToolOutputMaintenanceResult {
+    scannedSessionDirectories: number;
+    scannedArtifacts: number;
+    removedArtifacts: number;
+    truncated: boolean;
+    errors: string[];
+}
+interface ToolOutputMaintenanceOptions {
+    signal?: AbortSignal;
+    now?: number;
+    retentionMs?: number;
+    maxSessionDirectories?: number;
+    maxArtifactsPerSession?: number;
+    /** Session home override for isolated hosts/tests. */
+    sessionHomeDir?: string;
+}
+
+declare function scheduleToolOutputMaintenance(options: {
+    cwd: string;
+    services: NexusRunServices;
+    onResult?: (result: ToolOutputMaintenanceResult) => void;
+    run?: (cwd: string, options: ToolOutputMaintenanceOptions) => Promise<ToolOutputMaintenanceResult>;
+}): WorkspaceTaskHandle | undefined;
 
 /**
  * Token estimation utilities.
@@ -4622,6 +13545,33 @@ declare function computeContextUsageMetrics(opts: {
     toolsTokens: number;
 };
 
+interface SkillUrlRegistryOptions {
+    cacheDirectory?: string;
+    fetcher?: typeof fetch;
+    maxIndexBytes?: number;
+    maxFileBytes?: number;
+    maxTotalBytes?: number;
+    maxSkills?: number;
+    maxFilesPerSkill?: number;
+    timeoutMs?: number;
+}
+/**
+ * Download a registry's index and return cached directories containing a
+ * regular `SKILL.md`. A broken refresh preserves the last complete pack.
+ */
+declare function fetchSkillUrlRegistryRoots(baseUrl: string, options?: SkillUrlRegistryOptions): Promise<string[]>;
+
+type SkillLoadDiagnosticCode = "skill-too-large" | "skill-symlink" | "skill-frontmatter-invalid" | "skill-name-mismatch" | "skill-read-failed" | "skill-glob-failed" | "skill-registry-failed";
+interface SkillLoadDiagnostic {
+    code: SkillLoadDiagnosticCode;
+    path: string;
+    message: string;
+}
+interface SkillLoadOptions {
+    homeDirectory?: string;
+    onDiagnostic?: (diagnostic: SkillLoadDiagnostic) => void;
+    remoteRegistry?: SkillUrlRegistryOptions;
+}
 /**
  * Load skills from configured paths and standard locations.
  *
@@ -4634,7 +13584,7 @@ declare function computeContextUsageMetrics(opts: {
  *
  * Optional `skillsUrls`: remote registries (each base URL must serve `index.json` + skill files); cached under `~/.nexus/cache/skills/`.
  */
-declare function loadSkills(skillPaths: string[], cwd: string, skillsUrls?: string[], compatibility?: ClaudeCompatibilityOptions, config?: NexusConfig): Promise<SkillDef[]>;
+declare function loadSkills(skillPaths: string[], cwd: string, skillsUrls?: string[], compatibility?: ClaudeCompatibilityOptions, config?: NexusConfig, options?: SkillLoadOptions): Promise<SkillDef[]>;
 
 type SkillToolDescriptionRow = {
     name: string;
@@ -4645,22 +13595,25 @@ type ResolvedSkillBody = {
     displayName: string;
     content: string;
     skillDir: string;
+    authority: SkillAuthority;
 };
+declare class SkillNameAmbiguityError extends Error {
+    readonly query: string;
+    readonly candidates: string[];
+    constructor(query: string, candidates: string[]);
+}
 /** Rows for the `Skill` tool description (`<available_skills>`), from the same set as `loadSkills`. */
 declare function loadSkillToolCatalogRows(cwd: string, config: NexusConfig): Promise<SkillToolDescriptionRow[]>;
 /**
- * Resolve skill body from `loadSkills` only (case-insensitive / normalized / partial match).
+ * Resolve skill body from `loadSkills` only.
+ * Exact and normalized-exact names take precedence. Ambiguous partial matches
+ * throw `SkillNameAmbiguityError` with deterministic candidate names.
  */
-declare function resolveSkillBody(query: string, cwd: string, config: NexusConfig): Promise<ResolvedSkillBody | null>;
+declare function resolveSkillBody(query: string, cwd: string, config: NexusConfig, loadOptions?: SkillLoadOptions): Promise<ResolvedSkillBody | null>;
 /** Dynamic `Skill` tool description: lists discoverable skills for the LLM. */
 declare function buildSkillToolDynamicDescription(rows: SkillToolDescriptionRow[]): string;
 /** Sample files under the skill directory (paths containing `skill.md` skipped). */
-declare function sampleSkillSiblingFiles(skillDir: string, signal?: AbortSignal): Promise<string[]>;
-
-/**
- * Download registry from `baseUrl` (append index.json), return directories under cache that contain SKILL.md.
- */
-declare function fetchSkillUrlRegistryRoots(baseUrl: string): Promise<string[]>;
+declare function sampleSkillSiblingFiles(skillDir: string, signal?: AbortSignal, capturedAuthority?: SkillAuthority): Promise<string[]>;
 
 /**
  * MCP client transports: stdio, SSE (legacy remote), Streamable HTTP (current spec).
@@ -4671,7 +13624,65 @@ declare function effectiveUrlTransport(config: McpServerConfig): "http" | "sse";
 /**
  * Build MCP transport. `bundle` must already be resolved to `command`/`url` by the host.
  */
-declare function createMcpTransport(config: McpServerConfig): Transport;
+declare function createMcpTransport(config: McpServerConfig, options?: McpTransportFactoryOptions): Transport;
+
+interface McpRemoteFetchHopRequest {
+    url: string;
+    authorization: AuthorizedNetworkRequest;
+    method: string;
+    headers: Readonly<Record<string, string>>;
+    body?: Uint8Array;
+    signal: AbortSignal;
+}
+type McpRemoteFetchHop = (request: McpRemoteFetchHopRequest) => Promise<Response>;
+interface McpAuthorizedFetchOptions {
+    /** Injectable hop transport for deterministic, network-free tests. */
+    hop?: McpRemoteFetchHop;
+    maxRedirects?: number;
+    maxRequestBytes?: number;
+    maxRequestHeaders?: number;
+    maxRequestHeaderBytes?: number;
+    maxResponseHeaders?: number;
+    maxResponseHeaderBytes?: number;
+}
+type McpNodeRequestFactory = (options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => http.ClientRequest;
+interface McpPinnedNodeHopOptions {
+    httpRequest?: McpNodeRequestFactory;
+    httpsRequest?: McpNodeRequestFactory;
+    maxResponseHeaders?: number;
+    maxResponseHeaderBytes?: number;
+}
+/**
+ * Build a Node lookup function which never consults DNS. It returns only the
+ * host-authorized answers for the exact hostname of this request hop.
+ */
+declare function createMcpPinnedLookup(authorization: AuthorizedNetworkRequest): LookupFunction;
+/**
+ * Streaming Node HTTP(S) hop with DNS pinning. The original hostname remains
+ * in the request options for Host/TLS certificate validation, while lookup()
+ * can return only addresses authorized for this exact URL.
+ */
+declare function createNodePinnedMcpFetchHop(options?: McpPinnedNodeHopOptions): McpRemoteFetchHop;
+declare function createMcpAuthorizedFetch(authorize: McpRemoteRequestAuthorizer, options?: McpAuthorizedFetchOptions): FetchLike;
+
+interface McpResourceClient {
+    listResources(serverName?: string, signal?: AbortSignal): Promise<McpResourceRef[]>;
+    listResourceTemplates(serverName?: string, signal?: AbortSignal): Promise<McpResourceTemplateRef[]>;
+    readResource(serverName: string, uri: string, signal?: AbortSignal): Promise<McpResourceContent[]>;
+}
+/**
+ * Codex-style MCP resource tools, materialized per server so approvals and
+ * persisted grants remain scoped to one server and operation.
+ */
+declare function createMcpResourceTools(client: McpResourceClient, allowedServerNames: ReadonlySet<string>): ToolDef[];
+
+declare const MAX_MODEL_TOOL_NAME_CHARS = 64;
+/**
+ * Preserve existing readable MCP names when already provider-safe. User-
+ * controlled or oversized names receive a deterministic hash suffix, keeping
+ * raw protocol identity separate and preventing sanitized-name collisions.
+ */
+declare function callableMcpToolName(serverName: string, toolName: string): string;
 
 interface ResolveBundledOptions {
     /** Project directory (agent cwd); passed as CLAUDE_PROJECT_DIR to bundled servers */
@@ -4771,12 +13782,36 @@ declare function buildReviewPromptUncommitted(cwd: string): Promise<string>;
  */
 declare function buildReviewPromptBranch(cwd: string): Promise<string>;
 
+declare const SESSION_PROTOCOL_SERVICE_PORT_VERSION: 1;
 interface WorkspaceOwnedService {
     shutdown?(): void | Promise<void>;
     close?(): void | Promise<void>;
     dispose?(): void | Promise<void>;
 }
+interface SessionProtocolService extends WorkspaceOwnedService {
+    readonly portVersion: typeof SESSION_PROTOCOL_SERVICE_PORT_VERSION;
+    /**
+     * Dispatch must be backed by a durable idempotency ledger: the command
+     * fingerprint, state mutation, and typed receipt commit atomically.
+     */
+    dispatch(command: SessionCommandV2): Awaitable<SessionCommandReceipt>;
+    snapshot(sessionId: string): Awaitable<SessionProtocolSnapshot>;
+    events(input: {
+        readonly sessionId: string;
+        readonly afterSequence: number;
+        readonly signal?: AbortSignal;
+    }): AsyncIterable<ProtocolEnvelope>;
+    /**
+     * Atomically tombstone an idle session before the portable JSONL transcript
+     * is removed. Implementations reject deletion while accepted work exists.
+     */
+    deleteSession?(sessionId: string): Awaitable<{
+        readonly deleted: boolean;
+    }>;
+}
 interface WorkspaceRuntimeServices {
+    sessions?: WorkspaceOwnedService;
+    protocol?: SessionProtocolService;
     parallelAgents?: WorkspaceOwnedService;
     mcp?: WorkspaceOwnedService;
     plugins?: WorkspaceOwnedService;
@@ -4800,6 +13835,344 @@ interface WorkspaceRuntimeHandle {
     readonly released: boolean;
     release(): Promise<void>;
 }
+type Awaitable<T> = T | PromiseLike<T>;
+type SessionPhase = "idle" | "preparing" | "streaming" | "waiting_approval" | "executing_tools" | "compacting" | "settling" | "failed" | "interrupted";
+type SessionMode = "agent" | "plan" | "ask" | "debug" | "review";
+interface ModelSelectionSnapshot {
+    readonly profileId: string;
+    readonly selectionEpoch: number;
+}
+interface TurnExecutionSnapshot {
+    readonly mode: SessionMode;
+    readonly selection?: ModelSelectionSnapshot;
+}
+type SessionInputPart = {
+    type: "text";
+    text: string;
+} | {
+    type: "image";
+    mimeType: string;
+    data: string;
+} | {
+    type: "mention";
+    name: string;
+    path: string;
+} | {
+    type: "skill";
+    name: string;
+};
+interface AdmittedSessionInput {
+    id: string;
+    /**
+     * Durable turn and run identities allocated atomically during admission.
+     * They are intentionally distinct from the idempotent input/command
+     * identity and must be reused if this input is retried or requeued.
+     */
+    reservedTurnId: string;
+    reservedRunId: string;
+    sessionId: string;
+    delivery: "steer" | "queue";
+    parts: readonly SessionInputPart[];
+    execution: TurnExecutionSnapshot;
+    admittedSequence: number;
+    promotedSequence?: number;
+    expectedTurnId?: string;
+}
+interface TurnEpochSnapshot {
+    readonly configEpoch: number;
+    readonly contextEpoch: number;
+}
+interface SessionOwnershipFence {
+    readonly ownerId: string;
+    readonly leaseEpoch: number;
+}
+interface DurableSessionTurn {
+    readonly turnId: string;
+    readonly runId: string;
+    readonly input: AdmittedSessionInput;
+    readonly phase: SessionPhase;
+    readonly epochs: TurnEpochSnapshot;
+    readonly execution: TurnExecutionSnapshot;
+    /**
+     * Proof from durable storage that a previously persisted next-turn policy
+     * intentionally replaced only the admitted mode at claim time.
+     */
+    readonly modeOverride?: {
+        readonly requestedByTurnId: string;
+    };
+    readonly fence: SessionOwnershipFence;
+}
+interface PendingSessionApprovalSnapshot {
+    readonly approvalId: string;
+    readonly turnId: string;
+    readonly toolName: string;
+    readonly redactedSummary: string;
+}
+interface SessionRuntimeSnapshot {
+    readonly sessionId: string;
+    readonly phase: SessionPhase;
+    readonly activeTurn?: DurableSessionTurn;
+    readonly pendingApprovals: readonly PendingSessionApprovalSnapshot[];
+    readonly pendingQueue: readonly AdmittedSessionInput[];
+    readonly pendingSteers: readonly AdmittedSessionInput[];
+}
+interface AdmitSessionInputCommand {
+    readonly inputId: string;
+    readonly delivery: "steer" | "queue";
+    readonly parts: readonly SessionInputPart[];
+    readonly execution: TurnExecutionSnapshot;
+    readonly expectedTurnId?: string;
+}
+interface StartTurnCommand {
+    readonly inputId: string;
+    readonly parts: readonly SessionInputPart[];
+    readonly mode: SessionMode;
+    readonly selection?: ModelSelectionSnapshot;
+}
+interface SteerTurnCommand {
+    readonly inputId: string;
+    readonly expectedTurnId: string;
+    readonly parts: readonly SessionInputPart[];
+}
+interface QueueTurnCommand {
+    readonly inputId: string;
+    readonly parts: readonly SessionInputPart[];
+    readonly mode: SessionMode;
+    readonly selection?: ModelSelectionSnapshot;
+}
+interface InterruptTurnCommand {
+    readonly expectedTurnId: string;
+    readonly reason?: string;
+}
+interface ResolveApprovalCommand {
+    readonly approvalId: string;
+    readonly expectedTurnId: string;
+    readonly status: "approved" | "denied";
+}
+type TurnRunnerResult = {
+    readonly status: "completed";
+} | {
+    readonly status: "failed";
+    readonly error: string;
+} | {
+    readonly status: "interrupted";
+    readonly error?: string;
+};
+interface FinishTurnCommit {
+    /**
+     * Steers accepted after the runner's final safe boundary. Storage atomically
+     * converts them into queued turns instead of dropping accepted user input.
+     */
+    readonly requeuedInputs: readonly AdmittedSessionInput[];
+}
+interface TurnRunnerContext {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly input: AdmittedSessionInput;
+    readonly epochs: TurnEpochSnapshot;
+    readonly execution: TurnExecutionSnapshot;
+    readonly fence: SessionOwnershipFence;
+    readonly signal: AbortSignal;
+    readonly setPhase: (phase: SessionPhase) => Promise<void>;
+    readonly safeBoundary: () => Promise<readonly AdmittedSessionInput[]>;
+}
+interface TurnRunner {
+    run(context: TurnRunnerContext): Awaitable<TurnRunnerResult>;
+}
+declare const SESSION_COORDINATOR_STORAGE_PORT_VERSION: 1;
+interface SessionCoordinatorStorage {
+    readonly portVersion: typeof SESSION_COORDINATOR_STORAGE_PORT_VERSION;
+    admitInput(input: {
+        readonly inputId: string;
+        readonly sessionId: string;
+        readonly fence: SessionOwnershipFence;
+        readonly delivery: "steer" | "queue";
+        readonly expectedTurnId?: string;
+        readonly parts: readonly SessionInputPart[];
+        readonly execution: TurnExecutionSnapshot;
+    }): Awaitable<AdmittedSessionInput>;
+    pendingSteers(sessionId: string, turnId: string): Awaitable<readonly AdmittedSessionInput[]>;
+    promoteSteers(sessionId: string, turnId: string, cutoff: number, fence: SessionOwnershipFence): Awaitable<readonly AdmittedSessionInput[]>;
+    /**
+     * Atomically promotes the oldest queued input and persists its turn snapshot.
+     * Returning undefined means the queue is empty or another owner has a turn.
+     */
+    claimNextTurn(input: {
+        readonly sessionId: string;
+        readonly epochs: TurnEpochSnapshot;
+        readonly fence: SessionOwnershipFence;
+    }): Awaitable<DurableSessionTurn | undefined>;
+    setPhase(input: {
+        readonly sessionId: string;
+        readonly turnId: string;
+        readonly phase: SessionPhase;
+        readonly fence: SessionOwnershipFence;
+    }): Awaitable<void>;
+    requestInterrupt(input: {
+        readonly sessionId: string;
+        readonly turnId: string;
+        readonly reason?: string;
+        readonly fence: SessionOwnershipFence;
+    }): Awaitable<void>;
+    finishTurn(input: {
+        readonly sessionId: string;
+        readonly turnId: string;
+        readonly result: TurnRunnerResult;
+        readonly fence: SessionOwnershipFence;
+    }): Awaitable<FinishTurnCommit>;
+    /**
+     * Fenced hard-stop used only after bounded cooperative drain expires.
+     * Late runner callbacks must be rejected by turn/fence checks.
+     */
+    forceInterrupt(input: {
+        readonly sessionId: string;
+        readonly turnId: string;
+        readonly reason: string;
+        readonly fence: SessionOwnershipFence;
+    }): Awaitable<FinishTurnCommit>;
+    resolveApproval(input: {
+        readonly sessionId: string;
+        readonly approvalId: string;
+        readonly expectedTurnId: string;
+        readonly status: "approved" | "denied";
+        readonly fence: SessionOwnershipFence;
+    }): Awaitable<void>;
+    /**
+     * Reads the durable decision after a commit-unknown resolveApproval call.
+     * Absence means the mutation definitely did not commit and is safe to retry.
+     */
+    approvalResolution(input: {
+        readonly sessionId: string;
+        readonly approvalId: string;
+    }): Awaitable<{
+        readonly expectedTurnId: string;
+        readonly status: "approved" | "denied";
+    } | undefined>;
+    snapshot(sessionId: string): Awaitable<SessionRuntimeSnapshot>;
+    /**
+     * Atomically reconciles ambiguous persisted execution under the current
+     * fenced owner. Implementations must never replay uncertain side effects.
+     */
+    recoverSession(input: {
+        readonly sessionId: string;
+        readonly fence: SessionOwnershipFence;
+    }): Awaitable<{
+        readonly snapshot: SessionRuntimeSnapshot;
+        readonly interruptedTurn?: {
+            readonly turnId: string;
+            readonly runId: string;
+            readonly result: Extract<TurnRunnerResult, {
+                status: "interrupted";
+            }>;
+            readonly requeuedInputs: readonly AdmittedSessionInput[];
+        };
+    }>;
+}
+type CoordinatorEvent = {
+    readonly type: "input_admitted";
+    readonly sessionId: string;
+    readonly inputId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly delivery: "steer" | "queue";
+    readonly expectedTurnId?: string;
+    readonly admittedSequence: number;
+    readonly execution: TurnExecutionSnapshot;
+} | {
+    readonly type: "turn_started";
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly epochs: TurnEpochSnapshot;
+    readonly execution: TurnExecutionSnapshot;
+} | {
+    readonly type: "phase_changed";
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly phase: SessionPhase;
+} | {
+    readonly type: "steering_promoted";
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly inputIds: readonly string[];
+} | {
+    readonly type: "steering_requeued";
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly inputIds: readonly string[];
+} | {
+    readonly type: "interrupt_requested";
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly reason?: string;
+} | {
+    readonly type: "approval_resolved";
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly approvalId: string;
+    readonly status: "approved" | "denied";
+} | {
+    readonly type: "turn_finished";
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly status: TurnRunnerResult["status"];
+    readonly error?: string;
+};
+interface SessionCoordinatorOptions {
+    readonly sessionId: string;
+    readonly ownership: {
+        readonly fence: SessionOwnershipFence;
+    };
+    readonly storage: SessionCoordinatorStorage;
+    readonly runner: TurnRunner;
+    readonly epochs: {
+        capture(): Awaitable<TurnEpochSnapshot>;
+    };
+    /**
+     * Best-effort wake/notification channel only. Storage must persist all
+     * replay-relevant state and envelopes in the mutation transaction.
+     */
+    readonly events?: {
+        publish(event: CoordinatorEvent): Awaitable<void>;
+        /**
+         * Notification failures are diagnostic only. Durable state and runner
+         * progress must not depend on a connected UI/event subscriber.
+         */
+        onError?(error: unknown, event: CoordinatorEvent): Awaitable<void>;
+    };
+    readonly approvals?: {
+        deliver(command: {
+            readonly sessionId: string;
+            readonly expectedTurnId: string;
+            readonly approvalId: string;
+            readonly status: "approved" | "denied";
+        }): Awaitable<void>;
+        onError?(error: unknown, command: {
+            readonly sessionId: string;
+            readonly expectedTurnId: string;
+            readonly approvalId: string;
+            readonly status: "approved" | "denied";
+        }): Awaitable<void>;
+    };
+    /** Maximum diagnostic wait for the best-effort approval wake channel. */
+    readonly approvalDeliveryTimeoutMs?: number;
+    /** Maximum cooperative abort drain before a fenced hard-stop. */
+    readonly shutdownTimeoutMs?: number;
+}
+interface TurnHandle {
+    readonly turnId: string;
+    readonly runId: string;
+    /** True only when this command launched the runner rather than joining a queue. */
+    readonly started: boolean;
+    readonly settled: Promise<TurnRunnerResult>;
+}
 
 declare class ManagedWorkspaceRuntime implements WorkspaceRuntime {
     #private;
@@ -4818,6 +14191,117 @@ declare class WorkspaceRuntimeRegistry {
     close(directory: string): Promise<boolean>;
     closeAll(): Promise<void>;
 }
+
+/**
+ * Resolve one optional turn dependency without silently changing the
+ * capability set. A deadline or loader failure is always surfaced to the
+ * owning UI/transport before the explicit fallback is returned.
+ */
+declare function settleRuntimeDependency<T>(label: string, work: Promise<T>, timeoutMs: number, fallback: T, onDiagnostic: (message: string) => void): Promise<T>;
+
+type CoordinatorErrorCode = "closed" | "no_active_turn" | "turn_conflict" | "execution_conflict" | "invalid_phase";
+declare class SessionCoordinatorError extends Error {
+    readonly code: CoordinatorErrorCode;
+    constructor(code: CoordinatorErrorCode, message: string);
+}
+interface Deferred<T> {
+    readonly promise: Promise<T>;
+    resolve(value: T): void;
+    reject(error: unknown): void;
+}
+interface ActiveTurn {
+    readonly turn: DurableSessionTurn;
+    readonly abortController: AbortController;
+    readonly settlement: Deferred<TurnRunnerResult>;
+    phase: SessionPhase;
+}
+interface ApprovalDelivery {
+    readonly sessionId: string;
+    readonly expectedTurnId: string;
+    readonly approvalId: string;
+    readonly status: "approved" | "denied";
+}
+
+declare abstract class SessionCoordinatorBase {
+    protected readonly sessionId: string;
+    protected readonly fence: SessionOwnershipFence;
+    protected readonly storage: SessionCoordinatorOptions["storage"];
+    protected readonly runner: SessionCoordinatorOptions["runner"];
+    protected readonly epochs: SessionCoordinatorOptions["epochs"];
+    protected readonly events: SessionCoordinatorOptions["events"];
+    protected readonly approvals: SessionCoordinatorOptions["approvals"];
+    protected readonly approvalDeliveryTimeoutMs: number;
+    protected readonly shutdownTimeoutMs: number;
+    protected readonly settlements: Map<string, Deferred<TurnRunnerResult>>;
+    protected readonly completedResults: Map<string, TurnRunnerResult>;
+    protected readonly completedOrder: string[];
+    protected readonly reservedTurnOwners: Map<string, string>;
+    protected readonly reservedRunOwners: Map<string, string>;
+    protected readonly reservedIdentitiesByInput: Map<string, readonly [string, string]>;
+    protected tail: Promise<void>;
+    protected active: ActiveTurn | undefined;
+    protected identityError: SessionCoordinatorError | undefined;
+    protected recovered: boolean;
+    protected closing: boolean;
+    protected closed: boolean;
+    protected closePromise: Promise<void> | undefined;
+    constructor(options: SessionCoordinatorOptions);
+    protected enqueue<T>(operation: () => Promise<T> | T): Promise<T>;
+    protected assertAccepting(): void;
+    protected ensureRecoveredLocked(): Promise<void>;
+    protected recoverLocked(): Promise<SessionRuntimeSnapshot>;
+    protected admitLocked(command: AdmitSessionInputCommand): Promise<AdmittedSessionInput>;
+    protected requireActive(expectedTurnId?: string): ActiveTurn;
+    protected settlementFor(turnId: string): Deferred<TurnRunnerResult>;
+    protected registerSnapshotIdentities(snapshot: SessionRuntimeSnapshot): void;
+    protected registerReservedIdentity(input: AdmittedSessionInput): void;
+    protected rememberCompleted(turnId: string, result: TurnRunnerResult): void;
+    protected reconcileAmbiguousActiveLocked(active: ActiveTurn, cause: unknown, intendedResult: TurnRunnerResult, operation: string): Promise<SessionRuntimeSnapshot>;
+    protected drainOrForce(settlement: Promise<TurnRunnerResult>, timeoutReason: string): Promise<TurnRunnerResult>;
+    protected startNextLocked(retryAfterReconciliation?: boolean): Promise<DurableSessionTurn | undefined>;
+    protected launch(active: ActiveTurn): void;
+    protected reconcilePipelineFailureLocked(active: ActiveTurn, cause: unknown, intendedResult: TurnRunnerResult | undefined): Promise<void>;
+    protected setPhaseLocked(turnId: string, phase: SessionPhase): Promise<void>;
+    protected safeBoundaryLocked(turnId: string): Promise<readonly AdmittedSessionInput[]>;
+    protected settleLocked(turnId: string, result: TurnRunnerResult): Promise<void>;
+    protected publishRequeued(turnId: string, runId: string, commit: FinishTurnCommit): void;
+    protected publish(event: CoordinatorEvent): void;
+    protected deliverApproval(command: ApprovalDelivery): void;
+    protected reportApprovalError(error: unknown, command: ApprovalDelivery): void;
+    protected reportPublishError(error: unknown, event: CoordinatorEvent): void;
+}
+
+declare class SessionCoordinator extends SessionCoordinatorBase {
+    admit(command: AdmitSessionInputCommand): Promise<AdmittedSessionInput>;
+    start(command: StartTurnCommand): Promise<TurnHandle>;
+    steer(command: SteerTurnCommand): Promise<AdmittedSessionInput>;
+    queue(command: QueueTurnCommand): Promise<AdmittedSessionInput>;
+    interrupt(command: InterruptTurnCommand): Promise<boolean>;
+    approve(command: ResolveApprovalCommand): Promise<void>;
+    snapshot(): Promise<SessionRuntimeSnapshot>;
+    recover(): Promise<SessionRuntimeSnapshot>;
+    /**
+     * Stop all in-memory activity after the durable ownership fence is lost.
+     *
+     * This path deliberately performs no storage mutation: only a replacement
+     * owner may reconcile the ambiguous durable turn. Late runner completion is
+     * ignored because the active handle is detached before abort is signalled.
+     */
+    abandon(cause: unknown): Promise<void>;
+    close(): Promise<void>;
+}
+
+interface PersistedTurnCursor {
+    turnId: string;
+    runId: string;
+    afterSequence: number;
+}
+/**
+ * Select the durable event cursor for reattaching an already-running turn.
+ * Missing, stale, corrupt, and future cursors replay the active turn from its
+ * first available event instead of skipping to the snapshot high-water mark.
+ */
+declare function selectActiveTurnResumeCursor(snapshot: SessionProtocolSnapshot, stored: PersistedTurnCursor | undefined): number;
 
 /**
  * Shadow git repository for checkpoints.
@@ -4863,14 +14347,18 @@ declare class CheckpointTracker {
     getEntries(): CheckpointEntry[];
 }
 
+interface CheckpointStorageOptions {
+    /** Embedded-host/test override; defaults to `~/.nexus`. */
+    homeDir?: string;
+}
 /**
  * Persist checkpoint entries for a session (CLI use: after run or on each commit).
  * Stored under ~/.nexus/sessions/{cwdHash}/checkpoints.json keyed by sessionId.
  */
-declare function writeCheckpointEntries(cwd: string, sessionId: string, entries: CheckpointEntry[]): Promise<void>;
+declare function writeCheckpointEntries(cwd: string, sessionId: string, entries: CheckpointEntry[], options?: CheckpointStorageOptions): Promise<void>;
 /**
  * Load checkpoint entries for a session.
  */
-declare function readCheckpointEntries(cwd: string, sessionId: string): Promise<CheckpointEntry[]>;
+declare function readCheckpointEntries(cwd: string, sessionId: string, options?: CheckpointStorageOptions): Promise<CheckpointEntry[]>;
 
-export { type AgentDefinition, type AgentEvent, type AppliedReplacementSnippet, type ApprovalAction, type AtomicWriteOptions, type BackgroundTaskRecord, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type ContextUsageSnapshot, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, type DeferredToolDef, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, DurableRunEventSink, type DurableRunEventSinkOptions, type DurableRunRecord, type EmbeddingClient, type EmbeddingConfig, type FileLockOptions, FileLockTimeoutError, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type IndexerFactoryOptions, type JsonRecoveryResult, type LLMClient, type LegacyMemoryImportResult, type LegacyMemoryRecord, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MEMORY_SCHEMA_VERSION, MODES, MODE_TOOL_GROUPS, ManagedWorkspaceRuntime, type McpAuthRequest, type McpAuthResult, McpClient, type McpClientOptions, type McpConnectionState, type McpResourceContent, type McpResourceRef, type McpResourceTemplateRef, type McpServerConfig, McpServerConfigSchema, type McpServerStatus, type MemoryRecord, type MemoryRetrievalOptions, type MemoryRetrievalResult, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, NEXUS_SERVER_TOKEN_SECRET_KEY, type NexusConfig, NexusConfigSchema, type NexusRunServices, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationCorruptionError, type OrchestrationDiagnostic, type OrchestrationDiagnosticCode, OrchestrationInvariantError, OrchestrationRuntime, type OrchestrationRuntimeOptions, ParallelAgentManager, type PendingRunApproval, type PermissionResult, type PluginCapabilityDiagnostic, type PluginDiagnostic, type PluginDiscoveryResult, type PluginManifestRecord, type PluginMcpCapabilityResult, ProjectRegistry, type ProjectSettings, type ProviderConfig, type ProviderName, type QuestionOptionRow, READ_ONLY_TOOLS, type RegistrationResult, type RemoteSessionRecord, type ResolveBundledOptions, type ResolvedSkillBody, type RetrievedMemory, type RunEventDiagnostic, type RunEventEnvelope, RunEventStore, type RunEventStoreOptions, type RunStatus, type RunToolArtifact, type SaveSessionOptions, Session, SessionConflictError, SessionCorruptionError, type SessionMessage, type SessionStorageDiagnostic, type SessionStorageDiagnosticCode, SessionStore, type SessionStoreOptions, type SkillDef, type SkillToolDescriptionRow, type SlashCommandResolution, StorageCorruptionError, type StorageDiagnostic, type StorageDiagnosticCode, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SubAgentRuntimeContext, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskKind, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolDef, type ToolExecutionEnvironment, type ToolExecutionOrigin, type ToolExecutionOutcome, type ToolExecutionRequest, type ToolPart, ToolRegistry, type ToolResult, type ToolSpillRegistryEntry, UnsafeSessionIdError, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, type WorkingDirectoryChangeResult, type WorkspaceOwnedService, type WorkspaceRuntime, type WorkspaceRuntimeFactory, type WorkspaceRuntimeHandle, WorkspaceRuntimeRegistry, type WorkspaceRuntimeServices, type WorktreeSession, appendCompactionSnippetToSessionMemory, applyPluginRuntimeSettings, applySecretsToConfig, atomicWriteFile, atomicWriteJson, buildIndexWatcherGlobPattern, buildMcpToolSchema, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, canonParallelInnerRecipient, canonicalProjectRoot, catalogSelectionToModel, classifySkills, classifyTools, clearToolSpillsForSession, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpTransport, createNexusRunServices, createResumeAgentTool, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, createTaskCreateBatchTool, createTaskResumeTool, createTaskSnapshotTool, delegatedAgentDescriptionFromParallelInnerParams, deleteSession, deriveSessionTitle, discoverPluginManifests, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, ensureTeamMemberForTask, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, executeToolPipeline, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getContextWindowLimit, getDefaultAutoMemoryDir, getFileLockPath, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getOrchestrationRuntime, getParallelDelegatedAgentTaskDescriptions, getPlanContentForFollowup, getProjectHash, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMemoryFilePath, getSessionMeta, getSessionStorageDiagnostics, getToolOutputDir, getToolOutputSpill, getTreeSitterLanguageWasmsDir, getWebTreeSitterWasmPath, hadPlanExit, handleCompletedTaskSideEffects, importLegacyMemoryFiles, inheritSpillRegistryForMergedToolPart, interpretShellCommandResult, isDelegatedAgentParentTool, isDelegatedAgentParentToolEndClear, isPureSubagentParallelInput, listSessions, listToolSpillsForSession, loadAgentDefinitions, loadAgentInstructionBundle, loadAutoMemoryMarkdown, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginMcpServers, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, loadTeamMemoryMarkdown, loadTrustedPluginRuntimeRecords, mutateSession, normalizeMemoryRecord, normalizedAppliedReplacementsFromMetadata, parallelInnerUseIsDelegatedAgent, parseMentions, persistSecretsFromConfig, readCheckpointEntries, readJsonWithRecovery, readSessionMemoryFile, redactMemorySecrets, refreshSessionMemoryFile, registerToolOutputSpill, renderSlashCommandPrompt, resolveAutoMemoryDirectory, resolveBundledMcpServers, resolveConfiguredAndPluginMcpServers, resolvePluginDeclaredPath, resolveSkillBody, resolveSlashCommand, retrieveMemories, runAgentLoop, runAutoMemoryDreamIfDue, runPluginHooks, runScopedHooks, sampleSkillSiblingFiles, saveSession, setIndexTelemetrySink, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, tokenizeMemoryText, validatePluginManifestFile, withFileLock, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AdmitSessionInputCommand, type AdmittedSessionInput, type AgentDefinition, type AgentEvent, type AppliedReplacementSnippet, type ApprovalAction, type AtomicWriteOptions, type AttachSessionTurnOptions, type AuthorizedNetworkRequest, BROWSER_TOOLS, type BackgroundProcessRecord, BackgroundProcessSupervisor, type BackgroundTaskRecord, type CatalogModel, type CatalogProvider, type ChangedFile, type CheckpointEntry, type CheckpointStorageOptions, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, ConfigFileError, ConfigSubstitutionError, ConfigValidationError, type ContextUsageSnapshot, type CoordinatorEvent, type CredentialIdentity, type CredentialPurpose, type CustomToolTrustEvaluation, type CustomToolTrustGrant, type CustomToolTrustReason, CustomToolTrustStore, CustomToolTrustStoreError, type CustomToolTrustStoreOptions, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_EXECUTABLE_TREE_LIMITS, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, DEFAULT_PLUGIN_FINGERPRINT_LIMITS, type DeferredToolDef, type DeleteSessionOptions, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, DurableRunEventSink, type DurableRunEventSinkOptions, type DurableRunRecord, type DurableSessionTurn, type EmbeddingClient, type EmbeddingConfig, type ExecutableTreeLimits, type ExecutableTreeSnapshot, type FileLockOptions, FileLockTimeoutError, type FinalizeConfigCredentialsOptions, type FinishTurnCommit, type HostNetworkRequest, type HostPathAccess, type HostReadFileOptions, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type IndexerFactoryOptions, type InterruptTurnCommand, InterruptTurnCommandSchema, type JsonRecoveryResult, type LLMClient, LegacyAgentEventSchema, type LegacyMemoryImportResult, type LegacyMemoryRecord, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MAX_AGENT_EVENT_JSON_CHARS, MAX_IMAGES_PER_INPUT, MAX_IMAGE_BASE64_CHARS, MAX_INPUT_PARTS, MAX_MEMORY_CONTENT_CHARS, MAX_MEMORY_IDENTIFIER_CHARS, MAX_MEMORY_RELATION_IDS, MAX_MEMORY_SOURCE_URI_CHARS, MAX_MEMORY_TITLE_CHARS, MAX_MODEL_TOOL_NAME_CHARS, MAX_REMOTE_MCP_PROMPT_ARGUMENTS, MAX_REMOTE_MCP_PROMPT_ARGUMENT_VALUE_CHARS, MAX_REMOTE_MCP_PROMPT_CATALOG_CHARS, MAX_REMOTE_MCP_PROMPT_COMMANDS, MAX_USER_INPUT_TEXT_CHARS, MEMORY_SCHEMA_VERSION, MODES, MODE_TOOL_GROUPS, ManagedWorkspaceRuntime, type McpAuthRequest, type McpAuthResult, type McpAuthorizedFetchOptions, McpClient, type McpClientOptions, type McpConnectionState, type McpNodeRequestFactory, type McpPinnedNodeHopOptions, type McpPromptArgument, type McpPromptContent, type McpPromptMessage, type McpPromptRef, type McpPromptResult, type McpRemoteAuthorizationRequest, type McpRemoteFetchHop, type McpRemoteFetchHopRequest, type McpRemoteRequestAuthorizer, type McpResourceClient, type McpResourceContent, type McpResourceRef, type McpResourceTemplateRef, type McpServerConfig, McpServerConfigSchema, type McpServerStatus, type McpTool, type McpTransportFactoryOptions, type MemoryRecord, type MemoryRetrievalOptions, type MemoryRetrievalResult, MemoryValueLimitError, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, ModeSchema, ModelSelectionSchema, type ModelSelectionSnapshot, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, NEXUS_SERVER_TOKEN_SECRET_KEY, NetworkPolicyError, type NetworkPolicyErrorCode, type NetworkPolicyOptions, NetworkRequestError, type NetworkRequestErrorCode, type NetworkRequestOptions, type NetworkRequestPurpose, type NetworkResolver, type NetworkResourceResponse, type NetworkTransport, type NetworkTransportRequest, type NetworkTransportResponse, type NexusConfig, NexusConfigSchema, type NexusRunServices, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationCorruptionError, type OrchestrationDiagnostic, type OrchestrationDiagnosticCode, OrchestrationInvariantError, OrchestrationRuntime, type OrchestrationRuntimeOptions, PROJECT_AUTHORITY_REQUEST_KINDS, PROTOCOL_VERSION, ParallelAgentManager, type ParseSessionCommandResult, type PendingProjectAuthorityRequest, type PendingProjectMcpServer, type PendingRunApproval, type PendingSessionApproval, PendingSessionApprovalSchema, type PendingSessionApprovalSnapshot, type PermissionResult, type PersistSecretsOptions, type PersistedToolOutputProtection, type PersistedTurnCursor, type PluginCapabilityDiagnostic, type PluginDiagnostic, type PluginDiscoveryResult, type PluginFingerprintLimits, type PluginManifestRecord, type PluginMcpCapabilityResult, type PluginTrustEvaluation, type PluginTrustGrant, type PluginTrustReason, PluginTrustStoreCorruptionError, type PluginTrustStoreOptions, ProfileCredentialCollisionError, type ProfileCredentialRemoval, type ProjectAuthorityPayloadByKind, type ProjectAuthorityRequestKind, ProjectRegistry, type ProjectSettings, type ProtocolEnvelope, ProtocolEnvelopeSchema, type ProtocolError, ProtocolErrorCodeSchema, ProtocolErrorSchema, ProtocolPayloadSchema, ProtocolPersistenceSchema, type ProviderConfig, type ProviderName, type QuestionOptionRow, type QueueTurnCommand, QueueTurnCommandSchema, READ_ONLY_TOOLS, type RegistrationResult, type RemoteMcpPromptArgument, RemoteMcpPromptArgumentSchema, type RemoteMcpPromptCatalog, RemoteMcpPromptCatalogSchema, type RemoteMcpPromptCommand, RemoteMcpPromptCommandSchema, type RemoteMcpPromptResolveRequest, RemoteMcpPromptResolveRequestSchema, type RemoteMcpPromptResolveResponse, RemoteMcpPromptResolveResponseSchema, type RemoteSessionRecord, type ResolveApprovalCommand, ResolveApprovalCommandSchema, type ResolveBundledOptions, type ResolvedCredential, type ResolvedNetworkAddress, type ResolvedSkillBody, type RetrievedMemory, type RunEventDiagnostic, type RunEventEnvelope, RunEventStore, type RunEventStoreOptions, type RunSessionTurnOptions, type RunStatus, type RunToolArtifact, SESSION_COORDINATOR_STORAGE_PORT_VERSION, SESSION_PROTOCOL_SERVICE_PORT_VERSION, type SanitizedMemoryValue, type SaveSessionOptions, SecretsCorruptionError, type SecretsCorruptionReason, type SecretsRemoval, Session, type SessionApprovalIdentity, type SessionCommandReceipt, SessionCommandReceiptSchema, SessionCommandSchema, type SessionCommandV2, SessionConflictError, SessionCoordinator, SessionCoordinatorError, type SessionCoordinatorOptions, type SessionCoordinatorStorage, SessionCorruptionError, type SessionInputPart, type SessionMessage, type SessionMode, type SessionOwnershipFence, type SessionPhase, SessionProtocolError, type SessionProtocolService, type SessionProtocolSnapshot, SessionProtocolSnapshotSchema, type SessionRuntimeSnapshot, type SessionStorageDiagnostic, type SessionStorageDiagnosticCode, SessionStore, type SessionStoreOptions, type SessionTurnIdentity, type SkillAuthority, type SkillDef, type SkillLoadDiagnostic, type SkillLoadDiagnosticCode, type SkillLoadOptions, SkillNameAmbiguityError, type SkillToolDescriptionRow, type SlashCommandResolution, type StartTurnCommand, StartTurnCommandSchema, type SteerTurnCommand, SteerTurnCommandSchema, StorageCorruptionError, type StorageDiagnostic, type StorageDiagnosticCode, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SubAgentRuntimeContext, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskKind, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolContributionDiagnostic, type ToolContributionDiagnosticCode, type ToolContributionSnapshot, type ToolDef, type ToolExecutionEnvironment, type ToolExecutionOrigin, type ToolExecutionOutcome, type ToolExecutionRequest, type ToolIntegrationProvenance, type ToolOutputMaintenanceOptions, type ToolOutputMaintenanceResult, type ToolPart, ToolRegistry, type ToolResult, type ToolSpillRegistryEntry, type TurnEpochSnapshot, type TurnExecutionSnapshot, TurnExecutionSnapshotSchema, type TurnHandle, type TurnRunner, type TurnRunnerContext, type TurnRunnerResult, UnsafeConfigWriteError, UnsafeCustomToolSourceError, UnsafePluginContentError, UnsafeSessionIdError, UnsupportedSecretsVersionError, UserInputPartSchema, type UserInputPartV2, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, WORKSPACE_AUTHORITY_STORE_VERSION, type WorkingDirectoryChangeResult, type WorkspaceAuthorityGrant, type WorkspaceAuthorityGrants, type WorkspaceAuthorityIdentity, type WorkspaceAuthorityRecord, WorkspaceAuthorityStoreError, type WorkspaceAuthorityStoreErrorCode, type WorkspaceAuthorityStoreOptions, type WorkspaceOwnedService, WorkspacePathAuthorizationError, type WorkspacePathAuthorizationErrorCode, type WorkspaceProjectAuthorityApproval, type WorkspaceRuntime, type WorkspaceRuntimeFactory, type WorkspaceRuntimeHandle, WorkspaceRuntimeRegistry, type WorkspaceRuntimeServices, type WorkspaceTaskHandle, WorkspaceTaskSupervisor, WorkspaceToolContributionManager, WorkspaceToolContributionManagerClosedError, type WorkspaceToolContributionManagerOptions, type WorktreeSession, appendCompactionSnippetToSessionMemory, applyPluginRuntimeSettings, applySecretsToConfig, applyWorkspaceAuthorityGrants, approvalGrantKey, approveWorkspaceProjectAuthority, assertMemoryWriteInput, atomicWriteFile, atomicWriteJson, authorizeNetworkRequest, buildIndexWatcherGlobPattern, buildMcpToolSchema, buildRemoteMcpPromptCatalog, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, callableMcpToolName, canonParallelInnerRecipient, canonicalProjectRoot, canonicalizeCredentialDestination, canonicalizeNexusServerBaseUrl, catalogSelectionToModel, clearToolSpillsForSession, closeNexusRunServices, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpAuthorizedFetch, createMcpPinnedLookup, createMcpResourceTools, createMcpTransport, createNexusRunServices, createNodePinnedMcpFetchHop, createPendingProjectAuthorityRequest, createResumeAgentTool, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, createTaskCreateBatchTool, createTaskResumeTool, createTaskSnapshotTool, credentialIdentityKey, delegatedAgentDescriptionFromParallelInnerParams, deleteSession, deriveSessionTitle, discoverPluginManifests, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, ensureTeamMemberForTask, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, evaluatePluginTrust, executeToolPipeline, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, finalizeConfigCredentials, fingerprintExecutableTree, fingerprintProjectAuthorityPayload, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getConfigEnvironment, getContextWindowLimit, getDefaultAutoMemoryDir, getEmbeddingCredentialIdentity, getFileLockPath, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getNexusServerTokenSecretKey, getOrchestrationRuntime, getParallelDelegatedAgentTaskDescriptions, getPendingProjectAuthorityRequests, getPendingProjectMcpServers, getPlanContentForFollowup, getPluginTrustStorePath, getProjectHash, getProviderCredentialIdentity, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMemoryFilePath, getSessionMeta, getSessionStorageDiagnostics, getToolOutputDir, getToolOutputSpill, getTreeSitterLanguageWasmsDir, getWebTreeSitterWasmPath, getWorkspaceAuthorityIdentity, getWorkspaceAuthorityStorePath, grantPluginTrust, grantWorkspaceAuthority, hadPlanExit, handleCompletedTaskSideEffects, hydrateWorkspaceAuthority, importLegacyMemoryFiles, inheritSpillRegistryForMergedToolPart, interpretShellCommandResult, isDelegatedAgentParentTool, isDelegatedAgentParentToolEndClear, isLoopbackNexusServerDestination, isPublicNetworkAddress, isPureSubagentParallelInput, isValidPendingProjectAuthorityRequest, listPluginTrustGrants, listSessions, listToolSpillsForSession, listWorkspaceAuthorities, loadAgentDefinitions, loadAgentInstructionBundle, loadAutoMemoryMarkdown, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginMcpServers, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, loadTeamMemoryMarkdown, loadTrustedPluginRuntimeRecords, loadWorkspaceAuthority, mcpPromptCommandName, mcpPromptOpaqueId, mergeEmbeddingConfigSafely, mergeModelPresetSelection, mergeNexusConfigLayers, mergeProviderConfigPartialSafely, mergeProviderConfigSafely, mutateSession, nodePinnedTransport, normalizeAwsRegion, normalizeAzureResourceName, normalizeMemoryRecord, normalizedAppliedReplacementsFromMetadata, parallelInnerUseIsDelegatedAgent, parseMentions, parseSessionCommand, patchGlobalConfig, patchProjectConfig, persistSecretsFromConfig, readCheckpointEntries, readJsonWithRecovery, readSessionMemoryFile, redactMemorySecrets, refreshSessionMemoryFile, registerInheritedRunTools, registerToolContributionSnapshot, registerToolOutputSpill, renderMcpPromptResult, renderSlashCommandPrompt, requestNetworkResource, resolveAuthorizedWorkspacePath, resolveAutoMemoryDirectory, resolveBundledMcpServers, resolveConfiguredAndPluginMcpServers, resolveEmbeddingCredential, resolvePluginDeclaredPath, resolveProviderCredential, resolveSkillBody, resolveSlashCommand, restrictDelegatedMode, retrieveMemories, revokePluginTrust, revokeWorkspaceAuthority, revokeWorkspaceProjectAuthority, runAgentLoop, runAutoMemoryDreamIfDue, runPluginHooks, runScopedHooks, sampleSkillSiblingFiles, sanitizeMemoryValue, saveSession, scheduleToolOutputMaintenance, selectActiveTurnResumeCursor, selectProviderProfile, setIndexTelemetrySink, settleRuntimeDependency, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, tokenizeMemoryText, validatePluginManifestFile, withFileLock, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

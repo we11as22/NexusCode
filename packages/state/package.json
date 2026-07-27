@@ -14,9 +14,10 @@
     }
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node --test test/dist-import.test.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:dist": "node --test test/dist-import.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -8,4 +8,5 @@ export default defineConfig({
   clean: true,
   target: "node24",
   external: ["node:sqlite"],
+  removeNodeProtocol: false,
 })

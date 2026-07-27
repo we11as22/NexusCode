@@ -29,20 +29,64 @@ describe("VS Code secret settings", () => {
     )
 
     expect(JSON.parse(migrated)).toEqual({
-      model: "secure-model",
-      embeddings: "legacy-embeddings",
+      version: 2,
+      credentials: {},
+      legacyUnbound: {
+        model: "secure-model",
+        embeddings: "legacy-embeddings",
+        profiles: { review: "secure-profile" },
+      },
       qdrantApiKey: "secure-qdrant",
-      profiles: { review: "secure-profile" },
     })
   })
 
   it("recovers from a malformed old secure payload", () => {
     expect(JSON.parse(mergeLegacyNexusSecrets("{broken", {
       model: "legacy-model",
-    }))).toEqual({ model: "legacy-model" })
+    }))).toEqual({
+      version: 2,
+      credentials: {},
+      legacyUnbound: { model: "legacy-model" },
+    })
+  })
+
+  it("preserves bound v2 credentials while quarantining newly discovered legacy keys", () => {
+    const bound = {
+      purpose: "chat",
+      provider: "openai",
+      destination: "https://api.openai.com/v1",
+      secret: "bound",
+    }
+    const key = JSON.stringify(["chat", "openai", "https://api.openai.com/v1"])
+
+    expect(JSON.parse(mergeLegacyNexusSecrets(JSON.stringify({
+      version: 2,
+      credentials: { [key]: bound },
+      legacyUnbound: { model: "already-quarantined" },
+    }), {
+      model: "ignored-later-legacy",
+      embeddings: "legacy-embeddings",
+    }))).toEqual({
+      version: 2,
+      credentials: { [key]: bound },
+      legacyUnbound: {
+        model: "already-quarantined",
+        embeddings: "legacy-embeddings",
+      },
+    })
   })
 
   it("uses a dedicated Secret Storage key for autocomplete", () => {
     expect(AUTOCOMPLETE_API_KEY_SECRET).toBe("nexuscode_autocomplete_api_key")
+  })
+
+  it("fails closed without rewriting an unknown secure payload version", () => {
+    const raw = JSON.stringify({
+      version: 99,
+      credentials: { future: "opaque" },
+    })
+    expect(() => mergeLegacyNexusSecrets(raw, {
+      model: "legacy-model",
+    })).toThrow(/Unsupported secrets payload version/)
   })
 })

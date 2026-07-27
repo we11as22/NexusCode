@@ -12,6 +12,7 @@ type Props = {
   onClose: (result?: CloseResult) => void
   /** Connect or start Qdrant at URL; progress is logged to terminal. */
   onConnectQdrant?: (url: string) => Promise<void>
+  onRemoveApiKey: () => Promise<void>
 }
 
 export function NexusVectorPanel({
@@ -19,6 +20,7 @@ export function NexusVectorPanel({
   onSave,
   onClose,
   onConnectQdrant,
+  onRemoveApiKey,
 }: Props): React.ReactNode {
   const theme = getTheme()
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -31,11 +33,12 @@ export function NexusVectorPanel({
   const [vectorDbUrl, setVectorDbUrl] = useState(
     initialConfig.vectorDb?.url ?? 'http://127.0.0.1:6333',
   )
+  const [vectorDbApiKey, setVectorDbApiKey] = useState('')
   const [saving, setSaving] = useState(false)
   const [connectingQdrant, setConnectingQdrant] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const fieldCount = 5
+  const fieldCount = 7
 
   /** Enter: submit on "Save" row (index 3), toggle on 0/1, edit URL on 2 */
   const isEnter = (key: { return?: boolean }, inp: string) =>
@@ -50,11 +53,15 @@ export function NexusVectorPanel({
     if (key.downArrow) setSelectedIndex((i) => Math.min(fieldCount - 1, i + 1))
     if (key.backspace || input === '\x7f' || key.delete) {
       if (selectedIndex === 1) setVectorDbUrl((s) => s.slice(0, -1))
+      if (selectedIndex === 2) setVectorDbApiKey((s) => s.slice(0, -1))
       return
     }
-    if (selectedIndex === 1 && input != null && input !== '' && input !== '\r' && input !== '\n') {
+    if ((selectedIndex === 1 || selectedIndex === 2) && input != null && input !== '' && input !== '\r' && input !== '\n') {
       const printable = input.replace(/[\x00-\x1f\x7f]/g, '')
-      if (printable) setVectorDbUrl((s) => s + printable)
+      if (printable) {
+        if (selectedIndex === 1) setVectorDbUrl((s) => s + printable)
+        else setVectorDbApiKey((s) => s + printable)
+      }
       return
     }
     if (isEnter(key, input ?? '') || input === ' ') {
@@ -63,7 +70,19 @@ export function NexusVectorPanel({
         return
       }
       if (selectedIndex === 1) return
-      if (selectedIndex === 2 && onConnectQdrant) {
+      if (selectedIndex === 2) return
+      if (selectedIndex === 3) {
+        setError(null)
+        setSaving(true)
+        onRemoveApiKey()
+          .then(() => onClose({ saved: true }))
+          .catch((e) => {
+            setError(String(e))
+            setSaving(false)
+          })
+        return
+      }
+      if (selectedIndex === 4 && onConnectQdrant) {
         setError(null)
         setConnectingQdrant(true)
         const url = vectorDbUrl.trim() || 'http://127.0.0.1:6333'
@@ -75,11 +94,11 @@ export function NexusVectorPanel({
           })
         return
       }
-      if (selectedIndex === 3) {
+      if (selectedIndex === 5) {
         setVectorDbEnabled((v) => !v)
         return
       }
-      if (selectedIndex === 4) {
+      if (selectedIndex === 6) {
         setSaving(true)
         setError(null)
         const url = vectorDbUrl.trim() || 'http://127.0.0.1:6333'
@@ -94,6 +113,9 @@ export function NexusVectorPanel({
             url,
             collection: initialConfig.vectorDb?.collection ?? 'nexus',
             autoStart: initialConfig.vectorDb?.autoStart ?? true,
+            ...(vectorDbApiKey.trim()
+              ? { apiKey: vectorDbApiKey.trim() }
+              : {}),
           },
         })
           .then(() => onClose({ saved: true }))
@@ -106,12 +128,12 @@ export function NexusVectorPanel({
   })
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={theme.secondaryBorder} paddingX={1} marginTop={1} height={16}>
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.secondaryBorder} paddingX={1} marginTop={1} height={20}>
       <Box marginBottom={1}>
         <Text bold>Vector DB &amp; semantic index</Text>
       </Box>
       <Text dimColor>Off by default. Enable to use codebase_search (Qdrant + embeddings).</Text>
-      <Box flexDirection="column" height={6} marginTop={1}>
+      <Box flexDirection="column" height={8} marginTop={1}>
         <Box height={1}>
           <Text color={selectedIndex === 0 ? theme.primary : undefined}>
             {selectedIndex === 0 ? figures.pointer : ' '} Vector index (semantic search):
@@ -126,19 +148,30 @@ export function NexusVectorPanel({
         </Box>
         <Box height={1}>
           <Text color={selectedIndex === 2 ? theme.primary : undefined}>
-            {selectedIndex === 2 ? figures.pointer : ' '} Connect / Start Qdrant
+            {selectedIndex === 2 ? figures.pointer : ' '} Qdrant API key:
+          </Text>
+          <Text>{vectorDbApiKey ? '•'.repeat(vectorDbApiKey.length) : ' (blank keeps stored key)'}</Text>
+        </Box>
+        <Box height={1}>
+          <Text color={selectedIndex === 3 ? theme.primary : undefined}>
+            {selectedIndex === 3 ? figures.pointer : ' '} Remove stored Qdrant key
+          </Text>
+        </Box>
+        <Box height={1}>
+          <Text color={selectedIndex === 4 ? theme.primary : undefined}>
+            {selectedIndex === 4 ? figures.pointer : ' '} Connect / Start Qdrant
           </Text>
           {connectingQdrant ? <Text dimColor> …</Text> : null}
         </Box>
         <Box height={1}>
-          <Text color={selectedIndex === 3 ? theme.primary : undefined}>
-            {selectedIndex === 3 ? figures.pointer : ' '} Vector DB enabled (use for indexer):
+          <Text color={selectedIndex === 5 ? theme.primary : undefined}>
+            {selectedIndex === 5 ? figures.pointer : ' '} Vector DB enabled (use for indexer):
           </Text>
           <Text>{vectorDbEnabled ? 'on' : 'off'}</Text>
         </Box>
         <Box height={1}>
-          <Text color={selectedIndex === 4 ? theme.primary : undefined}>
-            {selectedIndex === 4 ? figures.pointer : ' '} Save and start
+          <Text color={selectedIndex === 6 ? theme.primary : undefined}>
+            {selectedIndex === 6 ? figures.pointer : ' '} Save and start
           </Text>
         </Box>
       </Box>
@@ -158,7 +191,7 @@ export function NexusVectorPanel({
         </Box>
       )}
       <Box marginTop={1}>
-        <Text dimColor>↑/↓ select · Enter/Space toggle / Connect / Save · Esc close</Text>
+        <Text dimColor>↑/↓ select · type URL/key · Enter/Space action · Esc close</Text>
       </Box>
     </Box>
   )

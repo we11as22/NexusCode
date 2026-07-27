@@ -1,12 +1,17 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import { randomUUID } from "node:crypto"
-import { kill } from "node:process"
-import * as yaml from "js-yaml"
+import { createHash, randomUUID } from "node:crypto"
 import { z } from "zod"
-import type { BackgroundTaskRecord, DeferredToolDef, ToolContext, ToolDef, TaskKind } from "../../types.js"
-import { backgroundBashJobs, startBackgroundShellTask } from "./execute-command.js"
-import { getOrchestrationRuntime } from "../../orchestration/runtime.js"
+import type {
+  BackgroundTaskRecord,
+  MemoryRecord,
+  ToolContext,
+  ToolDef,
+  TaskKind,
+} from "../../types.js"
+import { searchBm25 } from "../../search/bm25.js"
+import { startBackgroundShellTask } from "./execute-command.js"
+import type { OrchestrationRuntime } from "../../orchestration/runtime.js"
 import { loadAgentDefinitions } from "../../orchestration/agents.js"
 import { loadPluginRuntimeRecords, runPluginHooks } from "../../plugins/runtime.js"
 import { getClaudeCompatibilityOptions } from "../../compat/claude.js"
@@ -25,9 +30,32 @@ import {
   isLikelyLongRunningShellCommand,
 } from "./shell-safety.js"
 import { interpretShellCommandResult } from "./shell-command-semantics.js"
-import { validatePluginManifestFile } from "../../plugins/index.js"
+import {
+  loadPluginManifests,
+  validatePluginManifestFile,
+} from "../../plugins/index.js"
+import {
+  DEFAULT_PLUGIN_FINGERPRINT_LIMITS,
+  evaluatePluginTrust,
+  grantPluginTrust,
+  listPluginTrustGrants,
+  revokePluginTrust,
+} from "../../plugins/trust.js"
 import { retrieveMemories } from "../../memory/index.js"
 import { isMemoryAccessibleFromSession } from "../../orchestration/memory-selection.js"
+import { requestNetworkResource } from "../../network/network-request.js"
+import { readTrustedRuntimeOutput } from "./runtime-output.js"
+import {
+  readRawConfigFile,
+  writeRawConfigFile,
+} from "../../config/layered-io.js"
+import {
+  atomicWriteFile,
+  withFileLock,
+} from "../../storage/durable-fs.js"
+import { modeSpecificToolInputError } from "../../agent/mode-input-policy.js"
+
+const MAX_PLAN_BYTES = 5 * 1024 * 1024
 
 function zodPreview(schema: z.ZodTypeAny): unknown {
   const def = (schema as z.ZodTypeAny & { _def?: { typeName?: string; shape?: () => Record<string, z.ZodTypeAny>; innerType?: z.ZodTypeAny; options?: z.ZodTypeAny[]; values?: readonly string[] } })._def
@@ -63,51 +91,54 @@ function zodPreview(schema: z.ZodTypeAny): unknown {
   }
 }
 
-function toolSearchCandidates(tools: ToolDef[]): DeferredToolDef[] {
-  return tools.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    ...(tool.searchHint ? { searchHint: tool.searchHint } : {}),
-  }))
-}
-
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {}
 }
 
-async function readProjectConfigDocument(cwd: string): Promise<Record<string, unknown>> {
-  const configPath = path.join(cwd, ".nexus", "nexus.yaml")
-  try {
-    const raw = await fs.readFile(configPath, "utf8")
-    return asObject(yaml.load(raw))
-  } catch {
-    return {}
-  }
+function projectConfigPath(cwd: string): string {
+  return path.join(cwd, ".nexus", "nexus.yaml")
 }
 
-async function writeProjectConfigDocument(cwd: string, doc: Record<string, unknown>): Promise<void> {
-  const configPath = path.join(cwd, ".nexus", "nexus.yaml")
-  await fs.mkdir(path.dirname(configPath), { recursive: true })
-  await fs.writeFile(configPath, yaml.dump(doc, { indent: 2, lineWidth: 120 }), "utf8")
+async function readProjectConfigDocument(
+  cwd: string,
+): Promise<Record<string, unknown>> {
+  return readRawConfigFile(projectConfigPath(cwd)) ?? {}
+}
+
+function mutateProjectPluginConfig(
+  doc: Record<string, unknown>,
+  updater: (plugins: Record<string, unknown>) => void,
+): void {
+  const plugins = asObject(doc.plugins)
+  updater(plugins)
+  const options = asObject(plugins.options)
+  if (Object.keys(options).length > 0) plugins.options = options
+  else delete plugins.options
+  if (Array.isArray(plugins.trusted) && plugins.trusted.length === 0) {
+    delete plugins.trusted
+  }
+  if (Array.isArray(plugins.blocked) && plugins.blocked.length === 0) {
+    delete plugins.blocked
+  }
+  if (Object.keys(plugins).length > 0) doc.plugins = plugins
+  else delete doc.plugins
 }
 
 async function updateProjectPluginConfig(
   cwd: string,
   updater: (plugins: Record<string, unknown>) => void,
 ): Promise<void> {
-  const doc = await readProjectConfigDocument(cwd)
-  const plugins = asObject(doc.plugins)
-  updater(plugins)
-  const options = asObject(plugins.options)
-  if (Object.keys(options).length > 0) plugins.options = options
-  else delete plugins.options
-  if (Array.isArray(plugins.trusted) && plugins.trusted.length === 0) delete plugins.trusted
-  if (Array.isArray(plugins.blocked) && plugins.blocked.length === 0) delete plugins.blocked
-  if (Object.keys(plugins).length > 0) doc.plugins = plugins
-  else delete doc.plugins
-  await writeProjectConfigDocument(cwd, doc)
+  const configPath = projectConfigPath(cwd)
+  await withFileLock(configPath, async () => {
+    // Raw reads intentionally preserve unresolved substitutions as data. Any
+    // malformed or unreadable document throws instead of being replaced by an
+    // empty config.
+    const doc = readRawConfigFile(configPath) ?? {}
+    mutateProjectPluginConfig(doc, updater)
+    await writeRawConfigFile(configPath, doc)
+  })
 }
 
 async function refreshProjectPluginConfig(ctx: ToolContext): Promise<void> {
@@ -139,37 +170,87 @@ async function refreshProjectPluginConfig(ctx: ToolContext): Promise<void> {
   }
 }
 
-function slugifyName(value: string): string {
-  return value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || `plugin-${Date.now()}`
+function slugifyName(value: string): string | undefined {
+  const normalized = value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+  if (!normalized || normalized === "." || normalized === "..") return undefined
+  return normalized
 }
 
-async function copyDirectoryRecursive(sourceDir: string, targetDir: string): Promise<void> {
-  await fs.mkdir(targetDir, { recursive: true })
-  const entries = await fs.readdir(sourceDir, { withFileTypes: true })
+async function copyDirectoryRecursive(
+  sourceDir: string,
+  targetDir: string,
+  ctx: ToolContext,
+  state: {
+    root: string
+    entries: number
+    totalBytes: number
+  } = {
+    root: sourceDir,
+    entries: 0,
+    totalBytes: 0,
+  },
+  depth = 0,
+): Promise<void> {
+  if (depth > DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxDepth) {
+    throw new Error(
+      `Plugin tree exceeds maximum depth ${DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxDepth}.`,
+    )
+  }
+  const authorizedSource = await ctx.host.resolvePath(sourceDir, "list")
+  const authorizedTarget = await ctx.host.resolvePath(targetDir, "write")
+  await fs.mkdir(authorizedTarget, { recursive: true })
+  const entries = await fs.readdir(authorizedSource, { withFileTypes: true })
   for (const entry of entries) {
-    const sourcePath = path.join(sourceDir, entry.name)
-    const targetPath = path.join(targetDir, entry.name)
+    state.entries += 1
+    if (state.entries > DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxEntries) {
+      throw new Error(
+        `Plugin tree exceeds ${DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxEntries} entries.`,
+      )
+    }
+    const sourcePath = path.join(authorizedSource, entry.name)
+    const targetPath = path.join(authorizedTarget, entry.name)
+    const relativePath = path.relative(state.root, sourcePath)
+    if (
+      Buffer.byteLength(relativePath, "utf8") >
+      DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxRelativePathBytes
+    ) {
+      throw new Error(
+        `Plugin path exceeds ${DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxRelativePathBytes} bytes: ${relativePath}`,
+      )
+    }
+    if (entry.isSymbolicLink()) {
+      throw new Error(`Plugin symbolic links are not supported: ${sourcePath}`)
+    }
     if (entry.isDirectory()) {
-      await copyDirectoryRecursive(sourcePath, targetPath)
+      await copyDirectoryRecursive(sourcePath, targetPath, ctx, state, depth + 1)
       continue
     }
-    if (entry.isSymbolicLink()) continue
     if (!entry.isFile()) {
       throw new Error(`Unsupported plugin filesystem entry: ${sourcePath}`)
     }
-    await fs.copyFile(sourcePath, targetPath)
-    const sourceMode = (await fs.stat(sourcePath)).mode & 0o777
-    await fs.chmod(targetPath, sourceMode)
-  }
-}
-
-function isProcessRunning(pid: number | undefined): boolean {
-  if (!pid || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
+    const authorizedFile = await ctx.host.resolvePath(sourcePath, "read")
+    const authorizedDestination = await ctx.host.resolvePath(
+      targetPath,
+      "write",
+    )
+    const sourceStat = await fs.stat(authorizedFile)
+    if (sourceStat.size > DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxFileBytes) {
+      throw new Error(
+        `Plugin file exceeds ${DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxFileBytes} bytes: ${relativePath}`,
+      )
+    }
+    state.totalBytes += sourceStat.size
+    if (state.totalBytes > DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxTotalBytes) {
+      throw new Error(
+        `Plugin tree exceeds ${DEFAULT_PLUGIN_FINGERPRINT_LIMITS.maxTotalBytes} bytes.`,
+      )
+    }
+    await fs.copyFile(authorizedFile, authorizedDestination)
+    const sourceMode = sourceStat.mode & 0o777
+    await fs.chmod(authorizedDestination, sourceMode)
   }
 }
 
@@ -199,38 +280,87 @@ const toolSearchSchema = z.object({
 
 export const toolSearchTool: ToolDef<z.infer<typeof toolSearchSchema>> = {
   name: "ToolSearch",
-  description: "Search available tools and return compact schema previews for the best matches. Use this when a capability is missing from the initial manifest or when you need the exact canonical task/tool name instead of guessing.",
+  description: "Search deferred tool metadata with deterministic BM25 ranking and expose matching schemas for the next model call. Use `select:ExactToolName` for direct loading.",
   parameters: toolSearchSchema,
   readOnly: true,
   async execute({ query, max_results }, ctx) {
     const limit = max_results ?? 8
-    const q = query.trim().toLowerCase()
-    const tools = ctx.resolvedTools ?? []
-    const ranked = toolSearchCandidates(tools)
-      .map((tool, index) => {
-        const haystack = `${tool.name}\n${tool.description}\n${tool.searchHint ?? ""}`.toLowerCase()
-        const score =
-          (haystack.includes(q) ? 10 : 0) +
-          (tool.name.toLowerCase().includes(q) ? 10 : 0) +
-          q.split(/\s+/).filter(Boolean).reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0) -
-          index * 0.0001
-        return { tool, score }
-      })
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
+    const tools = ctx.searchableTools ?? ctx.resolvedTools ?? []
+    const selectMatch = query.trim().match(/^select:(.+)$/i)
+    const missingTools: string[] = []
+    const ranked = selectMatch
+      ? selectMatch[1]!
+          .split(",")
+          .map((name) => name.trim())
+          .filter(Boolean)
+          .reduce<Array<{ tool: ToolDef; score: number }>>(
+            (matches, requestedName) => {
+              const tool = tools.find(
+                (candidate) =>
+                  candidate.name.toLowerCase() ===
+                  requestedName.toLowerCase(),
+              )
+              if (!tool) {
+                missingTools.push(requestedName)
+              } else if (!matches.some((match) => match.tool.name === tool.name)) {
+                matches.push({ tool, score: Number.POSITIVE_INFINITY })
+              }
+              return matches
+            },
+            [],
+          )
+          .slice(0, limit)
+      : searchBm25(
+          tools.map((tool) => ({
+            value: tool,
+            // Repetition gives canonical names a deliberate field boost while
+            // descriptions/search hints retain natural-language discovery.
+            text: `${tool.name} ${tool.name} ${tool.name}\n${tool.description}\n${tool.searchHint ?? ""}`,
+          })),
+          query,
+          limit,
+        ).map(({ value, score }) => ({ tool: value, score }))
 
+    const activation = ctx.activateDeferredTools?.(
+      ranked.map(({ tool }) => tool.name),
+    )
+    if (activation && activation.rejected.length > 0) {
+      return {
+        success: false,
+        output:
+          `Tool activation was rejected because the requested names are outside the authorized search universe: ${activation.rejected.join(", ")}`,
+        metadata: {
+          activatedTools: [],
+          rejectedTools: activation.rejected,
+          missingTools,
+        },
+      }
+    }
+
+    const activatedNames = new Set(
+      activation?.activated.map((tool) => tool.name) ?? [],
+    )
     const rows = ranked.map(({ tool }) => {
       const def = tools.find((item) => item.name === tool.name)
       return [
         `## ${tool.name}`,
         tool.description,
+        activatedNames.has(tool.name)
+          ? "Status: activated for subsequent tool calls."
+          : "Status: already active.",
         `Schema preview: ${JSON.stringify(def ? zodPreview(def.parameters as z.ZodTypeAny) : {}, null, 2)}`,
       ].join("\n")
     })
     return {
       success: true,
       output: rows.length > 0 ? rows.join("\n\n") : `No tools matched query: ${query}`,
+      metadata: {
+        activatedTools:
+          activation?.activated.map((tool) => tool.name) ?? [],
+        alreadyActiveTools:
+          activation?.alreadyActive.map((tool) => tool.name) ?? [],
+        missingTools,
+      },
     }
   },
 }
@@ -259,19 +389,26 @@ const taskCreateSchema = z.object({
 
 async function createWorktreeForTask(
   ctx: ToolContext,
-  runtime: Awaited<ReturnType<typeof getOrchestrationRuntime>>,
+  runtime: OrchestrationRuntime,
   requestedName?: string,
 ): Promise<{ worktreePath: string; worktreeId: string; branch: string }> {
   const top = await ctx.host.runCommand("git rev-parse --show-toplevel", ctx.cwd, ctx.signal)
   if (top.exitCode !== 0) {
     throw new Error("Worktree isolation requires a git repository.")
   }
-  const repoRoot = top.stdout.trim()
+  const repoRoot = await ctx.host.resolvePath(top.stdout.trim(), "execute")
   const worktreeName = (requestedName?.trim() || `task-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, "-")
   const branch = `nexus/${worktreeName}`
-  const worktreePath = path.join(repoRoot, ".nexus", "worktrees", worktreeName)
+  const worktreePath = await ctx.host.resolvePath(
+    path.join(repoRoot, ".nexus", "worktrees", worktreeName),
+    "write",
+  )
   await fs.mkdir(path.dirname(worktreePath), { recursive: true })
-  const create = await ctx.host.runCommand(`git worktree add -b "${branch}" "${worktreePath}" HEAD`, ctx.cwd, ctx.signal)
+  const create = await ctx.host.runCommand(
+    `git worktree add -b ${quoteShellArgument(branch)} ${quoteShellArgument(worktreePath)} HEAD`,
+    ctx.cwd,
+    ctx.signal,
+  )
   if (create.exitCode !== 0) {
     throw new Error(create.stderr || create.stdout || "Failed to create worktree.")
   }
@@ -291,14 +428,49 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
   description:
     "Create a unified task in the orchestration runtime. kind=agent: delegated agent work; kind=shell: background shell jobs; kind=tracking (default): durable coordination items. Prefer TaskCreate over ad hoc coordination in prose. OpenClaude-class habits: use TaskList first to avoid duplicate subjects; for tracking work, move status forward with TaskUpdate (e.g. in_progress before you start, completed when done); give a clear imperative subject and a detailed description others can act on.",
   parameters: taskCreateSchema,
+  approval: {
+    capability: "execute",
+    when(args) {
+      return (
+        (args.kind === "shell" && Boolean(args.command?.trim())) ||
+        (args.kind === "agent" && args.isolation === "worktree")
+      )
+    },
+    command(args) {
+      return args.kind === "shell" ? args.command?.trim() : undefined
+    },
+    description(args) {
+      const command = args.kind === "shell" ? args.command?.trim() : undefined
+      return command
+        ? `Run: ${command}`
+        : `Create an isolated git worktree for task: ${args.subject}`
+    },
+    content(args) {
+      return args.kind === "shell"
+        ? args.command?.trim()
+        : args.description.trim()
+    },
+    shortDescription(args) {
+      return args.description.trim()
+    },
+  },
   async execute(args, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const modeInputError = modeSpecificToolInputError(
+      ctx.mode ?? "agent",
+      "TaskCreate",
+      args,
+    )
+    if (modeInputError) {
+      return { success: false, output: `ERROR: ${modeInputError}` }
+    }
+
+    const runtime = ctx.services.orchestrationRuntime
     const kind = (args.kind ?? "tracking") as TaskKind
     if (kind === "agent") {
       const manager = ctx.services.parallelAgentManager
       const agentCwd =
-        typeof args.cwd === "string" && path.isAbsolute(args.cwd)
-          ? args.cwd
+        typeof args.cwd === "string" && args.cwd.trim()
+          ? await ctx.host.resolvePath(args.cwd, "execute")
           : ctx.cwd
       let effectiveCwd = agentCwd
       let createdWorktree:
@@ -356,11 +528,16 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
             modelOverride: args.model,
             taskName: args.name,
           },
-          { host: ctx.host, services: ctx.services },
+          {
+            host: ctx.host,
+            services: ctx.services,
+            ownerSessionId: ctx.session.id,
+          },
         )
         const task = await runtime.updateTask(started.subagentId, {
           subject: args.subject,
           owner: args.owner,
+          sessionId: ctx.session.id,
           ...(args.teamName ? { teamName: args.teamName } : {}),
           metadata: agentMetadata,
           ...(args.activeForm ? { activeForm: args.activeForm } : {}),
@@ -375,6 +552,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
             task: resolved,
             agentId: started.subagentId,
             agentType: agentDefinition?.agentType,
+            runtime,
           })
           ctx.host.emit({ type: "task_created", task: resolved })
           ctx.host.emit({ type: "task_updated", task: resolved })
@@ -400,11 +578,16 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
           modelOverride: args.model,
           taskName: args.name,
         },
-        { host: ctx.host, services: ctx.services },
+        {
+          host: ctx.host,
+          services: ctx.services,
+          ownerSessionId: ctx.session.id,
+        },
       )
       const task = await runtime.updateTask(result.subagentId, {
         subject: args.subject,
         owner: args.owner,
+        sessionId: ctx.session.id,
         ...(args.teamName ? { teamName: args.teamName } : {}),
         metadata: agentMetadata,
         ...(args.activeForm ? { activeForm: args.activeForm } : {}),
@@ -419,6 +602,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
           task: resolved,
           agentId: result.subagentId,
           agentType: agentDefinition?.agentType,
+          runtime,
         })
         ctx.host.emit({ type: "task_created", task: resolved })
         ctx.host.emit({ type: "task_completed", task: resolved, outputPreview: result.output.slice(0, 500) })
@@ -428,6 +612,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
           config: ctx.config,
           task: resolved,
           outputPreview: result.output.slice(0, 500),
+          runtime,
         })
       }
       return {
@@ -453,9 +638,13 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
       const dangerousMessage = detectDangerousShellPattern(args.command)
       const autoBackgrounded = args.block == null && isLikelyLongRunningShellCommand(args.command)
       const shouldBlock = args.block ?? false
+      const shellCwd =
+        typeof args.cwd === "string" && args.cwd.trim()
+          ? await ctx.host.resolvePath(args.cwd, "execute")
+          : ctx.cwd
       const shellMetadata: Record<string, unknown> = {
         ...(args.metadata ?? {}),
-        ...(typeof args.cwd === "string" && path.isAbsolute(args.cwd) ? { cwd: args.cwd } : {}),
+        ...(shellCwd !== ctx.cwd ? { cwd: shellCwd } : {}),
         ...(dangerousMessage ? { dangerousWarning: dangerousMessage } : {}),
         ...(autoBackgrounded ? { assistantAutoBackgrounded: true } : {}),
       }
@@ -465,9 +654,11 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
           : args.command
       const { taskId } = await startBackgroundShellTask({
         command,
-        cwd: typeof args.cwd === "string" && path.isAbsolute(args.cwd) ? args.cwd : ctx.cwd,
+        cwd: shellCwd,
         shellRunner,
         host: ctx.host,
+        services: ctx.services,
+        sessionId: ctx.session.id,
         config: ctx.config,
         metadata: {
           assistantAutoBackgrounded: autoBackgrounded,
@@ -477,6 +668,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
       const task = await runtime.updateTask(taskId, {
         subject: args.subject,
         owner: args.owner,
+        sessionId: ctx.session.id,
         ...(args.teamName ? { teamName: args.teamName } : {}),
         shellRunner,
         metadata: shellMetadata,
@@ -490,6 +682,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
           cwd: ctx.cwd,
           host: ctx.host,
           task: resolved,
+          runtime,
         })
         ctx.host.emit({ type: "task_created", task: resolved })
       }
@@ -510,6 +703,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
           config: ctx.config,
           task: latestTask,
           outputPreview: output.slice(0, 500),
+          runtime,
         })
       }
       return {
@@ -523,6 +717,7 @@ export const taskCreateTool: ToolDef<z.infer<typeof taskCreateSchema>> = {
       kind,
       subject: args.subject,
       description: args.description,
+      sessionId: ctx.session.id,
       ...(args.activeForm ? { activeForm: args.activeForm } : {}),
       ...(args.owner ? { owner: args.owner } : {}),
       ...(args.teamName ? { teamName: args.teamName } : {}),
@@ -551,7 +746,7 @@ export const taskGetTool: ToolDef<z.infer<typeof taskGetSchema>> = {
   parameters: taskGetSchema,
   readOnly: true,
   async execute({ taskId }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const task = await runtime.getTask(taskId)
     if (!task) return { success: false, output: `Task not found: ${taskId}` }
     return { success: true, output: JSON.stringify(task, null, 2), metadata: { task } }
@@ -572,7 +767,7 @@ export const taskListTool: ToolDef<z.infer<typeof taskListSchema>> = {
   parameters: taskListSchema,
   readOnly: true,
   async execute(args, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const tasks = await runtime.listTasks(args)
     if (tasks.length === 0) return { success: true, output: "No tasks found." }
     return {
@@ -602,12 +797,23 @@ export const taskUpdateTool: ToolDef<z.infer<typeof taskUpdateSchema>> = {
   description: "Update an existing task. Use this to record status, ownership, blocking relationships, and task metadata as work progresses.",
   parameters: taskUpdateSchema,
   async execute(args, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const task = await runtime.updateTask(args.taskId, args)
     if (!task) return { success: false, output: `Task not found: ${args.taskId}` }
     ctx.host.emit({ type: "task_updated", task })
-    await ensureTeamMemberForTask({ cwd: ctx.cwd, host: ctx.host, task })
-    await handleCompletedTaskSideEffects({ cwd: ctx.cwd, host: ctx.host, config: ctx.config, task })
+    await ensureTeamMemberForTask({
+      cwd: ctx.cwd,
+      host: ctx.host,
+      task,
+      runtime,
+    })
+    await handleCompletedTaskSideEffects({
+      cwd: ctx.cwd,
+      host: ctx.host,
+      config: ctx.config,
+      task,
+      runtime,
+    })
     return {
       success: true,
       output: `Updated task ${task.id}: ${task.status}`,
@@ -621,7 +827,7 @@ const taskOutputSchema = z.object({
   block: z.boolean().optional().describe("When true, wait for running delegated or shell tasks to finish before returning. Defaults to true."),
 })
 
-async function waitForBackgroundTaskToFinish(runtime: Awaited<ReturnType<typeof getOrchestrationRuntime>>, taskId: string): Promise<BackgroundTaskRecord | null> {
+async function waitForBackgroundTaskToFinish(runtime: OrchestrationRuntime, taskId: string): Promise<BackgroundTaskRecord | null> {
   for (;;) {
     const task = await runtime.getBackgroundTask(taskId)
     if (!task) return null
@@ -633,7 +839,7 @@ async function waitForBackgroundTaskToFinish(runtime: Awaited<ReturnType<typeof 
 async function taskOutputFromBackground(
   task: BackgroundTaskRecord,
   block = true,
-  runtime?: Awaited<ReturnType<typeof getOrchestrationRuntime>>,
+  runtime?: OrchestrationRuntime,
   taskId?: string,
 ): Promise<string> {
   const resolved = block && runtime && taskId
@@ -641,7 +847,7 @@ async function taskOutputFromBackground(
     : task
   if (resolved.logPath) {
     try {
-      return await fs.readFile(resolved.logPath, "utf8")
+      return await readTrustedRuntimeOutput(resolved.logPath)
     } catch {
       return resolved.output ?? "(no output yet)"
     }
@@ -655,13 +861,17 @@ export const taskOutputTool: ToolDef<z.infer<typeof taskOutputSchema>> = {
   parameters: taskOutputSchema,
   readOnly: true,
   async execute({ taskId, block }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const task = await runtime.getTask(taskId)
-    if (!task) return { success: false, output: `Task not found: ${taskId}` }
+    if (!task || task.sessionId !== ctx.session.id) {
+      return { success: false, output: `Task not found: ${taskId}` }
+    }
     const shouldBlock = block ?? true
     if (task.kind === "agent") {
       const manager = ctx.services.parallelAgentManager
-      const snapshot = shouldBlock ? await manager.waitFor(taskId) : manager.getSnapshot(taskId)
+      const snapshot = shouldBlock
+        ? await manager.waitFor(taskId, ctx.session.id)
+        : manager.getSnapshot(taskId, ctx.session.id)
       const latest = await runtime.getTask(taskId)
       const status = snapshot?.status ?? latest?.status ?? task.status
       const body = snapshot?.output?.trim() || latest?.output?.trim() || task.output?.trim() || "(no output yet)"
@@ -676,8 +886,43 @@ export const taskOutputTool: ToolDef<z.infer<typeof taskOutputSchema>> = {
         metadata: { task: latest ?? task, task_id: taskId },
       }
     }
-    const background = await runtime.getBackgroundTask(taskId)
-    if (background) {
+    let background = await runtime.getBackgroundTask(taskId)
+    if (
+      background?.kind === "bash" &&
+      (background.status === "running" || background.status === "pending")
+    ) {
+      const liveJob = ctx.services.backgroundProcesses.get(taskId, {
+        workspace: ctx.cwd,
+        sessionId: ctx.session.id,
+      })
+      const processIdentity = background.metadata?.processIdentity
+      if (
+        !liveJob ||
+        typeof processIdentity !== "string" ||
+        liveJob.processIdentity !== processIdentity
+      ) {
+        const error =
+          "Background shell task has no matching live runtime-owned process identity; its persisted PID was not trusted."
+        background = await runtime.setBackgroundTaskStatus(
+          taskId,
+          "failed",
+          {
+            error,
+            metadata: {
+              ...(background.metadata ?? {}),
+              reconciliation: "missing_live_process_identity",
+            },
+          },
+        )
+        if (background) {
+          ctx.host.emit({
+            type: "background_task_updated",
+            task: background,
+          })
+        }
+      }
+    }
+    if (background?.sessionId === ctx.session.id) {
       const output = await taskOutputFromBackground(background, shouldBlock, runtime, taskId)
       const latest = await runtime.getTask(taskId)
       const interpretation =
@@ -692,7 +937,7 @@ export const taskOutputTool: ToolDef<z.infer<typeof taskOutputSchema>> = {
     }
     if (!task.outputFile) return { success: true, output: JSON.stringify(task, null, 2), metadata: { task } }
     try {
-      const content = await fs.readFile(task.outputFile, "utf8")
+      const content = await readTrustedRuntimeOutput(task.outputFile)
       return { success: true, output: content, metadata: { task } }
     } catch (error) {
       return { success: false, output: `Could not read output for task ${taskId}: ${(error as Error).message}` }
@@ -708,12 +953,25 @@ export const taskStopTool: ToolDef<z.infer<typeof taskStopSchema>> = {
   name: "TaskStop",
   description: "Stop a running task when supported. Agent tasks stop delegated runs; shell tasks stop the background process. Use this when the task is clearly no longer useful, stuck, or superseded.",
   parameters: taskStopSchema,
+  approval: {
+    capability: "execute",
+    alwaysPrompt: true,
+    description({ taskId }) {
+      return `Stop running task: ${taskId}`
+    },
+    content({ taskId }) {
+      return taskId
+    },
+  },
   async execute({ taskId }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const task = await runtime.getTask(taskId)
+    if (!task || task.sessionId !== ctx.session.id) {
+      return { success: false, output: `Task not found: ${taskId}` }
+    }
     if (task?.kind === "agent") {
       const manager = ctx.services.parallelAgentManager
-      const stopped = manager.stop(taskId)
+      const stopped = manager.stop(taskId, ctx.session.id)
       if (!stopped) return { success: false, output: `Task ${taskId} is not an active delegated task.` }
       const updated = await runtime.updateTask(taskId, { status: "killed" })
       if (updated) {
@@ -725,54 +983,122 @@ export const taskStopTool: ToolDef<z.infer<typeof taskStopSchema>> = {
           config: ctx.config,
           task: updated,
           outputPreview: updated.output?.slice(0, 500),
+          runtime,
         })
       }
       return { success: true, output: `Stopped agent task ${taskId}.` }
     }
     const background = await runtime.getBackgroundTask(taskId)
-    if (!background) return { success: false, output: `Background task not found: ${taskId}` }
-    if (background.kind === "bash" && backgroundBashJobs.has(taskId)) {
-      const job = backgroundBashJobs.get(taskId)!
-      kill(job.pid, "SIGTERM")
-      const next = await runtime.setBackgroundTaskStatus(taskId, "killed", { processId: job.pid })
-      if (next) {
-        ctx.host.emit({ type: "background_task_updated", task: next })
-        const unified = await runtime.getTask(taskId)
-        if (unified) {
-          ctx.host.emit({ type: "task_updated", task: unified })
-          ctx.host.emit({ type: "task_completed", task: unified, outputPreview: unified.output?.slice(0, 500) })
-          await handleCompletedTaskSideEffects({
-            cwd: ctx.cwd,
-            host: ctx.host,
-            config: ctx.config,
-            task: unified,
-            outputPreview: unified.output?.slice(0, 500),
+    if (!background || background.sessionId !== ctx.session.id) {
+      return { success: false, output: `Background task not found: ${taskId}` }
+    }
+    const liveJob = ctx.services.backgroundProcesses.get(taskId, {
+      workspace: ctx.cwd,
+      sessionId: ctx.session.id,
+    })
+    const processIdentity = background.metadata?.processIdentity
+    if (
+      background.kind === "bash" &&
+      (
+        !liveJob ||
+        typeof processIdentity !== "string" ||
+        processIdentity !== liveJob.processIdentity
+      )
+    ) {
+      if (
+        background.status === "running" ||
+        background.status === "pending"
+      ) {
+        const error =
+          "Background shell task has no matching live runtime-owned process identity; its persisted PID was not trusted."
+        const failed = await runtime.setBackgroundTaskStatus(
+          taskId,
+          "failed",
+          {
+            error,
+            metadata: {
+              ...(background.metadata ?? {}),
+              reconciliation: "missing_live_process_identity",
+            },
+          },
+        )
+        if (failed) {
+          ctx.host.emit({
+            type: "background_task_updated",
+            task: failed,
           })
+          const unified = await runtime.getTask(taskId)
+          if (unified) {
+            ctx.host.emit({ type: "task_updated", task: unified })
+            ctx.host.emit({
+              type: "task_completed",
+              task: unified,
+              outputPreview: unified.output?.slice(0, 500),
+            })
+          }
         }
       }
-      return { success: true, output: `Stopped bash task ${taskId}.` }
+      return {
+        success: false,
+        output:
+          `Task ${taskId} has no matching live runtime-owned process identity. ` +
+          "Refusing to trust or signal its persisted PID; stale running state was marked failed.",
+      }
     }
-    if (background.processId && isProcessRunning(background.processId)) {
-      kill(background.processId, "SIGTERM")
-      const next = await runtime.setBackgroundTaskStatus(taskId, "killed")
-      if (next) {
-        ctx.host.emit({ type: "background_task_updated", task: next })
-        const unified = await runtime.getTask(taskId)
-        if (unified) {
-          ctx.host.emit({ type: "task_updated", task: unified })
-          ctx.host.emit({ type: "task_completed", task: unified, outputPreview: unified.output?.slice(0, 500) })
-          await handleCompletedTaskSideEffects({
-            cwd: ctx.cwd,
-            host: ctx.host,
-            config: ctx.config,
-            task: unified,
-            outputPreview: unified.output?.slice(0, 500),
-          })
+    if (
+      background.kind === "bash" &&
+      liveJob &&
+      typeof processIdentity === "string"
+    ) {
+      try {
+        const stopped = await ctx.services.backgroundProcesses.stop(
+          taskId,
+          {
+            workspace: ctx.cwd,
+            sessionId: ctx.session.id,
+          },
+          {
+            processIdentity,
+            reason: "requested",
+          },
+        )
+        if (!stopped) {
+          return {
+            success: false,
+            output:
+              `Task ${taskId} no longer has the matching live process handle. ` +
+              "Its persisted PID was not signalled.",
+          }
+        }
+      } catch (error) {
+        return {
+          success: false,
+          output:
+            `Failed to stop bash task ${taskId}: ${(error as Error).message}`,
         }
       }
-      return { success: true, output: `Stopped task ${taskId}.` }
+      const latest = await runtime.getTask(taskId)
+      if (latest?.status !== "killed") {
+        return {
+          success: false,
+          output:
+            `Bash task ${taskId} reached terminal status ` +
+            `${latest?.status ?? "unknown"} before stop completed.`,
+          metadata: { task: latest ?? task, task_id: taskId },
+        }
+      }
+      return {
+        success: true,
+        output: `Stopped bash task ${taskId}; terminal state and log are finalized.`,
+        metadata: { task: latest, task_id: taskId },
+      }
     }
-    return { success: false, output: `Task ${taskId} cannot be stopped by TaskStop in this runtime.` }
+    return {
+      success: false,
+      output:
+        `Task ${taskId} has no live runtime-owned process handle. ` +
+        "Refusing to signal a persisted PID because it may have been reused.",
+    }
   },
 }
 
@@ -786,8 +1112,12 @@ export const teamCreateTool: ToolDef<z.infer<typeof teamCreateSchema>> = {
   description: "Create a shared team/swarm container for tasks and messages.",
   parameters: teamCreateSchema,
   async execute({ team_name, description }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
-    const team = await runtime.createTeam({ teamName: team_name, description })
+    const runtime = ctx.services.orchestrationRuntime
+    const team = await runtime.createTeam({
+      teamName: team_name,
+      description,
+      sessionId: ctx.session.id,
+    })
     ctx.host.emit({ type: "team_updated", team })
     return { success: true, output: `Created team ${team.name}.`, metadata: { team } }
   },
@@ -801,7 +1131,7 @@ export const teamListTool: ToolDef<z.infer<typeof teamListSchema>> = {
   parameters: teamListSchema,
   readOnly: true,
   async execute(_args, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const teams = await runtime.listTeams()
     if (teams.length === 0) return { success: true, output: "No teams found." }
     return {
@@ -824,7 +1154,7 @@ export const teamGetTool: ToolDef<z.infer<typeof teamGetSchema>> = {
   parameters: teamGetSchema,
   readOnly: true,
   async execute({ team_name }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const team = await runtime.getTeam(team_name)
     if (!team) return { success: false, output: `Team not found: ${team_name}` }
     return {
@@ -846,7 +1176,7 @@ export const teamInboxTool: ToolDef<z.infer<typeof teamInboxSchema>> = {
   parameters: teamInboxSchema,
   readOnly: true,
   async execute({ team_name, include_completed }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const team = await runtime.getTeam(team_name)
     if (!team) return { success: false, output: `Team not found: ${team_name}` }
     const tasks = await runtime.listTasks({ teamName: team_name, includeDeleted: false })
@@ -896,7 +1226,7 @@ export const teamAssignTaskTool: ToolDef<z.infer<typeof teamAssignTaskSchema>> =
   description: "Assign a task to a teammate, tighten owner/team linkage, and mark the teammate active.",
   parameters: teamAssignTaskSchema,
   async execute({ team_name, task_id, member_name, note }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const team = await runtime.getTeam(team_name)
     if (!team) return { success: false, output: `Team not found: ${team_name}` }
     const task = await runtime.updateTask(task_id, {
@@ -946,7 +1276,7 @@ export const teamAddMemberTool: ToolDef<z.infer<typeof teamAddMemberSchema>> = {
   description: "Add or update a team member for team/swarm coordination.",
   parameters: teamAddMemberSchema,
   async execute({ team_name, member_name, agent_id, agent_type, status }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const team = await runtime.addTeamMember(team_name, {
       name: member_name,
       joinedAt: Date.now(),
@@ -974,7 +1304,7 @@ export const teamSetMemberStatusTool: ToolDef<z.infer<typeof teamSetMemberStatus
   description: "Update a team member status and emit a team update.",
   parameters: teamSetMemberStatusSchema,
   async execute({ team_name, member_name, status, note }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const team = await runtime.updateTeamMember(team_name, member_name, {
       status,
       ...(status === "active" ? { lastActiveAt: Date.now() } : {}),
@@ -1013,7 +1343,7 @@ export const teamDeleteTool: ToolDef<z.infer<typeof teamDeleteSchema>> = {
   description: "Delete a team from the orchestration runtime.",
   parameters: teamDeleteSchema,
   async execute({ team_name }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const deleted = await runtime.deleteTeam(team_name)
     if (!deleted) return { success: false, output: `Team not found: ${team_name}` }
     return { success: true, output: `Deleted team ${team_name}.` }
@@ -1029,10 +1359,37 @@ const sendMessageSchema = z.object({
 
 export const sendMessageTool: ToolDef<z.infer<typeof sendMessageSchema>> = {
   name: "SendMessage",
-  description: "Persist a teammate/team message in the orchestration runtime.",
+  description:
+    "Queue a durable message for an owner-scoped delegated agent. The target is an exact agent id or unique persisted task name; queueing does not resume a completed task.",
   parameters: sendMessageSchema,
   async execute({ to, from, message, team_name }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
+    let queued: Awaited<
+      ReturnType<typeof ctx.services.parallelAgentManager.queueMessage>
+    >
+    try {
+      queued = await ctx.services.parallelAgentManager.queueMessage({
+        target: to,
+        message,
+        from: from?.trim() || "main",
+        ownerSessionId: ctx.session.id,
+        ...(ctx.partId
+          ? {
+              id: `agentmsg_${createHash("sha256")
+                .update(`${ctx.session.id}\u0000${ctx.partId}`)
+                .digest("hex")}`,
+            }
+          : {}),
+      })
+    } catch (error) {
+      return {
+        success: false,
+        output:
+          error instanceof Error
+            ? error.message
+            : `Unable to queue message for ${to}.`,
+      }
+    }
     if (team_name) {
       const sender = from?.trim() || "main"
       await runtime.addTeamMember(team_name, { name: sender, joinedAt: Date.now(), status: "active", lastActiveAt: Date.now() }).catch(() => null)
@@ -1044,18 +1401,19 @@ export const sendMessageTool: ToolDef<z.infer<typeof sendMessageSchema>> = {
       message,
       ...(team_name ? { teamName: team_name } : {}),
     })
-    const delivered = ctx.services.parallelAgentManager.deliverMessage(
-      to,
-      message,
-      from?.trim() || "main",
-    )
     ctx.host.emit({ type: "team_message", message: record })
     return {
       success: true,
-      output: delivered
-        ? `Delivered message to running agent ${to}.`
-        : `Queued message to ${to}; no matching agent is currently running.`,
-      metadata: { message: record, delivered },
+      output: queued.running
+        ? `Queued message to running agent ${to}; it will be accepted at the next safe provider boundary.`
+        : `Queued message to ${to}; resume that task explicitly to process it.`,
+      metadata: {
+        message: record,
+        mailboxMessage: queued.record,
+        queued: true,
+        targetAgentId: queued.targetAgentId,
+        running: queued.running,
+      },
     }
   },
 }
@@ -1073,7 +1431,7 @@ export const listRemoteSessionsTool: ToolDef<z.infer<typeof remoteSessionListSch
   readOnly: true,
   shouldDefer: true,
   async execute({ session_id, run_id, status }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const sessions = await runtime.listRemoteSessions({
       ...(session_id ? { sessionId: session_id } : {}),
       ...(run_id ? { runId: run_id } : {}),
@@ -1103,7 +1461,7 @@ export const getRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionGetSchema
   readOnly: true,
   shouldDefer: true,
   async execute({ remote_session_id }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const remoteSession = await runtime.getRemoteSession(remote_session_id)
     if (!remoteSession) return { success: false, output: `Remote session not found: ${remote_session_id}` }
     return {
@@ -1131,7 +1489,7 @@ export const updateRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionUpdate
   parameters: remoteSessionUpdateSchema,
   shouldDefer: true,
   async execute({ remote_session_id, status, last_event_seq, reconnect_attempts, reconnectable, viewer_only, error, metadata }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const remoteSession = await runtime.updateRemoteSession(remote_session_id, {
       ...(status ? { status } : {}),
       ...(typeof last_event_seq === "number" ? { lastEventSeq: last_event_seq } : {}),
@@ -1152,19 +1510,83 @@ export const updateRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionUpdate
 }
 
 const remoteSessionMessageSchema = z.object({
-  remote_session_id: z.string().min(1).describe("Tracked remote session id."),
-  content: z.string().min(1).describe("Message to send into the remote session."),
+  remote_session_id: z.string().min(1).max(512).describe("Tracked remote session id."),
+  content: z.string().min(1).max(1024 * 1024).describe("Message to send into the remote session."),
   mode: z.enum(["agent", "plan", "ask", "debug", "review"]).optional().describe("Mode for the remote message. Defaults to agent."),
-  preset_name: z.string().optional().describe("Optional preset name for the remote run."),
+  preset_name: z.string().max(512).optional().describe("Optional preset name for the remote run."),
 })
+
+type RemoteSessionHttpResult = {
+  ok: boolean
+  status: number
+  text: string
+}
+
+function remoteSessionEndpoint(
+  rawUrl: string,
+  sessionId: string,
+  suffix = "",
+): string {
+  const base = new URL(rawUrl)
+  return new URL(
+    `/session/${encodeURIComponent(sessionId)}${suffix}`,
+    base.origin,
+  ).toString()
+}
+
+async function requestRemoteSessionEndpoint(
+  ctx: ToolContext,
+  endpoint: string,
+  options: {
+    method?: "GET" | "POST"
+    body?: string
+  } = {},
+): Promise<RemoteSessionHttpResult> {
+  try {
+    const response = await requestNetworkResource(ctx.host, endpoint, {
+      purpose: "remote_session",
+      method: options.method ?? "GET",
+      headers: {
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        "x-nexus-directory": ctx.cwd,
+      },
+      ...(options.body ? { body: options.body } : {}),
+      maxRedirects: 0,
+      maxRequestBytes: 2 * 1024 * 1024,
+      maxResponseBytes: 64 * 1024,
+      timeoutMs: 30_000,
+      signal: ctx.signal,
+    })
+    return {
+      ok: response.status >= 200 && response.status < 300,
+      status: response.status,
+      text: new TextDecoder().decode(response.body),
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      text: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
 
 export const sendRemoteMessageTool: ToolDef<z.infer<typeof remoteSessionMessageSchema>> = {
   name: "SendRemoteMessage",
   description: "Send a new user message into a tracked remote Nexus session using the server HTTP API when available.",
   parameters: remoteSessionMessageSchema,
   shouldDefer: true,
+  approval: {
+    capability: "browser",
+    description({ remote_session_id }) {
+      return `Send content to remote Nexus session: ${remote_session_id}`
+    },
+    content({ content }) {
+      return content
+    },
+  },
   async execute({ remote_session_id, content, mode, preset_name }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const remoteSession = await runtime.getRemoteSession(remote_session_id)
     if (!remoteSession?.sessionId) {
       return { success: false, output: `Remote session ${remote_session_id} is missing sessionId metadata.` }
@@ -1172,28 +1594,31 @@ export const sendRemoteMessageTool: ToolDef<z.infer<typeof remoteSessionMessageS
     if (remoteSession.viewerOnly) {
       return { success: false, output: `Remote session ${remote_session_id} is viewer-only and cannot accept outbound messages from this client.` }
     }
-    const url = new URL(remoteSession.url)
-    const endpoint = `${url.protocol}//${url.host}/session/${remoteSession.sessionId}/message`
-    const response = await fetch(endpoint, {
+    let endpoint: string
+    try {
+      endpoint = remoteSessionEndpoint(
+        remoteSession.url,
+        remoteSession.sessionId,
+        "/message",
+      )
+    } catch (error) {
+      return {
+        success: false,
+        output: `Invalid remote session endpoint: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+    const response = await requestRemoteSessionEndpoint(ctx, endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-nexus-directory": ctx.cwd,
-      },
       body: JSON.stringify({
         content,
         mode: mode ?? "agent",
         ...(preset_name ? { presetName: preset_name } : {}),
       }),
-    }).catch((error: Error) => ({
-      ok: false,
-      status: 0,
-      text: async () => error.message,
-    }))
+    })
     if (!response.ok) {
       return {
         success: false,
-        output: `Failed to send remote message: ${response.status} ${await response.text()}`,
+        output: `Failed to send remote message: ${response.status} ${response.text}`,
       }
     }
     const nextRemote = await runtime.updateRemoteSession(remote_session_id, {
@@ -1213,7 +1638,7 @@ export const sendRemoteMessageTool: ToolDef<z.infer<typeof remoteSessionMessageS
 }
 
 const remoteSessionInterruptSchema = z.object({
-  remote_session_id: z.string().min(1).describe("Tracked remote session id."),
+  remote_session_id: z.string().min(1).max(512).describe("Tracked remote session id."),
 })
 
 export const interruptRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionInterruptSchema>> = {
@@ -1221,8 +1646,18 @@ export const interruptRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionInt
   description: "Interrupt the currently active run for a tracked remote Nexus session using the server abort endpoint when available.",
   parameters: remoteSessionInterruptSchema,
   shouldDefer: true,
+  approval: {
+    capability: "execute",
+    alwaysPrompt: true,
+    description({ remote_session_id }) {
+      return `Interrupt remote Nexus session: ${remote_session_id}`
+    },
+    content({ remote_session_id }) {
+      return remote_session_id
+    },
+  },
   async execute({ remote_session_id }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const remoteSession = await runtime.getRemoteSession(remote_session_id)
     if (!remoteSession?.sessionId) {
       return { success: false, output: `Remote session ${remote_session_id} is missing sessionId metadata.` }
@@ -1230,23 +1665,26 @@ export const interruptRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionInt
     if (remoteSession.viewerOnly) {
       return { success: false, output: `Remote session ${remote_session_id} is viewer-only and cannot be interrupted from this client.` }
     }
-    const url = new URL(remoteSession.url)
-    const endpoint = `${url.protocol}//${url.host}/session/${remoteSession.sessionId}/abort`
-    const response = await fetch(endpoint, {
+    let endpoint: string
+    try {
+      endpoint = remoteSessionEndpoint(
+        remoteSession.url,
+        remoteSession.sessionId,
+        "/abort",
+      )
+    } catch (error) {
+      return {
+        success: false,
+        output: `Invalid remote session endpoint: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+    const response = await requestRemoteSessionEndpoint(ctx, endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-nexus-directory": ctx.cwd,
-      },
-    }).catch((error: Error) => ({
-      ok: false,
-      status: 0,
-      text: async () => error.message,
-    }))
+    })
     if (!response.ok) {
       return {
         success: false,
-        output: `Failed to interrupt remote session: ${response.status} ${await response.text()}`,
+        output: `Failed to interrupt remote session: ${response.status} ${response.text}`,
       }
     }
     const nextRemote = await runtime.updateRemoteSession(remote_session_id, {
@@ -1265,7 +1703,7 @@ export const interruptRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionInt
 }
 
 const remoteSessionReconnectSchema = z.object({
-  remote_session_id: z.string().min(1).describe("Tracked remote session id."),
+  remote_session_id: z.string().min(1).max(512).describe("Tracked remote session id."),
 })
 
 export const reconnectRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionReconnectSchema>> = {
@@ -1273,31 +1711,44 @@ export const reconnectRemoteSessionTool: ToolDef<z.infer<typeof remoteSessionRec
   description: "Probe a tracked remote session endpoint and mark it connected again when the server is reachable.",
   parameters: remoteSessionReconnectSchema,
   shouldDefer: true,
+  approval: {
+    capability: "browser",
+    description({ remote_session_id }) {
+      return `Connect to remote Nexus session: ${remote_session_id}`
+    },
+    content({ remote_session_id }) {
+      return remote_session_id
+    },
+  },
   async execute({ remote_session_id }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const remoteSession = await runtime.getRemoteSession(remote_session_id)
     if (!remoteSession?.sessionId) {
       return { success: false, output: `Remote session ${remote_session_id} is missing sessionId metadata.` }
     }
-    const url = new URL(remoteSession.url)
-    const endpoint = `${url.protocol}//${url.host}/session/${remoteSession.sessionId}`
-    const response = await fetch(endpoint, {
-      headers: { "x-nexus-directory": ctx.cwd },
-    }).catch((error: Error) => ({
-      ok: false,
-      status: 0,
-      text: async () => error.message,
-    }))
+    let endpoint: string
+    try {
+      endpoint = remoteSessionEndpoint(
+        remoteSession.url,
+        remoteSession.sessionId,
+      )
+    } catch (error) {
+      return {
+        success: false,
+        output: `Invalid remote session endpoint: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+    const response = await requestRemoteSessionEndpoint(ctx, endpoint)
     if (!response.ok) {
       const failed = await runtime.updateRemoteSession(remote_session_id, {
         status: "error",
         reconnectAttempts: (remoteSession.reconnectAttempts ?? 0) + 1,
-        error: `Reconnect probe failed: ${response.status} ${await response.text()}`,
+        error: `Reconnect probe failed: ${response.status} ${response.text}`,
       })
       if (failed) ctx.host.emit({ type: "remote_session_updated", remoteSession: failed })
       return {
         success: false,
-        output: `Failed to reconnect remote session: ${response.status} ${await response.text()}`,
+        output: `Failed to reconnect remote session: ${response.status} ${response.text}`,
       }
     }
     const updated = await runtime.updateRemoteSession(remote_session_id, {
@@ -1323,33 +1774,34 @@ const enterPlanModeSchema = z.object({
 
 export const enterPlanModeTool: ToolDef<z.infer<typeof enterPlanModeSchema>> = {
   name: "EnterPlanMode",
-  description: "Request a transition into plan mode for subsequent turns. Hosts that support mode switching will update immediately.",
+  description:
+    "End the current response and transition the next turn into plan mode. " +
+    "No later tool call from the current response will execute.",
   parameters: enterPlanModeSchema,
   async execute({ reason }, ctx) {
     const switched = await ctx.host.requestModeChange?.("plan", reason)
-    return {
-      success: true,
-      output: switched?.success
-        ? switched.message || `Entered plan mode.${reason ? ` Reason: ${reason}` : ""}`
-        : `Planning handoff requested.${reason ? ` Reason: ${reason}` : ""} Ask the user or host to continue in plan mode.`,
-      metadata: switched ? { modeChange: switched } : undefined,
+    if (switched && !switched.success) {
+      return {
+        success: false,
+        output:
+          switched.message ||
+          "The host rejected the transition into plan mode.",
+        metadata: { modeChange: switched },
+      }
     }
-  },
-}
-
-const exitPlanModeSchema = z.object({
-  summary: z.string().optional().describe("Optional brief summary of the plan."),
-})
-
-export const exitPlanModeTool: ToolDef<z.infer<typeof exitPlanModeSchema>> = {
-  name: "ExitPlanMode",
-  description: "Alias for plan handoff completion. Use when the plan is ready for review.",
-  parameters: exitPlanModeSchema,
-  modes: ["plan"],
-  async execute({ summary }) {
+    const modeChange = switched ?? {
+      success: true,
+      mode: "plan" as const,
+      message:
+        `The current response ended and the next turn will use plan mode.` +
+        (reason ? ` Reason: ${reason}` : ""),
+    }
     return {
       success: true,
-      output: `Plan complete.\n\n${summary?.trim() || "Plan is ready."}`,
+      output:
+        modeChange.message ||
+        `Entered plan mode.${reason ? ` Reason: ${reason}` : ""}`,
+      metadata: { modeChange },
     }
   },
 }
@@ -1362,22 +1814,36 @@ export const enterWorktreeTool: ToolDef<z.infer<typeof enterWorktreeSchema>> = {
   name: "EnterWorktree",
   description: "Create an isolated git worktree for the current repository and register it in the orchestration runtime.",
   parameters: enterWorktreeSchema,
+  approval: {
+    capability: "execute",
+    description({ name }) {
+      return `Create and enter git worktree: ${name?.trim() || "(generated name)"}`
+    },
+    content({ name }) {
+      return name?.trim()
+    },
+  },
   async execute({ name }, ctx) {
     const run = (command: string) => ctx.host.runCommand(command, ctx.cwd, ctx.signal)
     const top = await run("git rev-parse --show-toplevel")
     if (top.exitCode !== 0) {
       return { success: false, output: "EnterWorktree requires a git repository." }
     }
-    const repoRoot = top.stdout.trim()
+    const repoRoot = await ctx.host.resolvePath(top.stdout.trim(), "execute")
     const worktreeName = (name?.trim() || `nexus-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, "-")
     const branch = `nexus/${worktreeName}`
-    const worktreePath = path.join(repoRoot, ".nexus", "worktrees", worktreeName)
+    const worktreePath = await ctx.host.resolvePath(
+      path.join(repoRoot, ".nexus", "worktrees", worktreeName),
+      "write",
+    )
     await fs.mkdir(path.dirname(worktreePath), { recursive: true })
-    const create = await run(`git worktree add -b "${branch}" "${worktreePath}" HEAD`)
+    const create = await run(
+      `git worktree add -b ${quoteShellArgument(branch)} ${quoteShellArgument(worktreePath)} HEAD`,
+    )
     if (create.exitCode !== 0) {
       return { success: false, output: `Failed to create worktree: ${create.stderr || create.stdout}` }
     }
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const session = await runtime.createWorktreeSession({
       originalCwd: ctx.cwd,
       worktreePath,
@@ -1404,8 +1870,17 @@ export const exitWorktreeTool: ToolDef<z.infer<typeof exitWorktreeSchema>> = {
   name: "ExitWorktree",
   description: "Mark a worktree as kept or remove it from disk.",
   parameters: exitWorktreeSchema,
+  approval: {
+    capability: "execute",
+    description({ worktree_id, action }) {
+      return `${(action ?? "keep") === "remove" ? "Remove" : "Exit and keep"} git worktree: ${worktree_id?.trim() || "(active worktree)"}`
+    },
+    content({ worktree_id }) {
+      return worktree_id?.trim()
+    },
+  },
   async execute({ worktree_id, action }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const session = worktree_id
       ? await runtime.updateWorktreeSession(worktree_id, {})
       : await runtime.findActiveWorktree()
@@ -1421,7 +1896,15 @@ export const exitWorktreeTool: ToolDef<z.infer<typeof exitWorktreeSchema>> = {
         metadata: { worktree: kept, ...(switched ? { cwdChange: switched } : {}) },
       }
     }
-    const result = await ctx.host.runCommand(`git worktree remove "${session.worktreePath}" --force`, ctx.cwd, ctx.signal)
+    const worktreePath = await ctx.host.resolvePath(
+      session.worktreePath,
+      "delete",
+    )
+    const result = await ctx.host.runCommand(
+      `git worktree remove ${quoteShellArgument(worktreePath)} --force`,
+      ctx.cwd,
+      ctx.signal,
+    )
     if (result.exitCode !== 0) {
       return { success: false, output: `Failed to remove worktree: ${result.stderr || result.stdout}` }
     }
@@ -1447,10 +1930,26 @@ function quoteSingle(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
+function quoteShellArgument(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
 export const powerShellTool: ToolDef<z.infer<typeof powershellSchema>> = {
   name: "PowerShell",
   description: "Execute a PowerShell command through pwsh/powershell with non-interactive flags.",
   parameters: powershellSchema,
+  approval: {
+    capability: "execute",
+    command({ command }) {
+      return command
+    },
+    description({ command }) {
+      return `Run: ${command}`
+    },
+    content({ command }) {
+      return command
+    },
+  },
   async execute({ command, timeout, run_in_background }, ctx) {
     const dedicatedToolMessage = detectPreferDedicatedToolMessage(command)
     if (dedicatedToolMessage) return { success: false, output: dedicatedToolMessage }
@@ -1471,6 +1970,8 @@ export const powerShellTool: ToolDef<z.infer<typeof powershellSchema>> = {
         cwd: ctx.cwd,
         shellRunner: "powershell",
         host: ctx.host,
+        services: ctx.services,
+        sessionId: ctx.session.id,
         config: ctx.config,
         metadata: {
           assistantAutoBackgrounded: autoBackgrounded,
@@ -1522,8 +2023,8 @@ export const listMcpResourcesTool: ToolDef<z.infer<typeof listMcpResourcesSchema
     const client = ctx.services.mcpClient
     if (!client) return { success: false, output: "MCP client is not initialized." }
     const [resources, templates] = await Promise.all([
-      client.listResources(server),
-      client.listResourceTemplates(server),
+      client.listResources(server, ctx.signal),
+      client.listResourceTemplates(server, ctx.signal),
     ])
     if (resources.length === 0 && templates.length === 0) {
       return { success: true, output: "No MCP resources or resource templates available." }
@@ -1540,7 +2041,16 @@ export const listMcpResourcesTool: ToolDef<z.infer<typeof listMcpResourcesSchema
             `- [${template.serverName}] ${template.name} (${template.uriTemplate}) [template]`,
         ),
       ].join("\n"),
-      metadata: { resources, templates },
+      metadata: {
+        mcpResources: {
+          resourceCount: resources.length,
+          templateCount: templates.length,
+          servers: Array.from(new Set([
+            ...resources.map((item) => item.serverName),
+            ...templates.map((item) => item.serverName),
+          ])),
+        },
+      },
     }
   },
 }
@@ -1558,14 +2068,25 @@ export const readMcpResourceTool: ToolDef<z.infer<typeof readMcpResourceSchema>>
   async execute({ server, uri }, ctx) {
     const client = ctx.services.mcpClient
     if (!client) return { success: false, output: "MCP client is not initialized." }
-    const result = await client.readResource(server, uri)
+    const result = await client.readResource(server, uri, ctx.signal)
     if (!result.length) return { success: false, output: `Resource not found: ${server} ${uri}` }
     return {
       success: true,
       output: result
         .map((item) => ("text" in item && item.text ? item.text : `[binary resource: ${item.mimeType ?? "unknown"}]`))
         .join("\n\n"),
-      metadata: { resource: result },
+      metadata: {
+        mcpResource: {
+          server,
+          uri,
+          contentItems: result.length,
+          textCharacters: result.reduce(
+            (sum, item) => sum + (item.text?.length ?? 0),
+            0,
+          ),
+          blobItems: result.filter((item) => typeof item.blob === "string").length,
+        },
+      },
     }
   },
 }
@@ -1578,6 +2099,15 @@ export const mcpAuthenticateTool: ToolDef<z.infer<typeof mcpAuthenticateSchema>>
   name: "McpAuthenticate",
   description: "Attempt to start or describe MCP authentication requirements for a server.",
   parameters: mcpAuthenticateSchema,
+  approval: {
+    capability: "mcp",
+    description({ server }) {
+      return `Authenticate MCP server: ${server}`
+    },
+    content({ server }) {
+      return server
+    },
+  },
   async execute({ server }, ctx) {
     const client = ctx.services.mcpClient
     if (!client) return { success: false, output: "MCP client is not initialized." }
@@ -1714,29 +2244,147 @@ const pluginTrustSchema = z.object({
   trusted: z.boolean().describe("Whether to trust the plugin for hook execution."),
 })
 
+async function resolveInstalledPluginForTrust(
+  name: string,
+  ctx: ToolContext,
+) {
+  const plugins = await loadPluginManifests(
+    ctx.cwd,
+    getClaudeCompatibilityOptions(ctx.config),
+  )
+  const discovered = plugins.find((plugin) => plugin.name === name)
+  if (!discovered) return null
+
+  const validated = await validatePluginManifestFile(discovered.sourcePath)
+  if (!validated.success || !validated.plugin) {
+    throw new Error(
+      `Plugin validation failed: ${validated.errors.join("; ") || "manifest is invalid"}`,
+    )
+  }
+  if (
+    validated.plugin.name !== discovered.name ||
+    path.resolve(validated.plugin.rootDir) !== path.resolve(discovered.rootDir) ||
+    path.resolve(validated.plugin.sourcePath) !== path.resolve(discovered.sourcePath)
+  ) {
+    throw new Error("Plugin identity changed while trust was being resolved")
+  }
+  return validated.plugin
+}
+
 export const pluginTrustTool: ToolDef<z.infer<typeof pluginTrustSchema>> = {
   name: "PluginTrust",
-  description: "Update the runtime trust setting for a plugin in .nexus/nexus.yaml.",
+  description: "Grant or revoke host-owned trust bound to the exact installed plugin path, identity, and content.",
   parameters: pluginTrustSchema,
   shouldDefer: true,
   requiresApproval: true,
+  approval: {
+    capability: "plugin",
+    alwaysPrompt: true,
+    description({ name, trusted }) {
+      return trusted
+        ? `Trust exact installed plugin content: ${name}`
+        : `Revoke plugin trust: ${name}`
+    },
+    content({ name }) {
+      return name
+    },
+    warning({ trusted }) {
+      return trusted
+        ? "This grants execution authority only to the plugin bytes fingerprinted during this approval. Any content or filesystem identity change revokes the grant."
+        : "Revoking trust disables privileged plugin surfaces until the exact content is explicitly approved again."
+    },
+  },
   async execute({ name, trusted }, ctx) {
-    let nextTrusted: string[] = []
-    await updateProjectPluginConfig(ctx.cwd, (plugins) => {
-      const trustedList = new Set(
-        Array.isArray(plugins.trusted)
-          ? plugins.trusted.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-          : (ctx.config.plugins?.trusted ?? []),
-      )
-      if (trusted) trustedList.add(name)
-      else trustedList.delete(name)
-      nextTrusted = Array.from(trustedList).sort()
-      plugins.trusted = nextTrusted
-    })
-    ctx.config.plugins = { ...ctx.config.plugins, trusted: nextTrusted }
-    return {
-      success: true,
-      output: trusted ? `Plugin ${name} marked as trusted.` : `Plugin ${name} removed from trusted plugin list.`,
+    try {
+      const plugin = await resolveInstalledPluginForTrust(name, ctx)
+      if (!plugin) {
+        return { success: false, output: `Plugin not found: ${name}` }
+      }
+
+      const before = await evaluatePluginTrust(plugin)
+      if (
+        before.reason === "store-corrupt" ||
+        before.reason === "store-unavailable" ||
+        before.reason === "unsafe-plugin"
+      ) {
+        return {
+          success: false,
+          output:
+            `Plugin authority store rejected ${name}: ${before.message ?? before.reason}`,
+          metadata: { pluginTrust: { operation: trusted ? "grant" : "revoke", before } },
+        }
+      }
+
+      if (!trusted) {
+        const revoked = await revokePluginTrust(plugin)
+        const grants = await listPluginTrustGrants()
+        return {
+          success: true,
+          output: revoked || before.revoked
+            ? `Plugin trust revoked for ${name}.`
+            : `Plugin trust was already revoked for ${name}.`,
+          metadata: {
+            pluginTrust: {
+              operation: "revoke",
+              pluginName: name,
+              revoked: revoked || before.revoked === true,
+              remainingGrants: grants.length,
+              before,
+            },
+          },
+        }
+      }
+
+      const grant = await grantPluginTrust(plugin)
+      const evaluation = await evaluatePluginTrust(plugin)
+      if (
+        !evaluation.trusted ||
+        evaluation.fingerprint !== grant.fingerprint
+      ) {
+        await revokePluginTrust(plugin).catch(() => undefined)
+        return {
+          success: false,
+          output:
+            `Plugin trust could not be verified for ${name}: ${evaluation.message ?? evaluation.reason}`,
+          metadata: {
+            pluginTrust: {
+              operation: "grant",
+              pluginName: name,
+              grantId: grant.id,
+              fingerprint: grant.fingerprint,
+              before,
+              evaluation,
+            },
+          },
+        }
+      }
+      const grants = await listPluginTrustGrants()
+      return {
+        success: true,
+        output:
+          `Trusted exact plugin content for ${name} (${grant.fingerprint}).` +
+          (before.reason === "content-changed" ||
+          before.reason === "identity-changed"
+            ? ` The previous ${before.reason} grant was revoked first.`
+            : ""),
+        metadata: {
+          pluginTrust: {
+            operation: "grant",
+            pluginName: name,
+            grantId: grant.id,
+            fingerprint: grant.fingerprint,
+            totalGrants: grants.length,
+            before,
+            evaluation,
+          },
+        },
+      }
+    } catch (error) {
+      return {
+        success: false,
+        output:
+          `Plugin authority store operation failed for ${name}: ${error instanceof Error ? error.message : String(error)}`,
+      }
     }
   },
 }
@@ -1846,9 +2494,17 @@ export const pluginValidateTool: ToolDef<z.infer<typeof pluginValidateSchema>> =
   readOnly: true,
   shouldDefer: true,
   async execute({ manifest_path }, ctx) {
-    const files = manifest_path
-      ? [path.isAbsolute(manifest_path) ? manifest_path : path.join(ctx.cwd, manifest_path)]
-      : (await loadPluginRuntimeRecords(ctx.cwd, ctx.config)).map((plugin) => plugin.sourcePath)
+    let files: string[]
+    try {
+      files = manifest_path
+        ? [await ctx.host.resolvePath(manifest_path, "read")]
+        : (await loadPluginRuntimeRecords(ctx.cwd, ctx.config)).map((plugin) => plugin.sourcePath)
+    } catch (error) {
+      return {
+        success: false,
+        output: `Plugin manifest access denied: ${(error as Error).message}`,
+      }
+    }
     if (files.length === 0) return { success: true, output: "No plugin manifests found." }
     const results = await Promise.all(files.map((file) => validatePluginManifestFile(file)))
     const success = results.every((result) => result.success)
@@ -1879,18 +2535,32 @@ export const pluginInstallLocalTool: ToolDef<z.infer<typeof pluginInstallLocalSc
   shouldDefer: true,
   requiresApproval: true,
   async execute({ source_dir, name, overwrite }, ctx) {
-    const sourceDirInput = path.isAbsolute(source_dir) ? source_dir : path.join(ctx.cwd, source_dir)
-    const sourceDir = await fs.realpath(sourceDirInput).catch(() => sourceDirInput)
+    const sourceDirInput = source_dir
+    let sourceDir: string
+    try {
+      sourceDir = await ctx.host.resolvePath(sourceDirInput, "list")
+      sourceDir = await fs.realpath(sourceDir)
+    } catch (error) {
+      return {
+        success: false,
+        output: `Plugin source access denied: ${(error as Error).message}`,
+      }
+    }
     const sourceStats = await fs.stat(sourceDir).catch(() => null)
     if (!sourceStats?.isDirectory()) {
       return { success: false, output: `Plugin source is not a directory: ${sourceDirInput}` }
     }
     const targetName = slugifyName(name ?? path.basename(sourceDir))
-    const targetDir = path.join(ctx.cwd, ".nexus", "plugins", targetName)
-    const exists = await fs.stat(targetDir).then(() => true).catch(() => false)
-    if (exists && !overwrite) {
-      return { success: false, output: `Target plugin directory already exists: ${targetDir}` }
+    if (!targetName) {
+      return {
+        success: false,
+        output: "Plugin target name must contain a non-reserved filename component.",
+      }
     }
+    const targetDir = await ctx.host.resolvePath(
+      path.join(ctx.cwd, ".nexus", "plugins", targetName),
+      "write",
+    )
     const manifestCandidates = [
       path.join(sourceDir, "plugin.json"),
       path.join(sourceDir, ".nexus-plugin", "plugin.json"),
@@ -1898,8 +2568,17 @@ export const pluginInstallLocalTool: ToolDef<z.infer<typeof pluginInstallLocalSc
       path.join(sourceDir, ".claude-plugin", "plugin.json"),
     ]
     const sourceManifest = (
-      await Promise.all(manifestCandidates.map(async (candidate) => ((await fs.stat(candidate).then(() => true).catch(() => false)) ? candidate : null)))
-    ).find(Boolean)
+      await Promise.all(
+        manifestCandidates.map(async (candidate) => {
+          try {
+            const authorized = await ctx.host.resolvePath(candidate, "read")
+            return (await fs.stat(authorized)).isFile() ? authorized : null
+          } catch {
+            return null
+          }
+        }),
+      )
+    ).find((candidate): candidate is string => candidate !== null)
     if (!sourceManifest) {
       return { success: false, output: `No plugin.json found in ${sourceDir}.` }
     }
@@ -1908,55 +2587,88 @@ export const pluginInstallLocalTool: ToolDef<z.infer<typeof pluginInstallLocalSc
       return { success: false, output: `Plugin source failed validation:\n${sourceValidation.errors.join("\n")}` }
     }
 
-    const pluginDir = path.dirname(targetDir)
-    await fs.mkdir(pluginDir, { recursive: true })
-    const operationId = randomUUID()
-    const stagingDir = path.join(pluginDir, `.${targetName}.install-${operationId}`)
-    const backupDir = path.join(pluginDir, `.${targetName}.backup-${operationId}`)
-    let previousMoved = false
-    let installed = false
-    try {
-      await copyDirectoryRecursive(sourceDir, stagingDir)
-      const stagedManifest = path.join(stagingDir, path.relative(sourceDir, sourceManifest))
-      const validation = await validatePluginManifestFile(stagedManifest)
-      if (!validation.success) {
-        return { success: false, output: `Installed plugin failed validation:\n${validation.errors.join("\n")}` }
+    return withFileLock(targetDir, async () => {
+      const exists = await fs.stat(targetDir).then(() => true).catch(() => false)
+      if (exists && !overwrite) {
+        return { success: false, output: `Target plugin directory already exists: ${targetDir}` }
       }
-      if (exists) {
-        await fs.rename(targetDir, backupDir)
-        previousMoved = true
+      const previousPlugin = exists
+        ? (await loadPluginRuntimeRecords(ctx.cwd, ctx.config)).find(
+            (plugin) => path.resolve(plugin.rootDir) === path.resolve(targetDir),
+          )
+        : undefined
+
+      const pluginDir = path.dirname(targetDir)
+      await fs.mkdir(pluginDir, { recursive: true })
+      const operationId = randomUUID()
+      const stagingDir = path.join(pluginDir, `.${targetName}.install-${operationId}`)
+      const backupDir = path.join(pluginDir, `.${targetName}.backup-${operationId}`)
+      let previousMoved = false
+      let installed = false
+      try {
+        await copyDirectoryRecursive(sourceDir, stagingDir, ctx)
+        const stagedManifest = path.join(stagingDir, path.relative(sourceDir, sourceManifest))
+        const validation = await validatePluginManifestFile(stagedManifest)
+        if (!validation.success) {
+          return { success: false, output: `Installed plugin failed validation:\n${validation.errors.join("\n")}` }
+        }
+        if (exists) {
+          await fs.rename(targetDir, backupDir)
+          previousMoved = true
+        }
+        await fs.rename(stagingDir, targetDir)
+        installed = true
+
+        // Validate after the atomic swap as well. Do not discard the previous
+        // complete plugin until the materialized target has passed validation
+        // and any old exact-content authority has been revoked.
+        const targetManifest = path.join(targetDir, path.relative(sourceDir, sourceManifest))
+        const finalValidation = await validatePluginManifestFile(targetManifest)
+        if (!finalValidation.success || !finalValidation.plugin) {
+          throw new Error(
+            `Materialized plugin failed validation:\n${finalValidation.errors.join("\n")}`,
+          )
+        }
+        if (previousPlugin) {
+          await revokePluginTrust(previousPlugin)
+        }
+        if (previousMoved) {
+          await fs.rm(backupDir, { recursive: true, force: true })
+          previousMoved = false
+        }
+        return {
+          success: true,
+          output: `Installed plugin ${finalValidation.plugin.name} into ${targetDir}.`,
+          metadata: { plugin: finalValidation.plugin, targetDir },
+        }
+      } catch (error) {
+        if (installed) {
+          await fs.rm(targetDir, { recursive: true, force: true }).catch(() => undefined)
+        }
+        if (previousMoved) {
+          try {
+            await fs.rename(backupDir, targetDir)
+            previousMoved = false
+          } catch {
+            // Keep the complete backup in place for manual recovery rather
+            // than deleting it from the finally block.
+          }
+        }
+        return {
+          success: false,
+          output:
+            `Plugin installation failed: ${error instanceof Error ? error.message : String(error)}` +
+            (previousMoved
+              ? ` Previous plugin preserved for recovery at ${backupDir}.`
+              : ""),
+        }
+      } finally {
+        await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
+        if (!previousMoved) {
+          await fs.rm(backupDir, { recursive: true, force: true }).catch(() => undefined)
+        }
       }
-      await fs.rename(stagingDir, targetDir)
-      installed = true
-      if (previousMoved) {
-        await fs.rm(backupDir, { recursive: true, force: true })
-        previousMoved = false
-      }
-      const targetManifest = path.join(targetDir, path.relative(sourceDir, sourceManifest))
-      const finalValidation = await validatePluginManifestFile(targetManifest)
-      return {
-        success: true,
-        output: `Installed plugin ${finalValidation.plugin?.name ?? targetName} into ${targetDir}.`,
-        metadata: { plugin: finalValidation.plugin, targetDir },
-      }
-    } catch (error) {
-      if (installed) {
-        await fs.rm(targetDir, { recursive: true, force: true }).catch(() => undefined)
-      }
-      if (previousMoved) {
-        await fs.rename(backupDir, targetDir).catch(() => undefined)
-        previousMoved = false
-      }
-      return {
-        success: false,
-        output: `Plugin installation failed: ${error instanceof Error ? error.message : String(error)}`,
-      }
-    } finally {
-      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
-      if (!previousMoved) {
-        await fs.rm(backupDir, { recursive: true, force: true }).catch(() => undefined)
-      }
-    }
+    })
   },
 }
 
@@ -1977,17 +2689,105 @@ export const pluginRemoveTool: ToolDef<z.infer<typeof pluginRemoveSchema>> = {
     if (plugin.scope !== "project") {
       return { success: false, output: `Only project-scoped plugins can be removed automatically. ${name} is ${plugin.scope}-scoped.` }
     }
-    await fs.rm(plugin.rootDir, { recursive: true, force: true })
-    await updateProjectPluginConfig(ctx.cwd, (pluginsConfig) => {
-      const blocked = Array.isArray(pluginsConfig.blocked) ? pluginsConfig.blocked.filter((item) => item !== name) : []
-      const trusted = Array.isArray(pluginsConfig.trusted) ? pluginsConfig.trusted.filter((item) => item !== name) : []
-      const options = asObject(pluginsConfig.options)
-      delete options[name]
-      pluginsConfig.blocked = blocked
-      pluginsConfig.trusted = trusted
-      if (Object.keys(options).length > 0) pluginsConfig.options = options
-      else delete pluginsConfig.options
-    })
+    const pluginRoot = await ctx.host.resolvePath(plugin.rootDir, "delete")
+    const configPath = projectConfigPath(ctx.cwd)
+    const quarantineRoot = path.join(
+      path.dirname(pluginRoot),
+      `.${path.basename(pluginRoot)}.remove-${randomUUID()}`,
+    )
+    let committed = false
+    try {
+      await withFileLock(pluginRoot, async () => {
+        await withFileLock(configPath, async () => {
+          const currentPlugin = (
+            await loadPluginRuntimeRecords(ctx.cwd, ctx.config)
+          ).find(
+            (item) =>
+              item.name === name &&
+              path.resolve(item.rootDir) === path.resolve(plugin.rootDir),
+          )
+          if (!currentPlugin) {
+            throw new Error(`Plugin changed while removal was waiting for its lifecycle lock: ${name}`)
+          }
+
+          let previousRaw: string | undefined
+          try {
+            previousRaw = await fs.readFile(configPath, "utf8")
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+          }
+          const doc = readRawConfigFile(configPath) ?? {}
+          let verifiedRaw: string | undefined
+          try {
+            verifiedRaw = await fs.readFile(configPath, "utf8")
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+          }
+          if (previousRaw !== verifiedRaw) {
+            throw new Error(`Project config changed while plugin removal was being prepared: ${configPath}`)
+          }
+
+          mutateProjectPluginConfig(doc, (pluginsConfig) => {
+            const blocked = Array.isArray(pluginsConfig.blocked)
+              ? pluginsConfig.blocked.filter((item) => item !== name)
+              : []
+            const trusted = Array.isArray(pluginsConfig.trusted)
+              ? pluginsConfig.trusted.filter((item) => item !== name)
+              : []
+            const options = asObject(pluginsConfig.options)
+            delete options[name]
+            pluginsConfig.blocked = blocked
+            pluginsConfig.trusted = trusted
+            if (Object.keys(options).length > 0) pluginsConfig.options = options
+            else delete pluginsConfig.options
+          })
+
+          await fs.rename(pluginRoot, quarantineRoot)
+          let configWritten = false
+          try {
+            await writeRawConfigFile(configPath, doc)
+            configWritten = true
+            await revokePluginTrust(currentPlugin)
+            committed = true
+          } catch (error) {
+            const rollbackErrors: string[] = []
+            if (configWritten) {
+              try {
+                if (previousRaw === undefined) {
+                  await fs.rm(configPath, { force: true })
+                } else {
+                  await atomicWriteFile(configPath, previousRaw, { mode: 0o600 })
+                }
+              } catch (rollbackError) {
+                rollbackErrors.push(
+                  `config rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+                )
+              }
+            }
+            try {
+              await fs.rename(quarantineRoot, pluginRoot)
+            } catch (rollbackError) {
+              rollbackErrors.push(
+                `plugin rollback failed; preserved at ${quarantineRoot}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+              )
+            }
+            throw new Error([
+              error instanceof Error ? error.message : String(error),
+              ...rollbackErrors,
+            ].join("; "))
+          }
+        })
+        if (committed) {
+          await fs.rm(quarantineRoot, { recursive: true, force: true })
+        }
+      })
+    } catch (error) {
+      return {
+        success: false,
+        output:
+          `Plugin removal failed for ${name}: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
     ctx.config.plugins = {
       ...ctx.config.plugins,
       blocked: (ctx.config.plugins?.blocked ?? []).filter((item) => item !== name),
@@ -1998,7 +2798,7 @@ export const pluginRemoveTool: ToolDef<z.infer<typeof pluginRemoveSchema>> = {
     }
     return {
       success: true,
-      output: `Removed plugin ${name} from ${plugin.rootDir}.`,
+      output: `Removed plugin ${name} from ${pluginRoot}.`,
     }
   },
 }
@@ -2088,7 +2888,7 @@ export const planCreateResearchTasksTool: ToolDef<z.infer<typeof planCreateResea
   async execute({ workflow_id, owner, team_name }, ctx) {
     const workflow = await getPlanWorkflow(ctx.cwd, workflow_id)
     if (!workflow) return { success: false, output: `Plan workflow not found: ${workflow_id}` }
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const unanswered = workflow.questions.filter((question) => !question.answer?.trim())
     if (unanswered.length === 0) {
       return { success: true, output: `Workflow ${workflow_id} has no unanswered interview questions.` }
@@ -2100,6 +2900,7 @@ export const planCreateResearchTasksTool: ToolDef<z.infer<typeof planCreateResea
         subject: `Research: ${question.question}`,
         description: question.question,
         status: "pending",
+        sessionId: ctx.session.id,
         ...(owner ? { owner } : {}),
         ...(team_name ? { teamName: team_name } : {}),
         metadata: {
@@ -2133,14 +2934,37 @@ export const planDraftWorkflowTool: ToolDef<z.infer<typeof planDraftWorkflowSche
   name: "PlanDraftWorkflow",
   description: "Draft a plan markdown file from a plan workflow interview and linked research tasks.",
   parameters: planDraftWorkflowSchema,
+  approval: {
+    capability: "write",
+    description({ workflow_id, file_name }) {
+      return `Write plan workflow ${workflow_id} to .nexus/plans/${file_name?.trim() || `${workflow_id}.md`}`
+    },
+    content({ workflow_id, file_name }) {
+      return `.nexus/plans/${file_name?.trim() || `${workflow_id}.md`}`
+    },
+  },
   async execute({ workflow_id, file_name }, ctx) {
     const workflow = await getPlanWorkflow(ctx.cwd, workflow_id)
     if (!workflow) return { success: false, output: `Plan workflow not found: ${workflow_id}` }
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const researchTasks = await Promise.all(workflow.researchTaskIds.map((taskId) => runtime.getTask(taskId)))
-    const planDir = path.join(ctx.cwd, ".nexus", "plans")
-    await fs.mkdir(planDir, { recursive: true })
-    const filePath = path.join(planDir, file_name?.trim() || `${workflow.id}.md`)
+    const requestedName = file_name?.trim() || `${workflow.id}.md`
+    if (
+      path.basename(requestedName) !== requestedName ||
+      requestedName === "." ||
+      requestedName === ".." ||
+      !/\.(md|txt)$/i.test(requestedName)
+    ) {
+      return {
+        success: false,
+        output:
+          "Plan file_name must be a plain .md or .txt filename under .nexus/plans.",
+      }
+    }
+    const filePath = await ctx.host.resolvePath(
+      path.join(ctx.cwd, ".nexus", "plans", requestedName),
+      "write",
+    )
     const content = [
       `# Plan: ${workflow.goal}`,
       "",
@@ -2162,7 +2986,7 @@ export const planDraftWorkflowTool: ToolDef<z.infer<typeof planDraftWorkflowSche
       "## Risks",
       "- Review cross-cutting impacts in the affected code areas before merging.",
     ].join("\n")
-    await fs.writeFile(filePath, content, "utf8")
+    await ctx.host.writeFile(filePath, content)
     const updated = await updatePlanWorkflow(ctx.cwd, workflow_id, (current) => ({
       ...current,
       status: "ready",
@@ -2199,15 +3023,24 @@ function parsePlanTasks(planText: string): string[] {
     .filter(Boolean)
 }
 
-async function resolvePlanFile(cwd: string, filePath?: string): Promise<string | null> {
-  if (filePath) return path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
-  const plansDir = path.join(cwd, ".nexus", "plans")
+async function resolvePlanFile(
+  ctx: ToolContext,
+  filePath?: string,
+): Promise<string | null> {
+  if (filePath) return ctx.host.resolvePath(filePath, "read")
+  const plansDir = await ctx.host.resolvePath(
+    path.join(ctx.cwd, ".nexus", "plans"),
+    "list",
+  )
   try {
     const entries = await fs.readdir(plansDir, { withFileTypes: true })
     const files = await Promise.all(entries
       .filter((entry) => entry.isFile() && /\.(md|txt)$/i.test(entry.name))
       .map(async (entry) => {
-        const absPath = path.join(plansDir, entry.name)
+        const absPath = await ctx.host.resolvePath(
+          path.join(plansDir, entry.name),
+          "read",
+        )
         const stat = await fs.stat(absPath)
         return { absPath, mtimeMs: stat.mtimeMs }
       }))
@@ -2222,18 +3055,29 @@ export const planMaterializeTasksTool: ToolDef<z.infer<typeof planMaterializeTas
   description: "Read a written plan and create orchestration tasks from its checklist items or section headings.",
   parameters: planMaterializeTasksSchema,
   async execute({ file_path, owner, team_name, dependency_ordered }, ctx) {
-    const planFile = await resolvePlanFile(ctx.cwd, file_path)
+    let planFile: string | null
+    try {
+      planFile = await resolvePlanFile(ctx, file_path)
+    } catch (error) {
+      return {
+        success: false,
+        output: `Plan file access denied: ${(error as Error).message}`,
+      }
+    }
     if (!planFile) return { success: false, output: "No plan file found. Write a plan under .nexus/plans/ first." }
-    const planText = await fs.readFile(planFile, "utf8")
+    const planText = await ctx.host.readFile(planFile, {
+      maxBytes: MAX_PLAN_BYTES,
+    })
     const taskLines = parsePlanTasks(planText)
     if (taskLines.length === 0) return { success: false, output: `No task candidates found in ${planFile}.` }
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const created: Array<{ id: string; subject: string }> = []
     let previousTaskId: string | undefined
     for (const subject of taskLines) {
       const task = await runtime.createTask({
         subject,
         description: subject,
+        sessionId: ctx.session.id,
         ...(owner ? { owner } : {}),
         ...(team_name ? { teamName: team_name } : {}),
         ...(dependency_ordered !== false && previousTaskId ? { blockedBy: [previousTaskId] } : {}),
@@ -2266,12 +3110,22 @@ export const planVerifyExecutionTool: ToolDef<z.infer<typeof planVerifyExecution
   parameters: planVerifyExecutionSchema,
   readOnly: true,
   async execute({ file_path, owner, team_name }, ctx) {
-    const planFile = await resolvePlanFile(ctx.cwd, file_path)
+    let planFile: string | null
+    try {
+      planFile = await resolvePlanFile(ctx, file_path)
+    } catch (error) {
+      return {
+        success: false,
+        output: `Plan file access denied: ${(error as Error).message}`,
+      }
+    }
     if (!planFile) return { success: false, output: "No plan file found to verify." }
-    const planText = await fs.readFile(planFile, "utf8")
+    const planText = await ctx.host.readFile(planFile, {
+      maxBytes: MAX_PLAN_BYTES,
+    })
     const planItems = parsePlanTasks(planText)
     if (planItems.length === 0) return { success: false, output: `No checklist or section items found in ${planFile}.` }
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const tasks = await runtime.listTasks({
       ...(owner ? { owner } : {}),
       ...(team_name ? { teamName: team_name } : {}),
@@ -2326,6 +3180,51 @@ function buildMemoryMetadata(
   }
 }
 
+function isAgentManagedMemory(memory: MemoryRecord): boolean {
+  return (
+    memory.trust === "agent" &&
+    memory.author.type === "agent" &&
+    (memory.scope === "session" ||
+      memory.scope === "project" ||
+      memory.scope === "team")
+  )
+}
+
+async function validateMemoryRelations(
+  runtime: OrchestrationRuntime,
+  relationIds: readonly string[],
+  input: {
+    scope: "session" | "project" | "team"
+    sessionId: string
+    teamNames: readonly string[]
+    ownMemoryId?: string
+  },
+): Promise<string | undefined> {
+  for (const memoryId of new Set(relationIds)) {
+    if (memoryId === input.ownMemoryId) {
+      return `Memory cannot supersede or contradict itself: ${memoryId}`
+    }
+    const related = await runtime.getMemory(memoryId)
+    if (
+      !related ||
+      !isMemoryAccessibleFromSession(
+        related,
+        input.sessionId,
+        input.teamNames,
+      )
+    ) {
+      return `Related memory is not accessible: ${memoryId}`
+    }
+    if (related.scope !== input.scope) {
+      return `Related memory must use the same scope: ${memoryId}`
+    }
+    if (!isAgentManagedMemory(related)) {
+      return `Protected user, system, or external memory cannot be superseded or contradicted: ${memoryId}`
+    }
+  }
+  return undefined
+}
+
 export const memoryCreateTool: ToolDef<z.infer<typeof memoryCreateSchema>> = {
   name: "MemoryCreate",
   description: "Create or replace a typed persistent memory record. Stored content is redacted for common credentials and later injected only as cited, non-authoritative context.",
@@ -2338,7 +3237,26 @@ export const memoryCreateTool: ToolDef<z.infer<typeof memoryCreateSchema>> = {
     if (expires_at && !Number.isFinite(expiresAt)) {
       return { success: false, output: `Invalid expires_at timestamp: ${expires_at}` }
     }
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
+    const accessibleTeamNames: string[] = scope === "team"
+      ? await runtime.listTeamNamesForSession(ctx.session.id).catch(() => [])
+      : []
+    if (scope === "team" && !accessibleTeamNames.includes(team_name!)) {
+      return {
+        success: false,
+        output: `Team is not bound to this session: ${team_name}`,
+      }
+    }
+    const relationError = await validateMemoryRelations(
+      runtime,
+      [...(supersedes ?? []), ...(contradicts ?? [])],
+      {
+        scope,
+        sessionId: ctx.session.id,
+        teamNames: accessibleTeamNames,
+      },
+    )
+    if (relationError) return { success: false, output: relationError }
     const metadata = buildMemoryMetadata(scope, ctx, team_name)
     const input = {
       scope,
@@ -2380,19 +3298,56 @@ export const memoryListTool: ToolDef<z.infer<typeof memoryListSchema>> = {
   parameters: memoryListSchema,
   readOnly: true,
   async execute({ scope, include_content, limit, team_name, query, include_expired }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const effectiveScope: Array<"project" | "session" | "team"> = scope?.length ? scope : ["project", "session", "team"]
-    const memories = await runtime.listMemories({
-      scope: effectiveScope,
-      ...(!query?.trim() ? { limit: limit ?? 20 } : {}),
-    })
-    const scoped = memories.filter((memory) => {
-      const metadata = memory.metadata ?? {}
-      if (memory.scope === "session") return metadata.sessionId === ctx.session.id
-      if (memory.scope === "team" && team_name) return metadata.teamName === team_name
-      if (memory.scope === "team" && !team_name) return true
-      return true
-    })
+    const accessibleTeamNames: string[] = await runtime
+      .listTeamNamesForSession(ctx.session.id)
+      .catch(() => [])
+    if (team_name && !accessibleTeamNames.includes(team_name)) {
+      return {
+        success: false,
+        output: `Team is not bound to this session: ${team_name}`,
+      }
+    }
+    const scanLimit = Math.max(50, Math.min(500, (limit ?? 20) * 10))
+    const loads: Array<Promise<MemoryRecord[]>> = []
+    if (effectiveScope.includes("project")) {
+      loads.push(runtime.listMemories({ scope: "project", limit: scanLimit }))
+    }
+    if (effectiveScope.includes("session")) {
+      loads.push(runtime.listMemories({
+        scope: "session",
+        limit: scanLimit,
+        metadataMatch: { sessionId: ctx.session.id },
+      }))
+    }
+    if (effectiveScope.includes("team")) {
+      const selectedTeamNames = team_name
+        ? [team_name]
+        : accessibleTeamNames.slice(0, 64)
+      for (const selectedTeamName of selectedTeamNames) {
+        loads.push(runtime.listMemories({
+          scope: "team",
+          limit: scanLimit,
+          metadataMatch: { teamName: selectedTeamName },
+        }))
+      }
+    }
+    const memoriesById = new Map<string, MemoryRecord>()
+    for (const memories of await Promise.all(loads)) {
+      for (const memory of memories) {
+        if (
+          isMemoryAccessibleFromSession(
+            memory,
+            ctx.session.id,
+            accessibleTeamNames,
+          )
+        ) {
+          memoriesById.set(memory.id, memory)
+        }
+      }
+    }
+    const scoped = [...memoriesById.values()]
     const filtered = query?.trim()
       ? retrieveMemories({
           memories: scoped,
@@ -2400,7 +3355,17 @@ export const memoryListTool: ToolDef<z.infer<typeof memoryListSchema>> = {
           limit: limit ?? 20,
           maxChars: 32_000,
         }).items.map((item) => item.memory)
-      : scoped.filter((memory) => include_expired || memory.expiresAt == null || memory.expiresAt > Date.now())
+      : scoped
+          .filter(
+            (memory) =>
+              include_expired ||
+              memory.expiresAt == null ||
+              memory.expiresAt > Date.now(),
+          )
+          .sort((left, right) =>
+            right.updatedAt - left.updatedAt ||
+            left.id.localeCompare(right.id))
+          .slice(0, limit ?? 20)
     if (filtered.length === 0) return { success: true, output: "No memories found." }
     await runtime.recordMemoryAccess(filtered.map((memory) => memory.id)).catch(() => [])
     return {
@@ -2430,9 +3395,16 @@ export const memoryGetTool: ToolDef<z.infer<typeof memoryGetSchema>> = {
   parameters: memoryGetSchema,
   readOnly: true,
   async execute({ memory_id }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const memory = await runtime.getMemory(memory_id)
-    if (!memory || !isMemoryAccessibleFromSession(memory, ctx.session.id)) {
+    const accessibleTeamNames: string[] = await runtime
+      .listTeamNamesForSession(ctx.session.id)
+      .catch(() => [])
+    if (!memory || !isMemoryAccessibleFromSession(
+      memory,
+      ctx.session.id,
+      accessibleTeamNames,
+    )) {
       return { success: false, output: `Memory not found: ${memory_id}` }
     }
     await runtime.recordMemoryAccess([memory.id]).catch(() => [])
@@ -2463,11 +3435,36 @@ export const memoryUpdateTool: ToolDef<z.infer<typeof memoryUpdateSchema>> = {
     if (typeof expires_at === "string" && !Number.isFinite(expiresAt)) {
       return { success: false, output: `Invalid expires_at timestamp: ${expires_at}` }
     }
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const existing = await runtime.getMemory(memory_id)
-    if (!existing || !isMemoryAccessibleFromSession(existing, ctx.session.id)) {
+    const accessibleTeamNames: string[] = await runtime
+      .listTeamNamesForSession(ctx.session.id)
+      .catch(() => [])
+    if (!existing || !isMemoryAccessibleFromSession(
+      existing,
+      ctx.session.id,
+      accessibleTeamNames,
+    )) {
       return { success: false, output: `Memory not found: ${memory_id}` }
     }
+    if (!isAgentManagedMemory(existing)) {
+      return {
+        success: false,
+        output:
+          `Memory ${memory_id} is protected; edit its authoritative source instead.`,
+      }
+    }
+    const relationError = await validateMemoryRelations(
+      runtime,
+      [...(supersedes ?? []), ...(contradicts ?? [])],
+      {
+        scope: existing.scope as "session" | "project" | "team",
+        sessionId: ctx.session.id,
+        teamNames: accessibleTeamNames,
+        ownMemoryId: existing.id,
+      },
+    )
+    if (relationError) return { success: false, output: relationError }
     const memory = await runtime.updateMemory(memory_id, {
       title,
       content,
@@ -2494,10 +3491,24 @@ export const memoryDeleteTool: ToolDef<z.infer<typeof memoryDeleteSchema>> = {
   description: "Delete a persistent memory record.",
   parameters: memoryDeleteSchema,
   async execute({ memory_id }, ctx) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
+    const runtime = ctx.services.orchestrationRuntime
     const existing = await runtime.getMemory(memory_id)
-    if (!existing || !isMemoryAccessibleFromSession(existing, ctx.session.id)) {
+    const accessibleTeamNames: string[] = await runtime
+      .listTeamNamesForSession(ctx.session.id)
+      .catch(() => [])
+    if (!existing || !isMemoryAccessibleFromSession(
+      existing,
+      ctx.session.id,
+      accessibleTeamNames,
+    )) {
       return { success: false, output: `Memory not found: ${memory_id}` }
+    }
+    if (!isAgentManagedMemory(existing)) {
+      return {
+        success: false,
+        output:
+          `Memory ${memory_id} is protected; remove it through its authoritative source.`,
+      }
     }
     const deleted = await runtime.deleteMemory(memory_id)
     if (!deleted) return { success: false, output: `Memory not found: ${memory_id}` }

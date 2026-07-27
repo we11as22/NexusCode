@@ -12,8 +12,23 @@ import { expandInstructionIncludes, readInstructionFileRaw, MAX_INSTRUCTION_FILE
  * - `@include` on its own line expands recursively (see instruction-include.ts).
  */
 
-async function readFileSafe(filePath: string): Promise<string | null> {
-  return readInstructionFileRaw(filePath)
+async function readFileSafe(
+  filePath: string,
+  authorityRoot?: string,
+): Promise<string | null> {
+  return readInstructionFileRaw(filePath, authorityRoot)
+}
+
+function staticGlobRoot(pattern: string): string {
+  const absolute = path.resolve(pattern)
+  const parsed = path.parse(absolute)
+  const parts = absolute.slice(parsed.root.length).split(path.sep)
+  const staticParts: string[] = []
+  for (const part of parts) {
+    if (part.includes("*")) break
+    staticParts.push(part)
+  }
+  return path.join(parsed.root, ...staticParts)
 }
 
 function getManagedInstructionsPath(): string | null {
@@ -27,7 +42,7 @@ function getManagedInstructionsPath(): string | null {
 async function loadManagedBlock(): Promise<string | null> {
   const p = getManagedInstructionsPath()
   if (!p) return null
-  const text = await readFileSafe(p)
+  const text = await readFileSafe(p, path.dirname(p))
   if (!text) return null
   const seen = new Set<string>([p])
   const expanded = await expandInstructionIncludes(text, path.dirname(p), seen)
@@ -47,7 +62,7 @@ async function loadUserGlobalBlock(compatibility?: ClaudeCompatibilityOptions): 
   const seen = new Set<string>()
   for (const abs of candidates) {
     if (seen.has(abs)) continue
-    const text = await readFileSafe(abs)
+    const text = await readFileSafe(abs, home)
     if (!text) continue
     seen.add(abs)
     const expanded = await expandInstructionIncludes(text, path.dirname(abs), new Set())
@@ -57,7 +72,7 @@ async function loadUserGlobalBlock(compatibility?: ClaudeCompatibilityOptions): 
   const globalNexusRules = await glob(path.join(home, ".nexus", "rules", "**/*.md")).catch(() => [] as string[])
   for (const match of globalNexusRules.sort()) {
     if (seen.has(match)) continue
-    const text = await readFileSafe(match)
+    const text = await readFileSafe(match, home)
     if (!text) continue
     seen.add(match)
     const expanded = await expandInstructionIncludes(text, path.dirname(match), new Set())
@@ -68,7 +83,7 @@ async function loadUserGlobalBlock(compatibility?: ClaudeCompatibilityOptions): 
     const globalClaudeRules = await glob(path.join(home, ".claude", "rules", "**/*.md")).catch(() => [] as string[])
     for (const match of globalClaudeRules.sort()) {
       if (seen.has(match)) continue
-      const text = await readFileSafe(match)
+      const text = await readFileSafe(match, home)
       if (!text) continue
       seen.add(match)
       const expanded = await expandInstructionIncludes(text, path.dirname(match), new Set())
@@ -93,7 +108,7 @@ async function collectFilesForDir(
   for (const file of topLevelFiles) {
     const candidate = path.join(dir, file)
     if (seen.has(candidate)) continue
-    const content = await readFileSafe(candidate)
+    const content = await readFileSafe(candidate, authorityRoot)
     if (!content) continue
     seen.add(candidate)
     const expanded = await expandInstructionIncludes(content, path.dirname(candidate), new Set(), 0, authorityRoot)
@@ -104,7 +119,7 @@ async function collectFilesForDir(
   for (const file of topLevelFiles) {
     const candidate = path.join(dir, ".nexus", file)
     if (seen.has(candidate)) continue
-    const content = await readFileSafe(candidate)
+    const content = await readFileSafe(candidate, authorityRoot)
     if (!content) continue
     seen.add(candidate)
     const expanded = await expandInstructionIncludes(content, path.dirname(candidate), new Set(), 0, authorityRoot)
@@ -116,7 +131,7 @@ async function collectFilesForDir(
   const nexusRuleFiles = await glob(path.join(nexusRulesDir, "**/*.md")).catch(() => [] as string[])
   for (const match of nexusRuleFiles.sort()) {
     if (seen.has(match)) continue
-    const content = await readFileSafe(match)
+    const content = await readFileSafe(match, authorityRoot)
     if (!content) continue
     seen.add(match)
     const expanded = await expandInstructionIncludes(content, path.dirname(match), new Set(), 0, authorityRoot)
@@ -127,7 +142,7 @@ async function collectFilesForDir(
   if (compatibility?.includeProjectDir && compatibility?.includeRules) {
     const claudeMd = path.join(dir, ".claude", "CLAUDE.md")
     if (!seen.has(claudeMd)) {
-      const c = await readFileSafe(claudeMd)
+      const c = await readFileSafe(claudeMd, authorityRoot)
       if (c) {
         seen.add(claudeMd)
         const expanded = await expandInstructionIncludes(c, path.dirname(claudeMd), new Set(), 0, authorityRoot)
@@ -138,7 +153,7 @@ async function collectFilesForDir(
     const claudeRuleFiles = await glob(path.join(claudeRulesDir, "**/*.md")).catch(() => [] as string[])
     for (const match of claudeRuleFiles.sort()) {
       if (seen.has(match)) continue
-      const content = await readFileSafe(match)
+      const content = await readFileSafe(match, authorityRoot)
       if (!content) continue
       seen.add(match)
       const expanded = await expandInstructionIncludes(content, path.dirname(match), new Set(), 0, authorityRoot)
@@ -176,8 +191,18 @@ export async function loadRules(cwd: string, rulePatterns: string[], compatibili
   const userGlobal = await loadUserGlobalBlock(compatibility)
   if (userGlobal.trim()) contents.push(userGlobal)
 
+  const directExternalFiles = rulePatterns.filter(
+    (pattern) =>
+      !pattern.includes("*") &&
+      (path.isAbsolute(pattern) || pattern.startsWith("~/")),
+  )
   const topLevelFiles = [
-    ...rulePatterns.filter((p) => !p.includes("**") && !p.includes("*")),
+    ...rulePatterns.filter(
+      (pattern) =>
+        !pattern.includes("*") &&
+        !path.isAbsolute(pattern) &&
+        !pattern.startsWith("~/"),
+    ),
     "NEXUS.local.md",
     ...(compatibility?.includeLocalInstructions ? ["CLAUDE.local.md"] : []),
   ]
@@ -202,16 +227,41 @@ export async function loadRules(cwd: string, rulePatterns: string[], compatibili
     }
   }
 
+  for (const configuredPath of directExternalFiles) {
+    const absolutePath = configuredPath.startsWith("~/")
+      ? path.join(os.homedir(), configuredPath.slice(2))
+      : path.resolve(configuredPath)
+    const content = await readFileSafe(
+      absolutePath,
+      path.dirname(absolutePath),
+    )
+    if (!content) continue
+    const expanded = await expandInstructionIncludes(
+      content,
+      path.dirname(absolutePath),
+      new Set(),
+    )
+    contents.push(
+      `<!-- Approved rule: ${absolutePath} -->\n${expanded}`,
+    )
+  }
+
   for (const pattern of globPatterns) {
     const expandedPath = pattern.startsWith("~")
       ? pattern.replace("~", os.homedir())
-      : path.join(resolvedCwd, pattern)
+      : path.isAbsolute(pattern)
+        ? pattern
+        : path.join(resolvedCwd, pattern)
 
     const matches = await glob(expandedPath).catch(() => [] as string[])
+    const authorityRoot =
+      path.isAbsolute(pattern) || pattern.startsWith("~")
+        ? staticGlobRoot(expandedPath)
+        : projectBoundary
     const globSeen = new Set<string>()
     for (const match of matches.sort()) {
       if (globSeen.has(match)) continue
-      const content = await readFileSafe(match)
+      const content = await readFileSafe(match, authorityRoot)
       if (!content) continue
       globSeen.add(match)
       const expanded = await expandInstructionIncludes(content, path.dirname(match), new Set())

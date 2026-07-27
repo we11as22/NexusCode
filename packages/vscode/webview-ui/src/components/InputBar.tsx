@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useLayoutEffect, useState, useCallback } from "react"
+import React, { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from "react"
 import { createPortal } from "react-dom"
 import { useChatStore } from "../stores/chat.js"
 import { AttachedImagesStripWithPicker } from "./AttachedImagesStrip.js"
@@ -12,7 +12,7 @@ const AT_MENTION_SUGGESTIONS = [
   { value: "@git", label: "@git — git status/diff" },
 ]
 
-type SlashSection = "SETTINGS" | "SESSION" | "CREATE" | "AGENT"
+type SlashSection = "SETTINGS" | "SESSION" | "CREATE" | "AGENT" | "CUSTOM" | "MCP"
 
 interface SlashCommandItem {
   name: string
@@ -43,7 +43,18 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
 ]
 
 export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTrigger?: (trigger: () => void) => void }) {
-  const { inputValue, isRunning, awaitingApproval, setInputValue, sendMessage, abort, addAttachedImage, attachedImages } = useChatStore()
+  const {
+    inputValue,
+    isRunning,
+    awaitingApproval,
+    setInputValue,
+    sendMessage,
+    abort,
+    addAttachedImage,
+    attachedImages,
+    slashCommandCatalog,
+    configurationError,
+  } = useChatStore()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [showSuggestions, setShowSuggestions] = useState(false)
@@ -101,13 +112,32 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
     return () => ro.disconnect()
   }, [])
 
+  const slashCommands = useMemo<SlashCommandItem[]>(() => {
+    const seen = new Set(SLASH_COMMANDS.map((command) => command.name))
+    const dynamic = slashCommandCatalog
+      .filter((command) => {
+        if (seen.has(command.name)) return false
+        seen.add(command.name)
+        return true
+      })
+      .map((command) => ({
+        name: command.name,
+        description: command.argumentHint
+          ? `${command.description} · ${command.argumentHint}`
+          : command.description,
+        section: command.kind === "mcp" ? "MCP" as const : "CUSTOM" as const,
+        icon: command.kind === "mcp" ? "🔌" : "⌘",
+      }))
+    return [...SLASH_COMMANDS, ...dynamic]
+  }, [slashCommandCatalog])
+
   const getFilteredSlashCommands = useCallback((query: string): SlashCommandItem[] => {
-    if (!query) return SLASH_COMMANDS
+    if (!query) return slashCommands
     const q = query.toLowerCase()
-    return SLASH_COMMANDS.filter(
+    return slashCommands.filter(
       cmd => cmd.name.toLowerCase().includes(q) || cmd.description.toLowerCase().includes(q)
     )
-  }, [])
+  }, [slashCommands])
 
   // Measure container position for portal overlay
   const updatePaletteBounds = useCallback(() => {
@@ -194,7 +224,7 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      if (!isRunning && !awaitingApproval && (inputValue.trim() || attachedImages.length > 0)) {
+      if (!configurationError && !isRunning && !awaitingApproval && (inputValue.trim() || attachedImages.length > 0)) {
         let expanded = inputValue
         for (const block of pasteBlocks) {
           expanded = expanded.split(block.token).join(block.text)
@@ -228,6 +258,7 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
 
     // Slash command palette: open when user types '/' at start of empty input
     if (value === "/") {
+      postMessage({ type: "getSlashCommandCatalog" })
       setShowSlashPalette(true)
       setSlashQuery("")
       setSlashSelectedIndex(0)
@@ -483,13 +514,15 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
               placeholder={
                 awaitingApproval
                   ? "Awaiting your approval (check VS Code notification)…"
+                  : configurationError
+                    ? "Fix the workspace configuration, then reload it"
                   : isRunning
                     ? "Running… (Esc to abort)"
                     : "Add a follow-up"
               }
-              disabled={false}
+              disabled={Boolean(configurationError)}
               rows={1}
-              className={`prompt-input min-w-0 w-full ${isRunning || awaitingApproval ? "opacity-70" : ""}`}
+              className={`prompt-input min-w-0 w-full ${isRunning || awaitingApproval || configurationError ? "opacity-70" : ""}`}
               style={{ minHeight: "44px" }}
               onSelect={scrollCaretIntoView}
               onKeyUp={scrollCaretIntoView}

@@ -43,8 +43,12 @@ import {
 import type { ToolUseBlockParam } from '../provider/message-schema.js'
 import { queryNexus, replMessagesFromSession } from '../nexus-query.js'
 import type { NexusApprovalMessage, NexusBannerMessage, NexusTodoMessage, NexusQuestionMessage, NexusContextMessage } from '../nexus-query.js'
+import {
+  commitNexusModeTransition,
+  type NexusModeMessage,
+} from '../nexus-mode-transition.js'
 import type { AutoApprovePermissions } from '../nexus-query.js'
-import type { WrappedClient } from '../services/mcpClient.js'
+import type { McpDisplayStatus } from '../mcp-display.js'
 import type { Tool } from '../Tool.js'
 import { AutoUpdaterResult } from '../utils/autoUpdater.js'
 import { getGlobalConfig, saveGlobalConfig } from '../utils/config.js'
@@ -74,12 +78,20 @@ import { getTheme } from '../utils/theme.js'
 import { BinaryFeedback } from '../components/binary-feedback/BinaryFeedback.js'
 import { getMaxThinkingTokens } from '../utils/thinking.js'
 import { getOriginalCwd } from '../utils/state.js'
-import type { ConfigSnapshot } from '../nexus-bootstrap.js'
+import {
+  applyCliModelSelection,
+  loadCliWorkspaceConfig,
+  type ConfigSnapshot,
+} from '../nexus-bootstrap.js'
 import { reduceSubagentEvent } from '../nexus-subagents.js'
 import type { SubAgentState } from '../nexus-subagents.js'
 import { applyCheckpointRestore, type RestoreType } from '../task-restore.js'
 import type { SessionMessage, ToolPart } from '@nexuscode/core'
-import { createLLMClient, loadConfig } from '@nexuscode/core'
+import {
+  createLLMClient,
+  finalizeConfigCredentials,
+  getConfigEnvironment,
+} from '@nexuscode/core'
 import {
   Session,
   hadPlanExit,
@@ -155,8 +167,8 @@ type Props = {
   verbose: boolean | undefined
   // Initial messages to populate the REPL with
   initialMessages?: MessageType[]
-  // MCP clients
-  mcpClients?: WrappedClient[]
+  // Immutable MCP status projection. The REPL never owns protocol clients.
+  mcpStatuses?: McpDisplayStatus[]
   // Flag to indicate if current model is default
   isDefaultModel?: boolean
   // Nexus integration (optional until agent is wired)
@@ -169,7 +181,6 @@ type Props = {
   nexusGetSessionList?: () => Promise<Array<{ id: string }>>
   nexusOnSwitchSession?: (sessionId: string) => Promise<void>
   nexusOnDeleteSession?: (sessionId: string) => Promise<void>
-  nexusSaveConfig?: () => Promise<void>
   nexusOnReindex?: () => void
   /** Full bootstrap result for Nexus agent (when set, REPL uses queryNexus instead of query) */
   nexusBootstrap?: import('../nexus-bootstrap.js').NexusBootstrapResult
@@ -232,7 +243,7 @@ export function REPL({
   tools,
   verbose: verboseFromCLI,
   initialMessages,
-  mcpClients = [],
+  mcpStatuses = [],
   isDefaultModel = true,
   nexusConfigSnapshot,
   nexusInitialMode,
@@ -243,7 +254,6 @@ export function REPL({
   nexusGetSessionList,
   nexusOnSwitchSession,
   nexusOnDeleteSession,
-  nexusSaveConfig,
   nexusOnReindex,
   nexusBootstrap,
   onNexusConfigSaved,
@@ -370,6 +380,17 @@ export function REPL({
     planText: string
   } | null>(null)
   const forcedNexusModeForNextRunRef = useRef<string | null>(null)
+  const applyNexusModeTransition = useCallback(
+    (message: NexusModeMessage) => {
+      commitNexusModeTransition(
+        nexusBootstrap,
+        forcedNexusModeForNextRunRef,
+        message,
+        setNexusModeOverride,
+      )
+    },
+    [nexusBootstrap],
+  )
 
   const hasRunningSubagent = useMemo(
     () =>
@@ -491,14 +512,30 @@ export function REPL({
   const onNexusCompact = useCallback(async () => {
     if (!nexusBootstrap) return
     try {
+      if (nexusBootstrap.serverUrl) {
+        throw new Error(
+          'Remote compaction requires remote protocol v2 and cannot fall back to a local model',
+        )
+      }
       if (nexusBannerClearTimerRef.current) {
         clearTimeout(nexusBannerClearTimerRef.current)
         nexusBannerClearTimerRef.current = null
       }
       setNexusBannerText('Compacting…')
-      const config = await loadConfig(nexusBootstrap.cwd, {
-        secrets: nexusBootstrap.secretsStore,
+      let config = await loadCliWorkspaceConfig(nexusBootstrap.cwd, {
+        loadEnv: true,
+        hostAuthority: true,
       })
+      const configEnvironment = getConfigEnvironment(config)
+      applyCliModelSelection(config, nexusBootstrap.cliModelSelection)
+      config = await finalizeConfigCredentials(
+        config as unknown as Record<string, unknown>,
+        nexusBootstrap.secretsStore,
+        {
+          profileName: nexusBootstrap.cliModelSelection.profileOverride,
+          environment: configEnvironment,
+        },
+      ) as unknown as typeof config
       const client = createLLMClient(config.model)
       await nexusBootstrap.compaction.compact(
         nexusBootstrap.session,
@@ -682,9 +719,117 @@ export function REPL({
 
   const canUseTool = useCanUseTool(setToolUseConfirm)
 
+  const remoteResumePromiseRef = useRef<Promise<boolean> | null>(null)
+  const resumeActiveRemoteTurn = useCallback(async (): Promise<boolean> => {
+    if (!nexusBootstrap?.serverUrl) return false
+    if (remoteResumePromiseRef.current) {
+      return remoteResumePromiseRef.current
+    }
+    const resumePromise = (async () => {
+      const controller = new AbortController()
+      assignAbortController(controller)
+      setIsLoading(true)
+      let attached = false
+      try {
+        for await (const message of queryNexus({
+          nexus: nexusBootstrap,
+          userPrompt: '',
+          repoTools: tools,
+          signal: controller.signal,
+          autoApprove: !!dangerouslySkipPermissions,
+          autoApprovePermissions: nexusAutoApprove,
+          modeOverride: nexusModeOverride,
+          tuiApprovalRef,
+          remoteResume: true,
+          onRemoteResume: (value) => {
+            attached = value
+          },
+        })) {
+          if (message && 'type' in message && message.type === 'nexus_mode') {
+            applyNexusModeTransition(message as NexusModeMessage)
+          } else if (message && 'type' in message && message.type === 'nexus_approval') {
+            const approval = message as NexusApprovalMessage
+            setNexusApprovalAction({
+              action: approval.action,
+              partId: approval.partId,
+            })
+          } else if (
+            message &&
+            'type' in message &&
+            message.type === 'nexus_banner'
+          ) {
+            applyNexusBanner(message as NexusBannerMessage)
+          } else if (
+            message &&
+            'type' in message &&
+            message.type === 'nexus_todo'
+          ) {
+            setNexusTodo((message as NexusTodoMessage).todo)
+          } else if (
+            message &&
+            'type' in message &&
+            message.type === 'nexus_question'
+          ) {
+            setNexusQuestionRequest(
+              (message as NexusQuestionMessage).request,
+            )
+          } else if (
+            message &&
+            'type' in message &&
+            message.type === 'nexus_context'
+          ) {
+            const context = message as NexusContextMessage
+            setNexusContextUsage({
+              usedTokens: context.usedTokens,
+              limitTokens: context.limitTokens,
+              percent: context.percent,
+            })
+          } else {
+            setMessages((current) => [
+              ...current,
+              message as MessageType,
+            ])
+          }
+        }
+        if (attached) {
+          setMessages(
+            replMessagesFromSession(nexusBootstrap.session.messages),
+          )
+        }
+        return attached
+      } finally {
+        if (abortControllerRef.current === controller) {
+          assignAbortController(null)
+        }
+        setIsLoading(false)
+        setNexusApprovalAction(null)
+      }
+    })()
+    remoteResumePromiseRef.current = resumePromise
+    try {
+      return await resumePromise
+    } finally {
+      if (remoteResumePromiseRef.current === resumePromise) {
+        remoteResumePromiseRef.current = null
+      }
+    }
+  }, [
+    nexusBootstrap,
+    tools,
+    dangerouslySkipPermissions,
+    nexusAutoApprove,
+    nexusModeOverride,
+    tuiApprovalRef,
+    applyNexusBanner,
+    assignAbortController,
+  ])
+
   async function onInit() {
     reverify()
 
+    if (await resumeActiveRemoteTurn()) {
+      return
+    }
     if (!initialPrompt) {
       return
     }
@@ -770,6 +915,10 @@ export function REPL({
           },
           onRunComplete: (h) => { lastNexusHostRef.current = h },
         })) {
+          if (message && 'type' in message && message.type === 'nexus_mode') {
+            applyNexusModeTransition(message as NexusModeMessage)
+            continue
+          }
           if (message && 'type' in message && message.type === 'nexus_approval') {
             const approvalMsg = message as NexusApprovalMessage
             setNexusApprovalAction({
@@ -906,6 +1055,10 @@ export function REPL({
         },
         onRunComplete: (h) => { lastNexusHostRef.current = h },
       })) {
+        if (message && 'type' in message && message.type === 'nexus_mode') {
+          applyNexusModeTransition(message as NexusModeMessage)
+          continue
+        }
         if (message && 'type' in message && message.type === 'nexus_approval') {
           const approvalMsg = message as NexusApprovalMessage
           setNexusApprovalAction({
@@ -1047,7 +1200,8 @@ export function REPL({
         `Switched session · ${sid}\nCLI resume: nexus --session ${nexusSessionId}`,
       ),
     ])
-  }, [nexusSessionId, nexusBootstrap])
+    void resumeActiveRemoteTurn()
+  }, [nexusSessionId, nexusBootstrap, resumeActiveRemoteTurn])
 
   // Remount header on real dimension changes so layout matches the new width. Do not clear the
   // viewport: ESC 2J wipes the screen while Ink still tracks prior output, which desyncs the TUI
@@ -1272,7 +1426,7 @@ export function REPL({
     toolUseConfirm,
     isMessageSelectorVisible,
     unresolvedToolUseIDs,
-    mcpClients,
+    mcpStatuses,
     isDefaultModel,
     nexusBootstrap,
     nexusConfigSnapshot,
@@ -1295,7 +1449,7 @@ export function REPL({
             flexDirection="column"
           >
             <Logo
-              mcpClients={mcpClients}
+              mcpStatuses={mcpStatuses}
               isDefaultModel={isDefaultModel}
             />
             <ProjectOnboarding workspaceDir={getOriginalCwd()} />
@@ -1309,7 +1463,7 @@ export function REPL({
       forkNumber,
       layoutRemountKey,
       messagesJSX,
-      mcpClients,
+      mcpStatuses,
       isDefaultModel,
       shouldHideNexusHeader,
     ],

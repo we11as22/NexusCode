@@ -6,6 +6,12 @@ import type { IHost, NexusConfig, PluginManifestRecord } from "../types.js"
 import { loadPluginManifests, resolvePluginDeclaredPath } from "./index.js"
 import { getClaudeCompatibilityOptions } from "../compat/claude.js"
 import { requestHostApproval } from "../agent/approval-coordinator.js"
+import { requestNetworkResource } from "../network/network-request.js"
+import {
+  evaluatePluginTrust,
+  type PluginTrustEvaluation,
+  type PluginTrustStoreOptions,
+} from "./trust.js"
 
 export interface PluginHookExecution {
   pluginName: string
@@ -64,15 +70,29 @@ function rememberCompletedOneShotHook(key: string): void {
 export function applyPluginRuntimeSettings(
   plugin: PluginManifestRecord,
   config: NexusConfig,
+  trust: PluginTrustEvaluation = { trusted: false, reason: "not-granted" },
 ): PluginManifestRecord {
   const pluginsConfig = config.plugins
   const blocked = new Set(pluginsConfig?.blocked ?? [])
-  const trusted = new Set(pluginsConfig?.trusted ?? [])
   const runtimeEnabled = (pluginsConfig?.enabled ?? true) && !blocked.has(plugin.name) && plugin.enabled !== false
+  const nameOnlyTrustRequested = (pluginsConfig?.trusted ?? []).includes(plugin.name)
+  const trustWarning = trust.trusted
+    ? undefined
+    : nameOnlyTrustRequested
+      ? `plugins.trusted contains ${plugin.name}, but name-only plugin trust is ignored; grant the exact plugin content through the host authority store`
+      : trust.reason !== "not-granted"
+        ? `plugin trust denied (${trust.reason})${trust.message ? `: ${trust.message}` : ""}`
+        : undefined
   return {
     ...plugin,
     runtimeEnabled,
-    trusted: trusted.has(plugin.name),
+    trusted: trust.trusted,
+    ...(trust.fingerprint ? { trustFingerprint: trust.fingerprint } : {}),
+    ...(trust.grantId ? { trustGrantId: trust.grantId } : {}),
+    warnings: [
+      ...(plugin.warnings ?? []),
+      ...(trustWarning ? [trustWarning] : []),
+    ],
     options: pluginsConfig?.options?.[plugin.name] ?? {},
   }
 }
@@ -80,17 +100,25 @@ export function applyPluginRuntimeSettings(
 export async function loadPluginRuntimeRecords(
   cwd: string,
   config: NexusConfig,
+  trustOptions: PluginTrustStoreOptions = {},
 ): Promise<PluginManifestRecord[]> {
   const manifests = await loadPluginManifests(cwd, getClaudeCompatibilityOptions(config))
-  return manifests.map((plugin) => applyPluginRuntimeSettings(plugin, config))
+  return Promise.all(manifests.map(async (plugin) =>
+    applyPluginRuntimeSettings(
+      plugin,
+      config,
+      await evaluatePluginTrust(plugin, trustOptions),
+    )
+  ))
 }
 
 /** Capabilities from project-controlled plugins are active only after explicit trust. */
 export async function loadTrustedPluginRuntimeRecords(
   cwd: string,
   config: NexusConfig,
+  trustOptions: PluginTrustStoreOptions = {},
 ): Promise<PluginManifestRecord[]> {
-  return (await loadPluginRuntimeRecords(cwd, config)).filter(
+  return (await loadPluginRuntimeRecords(cwd, config, trustOptions)).filter(
     (plugin) => plugin.runtimeEnabled !== false && plugin.trusted === true,
   )
 }
@@ -338,25 +366,30 @@ async function runOpenClaudeHookDeclarations(
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), hookTimeoutMs)
         try {
-          const response = await fetch(url, {
+          const response = await requestNetworkResource(host, url, {
+            purpose: "web_fetch",
             method: "POST",
             headers: { "content-type": "application/json", ...headers },
             body: await fs.readFile(payloadPath, "utf8"),
             signal: controller.signal,
+            timeoutMs: hookTimeoutMs,
+            maxRequestBytes: 1_000_000,
+            maxResponseBytes: 1_000_000,
           })
-          const responseText = (await response.text()).slice(0, 1_000_000)
-          const parsed = parseHookResponse(responseText, response.ok ? "" : `HTTP ${response.status}`)
+          const responseOk = response.status >= 200 && response.status < 300
+          const responseText = new TextDecoder().decode(response.body)
+          const parsed = parseHookResponse(responseText, responseOk ? "" : `HTTP ${response.status}`)
           const blocked = parsed.preventContinuation === true
           executions.push({
             pluginName: declaration.plugin.name,
             hookEvent,
-            success: response.ok,
+            success: responseOk,
             output: parsed.output,
             ...(blocked ? { preventContinuation: true } : {}),
             ...(parsed.stopReason ? { stopReason: parsed.stopReason } : {}),
             ...(parsed.additionalContext ? { additionalContext: parsed.additionalContext } : {}),
           })
-          if (declaration.hook.once === true && response.ok) {
+          if (declaration.hook.once === true && responseOk) {
             rememberCompletedOneShotHook(oneShotKey)
           }
         } catch (error) {
@@ -551,24 +584,33 @@ export async function runPluginHooks(
   const plugins = await loadPluginRuntimeRecords(cwd, config)
   const trusted = plugins.filter((plugin) => plugin.runtimeEnabled !== false && plugin.trusted === true)
   const timeoutMs = config.plugins?.hookTimeoutMs ?? 15_000
-  const [legacy, openClaude] = await Promise.all([
-    runHookDeclarations(
-      cwd,
-      host,
-      timeoutMs,
-      hookEvent,
-      payload,
-      trusted.map((plugin) => ({
-        name: plugin.name,
-        hooks: plugin.hooks.filter((item) => !item.toLowerCase().endsWith(".json")),
-      })),
-      (item, relativePath) => {
-        const plugin = trusted.find((candidate) => candidate.name === item.name)!
-        return resolvePluginDeclaredPath(plugin, relativePath)
-      },
-    ),
-    runOpenClaudeHookDeclarations(cwd, host, timeoutMs, hookEvent, payload, trusted),
-  ])
+  // Hook commands are side effects. Keep the compatibility families ordered
+  // instead of racing them: legacy declarations run first, followed by
+  // OpenClaude declarations. Each family already preserves plugin/declaration
+  // order internally.
+  const legacy = await runHookDeclarations(
+    cwd,
+    host,
+    timeoutMs,
+    hookEvent,
+    payload,
+    trusted.map((plugin) => ({
+      name: plugin.name,
+      hooks: plugin.hooks.filter((item) => !item.toLowerCase().endsWith(".json")),
+    })),
+    (item, relativePath) => {
+      const plugin = trusted.find((candidate) => candidate.name === item.name)!
+      return resolvePluginDeclaredPath(plugin, relativePath)
+    },
+  )
+  const openClaude = await runOpenClaudeHookDeclarations(
+    cwd,
+    host,
+    timeoutMs,
+    hookEvent,
+    payload,
+    trusted,
+  )
   return [...legacy, ...openClaude]
 }
 

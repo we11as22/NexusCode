@@ -1,4 +1,4 @@
-import type { Mode, PermissionAction, ModeConfig } from "../types.js"
+import type { Mode, PermissionAction, ModeConfig, ToolDef } from "../types.js"
 
 export type ToolGroup =
   | "read"
@@ -41,6 +41,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
     "Bash",
     "PowerShell",
     "EnterPlanMode",
+    "ExitPlanMode",
     "TeamCreate",
     "TeamDelete",
     "TeamAddMember",
@@ -83,6 +84,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
     "PluginInstallLocal",
     "PluginRemove",
     "PluginReload",
+    "McpAuthenticate",
     "PlanStartWorkflow",
     "PlanAnswerWorkflow",
     "PlanCreateResearchTasks",
@@ -123,6 +125,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
     "PluginInstallLocal",
     "PluginRemove",
     "PluginReload",
+    "McpAuthenticate",
     "UpdateRemoteSession",
     "SendRemoteMessage",
     "InterruptRemoteSession",
@@ -155,7 +158,7 @@ export const PLAN_MODE_BLOCKED_EXTENSIONS = new Set([
 export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   always: ["AskFollowupQuestion", "TodoWrite", "Parallel", "SendUserMessage", "ToolSearch"],
   plan_enter: ["EnterPlanMode"],
-  read:    ["Read", "List", "ListCodeDefinitions", "LSP", "ReadLints"],
+  read:    ["Read", "ToolOutputRead", "List", "ListCodeDefinitions", "LSP", "ReadLints"],
   write:   ["Write", "Edit"],
   execute: ["Bash", "PowerShell", "EnterWorktree", "ExitWorktree"],
   git_inspect: ["GitInspect"],
@@ -212,7 +215,7 @@ export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
     "MemoryDelete",
   ],
   context: ["Condense"],
-  plan_exit: ["PlanExit", "ExitPlanMode"],
+  plan_exit: ["PlanExit"],
 }
 
 /**
@@ -226,6 +229,7 @@ export const PLAN_MODE_ALLOWED_WRITE_PATTERN = /^\.nexus[\\/]plans[\\/].+\.(md|t
  */
 export const READ_ONLY_TOOLS = new Set([
   "Read",
+  "ToolOutputRead",
   "List",
   "ListCodeDefinitions",
   "LSP",
@@ -262,6 +266,16 @@ export const READ_ONLY_TOOLS = new Set([
 ])
 
 /**
+ * Read-only in scheduling terms, but capable of sending model/user-controlled
+ * data to the public network. These use the separate browser permission and
+ * must never inherit ordinary filesystem-read auto approval.
+ */
+export const BROWSER_TOOLS = new Set([
+  "WebFetch",
+  "WebSearch",
+])
+
+/**
  * Mandatory tool that must be called at the end of a turn per mode.
  * If the model finishes (returns text, no more tool calls) without calling it, the loop will force-call it.
  * Empty string for agent/ask/debug means no mandatory tool — turn ends when model stops.
@@ -295,15 +309,15 @@ export function getBuiltinToolsForMode(mode: Mode): string[] {
 export function getModeToolPolicySummary(mode: Mode): string {
   switch (mode) {
     case "agent":
-      return "Read/write/edit, shell & worktrees, search & web, MCP, skills, full task/team/remote/plugin/plan/memory orchestration, Condense, EnterPlanMode. PlanExit/ExitPlanMode are disabled (use Plan mode for handoff)."
+      return "Read/write/edit, shell & worktrees, search & web, MCP, skills, full task/team/remote/plugin/plan/memory orchestration, Condense, EnterPlanMode. PlanExit is disabled (use Plan mode for handoff)."
     case "plan":
       return "Read/search/web/MCP/skills; Write/Edit only for .nexus/plans/*.md|txt; PlanExit; tasks & plan workflows & memories; list/get plugins & remotes. No shell, EnterPlanMode, team mutations, plugin install/trust, remote interrupt/send, RunPluginHook."
     case "ask":
-      return "Read/search/web/MCP/skills, Condense, Parallel, todos; TaskCreate/Batch/Output/Stop/Resume/Snapshot, TaskGet/List; list-only teams/remotes/plugins; PlanGetWorkflow; MemoryList/Get only. No files, shell, plan exit, memory writes, orchestration mutations, RunPluginHook."
+      return "Read/search/web/MCP resources/skills, Condense, Parallel, todos; TaskCreate/Batch/Output/Stop/Resume/Snapshot, TaskGet/List; list-only teams/remotes/plugins; PlanGetWorkflow; MemoryList/Get only. No MCP authentication, files, shell, plan exit, memory writes, orchestration mutations, RunPluginHook."
     case "debug":
-      return "Same built-in surface as agent (incl. EnterPlanMode); use for diagnose-then-fix. PlanExit/ExitPlanMode disabled."
+      return "Same built-in surface as agent (incl. EnterPlanMode); use for diagnose-then-fix. PlanExit is disabled."
     case "review":
-      return "Read/search and validated read-only Git inspection, MCP, skills, Condense; inspect tasks/teams/remotes/plugins/plans (list/get/output/snapshot). No arbitrary shell, file edits, task create/resume/stop/update, memory writes, team mutations, plugin install, remote control, plan workflow mutations, RunPluginHook."
+      return "Read/search and validated read-only Git inspection, MCP resources, skills, Condense; inspect tasks/teams/remotes/plugins/plans (list/get/output/snapshot). No MCP authentication, arbitrary shell, file edits, task create/resume/stop/update, memory writes, team mutations, plugin install, remote control, plan workflow mutations, RunPluginHook."
     default:
       return String(mode)
   }
@@ -323,6 +337,53 @@ export function getBlockedToolsForMode(mode: Mode): Set<string> {
 export function isToolAllowedInMode(toolName: string, mode: Mode): boolean {
   if (getBlockedToolsForMode(mode).has(toolName)) return false
   return getBuiltinToolsForMode(mode).includes(toolName)
+}
+
+const RETIRED_BUILTIN_TOOL_NAMES = ["ExitPlanMode"] as const
+const KNOWN_BUILTIN_TOOL_NAMES = new Set([
+  ...Object.values(TOOL_GROUP_MEMBERS).flat(),
+  ...RETIRED_BUILTIN_TOOL_NAMES,
+])
+
+/** Names that remain reserved so an integration cannot replace an old core capability. */
+export function getRetiredBuiltinToolNames(): readonly string[] {
+  return RETIRED_BUILTIN_TOOL_NAMES
+}
+
+/** True for the public built-in surface, independent of the current mode. */
+export function isKnownBuiltinToolName(toolName: string): boolean {
+  return KNOWN_BUILTIN_TOOL_NAMES.has(toolName)
+}
+
+/**
+ * External tools are untrusted capabilities. In modes that promise a
+ * constrained/read-only execution surface, an absent readOnly declaration is
+ * treated as mutating and therefore denied.
+ */
+export function isDynamicToolAllowedInMode(
+  tool: ToolDef,
+  mode: Mode,
+): boolean {
+  if (tool.modes && !tool.modes.includes(mode)) return false
+  if (mode === "agent" || mode === "debug") return true
+  return tool.readOnly === true
+}
+
+/**
+ * Authoritative mode check used at execution time as well as manifest
+ * construction. This prevents callers, stale transcripts, nested tools, or
+ * integrations from bypassing the advertised mode boundary.
+ */
+export function isToolDefinitionAllowedInMode(
+  tool: ToolDef,
+  mode: Mode,
+): boolean {
+  if (getBlockedToolsForMode(mode).has(tool.name)) return false
+  if (tool.modes && !tool.modes.includes(mode)) return false
+  if (isKnownBuiltinToolName(tool.name)) {
+    return getBuiltinToolsForMode(mode).includes(tool.name)
+  }
+  return isDynamicToolAllowedInMode(tool, mode)
 }
 
 /**
@@ -349,9 +410,9 @@ export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   plan:
     "PLAN mode: study the repo (read/search/web/MCP/skills), write only plan files under .nexus/plans/*.md|.txt, use PlanExit when ready. Tasks and plan workflows allowed; shell, plugin install/trust, team mutations, remote control, and EnterPlanMode are disabled.",
   ask:
-    "ASK mode: read-only answers — read/search/web/MCP/skills, delegated TaskCreate (read-only subagents), TaskOutput/TaskStop/TaskResume, list/get state for tasks/teams/remotes/plugins and PlanGetWorkflow, MemoryList/MemoryGet. No file edits, shell, PlanExit/EnterPlanMode, memory writes, team/plugin/remote mutations, or mutating plan workflow tools.",
+    "ASK mode: read-only answers — read/search/web/MCP resources/skills, delegated TaskCreate (read-only subagents), TaskOutput/TaskStop/TaskResume, list/get state for tasks/teams/remotes/plugins and PlanGetWorkflow, MemoryList/MemoryGet. No MCP authentication, file edits, shell, PlanExit/EnterPlanMode, memory writes, team/plugin/remote mutations, or mutating plan workflow tools.",
   debug:
-    "DEBUG mode: same tool palette as agent; diagnose first with evidence, then minimal fixes and re-verify. PlanExit/ExitPlanMode disabled.",
+    "DEBUG mode: same tool palette as agent; diagnose first with evidence, then minimal fixes and re-verify. PlanExit is disabled.",
   review:
-    "REVIEW mode: audit only — read/search and validated GitInspect, MCP, skills; inspect existing tasks/teams/remotes/plugins/plans without creating or mutating orchestration. No arbitrary shell, Write/Edit, new tasks, or PlanExit/EnterPlanMode.",
+    "REVIEW mode: audit only — read/search and validated GitInspect, MCP resources, skills; inspect existing tasks/teams/remotes/plugins/plans without creating or mutating orchestration. No MCP authentication, arbitrary shell, Write/Edit, new tasks, or PlanExit/EnterPlanMode.",
 }

@@ -1,25 +1,11 @@
 import { z } from "zod"
-import * as fs from "node:fs"
-import * as path from "node:path"
 import type { ToolDef, ToolContext } from "../../types.js"
-import { backgroundBashJobs } from "./execute-command.js"
-import { getOrchestrationRuntime } from "../../orchestration/runtime.js"
+import { readTrustedRuntimeOutput } from "./runtime-output.js"
 
 const schema = z.object({
   bash_id: z.string().describe("The ID of the background shell to retrieve output from"),
   filter: z.string().optional().describe("Optional regular expression to filter the output lines. Only lines matching this regex will be included in the result."),
 })
-
-/** Check if a process is still running (Unix: signal 0; Windows: may be unreliable). */
-function isProcessRunning(pid: number): boolean {
-  if (pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
 
 export const bashOutputTool: ToolDef<z.infer<typeof schema>> = {
   name: "BashOutput",
@@ -41,11 +27,47 @@ Example flow:
   readOnly: true,
 
   async execute({ bash_id, filter }, ctx: ToolContext) {
-    const runtime = await getOrchestrationRuntime(ctx.cwd)
-    const backgroundTask = await runtime.getBackgroundTask(bash_id)
-    const job = backgroundBashJobs.get(bash_id) ?? (
-      backgroundTask?.processId && backgroundTask.logPath
-        ? { pid: backgroundTask.processId, logPath: backgroundTask.logPath }
+    const runtime = ctx.services.orchestrationRuntime
+    let backgroundTask = await runtime.getBackgroundTask(bash_id)
+    if (
+      !backgroundTask ||
+      backgroundTask.kind !== "bash" ||
+      backgroundTask.sessionId !== ctx.session.id
+    ) {
+      return {
+        success: false,
+        output: `No background bash job found for bash_id: ${bash_id}.`,
+      }
+    }
+    const registeredJob = ctx.services.backgroundProcesses.get(bash_id, {
+      workspace: ctx.cwd,
+      sessionId: ctx.session.id,
+    })
+    const processIdentity = backgroundTask.metadata?.processIdentity
+    const liveJob =
+      registeredJob &&
+      typeof processIdentity === "string" &&
+      registeredJob.processIdentity === processIdentity
+        ? registeredJob
+        : undefined
+    if (
+      !liveJob &&
+      (backgroundTask.status === "running" ||
+        backgroundTask.status === "pending")
+    ) {
+      backgroundTask =
+        await runtime.setBackgroundTaskStatus(bash_id, "failed", {
+          error:
+            "Background shell task has no matching live runtime-owned process identity; its persisted PID was not trusted.",
+          metadata: {
+            ...(backgroundTask.metadata ?? {}),
+            reconciliation: "missing_live_process_identity",
+          },
+        }) ?? backgroundTask
+    }
+    const job = liveJob ?? (
+      backgroundTask.logPath
+        ? { logPath: backgroundTask.logPath }
         : undefined
     )
     if (!job) {
@@ -54,20 +76,26 @@ Example flow:
         output: `No background bash job found for bash_id: ${bash_id}. It may have finished or never been started in this process.`,
       }
     }
-    const logPath = path.isAbsolute(job.logPath) ? job.logPath : path.join(ctx.cwd, job.logPath)
     let content: string
     try {
-      content = await fs.promises.readFile(logPath, "utf8")
+      content = await readTrustedRuntimeOutput(job.logPath)
     } catch (err) {
       const e = err as NodeJS.ErrnoException
       if (e?.code === "ENOENT") {
         // Race: Bash just started background process but log file was not created yet.
         // Treat as a valid "no output yet" state instead of failing the tool call.
-        const running = isProcessRunning(job.pid)
+        const running =
+          Boolean(liveJob) &&
+          (backgroundTask.status === "running" ||
+            backgroundTask.status === "pending")
         return {
           success: true,
-          output: `[Process status: ${running ? "running" : "exited"} | PID: ${job.pid}]\n(no output yet)`,
-          metadata: { pid: job.pid, lineCount: 0, status: running ? "running" : "exited" },
+          output: `[Process status: ${running ? "running" : "exited"}${liveJob ? ` | PID: ${liveJob.pid}` : ""}]\n(no output yet)`,
+          metadata: {
+            ...(liveJob ? { pid: liveJob.pid } : {}),
+            lineCount: 0,
+            status: running ? "running" : "exited",
+          },
         }
       }
       return {
@@ -75,8 +103,11 @@ Example flow:
         output: `Could not read log for bash_id ${bash_id}: ${(err as Error).message}`,
       }
     }
-    const running = isProcessRunning(job.pid)
-    const statusLine = `[Process status: ${running ? "running" : "exited"} | PID: ${job.pid}]\n`
+    const running =
+      Boolean(liveJob) &&
+      (backgroundTask.status === "running" ||
+        backgroundTask.status === "pending")
+    const statusLine = `[Process status: ${running ? "running" : "exited"}${liveJob ? ` | PID: ${liveJob.pid}` : ""}]\n`
     let lines = content.split(/\r?\n/)
     if (filter) {
       try {
@@ -91,7 +122,7 @@ Example flow:
       success: true,
       output: statusLine + (output || "(no output yet)"),
       metadata: {
-        pid: job.pid,
+        ...(liveJob ? { pid: liveJob.pid } : {}),
         lineCount: lines.length,
         status: running ? "running" : "exited",
         task: backgroundTask ?? null,

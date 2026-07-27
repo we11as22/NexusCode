@@ -1,5 +1,11 @@
 import * as vscode from "vscode"
 import * as path from "path"
+import {
+  approvalGrantKey,
+  authorizeNetworkRequest as authorizePublicNetworkRequest,
+  grantWorkspaceAuthority,
+  resolveAuthorizedWorkspacePath,
+} from "@nexuscode/core"
 import type {
   IHost,
   AgentEvent,
@@ -19,11 +25,58 @@ import type {
   McpAuthResult,
   ModeChangeResult,
   WorkingDirectoryChangeResult,
+  HostReadFileOptions,
+  HostPathAccess,
+  HostNetworkRequest,
+  AuthorizedNetworkRequest,
+  WorkspaceAuthorityStoreOptions,
 } from "@nexuscode/core"
+import { parseStrictExternalHttpUrl } from "./external-url-policy.js"
 
 const NEXUS_PREVIEW_SCHEME = "nexuscode-preview"
 const previewDocuments = new Map<string, string>()
 let previewProviderRegistration: vscode.Disposable | undefined
+
+export interface WebviewApprovalResolverSlot {
+  current: {
+    partId: string
+    action: ApprovalAction
+    resolve(result: PermissionResult): void
+  } | null
+}
+
+function normalizeApprovalCommand(command: string): string {
+  return command.trim().replace(/\s+/gu, " ")
+}
+
+export function resolveWebviewApproval(
+  slot: WebviewApprovalResolverSlot,
+  partId: string,
+  result: PermissionResult,
+): boolean {
+  const pending = slot.current
+  if (!pending || pending.partId !== partId) return false
+  let exactResult = result
+  if (result.addToAllowedCommand !== undefined) {
+    const expected =
+      pending.action.type === "execute"
+        ? pending.action.content
+        : undefined
+    if (
+      !expected?.trim() ||
+      normalizeApprovalCommand(result.addToAllowedCommand) !==
+        normalizeApprovalCommand(expected)
+    ) {
+      return false
+    }
+    exactResult = {
+      ...result,
+      addToAllowedCommand: expected,
+    }
+  }
+  pending.resolve(exactResult)
+  return true
+}
 
 function ensurePreviewProviderRegistered(): void {
   if (previewProviderRegistration) return
@@ -65,15 +118,17 @@ export class VsCodeHost implements IHost {
   private checkpointTracker?: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> }
   private useWebviewApproval: boolean
   private runCommandsInTerminal: boolean
-  private approvalResolveRef: { current: ((r: PermissionResult) => void) | null } | null = null
+  private approvalResolveRef: WebviewApprovalResolverSlot | null = null
+  private emittedApprovalPartId: string | null = null
   private onCheckpointEntriesUpdated?: () => void
   /** Called after an approved edit is written to disk; used to add to session unaccepted list. */
   private onSessionEditSaved?: (path: string, originalContent: string, newContent: string, isNewFile: boolean) => void
+  private authorityStoreOptions: WorkspaceAuthorityStoreOptions
 
   private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
 
   private normalizePendingEditKey(filePath: string): string {
-    const absPath = path.isAbsolute(filePath) ? filePath : path.join(this.cwd, filePath)
+    const absPath = this.resolveWorkspacePath(filePath)
     return path.normalize(absPath).replace(/\\/g, "/")
   }
 
@@ -83,11 +138,12 @@ export class VsCodeHost implements IHost {
     options?: {
       useWebviewApproval?: boolean
       runCommandsInTerminal?: boolean
-      approvalResolveRef?: { current: ((r: PermissionResult) => void) | null }
+      approvalResolveRef?: WebviewApprovalResolverSlot
       onCheckpointEntriesUpdated?: () => void
       onSessionEditSaved?: (path: string, originalContent: string, newContent: string, isNewFile: boolean) => void
       onModeChangeRequested?: (mode: Mode, reason?: string) => Promise<void> | void
       onWorkingDirectoryChangeRequested?: (cwd: string, reason?: string) => Promise<void> | void
+      authorityStoreOptions?: WorkspaceAuthorityStoreOptions
     }
   ) {
     this.cwd = cwd
@@ -99,6 +155,7 @@ export class VsCodeHost implements IHost {
     this.onSessionEditSaved = options?.onSessionEditSaved
     this.onModeChangeRequested = options?.onModeChangeRequested
     this.onWorkingDirectoryChangeRequested = options?.onWorkingDirectoryChangeRequested
+    this.authorityStoreOptions = options?.authorityStoreOptions ?? {}
   }
 
   private onModeChangeRequested?: (mode: Mode, reason?: string) => Promise<void> | void
@@ -127,44 +184,227 @@ export class VsCodeHost implements IHost {
     this.onCheckpointEntriesUpdated?.()
   }
 
-  async readFile(filePath: string): Promise<string> {
-    const absPath = filePath.startsWith("/") ? filePath : path.join(this.cwd, filePath)
+  private resolveWorkspacePath(filePath: string): string {
+    return resolveAuthorizedWorkspacePath(this.cwd, filePath)
+  }
+
+  private isAuthorizedWorkspacePath(filePath: string): boolean {
+    try {
+      this.resolveWorkspacePath(filePath)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private findOpenTextDocument(
+    absolutePath: string,
+  ): vscode.TextDocument | undefined {
+    const normalizedPath = path.normalize(absolutePath)
+    return vscode.workspace.textDocuments.find((document) => {
+      if (document.uri.scheme !== "file") return false
+      try {
+        return (
+          path.normalize(
+            this.resolveWorkspacePath(document.uri.fsPath),
+          ) === normalizedPath
+        )
+      } catch {
+        return false
+      }
+    })
+  }
+
+  private async replaceOpenTextDocument(
+    document: vscode.TextDocument,
+    content: string,
+  ): Promise<void> {
+    const before = document.getText()
+    const edit = new vscode.WorkspaceEdit()
+    edit.replace(
+      document.uri,
+      new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(before.length),
+      ),
+      content,
+    )
+    const applied = await vscode.workspace.applyEdit(edit)
+    if (!applied) {
+      throw new Error(
+        `VS Code refused to apply the edit for ${document.uri.fsPath}`,
+      )
+    }
+    if (document.getText() !== content) {
+      throw new Error(
+        `The editor buffer changed while applying the edit for ${document.uri.fsPath}; the buffer was left unsaved for manual review`,
+      )
+    }
+    const saved = await document.save()
+    if (!saved || document.isDirty || document.getText() !== content) {
+      throw new Error(
+        `VS Code could not safely save ${document.uri.fsPath}; the buffer was left open for manual review`,
+      )
+    }
+  }
+
+  private async ensureParentDirectories(absolutePath: string): Promise<void> {
+    const dir = path.dirname(absolutePath)
+    const cwdResolved = this.resolveWorkspacePath(".")
+    const relDir = path.relative(cwdResolved, dir)
+    if (!relDir || relDir === ".") return
+    const parts = relDir.split(path.sep)
+    let acc = cwdResolved
+    for (const part of parts) {
+      if (!part) continue
+      acc = path.join(acc, part)
+      try {
+        await vscode.workspace.fs.createDirectory(vscode.Uri.file(acc))
+      } catch {
+        // The directory may already exist.
+      }
+    }
+  }
+
+  private async writeAuthorizedFile(
+    absolutePath: string,
+    content: string,
+    expectation?: {
+      originalContent: string
+      isNewFile: boolean
+    },
+  ): Promise<void> {
+    const uri = vscode.Uri.file(absolutePath)
+    const document = this.findOpenTextDocument(absolutePath)
+
+    if (document) {
+      if (expectation?.isNewFile) {
+        throw new Error(
+          `File edit conflict: ${absolutePath} was created after the edit was prepared`,
+        )
+      }
+      if (
+        expectation &&
+        document.getText() !== expectation.originalContent
+      ) {
+        throw new Error(
+          `File edit conflict: ${absolutePath} changed in the editor after the diff was prepared`,
+        )
+      }
+      if (!expectation && document.isDirty) {
+        throw new Error(
+          `Refusing to overwrite unsaved editor changes in ${absolutePath}; save the file and retry`,
+        )
+      }
+      await this.replaceOpenTextDocument(document, content)
+      return
+    }
+
+    const stat = await Promise.resolve(vscode.workspace.fs.stat(uri)).catch(
+      () => undefined,
+    )
+    if (expectation?.isNewFile) {
+      if (stat) {
+        throw new Error(
+          `File edit conflict: ${absolutePath} was created after the edit was prepared`,
+        )
+      }
+    } else if (expectation) {
+      if (!stat || (stat.type & vscode.FileType.Directory) !== 0) {
+        throw new Error(
+          `File edit conflict: ${absolutePath} no longer matches the prepared diff`,
+        )
+      }
+      const current = Buffer.from(
+        await vscode.workspace.fs.readFile(uri),
+      ).toString("utf8")
+      if (current !== expectation.originalContent) {
+        throw new Error(
+          `File edit conflict: ${absolutePath} changed on disk after the diff was prepared`,
+        )
+      }
+    } else if (stat && (stat.type & vscode.FileType.Directory) !== 0) {
+      throw new Error(`Path is a directory: ${absolutePath}`)
+    }
+
+    await this.ensureParentDirectories(absolutePath)
+    await vscode.workspace.fs.writeFile(
+      uri,
+      new TextEncoder().encode(content),
+    )
+  }
+
+  async resolvePath(
+    filePath: string,
+    _access: HostPathAccess,
+  ): Promise<string> {
+    return this.resolveWorkspacePath(filePath)
+  }
+
+  async authorizeNetworkRequest(
+    request: HostNetworkRequest,
+  ): Promise<AuthorizedNetworkRequest> {
+    return authorizePublicNetworkRequest(request)
+  }
+
+  async readFile(
+    filePath: string,
+    options: HostReadFileOptions = {},
+  ): Promise<string> {
+    const absPath = this.resolveWorkspacePath(filePath)
+    const openDocument = this.findOpenTextDocument(absPath)
+    if (openDocument) {
+      const content = openDocument.getText()
+      if (
+        typeof options.maxBytes === "number" &&
+        Number.isSafeInteger(options.maxBytes) &&
+        options.maxBytes >= 0 &&
+        Buffer.byteLength(content, "utf8") > options.maxBytes
+      ) {
+        throw new Error(
+          `File exceeds the ${options.maxBytes}-byte host read limit`,
+        )
+      }
+      return content
+    }
     const uri = vscode.Uri.file(absPath)
+    const stat = await vscode.workspace.fs.stat(uri)
+    if ((stat.type & vscode.FileType.Directory) !== 0) {
+      throw new Error(`Path is a directory: ${filePath}`)
+    }
+    if (
+      typeof options.maxBytes === "number" &&
+      Number.isSafeInteger(options.maxBytes) &&
+      options.maxBytes >= 0 &&
+      stat.size > options.maxBytes
+    ) {
+      throw new Error(
+        `File exceeds the ${options.maxBytes}-byte host read limit`,
+      )
+    }
     const content = await vscode.workspace.fs.readFile(uri)
     return Buffer.from(content).toString("utf8")
   }
 
   async writeFile(filePath: string, content: string): Promise<void> {
-    const absPath = filePath.startsWith("/") ? filePath : path.join(this.cwd, filePath)
-    const dir = path.dirname(absPath)
-    const cwdResolved = path.resolve(this.cwd)
-    const relDir = path.relative(cwdResolved, dir)
-    if (relDir && !relDir.startsWith("..") && relDir !== ".") {
-      const parts = relDir.split(path.sep)
-      let acc = cwdResolved
-      for (const p of parts) {
-        if (!p) continue
-        acc = path.join(acc, p)
-        try {
-          await vscode.workspace.fs.createDirectory(vscode.Uri.file(acc))
-        } catch {
-          // Dir may already exist
-        }
-      }
-    }
-    const uri = vscode.Uri.file(absPath)
-    const encoder = new TextEncoder()
-    await vscode.workspace.fs.writeFile(uri, encoder.encode(content))
+    const absPath = this.resolveWorkspacePath(filePath)
+    await this.writeAuthorizedFile(absPath, content)
   }
 
   async deleteFile(filePath: string): Promise<void> {
-    const absPath = filePath.startsWith("/") ? filePath : path.join(this.cwd, filePath)
+    const absPath = this.resolveWorkspacePath(filePath)
+    const document = this.findOpenTextDocument(absPath)
+    if (document?.isDirty) {
+      throw new Error(
+        `Refusing to delete ${absPath} while it has unsaved editor changes`,
+      )
+    }
     const uri = vscode.Uri.file(absPath)
     await vscode.workspace.fs.delete(uri, { useTrash: true })
   }
 
   async exists(filePath: string): Promise<boolean> {
-    const absPath = filePath.startsWith("/") ? filePath : path.join(this.cwd, filePath)
+    const absPath = this.resolveWorkspacePath(filePath)
     const uri = vscode.Uri.file(absPath)
     try {
       await vscode.workspace.fs.stat(uri)
@@ -196,8 +436,9 @@ export class VsCodeHost implements IHost {
     cwd: string,
     signal?: AbortSignal
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const commandCwd = this.resolveWorkspacePath(cwd || this.cwd)
     if (this.runCommandsInTerminal) {
-      const terminal = this.getOrCreateNexusTerminal(cwd)
+      const terminal = this.getOrCreateNexusTerminal(commandCwd)
       const integration = await this.waitForShellIntegration(terminal)
       if (integration) {
         terminal.show(true)
@@ -207,7 +448,7 @@ export class VsCodeHost implements IHost {
     const { execa } = await import("execa")
     const result = await execa(command, {
       shell: true,
-      cwd,
+      cwd: commandCwd,
       reject: false,
       timeout: 120_000,
       cancelSignal: signal,
@@ -222,9 +463,11 @@ export class VsCodeHost implements IHost {
   async requestMcpAuthentication(request: McpAuthRequest): Promise<McpAuthResult> {
     if (request.startUrl) {
       try {
-        await vscode.env.openExternal(vscode.Uri.parse(request.startUrl))
+        const url = parseStrictExternalHttpUrl(request.startUrl)
+        await vscode.env.openExternal(vscode.Uri.parse(url.toString()))
         return {
-          success: true,
+          success: false,
+          pending: true,
           message: request.message?.trim() || `Opened authentication URL for ${request.server}.`,
         }
       } catch (error) {
@@ -338,7 +581,14 @@ export class VsCodeHost implements IHost {
     }
   }
 
-  async showApprovalDialog(action: ApprovalAction): Promise<PermissionResult> {
+  async showApprovalDialog(
+    action: ApprovalAction,
+    signal?: AbortSignal,
+  ): Promise<PermissionResult> {
+    const partId = this.emittedApprovalPartId
+    this.emittedApprovalPartId = null
+    if (signal?.aborted) return { approved: false }
+
     if (action.type === "doom_loop") {
       const choice = await vscode.window.showWarningMessage(
         `NexusCode: ${action.description}`,
@@ -356,19 +606,43 @@ export class VsCodeHost implements IHost {
       return { approved: true }
     }
 
-    const alwaysKey = `${action.type}:${action.tool}`
+    const alwaysKey = approvalGrantKey(action)
     if (this.alwaysApproved.has(alwaysKey)) {
       return { approved: true, alwaysApprove: true }
     }
 
     if (this.useWebviewApproval && this.approvalResolveRef) {
+      if (!partId) {
+        throw new Error(
+          "Webview approval is missing its exact tool-part identity",
+        )
+      }
+      if (this.approvalResolveRef.current) {
+        throw new Error(
+          "Cannot replace an unresolved webview approval",
+        )
+      }
       return new Promise<PermissionResult>((resolve) => {
-        this.approvalResolveRef!.current = (result: PermissionResult) => {
-          if (result.alwaysApprove) this.alwaysApproved.add(alwaysKey)
-          if (result.skipAll) this.sessionAutoApprove = true
-          this.approvalResolveRef!.current = null
-          resolve(result)
+        let settled = false
+        const pending = {
+          partId,
+          action,
+          resolve: (result: PermissionResult) => {
+            if (settled) return
+            settled = true
+            signal?.removeEventListener("abort", onAbort)
+            if (result.alwaysApprove) this.alwaysApproved.add(alwaysKey)
+            if (result.skipAll) this.sessionAutoApprove = true
+            if (this.approvalResolveRef?.current === pending) {
+              this.approvalResolveRef.current = null
+            }
+            resolve(result)
+          },
         }
+        const onAbort = () => pending.resolve({ approved: false })
+        signal?.addEventListener("abort", onAbort, { once: true })
+        if (signal?.aborted) onAbort()
+        if (!settled) this.approvalResolveRef!.current = pending
       })
     }
 
@@ -378,6 +652,8 @@ export class VsCodeHost implements IHost {
         ? "write"
         : action.type === "plugin"
           ? "perform this plugin action"
+          : action.type === "browser"
+            ? "access the public network"
           : "run"
     const buttons: string[] =
       action.type === "execute"
@@ -426,121 +702,58 @@ export class VsCodeHost implements IHost {
   }
 
   emit(event: AgentEvent): void {
+    if (event.type === "tool_approval_needed") {
+      this.emittedApprovalPartId = event.partId
+    }
     this.eventEmitter(event)
   }
 
   async addAllowedCommand(cwd: string, command: string): Promise<void> {
     const normalized = command.trim().replace(/\s+/g, " ")
     if (!normalized) return
-    const dirUri = vscode.Uri.file(path.join(cwd, ".nexus"))
-    const fileUri = vscode.Uri.file(path.join(cwd, ".nexus", "allowed-commands.json"))
-    let commands: string[] = []
-    try {
-      const data = await vscode.workspace.fs.readFile(fileUri)
-      const parsed = JSON.parse(Buffer.from(data).toString("utf8")) as { commands?: string[] }
-      if (Array.isArray(parsed?.commands)) commands = [...parsed.commands]
-    } catch {
-      // File missing or invalid
-    }
-    if (commands.includes(normalized)) return
-    commands.push(normalized)
-    try {
-      await vscode.workspace.fs.createDirectory(dirUri)
-    } catch {
-      // Dir may exist
-    }
-    await vscode.workspace.fs.writeFile(
-      fileUri,
-      new TextEncoder().encode(JSON.stringify({ commands }, null, 2))
+    const authorizedCwd = this.resolveWorkspacePath(cwd || this.cwd)
+    await grantWorkspaceAuthority(
+      authorizedCwd,
+      { kind: "command", value: normalized },
+      this.authorityStoreOptions,
     )
-
-    await this.appendToSettingsAllow(cwd, normalized)
   }
 
   async addAllowedPattern(cwd: string, pattern: string): Promise<void> {
     const normalized = pattern.trim()
     if (!normalized) return
-    await this.appendToSettingsAllow(cwd, normalized)
+    const authorizedCwd = this.resolveWorkspacePath(cwd || this.cwd)
+    await grantWorkspaceAuthority(
+      authorizedCwd,
+      { kind: "command-pattern", value: normalized },
+      this.authorityStoreOptions,
+    )
   }
 
   async addAllowedMcpTool(cwd: string, toolName: string): Promise<void> {
     const normalized = toolName.trim()
     if (!normalized) return
-    const dir = path.join(cwd, ".nexus")
-    const settings = await this.readSettingsLocal(cwd)
-    if (!settings.permissions) settings.permissions = {}
-    const list = settings.permissions.allowedMcpTools ?? []
-    if (list.includes(normalized)) return
-    settings.permissions.allowedMcpTools = [...list, normalized]
-    if (!settings.permissions.allow) settings.permissions.allow = []
-    if (!settings.permissions.deny) settings.permissions.deny = []
-    if (!settings.permissions.ask) settings.permissions.ask = []
-    await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir))
-    await vscode.workspace.fs.writeFile(
-      vscode.Uri.file(path.join(dir, "settings.local.json")),
-      new TextEncoder().encode(JSON.stringify(settings, null, 2))
-    )
-    await this.mirrorClaudeSettingsLocal(cwd, settings)
-  }
-
-  private async readSettingsLocal(cwd: string): Promise<{
-    permissions?: { allow?: string[]; deny?: string[]; ask?: string[]; allowedMcpTools?: string[] }
-  }> {
-    const settingsLocalPath = path.join(cwd, ".nexus", "settings.local.json")
-    try {
-      const data = await vscode.workspace.fs.readFile(vscode.Uri.file(settingsLocalPath))
-      const parsed = JSON.parse(Buffer.from(data).toString("utf8")) as {
-        permissions?: { allow?: string[]; deny?: string[]; ask?: string[]; allowedMcpTools?: string[] }
-      }
-      if (parsed && typeof parsed === "object") return parsed
-      return {}
-    } catch {
-      return {}
-    }
-  }
-
-  private async appendToSettingsAllow(cwd: string, entry: string): Promise<void> {
-    const dir = path.join(cwd, ".nexus")
-    const settings = await this.readSettingsLocal(cwd)
-    if (!settings.permissions) settings.permissions = {}
-    const allow = settings.permissions.allow ?? []
-    if (allow.includes(entry)) return
-    settings.permissions.allow = [...allow, entry]
-    if (!settings.permissions.deny) settings.permissions.deny = []
-    if (!settings.permissions.ask) settings.permissions.ask = []
-    await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir))
-    await vscode.workspace.fs.writeFile(
-      vscode.Uri.file(path.join(dir, "settings.local.json")),
-      new TextEncoder().encode(JSON.stringify(settings, null, 2))
-    )
-    await this.mirrorClaudeSettingsLocal(cwd, settings)
-  }
-
-  private async mirrorClaudeSettingsLocal(cwd: string, settings: {
-    permissions?: { allow?: string[]; deny?: string[]; ask?: string[]; allowedMcpTools?: string[] }
-  }): Promise<void> {
-    const claudeDir = path.join(cwd, ".claude")
-    try {
-      const stat = await vscode.workspace.fs.stat(vscode.Uri.file(claudeDir))
-      if (stat.type !== vscode.FileType.Directory) return
-    } catch {
-      return
-    }
-    await vscode.workspace.fs.createDirectory(vscode.Uri.file(claudeDir))
-    await vscode.workspace.fs.writeFile(
-      vscode.Uri.file(path.join(claudeDir, "settings.local.json")),
-      new TextEncoder().encode(JSON.stringify(settings, null, 2)),
+    const authorizedCwd = this.resolveWorkspacePath(cwd || this.cwd)
+    await grantWorkspaceAuthority(
+      authorizedCwd,
+      { kind: "mcp-tool", value: normalized },
+      this.authorityStoreOptions,
     )
   }
 
   async getProblems(): Promise<DiagnosticItem[]> {
     const diagnostics: DiagnosticItem[] = []
     const allDiagnostics = vscode.languages.getDiagnostics()
-    const cwdResolved = path.resolve(this.cwd)
+    const cwdResolved = this.resolveWorkspacePath(".")
 
     for (const [uri, diags] of allDiagnostics) {
-      const rel = path.relative(cwdResolved, uri.fsPath)
-      if (rel.startsWith("..") || path.isAbsolute(rel)) continue
+      let authorizedPath: string
+      try {
+        authorizedPath = this.resolveWorkspacePath(uri.fsPath)
+      } catch {
+        continue
+      }
+      const rel = path.relative(cwdResolved, authorizedPath)
       const filePath = rel.replace(/\\/g, "/")
       for (const d of diags) {
         diagnostics.push({
@@ -568,11 +781,12 @@ export class VsCodeHost implements IHost {
   }
 
   async setWorkingDirectory(cwd: string, reason?: string): Promise<WorkingDirectoryChangeResult> {
-    await this.onWorkingDirectoryChangeRequested?.(cwd, reason)
+    const authorizedCwd = this.resolveWorkspacePath(cwd)
+    await this.onWorkingDirectoryChangeRequested?.(authorizedCwd, reason)
     return {
       success: true,
-      cwd,
-      message: `Host working directory switched to ${cwd}.${reason ? ` ${reason}` : ""}`,
+      cwd: authorizedCwd,
+      message: `Host working directory switched to ${authorizedCwd}.${reason ? ` ${reason}` : ""}`,
     }
   }
 
@@ -582,7 +796,11 @@ export class VsCodeHost implements IHost {
         "vscode.executeWorkspaceSymbolProvider",
         request.query ?? "",
       )
-      const normalized = (symbols ?? []).map((symbol) => workspaceSymbolToCore(symbol))
+      const normalized = (symbols ?? [])
+        .filter((symbol) =>
+          this.isAuthorizedWorkspacePath(symbol.location.uri.fsPath),
+        )
+        .map((symbol) => workspaceSymbolToCore(symbol))
       return {
         operation: request.operation,
         summary: normalized.length > 0 ? `Found ${normalized.length} workspace symbol(s).` : "No workspace symbols found.",
@@ -590,9 +808,7 @@ export class VsCodeHost implements IHost {
       }
     }
 
-    const absolutePath = request.filePath
-      ? (path.isAbsolute(request.filePath) ? request.filePath : path.join(this.cwd, request.filePath))
-      : this.cwd
+    const absolutePath = this.resolveWorkspacePath(request.filePath ?? ".")
     const uri = resolveWorkspaceFileUri(this.cwd, absolutePath)
     const doc = await vscode.workspace.openTextDocument(uri)
     const position = new vscode.Position(Math.max(0, (request.line ?? 1) - 1), Math.max(0, (request.character ?? 1) - 1))
@@ -603,6 +819,9 @@ export class VsCodeHost implements IHost {
         uri,
       )
       const normalized = flattenDocumentSymbols(symbols ?? [], absolutePath)
+        .filter((symbol) =>
+          !symbol.path || this.isAuthorizedWorkspacePath(symbol.path),
+        )
       return {
         operation: request.operation,
         summary: normalized.length > 0 ? `Found ${normalized.length} document symbol(s).` : "No document symbols found.",
@@ -630,7 +849,10 @@ export class VsCodeHost implements IHost {
         uri,
         position,
       )
-      const locations = (definitions ?? []).map(locationLikeToCore).filter((item): item is LspLocation => Boolean(item))
+      const locations = (definitions ?? [])
+        .map(locationLikeToCore)
+        .filter((item): item is LspLocation => Boolean(item))
+        .filter((item) => this.isAuthorizedWorkspacePath(item.path))
       return {
         operation: request.operation,
         summary: locations.length > 0 ? `Found ${locations.length} definition location(s).` : "No definitions found.",
@@ -644,7 +866,10 @@ export class VsCodeHost implements IHost {
         uri,
         position,
       )
-      const locations = (implementations ?? []).map(locationLikeToCore).filter((item): item is LspLocation => Boolean(item))
+      const locations = (implementations ?? [])
+        .map(locationLikeToCore)
+        .filter((item): item is LspLocation => Boolean(item))
+        .filter((item) => this.isAuthorizedWorkspacePath(item.path))
       return {
         operation: request.operation,
         summary: locations.length > 0 ? `Found ${locations.length} implementation location(s).` : "No implementations found.",
@@ -658,7 +883,10 @@ export class VsCodeHost implements IHost {
         uri,
         position,
       )
-      const locations = (references ?? []).map(locationLikeToCore).filter((item): item is LspLocation => Boolean(item))
+      const locations = (references ?? [])
+        .map(locationLikeToCore)
+        .filter((item): item is LspLocation => Boolean(item))
+        .filter((item) => this.isAuthorizedWorkspacePath(item.path))
       return {
         operation: request.operation,
         summary: locations.length > 0 ? `Found ${locations.length} reference location(s).` : "No references found.",
@@ -672,7 +900,7 @@ export class VsCodeHost implements IHost {
       position,
     )
     const seed = (items ?? [])[0]
-    if (!seed) {
+    if (!seed || !this.isAuthorizedWorkspacePath(seed.uri.fsPath)) {
       return {
         operation: request.operation,
         summary: "No call hierarchy available at this symbol.",
@@ -690,26 +918,34 @@ export class VsCodeHost implements IHost {
         "vscode.provideIncomingCalls",
         seed,
       )
-      return {
-        operation: request.operation,
-        summary: (calls ?? []).length > 0 ? `Found ${(calls ?? []).length} incoming call(s).` : "No incoming calls found.",
-        calls: (calls ?? []).map((call) => ({
+      const normalizedCalls = (calls ?? [])
+        .filter((call) =>
+          this.isAuthorizedWorkspacePath(call.from.uri.fsPath),
+        )
+        .map((call) => ({
           ...callHierarchyItemToCore(call.from),
           fromRanges: call.fromRanges.map(rangeToCore),
-        })),
+        }))
+      return {
+        operation: request.operation,
+        summary: normalizedCalls.length > 0 ? `Found ${normalizedCalls.length} incoming call(s).` : "No incoming calls found.",
+        calls: normalizedCalls,
       }
     }
     const calls = await vscode.commands.executeCommand<vscode.CallHierarchyOutgoingCall[]>(
       "vscode.provideOutgoingCalls",
       seed,
     )
-    return {
-      operation: request.operation,
-      summary: (calls ?? []).length > 0 ? `Found ${(calls ?? []).length} outgoing call(s).` : "No outgoing calls found.",
-      calls: (calls ?? []).map((call) => ({
+    const normalizedCalls = (calls ?? [])
+      .filter((call) => this.isAuthorizedWorkspacePath(call.to.uri.fsPath))
+      .map((call) => ({
         ...callHierarchyItemToCore(call.to),
         fromRanges: call.fromRanges.map(rangeToCore),
-      })),
+      }))
+    return {
+      operation: request.operation,
+      summary: normalizedCalls.length > 0 ? `Found ${normalizedCalls.length} outgoing call(s).` : "No outgoing calls found.",
+      calls: normalizedCalls,
     }
   }
 
@@ -733,10 +969,64 @@ export class VsCodeHost implements IHost {
     const key = this.normalizePendingEditKey(filePath)
     const pending = this.pendingFileEdits.get(key)
     if (!pending) throw new Error(`No pending file edit for ${filePath}`)
-    // Persist approved content to disk (file does not open here; user opens by clicking in chat/UI).
-    await this.writeFile(filePath, pending.newContent)
+    const absolutePath = this.resolveWorkspacePath(filePath)
+    await this.writeAuthorizedFile(absolutePath, pending.newContent, {
+      originalContent: pending.originalContent,
+      isNewFile: pending.isNewFile,
+    })
     this.onSessionEditSaved?.(filePath, pending.originalContent, pending.newContent, pending.isNewFile)
     this.pendingFileEdits.delete(key)
+  }
+
+  /**
+   * Restore an already-saved agent edit only while its last written content is
+   * still authoritative. Controller Undo/Revert actions use this instead of
+   * writing through workspace.fs and potentially clobbering later user edits.
+   */
+  async revertSavedFileEdit(
+    filePath: string,
+    edit: {
+      originalContent: string
+      newContent: string
+      isNewFile: boolean
+    },
+  ): Promise<void> {
+    const absolutePath = this.resolveWorkspacePath(filePath)
+    if (!edit.isNewFile) {
+      await this.writeAuthorizedFile(absolutePath, edit.originalContent, {
+        originalContent: edit.newContent,
+        isNewFile: false,
+      })
+      return
+    }
+
+    const uri = vscode.Uri.file(absolutePath)
+    const document = this.findOpenTextDocument(absolutePath)
+    if (document) {
+      if (document.isDirty || document.getText() !== edit.newContent) {
+        throw new Error(
+          `File edit conflict: ${absolutePath} changed in the editor after the agent created it`,
+        )
+      }
+    } else {
+      const stat = await Promise.resolve(vscode.workspace.fs.stat(uri)).catch(
+        () => undefined,
+      )
+      if (!stat || (stat.type & vscode.FileType.Directory) !== 0) {
+        throw new Error(
+          `File edit conflict: ${absolutePath} no longer matches the saved agent edit`,
+        )
+      }
+      const current = Buffer.from(
+        await vscode.workspace.fs.readFile(uri),
+      ).toString("utf8")
+      if (current !== edit.newContent) {
+        throw new Error(
+          `File edit conflict: ${absolutePath} changed on disk after the agent created it`,
+        )
+      }
+    }
+    await vscode.workspace.fs.delete(uri, { useTrash: true })
   }
 
   async revertFileEdit(filePath: string): Promise<void> {
@@ -851,8 +1141,15 @@ function callHierarchyItemToCore(item: vscode.CallHierarchyItem): LspCallRecord 
  * Call from webview when user clicks an edited file (e.g. from Editable Files list).
  */
 export async function showDiffForPath(cwd: string, filePath: string): Promise<void> {
-  const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
-  const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
+  let absPath: string
+  try {
+    absPath = resolveAuthorizedWorkspacePath(cwd, filePath)
+  } catch {
+    vscode.window.showErrorMessage("NexusCode: Refusing to open a file outside the workspace")
+    return
+  }
+  const canonicalCwd = resolveAuthorizedWorkspacePath(cwd, ".")
+  const relPath = path.relative(canonicalCwd, absPath).replace(/\\/g, "/")
   const fileUri = resolveWorkspaceFileUri(cwd, absPath)
 
   try {
@@ -894,7 +1191,7 @@ export async function showSessionEditDiff(
   after: string,
   options?: { useWorkspaceAfterFile?: boolean }
 ): Promise<void> {
-  const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
+  const absPath = resolveAuthorizedWorkspacePath(cwd, filePath)
   const fileName = path.basename(filePath)
   const lang = getLanguageFromExtension(path.extname(filePath))
   const beforeDoc = await openReadonlyPreviewDocument(before, filePath, `${fileName}:before`)
@@ -941,11 +1238,16 @@ export async function openReadonlyTextDiff(
 }
 
 function resolveWorkspaceFileUri(cwd: string, absPath: string): vscode.Uri {
-  const wf = vscode.workspace.workspaceFolders?.[0]
-  if (!wf) return vscode.Uri.file(absPath)
-  const relPath = path.relative(cwd, absPath).replace(/\\/g, "/")
-  if (relPath.startsWith("..") || path.isAbsolute(relPath)) {
-    return vscode.Uri.file(absPath)
-  }
+  const canonicalCwd = resolveAuthorizedWorkspacePath(cwd, ".")
+  const authorizedPath = resolveAuthorizedWorkspacePath(canonicalCwd, absPath)
+  const wf = vscode.workspace.workspaceFolders?.find((folder) => {
+    try {
+      return resolveAuthorizedWorkspacePath(canonicalCwd, folder.uri.fsPath) === canonicalCwd
+    } catch {
+      return false
+    }
+  })
+  if (!wf) return vscode.Uri.file(authorizedPath)
+  const relPath = path.relative(canonicalCwd, authorizedPath).replace(/\\/g, "/")
   return vscode.Uri.joinPath(wf.uri, relPath)
 }

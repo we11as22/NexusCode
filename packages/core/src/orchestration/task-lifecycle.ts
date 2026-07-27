@@ -1,5 +1,5 @@
 import type { IHost, NexusConfig, TaskRecord, TeamMemberRecord } from "../types.js"
-import { getOrchestrationRuntime } from "./runtime.js"
+import { OrchestrationRuntime } from "./runtime.js"
 import { runPluginHooks } from "../plugins/runtime.js"
 
 function isTerminalTaskStatus(status: TaskRecord["status"]): boolean {
@@ -12,10 +12,11 @@ export async function ensureTeamMemberForTask(args: {
   task: TaskRecord
   agentId?: string
   agentType?: string
+  runtime?: OrchestrationRuntime
 }): Promise<void> {
   const { cwd, host, task, agentId, agentType } = args
   if (!task.teamName || !task.owner) return
-  const runtime = await getOrchestrationRuntime(cwd)
+  const runtime = args.runtime ?? new OrchestrationRuntime(cwd)
   const member: TeamMemberRecord = {
     name: task.owner,
     ...(agentId ? { agentId } : {}),
@@ -34,10 +35,11 @@ export async function handleCompletedTaskSideEffects(args: {
   config: NexusConfig
   task: TaskRecord
   outputPreview?: string
+  runtime?: OrchestrationRuntime
 }): Promise<void> {
   const { cwd, host, config, task, outputPreview } = args
   if (!isTerminalTaskStatus(task.status)) return
-  const runtime = await getOrchestrationRuntime(cwd)
+  const runtime = args.runtime ?? new OrchestrationRuntime(cwd)
 
   const hookResults = await runPluginHooks(
     cwd,

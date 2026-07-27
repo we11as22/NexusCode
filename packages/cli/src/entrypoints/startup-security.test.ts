@@ -1,0 +1,72 @@
+import { readFileSync } from "node:fs"
+import path from "node:path"
+import { describe, expect, it } from "vitest"
+
+const entrySource = readFileSync(
+  path.join(process.cwd(), "src", "entrypoints", "cli.tsx"),
+  "utf8",
+)
+const commandsSource = readFileSync(
+  path.join(process.cwd(), "src", "commands.ts"),
+  "utf8",
+)
+const bootstrapSource = readFileSync(
+  path.join(process.cwd(), "src", "nexus-bootstrap.ts"),
+  "utf8",
+)
+
+describe("CLI startup authority ordering", () => {
+  it("does not discover or connect project MCP while parsing arguments", () => {
+    expect(entrySource).toContain(
+      "const commands: SlashCommand[] = await getCommands(false)",
+    )
+    expect(commandsSource).toContain(
+      "const mcpCommands = includeMcp ? await getMCPCommands() : []",
+    )
+  })
+
+  it("canonicalizes and trusts the effective --project target before setup", () => {
+    const actionStart = entrySource.indexOf("const requestedCwd = project")
+    const setupStart = entrySource.indexOf(
+      "await setup(effectiveCwd",
+      actionStart,
+    )
+    const actionBody = entrySource.slice(actionStart, setupStart)
+
+    expect(actionBody.indexOf("getWorkspaceTrustIdentity(requestedCwd)"))
+      .toBeGreaterThanOrEqual(0)
+    expect(actionBody.indexOf("await setCwd(effectiveCwd)"))
+      .toBeGreaterThanOrEqual(0)
+    expect(actionBody.indexOf("await showSetupScreens("))
+      .toBeGreaterThan(actionBody.indexOf("await setCwd(effectiveCwd)"))
+  })
+
+  it("fails closed for an untrusted headless workspace", () => {
+    const setupStart = entrySource.indexOf("async function showSetupScreens(")
+    const setupEnd = entrySource.indexOf("function logStartup()", setupStart)
+    const setupBody = entrySource.slice(setupStart, setupEnd)
+
+    expect(setupBody).toContain("Refusing headless execution")
+    expect(setupBody).not.toContain(
+      "print mode is restricted to fail-closed",
+    )
+  })
+
+  it("does not turn project permission files into host grants", () => {
+    expect(bootstrapSource).not.toContain(
+      "config.permissions.allowedCommands = parsed.commands",
+    )
+    expect(bootstrapSource).not.toContain(
+      "config.permissions.allowCommandPatterns = perms.allow",
+    )
+    expect(bootstrapSource).not.toContain(
+      "config.permissions.allowedMcpTools = perms.allowedMcpTools",
+    )
+    expect(bootstrapSource).toContain(
+      "config.permissions.denyCommandPatterns = permissions.deny",
+    )
+    expect(bootstrapSource).toContain(
+      "config.permissions.askCommandPatterns = permissions.ask",
+    )
+  })
+})

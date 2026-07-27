@@ -3,7 +3,6 @@
  * Keeps our agent's config (model, modes, index, checkpoints) in sync with the CLI.
  */
 import * as path from 'node:path'
-import * as fs from 'node:fs/promises'
 import {
   loadConfig,
   writeConfig,
@@ -17,23 +16,17 @@ import {
   resolveBundledMcpServers,
   resolveConfiguredAndPluginMcpServers,
   createCompaction,
-  ParallelAgentManager,
-  createSpawnAgentTool,
-  createSpawnAgentOutputTool,
-  createSpawnAgentStopTool,
-  createSpawnAgentsParallelTool,
-  createListAgentRunsTool,
-  createAgentRunSnapshotTool,
-  createResumeAgentTool,
-  createTaskCreateBatchTool,
-  createTaskResumeTool,
-  createTaskSnapshotTool,
+  OrchestrationRuntime,
   createNexusRunServices,
+  closeNexusRunServices,
+  scheduleToolOutputMaintenance,
   listSessions,
   deleteSession as coreDeleteSession,
   readCheckpointEntries,
   getGlobalConfigDir,
   createFileSecretsStore,
+  finalizeConfigCredentials,
+  getConfigEnvironment,
   persistSecretsFromConfig,
   createCodebaseIndexer,
   MODES,
@@ -47,7 +40,13 @@ import {
   renderSlashCommandPrompt,
   resolveSlashCommand,
   NexusServerClient,
+  getNexusServerTokenSecretKey,
+  hydrateWorkspaceAuthority,
+  isLoopbackNexusServerDestination,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
+  mergeProviderConfigSafely,
+  selectProviderProfile,
+  type WorkspaceAuthorityStoreOptions,
 } from '@nexuscode/core'
 import type { CodebaseIndexer } from '@nexuscode/core'
 import { fileURLToPath } from 'node:url'
@@ -55,6 +54,18 @@ import {
   resolveRuntimeServerUrl,
   selectSession,
 } from './session-selection.js'
+import { createCliRemoteTurnCursorStore } from './remote-turn-cursor-store.js'
+import type { RemoteTurnCursorStore } from './remote-turn.js'
+import {
+  resolveMcpPromptCommand,
+  resolveRemoteMcpPromptCommand,
+} from './mcp-prompts.js'
+import { CliHost } from './host.js'
+import {
+  createCliMcpRemoteRequestAuthorizer,
+  createCliRunContext,
+  type CliRunContext,
+} from './run-context.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const NEXUS_ROOT = path.resolve(__dirname, '..', '..', '..')
@@ -71,7 +82,7 @@ function isOpenRouterBaseUrl(value: unknown): boolean {
 }
 
 export function normalizeModelConfig<T extends { provider?: unknown; id?: unknown; baseUrl?: unknown }>(model: T): T {
-  const next = { ...model } as T & { provider?: unknown; id?: unknown; baseUrl?: unknown }
+  let next = { ...model } as T & { provider?: unknown; id?: unknown; baseUrl?: unknown }
   const provider = String(next.provider ?? '')
   if (provider === 'openrouter') {
     next.provider = 'openai-compatible'
@@ -80,10 +91,77 @@ export function normalizeModelConfig<T extends { provider?: unknown; id?: unknow
   const modelId = String(next.id ?? '')
   if (next.provider === 'openai-compatible' && modelId.endsWith(':free')) {
     if (!isNonEmptyString(next.baseUrl) || isOpenRouterBaseUrl(next.baseUrl)) {
-      next.baseUrl = NEXUS_GATEWAY_BASE_URL
+      next = mergeProviderConfigSafely(
+        next as unknown as NexusConfig['model'],
+        { baseUrl: NEXUS_GATEWAY_BASE_URL },
+      ) as unknown as typeof next
     }
   }
   return next as T
+}
+
+export interface CliModelSelection {
+  modelOverride?: string
+  temperatureOverride?: number
+  reasoningEffortOverride?: string
+  profileOverride?: string
+}
+
+/**
+ * Apply CLI selection as one credential-safe transaction. This same function
+ * is replayed after live config reloads so bootstrap overrides reach the
+ * actual createLLMClient call.
+ */
+export function applyCliModelSelection(
+  config: NexusConfig,
+  selection: CliModelSelection,
+): void {
+  const {
+    modelOverride,
+    temperatureOverride,
+    reasoningEffortOverride,
+    profileOverride,
+  } = selection
+
+  if (modelOverride) {
+    const slashIdx = modelOverride.indexOf('/')
+    if (slashIdx > 0) {
+      const provider = modelOverride.slice(0, slashIdx)
+      const modelId = modelOverride.slice(slashIdx + 1)
+      const patch = provider === 'openrouter'
+        ? {
+            provider: 'openai-compatible' as const,
+            id: modelId,
+            baseUrl: OPENROUTER_BASE_URL,
+          }
+        : {
+            provider: provider as NexusConfig['model']['provider'],
+            id: modelId,
+          }
+      config.model = mergeProviderConfigSafely(config.model, patch)
+    } else {
+      config.model = mergeProviderConfigSafely(config.model, {
+        id: modelOverride,
+      })
+    }
+    config.model = normalizeModelConfig(config.model)
+  }
+
+  if (typeof temperatureOverride === 'number' && Number.isFinite(temperatureOverride)) {
+    config.model.temperature = Math.max(0, Math.min(2, temperatureOverride))
+  }
+
+  if (typeof reasoningEffortOverride === 'string') {
+    const trimmed = reasoningEffortOverride.trim()
+    if (trimmed.length > 0) config.model.reasoningEffort = trimmed
+  }
+
+  if (profileOverride) {
+    const profile = config.profiles?.[profileOverride]
+    if (!profile) throw new Error(`Profile not found: ${profileOverride}`)
+    config.model = selectProviderProfile(config.model, profile)
+    config.model = normalizeModelConfig(config.model)
+  }
 }
 
 export type ConfigSnapshot = {
@@ -93,13 +171,12 @@ export type ConfigSnapshot = {
   vectorDb?: { enabled: boolean; url: string }
   mcp: { servers: unknown[] }
   tools: {
-    classifyToolsEnabled: boolean
-    classifyThreshold: number
     parallelReads: boolean
     maxParallelReads: number
+    deferredLoadingMode?: "auto" | "always" | "never"
+    deferredLoadingThresholdPercent?: number
+    deferredLoadingMinimumTools?: number
   }
-  skillClassifyEnabled: boolean
-  skillClassifyThreshold: number
   skills: string[]
   skillsConfig?: Array<{ path: string; enabled: boolean }>
   rules: { files: string[] }
@@ -145,13 +222,13 @@ export function buildConfigSnapshot(conf: NexusConfig): ConfigSnapshot {
     vectorDb: conf.vectorDb ? { enabled: conf.vectorDb.enabled, url: conf.vectorDb.url } : undefined,
     mcp: { servers: (conf.mcp?.servers ?? []) as unknown[] },
     tools: {
-      classifyToolsEnabled: conf.tools.classifyToolsEnabled,
-      classifyThreshold: conf.tools.classifyThreshold,
       parallelReads: conf.tools.parallelReads,
       maxParallelReads: conf.tools.maxParallelReads,
+      deferredLoadingMode: conf.tools.deferredLoadingMode,
+      deferredLoadingThresholdPercent:
+        conf.tools.deferredLoadingThresholdPercent,
+      deferredLoadingMinimumTools: conf.tools.deferredLoadingMinimumTools,
     },
-    skillClassifyEnabled: conf.skillClassifyEnabled,
-    skillClassifyThreshold: conf.skillClassifyThreshold,
     skills: conf.skills ?? [],
     skillsConfig: conf.skillsConfig,
     rules: { files: conf.rules?.files ?? [] },
@@ -181,6 +258,54 @@ export function buildConfigSnapshot(conf: NexusConfig): ConfigSnapshot {
   }
 }
 
+export interface CliWorkspaceConfigOptions {
+  loadEnv: boolean
+  globalConfigPath?: string | false
+  hostAuthority: boolean
+  authorityStoreOptions?: WorkspaceAuthorityStoreOptions
+}
+
+/**
+ * Load one CLI runtime config with its two distinct policy sources:
+ * repository settings may only deny/ask, while persistent grants come from
+ * the host-owned store bound to this exact canonical workspace identity.
+ */
+export async function loadCliWorkspaceConfig(
+  cwd: string,
+  options: CliWorkspaceConfigOptions,
+): Promise<NexusConfig> {
+  const config = await loadConfig(cwd, {
+    loadEnv: options.loadEnv,
+    ...(options.globalConfigPath !== undefined
+      ? { globalConfigPath: options.globalConfigPath }
+      : {}),
+  })
+  try {
+    const settings = loadProjectSettings(cwd, {
+      compatibility: getClaudeCompatibilityOptions(config),
+    })
+    const permissions = settings.permissions
+    if (permissions) {
+      if (Array.isArray(permissions.deny)) {
+        config.permissions.denyCommandPatterns = permissions.deny
+      }
+      if (Array.isArray(permissions.ask)) {
+        config.permissions.askCommandPatterns = permissions.ask
+      }
+    }
+  } catch {
+    // Missing/invalid compatibility settings do not weaken config policy.
+  }
+  if (options.hostAuthority) {
+    await hydrateWorkspaceAuthority(
+      config,
+      cwd,
+      options.authorityStoreOptions,
+    )
+  }
+  return config
+}
+
 export interface NexusBootstrapResult {
   cwd: string
   config: NexusConfig
@@ -190,6 +315,11 @@ export interface NexusBootstrapResult {
   configSnapshot: ConfigSnapshot
   secretsStore: ReturnType<typeof createFileSecretsStore>
   toolRegistry: ToolRegistry
+  createRunContext: (
+    authorityConfig: NexusConfig,
+    runtimeConfig: NexusConfig,
+  ) => Promise<CliRunContext>
+  reconcileMcpServers: (authorityConfig: NexusConfig) => Promise<void>
   mcpClient: McpClient
   services: NexusRunServices
   rulesContent: string
@@ -197,6 +327,7 @@ export interface NexusBootstrapResult {
   compaction: ReturnType<typeof createCompaction>
   indexer: CodebaseIndexer | undefined
   serverUrl: string | null
+  remoteTurnCursorStore: RemoteTurnCursorStore | undefined
   sessionStore: {
     list: () => Promise<Array<{ id: string; ts: number; title?: string; messageCount: number }>>
     load: (sessionId: string) => Promise<Session | null>
@@ -204,7 +335,7 @@ export interface NexusBootstrapResult {
     delete: (sessionId: string) => Promise<boolean>
   }
   nexusRoot: string
-  mcpConfigFingerprint: string
+  cliModelSelection: CliModelSelection
   resolvePromptCommand: (
     name: string,
     args: string,
@@ -212,7 +343,9 @@ export interface NexusBootstrapResult {
     | { status: 'resolved'; prompt: string }
     | { status: 'ambiguous'; candidates: string[] }
     | { status: 'not-found' }
-  >
+      >
+  /** Idempotently drains workspace-owned live services for this CLI runtime. */
+  close: () => Promise<void>
 }
 
 export async function bootstrapNexus(opts: {
@@ -245,133 +378,140 @@ export async function bootstrapNexus(opts: {
     serverUrlOption,
     process.env.NEXUS_SERVER_URL,
   )
+  const remoteTurnCursorStore = serverUrl
+    ? createCliRemoteTurnCursorStore({
+        rootDir: getGlobalConfigDir(),
+        serverUrl,
+        cwd,
+      })
+    : undefined
+  if (
+    serverUrl &&
+    (
+      isNonEmptyString(modelOverride) ||
+      temperatureOverride !== undefined ||
+      isNonEmptyString(reasoningEffortOverride) ||
+      isNonEmptyString(profileOverride)
+    )
+  ) {
+    throw new Error(
+      'Remote protocol v2 is required for --model, --profile, --temperature, or --reasoning-effort overrides',
+    )
+  }
 
   const secretsStore = createFileSecretsStore(getGlobalConfigDir())
-  let config = await loadConfig(cwd, { secrets: secretsStore })
+  let config = await loadCliWorkspaceConfig(cwd, {
+    loadEnv: !serverUrl,
+    hostAuthority: !serverUrl,
+  })
 
-  // Merge .nexus/allowed-commands.json
-  try {
-    const allowPath = path.join(cwd, '.nexus', 'allowed-commands.json')
-    const raw = await fs.readFile(allowPath, 'utf8')
-    const parsed = JSON.parse(raw) as { commands?: string[] }
-    if (Array.isArray(parsed?.commands)) {
-      config.permissions.allowedCommands = parsed.commands
-    }
-  } catch {
-    // ignore
+  const cliModelSelection: CliModelSelection = {
+    modelOverride,
+    temperatureOverride,
+    reasoningEffortOverride,
+    profileOverride,
   }
-
-  // Merge .nexus/settings.json + settings.local.json
-  try {
-    const settings = loadProjectSettings(cwd, { compatibility: getClaudeCompatibilityOptions(config) })
-    const perms = settings.permissions
-    if (perms) {
-      if (Array.isArray(perms.allow)) config.permissions.allowCommandPatterns = perms.allow
-      if (Array.isArray(perms.deny)) config.permissions.denyCommandPatterns = perms.deny
-      if (Array.isArray(perms.ask)) config.permissions.askCommandPatterns = perms.ask
-      if (Array.isArray(perms.allowedMcpTools)) {
-        config.permissions.allowedMcpTools = perms.allowedMcpTools
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  // Apply --model override
-  if (modelOverride) {
-    const slashIdx = modelOverride.indexOf('/')
-    if (slashIdx > 0) {
-      const provider = modelOverride.slice(0, slashIdx)
-      const modelId = modelOverride.slice(slashIdx + 1)
-      if (provider === 'openrouter') {
-        config.model.provider = 'openai-compatible'
-        config.model.baseUrl = config.model.baseUrl || OPENROUTER_BASE_URL
-      } else {
-        ;(config.model as unknown as Record<string, unknown>).provider = provider
-      }
-      config.model.id = modelId
-    } else {
-      config.model.id = modelOverride
-    }
-    config.model = normalizeModelConfig(config.model)
-  }
-
-  if (typeof temperatureOverride === 'number' && Number.isFinite(temperatureOverride)) {
-    config.model.temperature = Math.max(0, Math.min(2, temperatureOverride))
-  }
-
-  if (typeof reasoningEffortOverride === 'string') {
-    const trimmed = reasoningEffortOverride.trim()
-    if (trimmed.length > 0) {
-      config.model.reasoningEffort = trimmed
-    }
-  }
-
-  if (profileOverride) {
-    const profile = (config as unknown as { profiles?: Record<string, unknown> })
-      .profiles?.[profileOverride] as Record<string, unknown> | undefined
-    if (!profile) throw new Error(`Profile not found: ${profileOverride}`)
-    config.model = { ...config.model, ...profile } as NexusConfig['model']
-    config.model = normalizeModelConfig(config.model)
-  }
+  applyCliModelSelection(config, cliModelSelection)
+  const runtimeConfig = serverUrl
+    ? config
+    : await finalizeConfigCredentials(
+      config as unknown as Record<string, unknown>,
+      secretsStore,
+      {
+        profileName: profileOverride,
+        environment: getConfigEnvironment(config),
+      },
+    ) as unknown as NexusConfig
 
   const mode: Mode = modeArg ?? 'agent'
-  const toolRegistry = new ToolRegistry()
-  const mcpClient = new McpClient()
+  const mcpAuthorizationHost = new CliHost(cwd, () => {})
+  const mcpClient = new McpClient({
+    remoteRequestAuthorizer:
+      createCliMcpRemoteRequestAuthorizer(mcpAuthorizationHost),
+  })
   let mcpConfigFingerprint = "[]"
+  const allowedMcpServerNames = new Set<string>()
 
-  const pluginMcp = await resolveConfiguredAndPluginMcpServers(cwd, config)
-  for (const diagnostic of pluginMcp.diagnostics) {
-    console.warn(`[nexus] plugin MCP ${diagnostic.pluginName}: ${diagnostic.message}`)
-  }
-  if (pluginMcp.servers.length > 0) {
+  const reconcileMcpServers = async (
+    authorityConfig: NexusConfig,
+  ): Promise<void> => {
+    if (serverUrl) return
+    const pluginMcp = await resolveConfiguredAndPluginMcpServers(
+      cwd,
+      authorityConfig,
+    )
+    for (const diagnostic of pluginMcp.diagnostics) {
+      console.warn(`[nexus] plugin MCP ${diagnostic.pluginName}: ${diagnostic.message}`)
+    }
     process.env.CLAUDE_PROJECT_DIR = cwd
-    const resolved = resolveBundledMcpServers(pluginMcp.servers, { cwd, nexusRoot: NEXUS_ROOT })
-    mcpConfigFingerprint = JSON.stringify(resolved)
+    const resolved = resolveBundledMcpServers(pluginMcp.servers, {
+      cwd,
+      nexusRoot: NEXUS_ROOT,
+    })
+    allowedMcpServerNames.clear()
+    for (const server of resolved) {
+      if (server.enabled !== false) allowedMcpServerNames.add(server.name)
+    }
+    const fingerprint = JSON.stringify(resolved)
+    if (fingerprint === mcpConfigFingerprint) return
     const statuses = await mcpClient.connectAll(resolved)
+    mcpConfigFingerprint = fingerprint
     for (const status of Object.values(statuses)) {
       if (status.state !== "connected" && status.state !== "disabled") {
         console.warn(`[nexus] MCP ${status.name}: ${status.error ?? status.state}`)
       }
     }
-    for (const tool of mcpClient.getTools()) {
-      toolRegistry.registerDynamicOrThrow(tool, "MCP")
-    }
   }
+  await reconcileMcpServers(config)
 
-  const parallelManager = new ParallelAgentManager()
   const services = createNexusRunServices({
-    parallelAgentManager: parallelManager,
+    orchestrationRuntime: new OrchestrationRuntime(cwd),
     mcpClient,
   })
-  for (const tool of [
-    createSpawnAgentTool(parallelManager, config),
-    createSpawnAgentsParallelTool(parallelManager, config),
-    createSpawnAgentOutputTool(parallelManager),
-    createSpawnAgentStopTool(parallelManager),
-    createListAgentRunsTool(parallelManager),
-    createAgentRunSnapshotTool(parallelManager),
-    createResumeAgentTool(parallelManager, config),
-  ]) {
-    toolRegistry.registerDynamicOrThrow(tool, "manager compatibility")
+  const toolOutputMaintenance = scheduleToolOutputMaintenance({
+    cwd,
+    services,
+    onResult(result) {
+      for (const diagnostic of result.errors) {
+        console.warn(`[nexus] tool-output maintenance: ${diagnostic}`)
+      }
+    },
+  })
+  void toolOutputMaintenance?.promise.catch((error) => {
+    console.warn("[nexus] tool-output maintenance failed:", error)
+  })
+  const createRunContext = (
+    authorityConfig: NexusConfig,
+    effectiveRuntimeConfig: NexusConfig,
+  ) => createCliRunContext({
+    cwd,
+    authorityConfig,
+    runtimeConfig: effectiveRuntimeConfig,
+    services,
+    allowedMcpServerNames,
+    remote: Boolean(serverUrl),
+  })
+  const initialRunContext = await createRunContext(config, runtimeConfig)
+  for (const diagnostic of initialRunContext.toolContributionDiagnostics) {
+    console.warn(
+      `[nexus] ${diagnostic.sourceId}: ${diagnostic.message}`,
+    )
   }
-  for (const tool of [
-    createTaskCreateBatchTool(parallelManager, config),
-    createTaskSnapshotTool(parallelManager),
-    createTaskResumeTool(parallelManager, config),
-  ]) {
-    toolRegistry.registerBoundBuiltinOrThrow(tool)
-  }
+  const toolRegistry = initialRunContext.toolRegistry
 
   const claudeCompatibility = getClaudeCompatibilityOptions(config)
-  const rulesContent = await loadAgentInstructionBundle(cwd, config.rules.files, config, claudeCompatibility)
-  const skills = await loadSkills(
-    config.skills,
-    cwd,
-    config.skillsUrls,
-    claudeCompatibility,
-    config,
-  ).catch(() => [])
+  const rulesContent = serverUrl
+    ? ""
+    : await loadAgentInstructionBundle(cwd, config.rules.files, config, claudeCompatibility)
+  const skills = serverUrl
+    ? []
+    : await loadSkills(
+        config.skills,
+        cwd,
+        config.skillsUrls,
+        claudeCompatibility,
+        config,
+      ).catch(() => [])
 
   const remoteClient = serverUrl
     ? new NexusServerClient({
@@ -379,7 +519,10 @@ export async function bootstrapNexus(opts: {
         directory: cwd,
         token:
           process.env.NEXUS_SERVER_TOKEN?.trim() ||
-          await secretsStore.getSecret(NEXUS_SERVER_TOKEN_SECRET_KEY) ||
+          await secretsStore.getSecret(getNexusServerTokenSecretKey(serverUrl)) ||
+          (isLoopbackNexusServerDestination(serverUrl)
+            ? await secretsStore.getSecret(NEXUS_SERVER_TOKEN_SECRET_KEY)
+            : null) ||
           "",
       })
     : null
@@ -422,12 +565,13 @@ export async function bootstrapNexus(opts: {
 
   let indexer: CodebaseIndexer | undefined
   if (
+    !serverUrl &&
     indexEnabled &&
     config.indexing.enabled &&
     config.indexing.vector &&
     config.vectorDb?.enabled
   ) {
-    indexer = await createCodebaseIndexer(cwd, config, {
+    indexer = await createCodebaseIndexer(cwd, runtimeConfig, {
       onWarning: (msg) => console.warn(msg),
       onProgress: (msg) => console.warn("[nexus]", msg),
     }).catch(() => undefined)
@@ -440,7 +584,26 @@ export async function bootstrapNexus(opts: {
     name,
     args,
   ) => {
-    const liveConfig = await loadConfig(cwd, { secrets: secretsStore })
+    if (remoteClient) {
+      const mcpPrompt = await resolveRemoteMcpPromptCommand(
+        remoteClient,
+        session.id,
+        name,
+        args,
+      )
+      if (mcpPrompt.status !== "not-found") return mcpPrompt
+    } else {
+      const mcpPrompt = await resolveMcpPromptCommand(
+        mcpClient,
+        name,
+        args,
+      )
+      if (mcpPrompt.status !== "not-found") return mcpPrompt
+    }
+    const liveConfig = await loadCliWorkspaceConfig(cwd, {
+      loadEnv: !serverUrl,
+      hostAuthority: !serverUrl,
+    })
     const commands = await loadSlashCommands(
       cwd,
       getClaudeCompatibilityOptions(liveConfig),
@@ -454,6 +617,35 @@ export async function bootstrapNexus(opts: {
     }
   }
 
+  let closePromise: Promise<void> | undefined
+  const close = (): Promise<void> => {
+    if (closePromise) return closePromise
+    closePromise = (async () => {
+      const errors: unknown[] = []
+      try {
+        // Delegated agents may still be using MCP, so drain shared services first.
+        await closeNexusRunServices(services)
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        await mcpClient.disconnectAll()
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        indexer?.close()
+      } catch (error) {
+        errors.push(error)
+      }
+      if (errors.length === 1) throw errors[0]
+      if (errors.length > 1) {
+        throw new AggregateError(errors, "Failed to close Nexus CLI runtime")
+      }
+    })()
+    return closePromise
+  }
+
   return {
     cwd,
     config,
@@ -463,6 +655,8 @@ export async function bootstrapNexus(opts: {
     configSnapshot,
     secretsStore,
     toolRegistry,
+    createRunContext,
+    reconcileMcpServers,
     mcpClient,
     services,
     rulesContent,
@@ -470,10 +664,12 @@ export async function bootstrapNexus(opts: {
     compaction,
     indexer,
     serverUrl,
+    remoteTurnCursorStore,
     sessionStore,
     nexusRoot: NEXUS_ROOT,
-    mcpConfigFingerprint,
+    cliModelSelection,
     resolvePromptCommand,
+    close,
   }
 }
 

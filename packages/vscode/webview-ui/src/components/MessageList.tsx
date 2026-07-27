@@ -11,6 +11,7 @@ import { MermaidBlock } from "./MermaidBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart, ReasoningPart } from "../stores/chat.js"
 import type { SubAgentState } from "../stores/chat.js"
+import type { ApprovalActionView } from "../types/approval.js"
 import { useChatStore } from "../stores/chat.js"
 import { buildChatRenderItems as buildProjectedChatRenderItems } from "../transcript/renderProjection.js"
 import {
@@ -58,11 +59,12 @@ function ApprovalInline({
   action,
   onResolve,
 }: {
-  action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } }
+  action: ApprovalActionView
   onResolve: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean, whatToDoInstead?: string) => void
 }) {
   const [showRedirect, setShowRedirect] = useState(false)
   const [redirectText, setRedirectText] = useState("")
+  const supportsScopedApproval = !useChatStore((s) => Boolean(s.serverUrl))
 
   const label =
     action.type === "execute"
@@ -84,7 +86,7 @@ function ApprovalInline({
   const BTN_DENY = `${BTN} border-red-500/40 text-red-400 hover:bg-red-500/15`
   const BTN_NEUTRAL = `${BTN} border-[var(--vscode-panel-border)] text-[var(--vscode-descriptionForeground)] hover:bg-[var(--vscode-list-hoverBackground)] hover:text-[var(--vscode-foreground)]`
 
-  if (showRedirect) {
+  if (supportsScopedApproval && showRedirect) {
     return (
       <div className="border-t border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-inactiveSelectionBackground)]/20 px-3 py-2 flex flex-col gap-1.5">
         <span className="text-[11px] text-[var(--vscode-descriptionForeground)]">What should the agent do instead?</span>
@@ -121,10 +123,16 @@ function ApprovalInline({
       {/* Action buttons row */}
       <div className="flex items-center gap-1 flex-wrap">
         <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true)} title="Allow once">✓ Allow</button>
-        <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true, true)} title="Always allow this tool">∞ Always</button>
-        <button type="button" className={BTN_NEUTRAL} onClick={() => onResolve(true, false, undefined, true)} title="Allow all for this session">⌀ Session</button>
+        {supportsScopedApproval && (
+          <>
+            <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true, true)} title="Always allow this tool">∞ Always</button>
+            <button type="button" className={BTN_NEUTRAL} onClick={() => onResolve(true, false, undefined, true)} title="Allow all for this session">⌀ Session</button>
+          </>
+        )}
         <button type="button" className={BTN_DENY} onClick={() => onResolve(false)} title="Deny">✗</button>
-        <button type="button" className={BTN_NEUTRAL} onClick={() => setShowRedirect(true)} title="Say what to do instead">↩</button>
+        {supportsScopedApproval && (
+          <button type="button" className={BTN_NEUTRAL} onClick={() => setShowRedirect(true)} title="Say what to do instead">↩</button>
+        )}
       </div>
     </div>
   )
@@ -538,7 +546,7 @@ function RenderItemRow({
   onListLayoutHint,
 }: {
   item: ChatRenderItem
-  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
+  pendingApproval: { partId: string; action: ApprovalActionView } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
   onListLayoutHint?: () => void
 }) {
@@ -602,8 +610,8 @@ function RenderItemRow({
   }
 
   const { message, isComplete } = item
-  /** Every user turn can roll back (incl. first); host clears chat / restores workspace when possible. */
-  const canRollback = message.role === "user"
+  const checkpointEnabled = useChatStore((s) => s.checkpointEnabled)
+  const canRollback = message.role === "user" && checkpointEnabled
   const checkpointEntries = useChatStore((s) => s.checkpointEntries)
   const restoreCheckpoint = useChatStore((s) => s.restoreCheckpoint)
   const showCheckpointDiff = useChatStore((s) => s.showCheckpointDiff)
@@ -1222,7 +1230,7 @@ function AssistantPartRow({
   activeReasoning: { messageId: string; reasoningId: string } | null
   canonicalReplyIndex: number
   isLastPart: boolean
-  pendingApproval: { partId: string; action: { type: string; tool: string; description: string; content?: string; diff?: string; diffStats?: { added: number; removed: number } } } | null
+  pendingApproval: { partId: string; action: ApprovalActionView } | null
   onResolveApproval: (approved: boolean, alwaysApprove?: boolean, addToAllowedCommand?: string, skipAll?: boolean) => void
   showReasoningInChat: boolean
   onListLayoutHint?: () => void

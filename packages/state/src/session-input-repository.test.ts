@@ -41,6 +41,180 @@ afterEach(() => {
 })
 
 describe("SessionInputRepository", () => {
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid admission clock value %s without consuming a sequence",
+    (now) => {
+      const database = NexusStateDatabase.open({ path: temporaryDatabasePath() })
+      seedSession(database)
+      const repository = new SessionInputRepository(database, { now: () => now })
+
+      try {
+        expect(() =>
+          repository.admit({
+            id: "invalid-clock-input",
+            sessionId: "session-1",
+            delivery: "queue",
+            parts: [{ type: "text", text: "safe payload" }],
+          }),
+        ).toThrow(/clock.*non-negative safe integer/i)
+        expect(
+          database.read((connection) =>
+            connection.get<{ inputs: number; events: number; sequences: number }>(
+              `SELECT
+                 (SELECT COUNT(*) FROM session_input) AS inputs,
+                 (SELECT COUNT(*) FROM durable_event) AS events,
+                 (SELECT COUNT(*) FROM aggregate_sequence) AS sequences`,
+            ),
+          ),
+        ).toEqual({ inputs: 0, events: 0, sequences: 0 })
+      } finally {
+        database.close()
+      }
+    },
+  )
+
+  it("rejects an invalid promotion clock without promoting the input", () => {
+    const database = NexusStateDatabase.open({ path: temporaryDatabasePath() })
+    seedSession(database)
+    let now = 1
+    const repository = new SessionInputRepository(database, { now: () => now })
+
+    try {
+      repository.admit({
+        id: "promotion-clock-input",
+        sessionId: "session-1",
+        delivery: "queue",
+        parts: [{ type: "text", text: "safe payload" }],
+      })
+      now = -1
+      expect(() => repository.promoteNextQueued("session-1")).toThrow(
+        /clock.*non-negative safe integer/i,
+      )
+      expect(repository.pending("session-1", "queue")).toHaveLength(1)
+      expect(
+        database.read((connection) =>
+          connection.get<{ events: number; sequence: number }>(
+            `SELECT
+               (SELECT COUNT(*) FROM durable_event) AS events,
+               (SELECT last_sequence FROM aggregate_sequence
+                WHERE aggregate_id = 'session:session-1') AS sequence`,
+          ),
+        ),
+      ).toEqual({ events: 1, sequence: 1 })
+    } finally {
+      database.close()
+    }
+  })
+
+  it("keeps durable event timestamps monotonic when the clock moves backwards", () => {
+    const database = NexusStateDatabase.open({ path: temporaryDatabasePath() })
+    seedSession(database)
+    let now = 100
+    const repository = new SessionInputRepository(database, { now: () => now })
+
+    try {
+      repository.admit({
+        id: "clock-monotonic-input",
+        sessionId: "session-1",
+        delivery: "queue",
+        parts: [{ type: "text", text: "safe payload" }],
+      })
+      now = 50
+      repository.promoteNextQueued("session-1")
+
+      expect(
+        database.read((connection) =>
+          connection.all<{ created_at: number }>(
+            `SELECT created_at
+             FROM durable_event
+             WHERE aggregate_id = ?
+             ORDER BY sequence`,
+            ["session:session-1"],
+          ),
+        ),
+      ).toEqual([{ created_at: 100 }, { created_at: 100 }])
+    } finally {
+      database.close()
+    }
+  })
+
+  it.each([
+    [
+      "empty text",
+      [{ type: "text", text: "" }],
+      /text.*at least one|text.*empty/i,
+    ],
+    [
+      "unsupported image MIME",
+      [{ type: "image", data: "aGVsbG8=", mimeType: "image/svg+xml" }],
+      /image.*mime/i,
+    ],
+    [
+      "non-base64 image",
+      [{ type: "image", data: "not-base64", mimeType: "image/png" }],
+      /base64/i,
+    ],
+    [
+      "too many parts",
+      Array.from({ length: 65 }, () => ({ type: "text", text: "x" })),
+      /at most 64/i,
+    ],
+    [
+      "too many images",
+      Array.from({ length: 9 }, () => ({
+        type: "image",
+        data: "aA==",
+        mimeType: "image/png",
+      })),
+      /at most 8.*image/i,
+    ],
+    [
+      "oversized aggregate text",
+      [{ type: "text", text: "x".repeat((1 << 20) + 1) }],
+      /text.*1048576|text.*limit/i,
+    ],
+  ] as const)(
+    "rejects %s before persisting an input",
+    (_description, parts, expectedError) => {
+      const database = NexusStateDatabase.open({ path: temporaryDatabasePath() })
+      seedSession(database)
+      const repository = new SessionInputRepository(database)
+
+      try {
+        expect(() =>
+          repository.admit({
+            id: "invalid-parts-input",
+            sessionId: "session-1",
+            delivery: "queue",
+            parts: parts as readonly UserInputPartRecord[],
+          }),
+        ).toThrow(expectedError)
+        expect(repository.pending("session-1")).toEqual([])
+      } finally {
+        database.close()
+      }
+    },
+  )
+
+  it("rejects identifiers outside the protocol-safe form", () => {
+    const database = NexusStateDatabase.open({ path: temporaryDatabasePath() })
+    seedSession(database)
+    const repository = new SessionInputRepository(database)
+
+    try {
+      expect(() =>
+        repository.admit({
+          id: "contains whitespace",
+          sessionId: "session-1",
+          delivery: "queue",
+          parts: [{ type: "text", text: "payload" }],
+        }),
+      ).toThrow(/identifier/i)
+    } finally {
+      database.close()
+    }
+  })
+
   it("makes admission idempotent while rejecting a changed payload", () => {
     const database = NexusStateDatabase.open({ path: temporaryDatabasePath() })
     seedSession(database)
@@ -226,6 +400,37 @@ describe("SessionInputRepository", () => {
       parts,
     })
     database.close()
+
+    const reopened = NexusStateDatabase.open({ path })
+    try {
+      expect(
+        new SessionInputRepository(reopened).pending("session-1")[0]?.parts,
+      ).toEqual(parts)
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it("round-trips mention and skill parts used by protocol v2", () => {
+    const path = temporaryDatabasePath()
+    const parts = [
+      { type: "mention", name: "database.ts", path: "packages/state/src/database.ts" },
+      { type: "skill", name: "systematic-debugging" },
+    ] as const
+    const database = NexusStateDatabase.open({ path })
+    seedSession(database)
+
+    try {
+      const admitted = new SessionInputRepository(database).admit({
+        id: "context-parts",
+        sessionId: "session-1",
+        delivery: "queue",
+        parts,
+      })
+      expect(admitted.parts).toEqual(parts)
+    } finally {
+      database.close()
+    }
 
     const reopened = NexusStateDatabase.open({ path })
     try {

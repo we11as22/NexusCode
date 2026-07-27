@@ -82,6 +82,7 @@ export class AutocompleteModel {
   constructor(
     private readonly getNexusConfig: () => NexusConfig | undefined,
     private readonly getAutocompleteApiKey: () => string | undefined,
+    private readonly resolveNexusModel?: () => Promise<ProviderConfig | undefined>,
   ) {}
 
   public supportsFim(): boolean {
@@ -106,7 +107,13 @@ export class AutocompleteModel {
     onChunk: (text: string) => void,
     signal?: AbortSignal,
   ): Promise<ResponseMetaData> {
-    const modelCfg = this.tryGetEffectiveModel()
+    const override = buildAutocompleteOverrideModel(this.getAutocompleteApiKey())
+    const modelCfg = override ??
+      (
+        this.resolveNexusModel
+          ? await this.resolveNexusModel()
+          : this.tryGetEffectiveModel()
+      )
     if (!modelCfg) {
       throw new Error("NexusCode: no model configured for autocomplete (agent YAML or autocomplete override in settings)")
     }

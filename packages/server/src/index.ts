@@ -5,6 +5,9 @@ import {
   readServerSecurityOptions,
   type ServerSecurityOptions,
 } from "./security.js"
+import { ServerRuntimeRegistry } from "./runtime-registry.js"
+import { createSqliteWorkspaceRuntimeFactory } from "./sqlite-workspace-runtime.js"
+import type { WorkspaceRuntimeFactory } from "@nexuscode/core"
 
 const port = Number(process.env.NEXUS_SERVER_PORT || process.env.PORT || "4097")
 const hostname = process.env.NEXUS_SERVER_HOST || "127.0.0.1"
@@ -13,6 +16,7 @@ export async function listen(opts?: {
   port?: number
   hostname?: string
   security?: ServerSecurityOptions
+  runtimeFactory?: WorkspaceRuntimeFactory
 }) {
   const p = opts?.port ?? port
   const h = opts?.hostname ?? hostname
@@ -22,8 +26,15 @@ export async function listen(opts?: {
       "Binding NexusCode server to a non-loopback host requires NEXUS_SERVER_ORIGINS",
     )
   }
-  const app = createApp(security)
-  return new Promise<{ stop: () => void }>((resolve, reject) => {
+  const runtimes = new ServerRuntimeRegistry(
+    opts?.runtimeFactory ?? createSqliteWorkspaceRuntimeFactory({
+      onDiagnostic: (error) => {
+        console.error("[nexus runtime]", error)
+      },
+    }),
+  )
+  const app = createApp(security, { runtimes })
+  return new Promise<{ stop: () => Promise<void> }>((resolve, reject) => {
     const server = serve(
       {
         port: p,
@@ -33,11 +44,21 @@ export async function listen(opts?: {
       (info) => {
         console.error(`NexusCode server listening on http://${info.address}:${info.port}`)
         resolve({
-          stop: () => server.close(),
+          stop: async () => {
+            await new Promise<void>((done, fail) => {
+              server.close((error) => {
+                if (error) fail(error)
+                else done()
+              })
+            })
+            await runtimes.close()
+          },
         })
       }
     )
-    server.on("error", reject)
+    server.on("error", (error) => {
+      void runtimes.close().finally(() => reject(error))
+    })
   })
 }
 
@@ -54,3 +75,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(1)
   })
 }
+
+export { ServerRuntimeRegistry } from "./runtime-registry.js"
+export {
+  createSqliteWorkspaceRuntimeFactory,
+  resolveWorkspaceStatePath,
+} from "./sqlite-workspace-runtime.js"

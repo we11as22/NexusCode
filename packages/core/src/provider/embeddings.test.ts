@@ -55,6 +55,39 @@ describe("embedding credential discovery", () => {
       baseUrl: "https://embeddings.example.com/v1",
     }))).toBe(true)
   })
+
+  it("requires a bound credential for remote Ollama embeddings", () => {
+    expect(isEmbeddingApiKeyMissing(embedding("ollama", {
+      baseUrl: "https://ollama.example.test",
+    }))).toBe(true)
+    expect(isEmbeddingApiKeyMissing(embedding("ollama", {
+      baseUrl: "https://ollama.example.test",
+      apiKey: "remote-ollama-secret",
+    }))).toBe(false)
+  })
+
+  it("never probes unrelated ambient keys for a custom compatible endpoint", () => {
+    vi.stubEnv("OPENAI_API_KEY", "openai-secret")
+    vi.stubEnv("OPENROUTER_API_KEY", "openrouter-secret")
+    vi.stubEnv("NEXUS_API_KEY", "nexus-secret")
+
+    const custom = embedding("openai-compatible", {
+      baseUrl: "https://embeddings.example.com/v1",
+    })
+    expect(isEmbeddingApiKeyMissing(custom)).toBe(true)
+    expect(() => createEmbeddingClient(custom)).toThrow(/Missing API key/)
+  })
+
+  it("uses only the exact official destination credential and rejects trusted-host HTTP", () => {
+    vi.stubEnv("OPENAI_API_KEY", "openai-secret")
+
+    expect(isEmbeddingApiKeyMissing(embedding("openai-compatible", {
+      baseUrl: "https://API.OPENAI.COM:443/v1/",
+    }))).toBe(false)
+    expect(isEmbeddingApiKeyMissing(embedding("openai-compatible", {
+      baseUrl: "http://api.openai.com/v1",
+    }))).toBe(true)
+  })
 })
 
 describe("offline local embeddings", () => {

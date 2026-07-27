@@ -10,13 +10,22 @@ import type {
   Mode,
   ApprovalAction,
   IIndexer,
+  ToolApprovalCapability,
+  ToolApprovalPolicy,
 } from "../types.js"
-import { PLAN_MODE_ALLOWED_WRITE_PATTERN, PLAN_MODE_BLOCKED_EXTENSIONS, READ_ONLY_TOOLS } from "./modes.js"
+import {
+  PLAN_MODE_ALLOWED_WRITE_PATTERN,
+  PLAN_MODE_BLOCKED_EXTENSIONS,
+  READ_ONLY_TOOLS,
+} from "./modes.js"
 import { requestHostApproval } from "./approval-coordinator.js"
 import { getMessagesForActiveContext } from "../session/active-context.js"
 import { truncateOutput } from "../context/truncate.js"
 import { registerToolOutputSpill } from "../context/tool-output-registry.js"
 import { coerceQuestionOptionRows, splitQuestionOptionListString } from "../tools/user-question-utils.js"
+import { modeSpecificToolInputError } from "./mode-input-policy.js"
+
+export { modeSpecificToolInputError } from "./mode-input-policy.js"
 
 const DOOM_LOOP_THRESHOLD = 3
 const DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND = 5
@@ -698,6 +707,87 @@ function normalizeCommand(command: string): string {
   return command.trim().replace(/\s+/g, " ")
 }
 
+/**
+ * Prefix grants are intentionally narrower than shell syntax. They authorize
+ * argv-style variations of one command, never a shell program assembled with
+ * operators, expansion, redirection, comments, or environment assignments.
+ * Exact grants are evaluated separately.
+ */
+function isSimpleCommandForPrefixGrant(command: string): boolean {
+  const source = command.trim()
+  if (!source) return false
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(source)) return false
+
+  let quote: "'" | '"' | null = null
+  let escaped = false
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index]!
+    if (escaped) {
+      if (char === "\n" || char === "\r") return false
+      escaped = false
+      continue
+    }
+    if (quote === "'") {
+      if (char === "'") quote = null
+      continue
+    }
+    if (quote === '"') {
+      if (char === '"') {
+        quote = null
+        continue
+      }
+      if (char === "\\") {
+        escaped = true
+        continue
+      }
+      // Command/parameter expansion remains active inside double quotes.
+      if (char === "$" || char === "`") return false
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      continue
+    }
+    if (char === "\\") {
+      escaped = true
+      continue
+    }
+    if (
+      char === "\n" ||
+      char === "\r" ||
+      char === ";" ||
+      char === "|" ||
+      char === "&" ||
+      char === "<" ||
+      char === ">" ||
+      char === "$" ||
+      char === "`" ||
+      char === "#" ||
+      char === "(" ||
+      char === ")" ||
+      char === "{" ||
+      char === "}" ||
+      char === "!"
+    ) {
+      return false
+    }
+  }
+  return quote === null && !escaped
+}
+
+function commandPatternPrefix(pattern: string): string {
+  const trimmed = pattern.trim()
+  const bashMatch = trimmed.match(/^Bash\((.+):\*\)$/)
+  if (bashMatch) return normalizeCommand(bashMatch[1]!)
+  if (trimmed.endsWith(":*")) {
+    return normalizeCommand(trimmed.slice(0, -2))
+  }
+  if (trimmed.endsWith("*")) {
+    return normalizeCommand(trimmed.slice(0, -1))
+  }
+  return normalizeCommand(trimmed)
+}
+
 function commandMatchesPattern(normalizedCommand: string, pattern: string): boolean {
   const p = pattern.trim()
   if (!p) return false
@@ -706,11 +796,27 @@ function commandMatchesPattern(normalizedCommand: string, pattern: string): bool
     const prefix = normalizeCommand(bashMatch[1]!)
     return normalizedCommand === prefix || normalizedCommand.startsWith(prefix + " ")
   }
+  if (p.endsWith(":*")) {
+    const prefix = normalizeCommand(p.slice(0, -2))
+    return normalizedCommand === prefix || normalizedCommand.startsWith(prefix + " ")
+  }
   if (p.endsWith("*")) {
     const prefix = p.slice(0, -1).trim()
     return normalizedCommand === prefix || normalizedCommand.startsWith(prefix + " ")
   }
   return normalizedCommand === p
+}
+
+function commandMatchesAllowPattern(
+  rawCommand: string,
+  normalizedCommand: string,
+  pattern: string,
+): boolean {
+  return (
+    isSimpleCommandForPrefixGrant(rawCommand) &&
+    isSimpleCommandForPrefixGrant(commandPatternPrefix(pattern)) &&
+    commandMatchesPattern(normalizedCommand, pattern)
+  )
 }
 
 const EXECUTION_APPROVAL_TOOLS = new Set([
@@ -723,75 +829,277 @@ const EXECUTION_APPROVAL_TOOLS = new Set([
   "PluginReload",
 ])
 
-export function buildApprovalAction(toolName: string, toolInput: Record<string, unknown>): ApprovalAction {
-  if (["Write", "Edit"].includes(toolName)) {
+interface ResolvedToolApproval {
+  capability: ToolApprovalCapability
+  action: ApprovalAction
+  command?: string
+  alwaysPrompt: boolean
+}
+
+function policyForInput(
+  tool: ToolDef,
+  toolInput: Record<string, unknown>,
+): ResolvedToolApproval | null {
+  const policy = tool.approval as
+    | ToolApprovalPolicy<Record<string, unknown>>
+    | undefined
+  if (!policy) return null
+
+  try {
+    if (policy.when && !policy.when(toolInput)) return null
+    const command = policy.command?.(toolInput)?.trim() || undefined
+    const content = policy.content?.(toolInput)
+    const shortDescription = policy.shortDescription?.(toolInput)
+    const warning = policy.warning?.(toolInput)
     return {
-      type: "write",
-      tool: toolName,
-      description: `Write to ${(toolInput["file_path"] ?? toolInput["path"]) ?? "file"}`,
-      content: toolInput["content"] as string | undefined,
+      capability: policy.capability,
+      command,
+      alwaysPrompt: policy.alwaysPrompt === true,
+      action: {
+        type: policy.capability,
+        tool: tool.name,
+        description: policy.description(toolInput),
+        ...(content ? { content } : {}),
+        ...(shortDescription ? { shortDescription } : {}),
+        ...(warning ? { warning } : {}),
+      },
     }
-  }
-  if (toolName === "Bash") {
-    const cmd = typeof toolInput["command"] === "string" ? toolInput["command"] : ""
-    const shortDesc = typeof toolInput["description"] === "string" ? toolInput["description"] : undefined
+  } catch {
+    // Tool-owned approval metadata is part of the security boundary. A broken
+    // resolver must fail closed without leaking its exception or payload.
     return {
-      type: "execute",
-      tool: toolName,
-      description: `Run: ${cmd}`,
-      content: cmd || undefined,
-      shortDescription: shortDesc,
+      capability: "read",
+      alwaysPrompt: true,
+      action: {
+        type: "read",
+        tool: tool.name,
+        description: `Approve sensitive tool invocation: ${tool.name}`,
+        warning:
+          "The tool could not describe its requested capability; approval is required.",
+      },
     }
-  }
-  if (EXECUTION_APPROVAL_TOOLS.has(toolName)) {
-    return {
-      type: "plugin",
-      tool: toolName,
-      description: `${toolName}: ${JSON.stringify(toolInput).slice(0, 500)}`,
-      content: JSON.stringify(toolInput),
-      warning: "This action can enable, execute, install, reconfigure, or remove trusted plugin code.",
-    }
-  }
-  if (toolName.includes("__")) {
-    return {
-      type: "mcp",
-      tool: toolName,
-      description: `MCP: ${toolName}`,
-    }
-  }
-  if (toolName === "Skill") {
-    const n = typeof toolInput["name"] === "string" ? toolInput["name"] : ""
-    return {
-      type: "read",
-      tool: toolName,
-      description: `Load skill: ${n || "(unnamed)"}`,
-    }
-  }
-  return {
-    type: "read",
-    tool: toolName,
-    description: `${toolName}(${JSON.stringify(toolInput).slice(0, 100)})`,
   }
 }
 
-export function toolNeedsApproval(
-  toolName: string,
+function inferredToolApproval(
+  tool: ToolDef,
   toolInput: Record<string, unknown>,
+): ResolvedToolApproval | null {
+  if (tool.integration?.kind === "mcp") {
+    return {
+      capability: "mcp",
+      alwaysPrompt: false,
+      action: {
+        type: "mcp",
+        tool: tool.name,
+        description:
+          `MCP ${tool.integration.serverName}/${tool.integration.originalName}`,
+      },
+    }
+  }
+  if (
+    tool.integration?.kind === "custom" ||
+    tool.integration?.kind === "plugin"
+  ) {
+    const source =
+      tool.integration.kind === "plugin"
+        ? `plugin ${tool.integration.pluginName}`
+        : "local custom tool source"
+    let content = "[unserializable custom tool arguments]"
+    try {
+      content = JSON.stringify(toolInput).slice(0, 4_096)
+    } catch {}
+    return {
+      capability: "plugin",
+      alwaysPrompt: true,
+      action: {
+        type: "plugin",
+        tool: tool.name,
+        description: `Run trusted ${source}: ${tool.name}`,
+        content,
+        warning:
+          "This invokes exact-content trusted local code in an isolated worker.",
+      },
+    }
+  }
+  const fromPolicy = policyForInput(tool, toolInput)
+  if (fromPolicy) return fromPolicy
+  if (tool.approval) return null
+
+  if (["Write", "Edit"].includes(tool.name)) {
+    const target = (toolInput["file_path"] ?? toolInput["path"]) ?? "file"
+    const content =
+      typeof toolInput["content"] === "string"
+        ? toolInput["content"]
+        : undefined
+    return {
+      capability: "write",
+      alwaysPrompt: false,
+      action: {
+        type: "write",
+        tool: tool.name,
+        description: `Write to ${target}`,
+        ...(content ? { content } : {}),
+      },
+    }
+  }
+  if (tool.name === "Bash") {
+    const command =
+      typeof toolInput["command"] === "string"
+        ? toolInput["command"].trim()
+        : ""
+    const shortDescription =
+      typeof toolInput["description"] === "string"
+        ? toolInput["description"].trim()
+        : ""
+    return {
+      capability: "execute",
+      command: command || undefined,
+      alwaysPrompt: false,
+      action: {
+        type: "execute",
+        tool: tool.name,
+        description: `Run: ${command}`,
+        ...(command ? { content: command } : {}),
+        ...(shortDescription ? { shortDescription } : {}),
+      },
+    }
+  }
+  if (EXECUTION_APPROVAL_TOOLS.has(tool.name)) {
+    const content = JSON.stringify(toolInput)
+    return {
+      capability: "plugin",
+      alwaysPrompt: true,
+      action: {
+        type: "plugin",
+        tool: tool.name,
+        description: `${tool.name}: ${content.slice(0, 500)}`,
+        content,
+        warning:
+          "This action can enable, execute, install, reconfigure, or remove trusted plugin code.",
+      },
+    }
+  }
+  if (tool.name === "Skill") {
+    const name =
+      typeof toolInput["name"] === "string" ? toolInput["name"] : ""
+    return {
+      capability: "read",
+      alwaysPrompt: false,
+      action: {
+        type: "read",
+        tool: tool.name,
+        description: `Load skill: ${name || "(unnamed)"}`,
+      },
+    }
+  }
+  if (tool.name === "WebFetch") {
+    const url =
+      typeof toolInput["url"] === "string"
+        ? toolInput["url"]
+        : "(invalid URL)"
+    return {
+      capability: "browser",
+      alwaysPrompt: false,
+      action: {
+        type: "browser",
+        tool: tool.name,
+        description: `Fetch public web content from ${url}`,
+        content: url,
+      },
+    }
+  }
+  if (tool.name === "WebSearch") {
+    const query =
+      typeof toolInput["query"] === "string"
+        ? toolInput["query"]
+        : "(invalid query)"
+    return {
+      capability: "browser",
+      alwaysPrompt: false,
+      action: {
+        type: "browser",
+        tool: tool.name,
+        description: `Search the public web for: ${query}`,
+        content: query,
+      },
+    }
+  }
+  if (READ_ONLY_TOOLS.has(tool.name) || tool.readOnly) {
+    return {
+      capability: "read",
+      alwaysPrompt: false,
+      action: {
+        type: "read",
+        tool: tool.name,
+        description: `${tool.name}(${JSON.stringify(toolInput).slice(0, 100)})`,
+      },
+    }
+  }
+  if (tool.requiresApproval) {
+    return {
+      capability: "read",
+      alwaysPrompt: true,
+      action: {
+        type: "read",
+        tool: tool.name,
+        description: `${tool.name}(${JSON.stringify(toolInput).slice(0, 100)})`,
+      },
+    }
+  }
+  return null
+}
+
+function approvalActionForResolvedPolicy(
+  tool: ToolDef,
+  toolInput: Record<string, unknown>,
+  approval: ResolvedToolApproval | null,
+): ApprovalAction {
+  return (
+    approval?.action ?? {
+      type: "read",
+      tool: tool.name,
+      description: `${tool.name}(${JSON.stringify(toolInput).slice(0, 100)})`,
+    }
+  )
+}
+
+export function buildApprovalAction(
+  tool: ToolDef,
+  toolInput: Record<string, unknown>,
+): ApprovalAction {
+  return approvalActionForResolvedPolicy(
+    tool,
+    toolInput,
+    inferredToolApproval(tool, toolInput),
+  )
+}
+
+function resolvedToolNeedsApproval(
+  tool: ToolDef,
+  toolInput: Record<string, unknown>,
+  approval: ResolvedToolApproval | null,
   autoApproveActions: Set<string>,
   config: NexusConfig,
-  mcpToolNames: Set<string>,
-  requiresApproval = false,
 ): boolean {
-  if (requiresApproval) return true
-  if (mcpToolNames.has(toolName)) {
+  if (!approval) return false
+  if (approval.alwaysPrompt) return true
+
+  if (approval.capability === "mcp") {
     const allowedMcp = config.permissions.allowedMcpTools ?? []
-    if (allowedMcp.includes(toolName)) return false
+    if (allowedMcp.includes(tool.name)) return false
     return !(config.permissions.autoApproveMcp ?? false)
   }
-  if (toolName === "Skill") {
+  if (tool.name === "Skill") {
     return config.permissions.autoApproveSkillLoad === false
   }
-  if (READ_ONLY_TOOLS.has(toolName)) {
+  if (approval.capability === "browser") {
+    return !(
+      config.permissions.autoApproveBrowser === true ||
+      autoApproveActions.has("browser")
+    )
+  }
+  if (approval.capability === "read") {
     if (autoApproveActions.has("read")) return false
     if (toolInput["path"] && typeof toolInput["path"] === "string") {
       for (const pattern of config.permissions.autoApproveReadPatterns) {
@@ -805,49 +1113,78 @@ export function toolNeedsApproval(
     }
     return !config.permissions.autoApproveRead
   }
-  if (["Write", "Edit"].includes(toolName)) {
+  if (approval.capability === "write") {
     return !config.permissions.autoApproveWrite && !autoApproveActions.has("write")
   }
-  if (toolName === "Bash") {
-    const cmd = typeof toolInput["command"] === "string" ? toolInput["command"] : ""
-    const normalized = normalizeCommand(cmd)
+  if (approval.capability === "execute") {
+    const rawCommand = approval.command ?? ""
+    const normalized = normalizeCommand(rawCommand)
     const denyPatterns = config.permissions.denyCommandPatterns ?? []
     const allowPatterns = config.permissions.allowCommandPatterns ?? []
     const askPatterns = config.permissions.askCommandPatterns ?? []
     const allowed = config.permissions.allowedCommands ?? []
     if (normalized && denyPatterns.some((p) => commandMatchesPattern(normalized, p))) return true
-    if (normalized && allowPatterns.some((p) => commandMatchesPattern(normalized, p))) return false
-    if (normalized && allowed.some((c) => normalizeCommand(c) === normalized)) return false
+    // Repository ask-rules are restrictions and must remain able to tighten a
+    // host-owned exact/prefix grant for this workspace.
     if (normalized && askPatterns.some((p) => commandMatchesPattern(normalized, p))) return true
+    if (rawCommand.trim() && allowed.some((command) => command.trim() === rawCommand.trim())) {
+      return false
+    }
+    if (
+      normalized &&
+      allowPatterns.some((pattern) =>
+        commandMatchesAllowPattern(rawCommand, normalized, pattern)
+      )
+    ) {
+      return false
+    }
     return !config.permissions.autoApproveCommand && !autoApproveActions.has("execute")
   }
+  if (approval.capability === "plugin") return true
   return false
 }
 
-function evaluatePermissionRules(
+export function toolNeedsApproval(
+  tool: ToolDef,
+  toolInput: Record<string, unknown>,
+  autoApproveActions: Set<string>,
+  config: NexusConfig,
+): boolean {
+  return resolvedToolNeedsApproval(
+    tool,
+    toolInput,
+    inferredToolApproval(tool, toolInput),
+    autoApproveActions,
+    config,
+  )
+}
+
+function evaluatePermissionRule(
   toolName: string,
   toolInput: Record<string, unknown>,
   config: NexusConfig
-): "allow" | "deny" | "ask" | null {
+): NexusConfig["permissions"]["rules"][number] | null {
   const rules = config.permissions.rules ?? []
+  let hostMatch: NexusConfig["permissions"]["rules"][number] | null = null
+  let projectMatch: NexusConfig["permissions"]["rules"][number] | null = null
   for (const rule of rules) {
     if (!ruleMatchesTool(rule.tool, toolName)) continue
     if (rule.pathPattern && !ruleMatchesPath(rule.pathPattern, toolInput)) continue
     if (rule.commandPattern && !ruleMatchesCommand(rule.commandPattern, toolInput)) continue
-    return rule.action
+    if (rule.authority === "project") {
+      projectMatch ??= rule
+    } else {
+      hostMatch ??= rule
+    }
+    if (hostMatch && projectMatch) break
   }
-  return null
-}
-
-function findRuleReason(toolName: string, toolInput: Record<string, unknown>, config: NexusConfig): string | undefined {
-  const rules = config.permissions.rules ?? []
-  for (const rule of rules) {
-    if (!ruleMatchesTool(rule.tool, toolName)) continue
-    if (rule.pathPattern && !ruleMatchesPath(rule.pathPattern, toolInput)) continue
-    if (rule.commandPattern && !ruleMatchesCommand(rule.commandPattern, toolInput)) continue
-    return rule.reason
+  if (!hostMatch) return projectMatch
+  if (!projectMatch) return hostMatch
+  const priority = { allow: 1, ask: 2, deny: 3 } as const
+  if (priority[projectMatch.action] > priority[hostMatch.action]) {
+    return projectMatch
   }
-  return undefined
+  return hostMatch
 }
 
 function ruleMatchesTool(pattern: string | undefined, toolName: string): boolean {
@@ -945,7 +1282,8 @@ export async function executeValidatedTool(
   messageId: string,
   completionState: CompletionState | undefined,
   mode: Mode,
-  mcpToolNames: Set<string>
+  _mcpToolNames: Set<string>,
+  prevalidatedArgs?: Record<string, unknown>,
 ): Promise<ToolResult> {
   const resolvedToolName =
     toolName === "list_dir" || toolName === "ListDirectory" || toolName === "list_directory"
@@ -966,8 +1304,43 @@ export async function executeValidatedTool(
   ctxWithPartId.partId ??= `part_${toolCallId}`
   ctxWithPartId.toolExecutionMessageId ??= messageId
 
+  let validatedArgs: unknown
+  let inputToParse: Record<string, unknown> =
+    typeof toolInput === "object" && toolInput !== null ? { ...toolInput } : {}
+  if (prevalidatedArgs) {
+    validatedArgs = prevalidatedArgs
+    toolInput = prevalidatedArgs
+  } else {
+    try {
+      inputToParse = normalizeToolInputForParse(
+        resolvedToolName,
+        inputToParse,
+      ) as Record<string, unknown>
+      validatedArgs = tool.parameters.parse(inputToParse)
+      if (
+        validatedArgs &&
+        typeof validatedArgs === "object" &&
+        !Array.isArray(validatedArgs)
+      ) {
+        toolInput = validatedArgs as Record<string, unknown>
+      }
+    } catch (err) {
+      if (err instanceof z.ZodError && tool.formatValidationError) {
+        return { success: false, output: tool.formatValidationError(err) }
+      }
+      return {
+        success: false,
+        output: formatToolValidationError(
+          resolvedToolName,
+          err,
+          inputToParse,
+        ),
+      }
+    }
+  }
+
   if (mode === "plan" && ["Write", "Edit"].includes(resolvedToolName)) {
-    const targetPath = extractWriteTargetPath(toolName, toolInput)
+    const targetPath = extractWriteTargetPath(resolvedToolName, toolInput)
     if (!targetPath) {
       return {
         success: false,
@@ -992,18 +1365,70 @@ export async function executeValidatedTool(
     }
   }
 
-  const ruleResult = evaluatePermissionRules(toolName, toolInput, config)
+  const modeInputError = modeSpecificToolInputError(
+    mode,
+    resolvedToolName,
+    toolInput,
+  )
+  if (modeInputError) {
+    return {
+      success: false,
+      output: `ERROR: ${modeInputError}`,
+    }
+  }
+
+  const resolvedApproval = inferredToolApproval(tool, toolInput)
+  const permissionRule = evaluatePermissionRule(
+    resolvedToolName,
+    toolInput,
+    config,
+  )
+  const ruleResult = permissionRule?.action ?? null
   if (ruleResult === "deny") {
-    const ruleReason = findRuleReason(toolName, toolInput, config)
+    const ruleReason = permissionRule?.reason
     return { success: false, output: `Access denied by permission rule${ruleReason ? `: ${ruleReason}` : ""}` }
   }
-  if (ruleResult === "ask") {
-    const action = buildApprovalAction(toolName, toolInput)
+  const useFileEditFlow =
+    (resolvedToolName === "Write" || resolvedToolName === "Edit") &&
+    typeof host.openFileEdit === "function" &&
+    typeof host.saveFileEdit === "function" &&
+    typeof host.revertFileEdit === "function"
+  const fileEditApproval = useFileEditFlow
+    ? {
+        required:
+          resolvedApproval?.alwaysPrompt === true ||
+          ruleResult === "ask" ||
+          (
+            ruleResult === null &&
+            resolvedToolNeedsApproval(
+              tool,
+              toolInput,
+              resolvedApproval,
+              autoApproveActions,
+              config,
+            )
+          ),
+        permissionRule: ruleResult === "ask",
+      }
+    : undefined
+  let approvalGrantedByRule = false
+  if (ruleResult === "ask" && !useFileEditFlow) {
+    const action = approvalActionForResolvedPolicy(
+      tool,
+      toolInput,
+      resolvedApproval,
+    )
     action.description = `[Permission Rule] ${action.description}`
-    const approval = await requestHostApproval(host, action, `part_${toolCallId}`)
+    const approval = await requestHostApproval(
+      host,
+      action,
+      `part_${toolCallId}`,
+      { signal: ctx.signal },
+    )
     if (!approval.approved) {
-      return { success: false, output: `User denied ${toolName}` }
+      return { success: false, output: `User denied ${resolvedToolName}` }
     }
+    approvalGrantedByRule = true
   }
 
   const writePath = (toolInput["file_path"] ?? toolInput["path"]) as string | undefined
@@ -1031,24 +1456,30 @@ export async function executeValidatedTool(
     }
   }
 
-  const useFileEditFlow =
-    (toolName === "Write" || toolName === "Edit") &&
-    typeof host.openFileEdit === "function" &&
-    typeof host.saveFileEdit === "function" &&
-    typeof host.revertFileEdit === "function"
-
-  if (ruleResult === null && !useFileEditFlow) {
-    const needsApproval = toolNeedsApproval(
-      toolName,
+  if (
+    !useFileEditFlow &&
+    !approvalGrantedByRule &&
+    (ruleResult === null || resolvedApproval?.alwaysPrompt === true)
+  ) {
+    const needsApproval = resolvedToolNeedsApproval(
+      tool,
       toolInput,
+      resolvedApproval,
       autoApproveActions,
       config,
-      mcpToolNames,
-      tool.requiresApproval === true,
     )
     if (needsApproval) {
-      const action = buildApprovalAction(toolName, toolInput)
-      const approval = await requestHostApproval(host, action, `part_${toolCallId}`)
+      const action = approvalActionForResolvedPolicy(
+        tool,
+        toolInput,
+        resolvedApproval,
+      )
+      const approval = await requestHostApproval(
+        host,
+        action,
+        `part_${toolCallId}`,
+        { signal: ctx.signal },
+      )
       if (!approval.approved) {
         if (approval.whatToDoInstead?.trim()) {
           session.addMessage({
@@ -1060,11 +1491,16 @@ export async function executeValidatedTool(
             output: `User declined this action and asked to do the following instead:\n\n${approval.whatToDoInstead.trim()}\n\nContinue your work following this instruction; do not repeat the declined action.`,
           }
         }
-        return { success: false, output: `User denied ${toolName}` }
+        return { success: false, output: `User denied ${resolvedToolName}` }
       }
-      if (approval.addToAllowedCommand != null && toolName === "Bash") {
+      if (
+        approval.addToAllowedCommand != null &&
+        resolvedApproval?.capability === "execute" &&
+        resolvedApproval.command
+      ) {
         const toAdd = normalizeCommand(approval.addToAllowedCommand)
-        if (toAdd) {
+        const approvedCommand = normalizeCommand(resolvedApproval.command)
+        if (toAdd && toAdd === approvedCommand) {
           await host.addAllowedCommand?.(ctx.cwd, toAdd)
           if (!config.permissions.allowedCommands) config.permissions.allowedCommands = []
           if (!config.permissions.allowedCommands.includes(toAdd)) {
@@ -1072,9 +1508,18 @@ export async function executeValidatedTool(
           }
         }
       }
-      if (approval.addToAllowedPattern != null && toolName === "Bash") {
+      if (
+        approval.addToAllowedPattern != null &&
+        resolvedApproval?.capability === "execute" &&
+        resolvedApproval.command
+      ) {
         const pattern = approval.addToAllowedPattern.trim()
-        if (pattern) {
+        const rawCommand = resolvedApproval.command
+        const normalizedCommand = normalizeCommand(rawCommand)
+        if (
+          pattern &&
+          commandMatchesAllowPattern(rawCommand, normalizedCommand, pattern)
+        ) {
           await host.addAllowedPattern?.(ctx.cwd, pattern)
           if (!config.permissions.allowCommandPatterns) config.permissions.allowCommandPatterns = []
           if (!config.permissions.allowCommandPatterns.includes(pattern)) {
@@ -1082,39 +1527,33 @@ export async function executeValidatedTool(
           }
         }
       }
-      if (approval.addToAllowedMcpTool != null && mcpToolNames.has(toolName)) {
-        const tool = approval.addToAllowedMcpTool.trim()
-        if (tool) {
-          await host.addAllowedMcpTool?.(ctx.cwd, tool)
+      if (
+        approval.addToAllowedMcpTool != null &&
+        resolvedApproval?.capability === "mcp"
+      ) {
+        const allowedTool = approval.addToAllowedMcpTool.trim()
+        if (allowedTool === tool.name) {
+          await host.addAllowedMcpTool?.(ctx.cwd, allowedTool)
           if (!config.permissions.allowedMcpTools) config.permissions.allowedMcpTools = []
-          if (!config.permissions.allowedMcpTools.includes(tool)) {
-            config.permissions.allowedMcpTools.push(tool)
+          if (!config.permissions.allowedMcpTools.includes(allowedTool)) {
+            config.permissions.allowedMcpTools.push(allowedTool)
           }
         }
       }
     }
   }
 
-  let validatedArgs: unknown
-  let inputToParse: Record<string, unknown> =
-    typeof toolInput === "object" && toolInput !== null ? { ...toolInput } : {}
   try {
-    inputToParse = normalizeToolInputForParse(resolvedToolName, inputToParse) as Record<string, unknown>
-    validatedArgs = tool.parameters.parse(inputToParse)
-  } catch (err) {
-    // Use tool's formatValidationError if available (kilocode pattern):
-    // returns a helpful message with the correct format so the LLM can self-correct.
-    if (err instanceof z.ZodError && tool.formatValidationError) {
-      return { success: false, output: tool.formatValidationError(err) }
-    }
-    return { success: false, output: formatToolValidationError(resolvedToolName, err, inputToParse) }
-  }
+    const executionContext = fileEditApproval
+      ? { ...ctx, fileEditApproval }
+      : ctx
+    const result = await tool.execute(
+      validatedArgs as Record<string, unknown>,
+      executionContext,
+    )
 
-  try {
-    const result = await tool.execute(validatedArgs as Record<string, unknown>, ctx)
-
-    if (result.success && ctx.indexer && ["Write", "Edit"].includes(toolName)) {
-      const targetPath = extractWriteTargetPath(toolName, validatedArgs as Record<string, unknown>)
+    if (result.success && ctx.indexer && ["Write", "Edit"].includes(resolvedToolName)) {
+      const targetPath = extractWriteTargetPath(resolvedToolName, validatedArgs as Record<string, unknown>)
       const refreshFile = ctx.indexer.refreshFile
       const refreshFileNow = ctx.indexer.refreshFileNow
       if (targetPath && (refreshFileNow || refreshFile)) {
@@ -1131,21 +1570,29 @@ export async function executeValidatedTool(
       }
     }
 
-    // Kilocode-style: truncate large tool output, save full content to global data dir (~/.nexus/data/tool-output/), return shortened + hint
+    // Bound every textual result, including failures from MCP/plugin tools.
+    // Error payloads are just as capable of overflowing the next model request.
     if (
-      result.success &&
       typeof result.output === "string" &&
       (result.metadata as { truncated?: boolean } | undefined)?.truncated !== true
     ) {
-      const truncated = await truncateOutput(result.output, { cwd: ctx.cwd })
+      const truncated = await truncateOutput(result.output, {
+        cwd: ctx.cwd,
+        sessionId: session.id,
+      })
       if (truncated.truncated) {
-        const partId = `part_${toolCallId}`
-        registerToolOutputSpill({
-          sessionId: session.id,
-          partId,
-          absolutePath: truncated.absolutePath,
-          toolName: resolvedToolName,
-        })
+        if (truncated.absolutePath) {
+          registerToolOutputSpill({
+            cwd: ctx.cwd,
+            sessionId: session.id,
+            partId: ctx.partId ?? `part_${toolCallId}`,
+            absolutePath: truncated.absolutePath,
+            ...(truncated.artifactId
+              ? { artifactId: truncated.artifactId }
+              : {}),
+            toolName: resolvedToolName,
+          })
+        }
         return {
           success: result.success,
           output: truncated.content,
@@ -1153,8 +1600,13 @@ export async function executeValidatedTool(
           metadata: {
             ...result.metadata,
             truncated: true,
-            outputPath: truncated.outputPath,
-            outputSpillAbsolutePath: truncated.absolutePath,
+            outputPersistence: truncated.persisted,
+            ...(truncated.artifactId
+              ? {
+                  outputArtifactId: truncated.artifactId,
+                  outputArtifactOwnerSessionId: session.id,
+                }
+              : {}),
           },
         }
       }

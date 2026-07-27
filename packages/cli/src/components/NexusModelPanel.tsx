@@ -39,6 +39,8 @@ type Props = {
   catalog: ModelsCatalog | null
   catalogError: string | null
   onSave: (patch: Partial<NexusConfig>) => Promise<void>
+  onRemoveApiKey: () => Promise<void>
+  onRemoveProfileApiKey: (profileName: string) => Promise<void>
   onClose: (result?: CloseResult) => void
 }
 
@@ -52,10 +54,12 @@ export function NexusModelPanel({
   catalog,
   catalogError,
   onSave,
+  onRemoveApiKey,
+  onRemoveProfileApiKey,
   onClose,
 }: Props): React.ReactNode {
   const theme = getTheme()
-  const [screen, setScreen] = useState<'providers' | 'models' | 'custom'>('providers')
+  const [screen, setScreen] = useState<'providers' | 'models' | 'custom' | 'profile-keys'>('providers')
   const [providerIndex, setProviderIndex] = useState(0)
   const [modelIndex, setModelIndex] = useState(0)
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
@@ -96,8 +100,15 @@ export function NexusModelPanel({
       }
     }
     out.push({ key: '__custom__', id: '__custom__', name: 'Custom model…' })
+    if (Object.keys(initialConfig.profiles ?? {}).length > 0) {
+      out.push({
+        key: '__profile_keys__',
+        id: '__profile_keys__',
+        name: 'Remove stored profile key…',
+      })
+    }
     return out
-  }, [catalog])
+  }, [catalog, initialConfig.profiles])
 
   /** Step 2: models for the selected provider (free first) */
   const modelOptions = useMemo((): ModelItem[] => {
@@ -119,7 +130,7 @@ export function NexusModelPanel({
       onClose({ cancelled: true })
       return
     }
-    if (screen === 'models' || screen === 'custom') {
+    if (screen === 'models' || screen === 'custom' || screen === 'profile-keys') {
       setScreen('providers')
       setSelectedProviderId(null)
       setProviderIndex(0)
@@ -155,9 +166,39 @@ export function NexusModelPanel({
           setScreen('custom')
           return
         }
+        if (item.id === '__profile_keys__') {
+          setModelIndex(0)
+          setScreen('profile-keys')
+          return
+        }
         setSelectedProviderId(item.id)
         setModelIndex(0)
         setScreen('models')
+      }
+      return
+    }
+
+    if (screen === 'profile-keys') {
+      const profileNames = Object.keys(initialConfig.profiles ?? {})
+      if (extendedKey.upArrow) {
+        setModelIndex((i) => Math.max(0, i - 1))
+        return
+      }
+      if (extendedKey.downArrow) {
+        setModelIndex((i) => Math.min(profileNames.length - 1, i + 1))
+        return
+      }
+      if (isEnter(extendedKey, input ?? '')) {
+        const profileName = profileNames[modelIndexRef.current]
+        if (!profileName) return
+        setSaving(true)
+        setError(null)
+        onRemoveProfileApiKey(profileName)
+          .then(() => onClose({ saved: true }))
+          .catch((e) => {
+            setError(String(e))
+            setSaving(false)
+          })
       }
       return
     }
@@ -195,8 +236,8 @@ export function NexusModelPanel({
     }
 
     if (screen === 'custom') {
-      // fieldCount = 7: 0=Provider, 1=BaseURL, 2=APIKey, 3=ModelID, 4=Temp, 5=ReasoningEffort, 6=Save
-      const fieldCount = 7
+      // 0=Provider, 1-5=fields, 6=explicit key removal, 7=Save.
+      const fieldCount = 8
 
       // On text fields (1-5): let field handle input first, THEN check navigation
       if (ownFieldIndex >= 1 && ownFieldIndex <= 5) {
@@ -237,9 +278,20 @@ export function NexusModelPanel({
         return
       }
       if (isEnter(extendedKey, input ?? '')) {
-        if (ownFieldIndex < fieldCount - 1) {
+        if (ownFieldIndex < 6) {
           // Enter on a field moves to next field
           setOwnFieldIndex((i) => Math.min(fieldCount - 1, i + 1))
+          return
+        }
+        if (ownFieldIndex === 6) {
+          setSaving(true)
+          setError(null)
+          onRemoveApiKey()
+            .then(() => onClose({ saved: true }))
+            .catch((e) => {
+              setError(String(e))
+              setSaving(false)
+            })
           return
         }
         // Enter on Save button
@@ -308,6 +360,12 @@ export function NexusModelPanel({
           <Box marginTop={1}>
             <Text color={ownFieldIndex === 6 ? theme.primary : undefined}>
               {ownFieldIndex === 6 ? figures.pointer : ' '}{' '}
+              <Text bold>{saving ? 'Working…' : 'Remove stored API key'}</Text>
+            </Text>
+          </Box>
+          <Box>
+            <Text color={ownFieldIndex === 7 ? theme.primary : undefined}>
+              {ownFieldIndex === 7 ? figures.pointer : ' '}{' '}
               <Text bold>{saving ? 'Saving…' : 'Save'}</Text>
             </Text>
           </Box>
@@ -325,6 +383,31 @@ export function NexusModelPanel({
   }
 
   // --- Models list (step 2a: after picking a provider)
+  if (screen === 'profile-keys') {
+    const profileNames = Object.keys(initialConfig.profiles ?? {})
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={theme.secondaryBorder} paddingX={1} marginTop={1}>
+        <Box marginBottom={1}>
+          <Text bold>Remove stored profile key</Text>
+          <Text dimColor> · Esc back</Text>
+        </Box>
+        {profileNames.map((profileName, index) => (
+          <Box key={profileName}>
+            <Text color={index === modelIndex ? theme.primary : undefined}>
+              {index === modelIndex ? figures.pointer : ' '} {profileName}
+            </Text>
+          </Box>
+        ))}
+        <Box marginTop={1}>
+          <Text dimColor>
+            {saving ? 'Removing…' : '↑/↓ select · Enter remove · Esc back'}
+          </Text>
+        </Box>
+        {error ? <Text color={theme.error}>{error}</Text> : null}
+      </Box>
+    )
+  }
+
   if (screen === 'models') {
     const list = modelOptions
     const provName = catalog?.providers.find((p) => p.id === selectedProviderId)?.name ?? selectedProviderId ?? ''

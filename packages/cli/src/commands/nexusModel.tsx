@@ -1,8 +1,20 @@
 import type { Command } from '../commands.js'
-import type { NexusBootstrapResult } from '../nexus-bootstrap.js'
+import {
+  loadCliWorkspaceConfig,
+  type NexusBootstrapResult,
+} from '../nexus-bootstrap.js'
 import { NexusModelPanel } from '../components/NexusModelPanel.js'
 import React from 'react'
-import { loadConfig, writeConfig, getModelsCatalog, persistSecretsFromConfig } from '@nexuscode/core'
+import {
+  getModelsCatalog,
+  credentialIdentityKey,
+  getEmbeddingCredentialIdentity,
+  getProviderCredentialIdentity,
+  mergeEmbeddingConfigSafely,
+  mergeProviderConfigSafely,
+  patchProjectConfig,
+  persistSecretsFromConfig,
+} from '@nexuscode/core'
 import type { NexusConfig } from '@nexuscode/core'
 
 function deepMerge<T extends object>(target: T, patch: Partial<T>): T {
@@ -31,16 +43,80 @@ export function createNexusModelCommand(nexus: NexusBootstrapResult): Command {
     async call(onDone) {
       const cwd = nexus.cwd
       const [config, catalog] = await Promise.all([
-        loadConfig(cwd, { secrets: nexus.secretsStore }),
+        loadCliWorkspaceConfig(cwd, {
+          loadEnv: !nexus.serverUrl,
+          hostAuthority: !nexus.serverUrl,
+        }),
         getModelsCatalog().catch((e) => ({ error: String(e) })),
       ])
       const catalogData = 'error' in catalog ? null : catalog
       const catalogError = 'error' in catalog ? (catalog as { error: string }).error : null
       const onSave = async (patch: Partial<NexusConfig>) => {
-        const current = await loadConfig(cwd, { secrets: nexus.secretsStore })
+        const current = await loadCliWorkspaceConfig(cwd, {
+          loadEnv: !nexus.serverUrl,
+          hostAuthority: !nexus.serverUrl,
+        })
         const merged = deepMerge(current, patch) as NexusConfig
-        await persistSecretsFromConfig(merged as unknown as Record<string, unknown>, nexus.secretsStore)
-        writeConfig(merged, cwd)
+        if (patch.model) {
+          merged.model = mergeProviderConfigSafely(current.model, patch.model)
+        }
+        if (current.embeddings && patch.embeddings) {
+          merged.embeddings = mergeEmbeddingConfigSafely(
+            current.embeddings,
+            patch.embeddings,
+          )
+        }
+        const modelScopeChanged = patch.model
+          ? credentialIdentityKey(getProviderCredentialIdentity(current.model)) !==
+            credentialIdentityKey(getProviderCredentialIdentity(merged.model))
+          : false
+        const embeddingScopeChanged =
+          current.embeddings && merged.embeddings && patch.embeddings
+            ? credentialIdentityKey(
+                getEmbeddingCredentialIdentity(current.embeddings),
+              ) !==
+              credentialIdentityKey(
+                getEmbeddingCredentialIdentity(merged.embeddings),
+              )
+            : false
+        await persistSecretsFromConfig(
+          merged as unknown as Record<string, unknown>,
+          nexus.secretsStore,
+          {
+            remove: {
+              ...(modelScopeChanged ? { model: current.model } : {}),
+              ...(embeddingScopeChanged
+                ? { embeddings: current.embeddings }
+                : {}),
+            },
+          },
+        )
+        await patchProjectConfig(
+          patch as unknown as Record<string, unknown>,
+          cwd,
+        )
+      }
+      const onRemoveApiKey = async () => {
+        const current = await loadCliWorkspaceConfig(cwd, {
+          loadEnv: !nexus.serverUrl,
+          hostAuthority: !nexus.serverUrl,
+        })
+        await persistSecretsFromConfig(
+          current as unknown as Record<string, unknown>,
+          nexus.secretsStore,
+          { remove: { model: true } },
+        )
+      }
+      const onRemoveProfileApiKey = async (profileName: string) => {
+        const current = await loadCliWorkspaceConfig(cwd, {
+          loadEnv: !nexus.serverUrl,
+          hostAuthority: !nexus.serverUrl,
+        })
+        await persistSecretsFromConfig(
+          current as unknown as Record<string, unknown>,
+          nexus.secretsStore,
+          { remove: { profileNames: [profileName] } },
+        )
       }
       return (
         <NexusModelPanel
@@ -49,6 +125,8 @@ export function createNexusModelCommand(nexus: NexusBootstrapResult): Command {
           catalog={catalogData}
           catalogError={catalogError}
           onSave={onSave}
+          onRemoveApiKey={onRemoveApiKey}
+          onRemoveProfileApiKey={onRemoveProfileApiKey}
           onClose={onDone}
         />
       )

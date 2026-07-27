@@ -6,6 +6,9 @@ import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotoc
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import type { McpServerConfig } from "../types.js"
+import { createMcpAuthorizedFetch } from "./authorized-fetch.js"
+import type { McpTransportFactoryOptions } from "./types.js"
+import { parseMcpHttpUrl } from "./url.js"
 
 /** Remote URL transport: explicit `transport`, or Roo-style `type`, else SSE (backward compatible). */
 export function effectiveUrlTransport(config: McpServerConfig): "http" | "sse" {
@@ -26,7 +29,10 @@ function mergeHeaders(config: McpServerConfig): Record<string, string> | undefin
 /**
  * Build MCP transport. `bundle` must already be resolved to `command`/`url` by the host.
  */
-export function createMcpTransport(config: McpServerConfig): Transport {
+export function createMcpTransport(
+  config: McpServerConfig,
+  options: McpTransportFactoryOptions = {},
+): Transport {
   if (config.bundle && !config.command && !config.url) {
     throw new Error(`MCP server "${config.name}": unresolved bundle — host must set command or url`)
   }
@@ -46,21 +52,32 @@ export function createMcpTransport(config: McpServerConfig): Transport {
   }
 
   if (config.url) {
-    const url = new URL(config.url)
-    const headers = mergeHeaders(config)
-    const kind = effectiveUrlTransport(config)
-
-    if (kind === "http") {
-      return new StreamableHTTPClientTransport(
-        url,
-        headers ? { requestInit: { headers } } : undefined,
+    const url = parseMcpHttpUrl(
+      config.url,
+      `MCP server "${config.name}" remote URL`,
+    )
+    if (!options.remoteRequestAuthorizer) {
+      throw new Error(
+        `MCP server "${config.name}": remote transport requires an injected network authorizer`,
       )
     }
-
-    return new SSEClientTransport(
-      url,
-      headers ? { requestInit: { headers } } : undefined,
+    const headers = mergeHeaders(config)
+    const kind = effectiveUrlTransport(config)
+    const authorizedFetch = createMcpAuthorizedFetch(
+      options.remoteRequestAuthorizer,
     )
+
+    if (kind === "http") {
+      return new StreamableHTTPClientTransport(url, {
+        fetch: authorizedFetch,
+        ...(headers ? { requestInit: { headers } } : {}),
+      })
+    }
+
+    return new SSEClientTransport(url, {
+      fetch: authorizedFetch,
+      ...(headers ? { requestInit: { headers } } : {}),
+    })
   }
 
   throw new Error(`MCP server "${config.name}" requires command or url`)

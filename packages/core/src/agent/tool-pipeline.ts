@@ -16,10 +16,12 @@ import {
 import {
   executeValidatedTool,
   formatToolValidationError,
+  modeSpecificToolInputError,
   normalizeToolInputForParse,
   type CompletionState,
 } from "./tool-execution.js"
 import { resolveToolNameAlias } from "../tools/aliases.js"
+import { isToolDefinitionAllowedInMode } from "./modes.js"
 
 export type ToolExecutionOrigin =
   | "native"
@@ -70,7 +72,6 @@ export interface ToolExecutionOutcome extends ToolResult {
   normalizedInput: Record<string, unknown>
   denied?: boolean
   stoppedByHook?: boolean
-  outputSpillPath?: string
   beforeHookResults?: PluginHookExecution[]
   afterHookResults?: PluginHookExecution[]
 }
@@ -81,6 +82,46 @@ function stopReason(results: PluginHookExecution[]): string | undefined {
     (stopped
       ? `${stopped.pluginName} requested that the agent stop the current continuation.`
       : undefined)
+}
+
+async function runHooksWithDiagnostic(
+  hookRunner: HookRunner,
+  cwd: string,
+  host: IHost,
+  config: ToolContext["config"],
+  event: PluginHookEvent,
+  payload: Record<string, unknown>,
+  failurePolicy: "block" | "continue",
+): Promise<PluginHookExecution[]> {
+  try {
+    return await hookRunner(cwd, host, config, event, payload)
+  } catch (error) {
+    // Before-tool hooks may enforce security policy and therefore fail closed.
+    // After-tool hooks are observability and must never erase a completed tool
+    // result. Both paths surface a structured, sanitized diagnostic.
+    // Do not include the exception message because hook errors can contain
+    // payloads, environment values, or command output with credentials.
+    const errorKind =
+      error instanceof Error && error.name.trim() ? error.name.trim() : "UnknownError"
+    const blocked = failurePolicy === "block"
+    return [{
+      pluginName: "nexus-plugin-runtime",
+      hookEvent: event,
+      success: false,
+      output:
+        `Plugin hook dispatcher failed during ${event} (${errorKind}). ` +
+        (blocked
+          ? "The tool execution was blocked because policy hooks could not be evaluated."
+          : "Observability hooks were skipped and the completed tool result was preserved."),
+      ...(blocked
+        ? {
+            preventContinuation: true,
+            stopReason:
+              "Tool execution blocked because before_tool policy hooks could not be evaluated.",
+          }
+        : {}),
+    }]
+  }
 }
 
 export async function executeToolPipeline(
@@ -114,8 +155,25 @@ export async function executeToolPipeline(
       normalizedInput,
     }
   }
+  if (!isToolDefinitionAllowedInMode(tool, mode)) {
+    return {
+      success: false,
+      output: `ERROR: Tool "${resolvedToolName}" is disabled in ${mode} mode.`,
+      toolName: resolvedToolName,
+      normalizedInput,
+    }
+  }
+  let validatedInput: Record<string, unknown>
   try {
-    tool.parameters.parse(normalizedInput)
+    const parsed = tool.parameters.parse(normalizedInput)
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error("Tool arguments must resolve to a JSON object")
+    }
+    validatedInput = parsed as Record<string, unknown>
   } catch (error) {
     const output =
       error instanceof z.ZodError && tool.formatValidationError
@@ -129,22 +187,40 @@ export async function executeToolPipeline(
     }
   }
 
+  const modeInputError = modeSpecificToolInputError(
+    mode,
+    resolvedToolName,
+    validatedInput,
+  )
+  if (modeInputError) {
+    return {
+      success: false,
+      output: `ERROR: ${modeInputError}`,
+      toolName: resolvedToolName,
+      normalizedInput,
+    }
+  }
+
   const hookRunner = environment.hookRunner ?? runPluginHooks
-  const hookPayload = {
+  const hookPayloadBase = {
     mode,
     sessionId: context.session.id,
     toolName: resolvedToolName,
-    toolInput: normalizedInput,
     origin: request.origin,
   }
   onStage?.("before_tool")
-  const beforeHookResults = await hookRunner(
+  const beforeHookResults = await runHooksWithDiagnostic(
+    hookRunner,
     context.cwd,
     context.host,
     context.config,
     "before_tool",
-    hookPayload,
-  ).catch(() => [])
+    {
+      ...hookPayloadBase,
+      toolInput: cloneToolInput(validatedInput),
+    },
+    "block",
+  )
   const beforeStopReason = stopReason(beforeHookResults)
   if (beforeStopReason) {
     return {
@@ -177,12 +253,40 @@ export async function executeToolPipeline(
     host: childHost,
     partId: request.partId,
     toolExecutionMessageId: request.messageId,
+    async executeNestedTool(nestedRequest) {
+      if (
+        !Number.isSafeInteger(nestedRequest.ordinal) ||
+        nestedRequest.ordinal < 0
+      ) {
+        return {
+          success: false,
+          output: "Nested tool execution requires a non-negative safe integer ordinal.",
+        }
+      }
+      const nestedCallId = `${request.callId}.parallel.${nestedRequest.ordinal + 1}`
+      return executeToolPipeline(
+        {
+          callId: nestedCallId,
+          messageId: request.messageId,
+          partId: `${request.partId}.parallel.${nestedRequest.ordinal + 1}`,
+          toolName: nestedRequest.toolName,
+          input: nestedRequest.input,
+          origin: "parallel",
+        },
+        {
+          ...environment,
+          // A nested call receives a fresh per-call context from this pipeline.
+          // Reusing childContext would leak the parent's part identity.
+          context,
+        },
+      )
+    },
   }
   const wrappedTool: ToolDef = {
     ...tool,
-    async execute(args) {
+    async execute(args, executionContext) {
       onStage?.("execute")
-      return tool.execute(args, childContext)
+      return tool.execute(args, executionContext)
     },
   }
   const tools = environment.tools.map((candidate) =>
@@ -192,7 +296,7 @@ export async function executeToolPipeline(
   const result = await executeValidatedTool(
     request.callId,
     resolvedToolName,
-    normalizedInput,
+    validatedInput,
     [...tools],
     childContext,
     new Set(environment.autoApproveActions),
@@ -203,35 +307,45 @@ export async function executeToolPipeline(
     completionState,
     mode,
     new Set(environment.mcpToolNames),
+    validatedInput,
   )
   onStage?.("spill")
 
   onStage?.("after_tool")
-  const afterHookResults = await hookRunner(
+  const afterHookResults = await runHooksWithDiagnostic(
+    hookRunner,
     context.cwd,
     context.host,
     context.config,
     "after_tool",
     {
-      ...hookPayload,
+      ...hookPayloadBase,
+      toolInput: cloneToolInput(validatedInput),
       success: result.success,
       output: result.output,
     },
-  ).catch(() => [])
+    "continue",
+  )
   const afterStopReason = stopReason(afterHookResults)
-  const outputSpillPath =
-    typeof result.metadata?.["outputSpillAbsolutePath"] === "string"
-      ? result.metadata["outputSpillAbsolutePath"]
-      : undefined
-
   return {
     ...result,
     toolName: resolvedToolName,
-    normalizedInput,
+    normalizedInput: validatedInput,
     ...(denied ? { denied: true } : {}),
     ...(afterStopReason ? { stoppedByHook: true } : {}),
-    ...(outputSpillPath ? { outputSpillPath } : {}),
     beforeHookResults,
     afterHookResults,
+  }
+}
+
+function cloneToolInput(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  try {
+    return structuredClone(input)
+  } catch {
+    // Valid tool arguments are JSON-compatible. A custom schema that returns
+    // an exotic value must not gain a shared mutable reference through hooks.
+    return JSON.parse(JSON.stringify(input)) as Record<string, unknown>
   }
 }

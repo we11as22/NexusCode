@@ -3,8 +3,29 @@ import * as path from "node:path"
 import * as crypto from "crypto"
 import * as fs from "node:fs"
 import { setIndexTelemetrySink } from "@nexuscode/core"
-import { Controller, type WebviewMessage, type ExtensionMessage } from "./controller.js"
+import { Controller, type ExtensionMessage } from "./controller.js"
 import { registerAutocompleteProvider } from "./services/autocomplete/index.js"
+import {
+  WebviewProtocolError,
+  parseWebviewInboundMessage,
+  type WebviewMessage,
+} from "./webview-protocol.js"
+import { projectExtensionMessageForWebview } from "./webview-projection.js"
+
+const MAX_PENDING_WEBVIEW_MESSAGES = 512
+const REPLAYABLE_MESSAGE_TYPES = new Set<ExtensionMessage["type"]>([
+  "stateUpdate",
+  "sessionList",
+  "sessionListLoading",
+  "indexStatus",
+  "configLoaded",
+  "skillDefinitions",
+  "modelsCatalog",
+  "agentPresets",
+  "agentPresetOptions",
+  "mcpServerStatus",
+  "slashCommandCatalog",
+])
 
 /**
  * VS Code WebviewView provider for NexusCode.
@@ -29,7 +50,11 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       this.output.appendLine(`[nexus:index:${event}] ${JSON.stringify(payload ?? {})}`)
     })
     this.controller = new Controller(context, (msg) => this.postMessage(msg))
-    const autocompleteManager = registerAutocompleteProvider(context, () => this.controller.getConfig())
+    const autocompleteManager = registerAutocompleteProvider(
+      context,
+      () => this.controller.getConfig(),
+      () => this.controller.resolveAutocompleteModel(),
+    )
     this.controller.setAutocompleteConfigReady(() => {
       void autocompleteManager.load()
     })
@@ -112,8 +137,14 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 
   private queueMessageForWebview(webview: vscode.Webview, msg: ExtensionMessage): void {
+    // Snapshot messages are already retained by latestMessages and replayed
+    // after readiness. Queuing them too duplicates large state/config payloads.
+    if (REPLAYABLE_MESSAGE_TYPES.has(msg.type)) return
     const queued = this.pendingMessages.get(webview) ?? []
     queued.push(this.cloneMessageForWebview(msg))
+    if (queued.length > MAX_PENDING_WEBVIEW_MESSAGES) {
+      queued.splice(0, queued.length - MAX_PENDING_WEBVIEW_MESSAGES)
+    }
     this.pendingMessages.set(webview, queued)
     this.debugLog(`queued outbound message: ${msg.type} (queue=${queued.length})`)
   }
@@ -124,12 +155,18 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     if (!queued || queued.length === 0) return
     this.debugLog(`flushing queued webview messages: ${queued.length}`)
     this.pendingMessages.set(webview, [])
-    for (const msg of queued) {
+    for (let index = 0; index < queued.length; index += 1) {
+      const msg = queued[index]!
       try {
         await webview.postMessage(msg)
       } catch (error) {
         console.warn("[NexusCode] Failed to flush queued webview message:", error)
-        this.queueMessageForWebview(webview, msg)
+        const arrived = this.pendingMessages.get(webview) ?? []
+        const remaining = [
+          ...queued.slice(index),
+          ...arrived,
+        ].slice(-MAX_PENDING_WEBVIEW_MESSAGES)
+        this.pendingMessages.set(webview, remaining)
         return
       }
     }
@@ -147,6 +184,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       case "agentPresets":
       case "agentPresetOptions":
       case "mcpServerStatus":
+      case "slashCommandCatalog":
         this.latestMessages.set(msg.type, this.cloneMessageForWebview(msg))
         break
       default:
@@ -166,6 +204,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       "sessionList",
       "indexStatus",
       "mcpServerStatus",
+      "slashCommandCatalog",
       "stateUpdate",
     ]
     for (const type of order) {
@@ -212,6 +251,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       await webview.postMessage(msg)
     } catch (error) {
       console.warn("[NexusCode] Failed to post message to webview:", error)
+      this.queueMessageForWebview(webview, msg)
     }
   }
 
@@ -226,17 +266,46 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       localResourceRoots: [this.context.extensionUri, webviewDistPath],
     }
 
-    webview.onDidReceiveMessage(async (msg: WebviewMessage | Record<string, unknown>) => {
-      const type = typeof msg?.type === "string" ? msg.type : "(unknown)"
-      this.debugLog(`inbound webview message: ${type}`)
-      if (type === "webviewBootstrap" || type === "webviewScriptError" || type === "webviewRuntimeError") {
-        this.debugLog(`webview debug event: ${type}`, msg)
+    webview.onDidReceiveMessage(async (rawMessage: unknown) => {
+      let inbound: ReturnType<typeof parseWebviewInboundMessage>
+      try {
+        inbound = parseWebviewInboundMessage(rawMessage)
+      } catch (error) {
+        const detail =
+          error instanceof WebviewProtocolError
+            ? `${error.code}: ${error.message}`
+            : "unexpected validator failure"
+        this.output.appendLine(
+          `[nexus:webview] Rejected invalid inbound message (${detail})`,
+        )
+        return
+      }
+      this.debugLog(`inbound webview message: ${inbound.message.type}`)
+      if (inbound.kind === "diagnostic") {
+        this.debugLog(
+          `webview debug event: ${inbound.message.type}`,
+          inbound.message,
+        )
         return
       }
       this.markWebviewReady(webview)
       await this.flushPendingMessages(webview)
       await this.replayLatestMessages(webview)
-      await this.controller.handleWebviewMessage(msg as WebviewMessage)
+      try {
+        await this.controller.handleWebviewMessage(inbound.message)
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        this.output.appendLine(
+          `[nexus:webview] Failed to handle ${inbound.message.type}: ${detail}`,
+        )
+        this.postMessage({
+          type: "agentEvent",
+          event: {
+            type: "error",
+            error: `Webview action failed: ${detail}`,
+          },
+        })
+      }
     }, null, this.disposables)
 
     webview.html = this.getHtml(webview)
@@ -252,7 +321,8 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   }
 
   private postMessage(msg: ExtensionMessage): void {
-    const stamped = this.stampMessage(msg)
+    const projected = projectExtensionMessageForWebview(msg)
+    const stamped = this.stampMessage(projected)
     this.rememberLatestMessage(stamped)
     const targets: vscode.Webview[] = []
     if (this.view?.webview) targets.push(this.view.webview)

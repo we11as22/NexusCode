@@ -218,9 +218,19 @@ export class Session implements ISession {
     return new Session(generateSessionId(), cwd)
   }
 
-  /** Create a session that is never saved to disk (for sub-agents). */
-  static createEphemeral(cwd: string): Session {
-    return new Session(generateSessionId(), cwd, undefined, undefined, true)
+  /**
+   * Create a session that is never saved to disk (for sub-agents).
+   * An optional transcript is defensively cloned so resume/fork cannot mutate
+   * the durable source snapshot.
+   */
+  static createEphemeral(
+    cwd: string,
+    messages?: readonly SessionMessage[],
+  ): Session {
+    const cloned = messages
+      ? JSON.parse(JSON.stringify(messages)) as SessionMessage[]
+      : undefined
+    return new Session(generateSessionId(), cwd, cloned, undefined, true)
   }
 
   static async resume(sessionId: string, cwd: string): Promise<Session | null> {

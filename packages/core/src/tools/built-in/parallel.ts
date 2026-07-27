@@ -1,6 +1,6 @@
 import { z } from "zod"
-import { formatToolValidationError, normalizeToolInputForParse } from "../../agent/tool-execution.js"
-import type { ToolDef, ToolContext, UserQuestionRequest, UserQuestionItem } from "../../types.js"
+import { normalizeToolInputForParse } from "../../agent/tool-execution.js"
+import type { ToolDef, ToolContext, UserQuestionItem } from "../../types.js"
 import { canonicalizeToolName, resolveToolNameAlias } from "../aliases.js"
 import {
   buildUserQuestionOptionsFromRows,
@@ -73,7 +73,9 @@ CORRECT format:
   ]})
 `,
   parameters: schema,
-  readOnly: true,
+  // The batch may contain delegated TaskCreate(kind="agent"), so the
+  // composite itself must not advertise a false read-only guarantee.
+  readOnly: false,
 
   formatValidationError(err: z.ZodError): string {
     const issues = err.issues.map(i => `  - ${i.path.join(".") || "root"}: ${i.message}`).join("\n")
@@ -90,6 +92,14 @@ CORRECT format:
     const tools = ctx.resolvedTools ?? []
     if (tools.length === 0) {
       return { success: false, output: "Parallel is not available: no resolved tools in context." }
+    }
+    if (!ctx.executeNestedTool) {
+      return {
+        success: false,
+        output:
+          "Parallel is unavailable because the authoritative nested tool executor was not provided. " +
+          "Refusing to invoke inner tools outside the validation and permission pipeline.",
+      }
     }
 
     const byExactName = new Map(tools.map((tool) => [tool.name, tool]))
@@ -177,22 +187,19 @@ CORRECT format:
       if (questions.length === 0) {
         return { success: false, output: "Parallel AskFollowupQuestion batch is empty or invalid." }
       }
-      const request: UserQuestionRequest = {
-        requestId: `question_request_${Date.now()}`,
-        title: title || "Asking questions",
-        submitLabel: submitLabel || "Continue",
-        customOptionLabel: normalizeCustomOptionLabel(customOptionLabel),
-        questions,
-      }
-      ctx.host.emit({ type: "question_request", request, partId: ctx.partId })
-      return {
-        success: true,
-        output: "User input is required before the task can continue.",
-        metadata: { questionRequest: true, request },
-      }
+      return ctx.executeNestedTool({
+        toolName: "AskFollowupQuestion",
+        ordinal: 0,
+        input: {
+          questions,
+          title: title || "Asking questions",
+          submit_label: submitLabel || "Continue",
+          custom_option_label: normalizeCustomOptionLabel(customOptionLabel),
+        },
+      })
     }
 
-    const promises = tool_uses.map(async (use): Promise<ParallelResult> => {
+    const promises = tool_uses.map(async (use, ordinal): Promise<ParallelResult> => {
       const tool = resolveTool(use, byExactName, byCanonicalName)
       if (!tool) {
         return {
@@ -209,7 +216,6 @@ CORRECT format:
           output: "Nested Parallel calls are not allowed. Put all independent tools in one Parallel.tool_uses array.",
         }
       }
-      const isLegacySpawn = tool.name === "SpawnAgent" || tool.name === "SpawnAgents"
       const isAgentTaskCreate = isParallelDelegatedAgentTaskCreate(tool, use)
       if (tool.name === "TaskCreate" && !isAgentTaskCreate) {
         return {
@@ -227,7 +233,7 @@ CORRECT format:
           output: "TaskCreateBatch cannot run inside Parallel — call it directly.",
         }
       }
-      if (!tool.readOnly && !isLegacySpawn && !isAgentTaskCreate) {
+      if (!tool.readOnly && !isAgentTaskCreate) {
         return {
           recipient_name: use.recipient_name,
           resolved_name: tool.name,
@@ -245,34 +251,12 @@ CORRECT format:
         }
       }
 
-      let parsed: unknown
-      let normalized: Record<string, unknown> = {}
       try {
-        // parameters may be a JSON string if LLM stringified it
-        let rawParams = use.parameters
-        if (typeof rawParams === "string") {
-          try { rawParams = JSON.parse(rawParams as string) } catch { /* leave as-is */ }
-        }
-        const input = typeof rawParams === "object" && rawParams != null ? { ...rawParams } : {}
-        normalized = normalizeToolInputForParse(tool.name, input as Record<string, unknown>)
-        parsed = tool.parameters.parse(normalized)
-      } catch (err) {
-        // Use the tool's own formatValidationError if available (kilocode pattern)
-        const friendlyMsg =
-          err instanceof z.ZodError && tool.formatValidationError
-            ? tool.formatValidationError(err)
-            : err instanceof z.ZodError
-              ? formatToolValidationError(tool.name, err, normalized)
-              : `Invalid arguments for ${tool.name}: ${err}`
-        return {
-          recipient_name: use.recipient_name,
-          resolved_name: tool.name,
-          success: false,
-          output: friendlyMsg,
-        }
-      }
-      try {
-        const result = await tool.execute(parsed as Record<string, unknown>, ctx)
+        const result = await ctx.executeNestedTool!({
+          toolName: tool.name,
+          input: parallelInnerParamsObject(use),
+          ordinal,
+        })
         return {
           recipient_name: use.recipient_name,
           resolved_name: tool.name,

@@ -1,17 +1,5 @@
 import { z } from "zod"
-import * as fs from "node:fs/promises"
-import * as path from "node:path"
-import * as os from "node:os"
 import type { ToolDef, ToolContext } from "../../types.js"
-
-/** Expand leading ~ to homedir so Read can access global data (e.g. ~/.nexus/data/run/*.log, tool-output/*.out). */
-function resolveFilePath(filePath: string, cwd: string): string {
-  const t = filePath.trim()
-  if (t === "~" || t.startsWith("~/") || t.startsWith("~\\")) {
-    return path.join(os.homedir(), t.slice(1))
-  }
-  return path.resolve(cwd, filePath)
-}
 
 const MAX_FILE_SIZE = 200 * 1024 // 200 KB — over this without offset/limit we return head+tail
 const DEFAULT_LIMIT = 2000
@@ -37,8 +25,7 @@ const schema = z.object({
 export const readFileTool: ToolDef<z.infer<typeof schema>> = {
   name: "Read",
   searchHint: "read file lines by path, inspect file contents with offset and limit, line-numbered file viewer",
-  description: `Reads a file from the local filesystem. You can access any file directly by using this tool.
-Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+  description: `Reads a file through the host-authorized filesystem. Local hosts may grant absolute paths; remote or sandboxed hosts can restrict access to their workspace capability. It is okay to request a file that does not exist; an error will be returned.
 
 Usage:
 - Use this after Grep, CodebaseSearch, List, Glob, ListCodeDefinitions, or LSP has already identified the relevant file and roughly the relevant range.
@@ -63,43 +50,35 @@ When NOT to use:
 
   async execute({ file_path, offset, limit }, ctx: ToolContext) {
     const filePath = file_path
-    const absPath = resolveFilePath(filePath, ctx.cwd)
-
-    let stat: Awaited<ReturnType<typeof fs.stat>>
-    try {
-      stat = await fs.stat(absPath)
-    } catch {
-      return { success: false, output: `File not found: ${filePath}` }
-    }
-
-    if (stat.isDirectory()) {
-      return { success: false, output: `Path is a directory, not a file: ${filePath}. Use List instead.` }
-    }
-
-    if (await isBinaryFile(absPath)) {
-      return {
-        success: true,
-        output: `[Binary file: ${filePath}]\nSize: ${formatBytes(stat.size)}\nCannot read binary content.`,
-      }
-    }
-
-    if (stat.size > MAX_READ_SIZE) {
-      return {
-        success: false,
-        output: `File too large (${formatBytes(stat.size)}). Use offset and limit to read specific sections, or use Grep to search. Max readable size is ${MAX_READ_SIZE / 1024 / 1024} MB.`,
-      }
-    }
-
-    if (stat.size > MAX_FILE_SIZE && !offset) {
-      const content = await fs.readFile(absPath, "utf8")
-      return truncateWithHeadTail(content, filePath)
-    }
-
     let content: string
     try {
-      content = await fs.readFile(absPath, "utf8")
-    } catch (err) {
-      return { success: false, output: `Failed to read ${filePath}: ${(err as Error).message}` }
+      content = await ctx.host.readFile(filePath, { maxBytes: MAX_READ_SIZE })
+    } catch (error) {
+      return {
+        success: false,
+        output: `Failed to read ${filePath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      }
+    }
+
+    const size = Buffer.byteLength(content, "utf8")
+    if (isBinaryContent(content)) {
+      return {
+        success: true,
+        output: `[Binary file: ${filePath}]\nSize: ${formatBytes(size)}\nCannot read binary content.`,
+      }
+    }
+
+    if (size > MAX_READ_SIZE) {
+      return {
+        success: false,
+        output: `File too large (${formatBytes(size)}). Use Grep to search. Max readable size is ${MAX_READ_SIZE / 1024 / 1024} MB.`,
+      }
+    }
+
+    if (size > MAX_FILE_SIZE && !offset) {
+      return truncateWithHeadTail(content, filePath)
     }
 
     const lines = content.split("\n")
@@ -136,21 +115,13 @@ When NOT to use:
   },
 }
 
-async function isBinaryFile(filePath: string): Promise<boolean> {
-  try {
-    const handle = await fs.open(filePath, "r")
-    const buffer = Buffer.alloc(512)
-    const { bytesRead } = await handle.read(buffer, 0, 512, 0)
-    await handle.close()
-    for (let i = 0; i < bytesRead; i++) {
-      const byte = buffer[i]!
-      if (byte === 0) return true
-      if (byte < 8) return true
-    }
-    return false
-  } catch {
-    return false
+function isBinaryContent(content: string): boolean {
+  const sample = content.slice(0, 512)
+  for (let i = 0; i < sample.length; i += 1) {
+    const code = sample.charCodeAt(i)
+    if (code === 0 || code < 8) return true
   }
+  return false
 }
 
 function truncateWithHeadTail(content: string, filePath: string): ReturnType<typeof readFileTool.execute> {

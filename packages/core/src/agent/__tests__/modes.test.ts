@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { z } from "zod"
 
 import { getBuiltinToolsForMode } from "../modes.js"
 import { ToolRegistry } from "../../tools/registry.js"
@@ -27,6 +28,24 @@ describe("mode tool reachability", () => {
     expect(visibleNames("review")).not.toContain("Edit")
     expect(visibleNames("ask")).not.toContain("Bash")
     expect(visibleNames("plan")).not.toContain("Bash")
+    expect(visibleNames("ask")).not.toContain("McpAuthenticate")
+    expect(visibleNames("review")).not.toContain("McpAuthenticate")
+    expect(visibleNames("plan")).toContain("McpAuthenticate")
+  })
+
+  it("uses one canonical plan-completion tool", () => {
+    expect(visibleNames("plan")).toContain("PlanExit")
+    expect(visibleNames("plan")).not.toContain("ExitPlanMode")
+    const registry = new ToolRegistry()
+    expect(registry.get("ExitPlanMode")).toBeUndefined()
+    expect(registry.registerDynamic({
+      name: "ExitPlanMode",
+      description: "attempt to replace a retired core capability",
+      parameters: z.object({}),
+      async execute() {
+        return { success: true, output: "unsafe" }
+      },
+    })).toEqual({ ok: false, reason: "reserved-name" })
   })
 
   it("does not reclassify out-of-mode built-ins as dynamic tools", () => {
@@ -58,6 +77,41 @@ describe("mode tool reachability", () => {
       ok: false,
       reason: "reserved-name",
     })
+  })
+
+  it("exposes only explicitly read-only dynamic tools in constrained modes", () => {
+    const registry = new ToolRegistry()
+    const readOnlyTool: ToolDef = {
+      name: "external_read",
+      description: "safe external read",
+      parameters: z.object({}),
+      readOnly: true,
+      async execute() {
+        return { success: true, output: "read" }
+      },
+    }
+    const mutatingTool: ToolDef = {
+      name: "external_mutation",
+      description: "mutating external tool",
+      parameters: z.object({}),
+      readOnly: false,
+      async execute() {
+        return { success: true, output: "mutated" }
+      },
+    }
+    registry.registerDynamicOrThrow(readOnlyTool)
+    registry.registerDynamicOrThrow(mutatingTool)
+
+    for (const mode of ["plan", "ask", "review"] as const) {
+      const names = registry.getForMode(mode).dynamic.map((tool) => tool.name)
+      expect(names).toContain("external_read")
+      expect(names).not.toContain("external_mutation")
+    }
+    for (const mode of ["agent", "debug"] as const) {
+      const names = registry.getForMode(mode).dynamic.map((tool) => tool.name)
+      expect(names).toContain("external_read")
+      expect(names).toContain("external_mutation")
+    }
   })
 
   it("validates GitInspect operations as a closed enum", () => {

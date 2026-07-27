@@ -3,8 +3,14 @@
  * (aligned with ClaudeCodeFree direct backend parsing).
  */
 
+import type { IHost } from "../../types.js"
+import { requestNetworkResource } from "../../network/network-request.js"
+
 const SEARCH_TIMEOUT_MS = 20_000
 const FIRECRAWL_TIMEOUT_MS = 45_000
+const SEARCH_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+const FIRECRAWL_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+const MAX_REDIRECTS = 5
 
 const PRIMARY_FETCH_UA = "NexusCode/1.0 (AI coding assistant; +https://github.com/nexuscode)"
 /** Opencode-style fallback when plain fetch fails or returns a challenge page. */
@@ -12,6 +18,11 @@ export const BROWSER_LIKE_FETCH_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 export type WebSearchHit = { title: string; url: string; snippet?: string }
+
+export interface WebRemoteContext {
+  host: IHost
+  signal?: AbortSignal
+}
 
 export function firecrawlBaseUrl(): string {
   const raw = process.env["FIRECRAWL_API_URL"]?.trim()
@@ -52,23 +63,23 @@ function normalizeHref(rawHref: string): string | null {
     if (href.startsWith("//duckduckgo.com/l/?")) {
       const parsed = new URL(`https:${href}`)
       const uddg = parsed.searchParams.get("uddg")
-      return uddg ? decodeURIComponent(uddg) : null
+      return uddg ? normalizeSearchResultUrl(decodeURIComponent(uddg)) : null
     }
     if (href.startsWith("//")) {
-      return `https:${href}`
+      return normalizeSearchResultUrl(`https:${href}`)
     }
     if (href.startsWith("https://duckduckgo.com/l/?") || href.startsWith("http://duckduckgo.com/l/?")) {
       const parsed = new URL(href)
       const uddg = parsed.searchParams.get("uddg")
-      return uddg ? decodeURIComponent(uddg) : null
+      return uddg ? normalizeSearchResultUrl(decodeURIComponent(uddg)) : null
     }
     if (href.startsWith("/l/?")) {
       const parsed = new URL(`https://duckduckgo.com${href}`)
       const uddg = parsed.searchParams.get("uddg")
-      return uddg ? decodeURIComponent(uddg) : null
+      return uddg ? normalizeSearchResultUrl(decodeURIComponent(uddg)) : null
     }
     if (href.startsWith("http://") || href.startsWith("https://")) {
-      return href
+      return normalizeSearchResultUrl(href)
     }
     return null
   } catch {
@@ -83,24 +94,34 @@ function containsCyrillic(text: string): boolean {
 /**
  * Free path: DuckDuckGo HTML (may be rate-limited; same approach as OpenClaude / ClaudeCodeFree).
  */
-export async function searchDuckDuckGoHtml(query: string, limit: number): Promise<WebSearchHit[]> {
+export async function searchDuckDuckGoHtml(
+  query: string,
+  limit: number,
+  context: WebRemoteContext,
+): Promise<WebSearchHit[]> {
   const kl = containsCyrillic(query) ? "ru-ru" : "us-en"
   const params = new URLSearchParams({ q: query.trim(), kl })
-  const controller = new AbortController()
-  const t = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS)
-  let html: string
-  try {
-    const res = await fetch(`https://html.duckduckgo.com/html/?${params}`, {
-      signal: controller.signal,
+  const response = await requestNetworkResource(
+    context.host,
+    `https://html.duckduckgo.com/html/?${params}`,
+    {
+      purpose: "web_search",
+      signal: context.signal,
+      timeoutMs: SEARCH_TIMEOUT_MS,
+      maxRedirects: MAX_REDIRECTS,
+      maxResponseBytes: SEARCH_MAX_RESPONSE_BYTES,
       headers: {
         Accept: "text/html,application/xhtml+xml",
         "User-Agent": PRIMARY_FETCH_UA,
       },
-    })
-    html = await res.text()
-  } finally {
-    clearTimeout(t)
+    },
+  )
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(
+      `DuckDuckGo HTTP ${response.status} ${response.statusText}`.trim(),
+    )
   }
+  const html = new TextDecoder("utf8", { fatal: false }).decode(response.body)
 
   const results: WebSearchHit[] = []
   const seen = new Set<string>()
@@ -117,76 +138,100 @@ export async function searchDuckDuckGoHtml(query: string, limit: number): Promis
   return results
 }
 
-export async function searchFirecrawl(query: string, limit: number, apiKey: string): Promise<WebSearchHit[]> {
+export async function searchFirecrawl(
+  query: string,
+  limit: number,
+  apiKey: string,
+  context: WebRemoteContext,
+): Promise<WebSearchHit[]> {
   const base = firecrawlBaseUrl()
-  const controller = new AbortController()
-  const t = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
-  try {
-    const res = await fetch(`${base}/search`, {
+  const response = await requestNetworkResource(
+    context.host,
+    `${base}/search`,
+    {
+      purpose: "web_search",
       method: "POST",
-      signal: controller.signal,
+      signal: context.signal,
+      timeoutMs: FIRECRAWL_TIMEOUT_MS,
+      maxRedirects: MAX_REDIRECTS,
+      maxResponseBytes: FIRECRAWL_MAX_RESPONSE_BYTES,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({ query: query.trim(), limit }),
-    })
-    if (!res.ok) {
-      throw new Error(`Firecrawl search HTTP ${res.status}`)
-    }
-    const json = (await res.json()) as Record<string, unknown>
-    const raw =
-      Array.isArray(json["data"])
-        ? (json["data"] as unknown[])
-        : Array.isArray((json["data"] as Record<string, unknown> | undefined)?.["web"])
-          ? ((json["data"] as { web: unknown[] }).web)
-          : []
-    const out: WebSearchHit[] = []
-    for (const item of raw) {
-      if (!item || typeof item !== "object") continue
-      const o = item as Record<string, unknown>
-      const url = typeof o["url"] === "string" ? o["url"] : typeof o["link"] === "string" ? o["link"] : ""
-      const title =
-        typeof o["title"] === "string" && o["title"].trim()
-          ? o["title"].trim()
-          : url
-      const snippet =
-        typeof o["description"] === "string"
-          ? o["description"]
-          : typeof o["snippet"] === "string"
-            ? o["snippet"]
-            : undefined
-      if (!url) continue
-      out.push({ title, url, snippet })
-      if (out.length >= limit) break
-    }
-    return out
-  } finally {
-    clearTimeout(t)
+    },
+  )
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`Firecrawl search HTTP ${response.status}`)
   }
+  const json = parseJsonResponse(response.body) as Record<string, unknown>
+  const raw =
+    Array.isArray(json["data"])
+      ? (json["data"] as unknown[])
+      : Array.isArray((json["data"] as Record<string, unknown> | undefined)?.["web"])
+        ? ((json["data"] as { web: unknown[] }).web)
+        : []
+  const out: WebSearchHit[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue
+    const o = item as Record<string, unknown>
+    const rawUrl =
+      typeof o["url"] === "string"
+        ? o["url"]
+        : typeof o["link"] === "string"
+          ? o["link"]
+          : ""
+    const url = normalizeSearchResultUrl(rawUrl)
+    if (!url) continue
+    const title =
+      typeof o["title"] === "string" && o["title"].trim()
+        ? o["title"].trim()
+        : url
+    const snippet =
+      typeof o["description"] === "string"
+        ? o["description"]
+        : typeof o["snippet"] === "string"
+          ? o["snippet"]
+          : undefined
+    out.push({ title, url, snippet })
+    if (out.length >= limit) break
+  }
+  return out
 }
 
 export type ScrapeResult = { text: string; contentType: string; via: "firecrawl" | "http" | "http-fallback" }
 
-export async function scrapeFirecrawlMarkdown(url: string, maxChars: number, apiKey: string): Promise<ScrapeResult | null> {
+export async function scrapeFirecrawlMarkdown(
+  url: string,
+  maxChars: number,
+  apiKey: string,
+  context: WebRemoteContext,
+): Promise<ScrapeResult | null> {
   const base = firecrawlBaseUrl()
-  const controller = new AbortController()
-  const t = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
   try {
-    const res = await fetch(`${base}/scrape`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+    const response = await requestNetworkResource(
+      context.host,
+      `${base}/scrape`,
+      {
+        purpose: "web_fetch",
+        method: "POST",
+        signal: context.signal,
+        timeoutMs: FIRECRAWL_TIMEOUT_MS,
+        maxRedirects: MAX_REDIRECTS,
+        maxResponseBytes: FIRECRAWL_MAX_RESPONSE_BYTES,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          url,
+          formats: ["markdown"],
+        }),
       },
-      body: JSON.stringify({
-        url,
-        formats: ["markdown"],
-      }),
-    })
-    if (!res.ok) return null
-    const json = (await res.json()) as Record<string, unknown>
+    )
+    if (response.status < 200 || response.status >= 300) return null
+    const json = parseJsonResponse(response.body) as Record<string, unknown>
     if (json["success"] === false) return null
     const data = json["data"] as Record<string, unknown> | undefined
     if (!data || typeof data !== "object") return null
@@ -204,8 +249,27 @@ export async function scrapeFirecrawlMarkdown(url: string, maxChars: number, api
     return { text, contentType: "text/markdown", via: "firecrawl" }
   } catch {
     return null
-  } finally {
-    clearTimeout(t)
+  }
+}
+
+function parseJsonResponse(body: Uint8Array): unknown {
+  return JSON.parse(new TextDecoder("utf8", { fatal: false }).decode(body))
+}
+
+export function normalizeSearchResultUrl(raw: string): string | null {
+  if (!raw) return null
+  try {
+    const parsed = new URL(raw)
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      parsed.username ||
+      parsed.password
+    ) {
+      return null
+    }
+    return parsed.toString()
+  } catch {
+    return null
   }
 }
 

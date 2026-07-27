@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
 import { hostname } from "node:os"
+import { isDeepStrictEqual } from "node:util"
 import {
+  type AgentMailboxMessage,
   type BackgroundTaskRecord,
   type BackgroundTaskStatus,
   type MemoryRecord,
@@ -18,7 +20,12 @@ import {
 } from "../types.js"
 import { canonicalProjectRoot } from "../session/storage.js"
 import { atomicWriteFile, atomicWriteJson, withFileLock } from "../storage/durable-fs.js"
-import { normalizeMemoryRecord, redactMemorySecrets } from "../memory/index.js"
+import {
+  assertMemoryWriteInput,
+  normalizeMemoryRecord,
+  redactMemorySecrets,
+  sanitizeMemoryValue,
+} from "../memory/index.js"
 
 type StoredRuntimeState = {
   tasks: TaskRecord[]
@@ -27,12 +34,19 @@ type StoredRuntimeState = {
   backgroundTasks: BackgroundTaskRecord[]
   memories: MemoryRecord[]
   remoteSessions: RemoteSessionRecord[]
+  /**
+   * Optional only for checksum-compatible reads of schema-v2 snapshots written
+   * before the delegated-agent mailbox was introduced.
+   */
+  agentMessages?: AgentMailboxMessage[]
 }
 
 type RuntimeWriter = {
   pid: number
   hostname: string
   instanceId: string
+  /** Stable for this Node process and changes when a PID is reused. */
+  processStartTime?: number
 }
 
 type RuntimeSnapshot = {
@@ -93,6 +107,18 @@ export interface OrchestrationRuntimeOptions {
   onDiagnostic?: (diagnostic: OrchestrationDiagnostic) => void
 }
 
+export interface SessionRecordDeletionResult {
+  removedTasks: number
+  removedBackgroundTasks: number
+  removedRemoteSessions: number
+  removedAgentMessages: number
+  removedMemories: number
+  removedTeams: number
+  updatedTeams: number
+  removedSnapshots: number
+  retainedSnapshots: number
+}
+
 export class OrchestrationCorruptionError extends Error {
   constructor(
     readonly statePath: string,
@@ -113,6 +139,16 @@ export class OrchestrationInvariantError extends Error {
 const RUNTIME_SCHEMA_VERSION = 2
 const DEFAULT_COMPACT_AFTER_RECORDS = 32
 const DEFAULT_COMPACT_AFTER_BYTES = 4 * 1024 * 1024
+const AGENT_MESSAGE_MAX_BYTES = 64 * 1024
+const AGENT_MESSAGE_MAX_PENDING_PER_TARGET = 1_000
+const AGENT_MESSAGE_MAX_ACKED_PER_TARGET = 1_000
+const AGENT_MESSAGE_MAX_ACK_BATCH = 128
+const AGENT_MESSAGE_MAX_ID_CHARS = 256
+const AGENT_MESSAGE_MAX_LABEL_CHARS = 256
+const MAX_SESSION_SNAPSHOT_DELETIONS = 2_048
+const CURRENT_PROCESS_START_TIME = Math.round(
+  Date.now() - process.uptime() * 1000,
+)
 
 function emptyRuntimeState(): StoredRuntimeState {
   return {
@@ -122,6 +158,7 @@ function emptyRuntimeState(): StoredRuntimeState {
     backgroundTasks: [],
     memories: [],
     remoteSessions: [],
+    agentMessages: [],
   }
 }
 
@@ -137,6 +174,7 @@ function normalizeRuntimeState(value: unknown, statePath: string): StoredRuntime
     "backgroundTasks",
     "memories",
     "remoteSessions",
+    "agentMessages",
   ]
   for (const field of fields) {
     if (candidate[field] !== undefined && !Array.isArray(candidate[field])) {
@@ -150,6 +188,116 @@ function normalizeRuntimeState(value: unknown, statePath: string): StoredRuntime
     backgroundTasks: [...(candidate.backgroundTasks ?? [])],
     memories: [...(candidate.memories ?? [])],
     remoteSessions: [...(candidate.remoteSessions ?? [])],
+    ...(candidate.agentMessages === undefined
+      ? {}
+      : { agentMessages: [...candidate.agentMessages] }),
+  }
+}
+
+function boundedMailboxString(
+  value: unknown,
+  label: string,
+  maxChars = AGENT_MESSAGE_MAX_LABEL_CHARS,
+): string {
+  if (typeof value !== "string") {
+    throw new OrchestrationInvariantError(`${label} must be a string`)
+  }
+  const normalized = value.trim()
+  if (!normalized) {
+    throw new OrchestrationInvariantError(`${label} must not be empty`)
+  }
+  if (normalized.length > maxChars || /[\u0000-\u001f\u007f]/u.test(normalized)) {
+    throw new OrchestrationInvariantError(`${label} is too long or contains control characters`)
+  }
+  return normalized
+}
+
+function boundedMailboxBody(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new OrchestrationInvariantError("Agent message must be a string")
+  }
+  const normalized = value.trim()
+  if (!normalized) {
+    throw new OrchestrationInvariantError("Agent message must not be empty")
+  }
+  if (Buffer.byteLength(normalized, "utf8") > AGENT_MESSAGE_MAX_BYTES) {
+    throw new OrchestrationInvariantError(
+      `Agent message is too long (maximum ${AGENT_MESSAGE_MAX_BYTES} bytes)`,
+    )
+  }
+  return normalized
+}
+
+function normalizeStoredAgentMessage(
+  value: unknown,
+  statePath: string,
+): AgentMailboxMessage {
+  if (!value || typeof value !== "object") {
+    throw new OrchestrationCorruptionError(
+      statePath,
+      "agentMessages contains a non-object record",
+    )
+  }
+  const candidate = value as Partial<AgentMailboxMessage>
+  try {
+    const record: AgentMailboxMessage = {
+      id: boundedMailboxString(
+        candidate.id,
+        "Agent message id",
+        AGENT_MESSAGE_MAX_ID_CHARS,
+      ),
+      ownerSessionId: boundedMailboxString(
+        candidate.ownerSessionId,
+        "Agent message owner session id",
+      ),
+      targetAgentId: boundedMailboxString(
+        candidate.targetAgentId,
+        "Agent message target id",
+      ),
+      sequence: candidate.sequence as number,
+      from: boundedMailboxString(candidate.from, "Agent message sender"),
+      message: boundedMailboxBody(candidate.message),
+      createdAt: candidate.createdAt as number,
+      ...(candidate.ackedAt === undefined
+        ? {}
+        : { ackedAt: candidate.ackedAt }),
+      ...(candidate.acknowledgedBySessionId === undefined
+        ? {}
+        : {
+            acknowledgedBySessionId: boundedMailboxString(
+              candidate.acknowledgedBySessionId,
+              "Agent message acknowledgement session id",
+            ),
+          }),
+    }
+    if (!Number.isSafeInteger(record.sequence) || record.sequence < 1) {
+      throw new Error("sequence must be a positive safe integer")
+    }
+    if (!Number.isFinite(record.createdAt) || record.createdAt < 0) {
+      throw new Error("createdAt must be a non-negative finite timestamp")
+    }
+    if (
+      record.ackedAt !== undefined &&
+      (!Number.isFinite(record.ackedAt) || record.ackedAt < record.createdAt)
+    ) {
+      throw new Error("ackedAt must be a finite timestamp after createdAt")
+    }
+    if (
+      (record.ackedAt === undefined) !==
+      (record.acknowledgedBySessionId === undefined)
+    ) {
+      throw new Error(
+        "ackedAt and acknowledgedBySessionId must be present together",
+      )
+    }
+    return record
+  } catch (error) {
+    throw new OrchestrationCorruptionError(
+      statePath,
+      `invalid agentMessages record: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
   }
 }
 
@@ -174,7 +322,10 @@ function isRuntimeWriter(value: unknown): value is RuntimeWriter {
     typeof candidate.hostname === "string" &&
     candidate.hostname.length > 0 &&
     typeof candidate.instanceId === "string" &&
-    candidate.instanceId.length > 0
+    candidate.instanceId.length > 0 &&
+    (candidate.processStartTime === undefined ||
+      (Number.isSafeInteger(candidate.processStartTime) &&
+        candidate.processStartTime > 0))
   )
 }
 
@@ -232,14 +383,12 @@ function newId(prefix: string): string {
   return `${prefix}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`
 }
 
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM"
-  }
+function isCurrentRuntimeProcess(writer: RuntimeWriter | undefined): boolean {
+  return (
+    writer?.pid === process.pid &&
+    writer.hostname === hostname() &&
+    writer.processStartTime === CURRENT_PROCESS_START_TIME
+  )
 }
 
 function mapBackgroundKindToTaskKind(kind: BackgroundTaskRecord["kind"]): TaskKind {
@@ -270,6 +419,16 @@ function mapBackgroundStatusToTaskStatus(status: BackgroundTaskStatus): TaskStat
   }
 }
 
+function isInsideDirectory(root: string, target: string): boolean {
+  const relative = path.relative(root, target)
+  return (
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  )
+}
+
 export class OrchestrationRuntime {
   private readonly root: string
   private readonly stateFile: string
@@ -286,6 +445,7 @@ export class OrchestrationRuntime {
   private backgroundTasks = new Map<string, BackgroundTaskRecord>()
   private memories = new Map<string, MemoryRecord>()
   private remoteSessions = new Map<string, RemoteSessionRecord>()
+  private agentMessages = new Map<string, AgentMailboxMessage>()
 
   constructor(readonly cwd: string, options: OrchestrationRuntimeOptions = {}) {
     this.root = getRuntimeDir(cwd, path.resolve(options.homeDir ?? path.join(os.homedir(), ".nexus")))
@@ -295,6 +455,7 @@ export class OrchestrationRuntime {
       pid: process.pid,
       hostname: hostname(),
       instanceId: crypto.randomBytes(12).toString("hex"),
+      processStartTime: CURRENT_PROCESS_START_TIME,
     }
     this.compactAfterRecords = Math.max(
       1,
@@ -310,6 +471,10 @@ export class OrchestrationRuntime {
 
   getStatePath(): string {
     return this.stateFile
+  }
+
+  getRuntimeDirectory(): string {
+    return this.root
   }
 
   getJournalPath(): string {
@@ -342,13 +507,27 @@ export class OrchestrationRuntime {
     this.backgroundTasks.clear()
     this.memories.clear()
     this.remoteSessions.clear()
+    this.agentMessages.clear()
     for (const task of state.tasks) {
         this.tasks.set(task.id, {
           ...task,
           kind: task.kind ?? "tracking",
         })
       }
-    for (const team of state.teams) this.teams.set(team.name, team)
+    for (const team of state.teams) {
+      const sessionIds = Array.isArray(team.sessionIds)
+        ? Array.from(new Set(
+            team.sessionIds.filter(
+              (sessionId): sessionId is string =>
+                typeof sessionId === "string" && sessionId.length > 0,
+            ),
+          ))
+        : []
+      this.teams.set(team.name, {
+        ...team,
+        ...(sessionIds.length > 0 ? { sessionIds } : {}),
+      })
+    }
     for (const worktree of state.worktrees) this.worktrees.set(worktree.id, worktree)
     for (const backgroundTask of state.backgroundTasks) this.backgroundTasks.set(backgroundTask.id, backgroundTask)
     for (const memory of state.memories) {
@@ -356,6 +535,16 @@ export class OrchestrationRuntime {
       this.memories.set(normalized.id, normalized)
     }
     for (const remoteSession of state.remoteSessions) this.remoteSessions.set(remoteSession.id, remoteSession)
+    for (const value of state.agentMessages ?? []) {
+      const message = normalizeStoredAgentMessage(value, this.stateFile)
+      if (this.agentMessages.has(message.id)) {
+        throw new OrchestrationCorruptionError(
+          this.stateFile,
+          `duplicate agent message id: ${message.id}`,
+        )
+      }
+      this.agentMessages.set(message.id, message)
+    }
     for (const backgroundTask of this.backgroundTasks.values()) {
         if (this.tasks.has(backgroundTask.id)) continue
         this.tasks.set(backgroundTask.id, {
@@ -390,6 +579,12 @@ export class OrchestrationRuntime {
       backgroundTasks: Array.from(this.backgroundTasks.values()).sort((a, b) => a.createdAt - b.createdAt),
       memories: Array.from(this.memories.values()).sort((a, b) => a.createdAt - b.createdAt),
       remoteSessions: Array.from(this.remoteSessions.values()).sort((a, b) => a.createdAt - b.createdAt),
+      agentMessages: Array.from(this.agentMessages.values()).sort(
+        (left, right) =>
+          left.createdAt - right.createdAt ||
+          left.sequence - right.sequence ||
+          left.id.localeCompare(right.id),
+      ),
     }
   }
 
@@ -486,12 +681,11 @@ export class OrchestrationRuntime {
     previousWriter?: RuntimeWriter,
   ): boolean {
     if (!this.reconcileStaleRuns) return false
-    if (previousWriter?.hostname === hostname() && isProcessAlive(previousWriter.pid)) return false
+    if (isCurrentRuntimeProcess(previousWriter)) return false
     let changed = false
     const now = Date.now()
     state.backgroundTasks = state.backgroundTasks.map((task) => {
       if (task.status !== "running") return task
-      if (task.kind === "bash" && task.processId && isProcessAlive(task.processId)) return task
       changed = true
       return {
         ...task,
@@ -819,6 +1013,22 @@ export class OrchestrationRuntime {
     }
   }
 
+  private bindTeamToSession(teamName: string, sessionId: string): void {
+    const team = this.teams.get(teamName)
+    if (!team || !sessionId) return
+    const sessionIds = Array.from(new Set([...(team.sessionIds ?? []), sessionId]))
+    if (
+      sessionIds.length === team.sessionIds?.length &&
+      sessionIds.every((candidate, index) => candidate === team.sessionIds?.[index])
+    ) {
+      return
+    }
+    this.teams.set(teamName, {
+      ...team,
+      sessionIds,
+    })
+  }
+
   private assertValidTaskTransition(previous: TaskStatus, next: TaskStatus, taskId: string): void {
     const terminal = new Set<TaskStatus>(["completed", "failed", "killed", "cancelled", "deleted"])
     if (terminal.has(previous) && previous !== next && !terminal.has(next)) {
@@ -903,6 +1113,9 @@ export class OrchestrationRuntime {
       }
       this.assertValidTaskDependencies(task.id, task.blockedBy ?? [])
       this.tasks.set(task.id, task)
+      if (task.teamName && task.sessionId) {
+        this.bindTeamToSession(task.teamName, task.sessionId)
+      }
       this.synchronizeTaskEdges(task.id)
       const synchronized = this.tasks.get(task.id)!
       if (synchronized.status === "completed") this.assertCanComplete(synchronized)
@@ -991,6 +1204,9 @@ export class OrchestrationRuntime {
       this.assertValidTaskTransition(existing.status, next.status, taskId)
       this.assertValidTaskDependencies(taskId, next.blockedBy ?? [])
       this.tasks.set(taskId, next)
+      if (next.teamName && next.sessionId) {
+        this.bindTeamToSession(next.teamName, next.sessionId)
+      }
       this.synchronizeTaskEdges(taskId)
       const synchronized = this.tasks.get(taskId)!
       if (synchronized.status === "completed") this.assertCanComplete(synchronized)
@@ -1002,16 +1218,21 @@ export class OrchestrationRuntime {
     teamName: string
     description: string
     members?: TeamMemberRecord[]
+    sessionId?: string
   }): Promise<TeamRecord> {
     return this.mutate(() => {
       const existing = this.teams.get(input.teamName)
-      if (existing) return existing
+      if (existing) {
+        if (input.sessionId) this.bindTeamToSession(input.teamName, input.sessionId)
+        return this.teams.get(input.teamName)!
+      }
       const team: TeamRecord = {
         name: input.teamName,
         description: input.description,
         createdAt: Date.now(),
         members: input.members ?? [],
         messages: [],
+        ...(input.sessionId ? { sessionIds: [input.sessionId] } : {}),
       }
       this.teams.set(team.name, team)
       return team
@@ -1026,6 +1247,303 @@ export class OrchestrationRuntime {
   async listTeams(): Promise<TeamRecord[]> {
     await this.ensureLoaded()
     return Array.from(this.teams.values()).sort((a, b) => a.createdAt - b.createdAt)
+  }
+
+  async listTeamNamesForSession(sessionId: string): Promise<string[]> {
+    await this.ensureLoaded()
+    const names = new Set<string>()
+    for (const team of this.teams.values()) {
+      if (team.sessionIds?.includes(sessionId)) names.add(team.name)
+    }
+    // Legacy snapshots did not persist TeamRecord.sessionIds. A task carrying
+    // both fields is nevertheless an explicit, durable binding.
+    for (const task of this.tasks.values()) {
+      if (task.sessionId === sessionId && task.teamName) names.add(task.teamName)
+    }
+    return Array.from(names).sort()
+  }
+
+  /**
+   * Transactionally remove session-bound orchestration projections.
+   *
+   * Running work is an ownership conflict, matching Codex thread deletion:
+   * callers must stop it first. Snapshot paths are treated as untrusted
+   * metadata and are unlinked only when they remain regular files inside this
+   * workspace runtime's private `agent-runs` directory.
+   */
+  async deleteSessionRecords(
+    sessionId: string,
+  ): Promise<SessionRecordDeletionResult> {
+    const normalizedSessionId = boundedMailboxString(
+      sessionId,
+      "Session deletion id",
+    )
+    const plan = await this.mutate(async () => {
+      const sessionTasks = Array.from(this.tasks.values()).filter(
+        (task) => task.sessionId === normalizedSessionId,
+      )
+      const sessionBackgroundTasks = Array.from(
+        this.backgroundTasks.values(),
+      ).filter((task) => task.sessionId === normalizedSessionId)
+      const sessionRemoteSessions = Array.from(
+        this.remoteSessions.values(),
+      ).filter((remote) => remote.sessionId === normalizedSessionId)
+      const activeTask = sessionTasks.find(
+        (task) => task.status === "in_progress",
+      )
+      const activeBackgroundTask = sessionBackgroundTasks.find(
+        (task) => task.status === "pending" || task.status === "running",
+      )
+      const activeRemoteSession = sessionRemoteSessions.find(
+        (remote) =>
+          remote.status === "connecting" ||
+          remote.status === "connected" ||
+          remote.status === "reconnecting",
+      )
+      if (activeTask || activeBackgroundTask || activeRemoteSession) {
+        const activeId =
+          activeTask?.id ??
+          activeBackgroundTask?.id ??
+          activeRemoteSession?.id ??
+          "unknown"
+        throw new OrchestrationInvariantError(
+          `Session ${normalizedSessionId} still owns active orchestration work: ${activeId}`,
+        )
+      }
+
+      const snapshotFiles = new Set<string>()
+      for (const task of sessionTasks) {
+        if (typeof task.snapshotFile === "string" && task.snapshotFile) {
+          snapshotFiles.add(task.snapshotFile)
+        }
+      }
+      for (const task of sessionBackgroundTasks) {
+        const snapshotFile = task.metadata?.snapshotFile
+        if (typeof snapshotFile === "string" && snapshotFile) {
+          snapshotFiles.add(snapshotFile)
+        }
+      }
+      if (snapshotFiles.size > MAX_SESSION_SNAPSHOT_DELETIONS) {
+        throw new OrchestrationInvariantError(
+          `Session ${normalizedSessionId} has too many snapshot files for one bounded deletion`,
+        )
+      }
+      // Files go first, while their durable task records still form a retry
+      // ledger. If cleanup or the subsequent state commit fails, a retry can
+      // safely observe missing files and finish the remaining projection.
+      const snapshotCleanup = await this.deleteOwnedSessionSnapshots(
+        Array.from(snapshotFiles),
+      )
+
+      const sessionTeamNames = new Set(
+        sessionTasks
+          .map((task) => task.teamName)
+          .filter((teamName): teamName is string => Boolean(teamName)),
+      )
+      const removedTaskIds = new Set(
+        sessionTasks.map((task) => task.id),
+      )
+      for (const taskId of removedTaskIds) this.tasks.delete(taskId)
+      for (const taskId of sessionBackgroundTasks.map((task) => task.id)) {
+        this.backgroundTasks.delete(taskId)
+      }
+      for (const remote of sessionRemoteSessions) {
+        this.remoteSessions.delete(remote.id)
+      }
+      let removedAgentMessages = 0
+      for (const [messageId, message] of this.agentMessages) {
+        if (message.ownerSessionId !== normalizedSessionId) continue
+        this.agentMessages.delete(messageId)
+        removedAgentMessages += 1
+      }
+
+      let removedMemories = 0
+      for (const memory of this.memories.values()) {
+        const metadataSessionId = memory.metadata?.sessionId
+        if (
+          memory.scope === "session" &&
+          (
+            memory.source.sessionId === normalizedSessionId ||
+            metadataSessionId === normalizedSessionId
+          )
+        ) {
+          this.memories.delete(memory.id)
+          removedMemories += 1
+        }
+      }
+
+      for (const [taskId, task] of this.tasks) {
+        const blocks = (task.blocks ?? []).filter(
+          (id) => !removedTaskIds.has(id),
+        )
+        const blockedBy = (task.blockedBy ?? []).filter(
+          (id) => !removedTaskIds.has(id),
+        )
+        const next: TaskRecord = {
+          ...task,
+          blocks,
+          blockedBy,
+          ...(task.parentTaskId && removedTaskIds.has(task.parentTaskId)
+            ? { parentTaskId: undefined }
+            : {}),
+          ...(task.resumeOf && removedTaskIds.has(task.resumeOf)
+            ? { resumeOf: undefined }
+            : {}),
+          ...(task.forkOf && removedTaskIds.has(task.forkOf)
+            ? { forkOf: undefined }
+            : {}),
+        }
+        if (
+          blocks.length !== (task.blocks ?? []).length ||
+          blockedBy.length !== (task.blockedBy ?? []).length ||
+          next.parentTaskId !== task.parentTaskId ||
+          next.resumeOf !== task.resumeOf ||
+          next.forkOf !== task.forkOf
+        ) {
+          next.updatedAt = Date.now()
+          this.tasks.set(taskId, next)
+        }
+      }
+
+      let removedTeams = 0
+      let updatedTeams = 0
+      for (const [teamName, team] of this.teams) {
+        const hasExplicitBinding =
+          team.sessionIds?.includes(normalizedSessionId) ?? false
+        if (!hasExplicitBinding && !sessionTeamNames.has(teamName)) continue
+        const remainingSessionIds = (team.sessionIds ?? []).filter(
+          (id) => id !== normalizedSessionId,
+        )
+        const stillUsedByTask = Array.from(this.tasks.values()).some(
+          (task) => task.teamName === teamName,
+        )
+        if (remainingSessionIds.length === 0 && !stillUsedByTask) {
+          this.teams.delete(teamName)
+          removedTeams += 1
+          continue
+        }
+        // A legacy task is itself an explicit durable binding, even though
+        // older TeamRecord snapshots did not carry `sessionIds`. If another
+        // session still uses that team there is no record field to rewrite.
+        if (!hasExplicitBinding) continue
+        const { sessionIds: _removed, ...withoutSessionIds } = team
+        this.teams.set(teamName, {
+          ...withoutSessionIds,
+          ...(remainingSessionIds.length > 0
+            ? { sessionIds: remainingSessionIds }
+            : {}),
+        })
+        updatedTeams += 1
+      }
+
+      return {
+        removedTasks: sessionTasks.length,
+        removedBackgroundTasks: sessionBackgroundTasks.length,
+        removedRemoteSessions: sessionRemoteSessions.length,
+        removedAgentMessages,
+        removedMemories,
+        removedTeams,
+        updatedTeams,
+        ...snapshotCleanup,
+      }
+    })
+
+    return {
+      removedTasks: plan.removedTasks,
+      removedBackgroundTasks: plan.removedBackgroundTasks,
+      removedRemoteSessions: plan.removedRemoteSessions,
+      removedAgentMessages: plan.removedAgentMessages,
+      removedMemories: plan.removedMemories,
+      removedTeams: plan.removedTeams,
+      updatedTeams: plan.updatedTeams,
+      removedSnapshots: plan.removedSnapshots,
+      retainedSnapshots: plan.retainedSnapshots,
+    }
+  }
+
+  private async deleteOwnedSessionSnapshots(
+    candidates: readonly string[],
+  ): Promise<{
+    removedSnapshots: number
+    retainedSnapshots: number
+  }> {
+    if (candidates.length === 0) {
+      return { removedSnapshots: 0, retainedSnapshots: 0 }
+    }
+    const snapshotRoot = path.resolve(this.root, "agent-runs")
+    const [runtimeInfo, snapshotRootInfo] = await Promise.all([
+      fs.lstat(this.root).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined
+        throw error
+      }),
+      fs.lstat(snapshotRoot).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined
+        throw error
+      }),
+    ])
+    if (
+      !runtimeInfo?.isDirectory() ||
+      runtimeInfo.isSymbolicLink() ||
+      !snapshotRootInfo?.isDirectory() ||
+      snapshotRootInfo.isSymbolicLink()
+    ) {
+      return {
+        removedSnapshots: 0,
+        retainedSnapshots: candidates.length,
+      }
+    }
+
+    const [realRuntimeRoot, realSnapshotRoot] = await Promise.all([
+      fs.realpath(this.root),
+      fs.realpath(snapshotRoot),
+    ])
+    if (!isInsideDirectory(realRuntimeRoot, realSnapshotRoot)) {
+      return {
+        removedSnapshots: 0,
+        retainedSnapshots: candidates.length,
+      }
+    }
+
+    let removedSnapshots = 0
+    let retainedSnapshots = 0
+    for (const rawCandidate of candidates) {
+      const candidate = path.resolve(rawCandidate)
+      if (!isInsideDirectory(snapshotRoot, candidate)) {
+        retainedSnapshots += 1
+        continue
+      }
+      const info = await fs.lstat(candidate).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined
+          throw error
+        },
+      )
+      if (!info) continue
+      if (!info.isFile() || info.isSymbolicLink()) {
+        retainedSnapshots += 1
+        continue
+      }
+      const realCandidate = await fs.realpath(candidate).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined
+          throw error
+        },
+      )
+      if (
+        !realCandidate ||
+        !isInsideDirectory(realSnapshotRoot, realCandidate)
+      ) {
+        retainedSnapshots += 1
+        continue
+      }
+      try {
+        await fs.unlink(candidate)
+        removedSnapshots += 1
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+      }
+    }
+    return { removedSnapshots, retainedSnapshots }
   }
 
   async deleteTeam(teamName: string): Promise<boolean> {
@@ -1108,6 +1626,304 @@ export class OrchestrationRuntime {
         })
       }
       return record
+    })
+  }
+
+  private assertOwnedAgentTarget(
+    ownerSessionId: string,
+    targetAgentId: string,
+  ): BackgroundTaskRecord {
+    const target = this.backgroundTasks.get(targetAgentId)
+    if (
+      !target ||
+      target.kind !== "subagent" ||
+      target.sessionId !== ownerSessionId
+    ) {
+      throw new OrchestrationInvariantError(
+        `Delegated-agent target ${targetAgentId} is not owned by session ${ownerSessionId}`,
+      )
+    }
+    return target
+  }
+
+  private pruneAcknowledgedAgentMessages(
+    ownerSessionId: string,
+    targetAgentId: string,
+  ): void {
+    const acknowledged = Array.from(this.agentMessages.values())
+      .filter(
+        (message) =>
+          message.ownerSessionId === ownerSessionId &&
+          message.targetAgentId === targetAgentId &&
+          message.ackedAt !== undefined,
+      )
+      .sort(
+        (left, right) =>
+          (left.ackedAt ?? 0) - (right.ackedAt ?? 0) ||
+          left.sequence - right.sequence,
+      )
+    const excess =
+      acknowledged.length - AGENT_MESSAGE_MAX_ACKED_PER_TARGET
+    for (let index = 0; index < excess; index += 1) {
+      this.agentMessages.delete(acknowledged[index]!.id)
+    }
+  }
+
+  /**
+   * Resolve only inside one root-session authority. Display names are useful
+   * for model calls, but must be unique among that owner's persisted tasks.
+   */
+  async resolveAgentMessageTarget(input: {
+    ownerSessionId: string
+    target: string
+  }): Promise<string | null> {
+    const ownerSessionId = boundedMailboxString(
+      input.ownerSessionId,
+      "Agent message owner session id",
+    )
+    const target = boundedMailboxString(
+      input.target,
+      "Agent message target",
+    )
+    await this.ensureLoaded()
+    const exact = this.backgroundTasks.get(target)
+    if (
+      exact?.kind === "subagent" &&
+      exact.sessionId === ownerSessionId
+    ) {
+      return exact.id
+    }
+    const matches = Array.from(this.backgroundTasks.values()).filter(
+      (candidate) =>
+        candidate.kind === "subagent" &&
+        candidate.sessionId === ownerSessionId &&
+        typeof candidate.metadata?.name === "string" &&
+        candidate.metadata.name.trim() === target,
+    )
+    if (matches.length > 1) {
+      throw new OrchestrationInvariantError(
+        `Delegated-agent target name is ambiguous for this session: ${target}`,
+      )
+    }
+    return matches[0]?.id ?? null
+  }
+
+  /**
+   * Durably enqueue a message. The explicit id makes retries idempotent; a
+   * reused id with different content is rejected rather than overwritten.
+   */
+  async enqueueAgentMessage(input: {
+    id?: string
+    ownerSessionId: string
+    targetAgentId: string
+    from: string
+    message: string
+  }): Promise<AgentMailboxMessage> {
+    const ownerSessionId = boundedMailboxString(
+      input.ownerSessionId,
+      "Agent message owner session id",
+    )
+    const targetAgentId = boundedMailboxString(
+      input.targetAgentId,
+      "Agent message target id",
+    )
+    const from = boundedMailboxString(input.from, "Agent message sender")
+    const message = boundedMailboxBody(input.message)
+    const id = input.id === undefined
+      ? newId("agentmsg")
+      : boundedMailboxString(
+          input.id,
+          "Agent message id",
+          AGENT_MESSAGE_MAX_ID_CHARS,
+        )
+
+    return this.mutate(() => {
+      this.assertOwnedAgentTarget(ownerSessionId, targetAgentId)
+      const existing = this.agentMessages.get(id)
+      if (existing) {
+        if (
+          existing.ownerSessionId === ownerSessionId &&
+          existing.targetAgentId === targetAgentId &&
+          existing.from === from &&
+          existing.message === message
+        ) {
+          return existing
+        }
+        throw new OrchestrationInvariantError(
+          `Agent message id already exists with different content: ${id}`,
+        )
+      }
+
+      const records = Array.from(this.agentMessages.values()).filter(
+        (candidate) =>
+          candidate.ownerSessionId === ownerSessionId &&
+          candidate.targetAgentId === targetAgentId,
+      )
+      const pendingCount = records.filter(
+        (candidate) => candidate.ackedAt === undefined,
+      ).length
+      if (pendingCount >= AGENT_MESSAGE_MAX_PENDING_PER_TARGET) {
+        throw new OrchestrationInvariantError(
+          `Delegated-agent inbox is full for ${targetAgentId}`,
+        )
+      }
+      const sequence = records.reduce(
+        (highest, candidate) => Math.max(highest, candidate.sequence),
+        0,
+      ) + 1
+      const record: AgentMailboxMessage = {
+        id,
+        ownerSessionId,
+        targetAgentId,
+        sequence,
+        from,
+        message,
+        createdAt: Date.now(),
+      }
+      this.agentMessages.set(record.id, record)
+      this.pruneAcknowledgedAgentMessages(ownerSessionId, targetAgentId)
+      return record
+    })
+  }
+
+  async listPendingAgentMessages(input: {
+    ownerSessionId: string
+    targetAgentId: string
+    limit?: number
+  }): Promise<AgentMailboxMessage[]> {
+    const ownerSessionId = boundedMailboxString(
+      input.ownerSessionId,
+      "Agent message owner session id",
+    )
+    const targetAgentId = boundedMailboxString(
+      input.targetAgentId,
+      "Agent message target id",
+    )
+    const limit = input.limit ?? AGENT_MESSAGE_MAX_ACK_BATCH
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > AGENT_MESSAGE_MAX_ACK_BATCH) {
+      throw new OrchestrationInvariantError(
+        `Agent message limit must be between 1 and ${AGENT_MESSAGE_MAX_ACK_BATCH}`,
+      )
+    }
+    await this.ensureLoaded()
+    return Array.from(this.agentMessages.values())
+      .filter(
+        (message) =>
+          message.ownerSessionId === ownerSessionId &&
+          message.targetAgentId === targetAgentId &&
+          message.ackedAt === undefined,
+      )
+      .sort(
+        (left, right) =>
+          left.sequence - right.sequence ||
+          left.createdAt - right.createdAt ||
+          left.id.localeCompare(right.id),
+      )
+      .slice(0, limit)
+      .map((message) => ({ ...message }))
+  }
+
+  /**
+   * Acknowledge only the next FIFO prefix. Already-acknowledged ids from the
+   * same worker are accepted so crash/retry after a durable checkpoint is safe.
+   */
+  async acknowledgeAgentMessages(input: {
+    ownerSessionId: string
+    targetAgentId: string
+    messageIds: readonly string[]
+    acknowledgedBySessionId: string
+  }): Promise<AgentMailboxMessage[]> {
+    const ownerSessionId = boundedMailboxString(
+      input.ownerSessionId,
+      "Agent message owner session id",
+    )
+    const targetAgentId = boundedMailboxString(
+      input.targetAgentId,
+      "Agent message target id",
+    )
+    const acknowledgedBySessionId = boundedMailboxString(
+      input.acknowledgedBySessionId,
+      "Agent message acknowledgement session id",
+    )
+    const messageIds = Array.from(new Set(input.messageIds.map((id) =>
+      boundedMailboxString(id, "Agent message id", AGENT_MESSAGE_MAX_ID_CHARS))))
+    if (
+      messageIds.length === 0 ||
+      messageIds.length > AGENT_MESSAGE_MAX_ACK_BATCH
+    ) {
+      throw new OrchestrationInvariantError(
+        `Agent message acknowledgement batch must contain 1-${AGENT_MESSAGE_MAX_ACK_BATCH} ids`,
+      )
+    }
+
+    return this.mutate(() => {
+      this.assertOwnedAgentTarget(ownerSessionId, targetAgentId)
+      const requested = messageIds.map((id) => {
+        const record = this.agentMessages.get(id)
+        if (!record) {
+          throw new OrchestrationInvariantError(
+            `Agent message does not exist: ${id}`,
+          )
+        }
+        if (
+          record.ownerSessionId !== ownerSessionId ||
+          record.targetAgentId !== targetAgentId
+        ) {
+          throw new OrchestrationInvariantError(
+            `Agent message ${id} belongs to another owner or target`,
+          )
+        }
+        if (
+          record.acknowledgedBySessionId !== undefined &&
+          record.acknowledgedBySessionId !== acknowledgedBySessionId
+        ) {
+          throw new OrchestrationInvariantError(
+            `Agent message ${id} was acknowledged by another worker session`,
+          )
+        }
+        return record
+      })
+      const requestedPending = requested.filter(
+        (record) => record.ackedAt === undefined,
+      )
+      const pendingPrefix = Array.from(this.agentMessages.values())
+        .filter(
+          (record) =>
+            record.ownerSessionId === ownerSessionId &&
+            record.targetAgentId === targetAgentId &&
+            record.ackedAt === undefined,
+        )
+        .sort(
+          (left, right) =>
+            left.sequence - right.sequence ||
+            left.createdAt - right.createdAt ||
+            left.id.localeCompare(right.id),
+        )
+        .slice(0, requestedPending.length)
+      if (
+        pendingPrefix.length !== requestedPending.length ||
+        pendingPrefix.some(
+          (record, index) => record.id !== requestedPending[index]?.id,
+        )
+      ) {
+        throw new OrchestrationInvariantError(
+          `Agent messages must be acknowledged as a FIFO prefix for ${targetAgentId}`,
+        )
+      }
+
+      const ackedAt = Date.now()
+      const acknowledged = requested.map((record) => {
+        if (record.ackedAt !== undefined) return record
+        const next: AgentMailboxMessage = {
+          ...record,
+          ackedAt: Math.max(ackedAt, record.createdAt),
+          acknowledgedBySessionId,
+        }
+        this.agentMessages.set(next.id, next)
+        return next
+      })
+      this.pruneAcknowledgedAgentMessages(ownerSessionId, targetAgentId)
+      return acknowledged.map((record) => ({ ...record }))
     })
   }
 
@@ -1280,6 +2096,7 @@ export class OrchestrationRuntime {
     contradicts?: string[]
     metadata?: Record<string, unknown>
   }): Promise<MemoryRecord> {
+    assertMemoryWriteInput(input)
     return this.mutate(() => {
       const now = Date.now()
       const title = redactMemorySecrets(input.title)
@@ -1373,6 +2190,7 @@ export class OrchestrationRuntime {
       metadata?: Record<string, unknown | null>
     },
   ): Promise<MemoryRecord | null> {
+    assertMemoryWriteInput(updates)
     return this.mutate(() => {
       const existing = this.memories.get(memoryId)
       if (!existing) return null
@@ -1417,16 +2235,39 @@ export class OrchestrationRuntime {
     contradicts?: string[]
     metadata?: Record<string, unknown>
   }): Promise<MemoryRecord> {
+    assertMemoryWriteInput(input)
     return this.mutate(() => {
-      const existing = Array.from(this.memories.values()).find(
-        (memory) =>
-          memory.scope === input.scope &&
-          memory.title === input.title &&
-          JSON.stringify(memory.metadata ?? {}) === JSON.stringify(input.metadata ?? {}),
-      )
-      const now = Date.now()
       const title = redactMemorySecrets(input.title)
       const content = redactMemorySecrets(input.content)
+      const sanitizedMetadata = input.metadata
+        ? sanitizeMemoryValue(input.metadata, {
+            strict: true,
+            label: "memory metadata",
+          }).value as Record<string, unknown>
+        : undefined
+      const existing = Array.from(this.memories.values()).find(
+        (memory) => {
+          if (memory.scope !== input.scope) return false
+          const legacyUri = sanitizedMetadata?.legacyMemoryUri
+          const legacyType = sanitizedMetadata?.legacyMemoryType
+          if (
+            typeof legacyUri === "string" &&
+            typeof legacyType === "string" &&
+            memory.metadata?.legacyMemoryUri === legacyUri &&
+            memory.metadata?.legacyMemoryType === legacyType
+          ) {
+            return true
+          }
+          return (
+            memory.title === title.text &&
+            isDeepStrictEqual(
+              memory.metadata ?? {},
+              sanitizedMetadata ?? {},
+            )
+          )
+        },
+      )
+      const now = Date.now()
       if (!existing) {
         const created = normalizeMemoryRecord({
           id: newId("memory"),
@@ -1444,7 +2285,7 @@ export class OrchestrationRuntime {
           ...(typeof input.expiresAt === "number" ? { expiresAt: input.expiresAt } : {}),
           ...(input.supersedes ? { supersedes: input.supersedes } : {}),
           ...(input.contradicts ? { contradicts: input.contradicts } : {}),
-          ...(input.metadata ? { metadata: input.metadata } : {}),
+          ...(sanitizedMetadata ? { metadata: sanitizedMetadata } : {}),
         })
         this.memories.set(created.id, created)
         return created
@@ -1465,7 +2306,7 @@ export class OrchestrationRuntime {
           ? "sensitive"
           : "normal",
         updatedAt: now,
-        ...(input.metadata ? { metadata: { ...input.metadata } } : {}),
+        ...(sanitizedMetadata ? { metadata: { ...sanitizedMetadata } } : {}),
       })
       this.memories.set(updated.id, updated)
       return updated

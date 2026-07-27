@@ -2,7 +2,26 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as readline from "node:readline"
 import { execa } from "execa"
-import type { IHost, AgentEvent, ApprovalAction, PermissionResult, DiagnosticItem, McpAuthRequest, McpAuthResult } from "@nexuscode/core"
+import {
+  authorizeNetworkRequest as authorizePublicNetworkRequest,
+  approvalGrantKey,
+  grantWorkspaceAuthority,
+  resolveAuthorizedWorkspacePath,
+} from "@nexuscode/core"
+import type {
+  AgentEvent,
+  ApprovalAction,
+  AuthorizedNetworkRequest,
+  DiagnosticItem,
+  HostNetworkRequest,
+  HostPathAccess,
+  HostReadFileOptions,
+  IHost,
+  McpAuthRequest,
+  McpAuthResult,
+  PermissionResult,
+  WorkspaceAuthorityStoreOptions,
+} from "@nexuscode/core"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
@@ -50,6 +69,7 @@ export class CliHost implements IHost {
     autoApprove = false,
     tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null },
     private readonly nonInteractivePolicy: NonInteractiveApprovalPolicy = {},
+    private readonly authorityStoreOptions: WorkspaceAuthorityStoreOptions = {},
   ) {
     this.cwd = cwd
     this.eventEmitter = onEvent
@@ -57,9 +77,41 @@ export class CliHost implements IHost {
     this.tuiApprovalRef = tuiApprovalRef
   }
 
-  async readFile(filePath: string): Promise<string> {
+  async resolvePath(
+    filePath: string,
+    access: HostPathAccess,
+  ): Promise<string> {
+    const absPath = this.resolve(filePath)
+    this.checkPathSecurity(absPath, access === "list" ? "read" : access)
+    return absPath
+  }
+
+  async authorizeNetworkRequest(
+    request: HostNetworkRequest,
+  ): Promise<AuthorizedNetworkRequest> {
+    return authorizePublicNetworkRequest(request)
+  }
+
+  async readFile(
+    filePath: string,
+    options: HostReadFileOptions = {},
+  ): Promise<string> {
     const absPath = this.resolve(filePath)
     this.checkPathSecurity(absPath, "read")
+    const stat = await fs.stat(absPath)
+    if (stat.isDirectory()) {
+      throw new Error(`Path is a directory: ${filePath}`)
+    }
+    if (
+      typeof options.maxBytes === "number" &&
+      Number.isSafeInteger(options.maxBytes) &&
+      options.maxBytes >= 0 &&
+      stat.size > options.maxBytes
+    ) {
+      throw new Error(
+        `File exceeds the ${options.maxBytes}-byte host read limit`,
+      )
+    }
     return fs.readFile(absPath, "utf8")
   }
 
@@ -91,9 +143,10 @@ export class CliHost implements IHost {
   }
 
   async runCommand(command: string, cwd: string, signal?: AbortSignal) {
+    const commandCwd = this.resolve(cwd || this.cwd)
     const result = await execa(command, {
       shell: true,
-      cwd: cwd || this.cwd,
+      cwd: commandCwd,
       reject: false,
       timeout: 120_000,
       cancelSignal: signal,
@@ -105,7 +158,11 @@ export class CliHost implements IHost {
     }
   }
 
-  async showApprovalDialog(action: ApprovalAction): Promise<PermissionResult> {
+  async showApprovalDialog(
+    action: ApprovalAction,
+    signal?: AbortSignal,
+  ): Promise<PermissionResult> {
+    if (signal?.aborted) return { approved: false }
     if (this.autoApprove) return { approved: true }
 
     if (!this.tuiApprovalRef && !process.stdin.isTTY) {
@@ -126,23 +183,44 @@ export class CliHost implements IHost {
     if (action.type === "read") return { approved: true }
 
     // Check "always approve" memory for this session
-    const alwaysKey = `${action.type}:${action.tool}`
+    const alwaysKey = approvalGrantKey(action)
     if (this.alwaysApproved.has(alwaysKey)) return { approved: true }
 
     // TUI mode: don't use readline — return Promise resolved by TUI when user types y/n/a/s
     if (this.tuiApprovalRef) {
       return new Promise<PermissionResult>(resolve => {
-        this.tuiApprovalRef!.current = (result: PermissionResult) => {
-          this.tuiApprovalRef!.current = null
+        let settled = false
+        const finish = (result: PermissionResult) => {
+          if (settled) return
+          settled = true
+          signal?.removeEventListener("abort", onAbort)
+          if (this.tuiApprovalRef?.current === resolver) {
+            this.tuiApprovalRef.current = null
+          }
           if (result.alwaysApprove) this.alwaysApproved.add(alwaysKey)
           if (result.skipAll) this.autoApprove = true
           resolve(result)
         }
+        const resolver = (result: PermissionResult) => finish(result)
+        const onAbort = () => finish({ approved: false })
+        signal?.addEventListener("abort", onAbort, { once: true })
+        if (signal?.aborted) onAbort()
+        if (!settled) this.tuiApprovalRef!.current = resolver
       })
     }
 
     // Non-TUI: use readline (e.g. --print or headless)
     return new Promise(resolve => {
+      let settled = false
+      let rl: readline.Interface | undefined
+      const finish = (result: PermissionResult) => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener("abort", onAbort)
+        rl?.close()
+        resolve(result)
+      }
+      const onAbort = () => finish({ approved: false })
       const lines: string[] = [""]
 
       if (action.type === "execute") {
@@ -175,6 +253,9 @@ export class CliHost implements IHost {
         lines.push(`\x1b[1;35m🧩 Plugin action:\x1b[0m`)
         lines.push(`  \x1b[36m${action.description}\x1b[0m`)
         if (action.warning) lines.push(`  \x1b[33m${action.warning}\x1b[0m`)
+      } else if (action.type === "browser") {
+        lines.push(`\x1b[1;34m🌐 Public network request:\x1b[0m`)
+        lines.push(`  \x1b[36m${action.description}\x1b[0m`)
       } else if (action.type === "doom_loop") {
         lines.push(`\x1b[1;31m⚠ Potential infinite loop detected:\x1b[0m`)
         lines.push(`  \x1b[31m${action.description}\x1b[0m`)
@@ -189,26 +270,26 @@ export class CliHost implements IHost {
       process.stdout.write(lines.join("\n"))
       process.stdout.write(`\x1b[1mAllow? \x1b[0m`)
 
-      const rl = readline.createInterface({
+      rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
         terminal: process.stdout.isTTY,
       })
+      signal?.addEventListener("abort", onAbort, { once: true })
+      if (signal?.aborted) onAbort()
 
       rl.once("line", (answer: string) => {
         const lower = answer.trim().toLowerCase()
         if (lower === "i" || lower === "instruct") {
           process.stdout.write(`\x1b[90mWhat to do instead? \x1b[0m`)
           rl.once("line", (instruction: string) => {
-            rl.close()
-            resolve({
+            finish({
               approved: false,
               whatToDoInstead: instruction.trim() || undefined,
             })
           })
           return
         }
-        rl.close()
         const addToAllowed = action.type === "execute" && (lower === "e" || lower === "add")
         const approved = ["y", "yes", "a", "always", "s", "skip"].includes(lower) || addToAllowed
         const alwaysApprove = lower === "a" || lower === "always"
@@ -221,7 +302,7 @@ export class CliHost implements IHost {
           this.autoApprove = true
         }
 
-        resolve({
+        finish({
           approved,
           alwaysApprove,
           skipAll,
@@ -237,93 +318,36 @@ export class CliHost implements IHost {
   }
 
   async addAllowedCommand(cwd: string, command: string): Promise<void> {
-    const dir = path.join(cwd, ".nexus")
-    const filePath = path.join(dir, "allowed-commands.json")
+    const authorizedCwd = this.resolve(cwd || this.cwd)
     const normalized = command.trim().replace(/\s+/g, " ")
     if (!normalized) return
-    let commands: string[] = []
-    try {
-      const raw = await fs.readFile(filePath, "utf8")
-      const parsed = JSON.parse(raw) as { commands?: string[] }
-      if (Array.isArray(parsed?.commands)) commands = [...parsed.commands]
-    } catch {
-      // File missing or invalid — start fresh
-    }
-    if (commands.includes(normalized)) return
-    commands.push(normalized)
-    await fs.mkdir(dir, { recursive: true })
-    await fs.writeFile(filePath, JSON.stringify({ commands }, null, 2), "utf8")
-
-    // Also append to .nexus/settings.local.json (like .claude)
-    await this.appendToSettingsAllow(dir, normalized)
+    await grantWorkspaceAuthority(
+      authorizedCwd,
+      { kind: "command", value: normalized },
+      this.authorityStoreOptions,
+    )
   }
 
   async addAllowedPattern(cwd: string, pattern: string): Promise<void> {
-    const dir = path.join(cwd, ".nexus")
+    const authorizedCwd = this.resolve(cwd || this.cwd)
     const trimmed = pattern.trim()
     if (!trimmed) return
-    await this.appendToSettingsAllow(dir, trimmed)
+    await grantWorkspaceAuthority(
+      authorizedCwd,
+      { kind: "command-pattern", value: trimmed },
+      this.authorityStoreOptions,
+    )
   }
 
   async addAllowedMcpTool(cwd: string, toolName: string): Promise<void> {
-    const dir = path.join(cwd, ".nexus")
+    const authorizedCwd = this.resolve(cwd || this.cwd)
     const trimmed = toolName.trim()
     if (!trimmed) return
-    const settingsLocalPath = path.join(dir, "settings.local.json")
-    let settings: { permissions?: { allowedMcpTools?: string[]; allow?: string[]; deny?: string[]; ask?: string[] } } = {}
-    try {
-      const raw = await fs.readFile(settingsLocalPath, "utf8")
-      settings = JSON.parse(raw) as typeof settings
-    } catch {
-      // File missing or invalid
-    }
-    if (!settings.permissions) settings.permissions = {}
-    const list = settings.permissions.allowedMcpTools ?? []
-    if (!list.includes(trimmed)) {
-      list.push(trimmed)
-      settings.permissions.allowedMcpTools = list
-      if (!settings.permissions.deny) settings.permissions.deny = []
-      if (!settings.permissions.ask) settings.permissions.ask = []
-      await fs.mkdir(dir, { recursive: true })
-      await fs.writeFile(settingsLocalPath, JSON.stringify(settings, null, 2), "utf8")
-      await this.mirrorClaudeSettingsLocal(cwd, settings)
-    }
-  }
-
-  private async appendToSettingsAllow(dir: string, entry: string): Promise<void> {
-    const settingsLocalPath = path.join(dir, "settings.local.json")
-    let settings: { permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } } = {}
-    try {
-      const raw = await fs.readFile(settingsLocalPath, "utf8")
-      settings = JSON.parse(raw) as typeof settings
-    } catch {
-      // File missing or invalid
-    }
-    if (!settings.permissions) settings.permissions = {}
-    const allow = settings.permissions.allow ?? []
-    if (!allow.includes(entry)) {
-      allow.push(entry)
-      settings.permissions.allow = allow
-      if (!settings.permissions.deny) settings.permissions.deny = []
-      if (!settings.permissions.ask) settings.permissions.ask = []
-      await fs.mkdir(dir, { recursive: true })
-      await fs.writeFile(settingsLocalPath, JSON.stringify(settings, null, 2), "utf8")
-      await this.mirrorClaudeSettingsLocal(path.dirname(dir), settings)
-    }
-  }
-
-  private async mirrorClaudeSettingsLocal(cwd: string, settings: {
-    permissions?: { allow?: string[]; deny?: string[]; ask?: string[]; allowedMcpTools?: string[] }
-  }): Promise<void> {
-    const claudeDir = path.join(cwd, ".claude")
-    try {
-      const stat = await fs.stat(claudeDir)
-      if (!stat.isDirectory()) return
-    } catch {
-      return
-    }
-    await fs.mkdir(claudeDir, { recursive: true })
-    await fs.writeFile(path.join(claudeDir, "settings.local.json"), JSON.stringify(settings, null, 2), "utf8")
+    await grantWorkspaceAuthority(
+      authorizedCwd,
+      { kind: "mcp-tool", value: trimmed },
+      this.authorityStoreOptions,
+    )
   }
 
   async getProblems(): Promise<DiagnosticItem[]> {
@@ -336,7 +360,8 @@ export class CliHost implements IHost {
       request.startUrl ? `Open this URL: ${request.startUrl}` : "",
     ].filter(Boolean)
     return {
-      success: Boolean(request.startUrl),
+      success: false,
+      ...(request.startUrl ? { pending: true } : {}),
       message: lines.join("\n"),
     }
   }
@@ -389,10 +414,9 @@ export class CliHost implements IHost {
     this.pendingFileEdits.delete(key)
   }
 
-  /** Resolve path relative to cwd if not absolute */
+  /** Resolve and authorize a path against this host's exact workspace root. */
   private resolve(filePath: string): string {
-    if (path.isAbsolute(filePath)) return filePath
-    return path.resolve(this.cwd, filePath)
+    return resolveAuthorizedWorkspacePath(this.cwd, filePath)
   }
 
   /** Guard against reading/writing sensitive paths */

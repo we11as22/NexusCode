@@ -1,5 +1,6 @@
 import type { ToolDef } from "../../types.js"
 import { readFileTool } from "./read-file.js"
+import { toolOutputReadTool } from "./tool-output-read.js"
 import { writeFileTool } from "./write-file.js"
 import { editTool } from "./replace-in-file.js"
 import { bashTool } from "./execute-command.js"
@@ -22,7 +23,6 @@ import {
 import { parallelTool } from "./parallel.js"
 import {
   enterPlanModeTool,
-  exitPlanModeTool,
   sendUserMessageTool,
   toolSearchTool,
   taskCreateTool,
@@ -85,6 +85,7 @@ export function getAllBuiltinTools(): ToolDef[] {
     parallelTool,
     toolSearchTool,
     readFileTool,
+    toolOutputReadTool,
     listTool,
     listDefinitionsTool,
     lspTool,
@@ -154,7 +155,6 @@ export function getAllBuiltinTools(): ToolDef[] {
 
     condenseTool,
     planExitTool,
-    exitPlanModeTool,
 
     useSkillTool,
   ]
@@ -162,6 +162,7 @@ export function getAllBuiltinTools(): ToolDef[] {
 
 export {
   readFileTool,
+  toolOutputReadTool,
   writeFileTool,
   editTool,
   parallelTool,
@@ -185,7 +186,6 @@ export {
   condenseTool,
   planExitTool,
   enterPlanModeTool,
-  exitPlanModeTool,
   toolSearchTool,
   taskCreateTool,
   taskGetTool,

@@ -4,6 +4,8 @@ export { getNexusDataDir, getToolOutputDir, getRunLogsDir } from "./data-dir.js"
 // Config
 export {
   loadConfig,
+  patchGlobalConfig,
+  patchProjectConfig,
   writeConfig,
   writeGlobalProfiles,
   getGlobalConfigDir,
@@ -13,14 +15,43 @@ export {
   writeProjectSettings,
   writeGlobalSettings,
   applySecretsToConfig,
+  finalizeConfigCredentials,
+  mergeNexusConfigLayers,
   stripSecretsFromConfig,
   stripProfileSecrets,
   getSecretsPayloadFromConfig,
   persistSecretsFromConfig,
+  getConfigEnvironment,
+  getPendingProjectAuthorityRequests,
+  getPendingProjectMcpServers,
+  createPendingProjectAuthorityRequest,
+  fingerprintProjectAuthorityPayload,
+  isValidPendingProjectAuthorityRequest,
+  PROJECT_AUTHORITY_REQUEST_KINDS,
   createFileSecretsStore,
+  ConfigFileError,
+  ConfigSubstitutionError,
+  ConfigValidationError,
   NEXUS_SECRETS_STORAGE_KEY,
+  ProfileCredentialCollisionError,
+  SecretsCorruptionError,
+  UnsafeConfigWriteError,
+  UnsupportedSecretsVersionError,
 } from "./config/index.js"
-export type { ProjectSettings, NexusSecretsStore, NexusSecretsPayload } from "./config/index.js"
+export type {
+  FinalizeConfigCredentialsOptions,
+  NexusSecretsPayload,
+  NexusSecretsStore,
+  PendingProjectMcpServer,
+  PendingProjectAuthorityRequest,
+  PersistSecretsOptions,
+  ProfileCredentialRemoval,
+  ProjectAuthorityPayloadByKind,
+  ProjectAuthorityRequestKind,
+  ProjectSettings,
+  SecretsCorruptionReason,
+  SecretsRemoval,
+} from "./config/index.js"
 export { NexusConfigSchema, McpServerConfigSchema } from "./config/schema.js"
 export type {
   NexusConfig,
@@ -35,8 +66,8 @@ export type {
 // Types
 export { MODES } from "./types.js"
 export type {
-  Mode, IHost, ISession, IIndexer,
-  AgentEvent, ToolDef, ToolResult, ToolContext,
+  Mode, IHost, ISession, IIndexer, SkillAuthority,
+  AgentEvent, ToolDef, ToolResult, ToolContext, ToolIntegrationProvenance,
   SessionMessage, ToolPart, MessagePart, TextPart,
   IndexSearchResult, IndexSearchOptions, IndexStatus, SymbolKind,
   CheckpointEntry, ChangedFile,
@@ -44,13 +75,72 @@ export type {
   TaskStatus, TaskKind, TaskRecord, TeamRecord, AgentDefinition, BackgroundTaskRecord,
   RemoteSessionRecord, WorktreeSession, DeferredToolDef, MemoryRecord, PluginManifestRecord,
   LspOperation, LspPosition, LspRange, LspLocation, LspSymbolRecord, LspCallRecord, LspQueryRequest, LspQueryResult,
-  ModeChangeResult, WorkingDirectoryChangeResult, McpAuthRequest, McpAuthResult,
+  ModeChangeResult, WorkingDirectoryChangeResult, McpAuthRequest, McpAuthResult, HostReadFileOptions, HostPathAccess,
+  NetworkRequestPurpose, HostNetworkRequest, ResolvedNetworkAddress, AuthorizedNetworkRequest,
 } from "./types.js"
 export {
+  NetworkPolicyError,
+  NetworkRequestError,
+  authorizeNetworkRequest,
+  isPublicNetworkAddress,
+  nodePinnedTransport,
+  requestNetworkResource,
+} from "./network/index.js"
+export { approvalGrantKey } from "./security/approval-grant.js"
+export type {
+  NetworkPolicyErrorCode,
+  NetworkPolicyOptions,
+  NetworkResolver,
+  NetworkRequestErrorCode,
+  NetworkRequestOptions,
+  NetworkResourceResponse,
+  NetworkTransport,
+  NetworkTransportRequest,
+  NetworkTransportResponse,
+} from "./network/index.js"
+export {
+  WorkspacePathAuthorizationError,
+  resolveAuthorizedWorkspacePath,
+} from "./security/workspace-path.js"
+export type {
+  WorkspacePathAuthorizationErrorCode,
+} from "./security/workspace-path.js"
+export {
+  WORKSPACE_AUTHORITY_STORE_VERSION,
+  WorkspaceAuthorityStoreError,
+  applyWorkspaceAuthorityGrants,
+  approveWorkspaceProjectAuthority,
+  getWorkspaceAuthorityIdentity,
+  getWorkspaceAuthorityStorePath,
+  grantWorkspaceAuthority,
+  hydrateWorkspaceAuthority,
+  listWorkspaceAuthorities,
+  loadWorkspaceAuthority,
+  revokeWorkspaceAuthority,
+  revokeWorkspaceProjectAuthority,
+} from "./security/workspace-authority.js"
+export type {
+  WorkspaceAuthorityGrant,
+  WorkspaceAuthorityGrants,
+  WorkspaceAuthorityIdentity,
+  WorkspaceAuthorityRecord,
+  WorkspaceAuthorityStoreErrorCode,
+  WorkspaceAuthorityStoreOptions,
+  WorkspaceProjectAuthorityApproval,
+} from "./security/workspace-authority.js"
+export {
+  MAX_MEMORY_CONTENT_CHARS,
+  MAX_MEMORY_IDENTIFIER_CHARS,
+  MAX_MEMORY_RELATION_IDS,
+  MAX_MEMORY_SOURCE_URI_CHARS,
+  MAX_MEMORY_TITLE_CHARS,
   MEMORY_SCHEMA_VERSION,
+  MemoryValueLimitError,
+  assertMemoryWriteInput,
   normalizeMemoryRecord,
   redactMemorySecrets,
   retrieveMemories,
+  sanitizeMemoryValue,
   tokenizeMemoryText,
 } from "./memory/index.js"
 export {
@@ -70,10 +160,32 @@ export type {
   MemoryRetrievalOptions,
   MemoryRetrievalResult,
   RetrievedMemory,
+  SanitizedMemoryValue,
 } from "./memory/index.js"
 
 // Provider
-export { createLLMClient, createEmbeddingClient } from "./provider/index.js"
+export {
+  createLLMClient,
+  createEmbeddingClient,
+  canonicalizeCredentialDestination,
+  credentialIdentityKey,
+  getEmbeddingCredentialIdentity,
+  getProviderCredentialIdentity,
+  mergeEmbeddingConfigSafely,
+  mergeModelPresetSelection,
+  mergeProviderConfigSafely,
+  mergeProviderConfigPartialSafely,
+  normalizeAwsRegion,
+  normalizeAzureResourceName,
+  resolveEmbeddingCredential,
+  resolveProviderCredential,
+  selectProviderProfile,
+} from "./provider/index.js"
+export type {
+  CredentialIdentity,
+  CredentialPurpose,
+  ResolvedCredential,
+} from "./provider/index.js"
 export type { LLMClient, EmbeddingClient } from "./provider/types.js"
 
 // Session
@@ -96,6 +208,8 @@ export {
   getSessionStorageDiagnostics,
 } from "./session/index.js"
 export type {
+  DeleteSessionOptions,
+  PersistedToolOutputProtection,
   SaveSessionOptions,
   SessionStorageDiagnostic,
   SessionStorageDiagnosticCode,
@@ -110,15 +224,29 @@ export { createCompaction } from "./session/compaction.js"
 // Server client (extension + CLI when serverUrl is set)
 export {
   NexusServerClient,
+  canonicalizeNexusServerBaseUrl,
   DEFAULT_HEARTBEAT_TIMEOUT_MS,
+  getNexusServerTokenSecretKey,
+  isLoopbackNexusServerDestination,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
 } from "./server-client.js"
-export type { NexusServerClientOptions } from "./server-client.js"
+export type {
+  AttachSessionTurnOptions,
+  NexusServerClientOptions,
+  RunSessionTurnOptions,
+  SessionApprovalIdentity,
+  SessionTurnIdentity,
+} from "./server-client.js"
 
 // Agent
 export { runAgentLoop } from "./agent/loop.js"
-export { MODE_TOOL_GROUPS, TOOL_GROUP_MEMBERS, READ_ONLY_TOOLS, getBuiltinToolsForMode } from "./agent/modes.js"
-export { classifyTools, classifySkills } from "./agent/classifier.js"
+export {
+  BROWSER_TOOLS,
+  MODE_TOOL_GROUPS,
+  TOOL_GROUP_MEMBERS,
+  READ_ONLY_TOOLS,
+  getBuiltinToolsForMode,
+} from "./agent/modes.js"
 export { buildSystemPrompt } from "./agent/prompts/components/index.js"
 export {
   ParallelAgentManager,
@@ -133,6 +261,8 @@ export {
   createTaskCreateBatchTool,
   createTaskSnapshotTool,
   createTaskResumeTool,
+  registerInheritedRunTools,
+  restrictDelegatedMode,
   type SubAgentRuntimeContext,
 } from "./agent/parallel.js"
 export {
@@ -171,6 +301,21 @@ export {
   type PluginDiscoveryResult,
 } from "./plugins/index.js"
 export {
+  DEFAULT_PLUGIN_FINGERPRINT_LIMITS,
+  PluginTrustStoreCorruptionError,
+  UnsafePluginContentError,
+  evaluatePluginTrust,
+  getPluginTrustStorePath,
+  grantPluginTrust,
+  listPluginTrustGrants,
+  revokePluginTrust,
+  type PluginFingerprintLimits,
+  type PluginTrustEvaluation,
+  type PluginTrustGrant,
+  type PluginTrustReason,
+  type PluginTrustStoreOptions,
+} from "./plugins/trust.js"
+export {
   loadPluginRuntimeRecords,
   loadTrustedPluginRuntimeRecords,
   applyPluginRuntimeSettings,
@@ -197,9 +342,40 @@ export type {
 // Tools
 export { ToolRegistry, type RegistrationResult } from "./tools/registry.js"
 export {
+  WorkspaceToolContributionManager,
+  WorkspaceToolContributionManagerClosedError,
+  registerToolContributionSnapshot,
+  type ToolContributionDiagnostic,
+  type ToolContributionDiagnosticCode,
+  type ToolContributionSnapshot,
+  type WorkspaceToolContributionManagerOptions,
+} from "./tools/custom/manager.js"
+export {
+  CustomToolTrustStore,
+  CustomToolTrustStoreError,
+  UnsafeCustomToolSourceError,
+  DEFAULT_EXECUTABLE_TREE_LIMITS,
+  fingerprintExecutableTree,
+  type CustomToolTrustEvaluation,
+  type CustomToolTrustGrant,
+  type CustomToolTrustReason,
+  type CustomToolTrustStoreOptions,
+  type ExecutableTreeLimits,
+  type ExecutableTreeSnapshot,
+} from "./tools/custom/tree-trust.js"
+export {
   createNexusRunServices,
+  closeNexusRunServices,
   type NexusRunServices,
 } from "./agent/run-services.js"
+export {
+  BackgroundProcessSupervisor,
+  type BackgroundProcessRecord,
+} from "./agent/background-process-supervisor.js"
+export {
+  WorkspaceTaskSupervisor,
+  type WorkspaceTaskHandle,
+} from "./runtime/workspace-task-supervisor.js"
 export {
   executeToolPipeline,
   type ToolExecutionEnvironment,
@@ -277,6 +453,13 @@ export {
   type LegacyMemoryImportResult,
 } from "./context/legacy-memory-import.js"
 export { runAutoMemoryDreamIfDue } from "./context/auto-dream.js"
+export {
+  scheduleToolOutputMaintenance,
+} from "./context/tool-output-maintenance.js"
+export type {
+  ToolOutputMaintenanceOptions,
+  ToolOutputMaintenanceResult,
+} from "./context/truncate.js"
 export { estimateTokens } from "./context/condense.js"
 export {
   computeContextUsageMetrics,
@@ -288,11 +471,17 @@ export type { ContextUsageSnapshot } from "./context/context-usage.js"
 
 // Skills
 export { loadSkills } from "./skills/manager.js"
+export type {
+  SkillLoadDiagnostic,
+  SkillLoadDiagnosticCode,
+  SkillLoadOptions,
+} from "./skills/manager.js"
 export {
   loadSkillToolCatalogRows,
   resolveSkillBody,
   buildSkillToolDynamicDescription,
   sampleSkillSiblingFiles,
+  SkillNameAmbiguityError,
 } from "./skills/skill-tool-catalog.js"
 export type { SkillToolDescriptionRow, ResolvedSkillBody } from "./skills/skill-tool-catalog.js"
 export { fetchSkillUrlRegistryRoots } from "./skills/url-registry.js"
@@ -302,16 +491,65 @@ export {
   McpClient,
   testMcpServers,
   buildMcpToolSchema,
+  renderMcpPromptResult,
 } from "./mcp/client.js"
 export type {
   McpClientOptions,
   McpConnectionState,
+  McpPromptArgument,
+  McpPromptContent,
+  McpPromptMessage,
+  McpPromptRef,
+  McpPromptResult,
   McpServerStatus,
+  McpTool,
   McpResourceRef,
   McpResourceContent,
   McpResourceTemplateRef,
 } from "./mcp/client.js"
 export { createMcpTransport, effectiveUrlTransport } from "./mcp/transport-factory.js"
+export type {
+  McpRemoteAuthorizationRequest,
+  McpRemoteRequestAuthorizer,
+  McpTransportFactoryOptions,
+} from "./mcp/types.js"
+export {
+  createMcpAuthorizedFetch,
+  createMcpPinnedLookup,
+  createNodePinnedMcpFetchHop,
+  type McpAuthorizedFetchOptions,
+  type McpNodeRequestFactory,
+  type McpPinnedNodeHopOptions,
+  type McpRemoteFetchHop,
+  type McpRemoteFetchHopRequest,
+} from "./mcp/authorized-fetch.js"
+export {
+  createMcpResourceTools,
+  type McpResourceClient,
+} from "./mcp/resource-tools.js"
+export {
+  MAX_MODEL_TOOL_NAME_CHARS,
+  callableMcpToolName,
+} from "./mcp/tool-name.js"
+export {
+  MAX_REMOTE_MCP_PROMPT_ARGUMENTS,
+  MAX_REMOTE_MCP_PROMPT_ARGUMENT_VALUE_CHARS,
+  MAX_REMOTE_MCP_PROMPT_CATALOG_CHARS,
+  MAX_REMOTE_MCP_PROMPT_COMMANDS,
+  RemoteMcpPromptArgumentSchema,
+  RemoteMcpPromptCatalogSchema,
+  RemoteMcpPromptCommandSchema,
+  RemoteMcpPromptResolveRequestSchema,
+  RemoteMcpPromptResolveResponseSchema,
+  buildRemoteMcpPromptCatalog,
+  mcpPromptCommandName,
+  mcpPromptOpaqueId,
+  type RemoteMcpPromptArgument,
+  type RemoteMcpPromptCatalog,
+  type RemoteMcpPromptCommand,
+  type RemoteMcpPromptResolveRequest,
+  type RemoteMcpPromptResolveResponse,
+} from "./mcp/prompt-transport.js"
 export { resolveBundledMcpServers } from "./mcp/resolve-bundled.js"
 export type { ResolveBundledOptions } from "./mcp/resolve-bundled.js"
 
@@ -331,7 +569,38 @@ export type { DiffFile, DiffHunk, DiffResult } from "./review/types.js"
 // Workspace runtime
 export {
   ManagedWorkspaceRuntime,
+  SESSION_COORDINATOR_STORAGE_PORT_VERSION,
+  SESSION_PROTOCOL_SERVICE_PORT_VERSION,
+  SessionCoordinator,
+  SessionCoordinatorError,
+  settleRuntimeDependency,
   WorkspaceRuntimeRegistry,
+  type AdmittedSessionInput,
+  type AdmitSessionInputCommand,
+  type CoordinatorEvent,
+  type DurableSessionTurn,
+  type FinishTurnCommit,
+  type InterruptTurnCommand,
+  type ModelSelectionSnapshot,
+  type PendingSessionApprovalSnapshot,
+  type QueueTurnCommand,
+  type ResolveApprovalCommand,
+  type SessionCoordinatorOptions,
+  type SessionCoordinatorStorage,
+  type SessionInputPart,
+  type SessionMode,
+  type SessionOwnershipFence,
+  type SessionPhase,
+  type SessionProtocolService,
+  type SessionRuntimeSnapshot,
+  type StartTurnCommand,
+  type SteerTurnCommand,
+  type TurnEpochSnapshot,
+  type TurnExecutionSnapshot,
+  type TurnHandle,
+  type TurnRunner,
+  type TurnRunnerContext,
+  type TurnRunnerResult,
   type WorkspaceOwnedService,
   type WorkspaceRuntime,
   type WorkspaceRuntimeFactory,
@@ -339,5 +608,9 @@ export {
   type WorkspaceRuntimeServices,
 } from "./runtime/index.js"
 
+// Versioned runtime protocol shared by server, CLI, and VS Code adapters.
+export * from "./protocol/index.js"
+
 // Checkpoint
 export { CheckpointTracker, writeCheckpointEntries, readCheckpointEntries } from "./checkpoint/index.js"
+export type { CheckpointStorageOptions } from "./checkpoint/index.js"

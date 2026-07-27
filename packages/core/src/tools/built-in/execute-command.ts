@@ -1,12 +1,12 @@
 import { z } from "zod"
-import { spawn } from "node:child_process"
+import { randomUUID } from "node:crypto"
+import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
 import stripAnsi from "strip-ansi"
 import type { ToolDef, ToolContext } from "../../types.js"
-import { getRunLogsDir, getToolOutputDir } from "../../data-dir.js"
-import { getOrchestrationRuntime } from "../../orchestration/runtime.js"
+import { getRunLogsDir } from "../../data-dir.js"
 import { handleCompletedTaskSideEffects } from "../../orchestration/task-lifecycle.js"
 import {
   detectBlockedSleepPattern,
@@ -16,7 +16,6 @@ import {
 } from "./shell-safety.js"
 import { interpretShellCommandResult } from "./shell-command-semantics.js"
 
-const MAX_OUTPUT_BYTES = 50 * 1024 // 50 KB
 /** Max size of saved full output file (OpenCode-style disk protection). */
 const MAX_TOOL_OUTPUT_FILE_BYTES = 50 * 1024 * 1024 // 50 MB
 const DEFAULT_TIMEOUT = 120_000 // 2 minutes
@@ -26,6 +25,68 @@ const PROGRESS_LIKE_LINE = /%\s*$|progress|downloading|building|extracting|\[\s*
 
 /** Delete run_*.log files older than this (Kilo-style retention). */
 const RUN_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+const BACKGROUND_STOP_GRACE_MS = 1_000
+const LOG_TRUNCATION_MARKER =
+  "\n[Background output truncated at the 50 MiB safety limit]\n"
+const BOUNDED_LOG_RUNNER = String.raw`
+const fs = require("node:fs")
+const { spawn } = require("node:child_process")
+const input = JSON.parse(
+  Buffer.from(process.argv[1], "base64url").toString("utf8"),
+)
+const marker = Buffer.from(input.marker, "utf8")
+const payloadLimit = input.maxBytes - marker.byteLength
+const logFd = fs.openSync(input.logPath, "r+")
+fs.ftruncateSync(logFd, 0)
+let written = 0
+let truncated = false
+let finished = false
+const append = (chunk) => {
+  if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk)
+  const remaining = payloadLimit - written
+  if (remaining <= 0) {
+    truncated = truncated || chunk.byteLength > 0
+    return
+  }
+  const take = Math.min(remaining, chunk.byteLength)
+  if (take > 0) {
+    fs.writeSync(logFd, chunk, 0, take)
+    written += take
+  }
+  if (take < chunk.byteLength) truncated = true
+}
+const finish = (code) => {
+  if (finished) return
+  finished = true
+  if (truncated) fs.writeSync(logFd, marker)
+  fs.closeSync(logFd)
+  process.exitCode = Number.isInteger(code) ? code : 1
+}
+const child = spawn(input.command, [], {
+  shell: true,
+  cwd: input.cwd,
+  env: process.env,
+  stdio: ["ignore", "pipe", "pipe"],
+  windowsHide: true,
+})
+child.stdout.on("data", append)
+child.stderr.on("data", append)
+child.once("error", () => finish(1))
+child.once("close", (code) => finish(code))
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.once(signal, () => {
+    try {
+      child.kill(signal)
+    } catch {}
+  })
+}
+`
+
+type BackgroundProcessOutcome = {
+  code: number | null
+  signal: NodeJS.Signals | null
+  error?: Error
+}
 
 /** Short path for display (e.g. ~/.nexus/data/run/run_123.log). */
 function shortDataPath(absolutePath: string): string {
@@ -36,43 +97,27 @@ function shortDataPath(absolutePath: string): string {
   return absolutePath.replace(/\\/g, "/")
 }
 
-async function cleanupOldRunLogs(runDir: string): Promise<void> {
+async function cleanupOldRunLogs(
+  runDir: string,
+  ownsActiveLog: (logPath: string) => boolean,
+): Promise<void> {
   const cutoff = Date.now() - RUN_LOG_RETENTION_MS
   try {
     const entries = await fs.promises.readdir(runDir, { withFileTypes: true })
     for (const e of entries) {
       if (!e.isFile() || !e.name.startsWith("run_") || !e.name.endsWith(".log")) continue
-      const m = e.name.match(/^run_(\d+)\.log$/)
+      const m = e.name.match(/^run_(\d+)(?:_[a-f0-9]+)?\.log$/i)
       const ts = m ? parseInt(m[1]!, 10) : NaN
       if (!Number.isFinite(ts) || ts < cutoff) {
-        await fs.promises.unlink(path.join(runDir, e.name)).catch(() => {})
+        const candidate = path.join(runDir, e.name)
+        if (ownsActiveLog(candidate)) continue
+        await fs.promises.unlink(candidate).catch(() => {})
       }
     }
   } catch {
     // Dir missing or not readable — ignore
   }
 }
-
-/** Delete tool_*.out files older than retention (Kilo-style). */
-async function cleanupOldToolOutputs(toolOutputDir: string): Promise<void> {
-  const cutoff = Date.now() - RUN_LOG_RETENTION_MS
-  try {
-    const entries = await fs.promises.readdir(toolOutputDir, { withFileTypes: true })
-    for (const e of entries) {
-      if (!e.isFile() || !e.name.startsWith("tool_") || !e.name.endsWith(".out")) continue
-      const m = e.name.match(/^tool_(\d+)\.out$/)
-      const ts = m ? parseInt(m[1]!, 10) : NaN
-      if (!Number.isFinite(ts) || ts < cutoff) {
-        await fs.promises.unlink(path.join(toolOutputDir, e.name)).catch(() => {})
-      }
-    }
-  } catch {
-    // Dir missing or not readable — ignore
-  }
-}
-
-/** Registry of background bash jobs: bash_id -> { pid, logPath } for BashOutput and KillBash. */
-export const backgroundBashJobs = new Map<string, { pid: number; logPath: string }>()
 
 async function readBackgroundOutput(logPath: string): Promise<string | undefined> {
   try {
@@ -82,14 +127,73 @@ async function readBackgroundOutput(logPath: string): Promise<string | undefined
   }
 }
 
-function isProcessRunning(pid: number): boolean {
-  if (pid <= 0) return false
+async function compactCompletedLog(logPath: string): Promise<void> {
+  const stat = await fs.promises.stat(logPath)
+  if (stat.size <= MAX_TOOL_OUTPUT_FILE_BYTES) return
+  const marker = Buffer.from(LOG_TRUNCATION_MARKER, "utf8")
+  const markerOffset = MAX_TOOL_OUTPUT_FILE_BYTES - marker.byteLength
+  const handle = await fs.promises.open(logPath, "r+")
   try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
+    await handle.write(marker, 0, marker.byteLength, markerOffset)
+    await handle.truncate(MAX_TOOL_OUTPUT_FILE_BYTES)
+  } finally {
+    await handle.close()
   }
+}
+
+function spawnBackgroundProcess(args: {
+  command: string
+  cwd: string
+  logPath: string
+  processIdentity: string
+}): ChildProcess {
+  const logFd = fs.openSync(args.logPath, "wx", 0o600)
+  fs.closeSync(logFd)
+  const input = Buffer.from(JSON.stringify({
+    command: args.command,
+    cwd: args.cwd,
+    logPath: args.logPath,
+    marker: LOG_TRUNCATION_MARKER,
+    maxBytes: MAX_TOOL_OUTPUT_FILE_BYTES,
+  })).toString("base64url")
+  return spawn(
+    process.execPath,
+    [
+      "-e",
+      BOUNDED_LOG_RUNNER,
+      input,
+    ],
+    {
+      cwd: args.cwd,
+      detached: process.platform !== "win32",
+      stdio: "ignore",
+      windowsHide: true,
+      env: {
+        ...process.env,
+        NEXUS_BACKGROUND_PROCESS_IDENTITY: args.processIdentity,
+      },
+    },
+  )
+}
+
+function waitForProcessOutcome(
+  completion: Promise<BackgroundProcessOutcome>,
+  timeoutMs: number,
+): Promise<BackgroundProcessOutcome | null> {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve(null)
+    }, timeoutMs)
+    void completion.then((outcome) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(outcome)
+    })
+  })
 }
 
 export async function startBackgroundShellTask(args: {
@@ -97,138 +201,274 @@ export async function startBackgroundShellTask(args: {
   cwd: string
   shellRunner?: "bash" | "powershell"
   host: ToolContext["host"]
+  services: ToolContext["services"]
+  sessionId: string
   config?: ToolContext["config"]
   metadata?: Record<string, unknown>
 }): Promise<{ taskId: string; pid: number; logPath: string }> {
   const runDir = getRunLogsDir()
-  try { fs.mkdirSync(runDir, { recursive: true }) } catch { /* ignore */ }
-  await cleanupOldRunLogs(runDir)
-  const taskId = `run_${Date.now()}`
+  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+  if (process.platform !== "win32") {
+    fs.chmodSync(runDir, 0o700)
+  }
+  await cleanupOldRunLogs(
+    runDir,
+    (candidate) =>
+      args.services.backgroundProcesses.ownsLogPath(candidate),
+  )
+  const taskId = `run_${Date.now()}_${randomUUID().replace(/-/g, "").slice(0, 12)}`
   const logPath = path.join(runDir, `${taskId}.log`)
-  const logStream = fs.createWriteStream(logPath, { flags: "a" })
-  const child = spawn(args.command, [], {
-    shell: true,
-    cwd: args.cwd,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  })
-  child.stdout?.pipe(logStream)
-  child.stderr?.pipe(logStream)
-  child.unref()
-  const pid = child.pid ?? 0
-  backgroundBashJobs.set(taskId, { pid, logPath })
-  const runtime = await getOrchestrationRuntime(args.cwd)
-  const task = await runtime.registerBackgroundTask({
-    id: taskId,
-    kind: "bash",
-    description: args.command,
-    status: "running",
+  const processIdentity = randomUUID()
+  const child = spawnBackgroundProcess({
     command: args.command,
     cwd: args.cwd,
-    processId: pid,
     logPath,
-    outputFile: logPath,
-    metadata: {
-      tool: args.shellRunner === "powershell" ? "PowerShell" : "Bash",
-      shellRunner: args.shellRunner ?? "bash",
-      ...(args.metadata ?? {}),
-    },
+    processIdentity,
   })
-  args.host.emit({ type: "background_task_updated", task })
-  const unified = await runtime.getTask(taskId)
-  if (unified) args.host.emit({ type: "task_created", task: unified })
+  child.unref()
+  const pid = child.pid ?? 0
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    child.kill("SIGKILL")
+    throw new Error("Background process did not receive a valid process id")
+  }
 
-  child.on("error", (error) => {
-    void (async () => {
-      const output = await readBackgroundOutput(logPath)
-      const next = await runtime.setBackgroundTaskStatus(taskId, "failed", {
-        output,
-        metadata: {
-          tool: args.shellRunner === "powershell" ? "PowerShell" : "Bash",
-          shellRunner: args.shellRunner ?? "bash",
-          error: error.message,
-          ...(args.metadata ?? {}),
+  const completion = new Promise<BackgroundProcessOutcome>((resolve) => {
+    let settled = false
+    const settle = (outcome: BackgroundProcessOutcome): void => {
+      if (settled) return
+      settled = true
+      resolve(outcome)
+    }
+    child.once("error", (error) => {
+      settle({ code: null, signal: null, error })
+    })
+    child.once("close", (code, signal) => {
+      settle({ code, signal })
+    })
+  })
+
+  const terminate = (signal: NodeJS.Signals): boolean => {
+    if (child.exitCode !== null || child.signalCode !== null) return false
+    if (process.platform === "win32") {
+      const result = spawnSync(
+        "taskkill",
+        ["/pid", String(pid), "/t", "/f"],
+        {
+          stdio: "ignore",
+          windowsHide: true,
+          timeout: BACKGROUND_STOP_GRACE_MS,
         },
-      })
-      if (next) {
-        args.host.emit({ type: "background_task_updated", task: next })
-        const unified = await runtime.getTask(taskId)
-        if (unified) {
-          args.host.emit({ type: "task_updated", task: unified })
-          if (args.config) {
-            await handleCompletedTaskSideEffects({
-              cwd: args.cwd,
-              host: args.host,
-              config: args.config,
-              task: unified,
-              outputPreview: unified.output?.slice(0, 500),
-            })
-          }
-        }
+      )
+      return result.status === 0
+    }
+    try {
+      process.kill(-pid, signal)
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false
+      try {
+        return child.kill(signal)
+      } catch {
+        return false
       }
-    })()
-  })
+    }
+  }
 
-  child.on("exit", (code, signalName) => {
-    void (async () => {
+  let runtimePromise!: Promise<
+    ToolContext["services"]["orchestrationRuntime"]
+  >
+  let requestedStopReason: "requested" | "owner_shutdown" | undefined
+  let terminationWasRequested = false
+  let finalizationPromise: Promise<void> | undefined
+  const finalize = (
+    outcome: BackgroundProcessOutcome,
+    options: {
+      forcedStatus?: "failed" | "killed"
+      stopReason?: "requested" | "owner_shutdown"
+    } = {},
+  ): Promise<void> => {
+    if (finalizationPromise) return finalizationPromise
+    finalizationPromise = (async () => {
+      const runtime = await runtimePromise
+      let logError: string | undefined
+      try {
+        await compactCompletedLog(logPath)
+      } catch (error) {
+        logError = (error as Error).message
+      }
       const output = await readBackgroundOutput(logPath)
       const interpretation =
-        typeof code === "number"
-          ? interpretShellCommandResult(args.command, code, output ?? "", "")
+        typeof outcome.code === "number"
+          ? interpretShellCommandResult(
+              args.command,
+              outcome.code,
+              output ?? "",
+              "",
+            )
           : { isError: true as const }
+      const effectiveStopReason =
+        options.stopReason ?? requestedStopReason
       const status =
-        signalName === "SIGTERM" || signalName === "SIGKILL"
+        options.forcedStatus ??
+        (terminationWasRequested
           ? "killed"
-          : !interpretation.isError
-            ? "completed"
-            : "failed"
+          : outcome.error
+          ? "failed"
+          : outcome.signal === "SIGTERM" || outcome.signal === "SIGKILL"
+            ? "killed"
+            : !interpretation.isError
+              ? "completed"
+              : "failed")
       const next = await runtime.setBackgroundTaskStatus(taskId, status, {
         output,
-        exitCode: typeof code === "number" ? code : undefined,
+        exitCode:
+          typeof outcome.code === "number" ? outcome.code : undefined,
+        ...(outcome.error ? { error: outcome.error.message } : {}),
+        metadata: {
+          tool:
+            args.shellRunner === "powershell" ? "PowerShell" : "Bash",
+          shellRunner: args.shellRunner ?? "bash",
+          ...(typeof outcome.code === "number" && interpretation.message
+            ? { returnCodeInterpretation: interpretation.message }
+            : {}),
+          ...(outcome.signal ? { signal: outcome.signal } : {}),
+          ...(effectiveStopReason
+            ? { stopReason: effectiveStopReason }
+            : {}),
+          ...(logError ? { logError } : {}),
+          ...(args.metadata ?? {}),
+          processIdentity,
+        },
+      })
+      if (!next) {
+        throw new Error(
+          `Background task ${taskId} disappeared before terminal state could be persisted`,
+        )
+      }
+      args.services.backgroundProcesses.remove(taskId, {
+        workspace: args.cwd,
+        sessionId: args.sessionId,
+      })
+      args.host.emit({ type: "background_task_updated", task: next })
+      const unified = await runtime.getTask(taskId)
+      if (!unified) return
+      args.host.emit({ type: "task_updated", task: unified })
+      args.host.emit({
+        type: "task_completed",
+        task: unified,
+        outputPreview: unified.output?.slice(0, 500),
+      })
+      if (args.config) {
+        await handleCompletedTaskSideEffects({
+          cwd: args.cwd,
+          host: args.host,
+          config: args.config,
+          task: unified,
+          outputPreview: unified.output?.slice(0, 500),
+          runtime,
+        }).catch(() => {})
+      }
+    })()
+    return finalizationPromise
+  }
+
+  let stopPromise: Promise<void> | undefined
+  const stop = (
+    reason: "requested" | "owner_shutdown",
+  ): Promise<void> => {
+    if (stopPromise) return stopPromise
+    requestedStopReason = reason
+    stopPromise = (async () => {
+      if (child.exitCode === null && child.signalCode === null) {
+        terminationWasRequested = terminate("SIGTERM")
+      }
+      let outcome = await waitForProcessOutcome(
+        completion,
+        BACKGROUND_STOP_GRACE_MS,
+      )
+      if (!outcome && child.exitCode === null && child.signalCode === null) {
+        terminationWasRequested =
+          terminate("SIGKILL") || terminationWasRequested
+        outcome = await waitForProcessOutcome(
+          completion,
+          BACKGROUND_STOP_GRACE_MS,
+        )
+      }
+      if (!outcome) {
+        const error = new Error(
+          `Could not confirm termination of background process ${pid}`,
+        )
+        await finalize(
+          {
+            code: child.exitCode,
+            signal: child.signalCode,
+            error,
+          },
+          { forcedStatus: "failed", stopReason: reason },
+        )
+        throw error
+      }
+      await finalize(outcome, {
+        ...(terminationWasRequested
+          ? { forcedStatus: "killed" as const }
+          : {}),
+        stopReason: reason,
+      })
+    })()
+    return stopPromise
+  }
+
+  runtimePromise = (async () => {
+    try {
+      args.services.backgroundProcesses.register({
+        taskId,
+        pid,
+        processIdentity,
+        logPath,
+        workspace: args.cwd,
+        sessionId: args.sessionId,
+        terminate,
+        stop,
+      })
+      const ownedRuntime = args.services.orchestrationRuntime
+      const task = await ownedRuntime.registerBackgroundTask({
+        id: taskId,
+        kind: "bash",
+        description: args.command,
+        status: "running",
+        command: args.command,
+        cwd: args.cwd,
+        processId: pid,
+        logPath,
+        outputFile: logPath,
+        sessionId: args.sessionId,
         metadata: {
           tool: args.shellRunner === "powershell" ? "PowerShell" : "Bash",
           shellRunner: args.shellRunner ?? "bash",
-          ...(typeof code === "number" && interpretation.message
-            ? { returnCodeInterpretation: interpretation.message }
-            : {}),
-          ...(signalName ? { signal: signalName } : {}),
           ...(args.metadata ?? {}),
+          processIdentity,
         },
       })
-      if (next) {
-        args.host.emit({ type: "background_task_updated", task: next })
-        const unified = await runtime.getTask(taskId)
-        if (unified) {
-          args.host.emit({ type: "task_updated", task: unified })
-          args.host.emit({ type: "task_completed", task: unified, outputPreview: unified.output?.slice(0, 500) })
-          if (args.config) {
-            await handleCompletedTaskSideEffects({
-              cwd: args.cwd,
-              host: args.host,
-              config: args.config,
-              task: unified,
-              outputPreview: unified.output?.slice(0, 500),
-            })
-          }
-        }
-      }
-    })()
-  })
+      args.host.emit({ type: "background_task_updated", task })
+      const unified = await ownedRuntime.getTask(taskId)
+      if (unified) args.host.emit({ type: "task_created", task: unified })
+      return ownedRuntime
+    } catch (error) {
+      terminate("SIGTERM")
+      args.services.backgroundProcesses.remove(taskId, {
+        workspace: args.cwd,
+        sessionId: args.sessionId,
+      })
+      throw error
+    }
+  })()
 
+  void completion
+    .then((outcome) => finalize(outcome))
+    .catch(() => {})
+
+  await runtimePromise
   return { taskId, pid, logPath }
-}
-
-/** Compact background job summary for prompt context so the agent can keep tracking long-running commands. */
-export function getBackgroundBashJobsForPrompt(_cwd: string): string {
-  if (backgroundBashJobs.size === 0) return ""
-  const rows = Array.from(backgroundBashJobs.entries())
-    .map(([bashId, job]) => {
-      const running = isProcessRunning(job.pid)
-      const logDisplay = path.isAbsolute(job.logPath) ? shortDataPath(job.logPath) : job.logPath
-      return `- ${bashId} | pid=${job.pid} | status=${running ? "running" : "exited"} | log=${logDisplay}`
-    })
-    .sort((a, b) => a.localeCompare(b))
-  return rows.join("\n")
 }
 
 const schema = z.object({
@@ -269,7 +509,7 @@ Usage notes:
     - npm install → "Install package dependencies"
     - mkdir foo → "Create directory 'foo'"
     - find . -name "*.tmp" -exec rm {} \\; → "Find and delete all .tmp files recursively"
-  - If output exceeds 50KB, it will be truncated (head+tail shown); full output is saved to the global data dir (~/.nexus/data/tool-output/) for further inspection. Use Grep or Read with offset/limit on that file if needed.
+  - If output exceeds 50KB, the response is truncated and provides an opaque artifact id. Inspect it only with ToolOutputRead using a bounded literal search or offset/limit; artifact filesystem paths are intentionally not exposed.
   - **Blocking vs background:** Use blocking (default) for short commands where you need the result immediately (e.g. git status, npm run lint, short scripts). Use run_in_background: true for long-running commands (builds, servers, tests, migrations). With background: Bash returns immediately with a task id; output is written to the global data dir (~/.nexus/data/run/<task_id>.log) in real time. Use TaskOutput(taskId) to read progress — the response includes the current task status — or TaskStop(taskId) to stop. Do NOT use '&' at the end of the command when using run_in_background. Never use run_in_background for 'sleep' — it returns immediately and is useless.
   - **CRITICAL — Use dedicated tools instead of shell commands:** You MUST avoid using Bash for file search, content search, reading, editing, or writing. Use the dedicated tools instead. Do NOT run find, grep, cat, head, tail, sed, awk, or echo in Bash for those purposes. Use:
     - File search: Glob (NOT find or ls)
@@ -374,6 +614,8 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
         cwd: workingDir,
         shellRunner: "bash",
         host: ctx.host,
+        services: ctx.services,
+        sessionId: ctx.session.id,
         config: ctx.config,
         metadata: {
           assistantAutoBackgrounded: autoBackgrounded,
@@ -416,39 +658,6 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
 
     const fullOutput = sanitizeOutput(result.stdout + (result.stderr ? `\n[stderr]\n${result.stderr}` : ""))
     const interpretation = interpretShellCommandResult(command, result.exitCode, result.stdout, result.stderr)
-    const bytes = Buffer.byteLength(fullOutput, "utf8")
-    let outputMessage: string
-    if (bytes <= MAX_OUTPUT_BYTES) {
-      outputMessage = fullOutput
-    } else {
-      const lines = fullOutput.split("\n")
-      const total = lines.length
-      const headLines = lines.slice(0, 100)
-      const tailLines = lines.slice(-100)
-      const truncatedCount = total - 200
-      const truncated = [
-        ...headLines,
-        `[... ${truncatedCount} lines truncated ...]`,
-        ...tailLines,
-      ].join("\n")
-      const toolOutputDir = getToolOutputDir()
-      try { fs.mkdirSync(toolOutputDir, { recursive: true }) } catch { /* ignore */ }
-      await cleanupOldToolOutputs(toolOutputDir)
-      const ts = Date.now()
-      const outPath = path.join(toolOutputDir, `tool_${ts}.out`)
-      // Cap file size by bytes to protect disk (Kilo/OpenCode-style)
-      const buf = Buffer.from(fullOutput, "utf8")
-      const capped =
-        buf.length <= MAX_TOOL_OUTPUT_FILE_BYTES
-          ? fullOutput
-          : buf.subarray(0, MAX_TOOL_OUTPUT_FILE_BYTES).toString("utf8") +
-            "\n\n[output truncated at 50 MB in file; use Grep or Read with offset/limit]\n"
-      await fs.promises.writeFile(outPath, capped, "utf8").catch(() => {})
-      const outPathDisplay = shortDataPath(outPath)
-      const hint = `\n\nFull output saved to: ${outPathDisplay}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
-      outputMessage = truncated + hint
-    }
-
     const success = !interpretation.isError
     const header = `$ ${command}\n[exit: ${result.exitCode}]\n`
 
@@ -458,7 +667,7 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
         header +
         (dangerousMessage ? `[warning] ${dangerousMessage}\n` : "") +
         (interpretation.message ? `[status] ${interpretation.message}\n` : "") +
-        outputMessage,
+        fullOutput,
       metadata: {
         ...(interpretation.message ? { returnCodeInterpretation: interpretation.message } : {}),
       },

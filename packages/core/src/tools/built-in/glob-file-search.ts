@@ -25,33 +25,66 @@ export const globFileSearchTool: ToolDef<z.infer<typeof globSchema>> = {
   readOnly: true,
 
   async execute({ pattern: glob_pattern, path: target_directory }, ctx) {
-    const cwd = target_directory ? path.resolve(ctx.cwd, target_directory) : ctx.cwd
     const cap = 500
 
     try {
+      const portablePattern = glob_pattern.replaceAll("\\", "/")
+      if (
+        portablePattern.includes("\0") ||
+        portablePattern.includes("..") ||
+        path.posix.isAbsolute(portablePattern) ||
+        path.win32.isAbsolute(glob_pattern)
+      ) {
+        return {
+          success: false,
+          output:
+            "glob failed: pattern must be relative to the authorized search directory and cannot contain parent traversal",
+        }
+      }
+      const cwd = await ctx.host.resolvePath(
+        target_directory ?? ".",
+        "list",
+      )
       const pattern = glob_pattern.includes("**") || glob_pattern.includes("*") ? glob_pattern : `**/${glob_pattern}`
       const matches = await glob(pattern, {
         cwd,
         absolute: true,
         nodir: true,
+        follow: false,
         ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/.nexus/**"],
       })
 
-      if (matches.length === 0) {
+      const toAuthorize = matches.length > cap ? matches.slice(0, 3000) : matches
+      const { lstat } = await import("node:fs/promises")
+      const authorizedMatches = (
+        await Promise.all(
+          toAuthorize.map(async (candidate) => {
+            try {
+              const authorized = await ctx.host.resolvePath(candidate, "read")
+              const info = await lstat(authorized)
+              return info.isFile() && !info.isSymbolicLink()
+                ? { absPath: authorized, mtime: info.mtimeMs }
+                : null
+            } catch {
+              return null
+            }
+          }),
+        )
+      ).filter(
+        (entry): entry is { absPath: string; mtime: number } => entry !== null,
+      )
+
+      if (authorizedMatches.length === 0) {
         return { success: true, output: `No files matched pattern "${glob_pattern}"${target_directory ? ` in ${target_directory}` : ""}.` }
       }
 
-      const toStat = matches.length > cap ? matches.slice(0, 3000) : matches
-      const { stat } = await import("node:fs/promises")
-      const withMtime = await Promise.all(
-        toStat.map(async (absPath) => {
-          const mtime = await stat(absPath).then(s => s.mtimeMs).catch(() => 0)
-          return { rel: path.relative(ctx.cwd, absPath), mtime }
-        })
-      )
+      const withMtime = authorizedMatches.map(({ absPath, mtime }) => ({
+        rel: path.relative(ctx.cwd, absPath),
+        mtime,
+      }))
       withMtime.sort((a, b) => b.mtime - a.mtime)
       const sorted = withMtime.slice(0, cap).map(({ rel }) => rel)
-      const truncated = matches.length > cap
+      const truncated = matches.length > cap || authorizedMatches.length > cap
 
       const header = `Found ${sorted.length} file(s)${truncated ? ` (showing first ${cap} by mtime)` : ""} for "${glob_pattern}":`
       return {

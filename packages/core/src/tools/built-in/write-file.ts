@@ -86,10 +86,12 @@ WARNING: Write replaces the entire file. Provide complete final content, not a p
     const modeAutoApprove = new Set(
       (ctx.mode ? ctx.config.modes?.[ctx.mode]?.autoApprove : undefined) ?? []
     )
-    const skipApproval =
+    const skipApprovalByConfig =
       ctx.config.permissions.autoApproveWrite ||
       modeAutoApprove.has("write") ||
       isNexusPlansPath(filePath)
+    const approvalRequired =
+      ctx.fileEditApproval?.required ?? !skipApprovalByConfig
 
     if (useFileEditFlow) {
       const diffPreview = createDiffPreview(originalContentStr, content, filePath)
@@ -98,11 +100,11 @@ WARNING: Write replaces the entire file. Provide complete final content, not a p
         newContent: content,
         isNewFile,
       })
-      if (!skipApproval) {
+      if (approvalRequired) {
         const approval = await requestHostApproval(ctx.host, {
           type: "write",
           tool: "Write",
-          description: `Write to ${filePath}`,
+          description: `${ctx.fileEditApproval?.permissionRule ? "[Permission Rule] " : ""}Write to ${filePath}`,
           content,
           diff: diffPreview,
           diffStats,

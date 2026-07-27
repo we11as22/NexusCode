@@ -17,12 +17,7 @@ export interface StateRunResult {
   lastInsertRowid: number | bigint
 }
 
-export interface StateConnection {
-  exec(sql: string): void
-  run(
-    sql: string,
-    parameters?: readonly StateInputValue[],
-  ): StateRunResult
+export interface StateReadConnection {
   get<T extends Record<string, StateOutputValue>>(
     sql: string,
     parameters?: readonly StateInputValue[],
@@ -35,10 +30,19 @@ export interface StateConnection {
   userVersion(): number
 }
 
+export interface StateConnection extends StateReadConnection {
+  exec(sql: string): void
+  run(
+    sql: string,
+    parameters?: readonly StateInputValue[],
+  ): StateRunResult
+}
+
 export interface NexusStateDatabaseOptions {
   path: string
   processId?: string
   now?: () => number
+  busyTimeoutMs?: number
 }
 
 export type IntegrityCheckResult =

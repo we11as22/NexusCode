@@ -1,17 +1,41 @@
 /**
  * Skill tool catalog and helpers — uses only Nexus `loadSkills` (manager.ts) discovery.
  */
-import type { Dirent } from "node:fs"
+import type { BigIntStats } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { pathToFileURL } from "node:url"
-import type { NexusConfig, SkillDef } from "../types.js"
-import { loadSkills } from "./manager.js"
+import type {
+  NexusConfig,
+  SkillAuthority,
+  SkillDef,
+} from "../types.js"
+import {
+  loadSkills,
+  type SkillLoadOptions,
+} from "./manager.js"
 import { getClaudeCompatibilityOptions } from "../compat/claude.js"
 
 export type SkillToolDescriptionRow = { name: string; description: string; location: string }
 
-export type ResolvedSkillBody = { displayName: string; content: string; skillDir: string }
+export type ResolvedSkillBody = {
+  displayName: string
+  content: string
+  skillDir: string
+  authority: SkillAuthority
+}
+
+export class SkillNameAmbiguityError extends Error {
+  constructor(
+    readonly query: string,
+    readonly candidates: string[],
+  ) {
+    super(
+      `Skill "${query}" is ambiguous. Candidates: ${candidates.join(", ")}.`,
+    )
+    this.name = "SkillNameAmbiguityError"
+  }
+}
 
 /** Rows for the `Skill` tool description (`<available_skills>`), from the same set as `loadSkills`. */
 export async function loadSkillToolCatalogRows(cwd: string, config: NexusConfig): Promise<SkillToolDescriptionRow[]> {
@@ -36,12 +60,15 @@ function normalizeName(n: string): string {
 }
 
 /**
- * Resolve skill body from `loadSkills` only (case-insensitive / normalized / partial match).
+ * Resolve skill body from `loadSkills` only.
+ * Exact and normalized-exact names take precedence. Ambiguous partial matches
+ * throw `SkillNameAmbiguityError` with deterministic candidate names.
  */
 export async function resolveSkillBody(
   query: string,
   cwd: string,
   config: NexusConfig,
+  loadOptions: SkillLoadOptions = {},
 ): Promise<ResolvedSkillBody | null> {
   const q = query.trim()
   if (!q) return null
@@ -52,25 +79,56 @@ export async function resolveSkillBody(
     config.skillsUrls,
     getClaudeCompatibilityOptions(config),
     config,
+    loadOptions,
   ).catch(() => [] as SkillDef[])
   const inputNorm = normalizeName(q)
 
-  let found = loaded.find((s) => s.name.toLowerCase() === q.toLowerCase())
+  const compareSkills = (left: SkillDef, right: SkillDef): number => {
+    if (left.name !== right.name) return left.name < right.name ? -1 : 1
+    if (left.path === right.path) return 0
+    return left.path < right.path ? -1 : 1
+  }
+  const select = (matches: SkillDef[]): SkillDef | undefined => {
+    const ordered = [...matches].sort(compareSkills)
+    if (ordered.length > 1) {
+      throw new SkillNameAmbiguityError(
+        q,
+        [...new Set(ordered.map((skill) => skill.name))],
+      )
+    }
+    return ordered[0]
+  }
+
+  let found = select(
+    loaded.filter((skill) => skill.name.toLowerCase() === q.toLowerCase()),
+  )
   if (!found) {
-    found = loaded.find((s) => normalizeName(s.name) === inputNorm)
+    found = select(
+      loaded.filter((skill) => normalizeName(skill.name) === inputNorm),
+    )
   }
   if (!found) {
-    found = loaded.find((s) => {
-      const sn = normalizeName(s.name)
-      return sn.includes(inputNorm) || inputNorm.includes(sn)
-    })
+    found = select(
+      loaded.filter((skill) => normalizeName(skill.name).includes(inputNorm)),
+    )
+  }
+  if (!found) {
+    found = select(
+      loaded.filter((skill) => inputNorm.includes(normalizeName(skill.name))),
+    )
   }
   if (!found) return null
+  const skillDir = path.dirname(found.path)
+  const authority = found.authority ?? {
+    lexicalRoot: skillDir,
+    realRoot: await fs.realpath(skillDir).catch(() => path.resolve(skillDir)),
+  }
 
   return {
     displayName: found.name,
     content: found.content,
-    skillDir: path.dirname(found.path),
+    skillDir,
+    authority,
   }
 }
 
@@ -85,7 +143,7 @@ function escapeXml(s: string): string {
 /** Dynamic `Skill` tool description: lists discoverable skills for the LLM. */
 export function buildSkillToolDynamicDescription(rows: SkillToolDescriptionRow[]): string {
   if (rows.length === 0) {
-    return "Load a specialized skill (markdown instructions). No skills are listed here yet; project skills may still appear under Active Skills in the system prompt when the classifier selects them."
+    return "Load a specialized skill (markdown instructions). No skills are listed here yet; discover project skills deterministically by exact name or through ToolSearch."
   }
   const examples = rows
     .map((s) => `'${s.name}'`)
@@ -115,28 +173,100 @@ export function buildSkillToolDynamicDescription(rows: SkillToolDescriptionRow[]
 
 const SAMPLE_LIMIT = 10
 
+function isPathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate)
+  return (
+    relative === "" ||
+    (
+      relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative)
+    )
+  )
+}
+
+async function inspectAuthorizedSamplePath(
+  candidatePath: string,
+  authority: SkillAuthority,
+): Promise<BigIntStats | null> {
+  try {
+    const currentRealRoot = await fs.realpath(authority.lexicalRoot)
+    if (currentRealRoot !== authority.realRoot) return null
+
+    const absolutePath = path.resolve(candidatePath)
+    if (!isPathInside(authority.lexicalRoot, absolutePath)) return null
+
+    const relative = path.relative(authority.lexicalRoot, absolutePath)
+    let current = authority.lexicalRoot
+    let candidateStat: BigIntStats | null = null
+    for (const component of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, component)
+      candidateStat = await fs.lstat(current, { bigint: true })
+      if (candidateStat.isSymbolicLink()) return null
+    }
+
+    const realPath = await fs.realpath(absolutePath)
+    if (!isPathInside(authority.realRoot, realPath)) return null
+    // The declared authority root itself may be an intentional absolute
+    // symlink; its captured real target above is the authority in that case.
+    return candidateStat ?? await fs.stat(absolutePath, { bigint: true })
+  } catch {
+    return null
+  }
+}
+
+function sameSamplePathVersion(
+  left: BigIntStats,
+  right: BigIntStats,
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  )
+}
+
 /** Sample files under the skill directory (paths containing `skill.md` skipped). */
-export async function sampleSkillSiblingFiles(skillDir: string, signal?: AbortSignal): Promise<string[]> {
+export async function sampleSkillSiblingFiles(
+  skillDir: string,
+  signal?: AbortSignal,
+  capturedAuthority?: SkillAuthority,
+): Promise<string[]> {
+  const authority = capturedAuthority ?? {
+    lexicalRoot: path.resolve(skillDir),
+    realRoot: await fs.realpath(skillDir).catch(() => path.resolve(skillDir)),
+  }
   const out: string[] = []
   async function walk(dir: string): Promise<void> {
     if (signal?.aborted || out.length >= SAMPLE_LIMIT) return
-    let entries: Dirent[] = []
+    const before = await inspectAuthorizedSamplePath(dir, authority)
+    if (!before?.isDirectory()) return
+    let entries: string[] = []
     try {
-      entries = await fs.readdir(dir, { withFileTypes: true })
+      entries = await fs.readdir(dir)
     } catch {
       return
     }
-    entries.sort((a, b) => String(a.name).localeCompare(String(b.name)))
-    for (const ent of entries) {
+    const after = await inspectAuthorizedSamplePath(dir, authority)
+    if (!after || !sameSamplePathVersion(before, after)) return
+
+    entries.sort()
+    for (const entryName of entries) {
       if (signal?.aborted || out.length >= SAMPLE_LIMIT) return
-      const full = path.join(dir, String(ent.name))
+      const full = path.join(dir, entryName)
       if (relPathHasGit(full, skillDir)) continue
-      if (ent.isDirectory()) {
+      const entry = await inspectAuthorizedSamplePath(full, authority)
+      if (!entry) continue
+      if (entry.isDirectory()) {
         await walk(full)
         continue
       }
-      if (!ent.isFile()) continue
+      if (!entry.isFile()) continue
       if (full.replace(/\\/g, "/").toLowerCase().includes("skill.md")) continue
+      const verified = await inspectAuthorizedSamplePath(full, authority)
+      if (!verified || !sameSamplePathVersion(entry, verified)) continue
       out.push(full)
     }
   }

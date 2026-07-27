@@ -26,6 +26,7 @@ import {
   getConfigForCLI,
   listConfigForCLI,
   enableConfigs,
+  getWorkspaceTrustIdentity,
 } from '../utils/config.js'
 import { cwd } from 'process'
 import { dateToFilename, logError, parseLogFilename } from '../utils/log.js'
@@ -39,7 +40,7 @@ import { LogList } from '../screens/LogList.js'
 import { ResumeConversation } from '../screens/ResumeConversation.js'
 import { startMCPServer } from './mcp.js'
 import { env } from '../utils/env.js'
-import { getCwd, setCwd } from '../utils/state.js'
+import { getCwd, setCwd, setOriginalCwd } from '../utils/state.js'
 import { omit } from 'lodash-es'
 import { getCommands } from '../commands.js'
 import { getNextAvailableLogForkNumber, loadLogList } from '../utils/log.js'
@@ -55,7 +56,6 @@ import {
   listMCPServers,
   parseEnvVars,
   removeMcpServer,
-  getClients,
   ensureConfigScope,
 } from '../services/mcpClient.js'
 import { handleMcprcServerApprovals } from '../services/mcpServerApproval.js'
@@ -79,6 +79,8 @@ import {
   listSessions,
   readCheckpointEntries,
   buildConfigSnapshot,
+  applyCliModelSelection,
+  loadCliWorkspaceConfig,
 } from '../nexus-bootstrap.js'
 import { runTaskRestore } from '../task-restore.js'
 import { createNexusConfigCommand } from '../commands/nexusConfig.js'
@@ -88,12 +90,14 @@ import { createNexusVectorCommand } from '../commands/nexusVector.js'
 import { createNexusEmbeddingsCommand } from '../commands/nexusEmbeddings.js'
 import { createNexusSkillsCommand } from '../commands/nexusSkills.js'
 import { createNexusMcpCommand } from '../commands/nexusMcp.js'
+import { createNexusAuthorityCommand } from '../commands/nexusAuthority.js'
 import { createNexusSessionsCommand } from '../commands/nexusSessions.js'
 import { queryNexus } from '../nexus-query.js'
 import { shouldAutoApprovePrint } from '../host.js'
 import type { RenderOptionsWithFlicker } from '../utils/ink.js'
 import type { Command as SlashCommand } from '../commands.js'
 import { resolveRuntimeMode } from '../session-selection.js'
+import { coreMcpDisplayStatuses } from '../mcp-display.js'
 
 export function completeOnboarding(): void {
   const config = getGlobalConfig()
@@ -105,6 +109,7 @@ export function completeOnboarding(): void {
 }
 
 async function showSetupScreens(
+  workspacePath: string,
   dangerouslySkipPermissions?: boolean,
   print?: boolean,
 ): Promise<void> {
@@ -119,9 +124,12 @@ async function showSetupScreens(
         '[nexus] Headless first run: using safe defaults; run nexus interactively to complete onboarding.\n',
       )
     }
-    if (!dangerouslySkipPermissions && !checkHasTrustDialogAccepted()) {
-      process.stderr.write(
-        '[nexus] Workspace trust has not been accepted; print mode is restricted to fail-closed, non-interactive permissions.\n',
+    if (
+      !dangerouslySkipPermissions &&
+      !checkHasTrustDialogAccepted(workspacePath)
+    ) {
+      throw new Error(
+        `[nexus] Refusing headless execution in an untrusted workspace: ${workspacePath}. Open NexusCode interactively and approve this exact folder first.`,
       )
     }
     return
@@ -173,16 +181,19 @@ async function showSetupScreens(
   }
 
   if (!dangerouslySkipPermissions) {
-    if (!checkHasTrustDialogAccepted()) {
+    if (!checkHasTrustDialogAccepted(workspacePath)) {
       await new Promise<void>(resolve => {
         const onDone = () => {
           // Grant read permission to the current working directory
           grantReadPermissionForOriginalDir()
           resolve()
         }
-        render(<TrustDialog onDone={onDone} />, {
-          exitOnCtrlC: false,
-        })
+        render(
+          <TrustDialog workspacePath={workspacePath} onDone={onDone} />,
+          {
+            exitOnCtrlC: false,
+          },
+        )
       })
     }
 
@@ -206,8 +217,7 @@ async function setup(
   dangerouslySkipPermissions?: boolean,
   nonInteractive = false,
 ): Promise<void> {
-  // Don't await so we don't block startup
-  setCwd(cwd)
+  await setCwd(cwd)
 
   // Always grant read permissions for original working dir
   grantReadPermissionForOriginalDir()
@@ -347,7 +357,7 @@ async function parseArgs(
   }
 
   // Get the initial list of commands filtering based on user type
-  const commands: SlashCommand[] = await getCommands()
+  const commands: SlashCommand[] = await getCommands(false)
 
   // Format command list for help text (using same filter as in help.ts)
   const commandList = commands
@@ -414,10 +424,17 @@ ${commandList}`,
           mode: modeOpt,
         },
       ) => {
-        await showSetupScreens(dangerouslySkipPermissions, print)
-        const effectiveCwd = project ? path.resolve(cwd, project) : cwd
+        const requestedCwd = project ? path.resolve(cwd, project) : cwd
+        const effectiveCwd =
+          getWorkspaceTrustIdentity(requestedCwd).canonicalPath
         const mode = resolveRuntimeMode(modeOpt)
-        setCwd(effectiveCwd)
+        setOriginalCwd(effectiveCwd)
+        await setCwd(effectiveCwd)
+        await showSetupScreens(
+          effectiveCwd,
+          dangerouslySkipPermissions,
+          print,
+        )
         logEvent('tengu_init', {
           entrypoint: 'nexus',
           hasInitialPrompt: Boolean(prompt).toString(),
@@ -431,11 +448,14 @@ ${commandList}`,
 
         assertMinVersion()
 
-        const [tools, mcpClients] = await Promise.all([
+        // Nexus owns one MCP runtime in bootstrapNexus. Legacy render tools and
+        // commands must not create a second set of stdio/HTTP clients.
+        const [tools, trustedCommands] = await Promise.all([
           getTools(
             enableArchitect ?? getCurrentProjectConfig().enableArchitectTool,
+            false,
           ),
-          getClients(),
+          getCommands(false),
         ])
         logStartup()
         const inputPrompt = [prompt, stdinContent].filter(Boolean).join('\n')
@@ -462,31 +482,50 @@ ${commandList}`,
           })
 
           let lastAssistantText = ''
-          for await (const message of queryNexus({
-            nexus,
-            userPrompt: inputPrompt,
-            repoTools: tools,
-            signal: AbortSignal.timeout(10 * 60 * 1000),
-            autoApprove: shouldAutoApprovePrint(dangerouslySkipPermissions),
-            modeOverride: mode,
-          })) {
-            if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'assistant') {
-              continue
+          try {
+            if (nexus.serverUrl) {
+              for await (const _message of queryNexus({
+                nexus,
+                userPrompt: '',
+                repoTools: tools,
+                signal: AbortSignal.timeout(10 * 60 * 1000),
+                autoApprove: shouldAutoApprovePrint(
+                  dangerouslySkipPermissions,
+                ),
+                modeOverride: mode,
+                remoteResume: true,
+              })) {
+                // Drain the active server-owned turn before new input.
+              }
             }
-            const content = (message as { message?: { content?: unknown[] } }).message?.content
-            if (!Array.isArray(content)) continue
-            const text = content
-              .filter((b): b is { type: 'text'; text: string } => (
-                typeof b === 'object' &&
-                b !== null &&
-                (b as { type?: unknown }).type === 'text' &&
-                typeof (b as { text?: unknown }).text === 'string'
-              ))
-              .map(b => b.text.trim())
-              .filter(Boolean)
-              .join('\n\n')
-              .trim()
-            if (text) lastAssistantText = text
+            for await (const message of queryNexus({
+              nexus,
+              userPrompt: inputPrompt,
+              repoTools: tools,
+              signal: AbortSignal.timeout(10 * 60 * 1000),
+              autoApprove: shouldAutoApprovePrint(dangerouslySkipPermissions),
+              modeOverride: mode,
+            })) {
+              if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'assistant') {
+                continue
+              }
+              const content = (message as { message?: { content?: unknown[] } }).message?.content
+              if (!Array.isArray(content)) continue
+              const text = content
+                .filter((b): b is { type: 'text'; text: string } => (
+                  typeof b === 'object' &&
+                  b !== null &&
+                  (b as { type?: unknown }).type === 'text' &&
+                  typeof (b as { text?: unknown }).text === 'string'
+                ))
+                .map(b => b.text.trim())
+                .filter(Boolean)
+                .join('\n\n')
+                .trim()
+              if (text) lastAssistantText = text
+            }
+          } finally {
+            await nexus.close()
           }
 
           console.log(lastAssistantText)
@@ -527,13 +566,28 @@ ${commandList}`,
             | 'nexusOnRestoreCheckpoint'
             | 'nexusOnSwitchSession'
           >) {
+            React.useEffect(
+              () => () => {
+                void n.close().catch((error: unknown) => {
+                  const message =
+                    error instanceof Error ? error.message : String(error)
+                  process.stderr.write(
+                    `[nexus] Failed to close CLI runtime: ${message}\n`,
+                  )
+                })
+              },
+              [n],
+            )
             const [configSnapshot, setConfigSnapshot] = React.useState(n.configSnapshot)
             const [activeSessionId, setActiveSessionId] = React.useState(n.session.id)
             const refreshConfig = React.useCallback(async () => {
-              const { loadConfig } = await import('@nexuscode/core')
-              const config = await loadConfig(n.cwd, { secrets: n.secretsStore })
+              const config = await loadCliWorkspaceConfig(n.cwd, {
+                loadEnv: !n.serverUrl,
+                hostAuthority: !n.serverUrl,
+              })
+              applyCliModelSelection(config, n.cliModelSelection)
               setConfigSnapshot(buildConfigSnapshot(config))
-            }, [n.cwd, n.secretsStore])
+            }, [n])
 
             const handleSwitchSession = React.useCallback(
               async (sessionId: string) => {
@@ -559,6 +613,7 @@ ${commandList}`,
                 createNexusEmbeddingsCommand(n),
                 createNexusSkillsCommand(n),
                 createNexusMcpCommand(n),
+                createNexusAuthorityCommand(n),
                 createNexusSessionsCommand(n, (id: string) => {
                   void handleSwitchSession(id)
                 }),
@@ -592,7 +647,7 @@ ${commandList}`,
           render(
             <NexusREPLWithConfigRefresh
               nexus={nexus}
-              baseCommands={commands}
+              baseCommands={trustedCommands}
               effectiveCwd={effectiveCwd}
               debug={debug}
               initialPrompt={inputPrompt}
@@ -601,14 +656,12 @@ ${commandList}`,
               verbose={verbose}
               tools={tools}
               dangerouslySkipPermissions={dangerouslySkipPermissions}
-              mcpClients={mcpClients}
+              mcpStatuses={coreMcpDisplayStatuses(
+                nexus.mcpClient.getServerStatuses(),
+              )}
               isDefaultModel={isDefaultModel}
               nexusInitialMode={nexus.mode}
               nexusNoIndex={!nexus.indexer}
-              nexusSaveConfig={async () => {
-                const { writeConfig } = await import('@nexuscode/core')
-                writeConfig(nexus.config, effectiveCwd)
-              }}
               nexusOnReindex={() => nexus.indexer?.startIndexing()}
             />,
             renderContext,
@@ -1050,7 +1103,7 @@ ${commandList}`,
     program
       .command('resume')
       .description(
-        'Resume a previous conversation. Optionally provide a number (0, 1, 2, etc.) or file path to resume a specific conversation.',
+        'Import and resume a legacy conversation log. Nexus sessions use --session or --continue.',
       )
       .argument(
         '[identifier]',
@@ -1073,16 +1126,26 @@ ${commandList}`,
           identifier,
           { cwd, enableArchitect, dangerouslySkipPermissions, verbose },
         ) => {
-          await setup(cwd, dangerouslySkipPermissions)
+          const effectiveCwd = getWorkspaceTrustIdentity(cwd).canonicalPath
+          setOriginalCwd(effectiveCwd)
+          await setCwd(effectiveCwd)
+          await showSetupScreens(
+            effectiveCwd,
+            dangerouslySkipPermissions,
+            false,
+          )
+          await setup(effectiveCwd, dangerouslySkipPermissions)
           assertMinVersion()
 
-          const [tools, commands, logs, mcpClients] = await Promise.all([
+          // Legacy transcripts can still be imported, but they must not start a
+          // second MCP runtime alongside the workspace-owned Nexus runtime.
+          const [tools, commands, logs] = await Promise.all([
             getTools(
               enableArchitect ?? getCurrentProjectConfig().enableArchitectTool,
+              false,
             ),
-            getCommands(),
+            getCommands(false),
             loadLogList(CACHE_PATHS.messages()),
-            getClients(),
           ])
           logStartup()
 
@@ -1131,7 +1194,7 @@ ${commandList}`,
                   commands={commands}
                   tools={tools}
                   initialMessages={messages}
-                  mcpClients={mcpClients}
+                  mcpStatuses={[]}
                   isDefaultModel={isDefaultModel}
                 />,
                 { exitOnCtrlC: false },

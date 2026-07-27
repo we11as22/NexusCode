@@ -1,5 +1,8 @@
 import type { z } from "zod"
 import type { NexusRunServices } from "./agent/run-services.js"
+import type {
+  PendingProjectAuthorityRequest,
+} from "./config/project-authority.js"
 
 // ─── Modes ───────────────────────────────────────────────────────────────────
 
@@ -34,6 +37,66 @@ export interface PermissionResult {
 
 // ─── Tool Types ───────────────────────────────────────────────────────────────
 
+export type ToolApprovalCapability =
+  | "read"
+  | "write"
+  | "execute"
+  | "mcp"
+  | "plugin"
+  | "browser"
+
+/**
+ * Declarative approval metadata owned by the tool definition.
+ *
+ * The execution pipeline remains the sole authority that interprets this
+ * metadata against host/config permissions. Dynamic tools describe only the
+ * capability and user-facing action derived from their input.
+ */
+export interface ToolApprovalPolicy<TArgs = Record<string, unknown>> {
+  capability: ToolApprovalCapability
+  /** Return false when this invocation has no side effect requiring approval. */
+  when?(args: TArgs): boolean
+  /** Command used by execute allow/ask/deny matching. */
+  command?(args: TArgs): string | undefined
+  /** Human-readable action presented to the user. */
+  description(args: TArgs): string
+  /** Optional full command/path/payload shown in the approval surface. */
+  content?(args: TArgs): string | undefined
+  /** Optional concise explanation supplied by the model/tool input. */
+  shortDescription?(args: TArgs): string | undefined
+  /** Optional capability-specific warning. */
+  warning?(args: TArgs): string | undefined
+  /**
+   * Require a prompt even when this capability is otherwise auto-approved.
+   * Reserved for irreversible/destructive actions such as killing a task.
+   */
+  alwaysPrompt?: boolean
+}
+
+export type ToolIntegrationProvenance =
+  | {
+      kind: "mcp"
+      serverName: string
+      originalName: string
+    }
+  | {
+      kind: "custom"
+      sourceId: string
+      sourcePath: string
+      fingerprint: string
+      bundleFingerprint: string
+      generation: string
+    }
+  | {
+      kind: "plugin"
+      pluginName: string
+      sourceId: string
+      sourcePath: string
+      fingerprint: string
+      bundleFingerprint: string
+      generation: string
+    }
+
 export interface ToolDef<TArgs = Record<string, unknown>> {
   name: string
   description: string
@@ -49,15 +112,20 @@ export interface ToolDef<TArgs = Record<string, unknown>> {
   /** If true, can be executed in parallel with other read-only tools */
   readOnly?: boolean
   /** Stable integration provenance; never infer ownership from a tool-name delimiter. */
-  integration?: {
-    kind: "mcp"
-    serverName: string
-    originalName: string
-  }
+  integration?: ToolIntegrationProvenance
   /** Which modes this tool is available in. undefined = all modes */
   modes?: Mode[]
-  /** If true, always show approval dialog */
+  /**
+   * Legacy marker that this tool participates in approval. Prefer `approval`
+   * for capability-aware behavior and `approval.alwaysPrompt` when the prompt
+   * must not be bypassed by an auto-approve setting.
+   */
   requiresApproval?: boolean
+  /**
+   * Capability policy for this tool. Prefer this over name-based approval
+   * inference, especially when approval depends on invocation arguments.
+   */
+  approval?: ToolApprovalPolicy<TArgs>
   /**
    * Optional: produce a human-readable validation error from a ZodError.
    * Return value is sent back to the LLM as the tool result so it can self-correct.
@@ -82,6 +150,24 @@ export interface ToolAttachment {
   mimeType?: string
 }
 
+export interface NestedToolExecutionRequest {
+  /** Resolved tool name. The authoritative pipeline still performs its own lookup. */
+  toolName: string
+  /** Raw arguments. Normalization and schema validation belong to the pipeline. */
+  input: Record<string, unknown>
+  /** Stable zero-based position inside the parent batch. */
+  ordinal: number
+}
+
+export interface ToolActivationResult {
+  /** Tools added to the active execution/manifest set by this operation. */
+  activated: ToolDef[]
+  /** Requested tools which were already active. */
+  alreadyActive: ToolDef[]
+  /** Names outside the authoritative searchable set. No activation occurs when this is non-empty. */
+  rejected: string[]
+}
+
 export interface ToolContext {
   cwd: string
   host: IHost
@@ -98,8 +184,35 @@ export interface ToolContext {
   partId?: string
   /** Assistant message id for the in-flight tool call (loop); used e.g. to merge sub-agent file edits when part id lookup fails. */
   toolExecutionMessageId?: string
-  /** All resolved tools for this run (set by loop). Used e.g. by Parallel to run multiple tools in one call. */
+  /**
+   * One-shot decision from the authoritative policy stage for a staged
+   * Write/Edit operation. The tool owns diff construction; it must not
+   * independently reinterpret config/rules when this decision is present.
+   */
+  fileEditApproval?: {
+    required: boolean
+    permissionRule: boolean
+  }
+  /** Currently active tools for this run. Composite tools may only execute this set. */
   resolvedTools?: ToolDef[]
+  /**
+   * Mode-authorized discovery universe. This may include tools intentionally
+   * omitted from the current model manifest by deferred loading/classification.
+   */
+  searchableTools?: ToolDef[]
+  /**
+   * Atomically activate exact names from searchableTools for subsequent model
+   * requests and nested execution. Unknown/forbidden names reject the batch.
+   */
+  activateDeferredTools?: (toolNames: string[]) => ToolActivationResult
+  /**
+   * Execute a child call through the same validation, policy, approval, hook,
+   * spill, and cancellation boundary as a direct model tool call.
+   *
+   * Composite tools must fail closed when this capability is absent; directly
+   * invoking another ToolDef.execute() would bypass the runtime policy.
+   */
+  executeNestedTool?: (request: NestedToolExecutionRequest) => Promise<ToolResult>
 }
 
 // ─── Host Interface ───────────────────────────────────────────────────────────
@@ -237,13 +350,74 @@ export interface McpAuthRequest {
 }
 
 export interface McpAuthResult {
+  /**
+   * True only after credentials have actually been completed and the caller
+   * may reconnect. Merely opening an external URL is not completion.
+   */
   success: boolean
+  /** Authentication was handed off and still requires user/browser action. */
+  pending?: boolean
   message: string
+}
+
+export interface HostReadFileOptions {
+  /**
+   * Reject before loading the file when the host can determine that its byte
+   * size exceeds this limit. Model-facing tools must still bound their output.
+   */
+  maxBytes?: number
+}
+
+export type HostPathAccess = "read" | "list" | "write" | "delete" | "execute"
+
+export type NetworkRequestPurpose =
+  | "web_fetch"
+  | "web_search"
+  | "mcp"
+  | "remote_session"
+
+export interface HostNetworkRequest {
+  /** Fully-qualified URL for the next outbound hop. */
+  url: string
+  /** Capability purpose, used by hosts for policy and audit decisions. */
+  purpose: NetworkRequestPurpose
+}
+
+export interface ResolvedNetworkAddress {
+  address: string
+  family: 4 | 6
+}
+
+/**
+ * Host authorization for exactly one outbound HTTP hop.
+ *
+ * The request transport must connect through one of `addresses` without
+ * performing a second uncontrolled DNS lookup. Redirects require a fresh
+ * authorization.
+ */
+export interface AuthorizedNetworkRequest {
+  url: string
+  hostname: string
+  addresses: readonly ResolvedNetworkAddress[]
 }
 
 export interface IHost {
   readonly cwd: string
-  readFile(path: string): Promise<string>
+  /**
+   * Resolve and authorize a caller-controlled path before a core service uses
+   * a lower-level filesystem/process API. Remote hosts must enforce their
+   * canonical workspace capability here, including symlink escapes.
+   */
+  resolvePath(path: string, access: HostPathAccess): Promise<string>
+  /**
+   * Validate and resolve a model/user-controlled outbound URL. Implementations
+   * must fail closed for non-public destinations and return every allowed DNS
+   * answer so the transport can pin the subsequent connection.
+   */
+  authorizeNetworkRequest(
+    request: HostNetworkRequest,
+  ): Promise<AuthorizedNetworkRequest>
+  readFile(path: string, options?: HostReadFileOptions): Promise<string>
   writeFile(path: string, content: string): Promise<void>
   deleteFile(path: string): Promise<void>
   exists(path: string): Promise<boolean>
@@ -253,7 +427,10 @@ export interface IHost {
     cwd: string,
     signal?: AbortSignal
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>
-  showApprovalDialog(action: ApprovalAction): Promise<PermissionResult>
+  showApprovalDialog(
+    action: ApprovalAction,
+    signal?: AbortSignal,
+  ): Promise<PermissionResult>
   emit(event: AgentEvent): void
   /** Persist command to .nexus/allowed-commands.json for this cwd so it is not asked for approval again */
   addAllowedCommand?(cwd: string, command: string): Promise<void>
@@ -334,6 +511,14 @@ export interface SessionMessage {
   ts: number
   role: SessionRole
   content: string | MessagePart[]
+  /** Durable delegated-agent inbox id accepted into this transcript. */
+  mailboxMessageId?: string
+  /** Exact root session that owns the delegated-agent inbox. */
+  mailboxOwnerSessionId?: string
+  /** Logical delegated-agent inbox from which this message was accepted. */
+  mailboxTargetAgentId?: string
+  /** Display-only sender label copied from the durable inbox record. */
+  mailboxSender?: string
   /**
    * Optional per-user-message preset name (extension/server may attach).
    * Used to scope skills + MCP/tool visibility for the run that produced the assistant reply.
@@ -384,15 +569,24 @@ export interface ToolPart {
   /** If true, output has been pruned for compaction */
   compacted?: boolean
   /**
-   * Absolute path to full tool output when truncated to disk (~/.nexus/data/tool-output/).
-   * Preserved for model hints after prune/compaction (OpenClaude-style spill registry).
+   * Legacy absolute path retained only for migration of older transcripts.
+   * New model-facing capabilities use outputArtifactId and never expose paths.
    */
   outputSpillPath?: string
+  /** Opaque handle accepted only by ToolOutputRead. */
+  outputArtifactId?: string
+  /** Exact session whose private artifact directory owns this output. */
+  outputArtifactOwnerSessionId?: string
   /** Set when tool is Write/Edit and completed; used for session diff (e.g. CLI "N files" block). */
   path?: string
   diffStats?: { added: number; removed: number }
   /** Copied from sub-agent session into parent for diff; omit from chat tool rows (CLI). */
   mergedFromSubagent?: boolean
+  /**
+   * Exact mode-authorized tools exposed by a successful ToolSearch call.
+   * Persisted so deferred discovery survives compaction and session resume.
+   */
+  activatedToolNames?: string[]
 }
 
 export type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart
@@ -449,6 +643,45 @@ export interface TeamMessageRecord {
   teamName?: string
 }
 
+/**
+ * Durable, owner-scoped input for a delegated agent.
+ *
+ * A record remains pending until its target transcript has been checkpointed
+ * with `mailboxMessageId`; acknowledgement is deliberately a separate step.
+ */
+export interface AgentMailboxMessage {
+  id: string
+  ownerSessionId: string
+  targetAgentId: string
+  sequence: number
+  from: string
+  message: string
+  createdAt: number
+  ackedAt?: number
+  acknowledgedBySessionId?: string
+}
+
+/**
+ * Turn-boundary port used by the agent loop. Implementations must checkpoint
+ * the supplied session durably before acknowledging `messages`.
+ */
+export interface AgentInputMailbox {
+  readPending(limit?: number): Promise<AgentMailboxMessage[]>
+  waitForInput(signal: AbortSignal): Promise<void>
+  /**
+   * Synchronously stop advertising this worker as an active consumer before
+   * its final durable inbox check. Enqueues that finish after this call must
+   * report that an explicit resume is required.
+   */
+  sealForCompletion(): void
+  /** Re-advertise the worker after the completion check found more input. */
+  reopenAfterCompletionCheck(): void
+  checkpointAndAcknowledge(
+    messages: readonly AgentMailboxMessage[],
+    session: ISession,
+  ): Promise<void>
+}
+
 export interface TeamMemberRecord {
   name: string
   agentId?: string
@@ -466,6 +699,8 @@ export interface TeamRecord {
   createdAt: number
   members: TeamMemberRecord[]
   messages: TeamMessageRecord[]
+  /** Sessions that explicitly created or used this team. */
+  sessionIds?: string[]
 }
 
 export interface AgentDefinition {
@@ -585,6 +820,8 @@ export interface PluginManifestRecord {
   }>
   agents: string[]
   skills: string[]
+  /** Executable tool modules or directories relative to the plugin root. */
+  tools?: string[]
   hooks: string[]
   inlineHookConfigs?: Record<string, unknown>[]
   mcpServers: string[]
@@ -596,6 +833,9 @@ export interface PluginManifestRecord {
   settingsSchema?: Record<string, unknown>
   warnings?: string[]
   trusted?: boolean
+  /** Exact tree fingerprint evaluated by the host-owned plugin trust store. */
+  trustFingerprint?: string
+  trustGrantId?: string
   runtimeEnabled?: boolean
   options?: Record<string, unknown>
 }
@@ -850,7 +1090,10 @@ export interface NexusConfig {
     /** Command patterns that always ask (ask list) */
     askCommandPatterns: string[]
     denyPatterns: string[]
-    /** Fine-grained permission rules evaluated in order, first match wins */
+    /**
+     * Fine-grained permission rules. First match wins inside each authority
+     * layer; decisions from separate layers combine restrictively.
+     */
     rules: PermissionRule[]
   }
   retry: RetryConfig
@@ -868,7 +1111,16 @@ export interface NexusConfig {
   }
   mcp: {
     servers: McpServerConfig[]
+    /** Repository-provided definitions awaiting exact host promotion. */
+    pendingProjectServers?: Array<{
+      source: "project"
+      origin: "project-config" | "project-mcp-json"
+      status: "pending"
+      config: McpServerConfig
+    }>
   }
+  /** Repository endpoint/path/executable requests awaiting exact host approval. */
+  pendingProjectAuthority?: PendingProjectAuthorityRequest[]
   /** Normalized list for UI: path + enabled. skills is derived (enabled only). */
   skillsConfig?: Array<{ path: string; enabled: boolean }>
   skills: string[]
@@ -876,7 +1128,9 @@ export interface NexusConfig {
   skillsUrls?: string[]
   tools: {
     custom: string[]
+    /** @deprecated Parsed for old configs; ignored by the runtime. */
     classifyToolsEnabled: boolean
+    /** @deprecated Parsed for old configs; ignored by the runtime. */
     classifyThreshold: number
     parallelReads: boolean
     maxParallelReads: number
@@ -887,7 +1141,9 @@ export interface NexusConfig {
     /** In auto mode, always defer once at least this many tools are marked shouldDefer. */
     deferredLoadingMinimumTools?: number
   }
+  /** @deprecated Parsed for old configs; ignored by the runtime. */
   skillClassifyEnabled: boolean
+  /** @deprecated Parsed for old configs; ignored by the runtime. */
   skillClassifyThreshold: number
   structuredOutput: "auto" | "always" | "never"
   summarization: {
@@ -958,6 +1214,11 @@ export interface ModeConfig {
 export type PermissionRuleAction = "allow" | "deny" | "ask"
 
 export interface PermissionRule {
+  /**
+   * Runtime provenance assigned while trusted host and untrusted project
+   * layers are merged. Project input cannot promote itself to host authority.
+   */
+  authority?: "host" | "project"
   /** Tool name or glob pattern matching tool names */
   tool?: string
   /** Path pattern (glob) to match against file args */
@@ -1014,12 +1275,19 @@ export interface McpServerConfig {
 
 // ─── Skill Types ───────────────────────────────────────────────────────────────
 
+export interface SkillAuthority {
+  lexicalRoot: string
+  realRoot: string
+}
+
 export interface SkillDef {
   name: string
   path: string
   /** Short description (YAML `description` or first heading / line). */
   summary: string
   content: string
+  /** Captured discovery authority used by post-load skill operations. */
+  authority?: SkillAuthority
 }
 
 // ─── Checkpoint ───────────────────────────────────────────────────────────────

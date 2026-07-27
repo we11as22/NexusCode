@@ -54,13 +54,13 @@ Usage:
 
   async execute({ pattern, path: searchPath, glob: includeGlob, output_mode, "-B": before, "-A": after, "-C": contextC, context: contextAlias, "-n": lineNumbers, "-i": case_sensitive, type: fileType, head_limit, offset: skipOffset, multiline }, ctx) {
     const context_lines = contextC ?? contextAlias ?? before ?? after ?? 0
-    const targets = searchPath ? [path.resolve(ctx.cwd, searchPath)] : [ctx.cwd]
     const include = includeGlob ?? (fileType ? `*.${fileType}` : undefined)
     const skipN = skipOffset ?? 0
     const maxResults = Math.min(head_limit ?? 500, 2000)
     const collectLimit = skipN + maxResults
 
     try {
+      const target = await ctx.host.resolvePath(searchPath ?? ".", "read")
       const results: string[] = []
       const seen = new Set<string>()
       let matchCount = 0
@@ -76,7 +76,7 @@ Usage:
       }
       if (multiline) args.push("-U", "--multiline-dotall")
       if (context_lines) args.push("--context", String(context_lines))
-      args.push(targets[0]!)
+      args.push(target)
 
       const { stdout } = await execa("rg", args, { cwd: ctx.cwd, reject: false })
       if (!stdout) {
@@ -194,11 +194,11 @@ export const listTool: ToolDef<z.infer<typeof listSchema>> = {
   async execute({ path: listPathArg, ignore: ignorePatterns, recursive, include, max_entries }, ctx) {
     const listPath =
       typeof listPathArg === "string" && listPathArg.length > 0 ? listPathArg : undefined
-    const targetDir = listPath ? path.resolve(ctx.cwd, listPath) : ctx.cwd
     const maxEntries = max_entries ?? 200
     const maxActual = Math.min(maxEntries, 2000)
 
     try {
+      const targetDir = await ctx.host.resolvePath(listPath ?? ".", "list")
       const { readdir, stat } = await import("node:fs/promises")
       const ignoreMod = await import("ignore")
       const ignoreFactory = ((ignoreMod as any).default ?? ignoreMod) as (...args: unknown[]) => ReturnType<typeof import("ignore").default>
@@ -238,16 +238,27 @@ export const listTool: ToolDef<z.infer<typeof listSchema>> = {
         for (const item of items.sort()) {
           if (entries.length >= maxActual) break
           const fullPath = path.join(dir, item)
-          const relPath = path.relative(ctx.cwd, fullPath)
+          const authorizedPath = await ctx.host
+            .resolvePath(fullPath, "list")
+            .catch(() => null)
+          if (!authorizedPath) continue
+          const workspaceRelative = path.relative(ctx.cwd, authorizedPath)
+          const relPath = (
+            workspaceRelative === ".." ||
+              workspaceRelative.startsWith(`..${path.sep}`) ||
+              path.isAbsolute(workspaceRelative)
+              ? path.relative(targetDir, authorizedPath)
+              : workspaceRelative
+          ).replace(/\\/g, "/")
 
           if (ig.ignores(relPath)) continue
-          const itemStat = await stat(fullPath).catch(() => null)
+          const itemStat = await stat(authorizedPath).catch(() => null)
           if (!itemStat) continue
 
           if (itemStat.isDirectory()) {
             entries.push(`${prefix}${item}/`)
             if (recursive || depth === 0) {
-              await walk(fullPath, prefix + "  ", depth + 1)
+              await walk(authorizedPath, prefix + "  ", depth + 1)
             }
           } else {
             // Apply include glob filter for files

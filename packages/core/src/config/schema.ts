@@ -1,4 +1,8 @@
 import { z } from "zod"
+import { isSafeMcpHttpUrl } from "../mcp/url.js"
+import {
+  PendingProjectAuthorityRequestSchema,
+} from "./project-authority.js"
 
 const PROVIDER_NAMES = [
   "anthropic", "openai", "google", "ollama", "openai-compatible",
@@ -45,13 +49,18 @@ const modeConfigSchema = z.object({
   customInstructions: z.string().optional(),
 })
 
+const mcpHttpUrlSchema = z.string().refine(
+  isSafeMcpHttpUrl,
+  "MCP URL must be an HTTP(S) URL without embedded credentials",
+)
+
 export const McpServerConfigSchema = z.object({
   name: z.string().min(1),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),
   cwd: z.string().optional(),
-  url: z.string().optional(),
+  url: mcpHttpUrlSchema.optional(),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
   type: z.enum(["stdio", "sse", "streamable-http", "http"]).optional(),
   headers: z.record(z.string()).optional(),
@@ -62,7 +71,7 @@ export const McpServerConfigSchema = z.object({
   bundle: z.string().optional(),
   auth: z.object({
     type: z.enum(["oauth", "url", "manual"]).optional(),
-    startUrl: z.string().optional(),
+    startUrl: mcpHttpUrlSchema.optional(),
     message: z.string().optional(),
   }).optional(),
 }).superRefine((server, ctx) => {
@@ -76,6 +85,20 @@ export const McpServerConfigSchema = z.object({
     })
   }
   const transport = server.transport ?? server.type
+  const normalizedTransport = server.transport
+  const normalizedType =
+    server.type === "streamable-http" ? "http" : server.type
+  if (
+    normalizedTransport &&
+    normalizedType &&
+    normalizedTransport !== normalizedType
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["transport"],
+      message: "transport and type must describe the same MCP transport",
+    })
+  }
   if (server.command && transport && transport !== "stdio") {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -90,6 +113,13 @@ export const McpServerConfigSchema = z.object({
       message: "URL-based MCP servers cannot use stdio transport",
     })
   }
+})
+
+const PendingProjectMcpServerSchema = z.object({
+  source: z.literal("project"),
+  origin: z.enum(["project-config", "project-mcp-json"]),
+  status: z.literal("pending"),
+  config: McpServerConfigSchema,
 })
 
 export const NexusConfigSchema = z.object({
@@ -187,6 +217,7 @@ export const NexusConfigSchema = z.object({
     askCommandPatterns: z.array(z.string()).default([]),
     denyPatterns: z.array(z.string()).default(["**/.env", "**/secrets/**", "**/*.key", "**/*.pem"]),
     rules: z.array(z.object({
+      authority: z.enum(["host", "project"]).optional(),
       tool: z.string().optional(),
       pathPattern: z.string().optional(),
       commandPattern: z.string().optional(),
@@ -218,7 +249,22 @@ export const NexusConfigSchema = z.object({
 
   mcp: z.object({
     servers: z.array(McpServerConfigSchema).default([]),
+    /**
+     * Repository-provided MCP definitions are data, not startup authority.
+     * A host may present these requests and promote one only after an explicit
+     * trusted approval flow.
+     */
+    pendingProjectServers: z.array(PendingProjectMcpServerSchema).default([]),
   }).default({}),
+
+  /**
+   * Normalized repository requests which are inert until the exact workspace
+   * host store approves their content fingerprint.
+   */
+  pendingProjectAuthority: z
+    .array(PendingProjectAuthorityRequestSchema)
+    .max(256)
+    .default([]),
 
   skills: z.array(z.union([
     z.string(),
@@ -229,10 +275,17 @@ export const NexusConfigSchema = z.object({
   skillsUrls: z.array(z.string()).optional(),
 
   tools: z.object({
-    custom: z.array(z.string()).default([]),
-    /** When true, use LLM to filter which MCP servers to use when server count > classifyThreshold. Default off. */
+    custom: z
+      .array(z.string().trim().min(1).max(4_096))
+      .max(128)
+      .default([]),
+    /**
+     * @deprecated Parsed only so older configuration files remain valid.
+     * Runtime capability discovery is deterministic and never invokes an LLM
+     * pre-classifier.
+     */
     classifyToolsEnabled: z.boolean().default(false),
-    /** Threshold: when MCP server count exceeds this, classifier selects which servers to use. Default 20. */
+    /** @deprecated Compatibility-only companion to classifyToolsEnabled. */
     classifyThreshold: z.number().int().positive().default(20),
     parallelReads: z.boolean().default(true),
     maxParallelReads: z.number().int().positive().default(5),
@@ -244,9 +297,9 @@ export const NexusConfigSchema = z.object({
     deferredLoadingMinimumTools: z.number().int().positive().default(8),
   }).default({}),
 
-  /** When true, use LLM to filter skills by task when count > skillClassifyThreshold. Default off. */
+  /** @deprecated Compatibility-only; skill discovery is deterministic. */
   skillClassifyEnabled: z.boolean().default(false),
-  /** Threshold for skill classification. Default 20. */
+  /** @deprecated Compatibility-only companion to skillClassifyEnabled. */
   skillClassifyThreshold: z.number().int().positive().default(20),
 
   structuredOutput: z.enum(["auto", "always", "never"]).default("auto"),

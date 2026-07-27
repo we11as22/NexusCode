@@ -11,11 +11,13 @@ import {
   createTestConfig,
 } from "../../test/fakes.js"
 import type { ToolContext } from "../../types.js"
+import { z } from "zod"
 import {
   createNexusRunServices,
   type NexusRunServices,
 } from "../run-services.js"
 import type { ParallelAgentManager } from "../parallel.js"
+import type { ToolContributionSnapshot } from "../../tools/custom/manager.js"
 
 const orchestrationRuntime = vi.hoisted(() => ({
   updateTask: vi.fn(async () => null),
@@ -90,14 +92,55 @@ function seedMcpClient(client: McpClient, label: string): void {
 }
 
 describe("Nexus run service isolation", () => {
+  it("preserves one immutable tool contribution generation for delegated agents", () => {
+    const snapshot = Object.freeze({
+      generation: "sha256:generation",
+      fingerprint: "sha256:content",
+      tools: Object.freeze([]),
+      diagnostics: Object.freeze([]),
+    }) satisfies ToolContributionSnapshot
+
+    const services = createNexusRunServices({
+      toolContributionSnapshot: snapshot,
+    })
+
+    expect(services.toolContributionSnapshot).toBe(snapshot)
+  })
+
+  it("preserves an explicit immutable MCP tool snapshot for delegated agents", () => {
+    const mcpToolSnapshot = Object.freeze([Object.freeze({
+      name: "docs__lookup",
+      description: "Look up documentation",
+      parameters: z.object({}),
+      integration: {
+        kind: "mcp" as const,
+        serverName: "docs",
+        originalName: "lookup",
+      },
+      async execute() {
+        return { success: true, output: "ok" }
+      },
+    })])
+
+    const services = createNexusRunServices({ mcpToolSnapshot })
+
+    expect(services.mcpToolSnapshot).toBe(mcpToolSnapshot)
+  })
+
   it("routes agent task creation only to the context manager", async () => {
     const managerA = fakeManager("agent-a")
     const managerB = fakeManager("agent-b")
     const contextA = await createContext(
-      createNexusRunServices({ parallelAgentManager: managerA }),
+      createNexusRunServices({
+        parallelAgentManager: managerA,
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
     )
     const contextB = await createContext(
-      createNexusRunServices({ parallelAgentManager: managerB }),
+      createNexusRunServices({
+        parallelAgentManager: managerB,
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
     )
 
     await taskCreateTool.execute(

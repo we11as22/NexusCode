@@ -1,4 +1,10 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import {
+  existsSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'fs'
 import { resolve, join } from 'path'
 import { cloneDeep, memoize, pick } from 'lodash-es'
 import { homedir } from 'os'
@@ -43,7 +49,14 @@ export type ProjectConfig = {
   exampleFiles?: string[]
   exampleFilesGeneratedAt?: number
   hasTrustDialogAccepted?: boolean
+  trustIdentity?: WorkspaceTrustIdentity
   hasCompletedProjectOnboarding?: boolean
+}
+
+export type WorkspaceTrustIdentity = {
+  canonicalPath: string
+  device: string
+  inode: string
 }
 
 const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
@@ -168,24 +181,78 @@ export const PROJECT_CONFIG_KEYS = [
 
 export type ProjectConfigKey = (typeof PROJECT_CONFIG_KEYS)[number]
 
-export function checkHasTrustDialogAccepted(): boolean {
-  let currentPath = getCwd()
-  const config = getConfig(GLOBAL_CLAUDE_FILE, DEFAULT_GLOBAL_CONFIG)
-
-  while (true) {
-    const projectConfig = config.projects?.[currentPath]
-    if (projectConfig?.hasTrustDialogAccepted) {
-      return true
-    }
-    const parentPath = resolve(currentPath, '..')
-    // Stop if we've reached the root (when parent is same as current)
-    if (parentPath === currentPath) {
-      break
-    }
-    currentPath = parentPath
+export function getWorkspaceTrustIdentity(
+  workspacePath: string,
+): WorkspaceTrustIdentity {
+  const canonicalPath = realpathSync.native(resolve(workspacePath))
+  const stat = statSync(canonicalPath)
+  if (!stat.isDirectory()) {
+    throw new Error(`Workspace is not a directory: ${workspacePath}`)
   }
+  return {
+    canonicalPath,
+    device: String(stat.dev),
+    inode: String(stat.ino),
+  }
+}
 
-  return false
+export function trustIdentityMatches(
+  expected: WorkspaceTrustIdentity | undefined,
+  actual: WorkspaceTrustIdentity,
+): boolean {
+  return Boolean(
+    expected &&
+      expected.canonicalPath === actual.canonicalPath &&
+      expected.device === actual.device &&
+      expected.inode === actual.inode,
+  )
+}
+
+export function hasExactWorkspaceTrust(
+  projects: Record<string, ProjectConfig> | undefined,
+  identity: WorkspaceTrustIdentity,
+): boolean {
+  const projectConfig = projects?.[identity.canonicalPath]
+  return (
+    projectConfig?.hasTrustDialogAccepted === true &&
+    trustIdentityMatches(projectConfig.trustIdentity, identity)
+  )
+}
+
+export function checkHasTrustDialogAccepted(
+  workspacePath = getCwd(),
+): boolean {
+  let identity: WorkspaceTrustIdentity
+  try {
+    identity = getWorkspaceTrustIdentity(workspacePath)
+  } catch {
+    return false
+  }
+  const config = getConfig(GLOBAL_CLAUDE_FILE, DEFAULT_GLOBAL_CONFIG)
+  return hasExactWorkspaceTrust(config.projects, identity)
+}
+
+export function saveWorkspaceTrust(workspacePath: string): void {
+  const identity = getWorkspaceTrustIdentity(workspacePath)
+  const config = getConfig(GLOBAL_CLAUDE_FILE, DEFAULT_GLOBAL_CONFIG)
+  const existing =
+    config.projects?.[identity.canonicalPath] ??
+    defaultConfigForProject(identity.canonicalPath)
+  saveConfig(
+    GLOBAL_CLAUDE_FILE,
+    {
+      ...config,
+      projects: {
+        ...config.projects,
+        [identity.canonicalPath]: {
+          ...existing,
+          hasTrustDialogAccepted: true,
+          trustIdentity: identity,
+        },
+      },
+    },
+    DEFAULT_GLOBAL_CONFIG,
+  )
 }
 
 // We have to put this test code here because Jest doesn't support mocking ES modules :O
@@ -346,7 +413,7 @@ export function getCurrentProjectConfig(): ProjectConfig {
     return TEST_PROJECT_CONFIG_FOR_TESTING
   }
 
-  const absolutePath = resolve(getCwd())
+  const absolutePath = getWorkspaceTrustIdentity(getCwd()).canonicalPath
   const config = getConfig(GLOBAL_CLAUDE_FILE, DEFAULT_GLOBAL_CONFIG)
 
   if (!config.projects) {
@@ -379,7 +446,7 @@ export function saveCurrentProjectConfig(projectConfig: ProjectConfig): void {
       ...config,
       projects: {
         ...config.projects,
-        [resolve(getCwd())]: projectConfig,
+        [getWorkspaceTrustIdentity(getCwd()).canonicalPath]: projectConfig,
       },
     },
     DEFAULT_GLOBAL_CONFIG,

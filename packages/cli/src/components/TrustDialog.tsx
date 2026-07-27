@@ -3,21 +3,19 @@ import { Box, Text, useInput } from 'ink'
 import { getTheme } from '../utils/theme.js'
 import { Select } from '@inkjs/ui'
 import {
-  saveCurrentProjectConfig,
-  getCurrentProjectConfig,
+  saveWorkspaceTrust,
 } from '../utils/config.js'
 import { PRODUCT_NAME } from '../constants/product.js'
 import { logEvent } from '../services/statsig.js'
 import { useExitOnCtrlCD } from '../hooks/useExitOnCtrlCD.js'
-import { homedir } from 'os'
-import { getCwd } from '../utils/state.js'
 import Link from './Link.js'
 
 type Props = {
+  workspacePath: string
   onDone(): void
 }
 
-export function TrustDialog({ onDone }: Props): React.ReactNode {
+export function TrustDialog({ workspacePath, onDone }: Props): React.ReactNode {
   const theme = getTheme()
   React.useEffect(() => {
     // Log when dialog is shown
@@ -25,21 +23,14 @@ export function TrustDialog({ onDone }: Props): React.ReactNode {
   }, [])
 
   function onChange(value: 'yes' | 'no') {
-    const config = getCurrentProjectConfig()
     switch (value) {
       case 'yes': {
         // Log when user accepts
-        const isHomeDir = homedir() === getCwd()
         logEvent('trust_dialog_accept', {
-          isHomeDir: String(isHomeDir),
+          workspacePath,
         })
 
-        if (!isHomeDir) {
-          saveCurrentProjectConfig({
-            ...config,
-            hasTrustDialogAccepted: true,
-          })
-        }
+        saveWorkspaceTrust(workspacePath)
         onDone()
         break
       }
@@ -71,7 +62,7 @@ export function TrustDialog({ onDone }: Props): React.ReactNode {
         <Text bold color={theme.warning}>
           Do you trust the files in this folder?
         </Text>
-        <Text bold>{process.cwd()}</Text>
+        <Text bold>{workspacePath}</Text>
 
         <Box flexDirection="column" gap={1}>
           <Text>

@@ -1,7 +1,11 @@
-import * as fs from "node:fs/promises"
-import * as path from "node:path"
-import * as os from "node:os"
-import { execa } from "execa"
+import {
+  DEFAULT_SAFE_ARCHIVE_LIMITS,
+  extractArchivePlanAtomically,
+  preflightTarGzArchive,
+  readResponseBodyWithLimit,
+  selectArchiveSubtree,
+  type SafeArchiveLimits,
+} from "./safe-archive.js"
 
 export interface ParsedGithubBlob {
   owner: string
@@ -17,114 +21,94 @@ export function parseGithubBlobUrl(url: string): ParsedGithubBlob | null {
     .trim()
     .match(/^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/)
   if (!m) return null
-  const [, owner, repo, ref, pathInRepo] = m
+  const [, rawOwner, rawRepo, rawRef, rawPathInRepo] = m
+  const owner = decodeSafeUrlSegment(rawOwner)
+  const repo = decodeSafeUrlSegment(rawRepo)
+  const ref = decodeSafeUrlSegment(rawRef)
+  const pathInRepo = decodeSafeRepoPath(rawPathInRepo)
+  if (!owner || !repo || !ref || !pathInRepo) return null
   return {
     owner,
     repo,
     ref,
-    pathInRepo: pathInRepo.replace(/\/$/, ""),
+    pathInRepo,
     codeloadUrl: `https://codeload.github.com/${owner}/${repo}/tar.gz/${ref}`,
   }
 }
 
-async function findEscapedPaths(dir: string): Promise<string[]> {
-  const resolved = path.resolve(dir)
-  const escaped: string[] = []
-
-  async function walk(current: string): Promise<void> {
-    const entries = await fs.readdir(current, { withFileTypes: true })
-    for (const entry of entries) {
-      const full = path.resolve(current, entry.name)
-      if (!full.startsWith(resolved + path.sep) && full !== resolved) {
-        escaped.push(full)
-        continue
-      }
-      if (entry.isSymbolicLink()) {
-        const target = await fs.realpath(full)
-        if (!target.startsWith(resolved + path.sep) && target !== resolved) {
-          escaped.push(full)
-          continue
-        }
-      }
-      if (entry.isDirectory()) {
-        await walk(full)
-      }
+function repeatedlyDecodeUrlComponent(value: string): string | null {
+  let decoded = value
+  try {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const next = decodeURIComponent(decoded)
+      if (next === decoded) return decoded
+      decoded = next
     }
+  } catch {
+    return null
   }
+  return /%[0-9a-f]{2}/i.test(decoded) ? null : decoded
+}
 
-  await walk(dir)
-  return escaped
+function decodeSafeUrlSegment(value: string): string | null {
+  const decoded = repeatedlyDecodeUrlComponent(value)
+  if (
+    !decoded ||
+    decoded === "." ||
+    decoded === ".." ||
+    decoded.includes("/") ||
+    decoded.includes("\\") ||
+    decoded.includes("\0")
+  ) {
+    return null
+  }
+  return decoded
+}
+
+function decodeSafeRepoPath(value: string): string | null {
+  const decoded = repeatedlyDecodeUrlComponent(value)
+  if (!decoded || decoded.startsWith("/") || decoded.includes("\\") || decoded.includes("\0")) {
+    return null
+  }
+  const segments = decoded.replace(/\/$/, "").split("/")
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    return null
+  }
+  return segments.join("/")
+}
+
+export interface GithubSkillExtractionOptions {
+  limits?: Partial<SafeArchiveLimits>
+  containmentRoot?: string
 }
 
 /**
  * Download repo tarball, extract skill folder matching GitHub blob path, copy to `destDir`.
  */
-export async function extractGithubSkillFromBlobUrl(blobUrl: string, destDir: string): Promise<void> {
+export async function extractGithubSkillFromBlobUrl(
+  blobUrl: string,
+  destDir: string,
+  options: GithubSkillExtractionOptions = {},
+): Promise<void> {
   const parsed = parseGithubBlobUrl(blobUrl)
   if (!parsed) {
     throw new Error("Skill URL must be a github.com/.../blob/... link")
   }
 
-  const stamp = Date.now()
-  const tarball = path.join(os.tmpdir(), `nexus-skillnet-${parsed.owner}-${parsed.repo}-${stamp}.tar.gz`)
-  const staging = path.join(os.tmpdir(), `nexus-skillnet-staging-${stamp}`)
-
-  try {
-    const response = await fetch(parsed.codeloadUrl)
-    if (!response.ok) {
-      throw new Error(`Download failed: ${response.status} ${response.statusText}`)
-    }
-    const buffer = Buffer.from(await response.arrayBuffer())
-    await fs.writeFile(tarball, buffer)
-
-    await fs.mkdir(staging, { recursive: true })
-    const tarResult = await execa("tar", ["-xzf", tarball, "-C", staging], { reject: false })
-    if (tarResult.exitCode !== 0) {
-      throw new Error(tarResult.stderr || `tar exited ${tarResult.exitCode}`)
-    }
-
-    const topEntries = await fs.readdir(staging, { withFileTypes: true })
-    const topDirs = topEntries.filter((e) => e.isDirectory())
-    if (topDirs.length !== 1) {
-      throw new Error("Unexpected archive layout (expected one top-level folder)")
-    }
-    const top = path.join(staging, topDirs[0]!.name)
-
-    const segments = parsed.pathInRepo.split("/").filter(Boolean)
-    let skillPath = path.join(top, ...segments)
-    let stat: Awaited<ReturnType<typeof fs.stat>> | null = null
-    try {
-      stat = await fs.stat(skillPath)
-    } catch {
-      stat = null
-    }
-    if (stat?.isFile()) {
-      skillPath = path.dirname(skillPath)
-    }
-
-    try {
-      await fs.access(path.join(skillPath, "SKILL.md"))
-    } catch {
-      throw new Error("Could not find SKILL.md for this path (wrong URL or not a skill folder)")
-    }
-
-    const escaped = await findEscapedPaths(skillPath)
-    if (escaped.length > 0) {
-      throw new Error("Skill folder contains unsafe paths")
-    }
-
-    await fs.mkdir(path.dirname(destDir), { recursive: true })
-    await fs.cp(skillPath, destDir, { recursive: true })
-  } finally {
-    try {
-      await fs.unlink(tarball)
-    } catch {
-      /* */
-    }
-    try {
-      await fs.rm(staging, { recursive: true })
-    } catch {
-      /* */
-    }
+  const response = await fetch(parsed.codeloadUrl)
+  if (!response.ok) {
+    throw new Error(`Download failed: ${response.status} ${response.statusText}`)
   }
+  const archive = await readResponseBodyWithLimit(
+    response,
+    options.limits?.maxDownloadBytes ?? DEFAULT_SAFE_ARCHIVE_LIMITS.maxDownloadBytes,
+  )
+  const repositoryPlan = await preflightTarGzArchive(archive, options.limits)
+  const skillPlan = selectArchiveSubtree(repositoryPlan, parsed.pathInRepo)
+  await extractArchivePlanAtomically(skillPlan, destDir, {
+    containmentRoot: options.containmentRoot,
+  })
 }

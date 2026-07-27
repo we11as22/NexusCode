@@ -1,14 +1,10 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google"
 import type { ProviderConfig } from "../types.js"
 import { BaseLLMClient } from "./base.js"
+import { resolveProviderCredential } from "./credential-identity.js"
 
 export function createGoogleClient(config: ProviderConfig) {
-  const apiKey =
-    config.apiKey ??
-    process.env["GOOGLE_GENERATIVE_AI_API_KEY"] ??
-    process.env["GOOGLE_API_KEY"] ??
-    process.env["GEMINI_API_KEY"] ??
-    ""
+  const apiKey = resolveProviderCredential(config).apiKey ?? ""
   const google = createGoogleGenerativeAI({
     apiKey,
     baseURL: config.baseUrl,

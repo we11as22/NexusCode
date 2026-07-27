@@ -1,7 +1,19 @@
-/** Metadata from {@link truncateOutput} / tool execution for disk-spilled tool results. */
-export function spillPathFromToolMetadata(metadata: unknown): string | undefined {
-  const m = metadata as { outputSpillAbsolutePath?: string } | undefined
-  return typeof m?.outputSpillAbsolutePath === "string" && m.outputSpillAbsolutePath.length > 0
-    ? m.outputSpillAbsolutePath
+export function artifactCapabilityFromToolMetadata(
+  metadata: unknown,
+): { artifactId: string; ownerSessionId: string } | undefined {
+  const value = metadata as {
+    outputArtifactId?: unknown
+    outputArtifactOwnerSessionId?: unknown
+  } | undefined
+  return (
+    typeof value?.outputArtifactId === "string" &&
+    value.outputArtifactId.length > 0 &&
+    typeof value.outputArtifactOwnerSessionId === "string" &&
+    value.outputArtifactOwnerSessionId.length > 0
+  )
+    ? {
+        artifactId: value.outputArtifactId,
+        ownerSessionId: value.outputArtifactOwnerSessionId,
+      }
     : undefined
 }

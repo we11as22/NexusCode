@@ -1,5 +1,10 @@
 import { MODES, type ToolDef, Mode, NexusConfig } from "../types.js"
-import { getBuiltinToolsForMode } from "../agent/modes.js"
+import {
+  getBuiltinToolsForMode,
+  getBlockedToolsForMode,
+  getRetiredBuiltinToolNames,
+  isDynamicToolAllowedInMode,
+} from "../agent/modes.js"
 import { getAllBuiltinTools } from "./built-in/index.js"
 import { canonicalizeToolName, resolveToolNameAlias } from "./aliases.js"
 
@@ -32,6 +37,7 @@ export class ToolRegistry {
       this.reservedBuiltinNames = new Set([
         ...this.getStaticBuiltinNames(),
         ...MODES.flatMap((mode) => getBuiltinToolsForMode(mode)),
+        ...getRetiredBuiltinToolNames(),
       ])
     }
     return this.reservedBuiltinNames
@@ -126,6 +132,7 @@ export class ToolRegistry {
    */
   getForMode(mode: Mode): { builtin: ToolDef[]; dynamic: ToolDef[] } {
     const builtinNames = new Set(getBuiltinToolsForMode(mode))
+    const blockedNames = getBlockedToolsForMode(mode)
     const reservedBuiltinNames = ToolRegistry.getReservedBuiltinNames()
     const builtin: ToolDef[] = []
     const dynamic: ToolDef[] = []
@@ -133,10 +140,13 @@ export class ToolRegistry {
     for (const tool of this.tools.values()) {
       if (tool.hiddenFromAgent) continue
       if (reservedBuiltinNames.has(tool.name)) {
-        if (!builtinNames.has(tool.name)) continue
+        if (!builtinNames.has(tool.name) || blockedNames.has(tool.name)) continue
         builtin.push(tool)
       } else {
-        if (tool.modes && !tool.modes.includes(mode)) continue
+        if (
+          blockedNames.has(tool.name) ||
+          !isDynamicToolAllowedInMode(tool, mode)
+        ) continue
         dynamic.push(tool)
       }
     }

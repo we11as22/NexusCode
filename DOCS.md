@@ -1,6 +1,6 @@
 # NexusCode — полная документация
 
-**NexusCode** — AI-агент для кода: расширение VS Code, CLI (TUI) и опциональный HTTP-сервер. Сессии и сообщения хранятся в **JSONL** под `~/.nexus/sessions/<хэш канонического корня проекта>/` через `@nexuscode/core`. Сервер (`packages/server`) пишет в **те же файлы**, что и локальный CLI/расширение (`session-fs-store.ts`), а не в отдельную SQLite.
+**NexusCode** — AI-агент для кода: расширение VS Code, CLI (TUI) и опциональный HTTP-сервер. Переносимый transcript/audit хранится в checksummed **JSONL** под `~/.nexus/sessions/<хэш канонического корня проекта>/`. Серверный workspace runtime дополнительно использует встроенный `node:sqlite` для транзакционных leases, admission, очередей, approvals, replay cursors и других coordination projections; SQLite не заменяет JSONL как переносимую историю.
 
 - **README** (English): [README.md](README.md) — установка, быстрый старт, ссылки.
 - **Архитектура** (English): [ARCHITECTURE.md](ARCHITECTURE.md) — слои, инварианты, потоки данных, детали UI/loop.
@@ -61,7 +61,7 @@ pnpm build
 
 После `pnpm run cli` или `cd packages/cli && npm link` добавьте `~/bin` (или каталог установки) в `PATH`. Запуск: `nexus`.
 
-Nexus core не использует нативный SQLite addon: сессии хранятся в JSONL, индексный tracker — в атомарном JSON, векторы — в Qdrant. Временно отключить индекс можно через `nexus --no-index`.
+Nexus не использует внешний нативный SQLite addon: backend coordination state работает на встроенном `node:sqlite`, transcript остаётся в JSONL, индексный tracker — в атомарном JSON, векторы — в Qdrant. Временно отключить индекс можно через `nexus --no-index`.
 
 ---
 
@@ -174,11 +174,11 @@ model:
 | **mcp** | servers | `[]` | `name`, `command`, `args`, `env`, `url`, `transport`, `type`, `headers`, `enabled`, `bundle` |
 | **skills** | | `[]` | строки или `{ path, enabled? }` |
 | **skillsUrls** | | опционально | удалённые реестры → `~/.nexus/cache/skills/` |
-| **tools** | classifyToolsEnabled | `false` | при `true` и числе MCP-серверов > threshold — классификация **серверов** |
-| | classifyThreshold | `20` | |
+| **tools** | classifyToolsEnabled | `false` | deprecated/no-op, читается только для совместимости старых конфигов |
+| | classifyThreshold | `20` | deprecated/no-op |
 | | parallelReads, maxParallelReads | `true`, `5` | |
-| **skillClassifyEnabled** | | `false` | |
-| **skillClassifyThreshold** | | `20` | |
+| **skillClassifyEnabled** | | `false` | deprecated/no-op |
+| **skillClassifyThreshold** | | `20` | deprecated/no-op |
 | **structuredOutput** | | `"auto"` | `auto` \| `always` \| `never` |
 | **summarization** | auto, threshold, keepRecentMessages, model | `true`, `0.80`, `8`, `""` | |
 | **parallelAgents** | maxParallel, maxTasksPerCall | `4`, `12` | второе — устаревший задел; параллельные сабагенты через `Parallel` / `SpawnAgentsParallel` |
@@ -345,7 +345,7 @@ Enter — отправить; Shift+Enter — новая строка; Shift+Tab
 
 ## MCP
 
-Конфигурация списка серверов в `mcp.servers` + merge с `mcp-servers.json`. Включение/выключение — **по серверу целиком**. При большом числе серверов и **`tools.classifyToolsEnabled`** классификатор выбирает **какие серверы** подключить; инструменты встроенного набора не отфильтровываются этим механизмом.
+Конфигурация списка серверов в `mcp.servers` + merge с `mcp-servers.json`. Включение/выключение — **по серверу целиком**. При большой динамической поверхности схемы deferred-инструментов не отправляются модели заранее: агент находит их детерминированным BM25-поиском через `ToolSearch`, после чего выбранные инструменты активируются на следующей границе provider-вызова. Отдельного LLM-классификатора нет.
 
 Транспорты в schema: `stdio`, `http`, `sse`; поле `type` — расширенные варианты для SDK.
 
@@ -355,7 +355,7 @@ Enter — отправить; Shift+Enter — новая строка; Shift+Tab
 
 ## Skills
 
-Пути из `skills`, удалённые индексы `skillsUrls`, walk-up `.nexus/skills`, глобальный `~/.nexus/skills`, установки маркетплейса. При **`skillClassifyEnabled`** и числе навыков > **`skillClassifyThreshold`** — LLM-отбор под задачу.
+Пути из `skills`, удалённые индексы `skillsUrls`, walk-up `.nexus/skills`, глобальный `~/.nexus/skills`, установки маркетплейса. Skills публикуются ограниченным каталогом и активируются по точному имени/metadata через `Skill`; скрытого LLM-отбора до запуска агента нет.
 
 ---
 

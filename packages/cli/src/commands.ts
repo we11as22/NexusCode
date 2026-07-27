@@ -91,8 +91,11 @@ const COMMANDS = memoize((): Command[] => [
   ...(process.env.USER_TYPE === 'ant' ? INTERNAL_ONLY_COMMANDS : []),
 ])
 
-export const getCommands = memoize(async (): Promise<Command[]> => {
-  return [...(await getMCPCommands()), ...COMMANDS()].filter(_ => _.isEnabled)
+export const getCommands = memoize(async (
+  includeMcp = true,
+): Promise<Command[]> => {
+  const mcpCommands = includeMcp ? await getMCPCommands() : []
+  return [...mcpCommands, ...COMMANDS()].filter(_ => _.isEnabled)
 })
 
 export function hasCommand(commandName: string, commands: Command[]): boolean {

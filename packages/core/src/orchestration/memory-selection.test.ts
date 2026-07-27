@@ -32,26 +32,29 @@ function memory(
 }
 
 describe("prompt memory scoping", () => {
-  it("includes global, project, current-session, and enabled team memories", () => {
+  it("includes global, project, current-session, and only explicitly bound team memories", () => {
     const candidates = filterPromptMemoryCandidates([
       memory("global", "global"),
       memory("project", "project"),
       memory("session-current", "session", { sessionId: "session-a" }),
       memory("session-other", "session", { sessionId: "session-b" }),
-      memory("team", "team", { teamName: "core" }),
+      memory("team-current", "team", { teamName: "core" }),
+      memory("team-other", "team", { teamName: "other" }),
+      memory("team-unbound", "team"),
       memory("task-current", "task", { sessionId: "session-a" }),
       memory("task-unbound", "task"),
       memory("agent-other", "agent", { sessionId: "session-b" }),
     ], {
       sessionId: "session-a",
       includeTeam: true,
+      teamNames: ["core"],
     })
 
     expect(candidates.map((item) => item.id)).toEqual([
       "global",
       "project",
       "session-current",
-      "team",
+      "team-current",
       "task-current",
     ])
   })
@@ -63,6 +66,7 @@ describe("prompt memory scoping", () => {
     ], {
       sessionId: "session-a",
       includeTeam: false,
+      teamNames: ["core"],
     }).map((item) => item.id)).toEqual(["project"])
   })
 
@@ -78,6 +82,21 @@ describe("prompt memory scoping", () => {
     )).toBe(false)
     expect(isMemoryAccessibleFromSession(memory("task-unbound", "task"), "session-a")).toBe(false)
     expect(isMemoryAccessibleFromSession(memory("agent-unbound", "agent"), "session-a")).toBe(false)
+    expect(isMemoryAccessibleFromSession(
+      memory("team-current", "team", { teamName: "core" }),
+      "session-a",
+      ["core"],
+    )).toBe(true)
+    expect(isMemoryAccessibleFromSession(
+      memory("team-other", "team", { teamName: "other" }),
+      "session-a",
+      ["core"],
+    )).toBe(false)
+    expect(isMemoryAccessibleFromSession(
+      memory("team-unbound", "team"),
+      "session-a",
+      ["core"],
+    )).toBe(false)
   })
 
   it("can rank an older relevant record when the caller supplies the complete scope", () => {

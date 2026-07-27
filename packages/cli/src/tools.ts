@@ -39,8 +39,14 @@ export const getAllTools = (): Tool[] => {
 }
 
 export const getTools = memoize(
-  async (enableArchitect?: boolean): Promise<Tool[]> => {
-    const tools = [...getAllTools(), ...(await getMCPTools())]
+  async (
+    enableArchitect?: boolean,
+    includeMcp = true,
+  ): Promise<Tool[]> => {
+    const tools = [
+      ...getAllTools(),
+      ...(includeMcp ? await getMCPTools() : []),
+    ]
 
     // Only include Architect tool if enabled via config or CLI flag
     if (enableArchitect) {

@@ -2,6 +2,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
 import type { ProviderConfig } from "../types.js"
 import { BaseLLMClient } from "./base.js"
+import { resolveProviderCredential } from "./credential-identity.js"
 import { createOpenRouterStreamNormalizingFetch } from "./openrouter-stream-normalize-fetch.js"
 
 /** Fixes malformed SSE chunks from some OpenRouter models (e.g. x-ai) before AI SDK Zod parse. */
@@ -22,30 +23,23 @@ export function createOpenAICompatibleClient(config: ProviderConfig) {
     throw new Error("openai-compatible provider requires baseUrl")
   }
 
-  const apiKey =
-    config.apiKey ??
-    process.env["OPENAI_API_KEY"] ??
-    process.env["OPENROUTER_API_KEY"] ??
-    process.env["KILO_API_KEY"] ??
-    process.env["NEXUS_API_KEY"] ??
-    "dummy"
-  if (apiKey === "dummy" && !isApiKeyOptionalBaseUrl(config.baseUrl)) {
-    throw new Error(
-      "Missing API key for openai-compatible provider. Set model.apiKey or OPENAI_API_KEY/OPENROUTER_API_KEY/NEXUS_API_KEY."
-    )
-  }
-  // Detect provider name from baseUrl for better structured output support
   const normalizedBaseUrl = normalizeGatewayBaseUrl(config.baseUrl)
+  const endpoint = classifyEndpoint(normalizedBaseUrl)
   const providerName = detectProviderFromUrl(normalizedBaseUrl)
-  const model = isKiloGatewayUrl(normalizedBaseUrl)
+  const credential = resolveProviderCredential({
+    ...config,
+    baseUrl: normalizedBaseUrl,
+  })
+  const apiKey = credential.apiKey ?? ""
+  const model = endpoint === "kilo" && isKiloGatewayUrl(normalizedBaseUrl)
     ? createKiloGatewayModel(normalizedBaseUrl, apiKey, config.id)
-    : isOpenRouterUrl(config.baseUrl)
+    : endpoint === "openrouter"
       ? createOpenRouterModel(normalizedBaseUrl, apiKey, config.id)
       : createOpenAICompatible({
         name: providerName,
         apiKey,
         baseURL: normalizedBaseUrl,
-        headers: needsOpenRouterHeaders(normalizedBaseUrl) ? DEFAULT_OPENROUTER_HEADERS : undefined,
+        headers: endpoint === "kilo" ? DEFAULT_OPENROUTER_HEADERS : undefined,
       }).chatModel(config.id)
 
   return new BaseLLMClient(model as any, providerName, config.id)
@@ -55,10 +49,15 @@ export function createOpenAICompatibleClient(config: ProviderConfig) {
  * Ollama-specific client with correct base URL.
  */
 export function createOllamaClient(config: ProviderConfig) {
+  const baseUrl = normalizeOllamaBaseUrl(config.baseUrl)
+  const credential = resolveProviderCredential({
+    ...config,
+    baseUrl,
+  })
   const provider = createOpenAICompatible({
     name: "ollama",
-    apiKey: "ollama",
-    baseURL: normalizeOllamaBaseUrl(config.baseUrl),
+    apiKey: credential.apiKey ?? "",
+    baseURL: baseUrl,
   })
   const model = provider.chatModel(config.id)
   return new BaseLLMClient(model as any, "ollama", config.id)
@@ -80,10 +79,14 @@ export function createNamedOpenAICompatibleClient(
   defaultBaseUrl: string,
   apiKeyEnvNames: string[],
 ) {
-  const apiKey =
-    config.apiKey ??
-    apiKeyEnvNames.map((name) => process.env[name]).find((value) => value?.trim()) ??
-    ""
+  // `apiKeyEnvNames` is retained in the public helper signature for source
+  // compatibility. The centralized resolver owns the destination allowlist.
+  void apiKeyEnvNames
+  const resolvedConfig = {
+    ...config,
+    baseUrl: config.baseUrl ?? defaultBaseUrl,
+  }
+  const apiKey = resolveProviderCredential(resolvedConfig).apiKey ?? ""
   const extraHeaders = config.extra?.["headers"]
   const headers =
     extraHeaders && typeof extraHeaders === "object" && !Array.isArray(extraHeaders)
@@ -95,51 +98,55 @@ export function createNamedOpenAICompatibleClient(
   const provider = createOpenAICompatible({
     name: providerName,
     apiKey,
-    baseURL: config.baseUrl ?? defaultBaseUrl,
+    baseURL: resolvedConfig.baseUrl,
     headers,
   })
   return new BaseLLMClient(provider.chatModel(config.id) as any, providerName, config.id)
 }
 
-function detectProviderFromUrl(baseUrl: string): string {
-  const url = baseUrl.toLowerCase()
-  if (url.includes("api.kilo.ai")) return "kilo"
-  if (url.includes("openrouter.ai")) return "openrouter"
-  if (url.includes("groq")) return "groq"
-  if (url.includes("together")) return "together"
-  if (url.includes("mistral")) return "mistral"
-  if (url.includes("fireworks")) return "fireworks"
-  if (url.includes("cerebras")) return "cerebras"
-  if (url.includes("perplexity")) return "perplexity"
-  if (url.includes("deepseek")) return "deepseek"
-  if (url.includes("x.ai") || url.includes("xai")) return "xai"
+type EndpointKind = "kilo" | "openrouter" | "openai" | "local" | "custom"
+
+function classifyEndpoint(baseUrl: string): EndpointKind {
+  const hostname = endpointHostname(baseUrl)
+  if (hostname === "api.kilo.ai") return "kilo"
+  if (hostname === "openrouter.ai" || hostname === "api.openrouter.ai") return "openrouter"
+  if (hostname === "api.openai.com") return "openai"
   if (
-    url.includes("localhost") ||
-    url.includes("127.0.0.1") ||
-    url.includes("[::1]") ||
-    url.includes("0.0.0.0")
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]" ||
+    hostname === "0.0.0.0"
   ) return "local"
+  return "custom"
+}
+
+function endpointHostname(baseUrl: string): string | null {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase().replace(/\.$/, "")
+  } catch {
+    return null
+  }
+}
+
+function detectProviderFromUrl(baseUrl: string): string {
+  const endpoint = classifyEndpoint(baseUrl)
+  if (endpoint !== "custom") return endpoint
+  const hostname = endpointHostname(baseUrl) ?? ""
+  if (hostname.includes("groq")) return "groq"
+  if (hostname.includes("together")) return "together"
+  if (hostname.includes("mistral")) return "mistral"
+  if (hostname.includes("fireworks")) return "fireworks"
+  if (hostname.includes("cerebras")) return "cerebras"
+  if (hostname.includes("perplexity")) return "perplexity"
+  if (hostname.includes("deepseek")) return "deepseek"
+  if (hostname === "api.x.ai" || hostname.includes("xai")) return "xai"
   return "openai-compatible"
 }
 
-function isApiKeyOptionalBaseUrl(baseUrl: string): boolean {
-  const url = baseUrl.toLowerCase()
-  return (
-    url.includes("localhost") ||
-    url.includes("127.0.0.1") ||
-    url.includes("[::1]") ||
-    url.includes("0.0.0.0") ||
-    url.includes("api.kilo.ai/api/")
-  )
-}
-
 function isKiloGatewayUrl(baseUrl: string): boolean {
+  if (classifyEndpoint(baseUrl) !== "kilo") return false
   const url = baseUrl.toLowerCase()
   return url.includes("api.kilo.ai/api/openrouter") || url.includes("api.kilo.ai/api/organizations/")
-}
-
-function isOpenRouterUrl(baseUrl: string): boolean {
-  return baseUrl.toLowerCase().includes("openrouter.ai")
 }
 
 function toKiloOpenRouterBase(baseUrl: string): string {
@@ -156,14 +163,10 @@ function toKiloOpenRouterBase(baseUrl: string): string {
 }
 
 function normalizeGatewayBaseUrl(baseUrl: string): string {
-  return isKiloGatewayUrl(baseUrl) || baseUrl.toLowerCase().includes("api.kilo.ai/api/gateway")
+  return classifyEndpoint(baseUrl) === "kilo" &&
+    (isKiloGatewayUrl(baseUrl) || baseUrl.toLowerCase().includes("/api/gateway"))
     ? toKiloOpenRouterBase(baseUrl)
     : baseUrl
-}
-
-function needsOpenRouterHeaders(baseUrl: string): boolean {
-  const url = baseUrl.toLowerCase()
-  return url.includes("openrouter.ai") || url.includes("api.kilo.ai/api/")
 }
 
 function createKiloGatewayModel(baseUrl: string, apiKey: string, modelId: string) {

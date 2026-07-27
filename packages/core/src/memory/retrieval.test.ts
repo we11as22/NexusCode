@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 import type { MemoryRecord } from "../types.js"
 import {
+  MAX_MEMORY_CONTENT_CHARS,
+  MemoryValueLimitError,
+  assertMemoryWriteInput,
   normalizeMemoryRecord,
   redactMemorySecrets,
   retrieveMemories,
@@ -99,6 +102,41 @@ describe("memory model and retrieval", () => {
     })
   })
 
+  it("does not let a lower-trust record suppress a stronger user memory", () => {
+    const user = memory(
+      "user-memory",
+      "Package manager",
+      "Use pnpm for workspace commands.",
+      {
+        trust: "user",
+        author: { type: "user" },
+        updatedAt: 100,
+      },
+    )
+    const agent = memory(
+      "agent-memory",
+      "Package manager override",
+      "Use npm for workspace commands.",
+      {
+        trust: "agent",
+        author: { type: "agent" },
+        updatedAt: 200,
+        supersedes: ["user-memory"],
+      },
+    )
+
+    const result = retrieveMemories({
+      memories: [user, agent],
+      query: "package manager workspace commands",
+      limit: 10,
+      maxChars: 4_000,
+      now: 300,
+    })
+
+    expect(result.items.map((item) => item.memory.id)).toContain("user-memory")
+    expect(result.excluded.superseded).toBe(0)
+  })
+
   it("redacts common credentials before durable storage", () => {
     const raw = [
       "api_key=sk-abcdefghijklmnopqrstuvwxyz123456",
@@ -114,6 +152,56 @@ describe("memory model and retrieval", () => {
     expect(redacted.text).not.toContain("user:password@")
     expect(redacted.text).not.toContain("BEGIN PRIVATE KEY")
     expect(redacted.redacted).toBe(true)
+  })
+
+  it("redacts nested metadata and provenance instead of leaking side-channel secrets", () => {
+    const normalized = normalizeMemoryRecord({
+      id: "sensitive",
+      scope: "project",
+      title: "Deployment",
+      content: "Use the configured endpoint.",
+      source: {
+        type: "external",
+        uri: "https://user:password@example.test/source",
+      },
+      author: {
+        type: "external",
+        id: "token=abcdefghijklmnopqrstuvwxyz123456",
+      },
+      metadata: {
+        authorization: "Bearer abcdefghijklmnopqrstuvwxyz",
+        nested: {
+          apiKey: "sk-abcdefghijklmnopqrstuvwxyz123456",
+          safe: "kept",
+        },
+      },
+      createdAt: 1,
+      updatedAt: 2,
+    })
+
+    expect(normalized.source.uri).toBe("https://[redacted]@example.test/source")
+    expect(normalized.author.id).toBe("[redacted]")
+    expect(normalized.metadata).toEqual({
+      authorization: "[redacted]",
+      nested: {
+        apiKey: "[redacted]",
+        safe: "kept",
+      },
+    })
+    expect(normalized.sensitivity).toBe("sensitive")
+  })
+
+  it("rejects oversized or non-JSON memory writes before persistence", () => {
+    expect(() =>
+      assertMemoryWriteInput({
+        content: "x".repeat(MAX_MEMORY_CONTENT_CHARS + 1),
+      })
+    ).toThrow(MemoryValueLimitError)
+    expect(() =>
+      assertMemoryWriteInput({
+        metadata: { invalid: 1n },
+      })
+    ).toThrow(MemoryValueLimitError)
   })
 
   it("merges optional healthy vector scores but ignores invalid projection data", () => {

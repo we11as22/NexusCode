@@ -10,13 +10,38 @@ import {
 import * as path from "node:path"
 import * as os from "node:os"
 import * as crypto from "node:crypto"
-import type { SessionMessage } from "../types.js"
-import { atomicWriteFile, withFileLock } from "../storage/durable-fs.js"
+import type {
+  MessagePart,
+  SessionMessage,
+  ToolPart,
+} from "../types.js"
+import {
+  atomicWriteFile,
+  withFileLock,
+} from "../storage/durable-fs.js"
+import {
+  deleteToolOutputArtifactsOwnedBySession,
+} from "../context/tool-output-lifecycle.js"
+import {
+  TOOL_OUTPUT_ARTIFACT_FILE_PATTERN,
+  TOOL_OUTPUT_ARTIFACT_ID_PATTERN,
+  TOOL_OUTPUT_SESSION_DIRECTORY_PATTERN,
+} from "../context/tool-output-format.js"
+import { clearToolSpillsForSession } from "../context/tool-output-registry.js"
+import {
+  getToolOutputSessionDir,
+  getToolOutputWorkspaceDir,
+} from "../data-dir.js"
 
 const SESSION_SCHEMA_VERSION = 2
 const DEFAULT_COMPACT_AFTER_RECORDS = 64
 const DEFAULT_COMPACT_AFTER_BYTES = 4 * 1024 * 1024
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const MAX_REFERENCE_SCAN_SESSIONS = 4_096
+const MAX_REFERENCE_SCAN_MESSAGES = 200_000
+const MAX_REFERENCE_SCAN_FILE_BYTES = 32 * 1024 * 1024
+const MAX_REFERENCE_SCAN_TOTAL_BYTES = 256 * 1024 * 1024
+const MAX_TOOL_OUTPUT_DELETE_BATCH_SIZE = 2_048
 
 export function canonicalProjectRoot(cwd: string): string {
   const trimmed = (cwd ?? "").trim()
@@ -79,11 +104,28 @@ export interface SessionStoreOptions {
   homeDir?: string
   compactAfterRecords?: number
   compactAfterBytes?: number
+  /** Bounded artifact cleanup batch; primarily configurable for embedded hosts/tests. */
+  toolOutputDeleteBatchSize?: number
   onDiagnostic?: (diagnostic: SessionStorageDiagnostic) => void
 }
 
 export interface SaveSessionOptions {
   expectedRevision?: number
+}
+
+export interface PersistedToolOutputProtection {
+  sessionDirectories: Set<string>
+  artifactPaths: Set<string>
+  protectAll: boolean
+}
+
+export interface DeleteSessionOptions {
+  /** Internal/embedded-host seam; defaults to the process-wide store. */
+  store?: SessionStore
+  /** Runtime projection coordinator. Defaults to the workspace runtime. */
+  runtime?: {
+    deleteSessionRecords(sessionId: string): Promise<unknown>
+  }
 }
 
 export class UnsafeSessionIdError extends Error {
@@ -370,6 +412,7 @@ export class SessionStore {
   private readonly homeDir: string
   private readonly compactAfterRecords: number
   private readonly compactAfterBytes: number
+  private readonly toolOutputDeleteBatchSize: number
   private readonly onDiagnostic?: (diagnostic: SessionStorageDiagnostic) => void
   private readonly diagnostics: SessionStorageDiagnostic[] = []
 
@@ -377,6 +420,14 @@ export class SessionStore {
     this.homeDir = path.resolve(options.homeDir ?? path.join(os.homedir(), ".nexus"))
     this.compactAfterRecords = Math.max(1, options.compactAfterRecords ?? DEFAULT_COMPACT_AFTER_RECORDS)
     this.compactAfterBytes = Math.max(1, options.compactAfterBytes ?? DEFAULT_COMPACT_AFTER_BYTES)
+    this.toolOutputDeleteBatchSize =
+      Number.isSafeInteger(options.toolOutputDeleteBatchSize) &&
+      options.toolOutputDeleteBatchSize! > 0
+        ? Math.min(
+            MAX_TOOL_OUTPUT_DELETE_BATCH_SIZE,
+            options.toolOutputDeleteBatchSize!,
+          )
+        : MAX_TOOL_OUTPUT_DELETE_BATCH_SIZE
     this.onDiagnostic = options.onDiagnostic
   }
 
@@ -659,9 +710,9 @@ export class SessionStore {
 
   async deleteSession(sessionId: string, cwd: string): Promise<boolean> {
     assertSafeSessionId(sessionId)
-    const journalPath = this.getSessionPath(sessionId, canonicalProjectRoot(cwd))
+    const root = canonicalProjectRoot(cwd)
+    const journalPath = this.getSessionPath(sessionId, root)
     return withFileLock(journalPath, async () => {
-      let deleted = false
       const directory = path.dirname(journalPath)
       const basename = path.basename(journalPath)
       const candidates = (await readdir(directory).catch(() => []))
@@ -670,9 +721,34 @@ export class SessionStore {
             name === basename ||
             name === `${basename}.bak` ||
             name === `${basename}.legacy-v1.bak` ||
-            name.startsWith(`${basename}.corrupt-`),
+            (
+              name.startsWith(basename) &&
+              /^\.corrupt-\d+-[0-9a-f]{8}$/i.test(
+                name.slice(basename.length),
+              )
+            ),
         )
-      for (const name of candidates) {
+      const artifactProtection =
+        await this.collectToolOutputProtection(root, sessionId)
+      await deleteToolOutputArtifactsOwnedBySession({
+        cwd: root,
+        sessionId,
+        maxArtifacts: this.toolOutputDeleteBatchSize,
+        protectedArtifacts: artifactProtection.artifactPaths,
+        protectAll: artifactProtection.protectAll,
+      })
+      await deleteSessionMemoryFiles(directory, sessionId)
+      await deleteSessionCheckpointEntry(directory, sessionId)
+      clearToolSpillsForSession(sessionId)
+      if (candidates.length === 0) return false
+
+      let deleted = false
+      const orderedCandidates = candidates.sort((left, right) => {
+        if (left === basename) return 1
+        if (right === basename) return -1
+        return left.localeCompare(right)
+      })
+      for (const name of orderedCandidates) {
         try {
           await unlink(path.join(directory, name))
           if (name === basename) deleted = true
@@ -683,9 +759,252 @@ export class SessionStore {
       return deleted
     })
   }
+
+  async collectToolOutputProtection(
+    cwd: string,
+    excludeSessionId?: string,
+  ): Promise<PersistedToolOutputProtection> {
+    const directory = this.getSessionsDir(cwd)
+    let filenames: string[]
+    try {
+      filenames = (await readdir(directory))
+        .filter((name) => name.endsWith(".jsonl"))
+        .sort()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return {
+          sessionDirectories: new Set(),
+          artifactPaths: new Set(),
+          protectAll: false,
+        }
+      }
+      return {
+        sessionDirectories: new Set(),
+        artifactPaths: new Set(),
+        protectAll: true,
+      }
+    }
+    if (filenames.length > MAX_REFERENCE_SCAN_SESSIONS) {
+      return {
+        sessionDirectories: new Set(),
+        artifactPaths: new Set(),
+        protectAll: true,
+      }
+    }
+
+    const sessionDirectories = new Set<string>()
+    const artifactPaths = new Set<string>()
+    const toolOutputWorkspaceRoot = path.resolve(
+      getToolOutputWorkspaceDir(cwd),
+    )
+    let scannedMessages = 0
+    let scannedBytes = 0
+    for (const filename of filenames) {
+      const candidateSessionId = filename.slice(0, -".jsonl".length)
+      if (!SAFE_SESSION_ID.test(candidateSessionId)) {
+        return {
+          sessionDirectories,
+          artifactPaths,
+          protectAll: true,
+        }
+      }
+      if (candidateSessionId === excludeSessionId) continue
+      sessionDirectories.add(
+        path.resolve(
+          getToolOutputSessionDir(cwd, candidateSessionId),
+        ),
+      )
+      let journalInfo
+      try {
+        journalInfo = await fs.promises.lstat(
+          path.join(directory, filename),
+        )
+      } catch {
+        return {
+          sessionDirectories,
+          artifactPaths,
+          protectAll: true,
+        }
+      }
+      if (
+        journalInfo.isSymbolicLink() ||
+        !journalInfo.isFile() ||
+        journalInfo.size > MAX_REFERENCE_SCAN_FILE_BYTES ||
+        scannedBytes + journalInfo.size >
+          MAX_REFERENCE_SCAN_TOTAL_BYTES
+      ) {
+        return {
+          sessionDirectories,
+          artifactPaths,
+          protectAll: true,
+        }
+      }
+      scannedBytes += journalInfo.size
+      let parsed: ParsedJournal
+      try {
+        parsed = await this.parseJournal(candidateSessionId, cwd)
+      } catch {
+        return {
+          sessionDirectories,
+          artifactPaths,
+          protectAll: true,
+        }
+      }
+      if (parsed.corruptTail) {
+        return {
+          sessionDirectories,
+          artifactPaths,
+          protectAll: true,
+        }
+      }
+      for (const message of parsed.session?.messages ?? []) {
+        scannedMessages += 1
+        if (scannedMessages > MAX_REFERENCE_SCAN_MESSAGES) {
+          return {
+            sessionDirectories,
+            artifactPaths,
+            protectAll: true,
+          }
+        }
+        if (!Array.isArray(message.content)) continue
+        for (const part of message.content as MessagePart[]) {
+          if (part.type !== "tool") continue
+          const tool = part as ToolPart
+          if (
+            typeof tool.outputArtifactOwnerSessionId === "string" &&
+            SAFE_SESSION_ID.test(tool.outputArtifactOwnerSessionId) &&
+            typeof tool.outputArtifactId === "string" &&
+            TOOL_OUTPUT_ARTIFACT_ID_PATTERN.test(tool.outputArtifactId)
+          ) {
+            artifactPaths.add(
+              path.join(
+                getToolOutputSessionDir(
+                  cwd,
+                  tool.outputArtifactOwnerSessionId,
+                ),
+                `${tool.outputArtifactId.toLowerCase()}.out`,
+              ),
+            )
+          }
+          if (typeof tool.outputSpillPath !== "string") continue
+          const legacyPath = path.resolve(tool.outputSpillPath)
+          const relative = path.relative(
+            toolOutputWorkspaceRoot,
+            legacyPath,
+          )
+          const segments = relative.split(path.sep)
+          if (
+            !path.isAbsolute(relative) &&
+            segments.length === 2 &&
+            TOOL_OUTPUT_SESSION_DIRECTORY_PATTERN.test(
+              segments[0] ?? "",
+            ) &&
+            TOOL_OUTPUT_ARTIFACT_FILE_PATTERN.test(segments[1] ?? "")
+          ) {
+            artifactPaths.add(legacyPath)
+          }
+        }
+      }
+    }
+    return { sessionDirectories, artifactPaths, protectAll: false }
+  }
+}
+
+async function deleteSessionMemoryFiles(
+  sessionsDirectory: string,
+  sessionId: string,
+): Promise<void> {
+  const memoryPath = path.join(
+    sessionsDirectory,
+    `${sessionId}.session-memory.md`,
+  )
+  await withFileLock(memoryPath, async () => {
+    for (const candidate of [memoryPath, `${memoryPath}.bak`]) {
+      await unlink(candidate).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error
+      })
+    }
+  })
+}
+
+async function deleteSessionCheckpointEntry(
+  sessionsDirectory: string,
+  sessionId: string,
+): Promise<void> {
+  const checkpointsPath = path.join(sessionsDirectory, "checkpoints.json")
+  await withFileLock(checkpointsPath, async () => {
+    let raw: string
+    try {
+      const info = await fs.promises.lstat(checkpointsPath)
+      if (info.isSymbolicLink() || !info.isFile()) {
+        throw new Error(
+          `Checkpoint storage is not a regular file: ${checkpointsPath}`,
+        )
+      }
+      raw = await readFile(checkpointsPath, "utf8")
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return
+      throw error
+    }
+
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      throw new Error(
+        `Refusing to rewrite corrupt checkpoint storage: ${checkpointsPath}`,
+      )
+    }
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error(
+        `Refusing to rewrite invalid checkpoint storage: ${checkpointsPath}`,
+      )
+    }
+    const checkpoints = { ...(parsed as Record<string, unknown>) }
+    if (!Object.prototype.hasOwnProperty.call(checkpoints, sessionId)) return
+    delete checkpoints[sessionId]
+
+    if (Object.keys(checkpoints).length === 0) {
+      for (const candidate of [
+        checkpointsPath,
+        `${checkpointsPath}.bak`,
+      ]) {
+        await unlink(candidate).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error
+        })
+      }
+      return
+    }
+    await atomicWriteFile(
+      checkpointsPath,
+      `${JSON.stringify(checkpoints, null, 2)}\n`,
+      { mode: 0o600 },
+    )
+    await unlink(`${checkpointsPath}.bak`).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error
+      },
+    )
+  })
 }
 
 const defaultSessionStore = new SessionStore()
+
+export async function collectPersistedToolOutputProtection(
+  cwd: string,
+  homeDir?: string,
+): Promise<PersistedToolOutputProtection> {
+  const store = homeDir === undefined
+    ? defaultSessionStore
+    : new SessionStore({ homeDir })
+  return store.collectToolOutputProtection(
+    canonicalProjectRoot(cwd),
+  )
+}
 
 export function getSessionStorageDiagnostics(): readonly SessionStorageDiagnostic[] {
   return defaultSessionStore.getDiagnostics()
@@ -729,8 +1048,22 @@ export async function listSessions(
   return defaultSessionStore.listSessions(cwd)
 }
 
-export async function deleteSession(sessionId: string, cwd: string): Promise<boolean> {
-  return defaultSessionStore.deleteSession(sessionId, cwd)
+export async function deleteSession(
+  sessionId: string,
+  cwd: string,
+  options: DeleteSessionOptions = {},
+): Promise<boolean> {
+  assertSafeSessionId(sessionId)
+  const root = canonicalProjectRoot(cwd)
+  const store = options.store ?? defaultSessionStore
+  let runtime = options.runtime
+  if (!runtime) {
+    const { getOrchestrationRuntime } =
+      await import("../orchestration/runtime.js")
+    runtime = await getOrchestrationRuntime(root)
+  }
+  await runtime.deleteSessionRecords(sessionId)
+  return store.deleteSession(sessionId, root)
 }
 
 export function generateSessionId(): string {

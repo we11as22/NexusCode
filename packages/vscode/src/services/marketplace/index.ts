@@ -3,6 +3,10 @@ import { MarketplaceApiClient } from "./api.js"
 import { MarketplacePaths } from "./paths.js"
 import { InstallationDetector } from "./detection.js"
 import { MarketplaceInstaller } from "./installer.js"
+import {
+  MarketplaceCatalogCapabilityStore,
+  type MarketplaceCatalogReference,
+} from "./catalog-capability.js"
 import type { SkillSearchOptions } from "./api.js"
 import type {
   MarketplaceItem,
@@ -17,6 +21,7 @@ export class MarketplaceService {
   private paths: MarketplacePaths
   private detector: InstallationDetector
   private installer: MarketplaceInstaller
+  private readonly catalog = new MarketplaceCatalogCapabilityStore()
 
   constructor() {
     this.paths = new MarketplacePaths()
@@ -29,28 +34,51 @@ export class MarketplaceService {
     workspace?: string,
     options?: { includeSkills?: boolean; skillSearch?: SkillSearchOptions; bypassCache?: boolean },
   ): Promise<MarketplaceDataResponse> {
-    const [fetched, metadata] = await Promise.all([
-      this.api.fetchAll({
-        includeSkills: options?.includeSkills,
-        skillSearch: options?.skillSearch,
-        bypassCache: options?.bypassCache,
-      }),
-      this.detector.detect(workspace),
-    ])
+    try {
+      const [fetched, metadata] = await Promise.all([
+        this.api.fetchAll({
+          includeSkills: options?.includeSkills,
+          skillSearch: options?.skillSearch,
+          bypassCache: options?.bypassCache,
+        }),
+        this.detector.detect(workspace),
+      ])
+      this.catalog.replace(fetched.items)
 
-    return {
-      marketplaceItems: fetched.items,
-      marketplaceInstalledMetadata: metadata,
-      errors: fetched.errors.length > 0 ? fetched.errors : undefined,
-      skillSearchMeta: fetched.skillSearchMeta,
+      return {
+        marketplaceItems: fetched.items,
+        marketplaceInstalledMetadata: metadata,
+        errors: fetched.errors.length > 0 ? fetched.errors : undefined,
+        skillSearchMeta: fetched.skillSearchMeta,
+      }
+    } catch (error) {
+      this.catalog.clear()
+      throw error
     }
   }
 
   async install(
-    item: MarketplaceItem,
+    reference: MarketplaceCatalogReference,
     options: InstallMarketplaceItemOptions,
     workspace?: string,
   ): Promise<InstallResult> {
+    if ((options.target ?? "project") === "project" && !workspace) {
+      return {
+        success: false,
+        slug: reference.id,
+        error: "No workspace directory for project-scope install",
+      }
+    }
+    let item: MarketplaceItem
+    try {
+      item = this.catalog.resolve(reference)
+    } catch (error) {
+      return {
+        success: false,
+        slug: reference.id,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
     const result = await this.installer.install(item, options, workspace)
 
     if (result.success) {
@@ -60,7 +88,28 @@ export class MarketplaceService {
     return result
   }
 
-  async remove(item: MarketplaceItem, scope: "project" | "global", workspace?: string): Promise<RemoveResult> {
+  async remove(
+    reference: MarketplaceCatalogReference,
+    scope: "project" | "global",
+    workspace?: string,
+  ): Promise<RemoveResult> {
+    if (scope === "project" && !workspace) {
+      return {
+        success: false,
+        slug: reference.id,
+        error: "No workspace directory for project-scope removal",
+      }
+    }
+    let item: MarketplaceItem
+    try {
+      item = this.catalog.resolve(reference)
+    } catch (error) {
+      return {
+        success: false,
+        slug: reference.id,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
     const result = await this.installer.remove(item, scope, workspace)
 
     if (result.success) {
@@ -71,6 +120,7 @@ export class MarketplaceService {
   }
 
   dispose(): void {
+    this.catalog.clear()
     this.api.dispose()
   }
 }
@@ -86,3 +136,4 @@ export type {
   SkillSearchMeta,
 } from "./types.js"
 export type { SkillSearchOptions } from "./api.js"
+export type { MarketplaceCatalogReference } from "./catalog-capability.js"

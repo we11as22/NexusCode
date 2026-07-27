@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { z } from "zod"
 import type {
+  AgentInputMailbox,
+  AgentMailboxMessage,
   ToolDef,
   ToolContext,
   NexusConfig,
@@ -18,14 +20,22 @@ import { loadAgentInstructionBundle } from "../context/agent-instructions.js"
 import { loadSkills } from "../skills/manager.js"
 import { getClaudeCompatibilityOptions } from "../compat/claude.js"
 import { ToolRegistry } from "../tools/registry.js"
+import { registerToolContributionSnapshot } from "../tools/custom/manager.js"
 import { createCompaction } from "../session/compaction.js"
 import { createLLMClient } from "../provider/index.js"
 import { runAgentLoop } from "./loop.js"
-import { getOrchestrationRuntime, getRuntimeDir } from "../orchestration/runtime.js"
+import {
+  getRuntimeDir,
+  OrchestrationRuntime,
+} from "../orchestration/runtime.js"
 import { loadAgentDefinitions } from "../orchestration/agents.js"
 import { runScopedHooks } from "../plugins/runtime.js"
 import { ensureTeamMemberForTask, handleCompletedTaskSideEffects } from "../orchestration/task-lifecycle.js"
-import { inheritSpillRegistryForMergedToolPart, registerToolOutputSpill } from "../context/tool-output-registry.js"
+import {
+  getToolOutputSpill,
+  inheritSpillRegistryForMergedToolPart,
+  registerToolOutputSpill,
+} from "../context/tool-output-registry.js"
 import type { NexusRunServices } from "./run-services.js"
 import { atomicWriteJson } from "../storage/durable-fs.js"
 
@@ -48,11 +58,69 @@ interface ResumeAgentOptions {
 interface AgentSpawnOptions {
   modelOverride?: string
   taskName?: string
+  resumeSeed?: {
+    sourceSubagentId: string
+    lineage: "resume" | "fork"
+    messages: SessionMessage[]
+    followupInstruction: string
+    /** Logical inboxes inherited from the resumed/forked lineage. */
+    mailboxTargetIds?: string[]
+  }
+}
+
+function spawnLineageMetadata(
+  options?: AgentSpawnOptions,
+): { resumeOf?: string; forkOf?: string } {
+  const seed = options?.resumeSeed
+  if (!seed) return {}
+  return seed.lineage === "fork"
+    ? { forkOf: seed.sourceSubagentId }
+    : { resumeOf: seed.sourceSubagentId }
 }
 
 export interface SubAgentRuntimeContext {
   host: IHost
   services: NexusRunServices
+  /** Session that owns and may observe/control the delegated run. */
+  ownerSessionId: string
+}
+
+/**
+ * A restrictive parent may delegate analysis, but it must never resume a
+ * previously more-privileged agent/debug worker with write/execute access.
+ */
+export function restrictDelegatedMode(
+  parentMode: Mode,
+  requestedMode: Mode,
+): Mode {
+  return (
+      parentMode === "plan" ||
+      parentMode === "ask" ||
+      parentMode === "review"
+    )
+    ? "ask"
+    : requestedMode
+}
+
+/**
+ * Register only immutable integration capabilities selected for the owning
+ * root turn. Reading the live workspace MCP catalog here could leak tools
+ * connected for another concurrent session or a newer config generation.
+ */
+export function registerInheritedRunTools(
+  registry: ToolRegistry,
+  services: NexusRunServices,
+): void {
+  if (services.toolContributionSnapshot) {
+    registerToolContributionSnapshot(
+      registry,
+      services.toolContributionSnapshot,
+      "inherited custom/plugin contribution",
+    )
+  }
+  for (const tool of services.mcpToolSnapshot ?? []) {
+    registry.registerDynamicOrThrow(tool, "inherited MCP/resource snapshot")
+  }
 }
 
 /**
@@ -139,6 +207,7 @@ function mergeSubagentFileEditsIntoParentSession(
   spawnToolPartId: string | undefined,
   parts: ToolPart[],
   fallbackAssistantMessageId?: string,
+  parentCwd = process.cwd(),
   /** Ephemeral subagent session id — used to inherit spill registry keys onto cloned part ids. */
   subagentSessionId?: string,
 ): void {
@@ -159,22 +228,42 @@ function mergeSubagentFileEditsIntoParentSession(
     }
     if (subagentSessionId?.trim()) {
       const spill = inheritSpillRegistryForMergedToolPart({
+        cwd: parentCwd,
         parentSessionId: parent.id,
         newPartId: clone.id,
         subagentSessionId: subagentSessionId.trim(),
         sourcePartId: tp.id,
         toolName: clone.tool,
         outputSpillPath: clone.outputSpillPath,
+        outputArtifactId: clone.outputArtifactId,
+        outputArtifactOwnerSessionId:
+          clone.outputArtifactOwnerSessionId,
       })
-      if (spill) clone.outputSpillPath = spill
+      if (spill) {
+        const inherited = getToolOutputSpill(parent.id, clone.id)
+        if (inherited) {
+          clone.outputArtifactId = inherited.artifactId
+          clone.outputArtifactOwnerSessionId = inherited.ownerSessionId
+        }
+      }
     } else if (clone.outputSpillPath?.trim()) {
       registerToolOutputSpill({
+        cwd: parentCwd,
         sessionId: parent.id,
+        ...(clone.outputArtifactOwnerSessionId
+          ? { ownerSessionId: clone.outputArtifactOwnerSessionId }
+          : {}),
         partId: clone.id,
         absolutePath: clone.outputSpillPath.trim(),
+        ...(clone.outputArtifactId
+          ? { artifactId: clone.outputArtifactId }
+          : {}),
         toolName: clone.tool,
       })
     }
+    // Absolute artifact paths are host-internal capabilities. Persist only the
+    // opaque id and exact physical owner in the parent transcript.
+    delete clone.outputSpillPath
     parent.addToolPart(msgId, clone)
   }
 }
@@ -189,8 +278,195 @@ interface SubAgentSnapshot {
   error?: string
 }
 
+const SUBAGENT_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024
+const SUBAGENT_SNAPSHOT_MAX_MESSAGES = 2_000
+const SUBAGENT_SNAPSHOT_MAX_PARTS_PER_MESSAGE = 10_000
+
+const storedMessagePartSchema = z
+  .object({
+    type: z.enum(["text", "tool", "reasoning", "image"]),
+  })
+  .passthrough()
+
+const storedSessionMessageSchema = z
+  .object({
+    id: z.string().min(1).max(256),
+    ts: z.number().finite(),
+    role: z.enum(["user", "assistant", "system", "tool"]),
+    content: z.union([
+      z.string(),
+      z.array(storedMessagePartSchema)
+        .max(SUBAGENT_SNAPSHOT_MAX_PARTS_PER_MESSAGE),
+    ]),
+    presetName: z.string().max(256).optional(),
+    parentId: z.string().max(256).optional(),
+    model: z.string().max(512).optional(),
+    summary: z.boolean().optional(),
+    todo: z.string().optional(),
+  })
+  .passthrough()
+
+const storedSubagentSnapshotSchema = z
+  .object({
+    schemaVersion: z.literal(1).optional(),
+    subagentId: z.string().min(1).max(256),
+    sessionId: z.string().min(1).max(256),
+    description: z.string().optional(),
+    mode: z.enum(["agent", "plan", "ask", "debug", "review"]).optional(),
+    success: z.boolean().optional(),
+    output: z.string().optional(),
+    error: z.string().optional(),
+    messages: z
+      .array(storedSessionMessageSchema)
+      .max(SUBAGENT_SNAPSHOT_MAX_MESSAGES),
+  })
+  .passthrough()
+
+export interface StoredSubagentTranscriptSnapshot {
+  subagentId: string
+  sessionId: string
+  messages: SessionMessage[]
+  messageCount: number
+  success?: boolean
+  description?: string
+  output?: string
+  error?: string
+}
+
+function isInsideDirectory(root: string, target: string): boolean {
+  const relative = path.relative(root, target)
+  return relative === "" || (
+    !relative.startsWith(`..${path.sep}`) &&
+    relative !== ".." &&
+    !path.isAbsolute(relative)
+  )
+}
+
+/**
+ * Read a delegated-agent transcript only from its private workspace-runtime
+ * directory. Runtime metadata is durable but not blindly trusted: a corrupt
+ * path must never turn TaskResume/TaskSnapshot into an arbitrary-file reader.
+ */
+export async function loadSubagentTranscriptSnapshot(args: {
+  cwd: string
+  snapshotFile: string
+  expectedSubagentId: string
+  homeDir?: string
+  runtimeDir?: string
+}): Promise<StoredSubagentTranscriptSnapshot> {
+  const snapshotRoot = path.resolve(
+    args.runtimeDir ?? getRuntimeDir(args.cwd, args.homeDir),
+    "agent-runs",
+  )
+  const candidate = path.resolve(args.snapshotFile)
+  if (!isInsideDirectory(snapshotRoot, candidate)) {
+    throw new Error(
+      `Sub-agent snapshot is outside the workspace runtime: ${candidate}`,
+    )
+  }
+
+  const fileInfo = await fs.lstat(candidate)
+  if (fileInfo.isSymbolicLink()) {
+    throw new Error(`Sub-agent snapshot must not be a symbolic link: ${candidate}`)
+  }
+  if (!fileInfo.isFile()) {
+    throw new Error(`Sub-agent snapshot is not a regular file: ${candidate}`)
+  }
+  if (fileInfo.size > SUBAGENT_SNAPSHOT_MAX_BYTES) {
+    throw new Error(
+      `Sub-agent snapshot exceeds ${SUBAGENT_SNAPSHOT_MAX_BYTES} bytes`,
+    )
+  }
+
+  const [realRoot, realCandidate] = await Promise.all([
+    fs.realpath(snapshotRoot),
+    fs.realpath(candidate),
+  ])
+  if (!isInsideDirectory(realRoot, realCandidate)) {
+    throw new Error(
+      `Sub-agent snapshot resolves outside the workspace runtime: ${candidate}`,
+    )
+  }
+
+  const raw = await fs.readFile(realCandidate, "utf8")
+  if (Buffer.byteLength(raw, "utf8") > SUBAGENT_SNAPSHOT_MAX_BYTES) {
+    throw new Error(
+      `Sub-agent snapshot exceeds ${SUBAGENT_SNAPSHOT_MAX_BYTES} bytes`,
+    )
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    throw new Error(
+      `Sub-agent snapshot is not valid JSON: ${(error as Error).message}`,
+    )
+  }
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    (parsed as { subagentId?: unknown }).subagentId !== args.expectedSubagentId
+  ) {
+    throw new Error(
+      `Sub-agent snapshot does not match ${args.expectedSubagentId}`,
+    )
+  }
+
+  const snapshot = storedSubagentSnapshotSchema.parse(parsed)
+  const messageIds = new Set<string>()
+  const toolIds = new Set<string>()
+  for (const message of snapshot.messages) {
+    if (messageIds.has(message.id)) {
+      throw new Error(`Sub-agent snapshot contains duplicate message id: ${message.id}`)
+    }
+    messageIds.add(message.id)
+    if (!Array.isArray(message.content)) continue
+    for (const part of message.content) {
+      if (
+        part.type !== "tool" ||
+        typeof part.id !== "string" ||
+        !part.id.trim()
+      ) {
+        continue
+      }
+      if (toolIds.has(part.id)) {
+        throw new Error(`Sub-agent snapshot contains duplicate tool id: ${part.id}`)
+      }
+      toolIds.add(part.id)
+    }
+  }
+
+  return {
+    subagentId: snapshot.subagentId,
+    sessionId: snapshot.sessionId,
+    messages: snapshot.messages as SessionMessage[],
+    messageCount: snapshot.messages.length,
+    ...(snapshot.success === undefined ? {} : { success: snapshot.success }),
+    ...(snapshot.description === undefined
+      ? {}
+      : { description: snapshot.description }),
+    ...(snapshot.output === undefined ? {} : { output: snapshot.output }),
+    ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+  }
+}
+
+export function createResumedSubagentSession(
+  cwd: string,
+  messages: readonly SessionMessage[],
+  followupInstruction: string,
+): Session {
+  const instruction = followupInstruction.trim()
+  if (!instruction) {
+    throw new Error("A resumed delegated agent requires a follow-up instruction.")
+  }
+  const session = Session.createEphemeral(cwd, messages)
+  session.addMessage({ role: "user", content: instruction })
+  return session
+}
+
 async function writeSubagentSnapshot(args: {
   cwd: string
+  runtimeDir?: string
   subagentId: string
   sessionId: string
   description: string
@@ -199,15 +475,19 @@ async function writeSubagentSnapshot(args: {
   parentPartId?: string
   depth: number
   parentSubagentId?: string
-  success: boolean
+  success?: boolean
   output: string
   error?: string
   messages: SessionMessage[]
 }): Promise<string> {
-  const dir = path.join(getRuntimeDir(args.cwd), "agent-runs")
+  const dir = path.join(
+    args.runtimeDir ?? getRuntimeDir(args.cwd),
+    "agent-runs",
+  )
   await fs.mkdir(dir, { recursive: true })
   const snapshotPath = path.join(dir, `${args.subagentId}.json`)
   await atomicWriteJson(snapshotPath, {
+    schemaVersion: 1,
     subagentId: args.subagentId,
     sessionId: args.sessionId,
     description: args.description,
@@ -241,12 +521,25 @@ export class ParallelAgentManager {
   private statusById = new Map<string, SubAgentStatus>()
   private errorById = new Map<string, string | undefined>()
   private controllers = new Map<string, AbortController>()
-  private liveSessions = new Map<string, ISession>()
-  private aliases = new Map<string, string>()
+  private ownerSessionById = new Map<string, string>()
+  private mailboxWaiters = new Map<string, Set<() => void>>()
+  private mailboxWorkerByTarget = new Map<string, string>()
+  private acceptingMailboxWorkers = new Set<string>()
   private history: string[] = []
   private acceptingTasks = true
   private shutdownPromise: Promise<void> | undefined
   private static readonly HISTORY_CAP = 100
+
+  readonly orchestrationRuntime: OrchestrationRuntime
+
+  constructor(orchestrationRuntime?: OrchestrationRuntime) {
+    this.orchestrationRuntime =
+      orchestrationRuntime ?? new OrchestrationRuntime(process.cwd())
+  }
+
+  private getRuntime(_cwd: string): Promise<OrchestrationRuntime> {
+    return Promise.resolve(this.orchestrationRuntime)
+  }
 
   private assertAcceptingTasks(): void {
     if (!this.acceptingTasks) {
@@ -264,10 +557,7 @@ export class ParallelAgentManager {
         this.statusById.delete(evict)
         this.errorById.delete(evict)
         this.controllers.delete(evict)
-        this.liveSessions.delete(evict)
-        for (const [alias, id] of this.aliases) {
-          if (id === evict) this.aliases.delete(alias)
-        }
+        this.ownerSessionById.delete(evict)
       }
     }
   }
@@ -323,13 +613,13 @@ export class ParallelAgentManager {
       this.assertAcceptingTasks()
       const subagentId = `subagent_${crypto.randomUUID()}`
       this.rememberId(subagentId)
+      if (!runtimeContext.ownerSessionId.trim()) {
+        throw new Error("Delegated agents require an owning session id.")
+      }
+      this.ownerSessionById.set(subagentId, runtimeContext.ownerSessionId)
       this.outputById.set(subagentId, "")
       this.statusById.set(subagentId, "running")
       this.errorById.set(subagentId, undefined)
-      if (spawnOptions?.taskName?.trim()) {
-        this.aliases.set(spawnOptions.taskName.trim(), subagentId)
-      }
-
       const localController = new AbortController()
       this.controllers.set(subagentId, localController)
       const abortChild = () => localController.abort()
@@ -367,10 +657,7 @@ export class ParallelAgentManager {
         signal.removeEventListener("abort", abortChild)
         this.running.delete(subagentId)
         this.controllers.delete(subagentId)
-        this.liveSessions.delete(subagentId)
-        for (const [alias, id] of this.aliases) {
-          if (id === subagentId) this.aliases.delete(alias)
-        }
+        this.releaseMailboxWorker(subagentId)
       })
 
       this.running.set(subagentId, task)
@@ -437,17 +724,23 @@ export class ParallelAgentManager {
       spawnOptions,
       runtimeContext,
     )
-    const runtime = await getOrchestrationRuntime(cwd)
+    const runtime = await this.getRuntime(cwd)
     await runtime.registerBackgroundTask({
       id: subagentId,
       kind: "subagent",
       description,
       status: "running",
+      sessionId: runtimeContext?.ownerSessionId,
       metadata: {
         mode,
         ...(agentType ? { agentType } : {}),
         ...(spawnOptions?.modelOverride ? { model: spawnOptions.modelOverride } : {}),
         ...(spawnOptions?.taskName ? { name: spawnOptions.taskName } : {}),
+        ...spawnLineageMetadata(spawnOptions),
+        mailboxTargetIds: Array.from(new Set([
+          subagentId,
+          ...(spawnOptions?.resumeSeed?.mailboxTargetIds ?? []),
+        ])),
         ...(contextSummary ? { contextSummary } : {}),
         ...(parentPartId ? { parentPartId } : {}),
         depth: (runtimeContext?.services.subagentDepth ?? 0) + 1,
@@ -463,7 +756,11 @@ export class ParallelAgentManager {
     return { subagentId }
   }
 
-  getSnapshot(subagentId: string): SubAgentSnapshot | null {
+  getSnapshot(
+    subagentId: string,
+    ownerSessionId: string,
+  ): SubAgentSnapshot | null {
+    if (this.ownerSessionById.get(subagentId) !== ownerSessionId) return null
     const sessionId = this.sessions.get(subagentId) ?? ""
     const status = this.statusById.get(subagentId)
     const output = this.outputById.get(subagentId) ?? ""
@@ -479,15 +776,20 @@ export class ParallelAgentManager {
     }
   }
 
-  async waitFor(subagentId: string): Promise<SubAgentSnapshot | null> {
+  async waitFor(
+    subagentId: string,
+    ownerSessionId: string,
+  ): Promise<SubAgentSnapshot | null> {
+    if (this.ownerSessionById.get(subagentId) !== ownerSessionId) return null
     const running = this.running.get(subagentId)
     if (running) {
       await running.catch(() => {})
     }
-    return this.getSnapshot(subagentId)
+    return this.getSnapshot(subagentId, ownerSessionId)
   }
 
-  stop(subagentId: string): boolean {
+  stop(subagentId: string, ownerSessionId: string): boolean {
+    if (this.ownerSessionById.get(subagentId) !== ownerSessionId) return false
     const ctrl = this.controllers.get(subagentId)
     if (!ctrl) return false
     this.statusById.set(subagentId, "killed")
@@ -510,22 +812,204 @@ export class ParallelAgentManager {
     return this.shutdownPromise
   }
 
-  /** Inject a queued user message into a currently running delegated agent. */
-  deliverMessage(target: string, message: string, from = "main"): boolean {
-    const resolved = this.aliases.get(target) ?? target
-    const session = this.liveSessions.get(resolved)
-    if (!session || !message.trim()) return false
-    session.addMessage({
-      role: "user",
-      content: `[Message from ${from.trim() || "main"}]\n${message.trim()}`,
-    })
-    return true
+  private mailboxKey(ownerSessionId: string, targetAgentId: string): string {
+    return `${ownerSessionId}\u0000${targetAgentId}`
   }
 
-  async listRuns(cwd: string) {
-    const runtime = await getOrchestrationRuntime(cwd)
+  private claimMailboxTargets(
+    workerAgentId: string,
+    ownerSessionId: string,
+    targetAgentIds: readonly string[],
+  ): void {
+    const keys = targetAgentIds.map((targetAgentId) =>
+      this.mailboxKey(ownerSessionId, targetAgentId))
+    const conflict = keys.find((key) => {
+      const worker = this.mailboxWorkerByTarget.get(key)
+      return worker !== undefined && worker !== workerAgentId
+    })
+    if (conflict) {
+      throw new Error(
+        "A delegated-agent mailbox can have only one active resume consumer.",
+      )
+    }
+    for (const key of keys) {
+      this.mailboxWorkerByTarget.set(key, workerAgentId)
+    }
+  }
+
+  private setMailboxWorkerAccepting(
+    workerAgentId: string,
+    accepting: boolean,
+  ): void {
+    if (accepting) {
+      this.acceptingMailboxWorkers.add(workerAgentId)
+    } else {
+      this.acceptingMailboxWorkers.delete(workerAgentId)
+    }
+  }
+
+  private releaseMailboxWorker(workerAgentId: string): void {
+    this.acceptingMailboxWorkers.delete(workerAgentId)
+    for (const [key, worker] of this.mailboxWorkerByTarget) {
+      if (worker === workerAgentId) {
+        this.mailboxWorkerByTarget.delete(key)
+      }
+    }
+  }
+
+  private registerMailboxWorker(
+    workerAgentId: string,
+    ownerSessionId: string,
+    targetAgentIds: readonly string[],
+  ): void {
+    this.claimMailboxTargets(workerAgentId, ownerSessionId, targetAgentIds)
+    this.setMailboxWorkerAccepting(workerAgentId, true)
+  }
+
+  private unregisterMailboxWorker(workerAgentId: string): void {
+    this.setMailboxWorkerAccepting(workerAgentId, false)
+  }
+
+  private isMailboxTargetAccepting(
+    ownerSessionId: string,
+    targetAgentId: string,
+  ): boolean {
+    const worker = this.mailboxWorkerByTarget.get(
+      this.mailboxKey(ownerSessionId, targetAgentId),
+    )
+    return (
+      worker !== undefined &&
+      this.acceptingMailboxWorkers.has(worker)
+    )
+  }
+
+  private notifyMailbox(ownerSessionId: string, targetAgentId: string): void {
+    const key = this.mailboxKey(ownerSessionId, targetAgentId)
+    const waiters = this.mailboxWaiters.get(key)
+    if (!waiters) return
+    this.mailboxWaiters.delete(key)
+    for (const wake of waiters) wake()
+  }
+
+  /**
+   * Resolve and persist before notifying the live run. No mutable child
+   * transcript is touched here; the child accepts input only at loop-owned
+   * provider boundaries.
+   */
+  async queueMessage(input: {
+    target: string
+    message: string
+    from?: string
+    ownerSessionId: string
+    id?: string
+  }): Promise<{
+    targetAgentId: string
+    record: AgentMailboxMessage
+    running: boolean
+  }> {
+    const targetAgentId =
+      await this.orchestrationRuntime.resolveAgentMessageTarget({
+        ownerSessionId: input.ownerSessionId,
+        target: input.target,
+      })
+    if (!targetAgentId) {
+      throw new Error(`Delegated-agent target not found: ${input.target}`)
+    }
+    const record = await this.orchestrationRuntime.enqueueAgentMessage({
+      ...(input.id ? { id: input.id } : {}),
+      ownerSessionId: input.ownerSessionId,
+      targetAgentId,
+      from: input.from?.trim() || "main",
+      message: input.message,
+    })
+    this.notifyMailbox(input.ownerSessionId, targetAgentId)
+    return {
+      targetAgentId,
+      record,
+      running: this.isMailboxTargetAccepting(
+        input.ownerSessionId,
+        targetAgentId,
+      ),
+    }
+  }
+
+  private async waitForMailboxInput(
+    ownerSessionId: string,
+    targetAgentIds: readonly string[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) {
+      throw signal.reason ?? new DOMException("Aborted", "AbortError")
+    }
+    const keys = targetAgentIds.map((targetAgentId) =>
+      this.mailboxKey(ownerSessionId, targetAgentId))
+    return new Promise<void>((resolve, reject) => {
+      let settled = false
+      let checking = false
+      const cleanup = () => {
+        clearInterval(poll)
+        signal.removeEventListener("abort", onAbort)
+        for (const key of keys) {
+          const waiters = this.mailboxWaiters.get(key)
+          waiters?.delete(wake)
+          if (waiters?.size === 0) this.mailboxWaiters.delete(key)
+        }
+      }
+      const finish = (error?: unknown) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        if (error !== undefined) reject(error)
+        else resolve()
+      }
+      const check = async () => {
+        if (settled || checking) return
+        checking = true
+        try {
+          for (const targetAgentId of targetAgentIds) {
+            const pending =
+              await this.orchestrationRuntime.listPendingAgentMessages({
+                ownerSessionId,
+                targetAgentId,
+                limit: 1,
+              })
+            if (pending.length > 0) {
+              finish()
+              return
+            }
+          }
+        } catch (error) {
+          finish(error)
+        } finally {
+          checking = false
+        }
+      }
+      const wake = () => {
+        void check()
+      }
+      const onAbort = () => {
+        finish(signal.reason ?? new DOMException("Aborted", "AbortError"))
+      }
+      for (const key of keys) {
+        const waiters = this.mailboxWaiters.get(key) ?? new Set<() => void>()
+        waiters.add(wake)
+        this.mailboxWaiters.set(key, waiters)
+      }
+      const poll = setInterval(wake, 200)
+      poll.unref?.()
+      signal.addEventListener("abort", onAbort, { once: true })
+      void check()
+    })
+  }
+
+  async listRuns(cwd: string, ownerSessionId: string) {
+    const runtime = await this.getRuntime(cwd)
     return (await runtime.listBackgroundTasks())
-      .filter((task) => task.kind === "subagent")
+      .filter(
+        (task) =>
+          task.kind === "subagent" &&
+          task.sessionId === ownerSessionId,
+      )
       .sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
@@ -539,29 +1023,74 @@ export class ParallelAgentManager {
     emit?: (event: AgentEvent) => void,
     parentPartId?: string,
     runtimeContext?: SubAgentRuntimeContext,
+    parentMode: Mode = "agent",
   ): Promise<SubAgentResult | { subagentId: string; background: true }> {
-    const runtime = await getOrchestrationRuntime(cwd)
+    const runtime = await this.getRuntime(cwd)
     const existing = await runtime.getBackgroundTask(subagentId)
     if (!existing || existing.kind !== "subagent") {
       throw new Error(`Sub-agent run not found: ${subagentId}`)
     }
-    const mode = ((existing.metadata?.mode as Mode | undefined) ?? "agent")
+    if (!runtimeContext?.ownerSessionId) {
+      throw new Error("Resuming a delegated agent requires an owning session.")
+    }
+    if (existing.sessionId !== runtimeContext.ownerSessionId) {
+      throw new Error(`Sub-agent run not found: ${subagentId}`)
+    }
+    const storedMode =
+      (existing.metadata?.mode as Mode | undefined) ?? "agent"
+    const mode = restrictDelegatedMode(parentMode, storedMode)
     const agentType = typeof existing.metadata?.agentType === "string"
       ? existing.metadata.agentType
       : undefined
     const originalDescription = String(existing.description || existing.metadata?.description || "").trim()
-    const previousOutput = String(existing.output || "").trim()
     const contextSummary = typeof existing.metadata?.contextSummary === "string"
       ? existing.metadata.contextSummary
       : undefined
+    const snapshotFile =
+      typeof existing.metadata?.snapshotFile === "string"
+        ? existing.metadata.snapshotFile
+        : undefined
+    if (!snapshotFile) {
+      throw new Error(
+        `Sub-agent run ${subagentId} has no durable transcript snapshot and cannot be resumed safely.`,
+      )
+    }
+    const snapshot = await loadSubagentTranscriptSnapshot({
+      cwd,
+      snapshotFile,
+      expectedSubagentId: subagentId,
+      runtimeDir: runtime.getRuntimeDirectory(),
+    })
+    const followupInstruction =
+      options.followupInstruction?.trim() ||
+      "Review the previous result, continue from it, and finish the task cleanly."
+    const inheritedMailboxTargetIds = options.fork
+      ? []
+      : Array.from(new Set([
+          subagentId,
+          ...(Array.isArray(existing.metadata?.mailboxTargetIds)
+            ? existing.metadata.mailboxTargetIds.filter(
+                (target): target is string =>
+                  typeof target === "string" && target.trim().length > 0,
+              )
+            : []),
+        ]))
     const resumeDescription = [
-      options.fork ? "Fork from the following earlier sub-agent run." : "Continue the following earlier sub-agent run.",
-      originalDescription ? `Original task:\n${originalDescription}` : "",
-      previousOutput ? `Previous output:\n${previousOutput.slice(0, 5000)}` : "",
-      options.followupInstruction?.trim()
-        ? `New instruction:\n${options.followupInstruction.trim()}`
-        : "New instruction:\nReview the previous result, continue from it, and finish the task cleanly.",
-    ].filter(Boolean).join("\n\n")
+      options.fork
+        ? `Fork of ${subagentId}`
+        : `Continuation of ${subagentId}`,
+      originalDescription,
+      followupInstruction,
+    ].filter(Boolean).join(": ")
+    const resumeSpawnOptions: AgentSpawnOptions = {
+      resumeSeed: {
+        sourceSubagentId: subagentId,
+        lineage: options.fork ? "fork" : "resume",
+        messages: snapshot.messages,
+        followupInstruction,
+        mailboxTargetIds: inheritedMailboxTargetIds,
+      },
+    }
 
     if (options.runInBackground) {
       const started = await this.spawnInBackground(
@@ -575,7 +1104,7 @@ export class ParallelAgentManager {
         contextSummary,
         parentPartId,
         agentType,
-        undefined,
+        resumeSpawnOptions,
         runtimeContext,
       )
       await runtime.updateBackgroundTask(started.subagentId, {
@@ -598,7 +1127,7 @@ export class ParallelAgentManager {
       contextSummary,
       parentPartId,
       agentType,
-      undefined,
+      resumeSpawnOptions,
       runtimeContext,
     )
     return result
@@ -621,12 +1150,22 @@ export class ParallelAgentManager {
     if (!runtimeContext) {
       throw new Error("Delegated agents require the parent host and run services.")
     }
-    const session = Session.createEphemeral(cwd)
+    const resumeSeed = spawnOptions?.resumeSeed
+    const session = resumeSeed
+      ? createResumedSubagentSession(
+          cwd,
+          resumeSeed.messages,
+          resumeSeed.followupInstruction,
+        )
+      : Session.createEphemeral(cwd)
     this.sessions.set(subagentId, session.id)
-    this.liveSessions.set(subagentId, session)
+    const mailboxTargetIds = Array.from(new Set([
+      subagentId,
+      ...(resumeSeed?.mailboxTargetIds ?? []),
+    ]))
     const depth = runtimeContext.services.subagentDepth + 1
     const parentSubagentId = runtimeContext.services.subagentId
-    const runtime = await getOrchestrationRuntime(cwd)
+    const runtime = await this.getRuntime(cwd)
     const existingRuntimeTask = await runtime.getBackgroundTask(subagentId)
     if (!existingRuntimeTask) {
       await runtime.registerBackgroundTask({
@@ -634,11 +1173,14 @@ export class ParallelAgentManager {
         kind: "subagent",
         description,
         status: "running",
+        sessionId: runtimeContext.ownerSessionId,
         metadata: {
           mode,
           ...(agentType ? { agentType } : {}),
           ...(spawnOptions?.modelOverride ? { model: spawnOptions.modelOverride } : {}),
           ...(spawnOptions?.taskName ? { name: spawnOptions.taskName } : {}),
+          ...spawnLineageMetadata(spawnOptions),
+          mailboxTargetIds,
           description,
           ...(contextSummary ? { contextSummary } : {}),
           ...(parentPartId ? { parentPartId } : {}),
@@ -648,22 +1190,27 @@ export class ParallelAgentManager {
       })
     }
     await runtime.updateBackgroundTask(subagentId, {
-      sessionId: session.id,
+      sessionId: runtimeContext.ownerSessionId,
       metadata: {
         mode,
         ...(agentType ? { agentType } : {}),
         ...(spawnOptions?.modelOverride ? { model: spawnOptions.modelOverride } : {}),
         ...(spawnOptions?.taskName ? { name: spawnOptions.taskName } : {}),
+        ...spawnLineageMetadata(spawnOptions),
+        mailboxTargetIds,
         description,
         ...(contextSummary ? { contextSummary } : {}),
         ...(parentPartId ? { parentPartId } : {}),
         depth,
         ...(parentSubagentId ? { parentSubagentId } : {}),
+        workerSessionId: session.id,
       },
     }).catch(() => null)
-    let userContent = contextSummary?.trim()
-      ? `${contextSummary}\n\n---\n\nTask: ${description}`
-      : description
+    let userContent = resumeSeed
+      ? ""
+      : contextSummary?.trim()
+        ? `${contextSummary}\n\n---\n\nTask: ${description}`
+        : description
 
     const taskConfig =
       spawnOptions?.modelOverride
@@ -685,9 +1232,7 @@ export class ParallelAgentManager {
       subagentDepth: runtimeContext.services.subagentDepth + 1,
       subagentId,
     }
-    for (const tool of services.mcpClient?.getTools() ?? []) {
-      toolRegistry.registerDynamicOrThrow(tool, "inherited MCP")
-    }
+    registerInheritedRunTools(toolRegistry, services)
     for (const tool of [
       createSpawnAgentTool(this, taskConfig),
       createSpawnAgentsAliasTool(this, taskConfig),
@@ -711,11 +1256,13 @@ export class ParallelAgentManager {
       ? (await loadAgentDefinitions(cwd, claudeCompatibility, taskConfig))
           .find((candidate) => candidate.agentType.toLowerCase() === agentType.toLowerCase())
       : undefined
-    if (agentDefinition?.systemPrompt?.trim()) {
+    if (!resumeSeed && agentDefinition?.systemPrompt?.trim()) {
       userContent =
         `${userContent}\n\n---\n\nAgent role (${agentDefinition.agentType}):\n${agentDefinition.systemPrompt.trim()}`
     }
-    session.addMessage({ role: "user", content: userContent })
+    if (!resumeSeed) {
+      session.addMessage({ role: "user", content: userContent })
+    }
 
     let { builtin: b, dynamic: d } = toolRegistry.getForMode(mode)
     let tools = toolRegistry.mergeWithHiddenExecutionTools([...b, ...d])
@@ -825,7 +1372,126 @@ export class ParallelAgentManager {
       },
     )
 
+    const agentMailbox: AgentInputMailbox = {
+      async readPending(limit = 32) {
+        const byTarget = await Promise.all(
+          mailboxTargetIds.map((targetAgentId) =>
+            runtime.listPendingAgentMessages({
+              ownerSessionId: runtimeContext.ownerSessionId,
+              targetAgentId,
+              limit,
+            })),
+        )
+        return byTarget
+          .flat()
+          .sort((left, right) => {
+            if (left.targetAgentId === right.targetAgentId) {
+              return left.sequence - right.sequence
+            }
+            return (
+              left.createdAt - right.createdAt ||
+              left.targetAgentId.localeCompare(right.targetAgentId) ||
+              left.sequence - right.sequence
+            )
+          })
+          .slice(0, limit)
+      },
+      waitForInput(mailboxSignal) {
+        return manager.waitForMailboxInput(
+          runtimeContext.ownerSessionId,
+          mailboxTargetIds,
+          mailboxSignal,
+        )
+      },
+      sealForCompletion() {
+        manager.unregisterMailboxWorker(subagentId)
+      },
+      reopenAfterCompletionCheck() {
+        manager.registerMailboxWorker(
+          subagentId,
+          runtimeContext.ownerSessionId,
+          mailboxTargetIds,
+        )
+      },
+      async checkpointAndAcknowledge(messages, acceptedSession) {
+        if (messages.length === 0) return
+        for (const message of messages) {
+          if (
+            message.ownerSessionId !== runtimeContext.ownerSessionId ||
+            !mailboxTargetIds.includes(message.targetAgentId)
+          ) {
+            throw new Error(
+              `Mailbox record ${message.id} escaped delegated-agent ownership`,
+            )
+          }
+        }
+        const checkpointOutput =
+          output.trim() || latestAssistantText(acceptedSession.messages)
+        const snapshotFile = await writeSubagentSnapshot({
+          cwd,
+          runtimeDir: runtime.getRuntimeDirectory(),
+          subagentId,
+          sessionId: acceptedSession.id,
+          description,
+          mode,
+          contextSummary,
+          parentPartId,
+          depth,
+          parentSubagentId,
+          output: checkpointOutput,
+          messages: acceptedSession.messages,
+        })
+        const currentTask = await runtime.getBackgroundTask(subagentId)
+        const updated = await runtime.updateBackgroundTask(subagentId, {
+          output: checkpointOutput,
+          metadata: {
+            ...(currentTask?.metadata ?? {}),
+            mode,
+            ...(agentType ? { agentType } : {}),
+            ...(spawnOptions?.modelOverride
+              ? { model: spawnOptions.modelOverride }
+              : {}),
+            ...(spawnOptions?.taskName ? { name: spawnOptions.taskName } : {}),
+            ...spawnLineageMetadata(spawnOptions),
+            description,
+            ...(contextSummary ? { contextSummary } : {}),
+            ...(parentPartId ? { parentPartId } : {}),
+            depth,
+            ...(parentSubagentId ? { parentSubagentId } : {}),
+            workerSessionId: acceptedSession.id,
+            snapshotFile,
+            mailboxTargetIds,
+          },
+        })
+        if (!updated) {
+          throw new Error(
+            `Cannot checkpoint mailbox input for missing agent task ${subagentId}`,
+          )
+        }
+
+        const byTarget = new Map<string, string[]>()
+        for (const message of messages) {
+          const ids = byTarget.get(message.targetAgentId) ?? []
+          ids.push(message.id)
+          byTarget.set(message.targetAgentId, ids)
+        }
+        for (const [targetAgentId, messageIds] of byTarget) {
+          await runtime.acknowledgeAgentMessages({
+            ownerSessionId: runtimeContext.ownerSessionId,
+            targetAgentId,
+            messageIds,
+            acknowledgedBySessionId: acceptedSession.id,
+          })
+        }
+      },
+    }
+
     try {
+      this.registerMailboxWorker(
+        subagentId,
+        runtimeContext.ownerSessionId,
+        mailboxTargetIds,
+      )
       if (agentDefinition?.hooks?.length && agentDefinition.sourcePath) {
         const startHookResults = await runScopedHooks(
           cwd,
@@ -864,7 +1530,9 @@ export class ParallelAgentManager {
         rulesContent,
         compaction,
         signal,
+        mailbox: agentMailbox,
       })
+      this.unregisterMailboxWorker(subagentId)
       if (signal.aborted) {
         throw new Error("Sub-agent stopped by parent agent.")
       }
@@ -881,6 +1549,7 @@ export class ParallelAgentManager {
       this.errorById.set(subagentId, undefined)
       const snapshotFile = await writeSubagentSnapshot({
         cwd,
+        runtimeDir: runtime.getRuntimeDirectory(),
         subagentId,
         sessionId: session.id,
         description,
@@ -894,7 +1563,7 @@ export class ParallelAgentManager {
         messages: session.messages,
       })
       const runtimeTask = await runtime.setBackgroundTaskStatus(subagentId, "completed", {
-        sessionId: session.id,
+        sessionId: runtimeContext.ownerSessionId,
         output,
         metadata: {
           ...(existingRuntimeTask?.metadata ?? {}),
@@ -902,11 +1571,14 @@ export class ParallelAgentManager {
           ...(agentType ? { agentType } : {}),
           ...(spawnOptions?.modelOverride ? { model: spawnOptions.modelOverride } : {}),
           ...(spawnOptions?.taskName ? { name: spawnOptions.taskName } : {}),
+          ...spawnLineageMetadata(spawnOptions),
+          mailboxTargetIds,
           description,
           ...(contextSummary ? { contextSummary } : {}),
           ...(parentPartId ? { parentPartId } : {}),
           depth,
           ...(parentSubagentId ? { parentSubagentId } : {}),
+          workerSessionId: session.id,
           snapshotFile,
         },
       }).catch(() => null)
@@ -920,6 +1592,7 @@ export class ParallelAgentManager {
             task: unified,
             agentId: subagentId,
             agentType,
+            runtime,
           })
           emit?.({ type: "task_updated", task: unified })
           emit?.({ type: "task_completed", task: unified, outputPreview: output.slice(0, 300) })
@@ -929,6 +1602,7 @@ export class ParallelAgentManager {
             config: taskConfig,
             task: unified,
             outputPreview: output.slice(0, 300),
+            runtime,
           })
         }
       }
@@ -962,6 +1636,7 @@ export class ParallelAgentManager {
         fileEditParts,
       }
     } catch (err) {
+      this.unregisterMailboxWorker(subagentId)
       const killed = signal.aborted || this.statusById.get(subagentId) === "killed"
       const error = killed
         ? "Stopped by parent agent."
@@ -981,6 +1656,7 @@ export class ParallelAgentManager {
       this.errorById.set(subagentId, error)
       const snapshotFile = await writeSubagentSnapshot({
         cwd,
+        runtimeDir: runtime.getRuntimeDirectory(),
         subagentId,
         sessionId: session.id,
         description,
@@ -998,7 +1674,7 @@ export class ParallelAgentManager {
         subagentId,
         killed ? "killed" : "failed",
         {
-        sessionId: session.id,
+        sessionId: runtimeContext.ownerSessionId,
         output: output || "",
         error,
         metadata: {
@@ -1007,11 +1683,14 @@ export class ParallelAgentManager {
           ...(agentType ? { agentType } : {}),
           ...(spawnOptions?.modelOverride ? { model: spawnOptions.modelOverride } : {}),
           ...(spawnOptions?.taskName ? { name: spawnOptions.taskName } : {}),
+          ...spawnLineageMetadata(spawnOptions),
+          mailboxTargetIds,
           description,
           ...(contextSummary ? { contextSummary } : {}),
           ...(parentPartId ? { parentPartId } : {}),
           depth,
           ...(parentSubagentId ? { parentSubagentId } : {}),
+          workerSessionId: session.id,
           snapshotFile,
         },
         },
@@ -1026,6 +1705,7 @@ export class ParallelAgentManager {
             task: unified,
             agentId: subagentId,
             agentType,
+            runtime,
           })
           emit?.({ type: "task_updated", task: unified })
           emit?.({ type: "task_completed", task: unified, outputPreview: output.slice(0, 300) })
@@ -1035,6 +1715,7 @@ export class ParallelAgentManager {
             config: taskConfig,
             task: unified,
             outputPreview: output.slice(0, 300),
+            runtime,
           })
         }
       }
@@ -1212,7 +1893,11 @@ Max ${config.parallelAgents.maxParallel} concurrent agents (${manager.activeCoun
           ctx.partId,
           agentDefinition?.agentType,
           undefined,
-          { host: ctx.host, services: ctx.services },
+          {
+            host: ctx.host,
+            services: ctx.services,
+            ownerSessionId: ctx.session.id,
+          },
         )
       }
 
@@ -1230,7 +1915,11 @@ Max ${config.parallelAgents.maxParallel} concurrent agents (${manager.activeCoun
           ctx.partId,
           agentDefinition?.agentType,
           undefined,
-          { host: ctx.host, services: ctx.services },
+          {
+            host: ctx.host,
+            services: ctx.services,
+            ownerSessionId: ctx.session.id,
+          },
         )
         return {
           success: true,
@@ -1246,6 +1935,7 @@ Max ${config.parallelAgents.maxParallel} concurrent agents (${manager.activeCoun
           ctx.partId,
           result.fileEditParts,
           ctx.toolExecutionMessageId,
+          ctx.cwd,
           result.sessionId,
         )
       }
@@ -1273,25 +1963,36 @@ export function createSpawnAgentOutputTool(manager: ParallelAgentManager): ToolD
     readOnly: true,
     async execute({ subagent_id, block }, ctx: ToolContext) {
       const shouldBlock = block ?? true
-      const snapshot = shouldBlock ? await manager.waitFor(subagent_id) : manager.getSnapshot(subagent_id)
-      const runtime = await getOrchestrationRuntime(ctx.cwd)
+      const snapshot = shouldBlock
+        ? await manager.waitFor(subagent_id, ctx.session.id)
+        : manager.getSnapshot(subagent_id, ctx.session.id)
+      const runtime = ctx.services.orchestrationRuntime
       const runtimeTask = await runtime.getBackgroundTask(subagent_id)
-      if (!snapshot && !runtimeTask) {
+      const ownedRuntimeTask =
+        runtimeTask?.sessionId === ctx.session.id ? runtimeTask : null
+      if (!snapshot && !ownedRuntimeTask) {
         return {
           success: false,
           output: `Unknown sub-agent id: ${subagent_id}.`,
         }
       }
       const status = snapshot?.status ?? (
-        runtimeTask?.status === "running"
+        ownedRuntimeTask?.status === "running"
           ? "running"
-          : runtimeTask?.status === "completed"
+          : ownedRuntimeTask?.status === "completed"
             ? "completed"
             : "error"
       )
-      const body = snapshot?.output?.trim() || runtimeTask?.output?.trim() || "(no output yet)"
-      const error = snapshot?.error ?? runtimeTask?.error
-      const sessionId = snapshot?.sessionId ?? runtimeTask?.sessionId ?? ""
+      const body =
+        snapshot?.output?.trim() ||
+        ownedRuntimeTask?.output?.trim() ||
+        "(no output yet)"
+      const error = snapshot?.error ?? ownedRuntimeTask?.error
+      const sessionId =
+        snapshot?.sessionId ??
+        (typeof ownedRuntimeTask?.metadata?.workerSessionId === "string"
+          ? ownedRuntimeTask.metadata.workerSessionId
+          : "")
       const statusLine = `[Sub-agent status: ${status}]`
       const errLine = error ? `\nError: ${error}` : ""
       return {
@@ -1314,13 +2015,27 @@ export function createSpawnAgentStopTool(manager: ParallelAgentManager): ToolDef
     hiddenFromAgent: true,
     description: "Stop a running background sub-agent started via SpawnAgent(run_in_background: true).",
     parameters: spawnStopSchema,
+    approval: {
+      capability: "execute",
+      alwaysPrompt: true,
+      description({ subagent_id }) {
+        return `Stop running delegated agent: ${subagent_id}`
+      },
+      content({ subagent_id }) {
+        return subagent_id
+      },
+    },
     async execute({ subagent_id }, ctx: ToolContext) {
-      const stopped = manager.stop(subagent_id)
+      const stopped = manager.stop(subagent_id, ctx.session.id)
       if (!stopped) {
         return { success: false, output: `No active background sub-agent with id ${subagent_id}.` }
       }
-      const runtime = await getOrchestrationRuntime(ctx.cwd)
-      const task = await runtime.setBackgroundTaskStatus(subagent_id, "killed").catch(() => null)
+      const runtime = ctx.services.orchestrationRuntime
+      const existing = await runtime.getBackgroundTask(subagent_id)
+      const task =
+        existing?.sessionId === ctx.session.id
+          ? await runtime.setBackgroundTaskStatus(subagent_id, "killed").catch(() => null)
+          : null
       if (task) ctx.host.emit({ type: "background_task_updated", task })
       return { success: true, output: `Stop signal sent to ${subagent_id}.` }
     },
@@ -1335,7 +2050,7 @@ export function createListAgentRunsTool(manager: ParallelAgentManager): ToolDef<
     parameters: listAgentRunsSchema,
     readOnly: true,
     async execute({ limit }, ctx: ToolContext) {
-      const runs = await manager.listRuns(ctx.cwd)
+      const runs = await manager.listRuns(ctx.cwd, ctx.session.id)
       const sliced = runs.slice(0, limit ?? 20)
       if (sliced.length === 0) return { success: true, output: "No sub-agent runs found." }
       return {
@@ -1362,16 +2077,25 @@ export function createAgentRunSnapshotTool(manager: ParallelAgentManager): ToolD
     parameters: agentRunSnapshotSchema,
     readOnly: true,
     async execute({ subagent_id, format }, ctx: ToolContext) {
-      const runtime = await getOrchestrationRuntime(ctx.cwd)
-      const task = await runtime.getBackgroundTask(subagent_id)
-      const live = manager.getSnapshot(subagent_id)
+      const runtime = ctx.services.orchestrationRuntime
+      const candidateTask = await runtime.getBackgroundTask(subagent_id)
+      const task =
+        candidateTask?.sessionId === ctx.session.id ? candidateTask : null
+      const live = manager.getSnapshot(subagent_id, ctx.session.id)
       const snapshotFile = typeof task?.metadata?.snapshotFile === "string" ? task.metadata.snapshotFile : ""
-      let parsed: Record<string, unknown> | null = null
+      let parsed: StoredSubagentTranscriptSnapshot | null = null
       if (snapshotFile) {
         try {
-          parsed = JSON.parse(await fs.readFile(snapshotFile, "utf8")) as Record<string, unknown>
-        } catch {
-          parsed = null
+          parsed = await loadSubagentTranscriptSnapshot({
+            cwd: ctx.cwd,
+            snapshotFile,
+            expectedSubagentId: subagent_id,
+          })
+        } catch (error) {
+          return {
+            success: false,
+            output: `Stored sub-agent snapshot is invalid: ${(error as Error).message}`,
+          }
         }
       }
       if (!task && !live && !parsed) {
@@ -1438,7 +2162,12 @@ export function createResumeAgentTool(manager: ParallelAgentManager, config: Nex
         ctx.config.parallelAgents.maxParallel,
         emit,
         ctx.partId,
-        { host: ctx.host, services: ctx.services },
+        {
+          host: ctx.host,
+          services: ctx.services,
+          ownerSessionId: ctx.session.id,
+        },
+        ctx.mode ?? "agent",
       )
       if ("background" in resumed) {
         return {
@@ -1453,6 +2182,7 @@ export function createResumeAgentTool(manager: ParallelAgentManager, config: Nex
           ctx.partId,
           resumed.fileEditParts,
           ctx.toolExecutionMessageId,
+          ctx.cwd,
           resumed.sessionId,
         )
       }
@@ -1487,13 +2217,24 @@ export function createTaskResumeTool(manager: ParallelAgentManager, config: Nexu
         ctx.config.parallelAgents.maxParallel,
         emit,
         ctx.partId,
-        { host: ctx.host, services: ctx.services },
+        {
+          host: ctx.host,
+          services: ctx.services,
+          ownerSessionId: ctx.session.id,
+        },
+        ctx.mode ?? "agent",
       )
       if ("background" in resumed) {
-        const runtime = await getOrchestrationRuntime(ctx.cwd)
+        const runtime = ctx.services.orchestrationRuntime
         const task = await runtime.getTask(resumed.subagentId)
         if (task) {
-          await ensureTeamMemberForTask({ cwd: ctx.cwd, host: ctx.host, task, agentId: resumed.subagentId })
+          await ensureTeamMemberForTask({
+            cwd: ctx.cwd,
+            host: ctx.host,
+            task,
+            agentId: resumed.subagentId,
+            runtime,
+          })
           ctx.host.emit({ type: "task_created", task })
         }
         return {
@@ -1508,13 +2249,20 @@ export function createTaskResumeTool(manager: ParallelAgentManager, config: Nexu
           ctx.partId,
           resumed.fileEditParts,
           ctx.toolExecutionMessageId,
+          ctx.cwd,
           resumed.sessionId,
         )
       }
-      const runtime = await getOrchestrationRuntime(ctx.cwd)
+      const runtime = ctx.services.orchestrationRuntime
       const task = await runtime.getTask(resumed.subagentId)
       if (task) {
-        await ensureTeamMemberForTask({ cwd: ctx.cwd, host: ctx.host, task, agentId: resumed.subagentId })
+        await ensureTeamMemberForTask({
+          cwd: ctx.cwd,
+          host: ctx.host,
+          task,
+          agentId: resumed.subagentId,
+          runtime,
+        })
         ctx.host.emit({ type: "task_completed", task, outputPreview: resumed.output.slice(0, 500) })
         await handleCompletedTaskSideEffects({
           cwd: ctx.cwd,
@@ -1522,6 +2270,7 @@ export function createTaskResumeTool(manager: ParallelAgentManager, config: Nexu
           config: ctx.config,
           task,
           outputPreview: resumed.output.slice(0, 500),
+          runtime,
         })
       }
       return {
@@ -1540,7 +2289,7 @@ export function createTaskSnapshotTool(manager: ParallelAgentManager): ToolDef<z
     parameters: taskSnapshotSchema,
     readOnly: true,
     async execute({ task_id, format }, ctx: ToolContext) {
-      const runtime = await getOrchestrationRuntime(ctx.cwd)
+      const runtime = ctx.services.orchestrationRuntime
       const task = await runtime.getTask(task_id)
       if (!task) return { success: false, output: `Task not found: ${task_id}` }
       if (task.kind === "agent") {
@@ -1577,7 +2326,7 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
     async execute({ tasks, block }, ctx: ToolContext) {
       const parentMode = ctx.mode ?? "agent"
       const shouldBlock = block ?? true
-      const runtime = await getOrchestrationRuntime(ctx.cwd)
+      const runtime = ctx.services.orchestrationRuntime
       const normalizeMode = (m?: Mode | "search" | "explore"): Mode =>
         parentMode === "plan" || parentMode === "ask" || parentMode === "review"
           ? "ask"
@@ -1620,11 +2369,21 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
             ctx.partId,
             agentDefinition?.agentType,
             undefined,
-            { host: ctx.host, services: ctx.services },
+            {
+              host: ctx.host,
+              services: ctx.services,
+              ownerSessionId: ctx.session.id,
+            },
           )
           const task = await runtime.getTask(subagentId)
           if (task) {
-            await ensureTeamMemberForTask({ cwd: ctx.cwd, host: ctx.host, task, agentId: subagentId })
+            await ensureTeamMemberForTask({
+              cwd: ctx.cwd,
+              host: ctx.host,
+              task,
+              agentId: subagentId,
+              runtime,
+            })
             ctx.host.emit({ type: "task_created", task })
           }
           started.push({ id: subagentId, description: item.description })
@@ -1650,11 +2409,21 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
           ctx.partId,
           agentDefinition?.agentType,
           undefined,
-          { host: ctx.host, services: ctx.services },
+          {
+            host: ctx.host,
+            services: ctx.services,
+            ownerSessionId: ctx.session.id,
+          },
         )
         const task = await runtime.getTask(result.subagentId)
         if (task) {
-          await ensureTeamMemberForTask({ cwd: ctx.cwd, host: ctx.host, task, agentId: result.subagentId })
+          await ensureTeamMemberForTask({
+            cwd: ctx.cwd,
+            host: ctx.host,
+            task,
+            agentId: result.subagentId,
+            runtime,
+          })
           ctx.host.emit({ type: "task_completed", task, outputPreview: result.output.slice(0, 500) })
           await handleCompletedTaskSideEffects({
             cwd: ctx.cwd,
@@ -1662,6 +2431,7 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
             config: ctx.config,
             task,
             outputPreview: result.output.slice(0, 500),
+            runtime,
           })
         }
         return result
@@ -1674,6 +2444,7 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
             ctx.partId,
             result.fileEditParts,
             ctx.toolExecutionMessageId,
+            ctx.cwd,
             result.sessionId,
           )
         }
@@ -1765,7 +2536,11 @@ Max ${config.parallelAgents.maxParallel} agents (${manager.activeCount} active).
             ctx.partId,
             undefined,
             undefined,
-            { host: ctx.host, services: ctx.services },
+            {
+              host: ctx.host,
+              services: ctx.services,
+              ownerSessionId: ctx.session.id,
+            },
           ),
         ),
       )
@@ -1784,6 +2559,7 @@ Max ${config.parallelAgents.maxParallel} agents (${manager.activeCount} active).
             ctx.partId,
             r.fileEditParts,
             ctx.toolExecutionMessageId,
+            ctx.cwd,
             r.sessionId,
           )
         }

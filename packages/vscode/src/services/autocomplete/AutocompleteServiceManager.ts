@@ -1,6 +1,6 @@
 import crypto from "crypto"
 import * as vscode from "vscode"
-import type { NexusConfig } from "@nexuscode/core"
+import type { NexusConfig, ProviderConfig } from "@nexuscode/core"
 import { t } from "./shims/i18n"
 import { TelemetryProxy, TelemetryEventName } from "./telemetry.js"
 import { AutocompleteModel } from "./AutocompleteModel.js"
@@ -65,12 +65,14 @@ export class AutocompleteServiceManager implements vscode.Disposable {
   constructor(
     context: vscode.ExtensionContext,
     getNexusConfig: () => NexusConfig | undefined,
+    resolveNexusModel?: () => Promise<ProviderConfig | undefined>,
   ) {
     this.context = context
 
     this.model = new AutocompleteModel(
       getNexusConfig,
       () => this.autocompleteApiKey,
+      resolveNexusModel,
     )
 
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ""

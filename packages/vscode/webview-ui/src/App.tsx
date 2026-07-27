@@ -123,6 +123,59 @@ export function App() {
         </div>
       )}
 
+      {store.configurationError && (
+        <div className="flex-shrink-0 px-3 py-2 border-b border-[var(--vscode-errorForeground)] bg-[var(--vscode-inputValidation-errorBackground)] text-[11px] text-[var(--vscode-errorForeground)]">
+          <div className="whitespace-pre-wrap break-words">
+            {store.configurationError}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="px-2 py-1 rounded border border-current hover:bg-[var(--vscode-list-hoverBackground)]"
+              disabled={store.isRunning}
+              onClick={() => postMessage({ type: "reloadConfiguration" })}
+            >
+              Reload configuration
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 rounded border border-current hover:bg-[var(--vscode-list-hoverBackground)]"
+              onClick={() => postMessage({ type: "openNexusConfigFolder", scope: "project" })}
+            >
+              Open project config
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 rounded border border-current hover:bg-[var(--vscode-list-hoverBackground)]"
+              onClick={() => postMessage({ type: "openNexusConfigFolder", scope: "global" })}
+            >
+              Open global config
+            </button>
+          </div>
+        </div>
+      )}
+
+      {store.toolContributionDiagnostics.length > 0 && (
+        <details className="flex-shrink-0 px-3 py-2 border-b border-[var(--vscode-inputValidation-warningBorder)] bg-[var(--vscode-inputValidation-warningBackground)] text-[11px] text-[var(--vscode-foreground)]">
+          <summary className="cursor-pointer select-none">
+            Custom/plugin tools: {store.toolContributionDiagnostics.length} diagnostic
+            {store.toolContributionDiagnostics.length === 1 ? "" : "s"}
+          </summary>
+          <div className="mt-1.5 space-y-1">
+            {store.toolContributionDiagnostics.map((diagnostic, index) => (
+              <div
+                key={`${diagnostic.code}:${diagnostic.source}:${diagnostic.toolName ?? ""}:${index}`}
+                className="whitespace-pre-wrap break-words"
+              >
+                [{diagnostic.level}] {diagnostic.code} · {diagnostic.source}
+                {diagnostic.toolName ? ` · ${diagnostic.toolName}` : ""}:{" "}
+                {diagnostic.message}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+
       {store.connectionState !== "idle" && store.serverUrl && (
         <div
           className={`flex-shrink-0 px-3 py-1.5 border-b text-[11px] ${
@@ -721,6 +774,7 @@ function ChatBottomBar() {
     planText.length > 0
   const hideChatInput = Boolean(pendingQuestion || showPlanFollowupSlot)
   const canSend =
+    !store.configurationError &&
     !store.isRunning &&
     !store.awaitingApproval &&
     (store.inputValue.trim().length > 0 || store.attachedImages.length > 0)
@@ -1312,10 +1366,9 @@ interface SettingsDraft {
   vectorDbUrl: string
   vectorDbApiKey: string
   vectorDbAutoStart: boolean
-  filterTools: boolean
-  toolClassifyThreshold: string
-  filterSkills: boolean
-  skillClassifyThreshold: string
+  deferredLoadingMode: "auto" | "always" | "never"
+  deferredLoadingThresholdPercent: string
+  deferredLoadingMinimumTools: string
   parallelReads: boolean
   maxParallelReads: string
   autoApproveRead: boolean
@@ -1439,6 +1492,7 @@ function SettingsView({
   }
 
   const canSave = Boolean(config && draft)
+  const pendingProjectAuthority = config?.pendingProjectAuthority ?? []
   const vectorHint = useMemo(() => {
     if (!draft) return ""
     if (!draft.indexingVector || !draft.vectorDbEnabled) return "Vector search is disabled."
@@ -1471,6 +1525,58 @@ function SettingsView({
         </button>
       </div>
 
+      {pendingProjectAuthority.length > 0 && (
+        <section className="nexus-section mt-2 border border-[var(--vscode-inputValidation-warningBorder)]">
+          <h3 className="nexus-section-title">
+            Project authority requests (inactive)
+          </h3>
+          <p className="nexus-muted text-[10px] mb-2">
+            Repository endpoints, executable integrations, and external paths
+            remain inactive until this runtime host approves the exact
+            normalized content for this workspace.
+          </p>
+          <div className="flex flex-col gap-2">
+            {pendingProjectAuthority.map((request) => {
+              const detail = JSON.stringify(request.payload)
+              return (
+                <div
+                  key={`${request.kind}:${request.fingerprint}`}
+                  className="rounded border border-[var(--vscode-panel-border)] p-2"
+                >
+                  <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-medium">{request.kind}</div>
+                      <div
+                        className="text-[10px] font-mono break-all text-[var(--vscode-descriptionForeground)]"
+                        title={detail}
+                      >
+                        {detail.length <= 240
+                          ? detail
+                          : `${detail.slice(0, 239)}…`}
+                      </div>
+                      <div className="text-[9px] font-mono text-[var(--vscode-descriptionForeground)]">
+                        sha256:{request.fingerprint.slice(0, 16)}…
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="nexus-btn nexus-btn-primary text-xs py-1 px-2 flex-shrink-0"
+                      onClick={() =>
+                        postMessage({
+                          type: "approvePendingProjectAuthority",
+                          fingerprint: request.fingerprint,
+                        })}
+                    >
+                      Approve exact request
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
+
       <section className="nexus-section mt-2">
         <h3 className="nexus-section-title">NexusCode Server</h3>
         <p className="nexus-muted text-[10px] mb-2">
@@ -1479,11 +1585,13 @@ function SettingsView({
         <SettingsInput
           label="Server URL (e.g. http://127.0.0.1:4097)"
           value={serverUrlLocal}
-          onChange={(v) => {
-            setServerUrlLocal(v)
-            postMessage({ type: "setServerUrl", url: v })
-          }}
+          onChange={setServerUrlLocal}
         />
+        {serverUrlLocal.trim() && !isValidOptionalNexusServerUrl(serverUrlLocal) ? (
+          <p className="text-[10px] text-[var(--vscode-errorForeground)] mt-1 mb-0">
+            Use HTTPS for remote servers, or HTTP(S) for loopback, without credentials, query, or fragment.
+          </p>
+        ) : null}
         <SettingsInput
           label="Server token (stored in VS Code Secret Storage)"
           value={serverTokenLocal}
@@ -1491,6 +1599,21 @@ function SettingsView({
           onChange={setServerTokenLocal}
         />
         <div className="flex gap-2 mt-2">
+          <button
+            type="button"
+            className="nexus-secondary-btn text-xs"
+            disabled={
+              !isValidOptionalNexusServerUrl(serverUrlLocal) ||
+              serverUrlLocal.trim() === serverUrl.trim()
+            }
+            onClick={() =>
+              postMessage({
+                type: "setServerUrl",
+                url: serverUrlLocal.trim(),
+              })}
+          >
+            Apply server URL
+          </button>
           <button
             type="button"
             className="nexus-secondary-btn text-xs"
@@ -1590,7 +1713,44 @@ function SettingsView({
               placeholder="Leave blank to keep the securely stored key"
               onChange={(v) => setDraft({ ...draft, modelApiKey: v })}
             />
+            <button
+              type="button"
+              className="nexus-secondary-btn text-xs"
+              onClick={async () => {
+                if (await confirmAsync("Remove the securely stored API key for the base chat model?")) {
+                  postMessage({ type: "removeCredential", target: "model" })
+                  setDraft({ ...draft, modelApiKey: "" })
+                }
+              }}
+            >
+              Remove stored model key
+            </button>
             <SettingsInput label="Base URL" value={draft.modelBaseUrl} onChange={(v) => setDraft({ ...draft, modelBaseUrl: v })} />
+            {Object.keys(config?.profiles ?? {}).length > 0 ? (
+              <div className="mt-2 space-y-1">
+                <div className="nexus-muted text-[10px]">Stored profile credentials</div>
+                {Object.keys(config?.profiles ?? {}).map((profileName) => (
+                  <div key={profileName} className="flex items-center justify-between gap-2">
+                    <code className="text-[10px] truncate">{profileName}</code>
+                    <button
+                      type="button"
+                      className="nexus-secondary-btn text-xs"
+                      onClick={async () => {
+                        if (await confirmAsync(`Remove the securely stored key for profile "${profileName}"?`)) {
+                          postMessage({
+                            type: "removeCredential",
+                            target: "profile",
+                            profileName,
+                          })
+                        }
+                      }}
+                    >
+                      Remove key
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div className="nexus-muted text-[10px]">Default context window fallback: 128k tokens.</div>
           </section>
 
@@ -1765,6 +1925,18 @@ function SettingsView({
         />
         <SettingsInput label="Model" value={draft.embModel} onChange={(v) => setDraft({ ...draft, embModel: v })} />
         <SettingsInput type="password" label="API Key" value={draft.embApiKey} onChange={(v) => setDraft({ ...draft, embApiKey: v })} />
+        <button
+          type="button"
+          className="nexus-secondary-btn text-xs"
+          onClick={async () => {
+            if (await confirmAsync("Remove the securely stored embeddings API key?")) {
+              postMessage({ type: "removeCredential", target: "embeddings" })
+              setDraft({ ...draft, embApiKey: "" })
+            }
+          }}
+        >
+          Remove stored embeddings key
+        </button>
         <SettingsInput label="Base URL" value={draft.embBaseUrl} onChange={(v) => setDraft({ ...draft, embBaseUrl: v })} />
         <SettingsInput label="Dimensions" value={draft.embDimensions} onChange={(v) => setDraft({ ...draft, embDimensions: v })} />
       </section>
@@ -1774,6 +1946,7 @@ function SettingsView({
       <IndexingAndDocsView
         draft={draft}
         setDraft={setDraft}
+        remoteRuntime={Boolean(serverUrl.trim())}
         onReindex={() => postMessage({ type: "reindex" })}
         onDeleteIndex={async () => {
           if (
@@ -1797,27 +1970,49 @@ function SettingsView({
           checked={draft.showReasoningInChat}
           onChange={(checked) => setDraft({ ...draft, showReasoningInChat: checked })}
         />
-        <h3 className="nexus-section-title mt-4">Tools & Skills Filtering</h3>
-        <SettingsToggle
-          label="Filter MCP servers when list is large"
-          checked={draft.filterTools}
-          onChange={(checked) => setDraft({ ...draft, filterTools: checked })}
+        <h3 className="nexus-section-title mt-4">Tool discovery</h3>
+        <SettingsSelect
+          label="Deferred tool loading"
+          value={draft.deferredLoadingMode}
+          options={[
+            {
+              value: "auto",
+              label: "Auto — defer only a materially large catalog",
+            },
+            {
+              value: "always",
+              label: "Always — discover deferred tools with ToolSearch",
+            },
+            {
+              value: "never",
+              label: "Never — send every tool schema up front",
+            },
+          ]}
+          onChange={(value) => setDraft({
+            ...draft,
+            deferredLoadingMode: value as SettingsDraft["deferredLoadingMode"],
+          })}
         />
-        <SettingsInput
-          label="MCP server threshold"
-          value={draft.toolClassifyThreshold}
-          onChange={(v) => setDraft({ ...draft, toolClassifyThreshold: v })}
-        />
-        <SettingsToggle
-          label="Filter skills when list is large"
-          checked={draft.filterSkills}
-          onChange={(checked) => setDraft({ ...draft, filterSkills: checked })}
-        />
-        <SettingsInput
-          label="Skill threshold"
-          value={draft.skillClassifyThreshold}
-          onChange={(v) => setDraft({ ...draft, skillClassifyThreshold: v })}
-        />
+        {draft.deferredLoadingMode === "auto" && (
+          <>
+            <SettingsInput
+              label="Minimum deferred tools"
+              value={draft.deferredLoadingMinimumTools}
+              onChange={(value) => setDraft({
+                ...draft,
+                deferredLoadingMinimumTools: value,
+              })}
+            />
+            <SettingsInput
+              label="Maximum catalog share of context (0.01–1)"
+              value={draft.deferredLoadingThresholdPercent}
+              onChange={(value) => setDraft({
+                ...draft,
+                deferredLoadingThresholdPercent: value,
+              })}
+            />
+          </>
+        )}
         <SettingsToggle
           label="Parallel read tools"
           checked={draft.parallelReads}
@@ -2219,6 +2414,7 @@ function IndexReadinessBar({ status }: { status: IndexStatusKind }) {
 function IndexingAndDocsView({
   draft,
   setDraft,
+  remoteRuntime,
   onReindex,
   onDeleteIndex,
   onOpenCursorignore,
@@ -2226,6 +2422,7 @@ function IndexingAndDocsView({
 }: {
   draft: SettingsDraft
   setDraft: React.Dispatch<React.SetStateAction<SettingsDraft>>
+  remoteRuntime: boolean
   onReindex: () => void
   onDeleteIndex: () => void
   onOpenCursorignore: () => void
@@ -2314,18 +2511,57 @@ function IndexingAndDocsView({
             value={draft.vectorDbApiKey}
             onChange={(v) => setDraft({ ...draft, vectorDbApiKey: v })}
           />
+          <button
+            type="button"
+            className="nexus-secondary-btn text-xs"
+            onClick={async () => {
+              if (await confirmAsync("Remove the securely stored Qdrant API key?")) {
+                postMessage({ type: "removeCredential", target: "qdrant" })
+                setDraft({ ...draft, vectorDbApiKey: "" })
+              }
+            }}
+          >
+            Remove stored Qdrant key
+          </button>
           <p className="text-[10px] text-[var(--vscode-descriptionForeground)] -mt-1">
             Optional (Qdrant Cloud / secured cluster). Stored with other API keys, not in nexus.yaml. Env: <code className="text-[10px]">QDRANT_API_KEY</code>.
           </p>
+          <SettingsToggle
+            label="Auto-start a local Qdrant process"
+            checked={draft.vectorDbAutoStart}
+            onChange={(checked) =>
+              setDraft({ ...draft, vectorDbAutoStart: checked })}
+          />
           <div className="flex items-center gap-2">
             <button
               type="button"
               className="nexus-secondary-btn text-xs"
-              onClick={() => postMessage({ type: "startOrConnectVectorDb", url: draft.vectorDbUrl.trim() || "http://127.0.0.1:6333", autoStart: true })}
+              disabled={
+                remoteRuntime ||
+                !isValidOptionalHttpUrl(
+                  draft.vectorDbUrl.trim() || "http://127.0.0.1:6333",
+                )
+              }
+              title={
+                remoteRuntime
+                  ? "Qdrant lifecycle is managed by the configured NexusCode Server"
+                  : undefined
+              }
+              onClick={() => postMessage({
+                type: "startOrConnectVectorDb",
+                url: draft.vectorDbUrl.trim() || "http://127.0.0.1:6333",
+                autoStart: draft.vectorDbAutoStart,
+              })}
             >
-              Connect / Start Qdrant
+              {draft.vectorDbAutoStart ? "Start / Connect Qdrant" : "Connect to Qdrant"}
             </button>
-            <span className="text-[11px] text-[var(--vscode-descriptionForeground)]">Connect to existing or auto-start (binary/Docker)</span>
+            <span className="text-[11px] text-[var(--vscode-descriptionForeground)]">
+              {remoteRuntime
+                ? "Managed by the configured NexusCode Server"
+                : draft.vectorDbAutoStart
+                  ? "Local loopback only; host confirmation is required"
+                  : "Connect to an existing HTTP(S) endpoint"}
+            </span>
           </div>
           <SettingsToggle label="Vector DB enabled (use for indexer)" checked={draft.vectorDbEnabled} onChange={(checked) => setDraft({ ...draft, vectorDbEnabled: checked })} />
           <SettingsInput label="Embedding batch size (min segments per upsert)" value={draft.embeddingBatchSize} onChange={(v) => setDraft({ ...draft, embeddingBatchSize: v })} />
@@ -2575,6 +2811,9 @@ function IntegrationsMcpView({
   setDraft: React.Dispatch<React.SetStateAction<SettingsDraft>>
 }) {
   const mcpStatus = useChatStore((s) => s.mcpStatus)
+  const pendingServers = useChatStore(
+    (s) => s.config?.mcp.pendingProjectServers ?? [],
+  )
   const [showRaw, setShowRaw] = useState(false)
   const [testing, setTesting] = useState(false)
   const [mcpTab, setMcpTab] = useState<"remote" | "configure">("configure")
@@ -2788,6 +3027,59 @@ function IntegrationsMcpView({
               {testing ? "Testing…" : "Test servers"}
             </button>
           </div>
+
+          {pendingServers.length > 0 && (
+            <div className="mb-3 rounded border border-[var(--vscode-inputValidation-warningBorder)] bg-[var(--vscode-inputValidation-warningBackground)] p-3">
+              <div className="text-xs font-semibold mb-1">
+                Project MCP requests (inactive)
+              </div>
+              <div className="text-[11px] text-[var(--vscode-descriptionForeground)] mb-2">
+                Repository configuration cannot start processes or contact servers until you approve the exact request into host-owned configuration.
+              </div>
+              <div className="flex flex-col gap-2">
+                {pendingServers.map((pending) => {
+                  const server = pending.config as Record<string, unknown>
+                  const name = serverName(server)
+                  const command = serverCommand(server)
+                  return (
+                    <div
+                      key={`${pending.origin}:${name}`}
+                      className="flex items-center gap-2 rounded border border-[var(--vscode-panel-border)] p-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-medium truncate" title={name}>
+                          {name}
+                        </div>
+                        <div className="text-[10px] font-mono text-[var(--vscode-descriptionForeground)] break-all">
+                          {command}
+                        </div>
+                        <div className="text-[10px] text-[var(--vscode-descriptionForeground)]">
+                          Source: {pending.origin}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="nexus-btn nexus-btn-primary text-xs py-1 px-2 flex-shrink-0"
+                        onClick={async () => {
+                          const approved = await confirmAsync(
+                            `Approve project MCP server "${name}"?\n\n${command}\n\nThis exact definition will become host-owned and may execute with workspace access.`,
+                          )
+                          if (!approved) return
+                          postMessage({
+                            type: "approvePendingMcp",
+                            name,
+                            origin: pending.origin,
+                          })
+                        }}
+                      >
+                        Approve exact request
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
 
           <div className="flex flex-col gap-2 mb-3">
             {servers.length === 0 ? (
@@ -3020,8 +3312,6 @@ function settingsConfigFingerprint(config: NexusConfigState): string {
         vectorDb: config.vectorDb,
         tools: config.tools,
         permissions: config.permissions,
-        skillClassifyEnabled: config.skillClassifyEnabled,
-        skillClassifyThreshold: config.skillClassifyThreshold,
         mcp: config.mcp,
         skillsConfig: config.skillsConfig,
         skills: config.skills,
@@ -3029,6 +3319,7 @@ function settingsConfigFingerprint(config: NexusConfigState): string {
         rules: config.rules,
         modes: config.modes,
         profiles: config.profiles,
+        pendingProjectAuthority: config.pendingProjectAuthority,
         ui: config.ui,
       })
     )
@@ -3071,13 +3362,12 @@ function toDraft(config: NexusConfigState, fallbackProvider: string, fallbackMod
     vectorDbUrl: config.vectorDb?.url ?? "http://127.0.0.1:6333",
     vectorDbApiKey: config.vectorDb?.apiKey ?? "",
     vectorDbAutoStart: config.vectorDb?.autoStart ?? true,
-    filterTools: config.tools.classifyToolsEnabled === true,
-    toolClassifyThreshold: String(
-      config.tools.classifyThreshold === 9999 ? 20 : (config.tools.classifyThreshold ?? 20)
+    deferredLoadingMode: config.tools.deferredLoadingMode ?? "auto",
+    deferredLoadingThresholdPercent: String(
+      config.tools.deferredLoadingThresholdPercent ?? 0.1
     ),
-    filterSkills: config.skillClassifyEnabled === true,
-    skillClassifyThreshold: String(
-      config.skillClassifyThreshold === 9999 ? 20 : (config.skillClassifyThreshold ?? 20)
+    deferredLoadingMinimumTools: String(
+      config.tools.deferredLoadingMinimumTools ?? 8
     ),
     parallelReads: Boolean(config.tools.parallelReads),
     maxParallelReads: String(config.tools.maxParallelReads ?? 5),
@@ -3136,10 +3426,9 @@ function getDefaultDraft(): SettingsDraft {
     vectorDbUrl: "http://127.0.0.1:6333",
     vectorDbApiKey: "",
     vectorDbAutoStart: true,
-    filterTools: false,
-    toolClassifyThreshold: "20",
-    filterSkills: false,
-    skillClassifyThreshold: "20",
+    deferredLoadingMode: "auto",
+    deferredLoadingThresholdPercent: "0.1",
+    deferredLoadingMinimumTools: "8",
     parallelReads: true,
     maxParallelReads: "5",
     autoApproveRead: true,
@@ -3190,8 +3479,13 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       : embProvider === "openai-compatible"
         ? (isLikelyHttpUrl(embBaseUrlRaw) ? embBaseUrlRaw : undefined)
         : (embBaseUrlRaw || undefined)
-  const toolThresholdRaw = parsePositiveInt(draft.toolClassifyThreshold, 20)
-  const skillThresholdRaw = parsePositiveInt(draft.skillClassifyThreshold, 20)
+  const deferredLoadingThresholdPercent = Math.min(
+    1,
+    Math.max(
+      0.01,
+      parseNumber(draft.deferredLoadingThresholdPercent) ?? 0.1,
+    ),
+  )
   const mcpServers = parseJsonArray(draft.mcpServersJson)
   const skillsConfig = draft.skillsConfig ?? linesToList(draft.skillsText).map((p) => ({ path: p, enabled: true }))
   const skills = skillsConfig.filter((s) => s.enabled).map((s) => s.path)
@@ -3237,10 +3531,18 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       apiKey: draft.vectorDbApiKey.trim() || undefined,
     },
     tools: {
-      classifyToolsEnabled: draft.filterTools,
-      classifyThreshold: draft.filterTools ? toolThresholdRaw : 9999,
+      // Compatibility fields are deliberately neutralized. Discovery uses
+      // the deterministic deferred catalog and never a preflight LLM call.
+      classifyToolsEnabled: false,
+      classifyThreshold: 20,
       parallelReads: draft.parallelReads,
       maxParallelReads: parsePositiveInt(draft.maxParallelReads, 5),
+      deferredLoadingMode: draft.deferredLoadingMode,
+      deferredLoadingThresholdPercent,
+      deferredLoadingMinimumTools: parsePositiveInt(
+        draft.deferredLoadingMinimumTools,
+        8,
+      ),
       custom: [],
     },
     permissions: {
@@ -3257,8 +3559,8 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       denyCommandPatterns: linesToList(draft.denyCommandPatternsText),
       allowedMcpTools: linesToList(draft.allowedMcpToolsText),
     },
-    skillClassifyEnabled: draft.filterSkills,
-    skillClassifyThreshold: draft.filterSkills ? skillThresholdRaw : 9999,
+    skillClassifyEnabled: false,
+    skillClassifyThreshold: 20,
     mcp: {
       servers: mcpServers,
     },
@@ -3309,6 +3611,46 @@ function linesToList(value: string): string[] {
 
 function isLikelyHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value)
+}
+
+function isValidOptionalHttpUrl(value: string): boolean {
+  const raw = value.trim()
+  if (!raw) return true
+  if (
+    raw.length > 4_096 ||
+    /[\u0000-\u001f\u007f]/u.test(raw)
+  ) {
+    return false
+  }
+  try {
+    const url = new URL(raw)
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      Boolean(url.hostname) &&
+      !url.username &&
+      !url.password
+    )
+  } catch {
+    return false
+  }
+}
+
+function isValidOptionalNexusServerUrl(value: string): boolean {
+  const raw = value.trim()
+  if (!raw) return true
+  if (!isValidOptionalHttpUrl(raw)) return false
+  const url = new URL(raw)
+  if (url.search || url.hash) return false
+  if (url.protocol === "https:") return true
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/gu, "")
+  if (hostname === "localhost" || hostname === "::1") return true
+  const match = hostname.match(
+    /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u,
+  )
+  return Boolean(
+    match &&
+      match.slice(1).every((octet) => Number(octet) <= 255),
+  )
 }
 
 function parseNumber(value: string): number | undefined {

@@ -161,7 +161,20 @@ export function retrieveMemories(options: MemoryRetrievalOptions): MemoryRetriev
     }
     return true
   })
-  const superseded = new Set(active.flatMap((memory) => memory.supersedes ?? []))
+  const activeById = new Map(active.map((memory) => [memory.id, memory]))
+  const superseded = new Set<string>()
+  for (const memory of active) {
+    for (const targetId of memory.supersedes ?? []) {
+      const target = activeById.get(targetId)
+      if (
+        target &&
+        target.id !== memory.id &&
+        stronger(memory, target).id === memory.id
+      ) {
+        superseded.add(target.id)
+      }
+    }
+  }
   let candidates = active.filter((memory) => {
     if (superseded.has(memory.id)) {
       excluded.superseded += 1

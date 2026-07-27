@@ -13,6 +13,7 @@ const pluginManifestSchema = z.object({
   commands: z.unknown().optional(),
   agents: z.unknown().optional(),
   skills: z.unknown().optional(),
+  tools: z.unknown().optional(),
   hooks: z.unknown().optional(),
   mcpServers: z.unknown().optional(),
   enabled: z.boolean().optional(),
@@ -74,6 +75,23 @@ function normalizeDeclaredList(value: unknown, field: string, warnings: string[]
     out.push(trimmed)
   }
   return out
+}
+
+function normalizeToolPaths(value: unknown, warnings: string[]): string[] {
+  const normalized = normalizeDeclaredList(value, "tools", warnings)
+  const bounded: string[] = []
+  for (const item of normalized) {
+    if (item.length > 4_096) {
+      warnings.push("tools: ignored path longer than 4096 characters")
+      continue
+    }
+    if (bounded.length >= 128) {
+      warnings.push("tools: ignored entries after the 128 path limit")
+      break
+    }
+    bounded.push(item)
+  }
+  return bounded
 }
 
 function normalizeCommandEntries(
@@ -212,6 +230,7 @@ export async function validatePluginManifestFile(filePath: string): Promise<{ su
     ...(commandEntries.length ? { commandEntries } : {}),
     agents: normalizeDeclaredList(result.data.agents, "agents", warnings),
     skills: normalizeDeclaredList(result.data.skills, "skills", warnings),
+    tools: normalizeToolPaths(result.data.tools, warnings),
     hooks: normalizeDeclaredList(result.data.hooks, "hooks", warnings),
     ...(inlineHookConfigs.length ? { inlineHookConfigs } : {}),
     mcpServers: normalizeDeclaredList(result.data.mcpServers, "mcpServers", warnings),
@@ -231,6 +250,8 @@ export async function validatePluginManifestFile(filePath: string): Promise<{ su
   plugin.commands = await addDefaultPath(rootDir, plugin.commands, "commands")
   plugin.agents = await addDefaultPath(rootDir, plugin.agents, "agents")
   plugin.skills = await addDefaultPath(rootDir, plugin.skills, "skills")
+  plugin.tools = await addDefaultPath(rootDir, plugin.tools ?? [], "tools")
+  plugin.tools = await addDefaultPath(rootDir, plugin.tools, "tool")
   const defaultHooks = await fs.stat(path.join(rootDir, "hooks", "hooks.json")).catch(() => null)
   if (defaultHooks?.isFile() && !plugin.hooks.includes("hooks/hooks.json")) {
     plugin.hooks.unshift("hooks/hooks.json")
@@ -244,6 +265,7 @@ export async function validatePluginManifestFile(filePath: string): Promise<{ su
     validateDeclaredPaths(rootDir, plugin.commands, "commands", errors),
     validateDeclaredPaths(rootDir, plugin.agents, "agents", errors),
     validateDeclaredPaths(rootDir, plugin.skills, "skills", errors),
+    validateDeclaredPaths(rootDir, plugin.tools, "tools", errors),
     validateDeclaredPaths(rootDir, plugin.mcpServers, "mcpServers", errors),
   ])
 
@@ -374,3 +396,4 @@ export async function loadPluginManifests(
 }
 
 export { MANIFEST_PATTERNS }
+export * from "./trust.js"

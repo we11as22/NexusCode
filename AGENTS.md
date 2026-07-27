@@ -35,7 +35,7 @@ This file provides guidance to agents when working with the NexusCode repository
 
 ## MCP and skills
 
-- MCP servers are configured in config (`mcp.servers`). The extension connects on init and after `saveConfig` when the MCP section changes. Tools from MCP are registered in the agent’s `ToolRegistry`. Skills are loaded from paths in `config.skills` and can be filtered by the classifier when over the threshold.
+- MCP servers are configured in config (`mcp.servers`). The extension connects on init and after `saveConfig` when the MCP section changes. Tools from MCP are registered in the agent’s `ToolRegistry`; large dynamic surfaces are discovered deterministically through `ToolSearch` and activated at the next provider boundary. Skills are loaded from `config.skills` and activated by exact name/metadata through the `Skill` catalog. No LLM pre-classifier runs before the agent loop.
 
 ## Best practices
 

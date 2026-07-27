@@ -23,12 +23,14 @@ type CloseResult = { cancelled?: boolean; saved?: boolean }
 type Props = {
   initialConfig: NexusConfig
   onSave: (patch: Partial<NexusConfig>) => Promise<void>
+  onRemoveApiKey: () => Promise<void>
   onClose: (result?: CloseResult) => void
 }
 
 export function NexusEmbeddingsPanel({
   initialConfig,
   onSave,
+  onRemoveApiKey,
   onClose,
 }: Props): React.ReactNode {
   const theme = getTheme()
@@ -40,12 +42,18 @@ export function NexusEmbeddingsPanel({
     return i >= 0 ? i : 0
   })
   const [modelId, setModelId] = useState(emb?.model ?? '')
-  // focus: 0=provider, 1=model, 2=save
+  const [baseUrl, setBaseUrl] = useState(emb?.baseUrl ?? '')
+  const [apiKey, setApiKey] = useState('')
+  // focus: 0=provider, 1=model, 2=base URL, 3=API key, 4=remove, 5=save
   const [focusIndex, setFocusIndex] = useState(0)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const modelField = useFieldInput(modelId, setModelId, invert)
+  const baseUrlField = useFieldInput(baseUrl, setBaseUrl, invert)
+  const apiKeyField = useFieldInput(apiKey, setApiKey, invert, {
+    maskChar: '•',
+  })
 
   const currentProvider = EMBEDDING_PROVIDERS[providerIndex]
   const providerId = currentProvider?.id ?? 'openai-compatible'
@@ -61,6 +69,8 @@ export function NexusEmbeddingsPanel({
     const config: EmbeddingConfig = {
       provider: providerId,
       model: modelId.trim(),
+      ...(baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
+      ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
     }
     onSave({ embeddings: config })
       .then(() => onClose({ saved: true }))
@@ -73,8 +83,13 @@ export function NexusEmbeddingsPanel({
   useInput((input, key) => {
     const extendedKey = asExtendedKey(key)
     // On model field, let field handle input first
-    if (focusIndex === 1) {
-      if (modelField.handleInput(input ?? '', extendedKey)) return
+    if (focusIndex >= 1 && focusIndex <= 3) {
+      const handler = [
+        modelField.handleInput,
+        baseUrlField.handleInput,
+        apiKeyField.handleInput,
+      ][focusIndex - 1]
+      if (handler?.(input ?? '', extendedKey)) return
     }
 
     if (extendedKey.escape) {
@@ -82,11 +97,11 @@ export function NexusEmbeddingsPanel({
       return
     }
     if (extendedKey.tab) {
-      setFocusIndex((f) => (f + 1) % 3)
+      setFocusIndex((f) => (f + 1) % 6)
       return
     }
     if (extendedKey.backtab) {
-      setFocusIndex((f) => (f - 1 + 3) % 3)
+      setFocusIndex((f) => (f - 1 + 6) % 6)
       return
     }
     if (extendedKey.upArrow) {
@@ -101,15 +116,24 @@ export function NexusEmbeddingsPanel({
       if (focusIndex === 0) {
         setProviderIndex((prev) => Math.min(EMBEDDING_PROVIDERS.length - 1, prev + 1))
       } else {
-        setFocusIndex((f) => Math.min(2, f + 1))
+        setFocusIndex((f) => Math.min(5, f + 1))
       }
       return
     }
     if (extendedKey.return) {
-      if (focusIndex === 2) {
+      if (focusIndex === 4) {
+        setSaving(true)
+        setError(null)
+        onRemoveApiKey()
+          .then(() => onClose({ saved: true }))
+          .catch((e) => {
+            setError(String(e))
+            setSaving(false)
+          })
+      } else if (focusIndex === 5) {
         doSave()
       } else {
-        setFocusIndex((f) => Math.min(2, f + 1))
+        setFocusIndex((f) => Math.min(5, f + 1))
       }
       return
     }
@@ -137,7 +161,25 @@ export function NexusEmbeddingsPanel({
       </Box>
       <Box marginTop={1}>
         <Text color={focusIndex === 2 ? theme.primary : undefined}>
-          {focusIndex === 2 ? figures.pointer : ' '}{' '}
+          {focusIndex === 2 ? figures.pointer : ' '} Base URL:{' '}
+        </Text>
+        <Text>{focusIndex === 2 ? baseUrlField.renderedValue : (baseUrl || '(provider default)')}</Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text color={focusIndex === 3 ? theme.primary : undefined}>
+          {focusIndex === 3 ? figures.pointer : ' '} API key:{' '}
+        </Text>
+        <Text>{focusIndex === 3 ? apiKeyField.renderedValue : (apiKey ? '•'.repeat(apiKey.length) : '(blank keeps stored key)')}</Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text color={focusIndex === 4 ? theme.primary : undefined}>
+          {focusIndex === 4 ? figures.pointer : ' '}{' '}
+          <Text bold>{saving ? 'Working…' : 'Remove stored API key'}</Text>
+        </Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text color={focusIndex === 5 ? theme.primary : undefined}>
+          {focusIndex === 5 ? figures.pointer : ' '}{' '}
           <Text bold>{saving ? 'Saving…' : 'Save'}</Text>
         </Text>
       </Box>
@@ -147,7 +189,7 @@ export function NexusEmbeddingsPanel({
         </Box>
       )}
       <Box marginTop={1}>
-        <Text dimColor>↑/↓ Tab navigate · type model · Enter next/save · Esc close</Text>
+        <Text dimColor>↑/↓ Tab navigate · Enter next/action · blank key keeps stored · Esc close</Text>
       </Box>
     </Box>
   )

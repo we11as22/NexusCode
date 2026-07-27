@@ -143,7 +143,7 @@ Connected MCP clients also monitor protocol close/error signals. A dropped trans
 **Nexus CLI chat order:** In Nexus mode the message list is rendered **in timeline order** (header in `Static`, then every row in sequence). The legacy split “all static messages first, then all transient” would pin `Exploring`/`Explored` blocks **below** final assistant text because explore is always transient. **ctrl+o** expands tool details on the parent spawn row; sub-agent explore is not duplicated as a second timeline block. **Escape** cancels the in-flight Nexus run via `AbortController` mirrored in a ref (`useCancelRequest` + `assignAbortController`) so cancel works even when Ink’s handler would otherwise see a stale signal; cancel is allowed while **`isLoading` or any sub-agent is still running**, and `onCancel` clears `subagentsByPartId` after abort.
 
 
-Optional **`packages/server`** runs the agent and persists sessions/messages via the **same JSONL store** as in-process hosts (`@nexuscode/core` session storage under `~/.nexus/sessions/…`, keyed by **canonical project root**). Extension and CLI connect over HTTP for shared runs, pagination, and long chats without loading full history into memory.
+Optional **`packages/server`** owns one long-lived runtime per canonical workspace. Its built-in SQLite control plane transactionally owns leases, input admission, turns/runs, queues, approvals and replay events; checksummed JSONL under `~/.nexus/sessions/…` remains the portable transcript/audit projection shared with in-process hosts. Extension and CLI connect through protocol v2 for idempotent commands, resumable streams and paginated history.
 
 **Context usage bar (CLI + VS Code):** The “used / limit” indicator is driven by a single formula in `packages/core/src/context/context-usage.ts`: **active session messages** (same window as the next request; tool text is whatever is stored after execution-time truncation / compaction, with no extra per-request cap in `buildMessagesFromSession`), plus **last built system prompt** tokens, plus a **heuristic for tool definitions** (name + description + fixed schema overhead per tool). The agent loop calls `emitContextUsage` after each system build and records `contextUsage` on the session (persisted in JSONL meta). The snapshot is **cleared only on a new user message**, not on every assistant/tool mutation, so idle UIs can still show the last full estimate after a run. When no snapshot exists yet, hosts show **session + tools** (and optional MCP server count fudge), not system — until the next loop iteration emits.
 
@@ -161,9 +161,9 @@ This keeps more recent granular context intact while still recovering from provi
 | Mode | Who runs the agent | Where sessions live | How client connects |
 |------|--------------------|----------------------|----------------------|
 | **Extension in-process** | `runAgentLoop()` in extension process, `VsCodeHost` | JSONL under `~/.nexus/sessions/<project-hash>/` (see `session/storage.ts`) | N/A |
-| **Extension + server** | Server process (`runSession` → `runAgentLoop` with `ServerHost`) | Same JSONL as local (per canonical `directory`) | Extension uses `nexuscode.serverUrl`; `NexusServerClient` (core) for list/get messages and **stream** |
+| **Extension + server** | Workspace-owned server runtime (`SessionProtocolService` → durable turn runner → `runAgentLoop`) | SQLite coordination + portable JSONL transcript per canonical `directory` | Extension uses `nexuscode.serverUrl`; `NexusServerClient` protocol v2 for commands, snapshots, replay and paginated history |
 | **CLI in-process** | `runAgentLoop()` in CLI process, `CliHost` | Local JSONL | N/A |
-| **CLI + server** | Server process | Same JSONL as local (per canonical `directory`) | CLI `--server <url>` (or `NEXUS_SERVER_URL`); `queryNexus` reuses the bootstrap session id with `streamMessage` (no per-message session fork); REPL consumes identically |
+| **CLI + server** | Same workspace-owned server runtime | SQLite coordination + portable JSONL transcript per canonical `directory` | CLI `--server <url>` (or `NEXUS_SERVER_URL`); the REPL uses the same protocol-v2 admission/replay contract as VS Code |
 
 Server stream (POST `/session/:id/message`) returns **NDJSON** (`Content-Type: application/x-ndjson`, chunked): one JSON object per line. Each object is an `AgentEvent` or a **heartbeat** line `{"type":"heartbeat","ts":<ms>}` sent every 10s so proxies and clients can detect dead connections. Clients skip heartbeat lines; if no event (including heartbeat) is received for `DEFAULT_HEARTBEAT_TIMEOUT_MS` (20s), the client reconnects from its last confirmed sequence. Every per-read heartbeat timer is cleared when that read settles. Malformed lines yield an `AgentEvent` `{ type: "error", error: "Invalid stream line: ..." }`.
 
@@ -263,9 +263,9 @@ Only modes with a configured mandatory tool are force-gated by that tool (curren
 
 Config is loaded from **`.nexus/nexus.yaml`** / **`.nexus/nexus.yml`** / **`.nexusrc.yaml`** / **`.nexusrc.yml`** (walk up from cwd) and **`~/.nexus/nexus.yaml`** (global). MCP server lists are merged from **`~/.nexus/mcp-servers.json`** and **`<project>/.nexus/mcp-servers.json`**. Both VS Code and CLI persist updates into the project file with deep-merge of nested sections (`model`, `embeddings`, `indexing`, `vectorDb`, `tools`, `mcp`, etc.). Env vars override file config; VS Code settings (`nexuscode.*`) override when the extension runs. Default model `baseUrl` in schema: **`https://api.kilo.ai/api/openrouter`** (not legacy `/api/gateway`).
 
-### MCP server filtering (not tool filtering)
+### Deterministic deferred tool discovery
 
-When the number of **MCP servers** exceeds `tools.classifyThreshold` (default 20) and `tools.classifyToolsEnabled` is true, an LLM classifier selects **which MCP servers** to use for the task. All tools from selected servers are included; custom tools (no `serverName__toolName` pattern) are always included. Skill filtering uses `skillClassifyThreshold` (default 20) and selects skills by task. Thresholds default to 20 in schema and UI.
+There is no preflight LLM classifier. The immutable turn catalog marks large dynamic surfaces as deferred; `ToolSearch` performs deterministic BM25 search over safe tool metadata and stages exact matches for the next provider boundary. Mode-blocked tools never enter the searchable catalog. Skills use a bounded catalog and exact name/metadata activation. Legacy classifier fields remain schema-compatible no-ops until old configs can be migrated away.
 
 ### Inline reasoning fallback for gateway streams
 
@@ -314,9 +314,9 @@ Config can reference `bundle: "context-mode"`; hosts resolve an optional checkou
 - **Mode permissions** are enforced in core (not only in the UI). Blocked tools are never passed to the model.
 - **Prompt and tool contracts must match runtime exactly.** System prompts, mode descriptions, sub-agent prompts, and tool descriptions must use the real tool names and parameter shapes: `PlanExit`, `TaskCreate` / `TaskCreateBatch` / `TaskOutput` / `TaskStop` (public orchestration), legacy hidden `SpawnAgent*` only for old transcripts, `Parallel`, `Read(file_path, offset, limit)`, and the exact-string `Edit` contract.
 - **Mode switching is live within one chat.** When the mode changes, the current mode's permissions and end-of-turn rules override any earlier assumptions from the same conversation; prompts must make that explicit so the agent does not blend plan/ask/review/agent behaviors.
-- **Built-in tools** are always available per mode; filtering applies only to dynamic (MCP/custom) tools, and by **MCP server** count (not individual tool count) when classification is enabled.
+- **Built-in tools** are available only when allowed by the active mode. Deferred discovery applies to eligible dynamic/rich tools individually and never bypasses mode authority.
 - **Deferred tools** remain executable even when omitted from the initial prompt-visible tool list. Discovery of deferred tools must go through `ToolSearch`; execution still resolves against the full runtime registry.
-- **MCP config**: enable/disable is per **server** (all tools of that server). The classifier selects servers, not individual tools.
+- **MCP config**: enable/disable remains per **server**; prompt exposure of each connected deferred tool is controlled by deterministic `ToolSearch`, not an LLM classifier.
 - **Background work** must register in the orchestration runtime if it is expected to outlive one synchronous tool call. `Bash(run_in_background: true)` and delegated agent tasks (`TaskCreate(kind: "agent", block: false)`, etc.) share this rule; poll/wait with `TaskOutput`, stop with `TaskStop`.
 - If vector prerequisites are invalid, **`CodebaseSearch` is unavailable**; use **Grep** / **ListCodeDefinitions** for discovery until vector indexing is configured.
 - Host UI must not change `runAgentLoop` contracts (options, events, tool results).
@@ -336,7 +336,7 @@ Config can reference `bundle: "context-mode"`; hosts resolve an optional checkou
 ## Data flow
 
 1. User message enters the VS Code webview or CLI TUI.
-2. **Without server:** the host appends the message to the local session (JSONL under `~/.nexus/sessions/…`). **With server:** the message is sent over HTTP; the server process appends to the **same JSONL files** for that canonical project root (`packages/server/src/session-fs-store.ts` → core `saveSession` / `loadSessionMessages`), not a separate SQLite DB.
+2. **Without server:** the host appends the message to the local JSONL session under `~/.nexus/sessions/…`. **With server:** protocol v2 first commits idempotent input admission and turn ownership in SQLite, then the durable runner checkpoints the same portable JSONL transcript before and during execution.
 3. Core (in-process or on server) builds prompt blocks (role, rules, skills, system, mentions, compaction).
 4. The model streams text and tool calls.
 5. Tools run via the host adapter with permission checks (rules, approval dialogs).
@@ -354,20 +354,20 @@ Reference agent trees used during engineering audits are not runtime dependencie
 NexusCode/
 ├── packages/
 │   ├── core/              ← Agent engine
-│   │   ├── agent/         ← Loop, modes, classifier (MCP servers + skills), prompts
+│   │   ├── agent/         ← Loop, modes, deterministic deferred activation, prompts
 │   │   ├── tools/         ← Built-in tool registry + built-in implementations
 │   │   ├── session/       ← JSONL storage, compaction
 │   │   ├── indexer/       ← AST/symbol parsing + optional Qdrant vectors
 │   │   ├── provider/      ← LLM providers + embeddings
 │   │   ├── checkpoint/    ← Shadow git
 │   │   ├── context/       ← @mentions, rules, condense
-│   │   ├── skills/        ← Skill loader + lexical ranking + classifier
+│   │   ├── skills/        ← Skill loader + bounded exact activation catalog
 │   │   ├── mcp/           ← MCP client, resolveBundledMcpServers
 │   │   ├── config/        ← Schema (NexusConfigSchema), load, merge
 │   │   └── review/        ← Review helpers (if any)
 │   ├── vscode/            ← Extension + React webview (controller, settings, chat, presets)
 │   ├── cli/               ← CLI host + TUI (slash commands, agent-config, sessions)
-│   └── server/            ← Optional: HTTP server + NDJSON streaming; JSONL session store (shared with CLI/extension)
+│   └── server/            ← Optional: protocol-v2 runtime; SQLite coordination + JSONL transcript projection
 ├── sources/
 │   └── claude-context-mode/  ← Optional local MCP source (not shipped)
 └── .nexus/                ← Project config (nexus.yaml, agent-configs.json, rules, skills)

@@ -2,7 +2,11 @@ import { Box, Text, useInput } from 'ink'
 import React, { useRef, useState } from 'react'
 import figures from 'figures'
 import { getTheme } from '../utils/theme.js'
-import type { NexusConfig, McpServerConfig } from '@nexuscode/core'
+import type {
+  NexusConfig,
+  McpServerConfig,
+  PendingProjectMcpServer,
+} from '@nexuscode/core'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as fs from 'node:fs'
@@ -25,6 +29,9 @@ export function NexusMcpPanel({ initialConfig, onSave, onClose }: Props): React.
   const [servers, setServers] = useState<McpServerConfig[]>(
     () => initialConfig.mcp?.servers ?? [],
   )
+  const [pendingServers, setPendingServers] = useState<PendingProjectMcpServer[]>(
+    () => initialConfig.mcp?.pendingProjectServers ?? [],
+  )
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -33,8 +40,16 @@ export function NexusMcpPanel({ initialConfig, onSave, onClose }: Props): React.
   const selectedIndexRef = useRef(0)
   selectedIndexRef.current = selectedIndex
 
-  const scrollStart = Math.max(0, Math.min(selectedIndex, servers.length - VISIBLE_ROWS))
-  const visibleServers = servers.slice(scrollStart, scrollStart + VISIBLE_ROWS)
+  const rows = [
+    ...servers.map((server) => ({ kind: 'active' as const, server })),
+    ...pendingServers.map((pending) => ({
+      kind: 'pending' as const,
+      server: pending.config,
+      pending,
+    })),
+  ]
+  const scrollStart = Math.max(0, Math.min(selectedIndex, rows.length - VISIBLE_ROWS))
+  const visibleServers = rows.slice(scrollStart, scrollStart + VISIBLE_ROWS)
 
   useInput((input, key) => {
     if (key.escape) {
@@ -47,12 +62,14 @@ export function NexusMcpPanel({ initialConfig, onSave, onClose }: Props): React.
       return
     }
     if (key.downArrow) {
-      setSelectedIndex((i) => Math.min(servers.length - 1, i + 1))
+      setSelectedIndex((i) => Math.min(rows.length - 1, i + 1))
       return
     }
 
     if (input === ' ' || key.return) {
-      if (servers.length === 0) return
+      if (rows.length === 0) return
+      const selected = rows[selectedIndexRef.current]
+      if (!selected || selected.kind !== 'active') return
       setServers((prev) =>
         prev.map((s, i) =>
           i === selectedIndexRef.current
@@ -61,6 +78,39 @@ export function NexusMcpPanel({ initialConfig, onSave, onClose }: Props): React.
         ),
       )
       setSaved(false)
+      return
+    }
+
+    if (input === 'a' || input === 'A') {
+      const selected = rows[selectedIndexRef.current]
+      if (!selected || selected.kind !== 'pending') return
+      const approved = {
+        ...selected.server,
+        enabled: true,
+      }
+      const nextServers = [
+        ...servers.filter((server) => server.name !== approved.name),
+        approved,
+      ]
+      setSaving(true)
+      setSaved(false)
+      setError(null)
+      onSave({ mcp: { servers: nextServers } })
+        .then(() => {
+          setServers(nextServers)
+          setPendingServers((current) =>
+            current.filter((entry) => entry !== selected.pending),
+          )
+          setSelectedIndex((index) =>
+            Math.max(0, Math.min(index, rows.length - 2)),
+          )
+          setSaving(false)
+          setSaved(true)
+        })
+        .catch((e) => {
+          setError(String(e))
+          setSaving(false)
+        })
       return
     }
 
@@ -108,22 +158,34 @@ export function NexusMcpPanel({ initialConfig, onSave, onClose }: Props): React.
         <Text dimColor>Toggle Model Context Protocol servers on or off.</Text>
       </Box>
 
-      {servers.length === 0 ? (
+      {rows.length === 0 ? (
         <Box flexDirection="column" minHeight={3}>
           <Text dimColor>No MCP servers configured.</Text>
-          <Text dimColor>Add servers in .nexus/mcp-servers.json.</Text>
+          <Text dimColor>Add trusted servers globally. Project definitions appear as approval requests.</Text>
         </Box>
       ) : (
-        <Box flexDirection="column" minHeight={Math.min(servers.length, VISIBLE_ROWS)}>
-          {visibleServers.map((server, i) => {
+        <Box flexDirection="column" minHeight={Math.min(rows.length, VISIBLE_ROWS)}>
+          {visibleServers.map((row, i) => {
+            const server = row.server
             const globalIndex = scrollStart + i
             const isSelected = globalIndex === selectedIndex
             const isEnabled = server.enabled ?? true
-            const statusText = isEnabled ? 'enabled' : 'disabled'
-            const statusColor = isEnabled ? theme.primary : theme.secondaryText ?? 'gray'
-            const detail = server.url ?? server.command ?? server.bundle ?? ''
+            const statusText = row.kind === 'pending'
+              ? 'approval required'
+              : isEnabled
+                ? 'enabled'
+                : 'disabled'
+            const statusColor = row.kind === 'pending'
+              ? theme.warning
+              : isEnabled
+                ? theme.primary
+                : theme.secondaryText ?? 'gray'
+            const detail = server.url ??
+              (server.command
+                ? [server.command, ...(server.args ?? [])].join(' ')
+                : server.bundle ?? '')
             return (
-              <Box key={server.name + String(globalIndex)} height={1}>
+              <Box key={`${row.kind}:${server.name}:${globalIndex}`} height={1}>
                 <Text color={isSelected ? theme.primary : undefined}>
                   {isSelected ? figures.pointer : ' '}{' '}
                 </Text>
@@ -158,8 +220,16 @@ export function NexusMcpPanel({ initialConfig, onSave, onClose }: Props): React.
         </Box>
       )}
 
+      {rows[selectedIndex]?.kind === 'pending' && (
+        <Box marginTop={1}>
+          <Text color={theme.warning}>
+            Project-requested server is inactive. A approves this exact command/URL into host-owned configuration.
+          </Text>
+        </Box>
+      )}
+
       <Box marginTop={1}>
-        <Text dimColor>↑/↓ navigate · Space/Enter toggle · S save · G global config · Esc close</Text>
+        <Text dimColor>↑/↓ navigate · Space toggle trusted · A approve pending · S save · G global config · Esc close</Text>
       </Box>
     </Box>
   )

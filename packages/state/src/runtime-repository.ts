@@ -1,5 +1,5 @@
 import type { NexusStateDatabase } from "./database.js"
-import type { StateConnection } from "./schema.js"
+import type { StateConnection, StateReadConnection } from "./schema.js"
 
 export type RunStatus =
   | "running"
@@ -23,8 +23,12 @@ const RESOLVED_APPROVAL_STATUSES = new Set<string>([
   "denied",
   "cancelled",
 ])
+// Runtime timestamps are non-negative, so zero is an irreversible released
+// tombstone even if the host clock moves backwards after release.
+const RELEASED_LEASE_EXPIRES_AT = 0
 
 export interface RuntimeRepositoryOptions {
+  /** Returns a non-negative integer timestamp in milliseconds. */
   now?: () => number
 }
 
@@ -80,6 +84,8 @@ export interface CreateApprovalInput {
   id: string
   sessionId: string
   runId?: string
+  ownerId: string
+  leaseEpoch: number
   toolName: string
   redactedSummary: string
   dedupeKey: string
@@ -87,6 +93,9 @@ export interface CreateApprovalInput {
 
 export interface ResolveApprovalInput {
   approvalId: string
+  sessionId: string
+  ownerId: string
+  leaseEpoch: number
   status: ResolvedApprovalStatus
 }
 
@@ -186,6 +195,33 @@ function assertTtl(ttlMs: number): void {
   }
 }
 
+function readRuntimeTime(now: () => number): number {
+  const value = now()
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("Runtime clock must return a non-negative safe integer")
+  }
+  return value
+}
+
+function monotonicRuntimeTime(
+  now: () => number,
+  ...floors: number[]
+): number {
+  return Math.max(readRuntimeTime(now), ...floors)
+}
+
+function nextLeaseEpoch(epoch: number): number {
+  if (!Number.isSafeInteger(epoch) || epoch < 1) {
+    throw new Error("Stored lease epoch is not a positive safe integer")
+  }
+  if (epoch === Number.MAX_SAFE_INTEGER) {
+    throw new Error(
+      "Cannot reclaim a lease at the maximum safe fencing epoch",
+    )
+  }
+  return epoch + 1
+}
+
 function leaseFromRow(row: SessionLeaseRow): SessionLease {
   return {
     sessionId: row.session_id,
@@ -232,7 +268,7 @@ function projectionFromRow(row: ProjectionCursorRow): ProjectionCursor {
 }
 
 function loadLease(
-  connection: StateConnection,
+  connection: StateReadConnection,
   sessionId: string,
 ): SessionLeaseRow | undefined {
   return connection.get<SessionLeaseRow>(
@@ -244,7 +280,7 @@ function loadLease(
 }
 
 function loadRun(
-  connection: StateConnection,
+  connection: StateReadConnection,
   runId: string,
 ): RunRow | undefined {
   return connection.get<RunRow>(
@@ -257,7 +293,7 @@ function loadRun(
 }
 
 function loadApproval(
-  connection: StateConnection,
+  connection: StateReadConnection,
   approvalId: string,
 ): ApprovalRow | undefined {
   return connection.get<ApprovalRow>(
@@ -270,7 +306,7 @@ function loadApproval(
 }
 
 function loadProjection(
-  connection: StateConnection,
+  connection: StateReadConnection,
   sessionId: string,
 ): ProjectionCursorRow | undefined {
   return connection.get<ProjectionCursorRow>(
@@ -278,6 +314,83 @@ function loadProjection(
      FROM rollout_projection
      WHERE session_id = ?`,
     [sessionId],
+  )
+}
+
+function requireLiveLease(
+  connection: StateReadConnection,
+  input: {
+    sessionId: string
+    ownerId: string
+    leaseEpoch: number
+  },
+  now: number,
+): SessionLeaseRow {
+  const lease = loadLease(connection, input.sessionId)
+  if (
+    !lease ||
+    lease.owner_id !== input.ownerId ||
+    lease.epoch !== input.leaseEpoch ||
+    lease.expires_at <= now
+  ) {
+    throw new RuntimeConflictError(
+      "lease_lost",
+      `Lease ${input.sessionId}@${input.leaseEpoch} is no longer owned by ${input.ownerId}`,
+    )
+  }
+  return lease
+}
+
+function requireRunningApprovalRun(
+  connection: StateReadConnection,
+  input: {
+    sessionId: string
+    runId: string
+    ownerId: string
+    leaseEpoch: number
+  },
+): RunRow {
+  const run = loadRun(connection, input.runId)
+  if (!run || run.session_id !== input.sessionId) {
+    throw new RuntimeConflictError(
+      "approval_conflict",
+      `Approval run ${input.runId} must belong to session ${input.sessionId}`,
+    )
+  }
+  if (run.status !== "running") {
+    throw new RuntimeConflictError(
+      "approval_conflict",
+      `Approval run ${input.runId} is no longer running`,
+    )
+  }
+  if (
+    run.owner_id !== input.ownerId ||
+    run.lease_epoch !== input.leaseEpoch
+  ) {
+    throw new RuntimeConflictError(
+      "lease_lost",
+      `Approval run ${input.runId} is fenced by different ownership`,
+    )
+  }
+  return run
+}
+
+function settleAbandonedSession(
+  connection: StateConnection,
+  sessionId: string,
+  now: number,
+): void {
+  connection.run(
+    `UPDATE run
+     SET status = 'interrupted', finished_at = MAX(?, started_at)
+     WHERE session_id = ? AND status = 'running'`,
+    [now, sessionId],
+  )
+  connection.run(
+    `UPDATE approval
+     SET status = 'cancelled', resolved_at = MAX(?, created_at)
+     WHERE session_id = ? AND status = 'pending'`,
+    [now, sessionId],
   )
 }
 
@@ -298,12 +411,15 @@ export class RuntimeRepository {
     assertNonEmpty(input.ownerId, "Owner id")
     assertTtl(input.ttlMs)
     return this.#database.transaction((connection) => {
-      const now = this.#now()
+      const existing = loadLease(connection, input.sessionId)
+      const now = monotonicRuntimeTime(
+        this.#now,
+        existing?.updated_at ?? 0,
+      )
       const expiresAt = now + input.ttlMs
       if (!Number.isSafeInteger(expiresAt)) {
         throw new Error("Lease expiry exceeds the safe integer range")
       }
-      const existing = loadLease(connection, input.sessionId)
       if (!existing) {
         connection.run(
           `INSERT INTO session_lease
@@ -327,14 +443,9 @@ export class RuntimeRepository {
           `Session ${input.sessionId} is owned by ${existing.owner_id}`,
         )
       }
-      const epoch = live ? existing.epoch : existing.epoch + 1
+      const epoch = live ? existing.epoch : nextLeaseEpoch(existing.epoch)
       if (!live) {
-        connection.run(
-          `UPDATE run
-           SET status = 'interrupted', finished_at = ?
-           WHERE session_id = ? AND status = 'running'`,
-          [now, input.sessionId],
-        )
+        settleAbandonedSession(connection, input.sessionId, now)
       }
       connection.run(
         `UPDATE session_lease
@@ -358,8 +469,11 @@ export class RuntimeRepository {
     assertEpoch(input.epoch)
     assertTtl(input.ttlMs)
     return this.#database.transaction((connection) => {
-      const now = this.#now()
       const existing = loadLease(connection, input.sessionId)
+      const now = monotonicRuntimeTime(
+        this.#now,
+        existing?.updated_at ?? 0,
+      )
       if (
         !existing ||
         existing.owner_id !== input.ownerId ||
@@ -396,10 +510,41 @@ export class RuntimeRepository {
     assertNonEmpty(input.ownerId, "Owner id")
     assertEpoch(input.epoch)
     this.#database.transaction((connection) => {
+      const existing = loadLease(connection, input.sessionId)
+      if (
+        !existing ||
+        existing.owner_id !== input.ownerId ||
+        existing.epoch !== input.epoch
+      ) {
+        throw new RuntimeConflictError(
+          "lease_lost",
+          `Lease ${input.sessionId}@${input.epoch} is no longer owned by ${input.ownerId}`,
+        )
+      }
+      if (existing.expires_at === RELEASED_LEASE_EXPIRES_AT) return
+
+      const now = monotonicRuntimeTime(this.#now, existing.updated_at)
+      if (existing.expires_at <= now) {
+        throw new RuntimeConflictError(
+          "lease_lost",
+          `Lease ${input.sessionId}@${input.epoch} expired before it could be released`,
+        )
+      }
+
+      settleAbandonedSession(connection, input.sessionId, now)
       const result = connection.run(
-        `DELETE FROM session_lease
-         WHERE session_id = ? AND owner_id = ? AND epoch = ?`,
-        [input.sessionId, input.ownerId, input.epoch],
+        `UPDATE session_lease
+         SET expires_at = ?, updated_at = ?
+         WHERE session_id = ? AND owner_id = ? AND epoch = ?
+           AND expires_at > ?`,
+        [
+          RELEASED_LEASE_EXPIRES_AT,
+          now,
+          input.sessionId,
+          input.ownerId,
+          input.epoch,
+          now,
+        ],
       )
       if (Number(result.changes) !== 1) {
         throw new RuntimeConflictError(
@@ -424,6 +569,22 @@ export class RuntimeRepository {
           existingRun.lease_epoch === input.leaseEpoch &&
           existingRun.status === "running"
         ) {
+          const lease = loadLease(connection, input.sessionId)
+          const now = monotonicRuntimeTime(
+            this.#now,
+            lease?.updated_at ?? existingRun.started_at,
+          )
+          if (
+            !lease ||
+            lease.owner_id !== input.ownerId ||
+            lease.epoch !== input.leaseEpoch ||
+            lease.expires_at <= now
+          ) {
+            throw new RuntimeConflictError(
+              "lease_lost",
+              `Cannot start run without the live lease ${input.sessionId}@${input.leaseEpoch}`,
+            )
+          }
           return runFromRow(existingRun)
         }
         throw new RuntimeConflictError(
@@ -432,8 +593,11 @@ export class RuntimeRepository {
         )
       }
 
-      const now = this.#now()
       const lease = loadLease(connection, input.sessionId)
+      const now = monotonicRuntimeTime(
+        this.#now,
+        lease?.updated_at ?? 0,
+      )
       if (
         !lease ||
         lease.owner_id !== input.ownerId ||
@@ -490,6 +654,15 @@ export class RuntimeRepository {
         )
       }
       if (existing.status !== "running") {
+        if (
+          existing.owner_id !== input.ownerId ||
+          existing.lease_epoch !== input.leaseEpoch
+        ) {
+          throw new RuntimeConflictError(
+            "lease_lost",
+            `Run ${input.runId} is fenced by different ownership`,
+          )
+        }
         if (existing.status === input.status) {
           return runFromRow(existing)
         }
@@ -498,8 +671,12 @@ export class RuntimeRepository {
           `Run ${input.runId} already finished as ${existing.status}`,
         )
       }
-      const now = this.#now()
       const lease = loadLease(connection, existing.session_id)
+      const now = monotonicRuntimeTime(
+        this.#now,
+        existing.started_at,
+        lease?.updated_at ?? 0,
+      )
       if (
         existing.owner_id !== input.ownerId ||
         existing.lease_epoch !== input.leaseEpoch ||
@@ -527,6 +704,12 @@ export class RuntimeRepository {
           input.leaseEpoch,
         ],
       )
+      connection.run(
+        `UPDATE approval
+         SET status = 'cancelled', resolved_at = ?
+         WHERE run_id = ? AND status = 'pending'`,
+        [finishedAt, input.runId],
+      )
       return runFromRow({
         ...existing,
         status: input.status,
@@ -538,12 +721,18 @@ export class RuntimeRepository {
   createApproval(input: CreateApprovalInput): ApprovalRecord {
     assertNonEmpty(input.id, "Approval id")
     assertNonEmpty(input.sessionId, "Session id")
+    assertNonEmpty(input.ownerId, "Owner id")
+    assertEpoch(input.leaseEpoch)
     assertNonEmpty(input.toolName, "Tool name")
     assertNonEmpty(input.redactedSummary, "Redacted approval summary")
     assertNonEmpty(input.dedupeKey, "Approval dedupe key")
     if (input.runId !== undefined) assertNonEmpty(input.runId, "Run id")
 
     return this.#database.transaction((connection) => {
+      const observedAt = readRuntimeTime(this.#now)
+      const lease = requireLiveLease(connection, input, observedAt)
+      let createdAt = Math.max(observedAt, lease.updated_at)
+
       const existing = loadApproval(connection, input.id)
       if (existing) {
         const same =
@@ -557,6 +746,16 @@ export class RuntimeRepository {
           "approval_conflict",
           `Approval id ${input.id} already exists with different content`,
         )
+      }
+
+      if (input.runId !== undefined) {
+        const run = requireRunningApprovalRun(connection, {
+          sessionId: input.sessionId,
+          runId: input.runId,
+          ownerId: input.ownerId,
+          leaseEpoch: input.leaseEpoch,
+        })
+        createdAt = Math.max(createdAt, run.started_at)
       }
 
       const duplicate = connection.get<ApprovalRow>(
@@ -578,7 +777,6 @@ export class RuntimeRepository {
         )
       }
 
-      const createdAt = this.#now()
       connection.run(
         `INSERT INTO approval
           (id, session_id, run_id, tool_name, redacted_summary, dedupe_key,
@@ -609,15 +807,26 @@ export class RuntimeRepository {
 
   resolveApproval(input: ResolveApprovalInput): ApprovalRecord {
     assertNonEmpty(input.approvalId, "Approval id")
+    assertNonEmpty(input.sessionId, "Session id")
+    assertNonEmpty(input.ownerId, "Owner id")
+    assertEpoch(input.leaseEpoch)
     if (!RESOLVED_APPROVAL_STATUSES.has(input.status)) {
       throw new Error("resolveApproval requires a terminal status")
     }
     return this.#database.transaction((connection) => {
+      const observedAt = readRuntimeTime(this.#now)
+      const lease = requireLiveLease(connection, input, observedAt)
       const existing = loadApproval(connection, input.approvalId)
       if (!existing) {
         throw new RuntimeConflictError(
           "approval_conflict",
           `Approval ${input.approvalId} does not exist`,
+        )
+      }
+      if (existing.session_id !== input.sessionId) {
+        throw new RuntimeConflictError(
+          "approval_conflict",
+          `Approval ${input.approvalId} does not belong to session ${input.sessionId}`,
         )
       }
       if (existing.status !== "pending") {
@@ -627,7 +836,20 @@ export class RuntimeRepository {
           `Approval ${input.approvalId} already resolved as ${existing.status}`,
         )
       }
-      const resolvedAt = this.#now()
+      let resolvedAt = Math.max(
+        observedAt,
+        lease.updated_at,
+        existing.created_at,
+      )
+      if (existing.run_id !== null) {
+        const run = requireRunningApprovalRun(connection, {
+          sessionId: input.sessionId,
+          runId: existing.run_id,
+          ownerId: input.ownerId,
+          leaseEpoch: input.leaseEpoch,
+        })
+        resolvedAt = Math.max(resolvedAt, run.started_at)
+      }
       connection.run(
         `UPDATE approval
          SET status = ?, resolved_at = ?
@@ -706,7 +928,10 @@ export class RuntimeRepository {
         )
       }
 
-      const updatedAt = this.#now()
+      const updatedAt = monotonicRuntimeTime(
+        this.#now,
+        existing?.updated_at ?? 0,
+      )
       connection.run(
         `INSERT INTO rollout_projection
           (session_id, sequence, checksum, updated_at)

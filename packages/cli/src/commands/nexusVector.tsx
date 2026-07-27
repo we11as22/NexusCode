@@ -1,8 +1,18 @@
 import type { Command } from '../commands.js'
-import type { NexusBootstrapResult } from '../nexus-bootstrap.js'
+import {
+  loadCliWorkspaceConfig,
+  type NexusBootstrapResult,
+} from '../nexus-bootstrap.js'
 import { NexusVectorPanel } from '../components/NexusVectorPanel.js'
 import React from 'react'
-import { loadConfig, writeConfig, createCodebaseIndexer, ensureQdrantRunning } from '@nexuscode/core'
+import {
+  createCodebaseIndexer,
+  ensureQdrantRunning,
+  finalizeConfigCredentials,
+  getConfigEnvironment,
+  patchProjectConfig,
+  persistSecretsFromConfig,
+} from '@nexuscode/core'
 import type { NexusConfig, CodebaseIndexer } from '@nexuscode/core'
 
 function deepMerge<T extends object>(target: T, patch: Partial<T>): T {
@@ -30,15 +40,42 @@ export function createNexusVectorCommand(nexus: NexusBootstrapResult): Command {
     },
     async call(onDone) {
       const cwd = nexus.cwd
-      const config = await loadConfig(cwd)
+      const config = await loadCliWorkspaceConfig(cwd, {
+        loadEnv: !nexus.serverUrl,
+        hostAuthority: !nexus.serverUrl,
+      })
       const onSave = async (patch: Partial<NexusConfig>) => {
-        const current = await loadConfig(cwd)
+        const current = await loadCliWorkspaceConfig(cwd, {
+          loadEnv: !nexus.serverUrl,
+          hostAuthority: !nexus.serverUrl,
+        })
         const merged = deepMerge(current, patch) as NexusConfig
-        writeConfig(merged, cwd)
-        const wantsVector = Boolean(merged.indexing?.vector && merged.vectorDb?.enabled)
-        if (wantsVector) {
+        await persistSecretsFromConfig(
+          merged as unknown as Record<string, unknown>,
+          nexus.secretsStore,
+        )
+        await patchProjectConfig(
+          patch as unknown as Record<string, unknown>,
+          cwd,
+        )
+        const effective = await loadCliWorkspaceConfig(cwd, {
+          loadEnv: !nexus.serverUrl,
+          hostAuthority: !nexus.serverUrl,
+        })
+        const wantsVector = Boolean(
+          effective.indexing?.vector && effective.vectorDb?.enabled,
+        )
+        if (wantsVector && !nexus.serverUrl) {
           const progress = (msg: string) => console.warn('[nexus]', msg)
-          const indexer = await createCodebaseIndexer(cwd, merged, {
+          const runtimeConfig = await finalizeConfigCredentials(
+            effective as unknown as Record<string, unknown>,
+            nexus.secretsStore,
+            {
+              profileName: nexus.cliModelSelection.profileOverride,
+              environment: getConfigEnvironment(effective),
+            },
+          ) as unknown as NexusConfig
+          const indexer = await createCodebaseIndexer(cwd, runtimeConfig, {
             onWarning: progress,
             onProgress: progress,
           }).catch(() => undefined)
@@ -50,7 +87,21 @@ export function createNexusVectorCommand(nexus: NexusBootstrapResult): Command {
           ;(nexus as { indexer?: CodebaseIndexer }).indexer = undefined
         }
       }
+      const onRemoveApiKey = async () => {
+        const current = await loadCliWorkspaceConfig(cwd, {
+          loadEnv: !nexus.serverUrl,
+          hostAuthority: !nexus.serverUrl,
+        })
+        await persistSecretsFromConfig(
+          current as unknown as Record<string, unknown>,
+          nexus.secretsStore,
+          { remove: { qdrant: true } },
+        )
+      }
       const onConnectQdrant = async (url: string) => {
+        if (nexus.serverUrl) {
+          throw new Error('Qdrant is managed by the remote NexusCode Server')
+        }
         const progress = (msg: string) => console.warn('[nexus]', msg)
         const result = await ensureQdrantRunning({
           url: url.trim() || 'http://127.0.0.1:6333',
@@ -66,6 +117,7 @@ export function createNexusVectorCommand(nexus: NexusBootstrapResult): Command {
           onSave={onSave}
           onClose={onDone}
           onConnectQdrant={onConnectQdrant}
+          onRemoveApiKey={onRemoveApiKey}
         />
       )
     },
