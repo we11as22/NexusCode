@@ -1,6 +1,15 @@
 # NexusCode Durable State, Memory, and Recovery Plan
 
-> Execution follows the approved runtime rearchitecture design. The canonical baseline is portable JSONL plus atomic snapshots; SQLite remains an optional rebuildable projection and is not required by startup, coding, memory, orchestration, CLI, server, or VS Code.
+> **Status (2026-07-27):** Tasks 1–5 document the completed portable
+> JSONL foundation. The completion gate that prohibited SQLite has been
+> superseded by the approved workspace-runtime design and
+> `2026-07-27-nexus-workspace-runtime-state.md`. JSONL remains the canonical
+> rollout/audit format; SQLite now becomes the mandatory transactional
+> coordination store in the managed backend.
+
+> Execution followed the earlier runtime design. Its portable JSONL, locking,
+> checksumming, recovery, Unicode memory, and replay work is retained rather
+> than reverted.
 
 **Goal:** Make every durable Nexus state transition crash-safe, migration-safe, cross-process-safe, inspectable, and consistent across CLI, server, and VS Code.
 

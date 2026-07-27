@@ -2,15 +2,27 @@
 
 **Date:** 2026-07-26
 
-**Status:** Approved direction; implementation planning pending
+**Status:** Approved; foundation implemented; workspace-runtime migration in progress
 
-**Primary references:** Codex and OpenClaude
+**Primary references:** Codex for protocol, session semantics, safety, and canonical
+rollouts; Kilo/OpenCode for the server-first process topology and transactional
+runtime state; OpenClaude for providers, plugins, hooks, and orchestration
 
-**Secondary references:** Kilo Code, then Roo Code for selected backend, indexing, checkpoint, and VS Code patterns
+**Secondary references:** Roo Code for selected checkpoint, editor-host, and
+optional indexing patterns; Cline and Claw Code for targeted UX and recovery
+patterns
 
 ## 1. Decision
 
-NexusCode will replace its current internal runtime with a session-scoped, capability-based architecture while preserving the public user experience through compatibility adapters and automatic migrations.
+NexusCode will replace its current internal runtime with a workspace-owned,
+server-first, capability-based architecture while preserving the public user
+experience through compatibility adapters and automatic migrations.
+
+One long-lived `WorkspaceRuntime` owns every session, task, subagent, plugin,
+MCP connection, memory service, and background activity for one canonical
+workspace directory. CLI, VS Code, and remote clients use the same versioned
+protocol through either an in-process or HTTP/SSE transport. A turn is a
+short-lived activity inside a session; it never owns workspace services.
 
 This is not a feature-reduction rewrite. Every supported feature must either:
 
@@ -125,7 +137,22 @@ Codex is the primary reference for:
 - integration testing and runtime invariants;
 - worktree-safe coding workflows.
 
-### 5.2 OpenClaude
+### 5.2 Kilo Code / OpenCode
+
+Kilo/OpenCode is the primary reference for:
+
+- one managed backend process shared by all VS Code views;
+- a shared connection service, generated client, and global event stream;
+- directory-scoped runtime instances inside one server;
+- durable input admission and `steer`/`queue` promotion;
+- transactional event sequencing and projections;
+- catalog contribution scopes and lifecycle cleanup;
+- packaging a backend independently of the extension host runtime.
+
+Kilo's unfinished V2 features are not copied blindly. Only behavior backed by
+source, schema, and tests becomes a Nexus contract.
+
+### 5.3 OpenClaude
 
 OpenClaude is an equal primary reference for:
 
@@ -135,17 +162,6 @@ OpenClaude is an equal primary reference for:
 - memory and project instruction compatibility;
 - schedules, long-running jobs, and orchestration ergonomics;
 - rich terminal-agent behavior.
-
-### 5.3 Kilo Code
-
-Kilo is the next reference for:
-
-- recall and memory-product behavior;
-- cross-surface packaging;
-- indexing and search extensions;
-- telemetry and observability;
-- provider and plugin breadth;
-- practical compatibility with OpenCode-style storage and tools.
 
 ### 5.4 Roo Code
 
@@ -165,7 +181,11 @@ flowchart LR
     VS["VS Code adapter"]
     SERVER["Server adapter"]
     PROTOCOL["Versioned Nexus protocol"]
-    RUNTIME["NexusRuntime"]
+    CLIENT["Typed Nexus client"]
+    SERVER_RUNTIME["Managed Nexus backend"]
+    REGISTRY["WorkspaceRuntimeRegistry"]
+    RUNTIME["WorkspaceRuntime"]
+    SESSION["SessionCoordinator"]
     POLICY["Capability and mode policy"]
     PIPELINE["ToolExecutionPipeline"]
     SUPERVISOR["AgentSupervisor"]
@@ -176,10 +196,14 @@ flowchart LR
     STORE["Portable event and state repositories"]
     SANDBOX["Sandbox and process broker"]
 
-    CLI --> PROTOCOL
-    VS --> PROTOCOL
-    SERVER --> PROTOCOL
-    PROTOCOL --> RUNTIME
+    CLI --> CLIENT
+    VS --> CLIENT
+    SERVER --> CLIENT
+    CLIENT --> PROTOCOL
+    PROTOCOL --> SERVER_RUNTIME
+    SERVER_RUNTIME --> REGISTRY
+    REGISTRY --> RUNTIME
+    RUNTIME --> SESSION
     RUNTIME --> POLICY
     RUNTIME --> PIPELINE
     RUNTIME --> SUPERVISOR
@@ -196,31 +220,52 @@ flowchart LR
     MCP --> PIPELINE
 ```
 
-### 6.1 `NexusRuntime`
+### 6.1 `WorkspaceRuntime`
 
-Each top-level run owns a `NexusRuntime`. It is constructed from immutable resolved configuration plus explicit host services.
+Each canonical workspace owns one long-lived `WorkspaceRuntime`. It is
+constructed from immutable resolved configuration plus explicit host services
+and is registered in a process-owned `WorkspaceRuntimeRegistry`.
 
 It owns:
 
-- run and session identity;
-- model client and capability metadata;
+- session coordinators and active turn identities;
+- model catalog, provider descriptors, and capability metadata;
 - tool registry;
 - tool execution pipeline;
 - capability and mode policy;
 - agent supervisor;
-- MCP session;
+- managed MCP supervisor;
 - plugin runtime;
 - memory service;
 - index service handle;
-- persistence transaction/event writer;
+- SQLite state database and JSONL rollout writer;
 - cancellation tree;
 - observability and redaction context.
 
-No tool obtains state through a process-global singleton. Child agents receive an explicit child runtime whose capabilities are an equal or narrower subset of the parent.
+No tool obtains state through an unowned process-global singleton. Child agents
+receive an explicit child session whose capabilities are an equal or narrower
+subset of the parent while its lifecycle remains owned by the workspace
+supervisor.
 
-`NexusRuntime.close()` is mandatory and idempotent. It cancels owned work, drains events, releases MCP transports, stops or detaches jobs according to policy, removes listeners, and releases database/index resources.
+`WorkspaceRuntime.close()` is mandatory and idempotent. It cancels or safely
+detaches owned work, drains events, releases MCP transports, stops jobs
+according to policy, removes listeners, checkpoints WAL state, and releases
+database/index resources.
 
-### 6.2 Surface adapters
+### 6.2 `SessionCoordinator`
+
+Every session is an actor-like coordinator with one serialized command
+mailbox. It accepts idempotent commands for input admission, turn start,
+steering, queueing, interruption, and approval. Different sessions may execute
+concurrently, but one session has at most one active turn.
+
+Input is admitted durably before provider or tool side effects. `steer`
+messages are promoted at the next safe boundary of the current turn; `queue`
+messages start distinct FIFO turns. Tool calls are durably recorded before
+execution. A tool left running after a crash becomes `interrupted` and is not
+automatically replayed.
+
+### 6.3 Surface adapters
 
 CLI, VS Code, and server become thin adapters. They may render UI and perform host-specific file previews, but they do not implement security policy, tool semantics, retries, or orchestration logic.
 
@@ -235,7 +280,10 @@ Every adapter uses the same versioned protocol types and the same runtime comman
 - request checkpoint/revert;
 - close or detach.
 
-Local CLI and VS Code may use an in-process transport, but it must exercise the same protocol handlers as the server.
+The CLI may use an in-process transport when no backend is available. The VS
+Code extension uses one bundled managed backend and one shared connection
+service; it never contains a second agent loop. Both transports exercise the
+same protocol handlers.
 
 ## 7. Versioned Runtime Protocol
 
@@ -586,9 +634,36 @@ Existing Markdown memory files are imported with provenance and remain readable/
 
 ## 15. Persistence
 
-Repository interfaces are authoritative; a database implementation is not. The portable baseline uses append-only JSONL journals plus atomically replaced manifests and snapshots. This works in CLI, server, and the VS Code extension without a native Node addon or Electron ABI coupling.
+Repository interfaces are authoritative and hide the database implementation
+from agent, tool, plugin, protocol, and surface code. The managed backend uses
+SQLite as the mandatory transactional runtime-state store. Append-only JSONL
+rollouts remain the canonical portable audit history for completed session
+items and large event payload references.
 
-SQLite is an optional projection backend for high-volume deployments, not a startup requirement and not the sole copy of user data. This follows Codex's useful separation between durable rollout history and rebuildable SQLite state, while preserving OpenClaude-style fallback behavior. Any SQLite adapter must use WAL, migrations, integrity checks, corruption quarantine, and automatic projection rebuild from the canonical journal. The agent, memory, and coding tools remain usable when that adapter is absent or unhealthy.
+This is a deliberate hybrid:
+
+- SQLite is authoritative for coordination that requires atomic transitions:
+  input inboxes, session and turn ownership, run status, approvals, task and
+  subagent graphs, mailboxes, plugin identities and trust, MCP lifecycle
+  metadata, configuration revisions, and structured memory records.
+- JSONL is authoritative for the portable conversation/audit rollout and is
+  projected into SQLite for pagination, filtering, and recovery.
+- large tool output, checkpoints, plugin code, and file snapshots remain
+  content-addressed files referenced by checksum; secrets remain in platform
+  secret stores.
+
+SQLite must use a pinned backend runtime, WAL, `synchronous=NORMAL`,
+`busy_timeout=5000`, foreign keys, versioned migrations, prepared statements,
+bounded transactions, integrity checks, corruption quarantine, and automatic
+projection rebuild from the canonical rollout where possible. Database access
+is owned by the backend process and is never opened directly by the VS Code
+extension host or webview.
+
+The removed `better-sqlite3` dependency is not restored. It was unused by the
+agent runtime and coupled installation to Node ABI-specific binaries. The new
+database adapter targets the pinned managed backend's built-in `node:sqlite`
+API behind a narrow interface so the rest of Nexus does not depend on its
+release-candidate surface.
 
 Repository records cover:
 
@@ -607,23 +682,30 @@ Repository records cover:
 - checkpoints;
 - index metadata and file fingerprints.
 
-Journal append and manifest replacement preserve state transitions atomically. Backends with native transactions must commit state and corresponding events together.
+SQLite transactions commit coordination state and their corresponding durable
+events together. JSONL projection uses deterministic IDs and a transactional
+outbox/projection cursor so a crash between database commit and file append is
+idempotently recoverable.
 
 ### 15.1 Migration
 
 On first open:
 
-1. back up legacy state and metadata;
-2. import sessions and messages idempotently;
-3. import orchestration `state.json`;
-4. import memory files and runtime memory records;
-5. import plugin and MCP metadata;
-6. record source checksums, journal sequence, and migration version;
-7. leave original files intact until verification succeeds.
+1. create the database beside no user-authored project files;
+2. apply embedded migrations under an exclusive migration lock;
+3. back up and inventory legacy state and metadata;
+4. project sessions and messages idempotently from JSONL while recording byte
+   offsets and checksums;
+5. import orchestration `state.json` and its transition journal;
+6. import memory files and runtime memory records;
+7. import plugin and MCP metadata without granting trust by name alone;
+8. record source checksums, journal sequence, and migration version;
+9. leave original files intact until verification succeeds.
 
 Migration can be rerun safely. Failures report an actionable diagnostic and never overwrite the source.
 
-Exports to legacy JSONL/Markdown remain available during the transition.
+Exports to JSONL/Markdown remain a supported product capability after the
+transition, not merely a temporary compatibility path.
 
 ## 16. Index Service
 
@@ -880,19 +962,21 @@ The implementation is staged in dependency order:
 2. runtime context and removal of global state;
 3. authoritative tool registry and execution pipeline;
 4. capability policy, approvals, and fail-closed host behavior;
-5. transactional storage and legacy migrations;
-6. supervisor/subagent/task/team/background lifecycle;
-7. plugin runtime and deterministic hooks;
-8. MCP session isolation and rich content;
-9. unified memory and context assembly;
-10. index service;
-11. config/provider normalization and live reload;
-12. CLI migration;
-13. VS Code migration;
-14. authenticated durable server;
-15. removal of legacy execution paths;
-16. complete regression/eval/performance pass;
-17. documentation and packaging cleanup.
+5. pinned managed backend runtime and transactional SQLite state;
+6. workspace runtime registry and session coordinator;
+7. typed protocol v2, durable input inbox, queue, steer, and replay;
+8. CLI client migration and removal of legacy config/MCP paths;
+9. VS Code managed backend and shared connection service;
+10. supervisor/subagent/task/team/background lifecycle;
+11. source-qualified plugin runtime and deterministic hooks;
+12. managed MCP lifecycle and rich content;
+13. unified memory and context assembly;
+14. config/provider normalization and live reload;
+15. webview state decomposition and behavioral tests;
+16. optional index lifecycle work, only after the core acceptance gate;
+17. removal of legacy execution paths;
+18. complete regression/eval/performance pass;
+19. documentation and packaging cleanup.
 
 Each stage must leave the repository buildable and must not introduce a second permanent implementation.
 
@@ -903,14 +987,17 @@ The re-architecture is complete only when all of the following are true:
 - every documented or UI-exposed feature appears in the feature census with executable evidence;
 - no setting, command, tool, mode, plugin hook, or server endpoint is considered implemented solely from documentation or dead source;
 - there is one tool execution pipeline;
-- no run-critical mutable singleton remains;
+- no turn owns workspace-critical services and no unowned run-critical mutable
+  singleton remains;
 - every advertised built-in tool is registered and callable in its allowed modes;
 - all plugin hooks cover native, textual, parallel, MCP, and subagent calls;
 - CLI, VS Code, and server produce protocol-compatible behavior;
 - non-interactive CLI and unauthenticated server requests cannot mutate state;
-- server reconnect survives process restart;
+- server reconnect rebuilds the session snapshot and resumes event replay after
+  process restart without replaying ambiguous side effects;
 - every shell execution has an honest sandbox/degraded status;
-- orchestration and memory survive concurrent updates and forced process termination;
+- input queues, orchestration, subagents, plugin trust, and memory survive
+  concurrent updates and forced process termination;
 - existing sessions/config/memory/plugins migrate without data loss;
 - Russian memory and skill queries retrieve relevant Cyrillic content;
 - modes cannot be bypassed through indirect tools;
@@ -935,9 +1022,13 @@ The re-architecture is complete only when all of the following are true:
 
 ### Storage portability
 
-**Risk:** A native database addon couples CLI Node ABI, Electron ABI, installation scripts, and VSIX packaging while making recovery dependent on one binary format.
+**Risk:** SQLite becomes a new single point of failure or the extension loads a
+runtime-incompatible native addon.
 
-**Mitigation:** Portable canonical journals, repository abstraction, atomic file operations, corruption fixtures, and optional rebuildable database projections outside the critical startup path.
+**Mitigation:** Use the managed backend's built-in SQLite behind a repository
+adapter, keep canonical JSONL rollouts and exports, quarantine corrupt DB/WAL
+files, rebuild projections, test migrations and crash boundaries, and never
+load the database from the extension host.
 
 ### Sandbox portability
 
