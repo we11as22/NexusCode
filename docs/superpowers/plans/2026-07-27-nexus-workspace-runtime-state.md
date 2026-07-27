@@ -483,7 +483,7 @@ export class WorkspaceRuntimeRegistry {
 }
 ```
 
-- [ ] **Step 1: Write registry ownership tests**
+- [x] **Step 1: Write registry ownership tests**
 
 Prove:
 
@@ -494,7 +494,7 @@ Prove:
 - a failed factory creation is not cached;
 - workspace A never exposes services from workspace B.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run:
 
@@ -504,14 +504,14 @@ corepack pnpm --filter @nexuscode/core test -- src/runtime/workspace-runtime-reg
 
 Expected: FAIL because the registry does not exist.
 
-- [ ] **Step 3: Implement registry and runtime lifecycle**
+- [x] **Step 3: Implement registry and runtime lifecycle**
 
 Use canonical realpaths, one creation promise per directory, reference-counted
 handles, and explicit process shutdown. `WorkspaceRuntime` owns one
 `ParallelAgentManager`, MCP supervisor handle, plugin scope, memory service,
 index handle, and state ports.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run:
 
@@ -522,7 +522,7 @@ corepack pnpm --filter @nexuscode/core typecheck
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/core/src/runtime packages/core/src/index.ts
@@ -774,7 +774,7 @@ git commit -m "refactor: share one Nexus runtime across every surface"
   idempotent.
 - [x] Session ownership, runs, approvals, leases, and projection cursors are
   transactional.
-- [ ] One canonical workspace directory maps to one runtime per process.
+- [x] One canonical workspace directory maps to one runtime per process.
 - [ ] A session has one active turn and a durable mailbox.
 - [ ] Server routes are thin and never construct turn-owned managers.
 - [ ] CLI and VS Code use the same command/event contract.

@@ -244,7 +244,15 @@ export class ParallelAgentManager {
   private liveSessions = new Map<string, ISession>()
   private aliases = new Map<string, string>()
   private history: string[] = []
+  private acceptingTasks = true
+  private shutdownPromise: Promise<void> | undefined
   private static readonly HISTORY_CAP = 100
+
+  private assertAcceptingTasks(): void {
+    if (!this.acceptingTasks) {
+      throw new Error("Parallel agent manager is shutting down.")
+    }
+  }
 
   private rememberId(subagentId: string): void {
     this.history.push(subagentId)
@@ -279,6 +287,7 @@ export class ParallelAgentManager {
     runtimeContext?: SubAgentRuntimeContext,
   ): Promise<{ subagentId: string; task: Promise<SubAgentResult> }> {
     return (async () => {
+      this.assertAcceptingTasks()
       if (!runtimeContext) {
         throw new Error("Delegated agents require the parent host and run services.")
       }
@@ -286,6 +295,7 @@ export class ParallelAgentManager {
         throw new Error("Cannot start a delegated agent from an aborted run.")
       }
       await assertDelegatedCwd(runtimeContext.host.cwd, cwd)
+      this.assertAcceptingTasks()
       const parentDepth = runtimeContext.services.subagentDepth
       const maxDepth = config.parallelAgents.maxDepth ?? 2
       if (parentDepth >= maxDepth) {
@@ -296,6 +306,7 @@ export class ParallelAgentManager {
       }
       // Wait for a concurrency slot
       while (this.running.size >= maxParallel) {
+        this.assertAcceptingTasks()
         if (parentDepth > 0) {
           throw new Error(
             `No delegated-agent capacity is available (${this.running.size}/${maxParallel}). ` +
@@ -306,8 +317,10 @@ export class ParallelAgentManager {
         // Flush the microtask queue so .finally() cleanup handlers run
         // before we re-check .size
         await Promise.resolve()
+        this.assertAcceptingTasks()
       }
 
+      this.assertAcceptingTasks()
       const subagentId = `subagent_${crypto.randomUUID()}`
       this.rememberId(subagentId)
       this.outputById.set(subagentId, "")
@@ -481,6 +494,20 @@ export class ParallelAgentManager {
     this.errorById.set(subagentId, "Stopped by parent agent.")
     ctrl.abort()
     return true
+  }
+
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise
+    this.acceptingTasks = false
+    this.shutdownPromise = Promise.resolve().then(async () => {
+      for (const [subagentId, controller] of this.controllers) {
+        this.statusById.set(subagentId, "killed")
+        this.errorById.set(subagentId, "Workspace runtime is shutting down.")
+        controller.abort()
+      }
+      await Promise.allSettled([...this.running.values()])
+    })
+    return this.shutdownPromise
   }
 
   /** Inject a queued user message into a currently running delegated agent. */

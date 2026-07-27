@@ -328,5 +328,16 @@ export type { ModelsCatalog, CatalogProvider, CatalogModel } from "./models/cata
 export { buildReviewPromptBranch, buildReviewPromptUncommitted } from "./review/index.js"
 export type { DiffFile, DiffHunk, DiffResult } from "./review/types.js"
 
+// Workspace runtime
+export {
+  ManagedWorkspaceRuntime,
+  WorkspaceRuntimeRegistry,
+  type WorkspaceOwnedService,
+  type WorkspaceRuntime,
+  type WorkspaceRuntimeFactory,
+  type WorkspaceRuntimeHandle,
+  type WorkspaceRuntimeServices,
+} from "./runtime/index.js"
+
 // Checkpoint
 export { CheckpointTracker, writeCheckpointEntries, readCheckpointEntries } from "./checkpoint/index.js"

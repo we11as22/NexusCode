@@ -66,6 +66,56 @@ describe("delegated agent host boundary", () => {
 })
 
 describe("delegated agent bounds", () => {
+  it("makes shutdown terminal and idempotent", async () => {
+    const manager = new ParallelAgentManager()
+
+    const first = manager.shutdown()
+    const second = manager.shutdown()
+
+    expect(second).toBe(first)
+    await first
+    await expect(manager.spawn(
+      "late task",
+      "agent",
+      createTestConfig(),
+      process.cwd(),
+      new AbortController().signal,
+      1,
+    )).rejects.toThrow(/shutting down/i)
+  })
+
+  it("rejects a spawn when shutdown wins an asynchronous admission race", async () => {
+    const manager = new ParallelAgentManager()
+    const host = createFakeHost({ cwd: process.cwd() })
+    const services = createNexusRunServices({
+      parallelAgentManager: manager,
+      subagentDepth: 0,
+    })
+    const config = createTestConfig({
+      parallelAgents: { maxParallel: 1, maxDepth: 0 },
+    })
+
+    const spawning = manager.spawn(
+      "racing task",
+      "agent",
+      config,
+      host.cwd,
+      new AbortController().signal,
+      1,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { host, services },
+    )
+    const shuttingDown = manager.shutdown()
+
+    await expect(spawning).rejects.toThrow(/shutting down/i)
+    await shuttingDown
+    expect(manager.activeCount).toBe(0)
+  })
+
   it("rejects delegated working directories outside the parent workspace", async () => {
     const manager = new ParallelAgentManager()
     const host = createFakeHost({ cwd: "/workspace" })
