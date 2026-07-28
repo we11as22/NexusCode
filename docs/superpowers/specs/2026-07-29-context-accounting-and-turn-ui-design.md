@@ -273,11 +273,42 @@ Raw `AgentEvent` остаётся append-only transport contract. Группир
 - live run не скрывает текущую операцию;
 - стабильные keys не меняются при переходе `Exploring` → `Explored`.
 
+Предоставленные скриншоты являются референсом именно для VS Code extension.
+После завершения хода `Worked for Ns` скрывает всю техническую работу между
+соответствующим user message и финальным assistant answer: reasoning,
+exploration/search, Bash и остальные tool cards, approvals, subagent activity
+и промежуточные статусы. Финальный ответ не входит в свёрнутую область. CLI
+использует тот же turn boundary и те же правила дедупликации, но отображает их
+терминальными компонентами, без буквального копирования webview-разметки.
+
 Для длительности `done` получает опциональный `durationMs`, а финальное
 assistant message сохраняет её для replay. Старые сессии просто не показывают
 `Worked for Ns`, если длительность неизвестна.
 
-### 9. Изменения кода
+### 9. Плавный streaming
+
+Core и server сохраняют каждый delta и его порядок. Сглаживание выполняется
+только на границе представления и не меняет durable event log:
+
+- VS Code host не отправляет полный `stateUpdate` на каждом text/reasoning
+  delta;
+- host-to-webview события упорядочиваются по sequence, а соседние delta одного
+  message/reasoning id объединяются до одного animation frame;
+- финальные boundary-события (`tool_start`, `tool_end`, `done`, `error`,
+  approval) принудительно сбрасывают накопленные delta перед публикацией;
+- store применяет один батч за render frame, поэтому React не пересобирает
+  transcript посимвольно;
+- CLI сохраняет authoritative draft, объединяет соседние delta и публикует
+  устойчивые полные строки с обязательным flush хвоста на boundary/done;
+- state snapshot и event stream сходятся по message/part identity и не
+  дублируют уже показанный текст при reconnect или replay.
+
+Эталонный принцип берётся из OpenClaude CLI (authoritative stream ref и
+ограниченные React-публикации), Codex event/task identity и Kilo server/client
+event ordering. Точный batching остаётся Nexus-адаптацией к Ink и VS Code
+webview.
+
+### 10. Изменения кода
 
 Один sticky-блок отображает все Nexus-owned unresolved change sets:
 
@@ -294,7 +325,7 @@ assistant message сохраняет её для replay. Старые сесси
 - inline diff остаётся в хронологии хода;
 - accepted/reverted/manual/git-unrelated изменения не попадают в блок.
 
-### 10. Безопасность и производительность
+### 11. Безопасность и производительность
 
 - Никаких дополнительных provider token-count запросов в основном пути.
 - Kilo catalog fetch сохраняет существующий timeout и cache.
@@ -321,6 +352,8 @@ assistant message сохраняет её для replay. Старые сесси
    и сохраняет существенные tool cards.
 9. Sticky change bar имеет безопасную семантику Undo/Keep/Review.
 10. Старые сессии и старые remote events остаются читаемыми.
+11. Delta batching сохраняет порядок, сбрасывает хвост перед boundary и не
+    дублирует текст после state/event reconciliation.
 
 ### Финальные команды
 
