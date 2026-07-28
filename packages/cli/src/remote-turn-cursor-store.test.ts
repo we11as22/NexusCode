@@ -46,6 +46,39 @@ describe("CLI remote turn cursor store", () => {
     await expect(store.load("session-one")).resolves.toBeUndefined()
   })
 
+  it("atomically promotes a fully persisted pre-POST command to a cursor", async () => {
+    const rootDir = await temporaryRoot()
+    const store = createCliRemoteTurnCursorStore({
+      rootDir,
+      serverUrl: "http://127.0.0.1:4097",
+      cwd: rootDir,
+    })
+    await store.savePrepared("session-outbox", {
+      version: 1,
+      phase: "prepared",
+      commandId: "command-outbox",
+      inputId: "input-outbox",
+      afterSequence: 12,
+      input: [{ type: "text", text: "persist before POST" }],
+      mode: "agent",
+    })
+    await expect(store.loadPrepared("session-outbox")).resolves.toMatchObject({
+      commandId: "command-outbox",
+      afterSequence: 12,
+    })
+
+    await store.save("session-outbox", {
+      turnId: "turn-outbox",
+      runId: "run-outbox",
+      afterSequence: 12,
+    })
+    await expect(store.loadPrepared("session-outbox")).resolves.toBeUndefined()
+    await expect(store.load("session-outbox")).resolves.toMatchObject({
+      turnId: "turn-outbox",
+      runId: "run-outbox",
+    })
+  })
+
   it("fails closed on a symlinked cursor entry", async () => {
     const rootDir = await temporaryRoot()
     const target = path.join(rootDir, "target.json")
@@ -67,7 +100,11 @@ describe("CLI remote turn cursor store", () => {
       runId: "run-original",
       afterSequence: 1,
     })
-    const cursorDir = path.join(rootDir, "data", "remote-turn-cursors")
+    const cursorDir = path.join(
+      rootDir,
+      "data",
+      "remote-turn-recovery",
+    )
     const [entryName] = await fs.readdir(cursorDir)
     if (!entryName) throw new Error("cursor entry was not created")
     const entryPath = path.join(cursorDir, entryName)

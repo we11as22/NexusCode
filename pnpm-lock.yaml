@@ -178,9 +178,9 @@ importers:
       diff:
         specifier: ^7.0.0
         version: 7.0.0
-      esbuild:
-        specifier: ^0.24.0
-        version: 0.24.2
+      esbuild-wasm:
+        specifier: 0.25.12
+        version: 0.25.12
       execa:
         specifier: ^9.5.0
         version: 9.6.1
@@ -236,6 +236,9 @@ importers:
       '@types/turndown':
         specifier: ^5.0.5
         version: 5.0.6
+      esbuild:
+        specifier: ^0.24.0
+        version: 0.24.2
       react:
         specifier: 18.3.1
         version: 18.3.1
@@ -352,6 +355,9 @@ importers:
       esbuild:
         specifier: ^0.24.0
         version: 0.24.2
+      esbuild-wasm:
+        specifier: 0.25.12
+        version: 0.25.12
       sharp:
         specifier: ^0.33.5
         version: 0.33.5
@@ -3100,6 +3106,11 @@ packages:
 
   es-toolkit@1.45.1:
     resolution: {integrity: sha512-/jhoOj/Fx+A+IIyDNOvO3TItGmlMKhtX8ISAHKE90c4b/k1tqaqEZ+uUqfpU8DMnW5cgNJv606zS55jGvza0Xw==}
+
+  esbuild-wasm@0.25.12:
+    resolution: {integrity: sha512-rZqkjL3Y6FwLpSHzLnaEy8Ps6veCNo1kZa9EOfJvmWtBq5dJH4iVjfmOO6Mlkv9B0tt9WFPFmb/VxlgJOnueNg==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   esbuild@0.21.5:
     resolution: {integrity: sha512-mg3OPMV4hXywwpoDxu3Qda5xCKQi+vCTZq8S9J/EpkhB2HzKXq4SNFZE3+NK93JYxc8VMSep+lOUSC/RVKaBqw==}
@@ -8356,6 +8367,8 @@ snapshots:
       hasown: 2.0.2
 
   es-toolkit@1.45.1: {}
+
+  esbuild-wasm@0.25.12: {}
 
   esbuild@0.21.5:
     optionalDependencies:

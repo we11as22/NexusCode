@@ -35,6 +35,9 @@ import {
   type IndexStatus,
   type NexusRunServices,
   canonicalProjectRoot,
+  FileChangeSetStore,
+  GitService,
+  hashWorkspaceIdentity,
   getClaudeCompatibilityOptions,
   loadSlashCommands,
   renderSlashCommandPrompt,
@@ -327,6 +330,8 @@ export interface NexusBootstrapResult {
   compaction: ReturnType<typeof createCompaction>
   indexer: CodebaseIndexer | undefined
   serverUrl: string | null
+  /** Authenticated protocol client used by explicit remote review actions. */
+  remoteClient: NexusServerClient | null
   remoteTurnCursorStore: RemoteTurnCursorStore | undefined
   sessionStore: {
     list: () => Promise<Array<{ id: string; ts: number; title?: string; messageCount: number }>>
@@ -464,9 +469,21 @@ export async function bootstrapNexus(opts: {
   }
   await reconcileMcpServers(config)
 
+  const workspaceId = hashWorkspaceIdentity(cwd)
   const services = createNexusRunServices({
     orchestrationRuntime: new OrchestrationRuntime(cwd),
     mcpClient,
+    ...(!serverUrl
+      ? {
+          changeSets: {
+            workspaceId,
+            store: new FileChangeSetStore(workspaceId, {
+              rootDir: getGlobalConfigDir(),
+            }),
+          },
+          git: new GitService(cwd),
+        }
+      : {}),
   })
   const toolOutputMaintenance = scheduleToolOutputMaintenance({
     cwd,
@@ -664,6 +681,7 @@ export async function bootstrapNexus(opts: {
     compaction,
     indexer,
     serverUrl,
+    remoteClient,
     remoteTurnCursorStore,
     sessionStore,
     nexusRoot: NEXUS_ROOT,

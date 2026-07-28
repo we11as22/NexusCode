@@ -39,10 +39,11 @@ describe("CLI remote turn wiring", () => {
     )
     const liveBody = querySource.slice(liveStart, liveEnd)
 
-    expect(liveBody).toContain("afterSequence: 0")
-    expect(liveBody.indexOf("afterSequence: 0")).toBeLessThan(
+    expect(liveBody).toContain("afterSequence: acknowledgedSequence")
+    expect(liveBody.indexOf("afterSequence: acknowledgedSequence")).toBeLessThan(
       liveBody.indexOf("onSequence: async (sequence)"),
     )
+    expect(liveBody).toContain("prepared.afterSequence")
     expect(liveBody).toContain("await admissionCursorWrite")
   })
 

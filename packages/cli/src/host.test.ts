@@ -9,6 +9,9 @@ import {
   shouldAutoApprovePrint,
 } from "./host.js"
 import {
+  ChangeSetService,
+  FileChangeSetStore,
+  hashFileContent,
   loadWorkspaceAuthority,
   type ApprovalAction,
 } from "@nexuscode/core"
@@ -293,224 +296,147 @@ describe("CliHost workspace filesystem authority", () => {
     })
   })
 
-  it("rejects a save when the file drifted after the edit preview", async () => {
+  it("applies durable file mutations only against exact bytes and mode", async () => {
     const workspace = await makeTempDirectory()
-    const file = path.join(workspace, "drift.txt")
-    await fs.writeFile(file, "original", "utf8")
+    const file = path.join(workspace, "durable.txt")
+    await fs.writeFile(file, "before", { mode: 0o640 })
     const host = new CliHost(workspace, () => {}, true)
+    const captured = await host.readFileState("durable.txt")
+    expect(captured.exists).toBe(true)
+    if (!captured.exists) throw new Error("missing fixture")
+    const digest = hashFileContent(captured.content)
 
-    await host.openFileEdit(file, {
-      originalContent: "original",
-      newContent: "agent",
-      isNewFile: false,
+    await host.applyFileMutation({
+      path: "durable.txt",
+      expected: {
+        exists: true,
+        ...digest,
+        blob: digest.hash,
+        mode: captured.mode,
+      },
+      next: {
+        exists: true,
+        content: Buffer.from("after"),
+        mode: captured.mode,
+      },
     })
-    await fs.writeFile(file, "manual", "utf8")
 
-    await expect(host.saveFileEdit(file)).rejects.toThrow(/conflict|changed/i)
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("after")
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o640)
+  })
+
+  it("leaves later user bytes untouched when durable CAS detects drift", async () => {
+    const workspace = await makeTempDirectory()
+    const file = path.join(workspace, "durable-drift.txt")
+    await fs.writeFile(file, "before")
+    const host = new CliHost(workspace, () => {}, true)
+    const captured = await host.readFileState("durable-drift.txt")
+    if (!captured.exists) throw new Error("missing fixture")
+    const digest = hashFileContent(captured.content)
+    await fs.writeFile(file, "manual")
+
+    await expect(host.applyFileMutation({
+      path: "durable-drift.txt",
+      expected: {
+        exists: true,
+        ...digest,
+        blob: digest.hash,
+        mode: captured.mode,
+      },
+      next: {
+        exists: true,
+        content: Buffer.from("agent"),
+        mode: captured.mode,
+      },
+    })).rejects.toThrow(/precondition failed/i)
     await expect(fs.readFile(file, "utf8")).resolves.toBe("manual")
-
-    // A failed compare-and-swap must retain the proposal for a deliberate retry.
-    await fs.writeFile(file, "original", "utf8")
-    await expect(host.saveFileEdit(file)).resolves.toBeUndefined()
-    await expect(fs.readFile(file, "utf8")).resolves.toBe("agent")
   })
 
-  it("coalesces repeated same-file edits so undo restores the true pre-turn content", async () => {
+  it("uses durable change sets for two-phase last-turn undo compensation", async () => {
     const workspace = await makeTempDirectory()
-    const file = path.join(workspace, "repeated.txt")
-    await fs.writeFile(file, "before", "utf8")
+    const file = path.join(workspace, "durable-undo.txt")
+    await fs.writeFile(file, "before")
     const host = new CliHost(workspace, () => {}, true)
-
-    await host.openFileEdit(file, {
-      originalContent: "before",
-      newContent: "middle",
-      isNewFile: false,
+    const store = new FileChangeSetStore("workspace-durable", {
+      rootDir: workspace,
     })
-    await host.saveFileEdit(file)
-    await host.openFileEdit(file, {
-      originalContent: "middle",
-      newContent: "after",
-      isNewFile: false,
+    const service = new ChangeSetService({
+      workspaceId: "workspace-durable",
+      store,
+      files: {
+        readFileState: (filePath) => host.readFileState(filePath),
+        applyFileMutation: (mutation) =>
+          host.applyFileMutation(mutation),
+      },
+      idFactory: () => "change-durable",
     })
-    await host.saveFileEdit(file)
-    host.startNewTurn()
-    const canonicalFile = path.join(await fs.realpath(workspace), "repeated.txt")
+    host.bindDurableChangeReview(service, "session-1", "turn-1")
+    const proposed = await service.propose({
+      identity: {
+        workspaceId: "workspace-durable",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        runId: "run-1",
+        messageId: "message-1",
+        partId: "part-1",
+        toolCallId: "call-1",
+      },
+      files: [{
+        path: "durable-undo.txt",
+        after: { exists: true, content: "agent" },
+        hunks: [],
+        binary: false,
+      }],
+    })
+    await service.approve(proposed.id, proposed.proposalHash)
+    await service.apply(proposed.id)
 
     await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
-      reverted: [canonicalFile],
+      reverted: ["durable-undo.txt"],
       conflicts: [],
     })
     await expect(fs.readFile(file, "utf8")).resolves.toBe("before")
-  })
-
-  it("keeps a successful file undo reversible until the conversation save commits", async () => {
-    const workspace = await makeTempDirectory()
-    const file = path.join(workspace, "two-phase.txt")
-    await fs.writeFile(file, "before", "utf8")
-    const host = new CliHost(workspace, () => {}, true)
-
-    await host.openFileEdit(file, {
-      originalContent: "before",
-      newContent: "agent",
-      isNewFile: false,
-    })
-    await host.saveFileEdit(file)
-    host.startNewTurn()
-
-    await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
-      conflicts: [],
-    })
-    await expect(fs.readFile(file, "utf8")).resolves.toBe("before")
-
-    await expect(host.rollbackLastTurnFileRevert()).resolves.toMatchObject({
+    await expect(host.rollbackLastTurnFileRevert()).resolves.toEqual({
+      reverted: [],
       conflicts: [],
     })
     await expect(fs.readFile(file, "utf8")).resolves.toBe("agent")
-    expect(host.getLastTurnFileEdits()).toHaveLength(1)
 
-    await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
-      conflicts: [],
-    })
+    await host.revertLastTurnFiles()
     host.commitLastTurnFileRevert()
     await expect(fs.readFile(file, "utf8")).resolves.toBe("before")
-    expect(host.getLastTurnFileEdits()).toHaveLength(0)
-  })
 
-  it("reports only files which remain restored when undo compensation conflicts", async () => {
-    const workspace = await makeTempDirectory()
-    const unchanged = path.join(workspace, "still-restored.txt")
-    const changed = path.join(workspace, "changed-after-restore.txt")
-    await fs.writeFile(unchanged, "unchanged-before", "utf8")
-    await fs.writeFile(changed, "changed-before", "utf8")
-    const host = new CliHost(workspace, () => {}, true)
-
-    for (const [file, before, after] of [
-      [unchanged, "unchanged-before", "unchanged-agent"],
-      [changed, "changed-before", "changed-agent"],
-    ] as const) {
-      await host.openFileEdit(file, {
-        originalContent: before,
-        newContent: after,
-        isNewFile: false,
-      })
-      await host.saveFileEdit(file)
-    }
-    host.startNewTurn()
+    await service.reapply(proposed.id)
     await host.revertLastTurnFiles()
-    await fs.writeFile(changed, "manual-after-restore", "utf8")
-
-    const result = await host.rollbackLastTurnFileRevert()
-    const canonicalUnchanged = path.join(
-      await fs.realpath(workspace),
-      "still-restored.txt",
-    )
-    const canonicalChanged = path.join(
-      await fs.realpath(workspace),
-      "changed-after-restore.txt",
-    )
-    expect(result).toMatchObject({
-      reverted: [canonicalUnchanged],
-      conflicts: [expect.objectContaining({ path: canonicalChanged })],
+    vi.spyOn(service, "reapply").mockImplementation(async (id) => {
+      const record = await service.get(id)
+      if (!record) throw new Error(`missing change set ${id}`)
+      return { ...record, state: "conflicted" }
     })
-    await expect(fs.readFile(unchanged, "utf8")).resolves.toBe(
-      "unchanged-before",
-    )
-    await expect(fs.readFile(changed, "utf8")).resolves.toBe(
-      "manual-after-restore",
-    )
+    await expect(host.rollbackLastTurnFileRevert()).resolves.toMatchObject({
+      reverted: ["change-durable"],
+      conflicts: [{
+        path: "change-durable",
+        reason:
+          "failed to restore the agent-written durable change: " +
+          "change set change-durable recovered to conflicted",
+      }],
+    })
+    await expect(fs.readFile(file, "utf8")).resolves.toBe("before")
   })
 
-  it("rejects a second same-turn edit after an interleaved manual change", async () => {
+  it("fails last-turn file undo closed without durable change ownership", async () => {
     const workspace = await makeTempDirectory()
-    const file = path.join(workspace, "interleaved.txt")
-    await fs.writeFile(file, "before", "utf8")
     const host = new CliHost(workspace, () => {}, true)
 
-    await host.openFileEdit(file, {
-      originalContent: "before",
-      newContent: "agent-one",
-      isNewFile: false,
-    })
-    await host.saveFileEdit(file)
-    await fs.writeFile(file, "manual", "utf8")
-    await host.openFileEdit(file, {
-      originalContent: "manual",
-      newContent: "agent-two",
-      isNewFile: false,
-    })
-
-    await expect(host.saveFileEdit(file)).rejects.toThrow(
-      /between agent edits|interleaved|conflict/i,
-    )
-    await expect(fs.readFile(file, "utf8")).resolves.toBe("manual")
-  })
-
-  it("keeps undo state and refuses to overwrite a later manual edit", async () => {
-    const workspace = await makeTempDirectory()
-    const file = path.join(workspace, "manual-after.txt")
-    await fs.writeFile(file, "before", "utf8")
-    const host = new CliHost(workspace, () => {}, true)
-
-    await host.openFileEdit(file, {
-      originalContent: "before",
-      newContent: "agent",
-      isNewFile: false,
-    })
-    await host.saveFileEdit(file)
-    host.startNewTurn()
-    await fs.writeFile(file, "manual", "utf8")
-    const canonicalFile = path.join(
-      await fs.realpath(workspace),
-      "manual-after.txt",
-    )
-
-    await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
+    await expect(host.revertLastTurnFiles()).resolves.toEqual({
       reverted: [],
-      conflicts: [expect.objectContaining({ path: canonicalFile })],
+      conflicts: [{
+        path: "(change service)",
+        reason:
+          "durable change ownership is unavailable; no files were changed",
+      }],
     })
-    await expect(fs.readFile(file, "utf8")).resolves.toBe("manual")
-    expect(host.getLastTurnFileEdits()).toHaveLength(1)
   })
 
-  it("rolls back already-restored files when a later batch restore fails", async () => {
-    const workspace = await makeTempDirectory()
-    const first = path.join(workspace, "first.txt")
-    const second = path.join(workspace, "second.txt")
-    await fs.writeFile(first, "first-before", "utf8")
-    await fs.writeFile(second, "second-before", "utf8")
-    const host = new CliHost(workspace, () => {}, true)
-
-    for (const [file, before, after] of [
-      [first, "first-before", "first-agent"],
-      [second, "second-before", "second-agent"],
-    ] as const) {
-      await host.openFileEdit(file, {
-        originalContent: before,
-        newContent: after,
-        isNewFile: false,
-      })
-      await host.saveFileEdit(file)
-    }
-    host.startNewTurn()
-
-    const writeFile = host.writeFile.bind(host)
-    let injected = false
-    vi.spyOn(host, "writeFile").mockImplementation(async (file, content) => {
-      if (!injected && file.endsWith("first.txt") && content === "first-before") {
-        injected = true
-        throw new Error("injected restore failure")
-      }
-      await writeFile(file, content)
-    })
-
-    await expect(host.revertLastTurnFiles()).resolves.toMatchObject({
-      reverted: [],
-      conflicts: [expect.objectContaining({
-        path: expect.stringMatching(/first\.txt$/),
-      })],
-    })
-    await expect(fs.readFile(first, "utf8")).resolves.toBe("first-agent")
-    await expect(fs.readFile(second, "utf8")).resolves.toBe("second-agent")
-    expect(host.getLastTurnFileEdits()).toHaveLength(2)
-  })
 })

@@ -19,7 +19,10 @@ function temporaryDatabasePath(): string {
   return join(directory, "state.sqlite")
 }
 
-function setup(nowValue = 100) {
+function setup(
+  nowValue = 100,
+  options: { maxPendingInputs?: number } = {},
+) {
   const database = NexusStateDatabase.open({
     path: temporaryDatabasePath(),
   })
@@ -47,6 +50,7 @@ function setup(nowValue = 100) {
   const repository = new SessionRuntimeRepository(database, {
     now: () => nowValue,
     createId: (kind) => `${kind}-${++identifier}`,
+    ...options,
   })
   const fence = {
     ownerId: lease.ownerId,
@@ -77,6 +81,47 @@ afterEach(() => {
 })
 
 describe("SessionRuntimeRepository command ledger", () => {
+  it("bounds all unpromoted queued and steering admissions atomically", () => {
+    const { database, repository, fence } = setup(100, {
+      maxPendingInputs: 2,
+    })
+    try {
+      const first = startCommand()
+      repository.prepareCommand({ command: first, fence })
+      repository.prepareCommand({
+        command: startCommand({
+          type: "queue_turn",
+          commandId: "command-2",
+          inputId: "input-2",
+        }),
+        fence,
+      })
+
+      expect(() =>
+        repository.prepareCommand({
+          command: startCommand({
+            type: "queue_turn",
+            commandId: "command-3",
+            inputId: "input-3",
+          }),
+          fence,
+        }),
+      ).toThrowError(expect.objectContaining({
+        name: "SessionRuntimeConflictError",
+        code: "queue_full",
+      }))
+      expect(repository.snapshot("session-1").pendingQueue).toHaveLength(2)
+
+      // Idempotent retries remain readable when the queue is at capacity.
+      expect(repository.prepareCommand({ command: first, fence })).toMatchObject({
+        commandId: first.commandId,
+        inputId: "input-1",
+      })
+    } finally {
+      database.close()
+    }
+  })
+
   it("idempotently creates the workspace/session ownership records", () => {
     const database = NexusStateDatabase.open({ path: temporaryDatabasePath() })
     const repository = new SessionRuntimeRepository(database)

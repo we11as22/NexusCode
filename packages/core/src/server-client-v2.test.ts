@@ -54,6 +54,96 @@ afterEach(() => {
 })
 
 describe("NexusServerClient protocol v2", () => {
+  it("durably prepares an idempotent turn before POST and can replay that exact outbox", async () => {
+    const order: string[] = []
+    const turn = { turnId: "turn-outbox", runId: "run-outbox" }
+    let posted: { commandId: string; inputId: string } | undefined
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input)
+        if (url.endsWith("/snapshot")) {
+          order.push("snapshot")
+          return Response.json({
+            version: PROTOCOL_VERSION,
+            sessionId: "session-test",
+            phase: "idle",
+            pendingApprovals: [],
+            pendingQueueCount: 0,
+            pendingSteerCount: 0,
+            earliestAvailableSequence: 1,
+            throughSequence: 4,
+          })
+        }
+        if (url.endsWith("/command")) {
+          order.push("post")
+          posted = JSON.parse(String(init?.body))
+          return Response.json({
+            version: PROTOCOL_VERSION,
+            commandId: posted!.commandId,
+            sessionId: "session-test",
+            accepted: true,
+            type: "start_turn",
+            inputId: posted!.inputId,
+            ...turn,
+            started: true,
+          })
+        }
+        order.push(new URL(url).searchParams.get("afterSequence") ?? "")
+        return ndjson([
+          envelope(5, {
+            type: "turn_started",
+            ...turn,
+            configEpoch: 1,
+            contextEpoch: 1,
+            execution: { mode: "agent" },
+          }, turn),
+          envelope(6, {
+            type: "turn_finished",
+            status: "completed",
+          }, turn),
+        ])
+      }),
+    )
+    const client = new NexusServerClient({
+      baseUrl: "http://127.0.0.1:4097",
+      directory: process.cwd(),
+      token: "secret-token",
+    })
+    let prepared:
+      | { commandId: string; inputId: string; afterSequence: number }
+      | undefined
+
+    for await (const _event of client.runSessionTurn({
+      sessionId: "session-test",
+      input: [{ type: "text", text: "durable" }],
+      mode: "agent",
+      onCommandPrepared: async (record) => {
+        order.push("persist")
+        prepared = { ...record }
+      },
+    })) {
+      // No projected agent events are needed for this boundary test.
+    }
+
+    expect(order).toEqual(["snapshot", "persist", "post", "4"])
+    expect(posted).toMatchObject({
+      commandId: prepared!.commandId,
+      inputId: prepared!.inputId,
+    })
+
+    order.length = 0
+    for await (const _event of client.runSessionTurn({
+      sessionId: "session-test",
+      input: [{ type: "text", text: "durable" }],
+      mode: "agent",
+      prepared,
+    })) {
+      // An idempotent recovery must not allocate or snapshot a new command.
+    }
+    expect(order).toEqual(["post", "4"])
+  })
+
   it("dispatches a validated idempotent command to the authenticated workspace route", async () => {
     const requests: Array<{
       url: string
@@ -182,6 +272,76 @@ describe("NexusServerClient protocol v2", () => {
     expect(requests.every((request) =>
       request.headers.get("authorization") === "Bearer secret-token"
     )).toBe(true)
+  })
+
+  it("lists and resolves durable changes through the authenticated session scope", async () => {
+    const proposalHash = "a".repeat(64)
+    const requests: Array<{ url: string; method: string }> = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input)
+        requests.push({ url, method: init?.method ?? "GET" })
+        if (url.endsWith("/changes")) {
+          return Response.json({
+            changes: [{
+              changeSetId: "change-1",
+              proposalHash,
+              path: "src/file.ts",
+              operation: "modify",
+              originalContent: "before",
+              newContent: "after",
+              diffStats: { added: 1, removed: 1 },
+              isNewFile: false,
+            }],
+            truncated: false,
+          })
+        }
+        return Response.json({
+          changeSetId: "change-1",
+          proposalHash,
+          state: "accepted",
+        })
+      }),
+    )
+    const client = new NexusServerClient({
+      baseUrl: "http://127.0.0.1:4097",
+      directory: process.cwd(),
+      token: "secret-token",
+    })
+
+    await expect(
+      client.getSessionChanges("session-test"),
+    ).resolves.toMatchObject({
+      changes: [{
+        changeSetId: "change-1",
+        path: "src/file.ts",
+      }],
+      truncated: false,
+    })
+    await expect(
+      client.resolveSessionChange(
+        "session-test",
+        "change-1",
+        "accept",
+      ),
+    ).resolves.toEqual({
+      changeSetId: "change-1",
+      proposalHash,
+      state: "accepted",
+    })
+    expect(requests).toEqual([
+      {
+        url:
+          "http://127.0.0.1:4097/v2/session/session-test/changes",
+        method: "GET",
+      },
+      {
+        url:
+          "http://127.0.0.1:4097/v2/session/session-test/changes/change-1/accept",
+        method: "POST",
+      },
+    ])
   })
 
   it("runs one turn from a durable cursor and exposes turn and approval identities", async () => {

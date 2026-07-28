@@ -16,7 +16,6 @@ import releaseNotes from './commands/release-notes.js'
 import review from './commands/review.js'
 import terminalSetup from './commands/terminalSetup.js'
 import { Tool, ToolUseContext } from './Tool.js'
-import resume from './commands/resume.js'
 import { getMCPCommands } from './services/mcpClient.js'
 import { memoize } from 'lodash-es'
 import type { Message } from './query.js'
@@ -69,7 +68,7 @@ export type Command = {
   userFacingName(): string
 } & (PromptCommand | LocalCommand | LocalJSXCommand)
 
-const INTERNAL_ONLY_COMMANDS = [ctx_viz, resume, listen]
+const INTERNAL_ONLY_COMMANDS = [ctx_viz, listen]
 
 // Declared as a function so that we don't run this until getCommands is called,
 // since underlying functions read from config, which can't be read at module initialization time

@@ -174,14 +174,11 @@ model:
 | **mcp** | servers | `[]` | `name`, `command`, `args`, `env`, `url`, `transport`, `type`, `headers`, `enabled`, `bundle` |
 | **skills** | | `[]` | строки или `{ path, enabled? }` |
 | **skillsUrls** | | опционально | удалённые реестры → `~/.nexus/cache/skills/` |
-| **tools** | classifyToolsEnabled | `false` | deprecated/no-op, читается только для совместимости старых конфигов |
-| | classifyThreshold | `20` | deprecated/no-op |
-| | parallelReads, maxParallelReads | `true`, `5` | |
-| **skillClassifyEnabled** | | `false` | deprecated/no-op |
-| **skillClassifyThreshold** | | `20` | deprecated/no-op |
+| **tools** | parallelReads, maxParallelReads | `true`, `5` | |
+| | deferredLoadingMode, deferredLoadingThresholdPercent, deferredLoadingMinimumTools | `"auto"`, `0.10`, `8` | детерминированный `ToolSearch`, без LLM-классификатора |
 | **structuredOutput** | | `"auto"` | `auto` \| `always` \| `never` |
 | **summarization** | auto, threshold, keepRecentMessages, model | `true`, `0.80`, `8`, `""` | |
-| **parallelAgents** | maxParallel, maxTasksPerCall | `4`, `12` | второе — устаревший задел; параллельные сабагенты через `Parallel` / `SpawnAgentsParallel` |
+| **parallelAgents** | maxParallel, maxTasksPerCall, maxDepth | `4`, `12`, `2` | лимиты одновременных агентов, размера одной волны и глубины делегирования |
 | **rules** | files | `CLAUDE.md`, `AGENTS.md`, `.nexus/rules/**` | |
 | **agentLoop** | toolCallBudget, maxIterations | опционально по режимам | включая `review` |
 | **profiles** | | `{}` | именованные профили модели |

@@ -88,6 +88,19 @@ describe("VS Code command wiring", () => {
     expect(vscodeIgnore).toContain("vitest.config.*")
   })
 
+  it("ships the cross-platform custom-tool bundler beside the extension", () => {
+    expect(esbuildSource).toContain(
+      'require.resolve("esbuild-wasm/package.json")',
+    )
+    expect(esbuildSource).toContain('"runtime",')
+    expect(esbuildSource).toContain('"esbuild-wasm",')
+    expect(esbuildSource).toContain("filter: /^esbuild-wasm$/")
+    expect(esbuildSource).toContain(
+      'path: "./runtime/esbuild-wasm/lib/main.js"',
+    )
+    expect(esbuildSource).toContain("external: true")
+  })
+
   it.each([
     ["nexuscode.newTask", "provider?.createNewSession()"],
     ["nexuscode.compact", "provider?.compact()"],
@@ -494,9 +507,9 @@ describe("VS Code command wiring", () => {
     )
   })
 
-  it("preserves the first baseline across repeated session edits to one file", () => {
+  it("projects session edit review from durable change sets only", () => {
     const start = controllerSource.indexOf(
-      "addSessionUnacceptedEdit(",
+      "private async refreshSessionChangeSets(",
     )
     const end = controllerSource.indexOf(
       "/** Push current state to webview",
@@ -506,12 +519,10 @@ describe("VS Code command wiring", () => {
 
     expect(start).toBeGreaterThanOrEqual(0)
     expect(end).toBeGreaterThan(start)
-    expect(body).toContain("originalContent: firstEdit.originalContent")
-    expect(body).toContain(
-      "simpleDiffStats(firstEdit.originalContent, newContent)",
-    )
-    expect(body).toContain("isNewFile: firstEdit.isNewFile")
-    expect(body).toContain("this.normalizePathKey(edit.path, this.getCwd())")
+    expect(body).toContain("this.sessionUnacceptedEdits = durable")
+    expect(body).toContain("changeSetId: record.id")
+    expect(body).not.toContain("firstEdit")
+    expect(controllerSource).not.toContain("onSessionEditSaved")
   })
 
   it("allows checkpoint diffs only for host-advertised checkpoint hashes", () => {
@@ -717,12 +728,15 @@ describe("VS Code command wiring", () => {
       runStart,
     )
     const runBody = controllerSource.slice(runStart, runEnd)
-    const admissionSave = runBody.indexOf("afterSequence: 0")
+    const admissionSave = runBody.indexOf(
+      "afterSequence: acknowledgedSequence",
+    )
     const sequenceSave = runBody.indexOf("onSequence: async (sequence)")
 
     expect(runBody).toContain("setSelectedSessionId(sid)")
     expect(admissionSave).toBeGreaterThanOrEqual(0)
     expect(sequenceSave).toBeGreaterThan(admissionSave)
+    expect(runBody).toContain("prepared.afterSequence")
     expect(runBody).toContain("await admissionCursorWrite")
   })
 

@@ -1,10 +1,21 @@
 import { Hono } from "hono"
-import { describe, expect, it, vi } from "vitest"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+  ChangeSetService,
+  FileChangeSetStore,
   MAX_IMAGE_BASE64_CHARS,
   ManagedWorkspaceRuntime,
   PROTOCOL_VERSION,
   buildRemoteMcpPromptCatalog,
+  createNexusRunServices,
+  hashFileContent,
+  hashWorkspaceIdentity,
+  type CapturedFileState,
+  type HostFileMutation,
+  type NexusRunServices,
   type RemoteMcpPromptResolveRequest,
   type RemoteMcpPromptResolveResponse,
   type ProtocolEnvelope,
@@ -23,6 +34,13 @@ import {
 } from "./session-v2.js"
 
 const workspace = "/allowed/workspace"
+const temporaryDirectories: string[] = []
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
 
 function command(
   overrides: Partial<SessionCommandV2> = {},
@@ -51,6 +69,7 @@ function setup(options: {
     request: RemoteMcpPromptResolveRequest,
     signal?: AbortSignal,
   ) => Promise<RemoteMcpPromptResolveResponse>
+  agentRuns?: NexusRunServices
 } = {}) {
   const dispatch = vi.fn(
     options.dispatch ??
@@ -97,7 +116,12 @@ function setup(options: {
   } as SessionProtocolService & { readonly portVersion: number }
   const runtime = new ManagedWorkspaceRuntime(
     workspace,
-    options.includeProtocol === false ? {} : { protocol },
+    options.includeProtocol === false
+      ? {}
+      : {
+          protocol,
+          ...(options.agentRuns ? { agentRuns: options.agentRuns } : {}),
+        },
   )
   const get = vi.fn(async (): Promise<WorkspaceRuntime> => runtime)
   const runtimes: SessionV2RuntimeProvider = { get }
@@ -165,6 +189,104 @@ describe("session protocol v2 routes", () => {
     expect(get).toHaveBeenCalledWith(workspace)
     expect(dispatch).toHaveBeenCalledOnce()
     expect(dispatch).toHaveBeenCalledWith(body)
+  })
+
+  it("lists and accepts exact session-owned durable changes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nexus-route-changes-"))
+    temporaryDirectories.push(root)
+    let current: CapturedFileState = {
+      exists: true,
+      content: Buffer.from("before"),
+      mode: 0o644,
+    }
+    const files = {
+      async readFileState(): Promise<CapturedFileState> {
+        return current.exists
+          ? {
+              exists: true,
+              content: Buffer.from(current.content),
+              mode: current.mode,
+            }
+          : { exists: false, content: null, mode: null }
+      },
+      async applyFileMutation(
+        mutation: HostFileMutation,
+      ): Promise<void> {
+        const actual = current.exists
+          ? hashFileContent(current.content).hash
+          : null
+        if (
+          current.exists !== mutation.expected.exists ||
+          actual !== mutation.expected.hash
+        ) {
+          throw new Error("fixture precondition failed")
+        }
+        current = mutation.next.exists
+          ? {
+              exists: true,
+              content: Buffer.from(mutation.next.content),
+              mode: mutation.next.mode,
+            }
+          : { exists: false, content: null, mode: null }
+      },
+    }
+    const workspaceId = hashWorkspaceIdentity(workspace)
+    const store = new FileChangeSetStore(workspaceId, {
+      rootDir: root,
+    })
+    const changes = new ChangeSetService({
+      workspaceId,
+      store,
+      files,
+      idFactory: () => "change-1",
+    })
+    const proposed = await changes.propose({
+      identity: {
+        workspaceId,
+        sessionId: "session-1",
+        turnId: "turn-1",
+        runId: "run-1",
+        messageId: "message-1",
+        partId: "part-1",
+        toolCallId: "call-1",
+      },
+      files: [{
+        path: "file.ts",
+        after: { exists: true, content: "after" },
+        hunks: [],
+        binary: false,
+      }],
+    })
+    await changes.approve(proposed.id, proposed.proposalHash)
+    await changes.apply(proposed.id)
+    const agentRuns = createNexusRunServices({
+      changeSets: { workspaceId, store },
+    })
+    const { app } = setup({ agentRuns })
+
+    const listed = await app.request(
+      "/v2/session/session-1/changes",
+    )
+    expect(listed.status).toBe(200)
+    await expect(listed.json()).resolves.toMatchObject({
+      changes: [{
+        changeSetId: "change-1",
+        originalContent: "before",
+        newContent: "after",
+        diffStats: { added: 1, removed: 1 },
+      }],
+      truncated: false,
+    })
+
+    const accepted = await app.request(
+      "/v2/session/session-1/changes/change-1/accept",
+      { method: "POST", body: "{}" },
+    )
+    expect(accepted.status).toBe(200)
+    await expect(accepted.json()).resolves.toMatchObject({
+      changeSetId: "change-1",
+      state: "accepted",
+    })
   })
 
   it("rejects an oversized HTTP body before JSON parsing or runtime access", async () => {

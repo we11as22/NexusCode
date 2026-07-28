@@ -55,9 +55,12 @@ were treated as evidence; README claims were not.
 - New clients opt into the additive pending projection; old strict protocol-v2
   clients retain their original snapshot shape.
 
-This closes the proven post-receipt restart bug. The stronger pre-request
-durable outbox remains the next recovery slice and is specified in
-`2026-07-28-change-ownership-and-recovery-design.md`.
+This closes the proven post-receipt restart bug. The CLI and VS Code clients
+also persist the complete canonical command before POST, replay the exact
+prepared/admitted command after a lost response, and clear it only after the
+target terminal has been durably applied locally. The outbox is bounded,
+checksummed, workspace/session scoped, and never attaches to another client's
+active turn.
 
 ### Edit and CLI undo correctness
 
@@ -78,32 +81,83 @@ durable outbox remains the next recovery slice and is specified in
 - Remote CLI undo is explicitly unavailable until the server owns a durable
   change-set/rewind command; it no longer claims a local-only rollback.
 
+### Durable changes, ApplyPatch, and review
+
+- Write, Edit, and strict Codex-style multi-file ApplyPatch share one
+  proposal-first `ChangeSetService`.
+- Approval binds exact session/turn/run/message/part/tool-call identity and an
+  exact proposal hash.
+- Local CLI/VS Code use the same checksummed file/blob store; the server uses a
+  transactional built-in SQLite adapter.
+- Apply/revert are compare-and-swap operations with crash-visible
+  applying/reverting recovery and compensation after partial host failure.
+- CLI, server, VS Code, and batch compensation report success only after the
+  exact durable terminal state is observed; a non-throwing recovery to
+  `conflicted` remains visible and is never counted as restored/reapplied.
+- Repeated same-turn edits coalesce to earliest-before/latest-after without
+  overwriting interleaved user changes.
+- CLI, remote server, and VS Code expose durable review state and honest
+  accept/revert capabilities. Multi-file patches remain one atomic review
+  action and are labelled as such.
+- Checkpoint restoration no longer renames nested `.git`, calls blanket
+  reset/clean, or guesses a destructive target from a description. Legacy
+  checkpoints without exact message binding are preview-only.
+
+### Bounded Git and diff
+
+- One argv-only Git service strips inherited routing/prompt/pager variables and
+  disables external diff/textconv behavior.
+- Status and diff cover staged, unstaged, untracked, renamed, deleted, binary,
+  oversized, unborn-HEAD, unmerged, submodule, and explicit omission states.
+- Time, stdout/stderr, file-count, per-file, and aggregate byte limits are
+  enforced without touching the user index.
+- GitInspect and review surfaces consume that shared typed result instead of
+  independent shell strings and parsers.
+
+### Memory, compaction, queues, and canonical resume
+
+- Queued turns are bounded and exact identities survive queued/active/terminal
+  restart races.
+- Manual and automatic compaction use stale-history CAS, fail closed on
+  truncated/incomplete summaries, and project completed summaries into
+  structured session memory.
+- Workspace session memory refresh is scheduled and bounded rather than
+  injected once at process start.
+- CLI resume accepts only canonical Nexus sessions. The separate transcript
+  importer and its parallel rendering path were removed, so resumed work uses
+  the same durable runtime/config/memory/MCP/skills/permission contracts as a
+  newly created session.
+
 ## Code-proven work still required
 
-1. Replace cursor-only remote start with the durable prepared/admitted outbox
-   and exact terminal lookup.
-2. Replace destructive shadow checkpoint restore and nested `.git` renaming
-   with core-owned content-addressed change sets and path-scoped restore.
-3. Replace CLI review/ad-hoc Git calls with a bounded shared Git service that
-   includes untracked/unborn/binary/skipped state and disables external helpers.
-4. Persist VS Code/CLI Keep/Undo state, including a durable recovery marker
-   for ambiguous cross-resource save failures, and add safe per-hunk acceptance.
-5. Require exact message-to-checkpoint bindings for workspace rollback.
-6. Close path check/use races with no-follow or handle-relative mutation where
-   supported.
-7. Complete delete tombstone fencing, atomic server fork, exact mention/skill
-   semantics, server-owned scoped grants/profiles/manual compaction, and VS Code
-   controller decomposition.
+1. Add Codex-grade OS sandbox brokers for local shell execution; application
+   policy and approvals cannot substitute for kernel isolation.
+2. Isolate trusted plugin hooks behind fine-grained capabilities/a separate
+   process instead of granting the host process's full OS authority.
+3. Add real Extension Host/UI automation and broaden complex multi-root
+   workspace coverage.
+4. Add selective multi-file/hunk review only by creating a new proposal and
+   approval hash; never mutate an already-approved atomic patch in place.
+5. Continue decomposing the large VS Code controller only behind behavioral
+   tests; core policy and durable state are already outside it.
+6. Resume arbitrary in-flight third-party provider/tool instructions across
+   process death only if those providers/tools expose a safe resumable
+   protocol. Today interrupted operations are truthfully terminated and
+   recovered/retried at Nexus boundaries.
 
 ## Verification
 
 All verification stayed inside temporary/local test fixtures:
 
-- workspace tests: **1393 passed**;
+- workspace tests: **1547 passed**;
 - TypeScript typecheck: all packages passed;
 - production workspace build: passed;
+- production VSIX packaging: passed, including extension bundle, webview,
+  Tree-sitter runtime, 36 language assets, 52 query assets, and the
+  cross-platform `esbuild-wasm` custom-tool runtime;
 - pinned-runtime, built-in SQLite, portability, and feature-census tests:
   **12 passed**;
+- MCP/skills validation workflow: passed;
 - `git diff --check`: passed;
 - no live LLM, real MCP server, external plugin, destructive workspace reset,
   or system preference mutation was used.

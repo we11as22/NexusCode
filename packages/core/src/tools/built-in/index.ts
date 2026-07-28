@@ -3,6 +3,7 @@ import { readFileTool } from "./read-file.js"
 import { toolOutputReadTool } from "./tool-output-read.js"
 import { writeFileTool } from "./write-file.js"
 import { editTool } from "./replace-in-file.js"
+import { applyPatchTool } from "./apply-patch.js"
 import { bashTool } from "./execute-command.js"
 import { bashOutputTool } from "./bash-output.js"
 import { killBashTool } from "./kill-bash.js"
@@ -92,6 +93,7 @@ export function getAllBuiltinTools(): ToolDef[] {
     readLintsTool,
     writeFileTool,
     editTool,
+    applyPatchTool,
     bashTool,
     bashOutputTool,
     killBashTool,
@@ -165,6 +167,7 @@ export {
   toolOutputReadTool,
   writeFileTool,
   editTool,
+  applyPatchTool,
   parallelTool,
   bashTool,
   bashOutputTool,

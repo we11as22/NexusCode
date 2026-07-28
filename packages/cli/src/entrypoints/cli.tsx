@@ -29,7 +29,7 @@ import {
   getWorkspaceTrustIdentity,
 } from '../utils/config.js'
 import { cwd } from 'process'
-import { dateToFilename, logError, parseLogFilename } from '../utils/log.js'
+import { dateToFilename, logError } from '../utils/log.js'
 import { Onboarding } from '../components/Onboarding.js'
 import { Doctor } from '../screens/Doctor.js'
 import { ApproveApiKey } from '../components/ApproveApiKey.js'
@@ -37,14 +37,11 @@ import { TrustDialog } from '../components/TrustDialog.js'
 import { checkHasTrustDialogAccepted } from '../utils/config.js'
 import { isDefaultSlowAndCapableModel } from '../utils/model.js'
 import { LogList } from '../screens/LogList.js'
-import { ResumeConversation } from '../screens/ResumeConversation.js'
 import { startMCPServer } from './mcp.js'
 import { env } from '../utils/env.js'
 import { getCwd, setCwd, setOriginalCwd } from '../utils/state.js'
 import { omit } from 'lodash-es'
 import { getCommands } from '../commands.js'
-import { getNextAvailableLogForkNumber, loadLogList } from '../utils/log.js'
-import { loadMessagesFromLog } from '../utils/conversationRecovery.js'
 import { cleanupOldMessageFilesInBackground } from '../utils/cleanup.js'
 import {
   handleListApprovedTools,
@@ -67,7 +64,6 @@ import {
   installGlobalPackage,
   assertMinVersion,
 } from '../utils/autoUpdater.js'
-import { CACHE_PATHS } from '../utils/log.js'
 import { PersistentShell } from '../utils/PersistentShell.js'
 import { GATE_USE_EXTERNAL_UPDATER } from '../constants/betas.js'
 import { clearTerminal } from '../utils/terminal.js'
@@ -92,7 +88,7 @@ import { createNexusSkillsCommand } from '../commands/nexusSkills.js'
 import { createNexusMcpCommand } from '../commands/nexusMcp.js'
 import { createNexusAuthorityCommand } from '../commands/nexusAuthority.js'
 import { createNexusSessionsCommand } from '../commands/nexusSessions.js'
-import { queryNexus } from '../nexus-query.js'
+import { queryNexus, replMessagesFromSession } from '../nexus-query.js'
 import { shouldAutoApprovePrint } from '../host.js'
 import type { RenderOptionsWithFlicker } from '../utils/ink.js'
 import type { Command as SlashCommand } from '../commands.js'
@@ -210,6 +206,104 @@ function logStartup(): void {
     ...config,
     numStartups: (config.numStartups ?? 0) + 1,
   })
+}
+
+function NexusREPLWithConfigRefresh({
+  nexus: n,
+  baseCommands,
+  effectiveCwd,
+  ...replProps
+}: {
+  nexus: Awaited<ReturnType<typeof bootstrapNexus>>
+  baseCommands: SlashCommand[]
+  effectiveCwd: string
+} & Omit<
+  React.ComponentProps<typeof REPL>,
+  | 'nexusConfigSnapshot'
+  | 'onNexusConfigSaved'
+  | 'nexusBootstrap'
+  | 'commands'
+  | 'nexusSessionId'
+  | 'nexusGetCheckpointList'
+  | 'nexusOnRestoreCheckpoint'
+  | 'nexusOnSwitchSession'
+>) {
+  React.useEffect(
+    () => () => {
+      void n.close().catch((error: unknown) => {
+        const message =
+          error instanceof Error ? error.message : String(error)
+        process.stderr.write(
+          `[nexus] Failed to close CLI runtime: ${message}\n`,
+        )
+      })
+    },
+    [n],
+  )
+  const [configSnapshot, setConfigSnapshot] = React.useState(n.configSnapshot)
+  const [activeSessionId, setActiveSessionId] = React.useState(n.session.id)
+  const refreshConfig = React.useCallback(async () => {
+    const config = await loadCliWorkspaceConfig(n.cwd, {
+      loadEnv: !n.serverUrl,
+      hostAuthority: !n.serverUrl,
+    })
+    applyCliModelSelection(config, n.cliModelSelection)
+    setConfigSnapshot(buildConfigSnapshot(config))
+  }, [n])
+
+  const handleSwitchSession = React.useCallback(
+    async (sessionId: string) => {
+      if (sessionId === n.session.id) return
+      const resumed = await n.sessionStore.load(sessionId)
+      if (!resumed) {
+        process.stderr.write(`[nexus] Session not found: ${sessionId}\n`)
+        return
+      }
+      n.session = resumed
+      setActiveSessionId(resumed.id)
+    },
+    [n],
+  )
+
+  const commandsToUse = React.useMemo<SlashCommand[]>(
+    () => [
+      ...baseCommands,
+      createNexusConfigCommand(n),
+      createNexusModelCommand(n),
+      createNexusIndexCommand(n),
+      createNexusVectorCommand(n),
+      createNexusEmbeddingsCommand(n),
+      createNexusSkillsCommand(n),
+      createNexusMcpCommand(n),
+      createNexusAuthorityCommand(n),
+      createNexusSessionsCommand(n, (id: string) => {
+        void handleSwitchSession(id)
+      }),
+    ],
+    [baseCommands, n, handleSwitchSession],
+  )
+
+  return (
+    <REPL
+      {...replProps}
+      commands={commandsToUse}
+      nexusConfigSnapshot={configSnapshot}
+      onNexusConfigSaved={refreshConfig}
+      nexusBootstrap={n}
+      nexusSessionId={activeSessionId}
+      nexusGetCheckpointList={() =>
+        readCheckpointEntries(effectiveCwd, activeSessionId)
+      }
+      nexusOnRestoreCheckpoint={(id, type) =>
+        runTaskRestore(effectiveCwd, activeSessionId, id, type)
+      }
+      nexusGetSessionList={n.sessionStore.list}
+      nexusOnSwitchSession={handleSwitchSession}
+      nexusOnDeleteSession={async (sessionId) => {
+        await n.sessionStore.delete(sessionId)
+      }}
+    />
+  )
 }
 
 async function setup(
@@ -545,104 +639,6 @@ ${commandList}`,
             reasoningEffortOverride: reasoningEffort,
             profileOverride: profile ?? undefined,
           })
-
-          function NexusREPLWithConfigRefresh({
-            nexus: n,
-            baseCommands,
-            effectiveCwd,
-            ...replProps
-          }: {
-            nexus: Awaited<ReturnType<typeof bootstrapNexus>>
-            baseCommands: SlashCommand[]
-            effectiveCwd: string
-          } & Omit<
-            React.ComponentProps<typeof REPL>,
-            | 'nexusConfigSnapshot'
-            | 'onNexusConfigSaved'
-            | 'nexusBootstrap'
-            | 'commands'
-            | 'nexusSessionId'
-            | 'nexusGetCheckpointList'
-            | 'nexusOnRestoreCheckpoint'
-            | 'nexusOnSwitchSession'
-          >) {
-            React.useEffect(
-              () => () => {
-                void n.close().catch((error: unknown) => {
-                  const message =
-                    error instanceof Error ? error.message : String(error)
-                  process.stderr.write(
-                    `[nexus] Failed to close CLI runtime: ${message}\n`,
-                  )
-                })
-              },
-              [n],
-            )
-            const [configSnapshot, setConfigSnapshot] = React.useState(n.configSnapshot)
-            const [activeSessionId, setActiveSessionId] = React.useState(n.session.id)
-            const refreshConfig = React.useCallback(async () => {
-              const config = await loadCliWorkspaceConfig(n.cwd, {
-                loadEnv: !n.serverUrl,
-                hostAuthority: !n.serverUrl,
-              })
-              applyCliModelSelection(config, n.cliModelSelection)
-              setConfigSnapshot(buildConfigSnapshot(config))
-            }, [n])
-
-            const handleSwitchSession = React.useCallback(
-              async (sessionId: string) => {
-                if (sessionId === n.session.id) return
-                const resumed = await n.sessionStore.load(sessionId)
-                if (!resumed) {
-                  process.stderr.write(`[nexus] Session not found: ${sessionId}\n`)
-                  return
-                }
-                n.session = resumed
-                setActiveSessionId(resumed.id)
-              },
-              [n],
-            )
-
-            const commandsToUse = React.useMemo<SlashCommand[]>(
-              () => [
-                ...baseCommands,
-                createNexusConfigCommand(n),
-                createNexusModelCommand(n),
-                createNexusIndexCommand(n),
-                createNexusVectorCommand(n),
-                createNexusEmbeddingsCommand(n),
-                createNexusSkillsCommand(n),
-                createNexusMcpCommand(n),
-                createNexusAuthorityCommand(n),
-                createNexusSessionsCommand(n, (id: string) => {
-                  void handleSwitchSession(id)
-                }),
-              ],
-              [baseCommands, n, handleSwitchSession],
-            )
-
-            return (
-              <REPL
-                {...replProps}
-                commands={commandsToUse}
-                nexusConfigSnapshot={configSnapshot}
-                onNexusConfigSaved={refreshConfig}
-                nexusBootstrap={n}
-                nexusSessionId={activeSessionId}
-                nexusGetCheckpointList={() =>
-                  readCheckpointEntries(effectiveCwd, activeSessionId)
-                }
-                nexusOnRestoreCheckpoint={(id, type) =>
-                  runTaskRestore(effectiveCwd, activeSessionId, id, type)
-                }
-                nexusGetSessionList={n.sessionStore.list}
-                nexusOnSwitchSession={handleSwitchSession}
-                nexusOnDeleteSession={async (sessionId) => {
-                  await n.sessionStore.delete(sessionId)
-                }}
-              />
-            )
-          }
 
           render(
             <NexusREPLWithConfigRefresh
@@ -1098,128 +1094,6 @@ ${commandList}`,
         )
         context.unmount = unmount
       })
-
-    // nexus resume
-    program
-      .command('resume')
-      .description(
-        'Import and resume a legacy conversation log. Nexus sessions use --session or --continue.',
-      )
-      .argument(
-        '[identifier]',
-        'A number (0, 1, 2, etc.) or file path to resume a specific conversation',
-      )
-      .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
-      .option(
-        '-ea, --enable-architect',
-        'Enable the Architect tool',
-        () => true,
-      )
-      .option('-v, --verbose', 'Do not truncate message output', () => true)
-      .option(
-        '--dangerously-skip-permissions',
-        'Skip all permission checks. Only works in Docker containers with no internet access. Will crash otherwise.',
-        () => true,
-      )
-      .action(
-        async (
-          identifier,
-          { cwd, enableArchitect, dangerouslySkipPermissions, verbose },
-        ) => {
-          const effectiveCwd = getWorkspaceTrustIdentity(cwd).canonicalPath
-          setOriginalCwd(effectiveCwd)
-          await setCwd(effectiveCwd)
-          await showSetupScreens(
-            effectiveCwd,
-            dangerouslySkipPermissions,
-            false,
-          )
-          await setup(effectiveCwd, dangerouslySkipPermissions)
-          assertMinVersion()
-
-          // Legacy transcripts can still be imported, but they must not start a
-          // second MCP runtime alongside the workspace-owned Nexus runtime.
-          const [tools, commands, logs] = await Promise.all([
-            getTools(
-              enableArchitect ?? getCurrentProjectConfig().enableArchitectTool,
-              false,
-            ),
-            getCommands(false),
-            loadLogList(CACHE_PATHS.messages()),
-          ])
-          logStartup()
-
-          // If a specific conversation is requested, load and resume it directly
-          if (identifier !== undefined) {
-            // Check if identifier is a number or a file path
-            const number = Math.abs(parseInt(identifier))
-            const isNumber = !isNaN(number)
-            let messages, date, forkNumber
-            try {
-              if (isNumber) {
-                logEvent('tengu_resume', { number: number.toString() })
-                const log = logs[number]
-                if (!log) {
-                  console.error('No conversation found at index', number)
-                  process.exit(1)
-                }
-                messages = await loadMessagesFromLog(log.fullPath, tools)
-                ;({ date, forkNumber } = log)
-              } else {
-                // Handle file path case
-                logEvent('tengu_resume', { filePath: identifier })
-                if (!existsSync(identifier)) {
-                  console.error('File does not exist:', identifier)
-                  process.exit(1)
-                }
-                messages = await loadMessagesFromLog(identifier, tools)
-                const pathSegments = identifier.split('/')
-                const filename =
-                  pathSegments[pathSegments.length - 1] ?? 'unknown'
-                ;({ date, forkNumber } = parseLogFilename(filename))
-              }
-              const fork = getNextAvailableLogForkNumber(
-                date,
-                forkNumber ?? 1,
-                0,
-              )
-              const isDefaultModel = await isDefaultSlowAndCapableModel()
-              render(
-                <REPL
-                  initialPrompt=""
-                  messageLogName={date}
-                  initialForkNumber={fork}
-                  shouldShowPromptInput={true}
-                  verbose={verbose}
-                  commands={commands}
-                  tools={tools}
-                  initialMessages={messages}
-                  mcpStatuses={[]}
-                  isDefaultModel={isDefaultModel}
-                />,
-                { exitOnCtrlC: false },
-              )
-            } catch (error) {
-              logError(`Failed to load conversation: ${error}`)
-              process.exit(1)
-            }
-          } else {
-            // Show the conversation selector UI
-            const context: { unmount?: () => void } = {}
-            const { unmount } = render(
-              <ResumeConversation
-                context={context}
-                commands={commands}
-                logs={logs}
-                tools={tools}
-                verbose={verbose}
-              />,
-              renderContextWithExitOnCtrlC,
-            )
-            context.unmount = unmount
-          }
-        },
-      )
 
     // nexus error
     program

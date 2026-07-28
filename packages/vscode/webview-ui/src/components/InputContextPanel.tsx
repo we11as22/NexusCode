@@ -242,6 +242,10 @@ export function InputContextPanel() {
               {sessionEditsForPanel.map((edit) => {
                 const name = edit.path.split(/[/\\]/).pop() ?? edit.path
                 const hasDiff = edit.diffStats.added > 0 || edit.diffStats.removed > 0
+                const groupedChange =
+                  typeof edit.changeSetId === "string" &&
+                  (edit.changeSetFileCount ?? 1) > 1
+                const groupedCount = edit.changeSetFileCount ?? 1
                 return (
                   <div key={edit.path} className="nexus-input-context-file-row">
                     <button
@@ -259,14 +263,22 @@ export function InputContextPanel() {
                             {edit.diffStats.removed > 0 && <span className="text-red-400">-{edit.diffStats.removed}</span>}
                           </span>
                         )}
+                        {groupedChange && (
+                          <span
+                            className="nexus-input-context-file-diff"
+                            title={`This file belongs to one atomic ${groupedCount}-file patch`}
+                          >
+                            patch&nbsp;{groupedCount}
+                          </span>
+                        )}
                       </span>
                     </button>
                     <button
                       type="button"
                       className="nexus-input-context-file-btn nexus-input-context-file-dismiss"
                       onClick={(e) => { e.stopPropagation(); revertSessionEditFile(edit.path) }}
-                      title="Revert this file"
-                      aria-label="Revert file"
+                      title={groupedChange ? `Revert the entire ${groupedCount}-file patch` : "Revert this file"}
+                      aria-label={groupedChange ? "Revert entire patch" : "Revert file"}
                     >
                       ✕
                     </button>
@@ -274,8 +286,8 @@ export function InputContextPanel() {
                       type="button"
                       className="nexus-input-context-file-btn nexus-input-context-file-allow"
                       onClick={(e) => { e.stopPropagation(); acceptSessionEditFile(edit.path) }}
-                      title="Accept (keep changes)"
-                      aria-label="Accept file"
+                      title={groupedChange ? `Accept the entire ${groupedCount}-file patch` : "Accept (keep changes)"}
+                      aria-label={groupedChange ? "Accept entire patch" : "Accept file"}
                     >
                       ✓
                     </button>

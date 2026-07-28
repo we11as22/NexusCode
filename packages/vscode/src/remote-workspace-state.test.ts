@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest"
+import * as fs from "node:fs/promises"
+import * as os from "node:os"
+import * as path from "node:path"
 
 import {
   VsCodeRemoteWorkspaceState,
@@ -19,6 +22,53 @@ class MemoryMemento implements WorkspaceMementoLike {
 }
 
 describe("VS Code remote workspace state", () => {
+  it("uses the extension storage filesystem for an atomic prepared-to-admitted transition", async () => {
+    const rootDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "nexus-vscode-outbox-"),
+    )
+    try {
+      const memento = new MemoryMemento()
+      const state = new VsCodeRemoteWorkspaceState(
+        memento,
+        "https://nexus.example.test",
+        "/workspace/project",
+        rootDir,
+      )
+      await state.savePrepared("session-outbox", {
+        version: 1,
+        phase: "prepared",
+        commandId: "command-outbox",
+        inputId: "input-outbox",
+        afterSequence: 3,
+        input: [{ type: "text", text: "recover after reload" }],
+        mode: "review",
+      })
+      await expect(
+        state.loadPrepared("session-outbox"),
+      ).resolves.toMatchObject({
+        commandId: "command-outbox",
+      })
+
+      await state.save("session-outbox", {
+        turnId: "turn-outbox",
+        runId: "run-outbox",
+        afterSequence: 4,
+      })
+      await expect(
+        state.loadPrepared("session-outbox"),
+      ).resolves.toBeUndefined()
+      await expect(state.load("session-outbox")).resolves.toMatchObject({
+        turnId: "turn-outbox",
+        afterSequence: 4,
+      })
+      expect(
+        [...memento.values.keys()].some((key) => key.includes(".cursor.")),
+      ).toBe(false)
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true })
+    }
+  })
+
   it("persists the selected session and exact replay cursor", async () => {
     const memento = new MemoryMemento()
     const state = new VsCodeRemoteWorkspaceState(

@@ -141,6 +141,7 @@ export class SessionRuntimeRepository {
   readonly #database: NexusStateDatabase
   readonly #now: () => number
   readonly #createId: (kind: "turn" | "run" | "event") => string
+  readonly #maxPendingInputs: number
 
   constructor(
     database: NexusStateDatabase,
@@ -150,6 +151,16 @@ export class SessionRuntimeRepository {
     this.#now = options.now ?? Date.now
     this.#createId =
       options.createId ?? ((kind) => `${kind}-${randomUUID()}`)
+    this.#maxPendingInputs = options.maxPendingInputs ?? 1_024
+    if (
+      !Number.isSafeInteger(this.#maxPendingInputs) ||
+      this.#maxPendingInputs < 1 ||
+      this.#maxPendingInputs > 1_024
+    ) {
+      throw new RangeError(
+        "Session pending input limit must be an integer from 1 through 1024",
+      )
+    }
   }
 
   ensureWorkspaceSession(input: {
@@ -1431,6 +1442,19 @@ export class SessionRuntimeRepository {
         )
       }
       return inputFromRow(existing)
+    }
+    const pending = connection.get<{ count: number }>(
+      `SELECT COUNT(*) AS count
+       FROM runtime_session_input
+       WHERE session_id = ?
+         AND promoted_sequence IS NULL`,
+      [input.sessionId],
+    )?.count ?? 0
+    if (pending >= this.#maxPendingInputs) {
+      throw new SessionRuntimeConflictError(
+        "queue_full",
+        `Session ${input.sessionId} already has ${pending} pending inputs`,
+      )
     }
     const reservedTurnId = this.#id("turn")
     const reservedRunId = this.#id("run")

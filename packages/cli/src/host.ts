@@ -1,12 +1,16 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as readline from "node:readline"
+import { randomUUID } from "node:crypto"
 import { execa } from "execa"
 import {
   authorizeNetworkRequest as authorizePublicNetworkRequest,
   approvalGrantKey,
   grantWorkspaceAuthority,
   resolveAuthorizedWorkspacePath,
+  hashFileContent,
+  FileMutationConflictError,
+  ChangeSetService,
 } from "@nexuscode/core"
 import type {
   AgentEvent,
@@ -21,10 +25,31 @@ import type {
   McpAuthResult,
   PermissionResult,
   WorkspaceAuthorityStoreOptions,
+  CapturedFileState,
+  HostFileMutation,
 } from "@nexuscode/core"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
+const MAX_CHANGE_FILE_BYTES = 128 * 1_024 * 1_024
+
+function absentFileState(): CapturedFileState {
+  return { exists: false, content: null, mode: null }
+}
+
+function capturedMatchesExpected(
+  captured: CapturedFileState,
+  expected: HostFileMutation["expected"],
+): boolean {
+  if (captured.exists !== expected.exists) return false
+  if (!captured.exists || !expected.exists) return true
+  const digest = hashFileContent(captured.content)
+  return (
+    digest.hash === expected.hash &&
+    digest.byteLength === expected.byteLength &&
+    captured.mode === expected.mode
+  )
+}
 
 export interface NonInteractiveApprovalPolicy {
   read?: boolean
@@ -45,13 +70,6 @@ export function shouldAutoApprovePrint(
   return dangerouslySkipPermissions === true
 }
 
-export interface CliSavedFileEdit {
-  path: string
-  originalContent: string
-  newContent: string
-  isNewFile: boolean
-}
-
 export interface CliFileRevertResult {
   reverted: string[]
   conflicts: Array<{ path: string; reason: string }>
@@ -69,17 +87,12 @@ export class CliHost implements IHost {
   private tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
   private alwaysApproved = new Set<string>()
   private nonInteractiveDiagnosticEmitted = false
-  private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
-  /** File edits from the current assistant turn (path → originalContent + isNewFile). Cleared on next assistant_message_started. */
-  private turnFileEdits: CliSavedFileEdit[] = []
-  /** Previous turn's edits; used by revertLastTurn to restore files. */
-  private previousTurnFileEdits: CliSavedFileEdit[] = []
-  /**
-   * A successfully restored file batch is held here until the matching
-   * conversation rewind is durably saved. This makes CLI undo a two-phase
-   * operation instead of silently splitting filesystem and chat state.
-   */
-  private pendingLastTurnFileRevert: CliSavedFileEdit[] = []
+  private durableReview?: {
+    service: ChangeSetService
+    sessionId: string
+    turnId: string
+  }
+  private pendingLastTurnChangeSetIds: string[] = []
 
   constructor(
     cwd: string,
@@ -131,6 +144,83 @@ export class CliHost implements IHost {
       )
     }
     return fs.readFile(absPath, "utf8")
+  }
+
+  async readFileState(filePath: string): Promise<CapturedFileState> {
+    const absPath = this.resolve(filePath)
+    this.checkPathSecurity(absPath, "read")
+    let info
+    try {
+      info = await fs.lstat(absPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return absentFileState()
+      }
+      throw error
+    }
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new Error(
+        `Durable file changes require a regular non-symbolic file: ${filePath}`,
+      )
+    }
+    if (info.size > MAX_CHANGE_FILE_BYTES) {
+      throw new Error(
+        `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+      )
+    }
+    const content = await fs.readFile(absPath)
+    if (content.byteLength > MAX_CHANGE_FILE_BYTES) {
+      throw new Error(
+        `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+      )
+    }
+    return {
+      exists: true,
+      content,
+      mode: info.mode & 0o7777,
+    }
+  }
+
+  async applyFileMutation(mutation: HostFileMutation): Promise<void> {
+    const absPath = this.resolve(mutation.path)
+    this.checkPathSecurity(absPath, "write")
+    const current = await this.readFileState(mutation.path)
+    if (!capturedMatchesExpected(current, mutation.expected)) {
+      throw new FileMutationConflictError(mutation.path)
+    }
+    if (!mutation.next.exists) {
+      await fs.unlink(absPath)
+      return
+    }
+    const bytes = Buffer.from(mutation.next.content)
+    if (bytes.byteLength > MAX_CHANGE_FILE_BYTES) {
+      throw new Error(
+        `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+      )
+    }
+    await fs.mkdir(path.dirname(absPath), { recursive: true })
+    const temporary = path.join(
+      path.dirname(absPath),
+      `.${path.basename(absPath)}.${process.pid}.${randomUUID()}.nexus-tmp`,
+    )
+    const mode = mutation.next.mode ?? 0o644
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined
+    try {
+      handle = await fs.open(temporary, "wx", mode)
+      await handle.writeFile(bytes)
+      await handle.sync()
+      await handle.chmod(mode)
+      await handle.close()
+      handle = undefined
+      const rechecked = await this.readFileState(mutation.path)
+      if (!capturedMatchesExpected(rechecked, mutation.expected)) {
+        throw new FileMutationConflictError(mutation.path)
+      }
+      await fs.rename(temporary, absPath)
+    } finally {
+      await handle?.close().catch(() => undefined)
+      await fs.unlink(temporary).catch(() => undefined)
+    }
   }
 
   async writeFile(filePath: string, content: string): Promise<void> {
@@ -384,76 +474,12 @@ export class CliHost implements IHost {
     }
   }
 
-  async openFileEdit(filePath: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void> {
-    const key = filePath.replace(/\\/g, "/")
-    this.pendingFileEdits.set(key, { originalContent: options.originalContent, newContent: options.newContent, isNewFile: options.isNewFile })
-  }
-
-  async saveFileEdit(filePath: string): Promise<void> {
-    const key = filePath.replace(/\\/g, "/")
-    const pending = this.pendingFileEdits.get(key)
-    if (!pending) throw new Error(`No pending file edit for ${filePath}`)
-    const absolutePath = this.resolve(filePath)
-    this.checkPathSecurity(absolutePath, "write")
-    const existing = this.turnFileEdits.find(
-      (edit) => edit.path === absolutePath,
-    )
-    if (
-      existing &&
-      pending.originalContent !== existing.newContent
-    ) {
-      throw new Error(
-        `File edit conflict: ${absolutePath} changed between agent edits`,
-      )
-    }
-    let currentContent: string | undefined
-    try {
-      currentContent = await fs.readFile(absolutePath, "utf8")
-    } catch (error) {
-      if (
-        !error ||
-        typeof error !== "object" ||
-        !("code" in error) ||
-        error.code !== "ENOENT"
-      ) {
-        throw error
-      }
-    }
-    if (pending.isNewFile) {
-      if (currentContent !== undefined) {
-        throw new Error(
-          `File edit conflict: ${absolutePath} was created after the diff was prepared`,
-        )
-      }
-    } else if (currentContent !== pending.originalContent) {
-      throw new Error(
-        `File edit conflict: ${absolutePath} changed after the diff was prepared`,
-      )
-    }
-
-    await this.writeFile(absolutePath, pending.newContent)
-    if (existing) {
-      existing.newContent = pending.newContent
-    } else {
-      this.turnFileEdits.push({
-        path: absolutePath,
-        originalContent: pending.originalContent,
-        newContent: pending.newContent,
-        isNewFile: pending.isNewFile,
-      })
-    }
-    this.pendingFileEdits.delete(key)
-  }
-
-  /** Call when a new assistant turn starts (e.g. on assistant_message_started). Moves current turn edits to previous. */
-  startNewTurn(): void {
-    this.previousTurnFileEdits = [...this.turnFileEdits]
-    this.turnFileEdits = []
-  }
-
-  /** Edits from the last completed assistant turn; used by revertLastTurn to restore files. */
-  getLastTurnFileEdits(): CliSavedFileEdit[] {
-    return [...this.previousTurnFileEdits]
+  bindDurableChangeReview(
+    service: ChangeSetService,
+    sessionId: string,
+    turnId: string,
+  ): void {
+    this.durableReview = { service, sessionId, turnId }
   }
 
   /**
@@ -462,98 +488,22 @@ export class CliHost implements IHost {
    * produce a half-reverted turn.
    */
   async revertLastTurnFiles(): Promise<CliFileRevertResult> {
-    if (this.pendingLastTurnFileRevert.length > 0) {
+    if (!this.durableReview) {
       return {
-        reverted: this.pendingLastTurnFileRevert.map((edit) => edit.path),
+        reverted: [],
         conflicts: [{
-          path: this.pendingLastTurnFileRevert[0]!.path,
-          reason: "the previous file undo is still awaiting conversation commit",
+          path: "(change service)",
+          reason:
+            "durable change ownership is unavailable; no files were changed",
         }],
       }
     }
-    const conflicts: CliFileRevertResult["conflicts"] = []
-    for (const edit of this.previousTurnFileEdits) {
-      try {
-        const current = await fs.readFile(edit.path, "utf8")
-        if (current !== edit.newContent) {
-          conflicts.push({
-            path: edit.path,
-            reason: "file changed after the agent edit",
-          })
-        }
-      } catch (error) {
-        conflicts.push({
-          path: edit.path,
-          reason:
-            error instanceof Error
-              ? error.message
-              : "file is no longer readable",
-        })
-      }
-    }
-    if (conflicts.length > 0) return { reverted: [], conflicts }
-
-    const restored: CliSavedFileEdit[] = []
-    for (const edit of [...this.previousTurnFileEdits].reverse()) {
-      try {
-        if (edit.isNewFile) await fs.unlink(edit.path)
-        else await this.writeFile(edit.path, edit.originalContent)
-        restored.push(edit)
-      } catch (error) {
-        conflicts.push({
-          path: edit.path,
-          reason: error instanceof Error ? error.message : "restore failed",
-        })
-        break
-      }
-    }
-    if (conflicts.length > 0) {
-      const stillReverted: string[] = []
-      for (const edit of restored.reverse()) {
-        try {
-          if (edit.isNewFile) {
-            const exists = await fs.access(edit.path)
-              .then(() => true)
-              .catch(() => false)
-            if (exists) {
-              throw new Error(
-                "new file reappeared while rolling back a failed undo",
-              )
-            }
-          } else {
-            const current = await fs.readFile(edit.path, "utf8")
-            if (current !== edit.originalContent) {
-              throw new Error(
-                "file changed while rolling back a failed undo",
-              )
-            }
-          }
-          await this.writeFile(edit.path, edit.newContent)
-        } catch (error) {
-          stillReverted.push(edit.path)
-          conflicts.push({
-            path: edit.path,
-            reason:
-              `failed to roll back partial undo: ` +
-              (error instanceof Error ? error.message : "unknown failure"),
-          })
-        }
-      }
-      return { reverted: stillReverted, conflicts }
-    }
-
-    this.pendingLastTurnFileRevert = [...this.previousTurnFileEdits]
-    return {
-      reverted: restored.map((edit) => edit.path),
-      conflicts: [],
-    }
+    return this.revertLastTurnChangeSets()
   }
 
   /** Commit the file half of a successful two-phase CLI undo. */
   commitLastTurnFileRevert(): void {
-    if (this.pendingLastTurnFileRevert.length === 0) return
-    this.pendingLastTurnFileRevert = []
-    this.previousTurnFileEdits = []
+    this.pendingLastTurnChangeSetIds = []
   }
 
   /**
@@ -562,106 +512,135 @@ export class CliHost implements IHost {
    * compensation from overwriting edits made during the failed save.
    */
   async rollbackLastTurnFileRevert(): Promise<CliFileRevertResult> {
-    const edits = [...this.pendingLastTurnFileRevert]
-    if (edits.length === 0) return { reverted: [], conflicts: [] }
-
-    const conflicts: CliFileRevertResult["conflicts"] = []
-    const stillReverted = new Set<string>()
-    for (const edit of edits) {
-      try {
-        if (edit.isNewFile) {
-          const exists = await fs.access(edit.path)
-            .then(() => true)
-            .catch((error: NodeJS.ErrnoException) => {
-              if (error.code === "ENOENT") return false
-              throw error
-            })
-          if (exists) {
-            conflicts.push({
-              path: edit.path,
-              reason: "new file reappeared after the file undo",
-            })
-          } else {
-            stillReverted.add(edit.path)
-          }
-        } else {
-          const current = await fs.readFile(edit.path, "utf8")
-          if (current !== edit.originalContent) {
-            conflicts.push({
-              path: edit.path,
-              reason: "file changed after the file undo",
-            })
-          } else {
-            stillReverted.add(edit.path)
-          }
-        }
-      } catch (error) {
-        conflicts.push({
-          path: edit.path,
-          reason:
-            error instanceof Error
-              ? error.message
-              : "file is no longer readable",
-        })
-      }
+    if (
+      this.durableReview &&
+      this.pendingLastTurnChangeSetIds.length > 0
+    ) {
+      return this.rollbackLastTurnChangeSets()
     }
-    if (conflicts.length > 0) {
-      return {
-        reverted: [...stillReverted],
-        conflicts,
-      }
-    }
-
-    const reapplied: CliSavedFileEdit[] = []
-    for (const edit of edits) {
-      try {
-        await this.writeFile(edit.path, edit.newContent)
-        reapplied.push(edit)
-      } catch (error) {
-        conflicts.push({
-          path: edit.path,
-          reason:
-            "failed to restore the agent-written state: " +
-            (error instanceof Error ? error.message : "unknown failure"),
-        })
-        break
-      }
-    }
-    if (conflicts.length > 0) {
-      const stillReverted = new Set(edits.map((edit) => edit.path))
-      for (const edit of [...reapplied].reverse()) {
-        try {
-          const current = await fs.readFile(edit.path, "utf8")
-          if (current !== edit.newContent) {
-            throw new Error(
-              "file changed while rolling back undo compensation",
-            )
-          }
-          if (edit.isNewFile) await fs.unlink(edit.path)
-          else await this.writeFile(edit.path, edit.originalContent)
-        } catch (error) {
-          stillReverted.delete(edit.path)
-          conflicts.push({
-            path: edit.path,
-            reason:
-              "failed to restore the compensated file undo: " +
-              (error instanceof Error ? error.message : "unknown failure"),
-          })
-        }
-      }
-      return {
-        reverted: [...stillReverted],
-        conflicts,
-      }
-    }
-
-    this.pendingLastTurnFileRevert = []
     return { reverted: [], conflicts: [] }
   }
 
-  async revertFileEdit(filePath: string): Promise<void> {
-    const key = filePath.replace(/\\/g, "/")
-    this.pendingFileEdits.delete(key)
+  private async revertLastTurnChangeSets(): Promise<CliFileRevertResult> {
+    const review = this.durableReview!
+    if (this.pendingLastTurnChangeSetIds.length > 0) {
+      return {
+        reverted: [],
+        conflicts: [{
+          path: this.pendingLastTurnChangeSetIds[0]!,
+          reason:
+            "the previous durable file undo is still awaiting conversation commit",
+        }],
+      }
+    }
+    const recovered = await review.service.recoverInterrupted({
+      sessionId: review.sessionId,
+      turnId: review.turnId,
+    })
+    const ambiguous = recovered.find(
+      (record) => record.state === "conflicted",
+    )
+    if (ambiguous) {
+      return {
+        reverted: [],
+        conflicts: [{
+          path: ambiguous.files.map((file) => file.path).join(", "),
+          reason:
+            `durable change ${ambiguous.id} has an ambiguous interrupted transition`,
+        }],
+      }
+    }
+    const records = await review.service.listEffectiveApplied({
+      sessionId: review.sessionId,
+      turnId: review.turnId,
+    })
+    if (records.length === 0) {
+      return { reverted: [], conflicts: [] }
+    }
+    const reverted: Array<(typeof records)[number]> = []
+    for (const record of [...records].reverse()) {
+      try {
+        const result = await review.service.revert(record.id)
+        if (result.state !== "reverted") {
+          throw new Error(
+            `change set ${record.id} recovered to ${result.state}`,
+          )
+        }
+        reverted.push(result)
+      } catch (error) {
+        const conflicts: CliFileRevertResult["conflicts"] = [{
+          path: record.files.map((file) => file.path).join(", "),
+          reason:
+            error instanceof Error ? error.message : String(error),
+        }]
+        const stillReverted = new Set(reverted.map((item) => item.id))
+        for (const restored of [...reverted].reverse()) {
+          try {
+            const reapplied = await review.service.reapply(restored.id)
+            if (reapplied.state !== "applied") {
+              throw new Error(
+                `change set ${restored.id} recovered to ${reapplied.state}`,
+              )
+            }
+            stillReverted.delete(restored.id)
+          } catch (compensationError) {
+            conflicts.push({
+              path: restored.files.map((file) => file.path).join(", "),
+              reason:
+                "failed to compensate partial durable undo: " +
+                (compensationError instanceof Error
+                  ? compensationError.message
+                  : String(compensationError)),
+            })
+          }
+        }
+        return {
+          reverted: reverted
+            .filter((item) => stillReverted.has(item.id))
+            .flatMap((item) => item.files.map((file) => file.path)),
+          conflicts,
+        }
+      }
+    }
+    this.pendingLastTurnChangeSetIds = reverted.map((record) => record.id)
+    return {
+      reverted: reverted.flatMap((record) =>
+        record.files.map((file) => file.path),
+      ),
+      conflicts: [],
+    }
+  }
+
+  private async rollbackLastTurnChangeSets(): Promise<CliFileRevertResult> {
+    const review = this.durableReview!
+    const ids = [...this.pendingLastTurnChangeSetIds]
+    const conflicts: CliFileRevertResult["conflicts"] = []
+    const stillReverted = new Set(ids)
+    for (const id of [...ids].reverse()) {
+      try {
+        const reapplied = await review.service.reapply(id)
+        if (reapplied.state !== "applied") {
+          throw new Error(
+            `change set ${id} recovered to ${reapplied.state}`,
+          )
+        }
+        stillReverted.delete(id)
+      } catch (error) {
+        conflicts.push({
+          path: id,
+          reason:
+            "failed to restore the agent-written durable change: " +
+            (error instanceof Error ? error.message : String(error)),
+        })
+      }
+    }
+    if (conflicts.length === 0) {
+      this.pendingLastTurnChangeSetIds = []
+    }
+    return {
+      reverted: [...stillReverted],
+      conflicts,
+    }
   }
 
   /** Resolve and authorize a path against this host's exact workspace root. */

@@ -3,6 +3,8 @@
  * Converts AgentEvent → UserMessage | AssistantMessage | ProgressMessage so the REPL can render.
  */
 import { randomUUID } from 'node:crypto'
+import { realpath } from 'node:fs/promises'
+import * as path from 'node:path'
 import type {
   PermissionResult,
   SessionMessage,
@@ -25,7 +27,10 @@ import {
   getNexusServerTokenSecretKey,
   isLoopbackNexusServerDestination,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
+  SessionProtocolError,
   SessionTurnTerminalError,
+  ChangeSetService,
+  hashWorkspaceIdentity,
   type AgentEvent,
   type ToolDef,
 } from '@nexuscode/core'
@@ -372,8 +377,37 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     read: autoApprovePermissions?.read === true,
   })
 
-  /** Start of this run: previous turn’s edits become revertable for /undo. */
-  host.startNewTurn()
+  const localExecutionIdentity = durableEventSink
+    ? {
+        workspaceId: hashWorkspaceIdentity(
+          await realpath(nexus.cwd).catch(() => path.resolve(nexus.cwd)),
+        ),
+        sessionId: session.id,
+        turnId: `turn_${durableEventSink.runId}`,
+        runId: durableEventSink.runId,
+      }
+    : undefined
+  if (localExecutionIdentity && runContext.services.changeSets) {
+    const binding = runContext.services.changeSets
+    if (binding.workspaceId !== localExecutionIdentity.workspaceId) {
+      throw new Error(
+        "CLI durable change storage does not match the active workspace",
+      )
+    }
+    host.bindDurableChangeReview(
+      new ChangeSetService({
+        workspaceId: binding.workspaceId,
+        store: binding.store,
+        files: {
+          readFileState: (filePath) => host.readFileState(filePath),
+          applyFileMutation: (mutation) =>
+            host.applyFileMutation(mutation),
+        },
+      }),
+      session.id,
+      localExecutionIdentity.turnId,
+    )
+  }
 
   const { builtin, dynamic } = runToolRegistry.getForMode(mode)
   const tools: ToolDef[] = runToolRegistry.mergeWithHiddenExecutionTools([
@@ -448,11 +482,24 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
               signal,
               approvalRef: tuiApprovalRef,
               deliver: deliverRemoteEvent,
+              onCommandPrepared: (prepared) => {
+                acknowledgedSequence = Math.max(
+                  acknowledgedSequence,
+                  prepared.afterSequence,
+                )
+                return cursorStore.savePrepared(sid, {
+                  version: 1,
+                  phase: 'prepared',
+                  ...prepared,
+                  input: [{ type: 'text', text: userPrompt }],
+                  mode,
+                })
+              },
               onTurn: (identity) => {
                 liveIdentity = identity
                 admissionCursorWrite = cursorStore.save(sid, {
                   ...identity,
-                  afterSequence: 0,
+                  afterSequence: acknowledgedSequence,
                 })
               },
               onSequence: async (sequence) => {
@@ -475,6 +522,12 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           } catch (error) {
             await admissionCursorWrite
             if (error instanceof SessionTurnTerminalError) {
+              await cursorStore.clear(sid)
+            } else if (
+              !liveIdentity &&
+              error instanceof SessionProtocolError &&
+              !error.protocolError.retryable
+            ) {
               await cursorStore.clear(sid)
             }
             throw error
@@ -503,6 +556,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       try {
         await runAgentLoop({
           session,
+          executionIdentity: localExecutionIdentity!,
           client,
           host,
           config,
@@ -732,7 +786,6 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         yield am
         if (event.fatal) return true
       } else if (event.type === 'done') {
-        host.startNewTurn()
         onRunComplete?.(host)
         return true
       } else if (

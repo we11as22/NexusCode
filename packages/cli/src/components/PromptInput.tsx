@@ -86,6 +86,11 @@ type Props = {
   onNexusConfigSaved?: () => void | Promise<void>
   /** When set (Nexus), /undo reverts the last message and file changes. */
   onNexusUndo?: () => Promise<void>
+  /** Inspect, accept, or revert one durable Nexus change set. */
+  onNexusChangeReview?: (
+    action: 'list' | 'accept' | 'revert',
+    selector: string,
+  ) => Promise<void>
   /** When set with onNexusCheckpointRestore, /undo opens a checkpoint menu instead of only last turn. */
   nexusListCheckpoints?: () => Promise<
     Array<{ hash: string; ts: number; description?: string }>
@@ -169,6 +174,7 @@ function PromptInput({
   onToggleNexusAutoApproveAction,
   onNexusConfigSaved,
   onNexusUndo,
+  onNexusChangeReview,
   nexusListCheckpoints,
   onNexusCheckpointRestore,
   onNexusCompact,
@@ -406,6 +412,25 @@ function PromptInput({
     onSubmitCountChange(_ => _ + 1)
 
     const trimmed = finalInput.trim()
+    const changeReviewMatch = trimmed.match(
+      /^\/(changes|accept|revert)(?:\s+(.*))?$/i,
+    )
+    if (changeReviewMatch && onNexusChangeReview) {
+      onInputChange('')
+      addToHistory(trimmed)
+      resetHistory()
+      setIsLoading(true)
+      try {
+        const command = changeReviewMatch[1]!.toLowerCase()
+        await onNexusChangeReview(
+          command === 'changes' ? 'list' : command as 'accept' | 'revert',
+          (changeReviewMatch[2] ?? '').trim(),
+        )
+      } finally {
+        setIsLoading(false)
+      }
+      return
+    }
     if (/^\/undo(\s|$)/i.test(trimmed) && onNexusUndo) {
       onInputChange('')
       addToHistory(trimmed)

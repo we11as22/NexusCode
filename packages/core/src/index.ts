@@ -68,6 +68,7 @@ export { MODES } from "./types.js"
 export type {
   Mode, IHost, ISession, IIndexer, SkillAuthority,
   AgentEvent, ToolDef, ToolResult, ToolContext, ToolIntegrationProvenance,
+  AgentExecutionIdentity, ToolExecutionIdentity,
   SessionMessage, ToolPart, MessagePart, TextPart,
   IndexSearchResult, IndexSearchOptions, IndexStatus, SymbolKind,
   CheckpointEntry, ChangedFile,
@@ -220,7 +221,10 @@ export type {
   StoredContextUsage,
 } from "./session/storage.js"
 export { hadPlanExit, getPlanContentForFollowup } from "./session/plan-followup.js"
-export { createCompaction } from "./session/compaction.js"
+export {
+  compactSessionAndPersist,
+  createCompaction,
+} from "./session/compaction.js"
 
 // Server client (extension + CLI when serverUrl is set)
 export {
@@ -235,6 +239,8 @@ export {
 export type {
   AttachSessionTurnOptions,
   NexusServerClientOptions,
+  RemoteChangeReviewEntry,
+  RemoteChangeReviewSnapshot,
   RunSessionTurnOptions,
   SessionApprovalIdentity,
   SessionTurnIdentity,
@@ -371,6 +377,11 @@ export {
   type NexusRunServices,
 } from "./agent/run-services.js"
 export {
+  assertAgentExecutionIdentity,
+  delegatedAgentExecutionIdentity,
+  toolExecutionIdentity,
+} from "./agent/execution-identity.js"
+export {
   BackgroundProcessSupervisor,
   type BackgroundProcessRecord,
 } from "./agent/background-process-supervisor.js"
@@ -389,6 +400,11 @@ export {
   normalizedAppliedReplacementsFromMetadata,
   type AppliedReplacementSnippet,
 } from "./tools/applied-replacements.js"
+export {
+  buildDurableChangeHunks,
+  exactChangeHunkDiffStats,
+  exactLineDiffStats,
+} from "./tools/file-change-flow.js"
 export { getAllBuiltinTools } from "./tools/built-in/index.js"
 export { interpretShellCommandResult } from "./tools/built-in/shell-command-semantics.js"
 export {
@@ -450,6 +466,11 @@ export {
 } from "./context/tool-output-registry.js"
 export type { ToolSpillRegistryEntry } from "./context/tool-output-registry.js"
 export { loadTeamMemoryMarkdown } from "./context/team-memory.js"
+export { scheduleSessionMemoryRefresh } from "./context/session-memory-scheduler.js"
+export {
+  projectPersistedCompactionSummary,
+  type CompactionProjectionResult,
+} from "./context/compaction-projection.js"
 export {
   importLegacyMemoryFiles,
   type LegacyMemoryImportResult,
@@ -615,4 +636,76 @@ export * from "./protocol/index.js"
 
 // Checkpoint
 export { CheckpointTracker, writeCheckpointEntries, readCheckpointEntries } from "./checkpoint/index.js"
+export {
+  GitCommandExecutionError,
+  GitCommandRunner,
+  GitService,
+  GitStatusParseError,
+  DEFAULT_GIT_DIFF_LIMITS,
+  collectGitDiff,
+  createSanitizedGitEnvironment,
+  parseGitStatusV2,
+  type GitCommandFailureKind,
+  type GitCommandLimits,
+  type GitCommandResult,
+  type GitCommandRunnerOptions,
+  type GitCommandRunnerPort,
+  type GitDiffLimits,
+  type GitDiffRequest,
+  type GitDiffResult,
+  type GitDiffScope,
+  type GitFileDiff,
+  type GitIgnoredStatusEntry,
+  type GitIndexStatus,
+  type GitOmission,
+  type GitOperation,
+  type GitOrdinaryStatusEntry,
+  type GitRenameStatusEntry,
+  type GitServiceOptions,
+  type GitStatusEntry,
+  type GitStatusSnapshot,
+  type GitSubmoduleStatus,
+  type GitUnmergedStatusEntry,
+  type GitUntrackedStatusEntry,
+  type ParsedGitStatus,
+} from "./git/index.js"
+export {
+  assertChangeSetTransition,
+  ChangeSetStorageCorruptionError,
+  ChangeSetStoreConflictError,
+  ChangeSetApprovalError,
+  ChangeSetConflictError,
+  ChangeSetService,
+  FileMutationConflictError,
+  FileChangeSetStore,
+  reapplyRevertedChangeSets,
+  revertEffectiveChangeSetsAfter,
+  hashChangeProposal,
+  hashFileContent,
+  hashWorkspaceIdentity,
+  normalizeChangePath,
+  sameChangeIdentity,
+  type ChangeFileRecord,
+  type CapturedFileState,
+  type ChangeHunk,
+  type ChangeIdentity,
+  type ChangeOmission,
+  type ChangeSetFailure,
+  type ChangeSetBlobPruneResult,
+  type ChangeSetBatchConflict,
+  type ChangeSetBatchRevertResult,
+  type ChangeSetListQuery,
+  type ChangeSetRecord,
+  type ChangeSetState,
+  type ChangeSetStore,
+  type ChangeSetFilePort,
+  type ChangeSetServiceOptions,
+  type ChangeProposalAfterState,
+  type ChangeProposalFile,
+  type CreateChangeProposal,
+  type FileChangeSetStoreOptions,
+  type FileStateRef,
+  type HostFileMutation,
+  type HostFileMutationNext,
+} from "./changes/index.js"
 export type { CheckpointStorageOptions } from "./checkpoint/index.js"

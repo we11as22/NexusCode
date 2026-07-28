@@ -361,7 +361,7 @@ const EXPLORING_CODEBASE = `## Exploring the codebase
 
 const EDITING_FILES_GUIDE = `## Editing Files
 
-Two tools to modify files: **Write** and **Edit**.
+Three tools modify files: **Edit**, **Write**, and **ApplyPatch**.
 
 ### Edit (PREFERRED for existing files)
 - Make targeted exact-string replacements without rewriting the entire file
@@ -377,12 +377,18 @@ Two tools to modify files: **Write** and **Edit**.
 - Use when: new files, complete restructuring, files where >50% changes
 - Must provide complete final content — no partial writes
 
+### ApplyPatch (for one coherent multi-file change)
+- Applies strict Codex-style add/update/delete/move hunks as one reviewable change set
+- Prefer it when the same logical change spans multiple files or includes a rename/delete
+- Include enough unchanged context for every replacement to be unambiguous
+- The whole patch is preflighted before mutation; do not split one atomic refactor into unrelated micro-edits
+
 ### Auto-formatting
 Editor may auto-format files after writing. Tool response includes post-format content — always use that as reference for next edits.`
 
 const MAKING_CODE_CHANGES = `## Making Code Changes
 
-- **Use tools, not text** — When making code changes, NEVER output code to the user unless they explicitly request it. Use the Edit or Write tools to implement changes directly in files.
+- **Use tools, not text** — When making code changes, NEVER output code to the user unless they explicitly request it. Use Edit, Write, or ApplyPatch to implement changes directly in files.
 - **Immediately runnable** — Generated code must be runnable immediately. Add all necessary import statements, dependencies, and endpoint declarations. Do not produce partial code that requires manual completion by the user.
 - **New project from scratch** — If creating a codebase from scratch, include an appropriate dependency file (e.g. \`package.json\`, \`requirements.txt\`) with package versions and a helpful \`README.md\`.
 - **No binary or hash output** — Never output long hashes, binary content, or non-textual code; these are not useful to the user.

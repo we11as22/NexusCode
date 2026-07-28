@@ -36,6 +36,23 @@ async function copyTreeSitterRuntime() {
   })
 }
 
+async function copyCustomToolRuntime() {
+  const packageJson = require.resolve("esbuild-wasm/package.json")
+  const sourceDir = path.dirname(packageJson)
+  const outputDir = path.join(
+    __dirname,
+    "dist",
+    "runtime",
+    "esbuild-wasm",
+  )
+  await fs.rm(outputDir, { recursive: true, force: true })
+  await fs.mkdir(path.dirname(outputDir), { recursive: true })
+  await fs.cp(sourceDir, outputDir, {
+    recursive: true,
+    force: true,
+  })
+}
+
 const ctx = await esbuild.context({
   entryPoints: ["src/extension.ts"],
   bundle: true,
@@ -51,6 +68,10 @@ const ctx = await esbuild.context({
         build.onResolve({ filter: /^@nexuscode\/core$/ }, () => ({
           path: path.join(__dirname, "..", "core", "src", "index.ts"),
         }))
+        build.onResolve({ filter: /^esbuild-wasm$/ }, () => ({
+          path: "./runtime/esbuild-wasm/lib/main.js",
+          external: true,
+        }))
       },
     },
   ],
@@ -65,12 +86,18 @@ const ctx = await esbuild.context({
 })
 
 if (watch) {
-  await copyTreeSitterRuntime()
+  await Promise.all([
+    copyTreeSitterRuntime(),
+    copyCustomToolRuntime(),
+  ])
   await ctx.watch()
   console.log("Watching for changes...")
 } else {
   await ctx.rebuild()
-  await copyTreeSitterRuntime()
+  await Promise.all([
+    copyTreeSitterRuntime(),
+    copyCustomToolRuntime(),
+  ])
   await ctx.dispose()
   console.log("Extension built.")
 }

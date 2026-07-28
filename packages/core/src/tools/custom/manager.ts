@@ -9,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises"
 import path from "node:path"
-import type { Plugin as EsbuildPlugin } from "esbuild"
+import type { Plugin as EsbuildPlugin } from "esbuild-wasm"
 
 import type {
   Mode,
@@ -163,7 +163,7 @@ export class WorkspaceToolContributionManagerClosedError extends Error {
 class CustomToolBundlerUnavailableError extends Error {
   constructor(options?: ErrorOptions) {
     super(
-      "The installed Nexus runtime does not provide the required esbuild bundler",
+      "The installed Nexus runtime does not provide the required cross-platform esbuild-wasm bundler",
       options,
     )
     this.name = "CustomToolBundlerUnavailableError"
@@ -251,9 +251,9 @@ async function compileEntry(
   entryPath: string,
   outputPath: string,
 ): Promise<CompiledModule> {
-  let esbuild: typeof import("esbuild")
+  let esbuild: typeof import("esbuild-wasm")
   try {
-    esbuild = await import("esbuild")
+    esbuild = await import("esbuild-wasm")
   } catch (error) {
     throw new CustomToolBundlerUnavailableError({ cause: error })
   }

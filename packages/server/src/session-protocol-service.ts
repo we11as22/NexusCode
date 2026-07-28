@@ -155,6 +155,13 @@ function mapProtocolError(error: unknown): SessionProtocolError {
             "The session still has accepted or active work; interrupt and drain it before deleting",
           retryable: false,
         })
+      case "queue_full":
+        return new SessionProtocolError({
+          code: "input_too_large",
+          message:
+            "The session input queue is full; wait for an accepted turn to finish",
+          retryable: false,
+        })
     }
   }
   if (error instanceof RuntimeConflictError) {

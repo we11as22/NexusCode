@@ -12,18 +12,23 @@ import {
   assertRemoteHostSelectionSupported,
   assertRemotePresetSupported,
   resumeVsCodeRemoteTurn,
+  type RemotePreparedTurnRecord,
   type VsCodeRemoteCursorRecord,
   type VsCodeRemoteCursorStore,
   type VsCodeRemoteAttachClient,
   type VsCodeRemoteTurnClient,
 } from "./remote-turn.js"
 
-function memoryCursorStore(initial?: VsCodeRemoteCursorRecord): {
+function memoryCursorStore(
+  initial?: VsCodeRemoteCursorRecord,
+  initialPrepared?: RemotePreparedTurnRecord,
+): {
   store: VsCodeRemoteCursorStore
   saves: VsCodeRemoteCursorRecord[]
   clears: string[]
 } {
   let current = initial
+  let prepared = initialPrepared
   const saves: VsCodeRemoteCursorRecord[] = []
   const clears: string[] = []
   return {
@@ -33,12 +38,21 @@ function memoryCursorStore(initial?: VsCodeRemoteCursorRecord): {
       async load() {
         return current
       },
+      async loadPrepared() {
+        return prepared
+      },
       async save(_sessionId, record) {
         current = record
+        prepared = undefined
         saves.push(record)
+      },
+      async savePrepared(_sessionId, record) {
+        current = undefined
+        prepared = record
       },
       async clear(sessionId) {
         current = undefined
+        prepared = undefined
         clears.push(sessionId)
       },
     },
@@ -46,6 +60,60 @@ function memoryCursorStore(initial?: VsCodeRemoteCursorRecord): {
 }
 
 describe("VS Code remote protocol-v2 turn", () => {
+  it("replays a prepared pre-POST outbox before looking for an active turn", async () => {
+    const prepared: RemotePreparedTurnRecord = {
+      version: 1,
+      phase: "prepared",
+      commandId: "command-prepared",
+      inputId: "input-prepared",
+      afterSequence: 6,
+      input: [{ type: "text", text: "recover extension turn" }],
+      mode: "review",
+    }
+    const cursors = memoryCursorStore(undefined, prepared)
+    let receivedPrepared: unknown
+    const client: VsCodeRemoteAttachClient = {
+      async getSessionProtocolSnapshot() {
+        throw new Error("prepared recovery must dispatch first")
+      },
+      async *runSessionTurn(options) {
+        receivedPrepared = options.prepared
+        options.onTurn?.({
+          turnId: "turn-prepared",
+          runId: "run-prepared",
+        })
+      },
+      async *attachSessionTurn() {
+        throw new Error("prepared recovery must not attach another turn")
+      },
+      async interruptSessionTurn() {
+        return false
+      },
+      async resolveSessionApproval() {
+        return
+      },
+    }
+
+    await expect(resumeVsCodeRemoteTurn({
+      client,
+      sessionId: "session-prepared",
+      signal: new AbortController().signal,
+      cursorStore: cursors.store,
+      deliver: () => undefined,
+    })).resolves.toBe(true)
+
+    expect(receivedPrepared).toEqual({
+      commandId: "command-prepared",
+      inputId: "input-prepared",
+      afterSequence: 6,
+    })
+    expect(cursors.saves).toEqual([{
+      turnId: "turn-prepared",
+      runId: "run-prepared",
+      afterSequence: 6,
+    }])
+  })
+
   it("restores a pending approval after restart with exact protocol identity", async () => {
     const resolutions: string[] = []
     let attachedAfterSequence: number | undefined

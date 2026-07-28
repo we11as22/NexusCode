@@ -4,6 +4,7 @@ import {
   LegacyAgentEventSchema,
   Session,
   deriveSessionTitle,
+  hashWorkspaceIdentity,
   loadSession,
   saveSession,
   type AgentEvent,
@@ -282,6 +283,12 @@ export class ServerTurnRunner implements TurnRunner {
     try {
       await this.#execute({
         session,
+        executionIdentity: {
+          workspaceId: hashWorkspaceIdentity(this.#canonicalDirectory),
+          sessionId: context.sessionId,
+          turnId: context.turnId,
+          runId: context.runId,
+        },
         cwd: this.#canonicalDirectory,
         content: textPreview(content),
         mode: context.execution.mode,

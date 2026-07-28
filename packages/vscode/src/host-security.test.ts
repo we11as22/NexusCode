@@ -52,10 +52,22 @@ describe("VS Code host workspace authority wiring", () => {
   it("authorizes language-server input and filters output locations", () => {
     const body = methodBody(
       "async queryLanguageServer(",
-      "async openFileEdit(",
+      "function getLanguageFromExtension(",
     )
     expect(body).toContain("this.resolveWorkspacePath(request.filePath")
     expect(body).toContain("this.isAuthorizedWorkspacePath")
+  })
+
+  it("exposes only the durable CAS file-mutation boundary", () => {
+    expect(
+      methodBody("async readFileState(", "async applyFileMutation("),
+    ).toContain("this.resolveWorkspacePath(filePath)")
+    expect(
+      methodBody("async applyFileMutation(", "async runCommand("),
+    ).toContain("capturedMatchesExpected")
+    expect(hostSource).not.toContain("openFileEdit")
+    expect(hostSource).not.toContain("saveFileEdit")
+    expect(hostSource).not.toContain("revertSavedFileEdit")
   })
 
   it("persists folder grants through the host-owned exact-workspace store", () => {

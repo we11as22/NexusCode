@@ -1,7 +1,12 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
+import { randomUUID } from "node:crypto"
 import { execa } from "execa"
-import { authorizeNetworkRequest as authorizePublicNetworkRequest } from "@nexuscode/core"
+import {
+  authorizeNetworkRequest as authorizePublicNetworkRequest,
+  FileMutationConflictError,
+  hashFileContent,
+} from "@nexuscode/core"
 import type {
   AgentEvent,
   ApprovalAction,
@@ -15,11 +20,32 @@ import type {
   Mode,
   ModeChangeResult,
   PermissionResult,
+  CapturedFileState,
+  HostFileMutation,
 } from "@nexuscode/core"
 import { resolveWorkspaceRoot } from "./security.js"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
+const MAX_CHANGE_FILE_BYTES = 128 * 1_024 * 1_024
+
+function absentFileState(): CapturedFileState {
+  return { exists: false, content: null, mode: null }
+}
+
+function capturedMatchesExpected(
+  captured: CapturedFileState,
+  expected: HostFileMutation["expected"],
+): boolean {
+  if (captured.exists !== expected.exists) return false
+  if (!captured.exists || !expected.exists) return true
+  const digest = hashFileContent(captured.content)
+  return (
+    digest.hash === expected.hash &&
+    digest.byteLength === expected.byteLength &&
+    captured.mode === expected.mode
+  )
+}
 
 /**
  * Server host — runs on the server machine and emits events to the stream.
@@ -108,6 +134,83 @@ export class ServerHost implements IHost {
       )
     }
     return fs.readFile(absPath, "utf8")
+  }
+
+  async readFileState(filePath: string): Promise<CapturedFileState> {
+    const absPath = this.resolve(filePath)
+    this.checkPathSecurity(absPath, "read")
+    let info
+    try {
+      info = await fs.lstat(absPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return absentFileState()
+      }
+      throw error
+    }
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new Error(
+        `Durable file changes require a regular non-symbolic file: ${filePath}`,
+      )
+    }
+    if (info.size > MAX_CHANGE_FILE_BYTES) {
+      throw new Error(
+        `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+      )
+    }
+    const content = await fs.readFile(absPath)
+    if (content.byteLength > MAX_CHANGE_FILE_BYTES) {
+      throw new Error(
+        `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+      )
+    }
+    return {
+      exists: true,
+      content,
+      mode: info.mode & 0o7777,
+    }
+  }
+
+  async applyFileMutation(mutation: HostFileMutation): Promise<void> {
+    const absPath = this.resolve(mutation.path)
+    this.checkPathSecurity(absPath, "write")
+    const current = await this.readFileState(mutation.path)
+    if (!capturedMatchesExpected(current, mutation.expected)) {
+      throw new FileMutationConflictError(mutation.path)
+    }
+    if (!mutation.next.exists) {
+      await fs.unlink(absPath)
+      return
+    }
+    const bytes = Buffer.from(mutation.next.content)
+    if (bytes.byteLength > MAX_CHANGE_FILE_BYTES) {
+      throw new Error(
+        `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+      )
+    }
+    await fs.mkdir(path.dirname(absPath), { recursive: true })
+    const temporary = path.join(
+      path.dirname(absPath),
+      `.${path.basename(absPath)}.${process.pid}.${randomUUID()}.nexus-tmp`,
+    )
+    const mode = mutation.next.mode ?? 0o644
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined
+    try {
+      handle = await fs.open(temporary, "wx", mode)
+      await handle.writeFile(bytes)
+      await handle.sync()
+      await handle.chmod(mode)
+      await handle.close()
+      handle = undefined
+      const rechecked = await this.readFileState(mutation.path)
+      if (!capturedMatchesExpected(rechecked, mutation.expected)) {
+        throw new FileMutationConflictError(mutation.path)
+      }
+      await fs.rename(temporary, absPath)
+    } finally {
+      await handle?.close().catch(() => undefined)
+      await fs.unlink(temporary).catch(() => undefined)
+    }
   }
 
   async writeFile(filePath: string, content: string): Promise<void> {

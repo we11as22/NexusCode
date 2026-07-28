@@ -35,6 +35,9 @@ describe("VS Code workspace run services", () => {
     expect(second).toBe(first)
     expect(second.parallelAgentManager).toBe(first.parallelAgentManager)
     expect(second.backgroundProcesses).toBe(first.backgroundProcesses)
+    expect(second.changeSets?.workspaceId).toMatch(/^[a-f0-9]{64}$/u)
+    expect(second.changeSets?.store).toBeDefined()
+    expect(second.git).toBeDefined()
     await registry.close()
   })
 

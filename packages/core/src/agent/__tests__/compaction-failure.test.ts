@@ -114,6 +114,12 @@ async function runWith(options: {
   const host = options.host ?? createFakeHost({ cwd })
   await runAgentLoop({
     session,
+    executionIdentity: {
+      workspaceId: "test-workspace",
+      sessionId: session.id,
+      turnId: "test-turn",
+      runId: "test-run",
+    },
     client: options.client,
     host,
     config: createTestConfig({

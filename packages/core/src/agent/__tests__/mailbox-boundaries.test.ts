@@ -156,6 +156,12 @@ async function runWithMailbox(input: {
   const rootAbort = new AbortController()
   await runAgentLoop({
     session,
+    executionIdentity: {
+      workspaceId: "test-workspace",
+      sessionId: session.id,
+      turnId: "test-turn",
+      runId: "test-run",
+    },
     client: input.client,
     host: createFakeHost({ cwd }),
     config: createTestConfig({

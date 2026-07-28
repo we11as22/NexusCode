@@ -8,6 +8,10 @@ import type {
   SessionTurnIdentity,
   TurnExecutionSnapshot,
   UserInputPartV2,
+  PreparedSessionTurnIdentity,
+  RemotePreparedTurnRecord,
+  RemoteTurnCursorRecord as CoreRemoteTurnCursorRecord,
+  RemoteTurnRecoveryStore,
 } from '@nexuscode/core'
 import {
   selectActiveTurnResumeCursor,
@@ -55,17 +59,15 @@ export interface RunRemoteCliTurnOptions {
   }
   onTurn?: (identity: SessionTurnIdentity) => void
   onSequence?: (sequence: number) => void | Promise<void>
+  prepared?: PreparedSessionTurnIdentity
+  onCommandPrepared?: (
+    prepared: PreparedSessionTurnIdentity,
+  ) => void | Promise<void>
 }
 
-export interface RemoteTurnCursorRecord extends SessionTurnIdentity {
-  afterSequence: number
-}
-
-export interface RemoteTurnCursorStore {
-  load(sessionId: string): Promise<RemoteTurnCursorRecord | undefined>
-  save(sessionId: string, record: RemoteTurnCursorRecord): Promise<void>
-  clear(sessionId: string): Promise<void>
-}
+export type RemoteTurnCursorRecord = CoreRemoteTurnCursorRecord
+export type RemoteTurnCursorStore = RemoteTurnRecoveryStore
+export type { RemotePreparedTurnRecord }
 
 export interface ResumeRemoteCliTurnOptions {
   client: CliRemoteAttachClient
@@ -321,6 +323,10 @@ export function runRemoteCliTurn(
       input: options.input,
       mode: options.mode,
       ...(options.selection ? { selection: options.selection } : {}),
+      ...(options.prepared ? { prepared: options.prepared } : {}),
+      ...(options.onCommandPrepared
+        ? { onCommandPrepared: options.onCommandPrepared }
+        : {}),
       ...hooks,
     }),
   )
@@ -346,6 +352,72 @@ function isAttachRace(error: unknown, code: 'no_active_turn' | 'turn_conflict') 
 export async function resumeRemoteCliTurn(
   options: ResumeRemoteCliTurnOptions,
 ): Promise<boolean> {
+  const prepared = await options.cursorStore.loadPrepared(options.sessionId)
+  if (prepared) {
+    await options.onActiveExecution?.({
+      mode: prepared.mode,
+      ...(prepared.selection ? { selection: prepared.selection } : {}),
+    })
+    let liveIdentity: SessionTurnIdentity | undefined
+    let acknowledgedSequence = prepared.afterSequence
+    let admissionWrite: Promise<void> = Promise.resolve()
+    try {
+      await runRemoteCliTurn({
+        client: options.client,
+        sessionId: options.sessionId,
+        input: prepared.input,
+        mode: prepared.mode,
+        ...(prepared.selection ? { selection: prepared.selection } : {}),
+        prepared: {
+          commandId: prepared.commandId,
+          inputId: prepared.inputId,
+          afterSequence: prepared.afterSequence,
+        },
+        signal: options.signal,
+        deliver: options.deliver,
+        approvalRef: options.approvalRef,
+        onTurn: (identity) => {
+          liveIdentity = identity
+          admissionWrite = options.cursorStore.save(options.sessionId, {
+            ...identity,
+            afterSequence: acknowledgedSequence,
+          })
+        },
+        onSequence: async (sequence) => {
+          await admissionWrite
+          if (!liveIdentity) {
+            throw new Error(
+              "Remote sequence arrived before recovered turn admission",
+            )
+          }
+          acknowledgedSequence = Math.max(acknowledgedSequence, sequence)
+          await options.cursorStore.save(options.sessionId, {
+            ...liveIdentity,
+            afterSequence: acknowledgedSequence,
+          })
+        },
+      })
+    } catch (error) {
+      await admissionWrite
+      if (
+        error instanceof SessionTurnTerminalError ||
+        (
+          !liveIdentity &&
+          error instanceof SessionProtocolError &&
+          !error.protocolError.retryable
+        )
+      ) {
+        await options.cursorStore.clear(options.sessionId)
+      }
+      throw error
+    }
+    await admissionWrite
+    if (!options.signal.aborted) {
+      await options.cursorStore.clear(options.sessionId)
+    }
+    return true
+  }
+
   for (let attempt = 0; attempt < 2; attempt++) {
     const stored = await options.cursorStore.load(options.sessionId)
     const snapshot = await options.client.getSessionProtocolSnapshot(

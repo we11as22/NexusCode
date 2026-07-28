@@ -100,6 +100,12 @@ describe("doom-loop approval coordination", () => {
 
     await runAgentLoop({
       session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
       client,
       host,
       config: createTestConfig({

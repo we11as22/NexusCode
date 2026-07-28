@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto"
 
 import {
+  FileRemoteTurnRecoveryStore,
+  RemotePreparedTurnRecordSchema,
   canonicalProjectRoot,
   canonicalizeNexusServerBaseUrl,
+} from "@nexuscode/core"
+import type {
+  RemotePreparedTurnRecord,
+  RemoteTurnRecoveryStore,
 } from "@nexuscode/core"
 
 import type {
@@ -25,6 +31,10 @@ interface StoredSelectedSession {
 
 interface StoredRemoteCursor extends VsCodeRemoteCursorRecord {
   version: typeof REMOTE_STATE_VERSION
+  sessionId: string
+}
+
+interface StoredRemotePreparedTurn extends RemotePreparedTurnRecord {
   sessionId: string
 }
 
@@ -75,18 +85,28 @@ export class VsCodeRemoteWorkspaceState
   implements VsCodeRemoteCursorStore
 {
   private readonly namespace: string
+  private readonly recovery?: RemoteTurnRecoveryStore
   private readonly pendingWrites = new Map<string, Promise<void>>()
 
   constructor(
     private readonly memento: WorkspaceMementoLike,
     serverUrl: string,
     cwd: string,
+    recoveryRootDir?: string,
   ) {
-    const authority = [
-      canonicalizeNexusServerBaseUrl(serverUrl),
-      canonicalProjectRoot(cwd),
-    ].join("\0")
+    const canonicalServer = canonicalizeNexusServerBaseUrl(serverUrl)
+    const canonicalWorkspace = canonicalProjectRoot(cwd)
+    const authority = [canonicalServer, canonicalWorkspace].join("\0")
     this.namespace = `nexuscode.remote.v${REMOTE_STATE_VERSION}.${digest(authority)}`
+    if (recoveryRootDir) {
+      this.recovery = new FileRemoteTurnRecoveryStore({
+        rootDir: recoveryRootDir,
+        namespace: JSON.stringify([
+          canonicalServer,
+          canonicalWorkspace,
+        ]),
+      })
+    }
   }
 
   async getSelectedSessionId(): Promise<string | undefined> {
@@ -122,15 +142,59 @@ export class VsCodeRemoteWorkspaceState
     sessionId: string,
   ): Promise<VsCodeRemoteCursorRecord | undefined> {
     if (!isOpaqueId(sessionId)) return undefined
+    if (this.recovery) {
+      const cursor = await this.recovery.load(sessionId)
+      if (cursor) return cursor
+      if (await this.recovery.loadPrepared(sessionId)) return undefined
+    }
     const key = this.cursorKey(sessionId)
     await this.waitForPendingWrite(key)
     const stored = this.memento.get<unknown>(key)
     if (!isStoredRemoteCursor(stored, sessionId)) return undefined
-    return {
+    const cursor = {
       turnId: stored.turnId,
       runId: stored.runId,
       afterSequence: stored.afterSequence,
     }
+    if (this.recovery) {
+      await this.recovery.save(sessionId, cursor)
+      await this.enqueueWrite(key, () =>
+        this.memento.update(key, undefined),
+      )
+    }
+    return cursor
+  }
+
+  async loadPrepared(
+    sessionId: string,
+  ): Promise<RemotePreparedTurnRecord | undefined> {
+    if (!isOpaqueId(sessionId)) return undefined
+    if (this.recovery) {
+      const prepared = await this.recovery.loadPrepared(sessionId)
+      if (prepared) return prepared
+      if (await this.recovery.load(sessionId)) return undefined
+    }
+    const key = this.cursorKey(sessionId)
+    await this.waitForPendingWrite(key)
+    const stored = this.memento.get<unknown>(key)
+    if (
+      !stored ||
+      typeof stored !== "object" ||
+      (stored as { sessionId?: unknown }).sessionId !== sessionId
+    ) {
+      return undefined
+    }
+    const { sessionId: _sessionId, ...candidate } =
+      stored as StoredRemotePreparedTurn
+    const parsed = RemotePreparedTurnRecordSchema.safeParse(candidate)
+    if (!parsed.success) return undefined
+    if (this.recovery) {
+      await this.recovery.savePrepared(sessionId, parsed.data)
+      await this.enqueueWrite(key, () =>
+        this.memento.update(key, undefined),
+      )
+    }
+    return parsed.data
   }
 
   async save(
@@ -146,6 +210,13 @@ export class VsCodeRemoteWorkspaceState
     ) {
       throw new TypeError("Remote turn cursor is invalid")
     }
+    if (this.recovery) {
+      await this.recovery.save(sessionId, record)
+      await this.enqueueWrite(this.cursorKey(sessionId), () =>
+        this.memento.update(this.cursorKey(sessionId), undefined),
+      )
+      return
+    }
     const key = this.cursorKey(sessionId)
     await this.enqueueWrite(key, () =>
       this.memento.update(key, {
@@ -158,8 +229,33 @@ export class VsCodeRemoteWorkspaceState
     )
   }
 
+  async savePrepared(
+    sessionId: string,
+    record: RemotePreparedTurnRecord,
+  ): Promise<void> {
+    if (!isOpaqueId(sessionId)) {
+      throw new TypeError("Remote session id is invalid")
+    }
+    const parsed = RemotePreparedTurnRecordSchema.parse(record)
+    if (this.recovery) {
+      await this.recovery.savePrepared(sessionId, parsed)
+      await this.enqueueWrite(this.cursorKey(sessionId), () =>
+        this.memento.update(this.cursorKey(sessionId), undefined),
+      )
+      return
+    }
+    const key = this.cursorKey(sessionId)
+    await this.enqueueWrite(key, () =>
+      this.memento.update(key, {
+        ...parsed,
+        sessionId,
+      } satisfies StoredRemotePreparedTurn),
+    )
+  }
+
   async clear(sessionId: string): Promise<void> {
     if (!isOpaqueId(sessionId)) return
+    await this.recovery?.clear(sessionId)
     const key = this.cursorKey(sessionId)
     await this.enqueueWrite(key, () =>
       this.memento.update(key, undefined),

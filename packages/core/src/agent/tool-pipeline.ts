@@ -22,6 +22,7 @@ import {
 } from "./tool-execution.js"
 import { resolveToolNameAlias } from "../tools/aliases.js"
 import { isToolDefinitionAllowedInMode } from "./modes.js"
+import { toolExecutionIdentity } from "./execution-identity.js"
 
 export type ToolExecutionOrigin =
   | "native"
@@ -253,6 +254,18 @@ export async function executeToolPipeline(
     host: childHost,
     partId: request.partId,
     toolExecutionMessageId: request.messageId,
+    ...(context.executionIdentityBase
+      ? {
+          executionIdentity: toolExecutionIdentity(
+            context.executionIdentityBase,
+            {
+              messageId: request.messageId,
+              partId: request.partId,
+              toolCallId: request.callId,
+            },
+          ),
+        }
+      : {}),
     async executeNestedTool(nestedRequest) {
       if (
         !Number.isSafeInteger(nestedRequest.ordinal) ||

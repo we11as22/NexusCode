@@ -59,6 +59,12 @@ async function runBlockedLoop() {
 
   await runAgentLoop({
     session,
+    executionIdentity: {
+      workspaceId: "test-workspace",
+      sessionId: session.id,
+      turnId: "test-turn",
+      runId: "test-run",
+    },
     client: llm.value,
     host,
     config: createTestConfig(),
@@ -201,6 +207,12 @@ describe("blocking lifecycle hooks", () => {
 
     await runAgentLoop({
       session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
       client: llm,
       host: createFakeHost({ cwd }),
       config: createTestConfig(),

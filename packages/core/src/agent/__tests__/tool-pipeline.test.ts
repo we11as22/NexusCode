@@ -29,6 +29,12 @@ function createContext(order: string[]): ToolContext {
       permissions: { autoApproveCommand: false },
     }),
     services: createNexusRunServices(),
+    executionIdentityBase: {
+      workspaceId: "workspace-test",
+      sessionId: "session-test",
+      turnId: "turn-test",
+      runId: "run-test",
+    },
     mode: "agent",
     signal: new AbortController().signal,
   }
@@ -47,6 +53,15 @@ describe.each<ToolExecutionOrigin>(["native", "textual", "parallel"])(
         async execute(_args, childContext) {
           expect(childContext.partId).toBe("part_call-1")
           expect(childContext.toolExecutionMessageId).toBe("message-1")
+          expect(childContext.executionIdentity).toEqual({
+            workspaceId: "workspace-test",
+            sessionId: "session-test",
+            turnId: "turn-test",
+            runId: "run-test",
+            messageId: "message-1",
+            partId: "part_call-1",
+            toolCallId: "call-1",
+          })
           return { success: true, output: "ok" }
         },
       }
@@ -100,6 +115,15 @@ it("routes every Parallel inner call through the authoritative pipeline", async 
       expect(args).toEqual({ file_path: "README.md" })
       expect(childContext.partId).toBe("part_outer.parallel.1")
       expect(childContext.toolExecutionMessageId).toBe("message-outer")
+      expect(childContext.executionIdentity).toEqual({
+        workspaceId: "workspace-test",
+        sessionId: "session-test",
+        turnId: "turn-test",
+        runId: "run-test",
+        messageId: "message-outer",
+        partId: "part_outer.parallel.1",
+        toolCallId: "outer.parallel.1",
+      })
       return { success: true, output: "inner-ok" }
     },
   }

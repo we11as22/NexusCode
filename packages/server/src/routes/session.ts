@@ -1,7 +1,12 @@
 import { Hono } from "hono"
 import type { MiddlewareHandler } from "hono"
 import { stream } from "hono/streaming"
-import { Session, deriveSessionTitle, getOrchestrationRuntime } from "@nexuscode/core"
+import {
+  Session,
+  deriveSessionTitle,
+  getOrchestrationRuntime,
+  hashWorkspaceIdentity,
+} from "@nexuscode/core"
 import type { AgentEvent, Mode } from "@nexuscode/core"
 import {
   createSession as fsCreateSession,
@@ -277,6 +282,12 @@ sessionRoutes.post("/:id/message", async (c) => {
         try {
           await runSession({
             session,
+            executionIdentity: {
+              workspaceId: hashWorkspaceIdentity(cwd),
+              sessionId: id,
+              turnId: `turn_${created.id}`,
+              runId: created.id,
+            },
             cwd,
             content,
             mode,

@@ -7,6 +7,10 @@ import type {
   SessionTurnIdentity,
   TurnExecutionSnapshot,
   UserInputPartV2,
+  PreparedSessionTurnIdentity,
+  RemotePreparedTurnRecord,
+  RemoteTurnCursorRecord as CoreRemoteTurnCursorRecord,
+  RemoteTurnRecoveryStore,
 } from "@nexuscode/core"
 import {
   selectActiveTurnResumeCursor,
@@ -26,18 +30,9 @@ export type VsCodeRemoteAttachClient = VsCodeRemoteTurnClient &
     "attachSessionTurn" | "getSessionProtocolSnapshot"
   >
 
-export interface VsCodeRemoteCursorRecord extends SessionTurnIdentity {
-  afterSequence: number
-}
-
-export interface VsCodeRemoteCursorStore {
-  load(sessionId: string): Promise<VsCodeRemoteCursorRecord | undefined>
-  save(
-    sessionId: string,
-    record: VsCodeRemoteCursorRecord,
-  ): Promise<void>
-  clear(sessionId: string): Promise<void>
-}
+export type VsCodeRemoteCursorRecord = CoreRemoteTurnCursorRecord
+export type VsCodeRemoteCursorStore = RemoteTurnRecoveryStore
+export type { RemotePreparedTurnRecord }
 
 interface RemoteApprovalIdentity {
   turnId: string
@@ -62,6 +57,10 @@ export interface RunVsCodeRemoteTurnOptions {
   signal: AbortSignal
   onTurn?: (identity: { turnId: string; runId: string }) => void
   onSequence?: (sequence: number) => void | Promise<void>
+  prepared?: PreparedSessionTurnIdentity
+  onCommandPrepared?: (
+    prepared: PreparedSessionTurnIdentity,
+  ) => void | Promise<void>
 }
 
 export interface AttachVsCodeRemoteTurnOptions {
@@ -186,6 +185,10 @@ export class VsCodeRemoteTurn {
           mode: options.mode,
           ...(this.options.selection
             ? { selection: this.options.selection }
+            : {}),
+          ...(options.prepared ? { prepared: options.prepared } : {}),
+          ...(options.onCommandPrepared
+            ? { onCommandPrepared: options.onCommandPrepared }
             : {}),
           ...hooks,
           onSequence: options.onSequence,
@@ -363,6 +366,85 @@ function isAttachRace(
 export async function resumeVsCodeRemoteTurn(
   options: ResumeVsCodeRemoteTurnOptions,
 ): Promise<boolean> {
+  const prepared = await options.cursorStore.loadPrepared(options.sessionId)
+  if (prepared) {
+    await options.onActiveExecution?.({
+      mode: prepared.mode,
+      ...(prepared.selection ? { selection: prepared.selection } : {}),
+    })
+    let liveIdentity: SessionTurnIdentity | undefined
+    let acknowledgedSequence = prepared.afterSequence
+    let admissionWrite: Promise<void> = Promise.resolve()
+    const turn = new VsCodeRemoteTurn({
+      client: options.client,
+      sessionId: options.sessionId,
+      ...(prepared.selection ? { selection: prepared.selection } : {}),
+    })
+    options.onRemoteTurn?.(turn)
+    try {
+      for await (const event of turn.run({
+        input: prepared.input,
+        mode: prepared.mode,
+        prepared: {
+          commandId: prepared.commandId,
+          inputId: prepared.inputId,
+          afterSequence: prepared.afterSequence,
+        },
+        signal: options.signal,
+        onTurn: (identity) => {
+          liveIdentity = identity
+          admissionWrite = options.cursorStore.save(options.sessionId, {
+            ...identity,
+            afterSequence: acknowledgedSequence,
+          })
+        },
+        onSequence: async (sequence) => {
+          await admissionWrite
+          if (!liveIdentity) {
+            throw new Error(
+              "Remote sequence arrived before recovered turn admission",
+            )
+          }
+          acknowledgedSequence = Math.max(acknowledgedSequence, sequence)
+          await options.cursorStore.save(options.sessionId, {
+            ...liveIdentity,
+            afterSequence: acknowledgedSequence,
+          })
+        },
+      })) {
+        if (
+          event.type === "tool_approval_needed" &&
+          !turn.bindApprovalPart(event.partId)
+        ) {
+          throw new Error(
+            "Remote approval event is missing its protocol approval identity",
+          )
+        }
+        await options.deliver(event, turn)
+      }
+      await admissionWrite
+      if (!options.signal.aborted) {
+        await options.cursorStore.clear(options.sessionId)
+      }
+      return true
+    } catch (error) {
+      await admissionWrite
+      if (
+        error instanceof SessionTurnTerminalError ||
+        (
+          !liveIdentity &&
+          error instanceof SessionProtocolError &&
+          !error.protocolError.retryable
+        )
+      ) {
+        await options.cursorStore.clear(options.sessionId)
+      }
+      throw error
+    } finally {
+      options.onRemoteTurn?.(undefined)
+    }
+  }
+
   for (let attempt = 0; attempt < 2; attempt++) {
     const stored = await options.cursorStore.load(options.sessionId)
     const snapshot = await options.client.getSessionProtocolSnapshot(

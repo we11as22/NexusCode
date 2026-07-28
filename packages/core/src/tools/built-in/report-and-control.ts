@@ -28,7 +28,6 @@ const askQuestionItemSchema = z.object({
   multi_select: z.boolean().optional().describe(
     "When true, the user may pick multiple options; answers are comma-separated. Previews are disallowed in this mode.",
   ),
-  allow_custom: z.boolean().optional().describe("Deprecated — ignored. The UI always adds exactly one “Other/custom” row; do not put Other/custom in options."),
 })
 
 const askSchema = z.object({
@@ -245,4 +244,3 @@ Task states: pending | in_progress | completed | cancelled. Use merge=true to up
     return { success: true, output: "Todo list updated." }
   },
 }
-

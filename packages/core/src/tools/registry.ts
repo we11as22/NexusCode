@@ -128,7 +128,8 @@ export class ToolRegistry {
   /**
    * Get tools for a given mode.
    * Built-in tools for the mode are always included.
-   * Additional MCP/custom tools are returned separately for optional classification.
+   * Additional MCP/custom tools are returned separately for deterministic
+   * deferred discovery.
    */
   getForMode(mode: Mode): { builtin: ToolDef[]; dynamic: ToolDef[] } {
     const builtinNames = new Set(getBuiltinToolsForMode(mode))

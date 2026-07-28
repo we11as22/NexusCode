@@ -71,6 +71,12 @@ async function runWithTools(options: {
   session.addMessage({ role: "user", content: "find and use the requested capability" })
   await runAgentLoop({
     session,
+    executionIdentity: {
+      workspaceId: "test-workspace",
+      sessionId: session.id,
+      turnId: "test-turn",
+      runId: "test-run",
+    },
     client: options.client,
     host: createFakeHost({
       cwd,
@@ -284,6 +290,12 @@ describe("ToolSearch run-local activation", () => {
 
     await runAgentLoop({
       session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
       client,
       host: createFakeHost({ cwd }),
       config: createTestConfig({
@@ -341,7 +353,7 @@ describe("ToolSearch run-local activation", () => {
     }
     let providerCall = 0
     const generateStructured = vi.fn(async () => {
-      throw new Error("legacy classifier must not run")
+      throw new Error("deterministic discovery must not invoke a classifier")
     })
     const client = {
       providerName: "test",
@@ -383,8 +395,6 @@ describe("ToolSearch run-local activation", () => {
       config: createTestConfig({
         memory: { sessionMemoryEnabled: false },
         tools: {
-          classifyToolsEnabled: true,
-          classifyThreshold: 1,
           deferredLoadingMode: "always",
         },
       }),

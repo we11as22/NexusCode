@@ -86,7 +86,13 @@ export interface WebviewState {
   /** True while older messages are being fetched. */
   loadingOlderMessages?: boolean
   /** Session unaccepted edits: path + diffStats for "N Files" panel. */
-  sessionUnacceptedEdits?: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
+  sessionUnacceptedEdits?: Array<{
+    path: string
+    diffStats: { added: number; removed: number }
+    isNewFile?: boolean
+    changeSetId: string
+    changeSetFileCount?: number
+  }>
   pendingQuestionRequest?: {
     requestId: string
     title?: string

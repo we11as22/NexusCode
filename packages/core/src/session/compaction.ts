@@ -1,4 +1,12 @@
-import type { ISession, SessionMessage, ToolPart, MessagePart } from "../types.js"
+import { isDeepStrictEqual } from "node:util"
+
+import type {
+  ISession,
+  MessagePart,
+  NexusConfig,
+  SessionMessage,
+  ToolPart,
+} from "../types.js"
 import type { LLMClient } from "../provider/index.js"
 import { estimateTokens } from "../context/condense.js"
 import {
@@ -6,6 +14,8 @@ import {
   getActiveMessagesAfterLatestSummary,
   getLatestSummaryMessage,
 } from "./active-context.js"
+import { projectPersistedCompactionSummary } from "../context/compaction-projection.js"
+import type { OrchestrationRuntime } from "../orchestration/runtime.js"
 
 // Minimum tokens to bother pruning (aligned with kilocode-style thresholds)
 const PRUNE_MINIMUM = 20_000
@@ -41,6 +51,8 @@ export type CompactionResult =
         | "summarizer_error"
         | "empty_summary"
         | "incomplete_summary"
+        | "history_changed"
+        | "persistence_error"
         | "aborted"
         | "internal_error"
       error: Error
@@ -79,6 +91,61 @@ export function createCompaction(): SessionCompaction {
       return tokenCount >= usable * threshold
     },
   }
+}
+
+/**
+ * Run an explicit user-requested compaction and make the summary durable
+ * before reporting success. UI surfaces must not duplicate the subtly
+ * different force/result/save handling themselves.
+ */
+export async function compactSessionAndPersist(input: {
+  session: ISession
+  client: LLMClient
+  compaction?: SessionCompaction
+  signal?: AbortSignal
+  durableContext?: CompactionDurableContext
+  projection?: {
+    cwd: string
+    config: NexusConfig
+    orchestrationRuntime: OrchestrationRuntime
+  }
+}): Promise<CompactionResult> {
+  const service = input.compaction ?? createCompaction()
+  const result = await service.compact(
+    input.session,
+    input.client,
+    input.signal,
+    {
+      force: true,
+      ...(input.durableContext
+        ? { durableContext: input.durableContext }
+        : {}),
+    },
+  )
+  if (result.status !== "compacted") return result
+  try {
+    await input.session.save()
+  } catch (error) {
+    return {
+      status: "failed",
+      reason: "persistence_error",
+      error: normalizeError(
+        error,
+        "Compaction summary could not be persisted",
+      ),
+    }
+  }
+  if (input.projection) {
+    const projected = await projectPersistedCompactionSummary({
+      session: input.session,
+      summaryMessageId: result.summaryMessageId,
+      ...input.projection,
+    })
+    for (const diagnostic of projected.diagnostics) {
+      console.warn(`[nexus] ${diagnostic}`)
+    }
+  }
+  return result
 }
 
 /**
@@ -202,6 +269,7 @@ async function compactNow(
   }
   const previousSummaryMessage = getLatestSummaryMessage(session.messages)
   const recentMessages = getActiveMessagesAfterLatestSummary(session.messages)
+  const transcriptSnapshot = structuredClone(session.messages)
   if (!opts?.force && !previousSummaryMessage && recentMessages.length < 4) {
     return { status: "skipped", reason: "insufficient_history" }
   }
@@ -344,22 +412,34 @@ ${JSON.stringify(recoveryState)}`
       error: new Error("Compaction summarizer returned an empty summary"),
     }
   }
-  if (!sawFinish && !summaryCapped) {
+  if (!sawFinish) {
     return {
       status: "failed",
       reason: "incomplete_summary",
       error: new Error(
-        "Compaction summarizer stream closed before completion",
+        summaryCapped
+          ? "Compaction summarizer reached the local output cap before completion"
+          : "Compaction summarizer stream closed before completion",
       ),
     }
   }
-  if (summaryCapped) {
-    const marker = "\n\n[summary output capped by Nexus]\n"
-    summaryText =
-      safeSlicePrefix(
-        summaryText,
-        MAX_COMPACTION_SUMMARY_CHARS - marker.length,
-      ) + marker
+
+  // Compaction is a compare-and-swap operation over the conversation. A user
+  // message, mailbox delivery, streamed tool update, rewind, or another host
+  // mutation that lands while the summarizer is running was not represented
+  // in `summaryText`. Appending a summary after it would make that stale
+  // summary the active-context boundary and hide the newer evidence. Kimi
+  // Code v2 applies the same history-safety invariant before committing its
+  // compaction rewrite; Nexus fails closed and leaves the changed transcript
+  // untouched so the caller can retry from a fresh snapshot.
+  if (!isDeepStrictEqual(session.messages, transcriptSnapshot)) {
+    return {
+      status: "failed",
+      reason: "history_changed",
+      error: new Error(
+        "Session history changed during compaction; the stale summary was discarded.",
+      ),
+    }
   }
 
   if (

@@ -8,6 +8,13 @@ import {
   WorkspaceToolContributionManager,
   type ToolContributionSnapshot,
 } from "../tools/custom/manager.js"
+import type { ChangeSetStore } from "../changes/types.js"
+import type { GitService } from "../git/service.js"
+
+export interface WorkspaceChangeSetBinding {
+  readonly workspaceId: string
+  readonly store: ChangeSetStore
+}
 
 export interface NexusRunServices {
   parallelAgentManager: ParallelAgentManager
@@ -25,6 +32,10 @@ export interface NexusRunServices {
   toolContributionSnapshot?: ToolContributionSnapshot
   /** Workspace-owned durable task/team/memory projection. */
   orchestrationRuntime: OrchestrationRuntime
+  /** Workspace-owned durable change metadata/blob repository. */
+  changeSets?: WorkspaceChangeSetBinding
+  /** Workspace-bound, read-only and bounded Git inspection service. */
+  git?: GitService
   /** Root run is 0; incremented for every delegated-agent generation. */
   subagentDepth: number
   /** Current delegated run id; absent for the root run. */
@@ -40,6 +51,8 @@ export function createNexusRunServices(input: {
   toolContributionManager?: WorkspaceToolContributionManager
   toolContributionSnapshot?: ToolContributionSnapshot
   orchestrationRuntime?: OrchestrationRuntime
+  changeSets?: WorkspaceChangeSetBinding
+  git?: GitService
   cwd?: string
   subagentDepth?: number
   subagentId?: string
@@ -67,6 +80,8 @@ export function createNexusRunServices(input: {
       ? { toolContributionSnapshot: input.toolContributionSnapshot }
       : {}),
     orchestrationRuntime,
+    ...(input.changeSets ? { changeSets: input.changeSets } : {}),
+    ...(input.git ? { git: input.git } : {}),
     subagentDepth: input.subagentDepth ?? 0,
     ...(input.subagentId ? { subagentId: input.subagentId } : {}),
   }

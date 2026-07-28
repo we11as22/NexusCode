@@ -205,6 +205,7 @@ export class SessionRuntimeConflictError extends Error {
     | "invalid_phase"
     | "session_deleted"
     | "session_not_idle"
+    | "queue_full"
 
   constructor(
     code: SessionRuntimeConflictError["code"],
@@ -219,4 +220,9 @@ export class SessionRuntimeConflictError extends Error {
 export interface SessionRuntimeRepositoryOptions {
   now?: () => number
   createId?: (kind: "turn" | "run" | "event") => string
+  /**
+   * Maximum accepted inputs which have not yet been promoted into a turn.
+   * Must stay within the protocol snapshot's 1024-identity bound.
+   */
+  maxPendingInputs?: number
 }

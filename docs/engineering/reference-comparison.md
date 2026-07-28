@@ -7,6 +7,11 @@ OpenCode, Claw Code, Kimi Code, Kimi CLI, MiMo Code, and Qwen Code.
 
 This document records implementation evidence, not README claims. The audit followed each capability through configuration, construction, execution, persistence, host rendering, and cleanup where those layers existed.
 
+**Audited revisions:** Codex `61a4488`, OpenClaude `a3dc345`, Kilo Code
+`614c21ee81`, Roo Code `b867ec9`, Cline `dd7a1c5`, OpenCode `7534d23`,
+Claw Code `4ea31c1`, Kimi Code `77618e3`, Kimi CLI `4a550ef`, MiMo Code
+`076b790`, and Qwen Code `3209b89`.
+
 ## Reference order
 
 Codex and OpenClaude are equal primary references, for different reasons:
@@ -31,21 +36,22 @@ Nexus does not copy one project wholesale. It uses one shared TypeScript core fo
 | Agent loop | One authoritative `runAgentLoop` and one tool-execution pipeline | Codex, OpenClaude | Implemented; dead duplicate permission engine removed |
 | Modes | Agent, plan, ask, debug, review with mode-specific tool policy | OpenClaude, Kilo, Roo | Implemented and shared by all hosts |
 | Sessions | Checksummed JSONL transcript plus built-in SQLite transactional coordination, repair, migration, bounded active context | Codex, OpenCode, MiMo | Implemented; JSONL remains portable history while SQLite owns leases, admission, approvals, queues, replay and orchestration |
-| Remote runs | Authenticated NDJSON, durable event replay, sequence reconnect, explicit abort and approval | Codex, OpenCode | Implemented; accepted identity survives queued/active/terminal restart races, resolved approvals do not replay, and failed/expired cursors cannot permanently block the surface |
+| Remote runs | Authenticated NDJSON, durable event replay, sequence reconnect, pre-request client outbox, exact turn identity, explicit abort and approval | Codex, OpenCode, Kimi Code | Implemented; the canonical command is persisted before POST, admission is idempotent, exact terminal replay survives lost responses and queued/active/terminal restart races, and failed/expired cursors cannot permanently block the surface |
 | Permissions | Mode policy, ordered rules, path/command checks, serialized interactive approvals, fail-closed server | Codex, OpenCode, Claw | Implemented at application boundary; privileged plugin and agent-hook actions cannot inherit read auto-approval; OS process sandbox remains a separate gap |
 | Tool lifecycle | Validation, normalization, hooks, timeout/cancel, output spill, durable task events | Codex, Kilo | Implemented |
 | Subagents | Task-first delegated runs, batches, snapshots, resume, worktree isolation, narrowed modes | OpenClaude, Codex, Cline | Implemented; approval requests are serialized across root/delegated hosts and agent-hook paths are confined |
 | Teams/orchestration | Durable tasks, teams, inbox, members, messages, worktrees, remote sessions | OpenClaude | Implemented with checksummed snapshot + journal |
 | Memory | Global/project/session/team and bound task/agent records, markdown import, scrolling memory, relevance retrieval, redaction, access accounting | OpenClaude, Kilo | Implemented; complete eligible scopes are ranked before prompt budgeting and private scopes fail closed |
 | Rules and skills | Managed/user/project cascade, includes, Claude compatibility, deferred skill discovery | OpenClaude, Codex | Implemented; server loading is bounded and fail-soft with visible diagnostics |
-| Plugins | Manifest validation, explicit trust, lifecycle hooks, agents, skills, commands, MCP, install/remove/reload | OpenClaude, OpenCode | Implemented for trusted local plugins; trust/install/remove/manual hook calls require user approval, and one-shot hooks are success-only and session-scoped |
+| Plugins | Manifest validation, explicit trust, lifecycle hooks, agents, skills, commands, MCP, install/remove/reload, isolated custom-tool workers | OpenClaude, OpenCode, Roo | Implemented for trusted local plugins; trust/install/remove/manual hook calls require user approval, one-shot hooks are success-only and session-scoped, and the installed VSIX ships the cross-platform custom-tool compiler instead of depending on a source checkout or platform-native optional binary |
 | MCP | stdio/HTTP/SSE, timeout, pagination, resources, auth handoff, schema normalization, list-change refresh, safe reconnect | Cline, OpenCode | Implemented; dropped transports reconnect without replaying a possibly mutating call |
 | Code intelligence | Tree-sitter symbols, incremental tracking, optional embeddings/Qdrant, LSP in VS Code | Roo, Kilo | Implemented; semantic index is optional and the agent works without it |
-| Checkpoints and change review | Shadow Git capture and host diff surfaces exist; CLI saved-edit CAS and two-phase local undo are implemented | Kimi, Qwen, Codex | Not complete: blanket workspace restore and nested-repository handling are unsafe and must be replaced by path-scoped content ownership |
+| Checkpoints and change review | Durable content-addressed change sets, exact proposal approval, CAS apply/revert/recovery, path-scoped checkpoint restore, bounded Git status/diff, and CLI/server/VS Code review | Codex, Kimi Code, Qwen, MiMo | Implemented; legacy shadow checkpoints without exact message binding are preview-only and no restore path runs blanket reset/clean or renames nested Git metadata |
+| File mutation | Write, Edit, and strict multi-file ApplyPatch share one proposal-first durable mutation flow | Codex, Kilo, Roo, MiMo | Implemented; ApplyPatch validates every exact hunk before one atomic review action, retains binary delete bytes, compensates partial host failures, and identifies grouped multi-file review actions honestly |
 | Terminal | Foreground/background tasks, output/stop lifecycle, integrated VS Code terminal, cancellation | Codex, Cline | Implemented |
 | Providers | Anthropic, OpenAI-compatible, OpenAI, Google, Azure, Bedrock and compatible gateways | Kilo, OpenCode | Implemented with compatibility tests for the AI SDK generation in this repository |
 | Browser | Web search/fetch built in; interactive browser only through a present plugin or MCP tool | Cline | Intentionally external; prompt no longer claims a nonexistent built-in browser |
-| Surface parity | Shared core in CLI, server, and VS Code; host-specific capability adapters | Codex app server, Cline SDK | Substantial parity; VS Code secrets use SecretStorage and the extension is disabled for untrusted workspaces; deep real-host E2E coverage is still weaker than Cline |
+| Surface parity | Shared core in CLI, server, and VS Code; host-specific capability adapters | Codex app server, Cline SDK | Substantial parity; CLI resumes only canonical Nexus sessions, VS Code secrets use SecretStorage, and the extension is disabled for untrusted workspaces; deep real-host E2E coverage is still weaker than Cline |
 
 ## What Nexus took from each implementation
 
@@ -85,14 +91,24 @@ Nexus adopts the useful operational-database boundary without making SQLite the
 canonical conversation format: portable transcript history and transactional
 coordination have different failure and query requirements.
 
+Kilo and Roo also informed the per-file diff projection and extension tool
+metadata. Nexus keeps Codex-style whole-call ownership for a multi-file patch;
+the extension marks those files as one atomic patch instead of implying that a
+single row can be accepted independently.
+
 ### Roo Code
 
 - Tree-sitter language coverage and query assets.
 - Qdrant-backed semantic search with local cache/tracker state.
 - Incremental indexing, ignore handling, failure thresholds, and partial-index policy.
 - Checkpoint and VS Code interaction patterns.
+- Cross-platform `esbuild-wasm` packaging for runtime-provided code tools.
 
-Nexus corrected its production packaging so Tree-sitter WASM and query files are present in the VSIX/build, rather than only working from a source checkout.
+Nexus corrected its production packaging so Tree-sitter WASM/query files and
+the custom-tool compiler are present in the VSIX/build, rather than only
+working from a source checkout. Unlike Roo's direct compiler invocation, the
+Nexus bundler retains an import-resolution policy that rejects paths escaping
+the exact trusted tool tree before worker execution.
 
 ### Cline
 
@@ -103,6 +119,28 @@ Nexus corrected its production packaging so Tree-sitter WASM and query files are
 - A real interactive browser as evidence of what a browser feature requires.
 
 Nexus adopted the lifecycle and UX lessons, but did not pretend WebFetch was equivalent to a browser. Interactive navigation, screenshots, and page actions require an installed browser plugin/MCP capability until a real bundled browser service is implemented.
+
+### Kimi Code and Kimi CLI
+
+- FIFO turn admission with stable client-owned identities.
+- Serialized undo, exact preconditions, and retained terminal results.
+- Step-request queues that deliver user answers at provider boundaries.
+- Tail-preserving compaction and durable transcript fork/truncation behavior.
+
+Nexus uses those invariants in its queued-turn store, pre-request remote
+outbox, mailbox delivery, compaction CAS, and two-phase chat/file rewind.
+
+### MiMo Code and Qwen Code
+
+- MiMo's message/part-bound patch history, server SQLite/WAL ownership, and
+  scoped restore validation.
+- Qwen's writer-lease discipline, fail-closed compaction tiers, complete Git
+  state enumeration, background agents, and permission-rule boundaries.
+
+Nexus uses SQLite only where server concurrency needs transactions and keeps
+local CLI/extension history portable. It does not copy Qwen's intent
+classifier for MCP or skills: deterministic discovery and explicit activation
+are easier to audit and do not hide capabilities behind another model call.
 
 ### OpenCode
 
@@ -137,6 +175,9 @@ SQLite is not a universal prerequisite for a coding agent:
 | Cline | Core/CLI session metadata and discovery; checkpoints remain separate |
 | OpenCode | Operational SQLite/Drizzle database and durable event model |
 | Claw Code | Simple RAG store with linear cosine scan; Qdrant exists as the scale-up path |
+| Kimi Code / Kimi CLI | No SQLite requirement for the core terminal agent; portable session/event files own history |
+| MiMo Code | SQLite/WAL for server-side state and locks; patch history remains explicitly message-bound |
+| Qwen Code | Local operational/session persistence where useful, not a mandatory code-index backend |
 | NexusCode | Built-in SQLite for transactional runtime coordination; checksummed JSONL transcript/audit history; JSON index tracker; optional Qdrant vectors |
 
 Nexus already uses built-in `node:sqlite`, with migrations and integrity-tested
@@ -153,20 +194,25 @@ These are not hidden behind marketing language:
 1. **OS-level command sandbox.** Nexus has path confinement, command policy, approvals, server workspace roots, cancellation, and Docker-only permission bypass checks. It does not yet provide Codex-grade platform sandboxing for every local command.
 2. **Plugin capability isolation.** Plugins require explicit trust and declared paths, but a trusted hook still executes with the host process's OS privileges. Fine-grained capability grants and an isolated runner would improve this.
 3. **Interactive browser.** Cline has a real Chrome/Puppeteer service. Nexus intentionally exposes only WebSearch/WebFetch unless a browser plugin or MCP tool is present.
-4. **Durable client outbox and queue UX.** Server admission and queued identities
-   are durable, and clients no longer attach another active turn after restart.
-   A command must still be persisted before POST to close the lost-response
-   window and provide true exactly-once UI semantics.
-5. **Crash continuation.** Durable events and admitted user input survive a server crash, and interrupted runs are truthfully marked. Provider streams or partially executed tools are not resumed across process death.
-6. **Host-level E2E depth.** Core/server/CLI/VS Code unit and integration tests now exist, but Cline still has broader real-host UI coverage.
-7. **Multi-root IDE semantics.** Indexing supports multiple projects, but every host workflow is not yet proven against complex VS Code multi-root workspaces.
-8. **Change ownership and checkpoint safety.** Per-file VS Code undo and CLI
-   compare-before-write exist, but full checkpoint restore can still destroy
-   unrelated changes. Durable content-addressed change sets and path-scoped
-   restore are required before this capability is complete.
-9. **Complete Git review.** Current read-only Git tools do not yet consistently
-   include untracked, unborn-HEAD, binary, renamed, skipped, and external-helper
-   failure states across both CLI and VS Code.
+4. **Crash continuation.** Durable events, admitted input, exact turn identity,
+   and change recovery survive process restarts. An in-flight provider stream
+   or arbitrary third-party tool cannot be resumed at the exact instruction
+   boundary after process death; it is marked interrupted and safely retried
+   or reviewed.
+5. **Host-level E2E depth.** Core/server/CLI/VS Code unit and integration tests
+   are broad, but real Extension Host UI automation remains shallower than
+   Cline's.
+6. **Multi-root IDE semantics.** Indexing supports multiple projects, but every
+   mutation, checkpoint, terminal, and review workflow is not yet proven
+   against complex VS Code multi-root workspaces.
+7. **Partial multi-file acceptance.** A multi-file ApplyPatch is intentionally
+   one proposal and one approval/revert boundary. The UI identifies that
+   grouping. Selecting only some hunks/files would require a new proposal hash
+   and is not silently emulated.
+8. **Large controller decomposition.** Core policy is already separated from
+   hosts, but the VS Code controller still contains too much UI orchestration.
+   Further extraction should be behavior-preserving and driven by real host
+   tests, not a speculative rewrite.
 
 The first two are the highest-value next architectural milestone. They require a real platform process broker/isolated plugin runner rather than another application-level flag. Browser bundling and SQLite are not prerequisites for reliable coding behavior.
 

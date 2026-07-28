@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   createNexusRunServices,
+  hashWorkspaceIdentity,
   type SessionMessage,
 } from "@nexuscode/core"
 
@@ -151,6 +152,12 @@ describe("ServerTurnRunner", () => {
     })!
     const execute = vi.fn(async (options: RunSessionOptions) => {
       expect(options.services).toBe(services)
+      expect(options.executionIdentity).toEqual({
+        workspaceId: hashWorkspaceIdentity(workspace),
+        sessionId: "session-services",
+        turnId: turn.turnId,
+        runId: turn.runId,
+      })
     })
     const sessionStore = createMemorySessionStore(["session-services"])
     const runner = new ServerTurnRunner({

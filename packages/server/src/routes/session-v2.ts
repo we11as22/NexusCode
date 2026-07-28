@@ -16,12 +16,19 @@ import {
   SessionCommandReceiptSchema,
   SessionProtocolError,
   SessionProtocolSnapshotSchema,
+  ChangeSetService,
+  ChangeSetApprovalError,
+  ChangeSetConflictError,
+  exactChangeHunkDiffStats,
+  exactLineDiffStats,
+  hashWorkspaceIdentity,
   parseSessionCommand,
   type ProtocolError,
   type SessionCommandReceipt,
   type SessionCommandV2,
   type SessionProtocolService,
   type WorkspaceRuntime,
+  type NexusRunServices,
 } from "@nexuscode/core"
 import type { ServerEnv } from "../security.js"
 import {
@@ -31,6 +38,7 @@ import {
   McpPromptRuntimeUnavailableError,
   resolveServerMcpPrompt,
 } from "../mcp-prompt-service.js"
+import { ServerHost } from "../host.js"
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
 const MAX_UTF8_BYTES_PER_CHARACTER = 4
@@ -47,6 +55,10 @@ export const MAX_SESSION_COMMAND_BODY_BYTES =
     MAX_MENTION_PATH_CHARACTERS +
   COMMAND_JSON_OVERHEAD_BYTES
 export const MAX_MCP_PROMPT_RESOLVE_BODY_BYTES = 1024 * 1024
+const MAX_REMOTE_CHANGE_FILES = 200
+const MAX_REMOTE_CHANGE_BLOB_BYTES = 512 * 1024
+const MAX_REMOTE_CHANGE_RESPONSE_BYTES = 1536 * 1024
+const CHANGE_SET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u
 
 export interface SessionV2RuntimeProvider {
   get(directory: string): Promise<WorkspaceRuntime>
@@ -113,6 +125,16 @@ function internalError(): ProtocolError {
 }
 
 function protocolError(error: unknown): ProtocolError {
+  if (
+    error instanceof ChangeSetConflictError ||
+    error instanceof ChangeSetApprovalError
+  ) {
+    return {
+      code: "turn_conflict",
+      message: error.message,
+      retryable: false,
+    }
+  }
   return error instanceof SessionProtocolError
     ? error.protocolError
     : internalError()
@@ -199,6 +221,50 @@ function protocolFor(runtime: WorkspaceRuntime): SessionProtocolService {
     })
   }
   return service
+}
+
+function exactUtf8(bytes: Buffer): string | undefined {
+  const text = bytes.toString("utf8")
+  return Buffer.from(text, "utf8").equals(bytes) ? text : undefined
+}
+
+function changeReviewFor(
+  runtime: WorkspaceRuntime,
+  workspaceRoot: string,
+): {
+  service: ChangeSetService
+  store: NonNullable<NexusRunServices["changeSets"]>["store"]
+} {
+  const services = runtime.services.agentRuns as
+    | NexusRunServices
+    | undefined
+  const binding = services?.changeSets
+  if (!binding) {
+    throw new SessionProtocolError({
+      code: "runtime_unavailable",
+      message: "The workspace runtime does not expose durable changes",
+      retryable: true,
+    })
+  }
+  const workspaceId = hashWorkspaceIdentity(runtime.canonicalDirectory)
+  if (binding.workspaceId !== workspaceId) {
+    throw new Error(
+      "Workspace durable change storage identity is inconsistent",
+    )
+  }
+  const host = new ServerHost(workspaceRoot, () => {})
+  return {
+    store: binding.store,
+    service: new ChangeSetService({
+      workspaceId,
+      store: binding.store,
+      files: {
+        readFileState: (filePath) => host.readFileState(filePath),
+        applyFileMutation: (mutation) =>
+          host.applyFileMutation(mutation),
+      },
+    }),
+  }
 }
 
 export function createSessionV2Routes(options: SessionV2RouteOptions) {
@@ -302,6 +368,199 @@ export function createSessionV2Routes(options: SessionV2RouteOptions) {
       // the additive identities only to clients which opt in explicitly.
       const { pendingTurns: _pendingTurns, ...legacySnapshot } = snapshot
       return context.json(legacySnapshot)
+    } catch (error) {
+      const mapped = protocolError(error)
+      return context.json(protocolResponse(mapped), statusFor(mapped))
+    }
+  })
+
+  routes.get("/:id/changes", async (context) => {
+    const sessionId = context.req.param("id")
+    try {
+      const runtime = await runtimeFor(context, options.runtimes)
+      const protocol = protocolFor(runtime)
+      const snapshot = SessionProtocolSnapshotSchema.parse(
+        await protocol.snapshot(sessionId),
+      )
+      if (snapshot.sessionId !== sessionId) {
+        throw new Error("Runtime returned a snapshot for another session")
+      }
+      const review = changeReviewFor(
+        runtime,
+        context.get("workspaceRoot"),
+      )
+      const recovered = snapshot.activeTurnId
+        ? []
+        : await review.service.recoverInterrupted({ sessionId })
+      const ambiguous = recovered.find(
+        (record) => record.state === "conflicted",
+      )
+      if (ambiguous) {
+        throw new SessionProtocolError({
+          code: "turn_conflict",
+          message:
+            `Interrupted durable change ${ambiguous.id} has ambiguous file state`,
+          retryable: false,
+        })
+      }
+      const records = await review.service.listEffectiveApplied({
+        sessionId,
+      })
+      const totalFileCount = records.reduce(
+        (count, record) => count + record.files.length,
+        0,
+      )
+      let responseBytes = 0
+      let fileCount = 0
+      const changes: Array<{
+        changeSetId: string
+        proposalHash: string
+        path: string
+        operation: string
+        originalContent?: string
+        newContent?: string
+        diffStats: { added: number; removed: number }
+        isNewFile: boolean
+        contentOmitted?: boolean
+      }> = []
+      for (const record of records) {
+        for (const file of record.files) {
+          if (fileCount >= MAX_REMOTE_CHANGE_FILES) break
+          fileCount += 1
+          let originalContent =
+            file.before.exists ? undefined : ""
+          let newContent = file.after.exists ? undefined : ""
+          let contentOmitted = false
+          for (const [side, state] of [
+            ["before", file.before],
+            ["after", file.after],
+          ] as const) {
+            if (!state.exists) continue
+            if (
+              state.byteLength > MAX_REMOTE_CHANGE_BLOB_BYTES ||
+              responseBytes + state.byteLength >
+                MAX_REMOTE_CHANGE_RESPONSE_BYTES
+            ) {
+              contentOmitted = true
+              continue
+            }
+            const bytes = await review.store.getBlob(state.blob)
+            const text = exactUtf8(bytes)
+            if (text === undefined) {
+              contentOmitted = true
+              continue
+            }
+            responseBytes += bytes.byteLength
+            if (side === "before") originalContent = text
+            else newContent = text
+          }
+          const hasBoth =
+            originalContent !== undefined &&
+            newContent !== undefined
+          changes.push({
+            changeSetId: record.id,
+            proposalHash: record.proposalHash,
+            path: file.path,
+            operation: file.operation,
+            ...(originalContent !== undefined
+              ? { originalContent }
+              : {}),
+            ...(newContent !== undefined ? { newContent } : {}),
+            diffStats:
+              file.hunks.length > 0
+                ? exactChangeHunkDiffStats(file.hunks)
+                : hasBoth
+                  ? exactLineDiffStats(originalContent!, newContent!)
+                  : { added: 0, removed: 0 },
+            isNewFile: !file.before.exists,
+            ...(contentOmitted || !hasBoth
+              ? { contentOmitted: true }
+              : {}),
+          })
+        }
+        if (fileCount >= MAX_REMOTE_CHANGE_FILES) break
+      }
+      return context.json({
+        changes,
+        truncated: totalFileCount > MAX_REMOTE_CHANGE_FILES,
+      })
+    } catch (error) {
+      const mapped = protocolError(error)
+      return context.json(protocolResponse(mapped), statusFor(mapped))
+    }
+  })
+
+  routes.post("/:id/changes/:changeId/:action", async (context) => {
+    const sessionId = context.req.param("id")
+    const changeSetId = context.req.param("changeId")
+    const action = context.req.param("action")
+    if (
+      !CHANGE_SET_ID_PATTERN.test(changeSetId) ||
+      (action !== "accept" && action !== "revert")
+    ) {
+      const error = invalidCommand("Invalid durable change action")
+      return context.json(protocolResponse(error), statusFor(error))
+    }
+    try {
+      const runtime = await runtimeFor(context, options.runtimes)
+      const protocol = protocolFor(runtime)
+      const snapshot = SessionProtocolSnapshotSchema.parse(
+        await protocol.snapshot(sessionId),
+      )
+      if (snapshot.activeTurnId) {
+        throw new SessionProtocolError({
+          code: "turn_conflict",
+          message:
+            "Stop the active turn before accepting or reverting changes",
+          retryable: true,
+        })
+      }
+      const review = changeReviewFor(
+        runtime,
+        context.get("workspaceRoot"),
+      )
+      const recovered = await review.service.recoverInterrupted({
+        sessionId,
+      })
+      const ambiguous = recovered.find(
+        (candidate) => candidate.state === "conflicted",
+      )
+      if (ambiguous) {
+        throw new SessionProtocolError({
+          code: "turn_conflict",
+          message:
+            `Interrupted durable change ${ambiguous.id} has ambiguous file state`,
+          retryable: false,
+        })
+      }
+      const record = await review.service.get(changeSetId)
+      if (!record || record.identity.sessionId !== sessionId) {
+        throw new SessionProtocolError({
+          code: "not_found",
+          message: "Durable change set was not found in this session",
+          retryable: false,
+        })
+      }
+      const updated =
+        action === "accept"
+          ? await review.service.accept(changeSetId)
+          : await review.service.revert(changeSetId)
+      const expectedState =
+        action === "accept" ? "accepted" : "reverted"
+      if (updated.state !== expectedState) {
+        throw new SessionProtocolError({
+          code: "turn_conflict",
+          message:
+            `Durable change ${changeSetId} recovered to ` +
+            `${updated.state} instead of ${expectedState}`,
+          retryable: false,
+        })
+      }
+      return context.json({
+        changeSetId: updated.id,
+        proposalHash: updated.proposalHash,
+        state: updated.state,
+      })
     } catch (error) {
       const mapped = protocolError(error)
       return context.json(protocolResponse(mapped), statusFor(mapped))

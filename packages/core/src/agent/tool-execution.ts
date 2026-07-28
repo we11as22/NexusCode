@@ -23,6 +23,7 @@ import { getMessagesForActiveContext } from "../session/active-context.js"
 import { truncateOutput } from "../context/truncate.js"
 import { registerToolOutputSpill } from "../context/tool-output-registry.js"
 import { coerceQuestionOptionRows, splitQuestionOptionListString } from "../tools/user-question-utils.js"
+import { extractApplyPatchPaths } from "../tools/built-in/apply-patch.js"
 import { modeSpecificToolInputError } from "./mode-input-policy.js"
 
 export { modeSpecificToolInputError } from "./mode-input-policy.js"
@@ -33,9 +34,26 @@ const DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND = 5
 export { DOOM_LOOP_THRESHOLD, DOOM_LOOP_THRESHOLD_EXECUTE_COMMAND }
 
 export function extractWriteTargetPath(toolName: string, toolInput: Record<string, unknown>): string | undefined {
+  return extractWriteTargetPaths(toolName, toolInput)[0]
+}
+
+export function extractWriteTargetPaths(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): string[] {
   const pathVal = toolInput["file_path"] ?? toolInput["path"]
-  if (typeof pathVal === "string" && pathVal) return pathVal
-  return undefined
+  if (typeof pathVal === "string" && pathVal) return [pathVal]
+  if (
+    toolName === "ApplyPatch" &&
+    typeof toolInput["patch"] === "string"
+  ) {
+    try {
+      return extractApplyPatchPaths(toolInput["patch"])
+    } catch {
+      return []
+    }
+  }
+  return []
 }
 
 function normalizePathForComparison(cwd: string, rawPath: string): string {
@@ -213,9 +231,8 @@ const TOOL_BOOLEAN_ARG_KEYS: Record<string, readonly string[]> = {
   List: ["recursive"],
   Grep: ["-n", "-i", "multiline"],
   Bash: ["run_in_background", "dangerouslyDisableSandbox"],
-  TodoWrite: ["merge", "allow_custom"],
+  TodoWrite: ["merge"],
   Edit: ["replace_all"],
-  AskFollowupQuestion: ["allow_custom"],
 }
 
 function coerceBooleanFields(input: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
@@ -926,8 +943,12 @@ function inferredToolApproval(
   if (fromPolicy) return fromPolicy
   if (tool.approval) return null
 
-  if (["Write", "Edit"].includes(tool.name)) {
-    const target = (toolInput["file_path"] ?? toolInput["path"]) ?? "file"
+  if (["Write", "Edit", "ApplyPatch"].includes(tool.name)) {
+    const targets = extractWriteTargetPaths(tool.name, toolInput)
+    const target =
+      targets.length > 1
+        ? `${targets.length} files`
+        : targets[0] ?? "file"
     const content =
       typeof toolInput["content"] === "string"
         ? toolInput["content"]
@@ -1169,7 +1190,10 @@ function evaluatePermissionRule(
   let projectMatch: NexusConfig["permissions"]["rules"][number] | null = null
   for (const rule of rules) {
     if (!ruleMatchesTool(rule.tool, toolName)) continue
-    if (rule.pathPattern && !ruleMatchesPath(rule.pathPattern, toolInput)) continue
+    if (
+      rule.pathPattern &&
+      !ruleMatchesPath(rule.pathPattern, toolName, toolInput)
+    ) continue
     if (rule.commandPattern && !ruleMatchesCommand(rule.commandPattern, toolInput)) continue
     if (rule.authority === "project") {
       projectMatch ??= rule
@@ -1195,9 +1219,17 @@ function ruleMatchesTool(pattern: string | undefined, toolName: string): boolean
   return pattern === toolName || toolName.startsWith(pattern + "_")
 }
 
-function ruleMatchesPath(pathPattern: string, toolInput: Record<string, unknown>): boolean {
-  const filePath = (toolInput["file_path"] ?? toolInput["path"]) as string | undefined
-  if (filePath) return matchesGlob(filePath, pathPattern)
+function ruleMatchesPath(
+  pathPattern: string,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): boolean {
+  const filePaths = extractWriteTargetPaths(toolName, toolInput)
+  if (filePaths.length > 0) {
+    return filePaths.some((filePath) =>
+      matchesGlob(filePath, pathPattern),
+    )
+  }
   const skillName = toolInput["name"] as string | undefined
   if (typeof skillName === "string" && skillName.trim()) return matchesGlob(skillName.trim(), pathPattern)
   return false
@@ -1339,6 +1371,13 @@ export async function executeValidatedTool(
     }
   }
 
+  if (mode === "plan" && resolvedToolName === "ApplyPatch") {
+    return {
+      success: false,
+      output:
+        "ApplyPatch is disabled in plan mode. Use Write/Edit only for a plan under .nexus/plans/*.md or .txt.",
+    }
+  }
   if (mode === "plan" && ["Write", "Edit"].includes(resolvedToolName)) {
     const targetPath = extractWriteTargetPath(resolvedToolName, toolInput)
     if (!targetPath) {
@@ -1389,10 +1428,9 @@ export async function executeValidatedTool(
     return { success: false, output: `Access denied by permission rule${ruleReason ? `: ${ruleReason}` : ""}` }
   }
   const useFileEditFlow =
-    (resolvedToolName === "Write" || resolvedToolName === "Edit") &&
-    typeof host.openFileEdit === "function" &&
-    typeof host.saveFileEdit === "function" &&
-    typeof host.revertFileEdit === "function"
+    ["Write", "Edit", "ApplyPatch"].includes(resolvedToolName) &&
+    ctx.changeSetService !== undefined &&
+    ctx.executionIdentity !== undefined
   const fileEditApproval = useFileEditFlow
     ? {
         required:
@@ -1431,10 +1469,17 @@ export async function executeValidatedTool(
     approvalGrantedByRule = true
   }
 
-  const writePath = (toolInput["file_path"] ?? toolInput["path"]) as string | undefined
-  if (ruleResult === null && writePath) {
+  const writePaths = extractWriteTargetPaths(
+    resolvedToolName,
+    toolInput,
+  )
+  const writePath = writePaths[0]
+  if (ruleResult === null && writePaths.length > 0) {
     for (const pattern of config.permissions.denyPatterns) {
-      if (matchesGlob(writePath, pattern)) {
+      const deniedPath = writePaths.find((candidate) =>
+        matchesGlob(candidate, pattern),
+      )
+      if (deniedPath) {
         return { success: false, output: `Access denied: path matches deny pattern "${pattern}"` }
       }
     }

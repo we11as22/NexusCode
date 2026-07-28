@@ -88,10 +88,20 @@ import type { SubAgentState } from '../nexus-subagents.js'
 import { applyCheckpointRestore, type RestoreType } from '../task-restore.js'
 import type { SessionMessage, ToolPart } from '@nexuscode/core'
 import {
+  ChangeSetService,
+  compactSessionAndPersist,
   createLLMClient,
+  exactChangeHunkDiffStats,
+  exactLineDiffStats,
   finalizeConfigCredentials,
   getConfigEnvironment,
 } from '@nexuscode/core'
+import {
+  formatChangeReview,
+  resolveChangeReviewSelection,
+  type CliChangeReviewItem,
+} from '../change-review.js'
+import { CliHost } from '../host.js'
 import {
   Session,
   hadPlanExit,
@@ -142,6 +152,16 @@ function getSessionDiffFromMessages(messages: SessionMessage[] | undefined): Ses
     for (const p of content) {
       if (p.type !== 'tool') continue
       const tp = p as ToolPart
+      if (tp.status === 'completed' && tp.changeFiles?.length) {
+        for (const file of tp.changeFiles) {
+          entries.push({
+            file: file.path,
+            additions: file.diffStats.added,
+            deletions: file.diffStats.removed,
+          })
+        }
+        continue
+      }
       if ((tp.tool === 'Write' || tp.tool === 'Edit') && tp.status === 'completed' && tp.path) {
         entries.push({
           file: tp.path,
@@ -440,6 +460,164 @@ export function REPL({
     [],
   )
 
+  const onNexusChangeReview = useCallback(async (
+    action: 'list' | 'accept' | 'revert',
+    selector: string,
+  ) => {
+    if (!nexusBootstrap) return
+    try {
+      let items: CliChangeReviewItem[]
+      let truncated = false
+      let resolveOne: (
+        item: CliChangeReviewItem,
+        requestedAction: 'accept' | 'revert',
+      ) => Promise<void>
+
+      if (nexusBootstrap.remoteClient) {
+        const snapshot = await nexusBootstrap.remoteClient.getSessionChanges(
+          nexusBootstrap.session.id,
+        )
+        truncated = snapshot.truncated
+        const grouped = new Map<string, CliChangeReviewItem>()
+        for (const change of snapshot.changes) {
+          const current = grouped.get(change.changeSetId)
+          if (current) {
+            grouped.set(change.changeSetId, {
+              ...current,
+              paths: [...current.paths, change.path],
+              added: current.added + change.diffStats.added,
+              removed: current.removed + change.diffStats.removed,
+            })
+          } else {
+            grouped.set(change.changeSetId, {
+              changeSetId: change.changeSetId,
+              proposalHash: change.proposalHash,
+              paths: [change.path],
+              added: change.diffStats.added,
+              removed: change.diffStats.removed,
+            })
+          }
+        }
+        items = [...grouped.values()]
+        resolveOne = async (item, requestedAction) => {
+          const resolved =
+            await nexusBootstrap.remoteClient!.resolveSessionChange(
+              nexusBootstrap.session.id,
+              item.changeSetId,
+              requestedAction,
+            )
+          if (resolved.proposalHash !== item.proposalHash) {
+            throw new Error(
+              "The server resolved a different durable proposal hash.",
+            )
+          }
+        }
+      } else {
+        const binding = nexusBootstrap.services.changeSets
+        if (!binding) {
+          throw new Error("Durable change review is unavailable in this workspace.")
+        }
+        const reviewHost = new CliHost(nexusBootstrap.cwd, () => {})
+        const service = new ChangeSetService({
+          workspaceId: binding.workspaceId,
+          store: binding.store,
+          files: reviewHost,
+        })
+        const recovered = await service.recoverInterrupted({
+          sessionId: nexusBootstrap.session.id,
+        })
+        const ambiguous = recovered.find(
+          (record) => record.state === "conflicted",
+        )
+        if (ambiguous) {
+          throw new Error(
+            `Interrupted change ${ambiguous.id} has ambiguous file state and requires manual review.`,
+          )
+        }
+        const records = await service.listEffectiveApplied({
+          sessionId: nexusBootstrap.session.id,
+        })
+        items = await Promise.all(records.map(async (record) => {
+          let added = 0
+          let removed = 0
+          for (const file of record.files) {
+            let stats = exactChangeHunkDiffStats(file.hunks)
+            if (file.hunks.length === 0) {
+              const beforeBytes = file.before.exists
+                ? await binding.store.getBlob(file.before.blob)
+                : Buffer.alloc(0)
+              const afterBytes = file.after.exists
+                ? await binding.store.getBlob(file.after.blob)
+                : Buffer.alloc(0)
+              const before = beforeBytes.toString('utf8')
+              const after = afterBytes.toString('utf8')
+              if (
+                Buffer.from(before, 'utf8').equals(beforeBytes) &&
+                Buffer.from(after, 'utf8').equals(afterBytes)
+              ) {
+                stats = exactLineDiffStats(before, after)
+              }
+            }
+            added += stats.added
+            removed += stats.removed
+          }
+          return {
+            changeSetId: record.id,
+            proposalHash: record.proposalHash,
+            paths: record.files.map((file) => file.path),
+            added,
+            removed,
+          }
+        }))
+        resolveOne = async (item, requestedAction) => {
+          const resolved = requestedAction === 'accept'
+            ? await service.accept(item.changeSetId)
+            : await service.revert(item.changeSetId)
+          if (resolved.proposalHash !== item.proposalHash) {
+            throw new Error(
+              "The local store resolved a different durable proposal hash.",
+            )
+          }
+          const expectedState =
+            requestedAction === 'accept' ? 'accepted' : 'reverted'
+          if (resolved.state !== expectedState) {
+            throw new Error(
+              `Durable change ${item.changeSetId} recovered to ` +
+              `${resolved.state} instead of ${expectedState}.`,
+            )
+          }
+        }
+      }
+
+      if (action === 'list') {
+        setMessages(prev => [
+          ...prev,
+          createAssistantMessage(formatChangeReview(items, truncated)),
+        ])
+        return
+      }
+      const selected = resolveChangeReviewSelection(items, selector)
+      await resolveOne(selected, action)
+      setMessages(prev => [
+        ...prev,
+        createAssistantMessage(
+          action === 'accept'
+            ? `Accepted ${selected.changeSetId.slice(0, 12)}: ${selected.paths.join(', ')}.`
+            : `Reverted ${selected.changeSetId.slice(0, 12)} and restored the exact prior file state: ${selected.paths.join(', ')}.`,
+        ),
+      ])
+    } catch (error) {
+      setMessages(prev => [
+        ...prev,
+        createAssistantMessage(
+          `Durable change review failed safely: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        ),
+      ])
+    }
+  }, [nexusBootstrap])
+
   /** Revert last assistant turn and file edits (/undo). */
   const onNexusUndo = useCallback(async () => {
     const host = lastNexusHostRef.current
@@ -634,7 +812,10 @@ export function REPL({
       setMessages([
         ...rebuilt,
         createAssistantMessage(
-          `${modeLabel} restored to checkpoint #${checkpointId} (${result.hash.slice(0, 7)}).`,
+          `${modeLabel} restored to checkpoint #${checkpointId} ` +
+          `(${result.hash.slice(0, 7)}). ` +
+          `${result.revertedChangeSets} Nexus-owned change set(s) reverted; ` +
+          "manual, accepted, ignored, and nested-repository changes were preserved.",
         ),
       ])
       return { ok: true }
@@ -680,11 +861,23 @@ export function REPL({
         },
       ) as unknown as typeof config
       const client = createLLMClient(config.model)
-      await nexusBootstrap.compaction.compact(
-        nexusBootstrap.session,
+      const result = await compactSessionAndPersist({
+        session: nexusBootstrap.session,
         client,
-      )
-      await nexusBootstrap.session.save().catch(() => {})
+        compaction: nexusBootstrap.compaction,
+        projection: {
+          cwd: nexusBootstrap.cwd,
+          config,
+          orchestrationRuntime:
+            nexusBootstrap.services.orchestrationRuntime,
+        },
+      })
+      if (result.status === 'failed') throw result.error
+      if (result.status !== 'compacted') {
+        throw new Error(
+          `Compaction did not produce a summary (${result.reason}).`,
+        )
+      }
       setMessages(replMessagesFromSession(nexusBootstrap.session.messages))
       applyNexusBanner({
         type: 'nexus_banner',
@@ -1154,6 +1347,27 @@ export function REPL({
       assignAbortController(null)
       setIsLoading(false)
       return
+    }
+    if (nexusBootstrap?.serverUrl) {
+      try {
+        if (await resumeActiveRemoteTurn()) {
+          setMessages(oldMessages => [
+            ...oldMessages,
+            createAssistantMessage(
+              'Recovered the previous durable remote turn first. Resend the new prompt when you are ready.',
+            ),
+          ])
+          assignAbortController(null)
+          setIsLoading(false)
+          return
+        }
+      } catch {
+        // The recovery path already surfaced the protocol error. Starting a
+        // second command could overwrite a prepared outbox or duplicate work.
+        assignAbortController(null)
+        setIsLoading(false)
+        return
+      }
     }
     setMessages(oldMessages => [...oldMessages, ...newMessages])
 
@@ -1816,6 +2030,9 @@ export function REPL({
                 }
                 onNexusConfigSaved={onNexusConfigSaved}
                 onNexusUndo={nexusBootstrap ? onNexusUndo : undefined}
+                onNexusChangeReview={
+                  nexusBootstrap ? onNexusChangeReview : undefined
+                }
                 nexusListCheckpoints={nexusGetCheckpointList}
                 onNexusCheckpointRestore={
                   nexusBootstrap ? onNexusCheckpointRestore : undefined

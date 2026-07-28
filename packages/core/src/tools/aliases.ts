@@ -13,6 +13,7 @@ const BUILTIN_ALIASES: Readonly<Record<string, string>> = {
   writetofile: "Write",
   editfile: "Edit",
   replaceinfile: "Edit",
+  applypatch: "ApplyPatch",
   executecommand: "Bash",
   runterminalcmd: "Bash",
   grepsearch: "Grep",

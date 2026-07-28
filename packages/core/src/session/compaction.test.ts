@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
 import type { LLMClient } from "../provider/types.js"
 import { createFakeSession } from "../test/fakes.js"
-import { createCompaction } from "./compaction.js"
+import {
+  compactSessionAndPersist,
+  createCompaction,
+} from "./compaction.js"
 
 describe("session compaction recovery state", () => {
   it("appends exact structured mode, task, memory, and artifact references", async () => {
@@ -149,6 +152,99 @@ describe("session compaction recovery state", () => {
       expect(result.reason).toBe("incomplete_summary")
     }
     expect(session.messages).toEqual(before)
+  })
+
+  it("does not install a stale summary when the transcript changes in flight", async () => {
+    const session = createFakeSession()
+    session.addMessage({ role: "user", content: "start" })
+    session.addMessage({ role: "assistant", content: "working" })
+    session.addMessage({ role: "user", content: "continue" })
+    session.addMessage({ role: "assistant", content: "still working" })
+    let release!: () => void
+    let samplingStarted!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const started = new Promise<void>((resolve) => {
+      samplingStarted = resolve
+    })
+    const client = {
+      providerName: "test",
+      modelId: "test",
+      async *stream() {
+        samplingStarted()
+        await gate
+        yield { type: "text_delta" as const, delta: "stale summary" }
+        yield { type: "finish" as const }
+      },
+    } as unknown as LLMClient
+
+    const compacting = createCompaction().compact(
+      session,
+      client,
+      undefined,
+      { force: true },
+    )
+    await started
+    const lateMessage = session.addMessage({
+      role: "user",
+      content: "late correction that was not summarized",
+    })
+    release()
+
+    const result = await compacting
+
+    expect(result.status).toBe("failed")
+    if (result.status === "failed") {
+      expect(result.reason).toBe("history_changed")
+      expect(result.error.message).toMatch(/changed during compaction/i)
+    }
+    expect(session.messages.at(-1)).toEqual(lateMessage)
+    expect(session.messages.some((message) => message.summary)).toBe(false)
+  })
+
+  it("forces and persists an explicit manual compaction", async () => {
+    const session = createFakeSession()
+    session.addMessage({ role: "user", content: "single short turn" })
+    session.save = vi.fn(async () => undefined)
+    const client = {
+      providerName: "test",
+      modelId: "test",
+      async *stream() {
+        yield { type: "text_delta" as const, delta: "durable summary" }
+        yield { type: "finish" as const }
+      },
+    } as unknown as LLMClient
+
+    const result = await compactSessionAndPersist({ session, client })
+
+    expect(result.status).toBe("compacted")
+    expect(session.save).toHaveBeenCalledTimes(1)
+    expect(session.messages.some((message) => message.summary)).toBe(true)
+  })
+
+  it("does not report manual compaction success when persistence fails", async () => {
+    const session = createFakeSession()
+    session.addMessage({ role: "user", content: "single short turn" })
+    session.save = vi.fn(async () => {
+      throw new Error("journal unavailable")
+    })
+    const client = {
+      providerName: "test",
+      modelId: "test",
+      async *stream() {
+        yield { type: "text_delta" as const, delta: "summary" }
+        yield { type: "finish" as const }
+      },
+    } as unknown as LLMClient
+
+    const result = await compactSessionAndPersist({ session, client })
+
+    expect(result.status).toBe("failed")
+    if (result.status === "failed") {
+      expect(result.reason).toBe("persistence_error")
+      expect(result.error.message).toBe("journal unavailable")
+    }
   })
 
   it("shares a queued failure instead of repeating the paid summarizer call", async () => {
@@ -314,12 +410,13 @@ describe("session compaction recovery state", () => {
     ).toHaveLength(1)
   })
 
-  it("bounds a misbehaving summarizer stream", async () => {
+  it("rejects a summary that reaches the local output cap", async () => {
     const session = createFakeSession()
     session.addMessage({ role: "user", content: "start" })
     session.addMessage({ role: "assistant", content: "working" })
     session.addMessage({ role: "user", content: "continue" })
     session.addMessage({ role: "assistant", content: "still working" })
+    const before = structuredClone(session.messages)
     const client = {
       providerName: "test",
       modelId: "test",
@@ -330,14 +427,15 @@ describe("session compaction recovery state", () => {
       },
     } as unknown as LLMClient
 
-    await createCompaction().compact(session, client, undefined, {
+    const result = await createCompaction().compact(session, client, undefined, {
       force: true,
     })
 
-    const summary = session.messages.find((message) => message.summary)
-    expect(typeof summary?.content).toBe("string")
-    expect((summary?.content as string).length).toBeLessThanOrEqual(33_000)
-    expect(summary?.content).toContain("summary output capped")
-    expect(summary?.content).not.toContain("must-not-grow")
+    expect(result.status).toBe("failed")
+    if (result.status === "failed") {
+      expect(result.reason).toBe("incomplete_summary")
+      expect(result.error.message).toMatch(/output cap/i)
+    }
+    expect(session.messages).toEqual(before)
   })
 })

@@ -81,3 +81,7 @@ export {
   createSqliteWorkspaceRuntimeFactory,
   resolveWorkspaceStatePath,
 } from "./sqlite-workspace-runtime.js"
+export {
+  SqliteChangeSetStore,
+  type SqliteChangeSetStoreOptions,
+} from "./sqlite-change-set-store.js"

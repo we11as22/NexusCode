@@ -139,9 +139,6 @@ export function createFakeHost(overrides: Partial<IHost> = {}): FakeHost {
       ? { resolveAtMention: overrides.resolveAtMention }
       : {}),
     ...(overrides.getProblems ? { getProblems: overrides.getProblems } : {}),
-    ...(overrides.restoreCheckpoint
-      ? { restoreCheckpoint: overrides.restoreCheckpoint }
-      : {}),
     ...(overrides.getCheckpointEntries
       ? { getCheckpointEntries: overrides.getCheckpointEntries }
       : {}),
@@ -166,14 +163,11 @@ export function createFakeHost(overrides: Partial<IHost> = {}): FakeHost {
     ...(overrides.requestMcpAuthentication
       ? { requestMcpAuthentication: overrides.requestMcpAuthentication }
       : {}),
-    ...(overrides.openFileEdit
-      ? { openFileEdit: overrides.openFileEdit }
+    ...(overrides.readFileState
+      ? { readFileState: overrides.readFileState }
       : {}),
-    ...(overrides.saveFileEdit
-      ? { saveFileEdit: overrides.saveFileEdit }
-      : {}),
-    ...(overrides.revertFileEdit
-      ? { revertFileEdit: overrides.revertFileEdit }
+    ...(overrides.applyFileMutation
+      ? { applyFileMutation: overrides.applyFileMutation }
       : {}),
   }
 }

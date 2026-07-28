@@ -8,6 +8,8 @@ import {
   ManagedWorkspaceRuntime,
   OrchestrationRuntime,
   getGlobalConfigDir,
+  GitService,
+  hashWorkspaceIdentity,
   scheduleToolOutputMaintenance,
   type TurnEpochSnapshot,
   type TurnRunner,
@@ -25,6 +27,7 @@ import { ServerHost } from "./host.js"
 import { createServerMcpClient } from "./server-capabilities.js"
 import { SessionApprovalBroker } from "./session-approval-broker.js"
 import { SqliteSessionProtocolService } from "./session-protocol-service.js"
+import { SqliteChangeSetStore } from "./sqlite-change-set-store.js"
 
 export interface WorkspaceRunnerFactoryContext {
   readonly canonicalDirectory: string
@@ -114,9 +117,21 @@ export function createSqliteWorkspaceRuntimeFactory(
       const approvals = new SessionApprovalBroker()
       const host = new ServerHost(canonical, () => {})
       const mcpClient = createServerMcpClient(host)
+      const changeWorkspaceId = hashWorkspaceIdentity(canonical)
       const services = createNexusRunServices({
         orchestrationRuntime: new OrchestrationRuntime(canonical),
         mcpClient,
+        changeSets: {
+          workspaceId: changeWorkspaceId,
+          store: new SqliteChangeSetStore(
+            database,
+            changeWorkspaceId,
+            {
+              ...(options.now ? { now: options.now } : {}),
+            },
+          ),
+        },
+        git: new GitService(canonical),
       })
       const toolOutputMaintenance = scheduleToolOutputMaintenance({
         cwd: canonical,

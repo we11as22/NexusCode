@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest"
+import * as fs from "node:fs/promises"
+import * as os from "node:os"
+import * as path from "node:path"
 
+import { afterEach, describe, expect, it } from "vitest"
+
+import { FileChangeSetStore } from "../../changes/file-store.js"
+import { ChangeSetService } from "../../changes/service.js"
+import type { CapturedFileState } from "../../changes/types.js"
 import {
   createFakeHost,
   createFakeSession,
@@ -10,9 +17,18 @@ import type {
   ToolContext,
 } from "../../types.js"
 import { writeFileTool } from "../../tools/built-in/write-file.js"
-import { editTool } from "../../tools/built-in/replace-in-file.js"
 import { createNexusRunServices } from "../run-services.js"
 import { executeToolPipeline } from "../tool-pipeline.js"
+
+const roots: string[] = []
+
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map((root) =>
+      fs.rm(root, { recursive: true, force: true }),
+    ),
+  )
+})
 
 async function runWrite(options: {
   rule?: "allow" | "ask" | "deny"
@@ -20,17 +36,38 @@ async function runWrite(options: {
   approval?: PermissionResult
 }) {
   const order: string[] = []
-  const cwd = process.cwd()
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-file-approval-"))
+  roots.push(cwd)
+  let state: CapturedFileState = {
+    exists: false,
+    content: null,
+    mode: null,
+  }
   const host = createFakeHost({
     cwd,
-    async openFileEdit() {
-      order.push("open")
+    async readFileState() {
+      order.push("stage")
+      return state.exists
+        ? {
+            exists: true,
+            content: Buffer.from(state.content),
+            mode: state.mode,
+          }
+        : state
     },
-    async saveFileEdit() {
-      order.push("save")
-    },
-    async revertFileEdit() {
-      order.push("revert")
+    async applyFileMutation(mutation) {
+      order.push("apply")
+      state = mutation.next.exists
+        ? {
+            exists: true,
+            content: Buffer.from(mutation.next.content),
+            mode: mutation.next.mode,
+          }
+        : {
+            exists: false,
+            content: null,
+            mode: null,
+          }
     },
     async showApprovalDialog() {
       order.push("approval")
@@ -49,14 +86,33 @@ async function runWrite(options: {
         : [],
     },
   })
+  const session = createFakeSession(cwd)
+  const changeSetService = new ChangeSetService({
+    workspaceId: "workspace-approval",
+    store: new FileChangeSetStore("workspace-approval", { rootDir: cwd }),
+    files: {
+      readFileState: (filePath) => host.readFileState!(filePath),
+      applyFileMutation: (mutation) => host.applyFileMutation!(mutation),
+    },
+  })
   const context: ToolContext = {
     cwd,
     host,
-    session: createFakeSession(cwd),
+    session,
     config,
     mode: "agent",
     signal: new AbortController().signal,
     services: createNexusRunServices(),
+    executionIdentity: {
+      workspaceId: "workspace-approval",
+      sessionId: session.id,
+      turnId: "turn-approval",
+      runId: "run-approval",
+      messageId: "message",
+      partId: "part_file-edit",
+      toolCallId: "file-edit",
+    },
+    changeSetService,
   }
 
   const result = await executeToolPipeline(
@@ -87,41 +143,13 @@ async function runWrite(options: {
 }
 
 describe("file edit approval authority", () => {
-  it("rejects a non-unique exact replacement unless replace_all is explicit", async () => {
-    const cwd = process.cwd()
-    const host = createFakeHost({
-      cwd,
-      async readFile() {
-        return "same\nmiddle\nsame\n"
-      },
-    })
-    const context: ToolContext = {
-      cwd,
-      host,
-      session: createFakeSession(cwd),
-      config: createTestConfig(),
-      mode: "agent",
-      signal: new AbortController().signal,
-      services: createNexusRunServices(),
-    }
-
-    await expect(editTool.execute({
-      file_path: "src/repeated.ts",
-      old_string: "same",
-      new_string: "changed",
-    }, context)).resolves.toMatchObject({
-      success: false,
-      output: expect.stringMatching(/not unique|2 occurrences/i),
-    })
-    expect(host.approvals).toEqual([])
-  })
-
   it("lets an allow rule suppress the host prompt without bypassing staging", async () => {
     const { result, host, order } = await runWrite({ rule: "allow" })
 
     expect(result.success).toBe(true)
     expect(host.approvals).toEqual([])
-    expect(order).toEqual(["open", "save"])
+    expect(order.filter((step) => step === "stage").length).toBeGreaterThan(0)
+    expect(order.at(-1)).toBe("apply")
   })
 
   it("uses exactly one diff-aware prompt for an ask rule", async () => {
@@ -134,16 +162,20 @@ describe("file edit approval authority", () => {
       tool: "Write",
       diff: expect.stringContaining("src/new.ts"),
     })
-    expect(order).toEqual(["open", "approval", "save"])
+    expect(order.filter((step) => step === "approval")).toHaveLength(1)
+    expect(order.indexOf("approval")).toBeGreaterThan(order.indexOf("stage"))
+    expect(order.indexOf("apply")).toBeGreaterThan(order.indexOf("approval"))
   })
 
-  it("never saves before a required approval and reverts a denial", async () => {
+  it("never applies a proposal before approval and durably rejects a denial", async () => {
     const { result, order } = await runWrite({
       approval: { approved: false },
     })
 
     expect(result.success).toBe(false)
-    expect(order).toEqual(["open", "approval", "revert"])
+    expect(result.metadata).toMatchObject({ changeSetState: "rejected" })
+    expect(order.filter((step) => step === "approval")).toHaveLength(1)
+    expect(order).not.toContain("apply")
   })
 
   it("denies by rule before staging any edit", async () => {

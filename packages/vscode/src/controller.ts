@@ -23,8 +23,14 @@ import {
   type ApprovalAction,
   type PermissionResult,
   type CheckpointEntry,
+  type ChangeSetRecord,
   type McpServerConfig,
   type ToolContributionDiagnostic,
+  ChangeSetService,
+  exactChangeHunkDiffStats,
+  exactLineDiffStats,
+  reapplyRevertedChangeSets,
+  revertEffectiveChangeSetsAfter,
 } from "@nexuscode/core"
 import {
   patchGlobalConfig,
@@ -46,6 +52,7 @@ import {
   type McpClient,
   resolveBundledMcpServers,
   resolveConfiguredAndPluginMcpServers,
+  compactSessionAndPersist,
   createCompaction,
   createSpawnAgentTool,
   createSpawnAgentOutputTool,
@@ -73,6 +80,7 @@ import {
   getNexusServerTokenSecretKey,
   isLoopbackNexusServerDestination,
   NEXUS_SERVER_TOKEN_SECRET_KEY,
+  SessionProtocolError,
   SessionTurnTerminalError,
   INDEX_FILE_WATCHER_DEBOUNCE_MS,
   canonicalProjectRoot,
@@ -89,6 +97,7 @@ import {
   mergeProviderConfigSafely,
   selectProviderProfile,
   settleRuntimeDependency,
+  hashWorkspaceIdentity,
 } from "@nexuscode/core"
 import {
   VsCodeHost,
@@ -400,7 +409,13 @@ export interface WebviewState {
   /** True while older messages are being fetched. */
   loadingOlderMessages?: boolean
   /** Session unaccepted edits: files changed this session not yet accepted (Undo All / Keep All). */
-  sessionUnacceptedEdits?: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
+  sessionUnacceptedEdits?: Array<{
+    path: string
+    diffStats: { added: number; removed: number }
+    isNewFile?: boolean
+    changeSetId: string
+    changeSetFileCount?: number
+  }>
   pendingQuestionRequest?: UserQuestionRequest | null
   /** Active preset name for the chat (per-message scoping for skills + MCP). */
   activePresetName?: string
@@ -408,16 +423,16 @@ export interface WebviewState {
   autocompleteExtension: AutocompleteExtensionUiState
 }
 
-function simpleDiffStats(originalContent: string, newContent: string): { added: number; removed: number } {
-  const a = originalContent.split(/\r?\n/)
-  const b = newContent.split(/\r?\n/)
-  const setA = new Set(a)
-  const setB = new Set(b)
-  let removed = 0
-  let added = 0
-  for (const line of a) if (!setB.has(line)) removed++
-  for (const line of b) if (!setA.has(line)) added++
-  return { added, removed }
+interface SessionUnacceptedEdit {
+  path: string
+  originalContent: string
+  newContent: string
+  diffStats: { added: number; removed: number }
+  isNewFile: boolean
+  changeSetId: string
+  changeSetFileCount?: number
+  proposalHash?: string
+  contentOmitted?: boolean
 }
 
 function projectToolContributionDiagnostics(
@@ -523,7 +538,9 @@ export class Controller {
     setSecret: async (key: string, value: string) => this.context.secrets.store(key, value),
   }
   /** Session unaccepted edits: full content for revert/diff; cleared on session change. */
-  private sessionUnacceptedEdits: Array<{ path: string; originalContent: string; newContent: string; diffStats: { added: number; removed: number }; isNewFile: boolean }> = []
+  private sessionUnacceptedEdits: SessionUnacceptedEdit[] = []
+  private changeSetReviewSessionId: string | null = null
+  private changeSetReviewRefresh: Promise<void> | null = null
   /** Active host for the running local loop; used for pending write/edit previews before approval. */
   private activeRunHost: VsCodeHost | null = null
   /** Server-stream shadow state: remembers latest SpawnAgent tool so subagent events can attach even before final server snapshot arrives. */
@@ -571,27 +588,6 @@ export class Controller {
     return vscode.Uri.joinPath(workspaceFolder.uri, relativePath)
   }
 
-  private async revertDirtyWorkspaceDocs(cwd: string): Promise<void> {
-    for (const doc of vscode.workspace.textDocuments) {
-      if (doc.uri.scheme !== "file") continue
-      try {
-        this.webviewPathCapabilities.resolveWorkspacePath(
-          cwd,
-          doc.uri.fsPath,
-        )
-      } catch {
-        continue
-      }
-      if (!doc.isDirty) continue
-      try {
-        await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preserveFocus: false })
-        await vscode.commands.executeCommand("workbench.action.files.revert")
-      } catch {
-        // Ignore per-doc revert errors
-      }
-    }
-  }
-
   private async openWorkspaceFile(cwd: string, filePath: string): Promise<void> {
     let authorizedPath: string
     try {
@@ -622,60 +618,6 @@ export class Controller {
         ? message.content
         : (message.content.find((part) => part.type === "text") as { text?: string } | undefined)?.text ?? ""
     return raw.replace(/\s+/g, " ").trim().slice(0, 80) || "User message"
-  }
-
-  private extractUserMessageText(message: SessionMessage): string {
-    if (typeof message.content === "string") {
-      return message.content.replace(/\s+/g, " ").trim()
-    }
-    if (!Array.isArray(message.content)) return ""
-    return message.content
-      .filter((part) => part.type === "text")
-      .map((part) => (part as { text?: string }).text ?? "")
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim()
-  }
-
-  private selectRollbackCheckpointEntry(
-    entries: CheckpointEntry[],
-    messages: SessionMessage[],
-    target: SessionMessage,
-    targetIndex: number
-  ): CheckpointEntry | undefined {
-    if (entries.length === 0) return undefined
-    const reversed = [...entries].reverse()
-    const exact = reversed.find((entry) => entry.messageId === target.id)
-    if (exact) return exact
-
-    const nextUserMessage = messages.slice(targetIndex + 1).find((m) => m.role === "user")
-    const windowUpperTs = nextUserMessage?.ts ?? Number.POSITIVE_INFINITY
-    const forwardInWindow = entries.find((entry) => entry.ts >= target.ts && entry.ts < windowUpperTs)
-    if (forwardInWindow) return forwardInWindow
-
-    const fallbackByTime = reversed.find((entry) => entry.ts <= target.ts)
-    if (fallbackByTime) return fallbackByTime
-
-    // Compatibility fallback: map user-message ordinal to checkpoint ordinal when message ids/timestamps drift.
-    const targetUserOrdinal = messages
-      .slice(0, targetIndex + 1)
-      .filter((m) => m.role === "user")
-      .length
-    if (targetUserOrdinal > 0 && entries[targetUserOrdinal - 1]) {
-      return entries[targetUserOrdinal - 1]
-    }
-
-    // Last fallback: match checkpoint description prefix with target user text.
-    const targetText = this.extractUserMessageText(target)
-    if (targetText) {
-      const normalizedTarget = targetText.slice(0, 80).toLowerCase()
-      const byDescription = reversed.find((entry) =>
-        (entry.description ?? "").toLowerCase().includes(normalizedTarget)
-      )
-      if (byDescription) return byDescription
-    }
-
-    return undefined
   }
 
   /**
@@ -871,11 +813,33 @@ export class Controller {
             ...(Array.isArray(event.appliedReplacements) && event.appliedReplacements.length > 0
               ? { appliedReplacements: event.appliedReplacements }
               : {}),
+            ...(typeof event.metadata?.changeSetId === "string"
+              ? {
+                  changeSetId: event.metadata.changeSetId,
+                  ...(typeof event.metadata.proposalHash === "string"
+                    ? { proposalHash: event.metadata.proposalHash }
+                    : {}),
+                  ...(typeof event.metadata.changeSetState === "string"
+                    ? {
+                        changeSetState:
+                          event.metadata.changeSetState as ToolPart["changeSetState"],
+                      }
+                    : {}),
+                }
+              : {}),
             timeEnd: Date.now(),
           } as ToolPart
         }
         if (isDelegatedAgentParentToolEndClear(event.tool, (event as { input?: Record<string, unknown> }).input)) {
           this.streamLastSpawnAgentPartId = null
+        }
+        if (typeof event.metadata?.changeSetId === "string") {
+          void this.refreshSessionChangeSets(true).catch((error) => {
+            console.warn(
+              "[nexus] Failed to refresh streamed durable changes:",
+              error,
+            )
+          })
         }
         return
       }
@@ -1011,46 +975,83 @@ export class Controller {
     const target = msgs[idx]!
     if (target.role !== "user") return
 
+    const cwd = this.getCwd()
+    const tracker = await this.ensureCheckpointForCurrentSession(this.session.id, cwd, this.config)
+    const entries = tracker?.getEntries() ?? []
+    const checkpointEntry = [...entries]
+      .reverse()
+      .find((entry) => entry.messageId === target.id)
     const choice = await vscode.window.showWarningMessage(
-      "Discard all changes and chat messages up to this checkpoint?",
+      checkpointEntry
+        ? "Rewind chat and revert pending Nexus-owned edits from this message onward? Manual, accepted, ignored, and nested-repository changes will be preserved."
+        : "No exact message-bound workspace checkpoint exists. Rewind chat only?",
       { modal: true },
       "Continue",
       "Cancel"
     )
     if (choice !== "Continue") return
 
-    const cwd = this.getCwd()
-    const tracker = await this.ensureCheckpointForCurrentSession(this.session.id, cwd, this.config)
-    const entries = tracker?.getEntries() ?? []
-    const checkpointEntry = this.selectRollbackCheckpointEntry(entries, msgs, target, idx)
-
-    if (checkpointEntry && tracker) {
-      this.abortController?.abort()
-      this.isRunning = false
+    if (checkpointEntry) {
+      let workspace
       try {
-        await tracker.resetHead(checkpointEntry.hash)
+        workspace = await this.revertNexusChangesAfterCheckpoint(
+          checkpointEntry,
+        )
+        const persisted = await this.persistCheckpointChatRewind({
+          rewind: () => this.session?.rewindBeforeMessageId(target.id),
+          isPersisted: () =>
+            !this.session?.messages.some((message) =>
+              message.id === target.id,
+            ),
+          service: workspace.service,
+          reverted: workspace.reverted,
+        })
+        this.sessionUnacceptedEdits = []
+        this.changeSetReviewSessionId = null
+        await this.refreshSessionChangeSets(true).catch(() => undefined)
+        this.postStateToWebview()
+        vscode.window.showInformationMessage(
+          "NexusCode: Rewound chat and reverted " +
+          `${workspace.reverted.length} pending Nexus-owned change set(s). ` +
+          "Unrelated and accepted changes were preserved." +
+          (persisted.saveReportedError
+            ? " The save call reported an error, but the durable journal confirms the rewind."
+            : ""),
+          { modal: false },
+        )
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        vscode.window.showErrorMessage(`NexusCode: Failed to rollback workspace — ${message}`)
+        vscode.window.showErrorMessage(
+          `NexusCode: Rollback stopped safely — ${message}`,
+        )
         return
       }
-      await this.revertDirtyWorkspaceDocs(cwd)
-      this.session.rewindBeforeMessageId(target.id)
-      this.sessionUnacceptedEdits = []
-      await this.session.save().catch(() => {})
-      this.postStateToWebview()
-      vscode.window.showInformationMessage("NexusCode: Rolled back workspace and chat to before this message.", { modal: false })
       return
     }
 
-    // Fallback for old sessions without message-linked checkpoints.
-    this.session.rewindBeforeMessageId(target.id)
-    await this.session.save().catch(() => {})
-    this.postStateToWebview()
-    vscode.window.showWarningMessage(
-      "NexusCode: No workspace checkpoint found for this message. Chat was rolled back, but files were not changed.",
-      { modal: false }
-    )
+    try {
+      const persisted = await this.persistCheckpointChatRewind({
+        rewind: () => this.session?.rewindBeforeMessageId(target.id),
+        isPersisted: () =>
+          !this.session?.messages.some((message) =>
+            message.id === target.id,
+          ),
+      })
+      this.postStateToWebview()
+      vscode.window.showWarningMessage(
+        "NexusCode: Chat was rewound; workspace files were preserved because no exact message-bound checkpoint existed." +
+        (persisted.saveReportedError
+          ? " The save call reported an error, but the durable journal confirms the rewind."
+          : ""),
+        { modal: false }
+      )
+    } catch (error) {
+      vscode.window.showErrorMessage(
+        `NexusCode: Chat rollback stopped safely — ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
   }
 
   constructor(
@@ -1434,6 +1435,7 @@ export class Controller {
       this.context.workspaceState,
       serverUrl,
       cwd,
+      this.context.globalStorageUri?.fsPath,
     )
     this.remoteWorkspaceStateCache = { serverUrl, cwd, state }
     return state
@@ -1712,6 +1714,14 @@ export class Controller {
     }
     // Prefer live stream snapshot; else persisted session snapshot; else same formula as agent (session + tools; no system until next run).
     const sessionId = this.session.id
+    if (
+      this.changeSetReviewSessionId !== sessionId &&
+      !this.changeSetReviewRefresh
+    ) {
+      void this.refreshSessionChangeSets().catch((error) => {
+        console.warn("[nexus] Failed to load durable change review:", error)
+      })
+    }
     const useLastContext =
       this.lastContextUsage != null && this.lastContextUsage.sessionId === sessionId
     if (!useLastContext && this.lastContextUsage != null) this.lastContextUsage = null
@@ -1784,53 +1794,290 @@ export class Controller {
   }
 
   /** Session unaccepted edits for webview: path + diffStats only. */
-  private getSessionUnacceptedEditsForState(): Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }> {
+  private getSessionUnacceptedEditsForState(): Array<{
+    path: string
+    diffStats: { added: number; removed: number }
+    isNewFile?: boolean
+    changeSetId: string
+    changeSetFileCount?: number
+  }> {
     return this.sessionUnacceptedEdits.map((e) => ({
       path: e.path,
       diffStats: e.diffStats,
       isNewFile: e.isNewFile,
+      changeSetId: e.changeSetId,
+      ...(e.changeSetFileCount && e.changeSetFileCount > 1
+        ? { changeSetFileCount: e.changeSetFileCount }
+        : {}),
     }))
   }
 
-  /** Add an edit to session unaccepted after saveFileEdit (called from host callback). */
-  addSessionUnacceptedEdit(path: string, originalContent: string, newContent: string, isNewFile: boolean): void {
-    const displayPath = path.replace(/\\/g, "/")
-    let key = displayPath
-    try {
-      key = this.normalizePathKey(path, this.getCwd())
-    } catch {
-      // The host already authorized this path. Keep a stable display fallback
-      // if the workspace disappears while the completion event is delivered.
+  private localChangeSetReview(cwd: string): {
+    service: ChangeSetService
+    store: NonNullable<
+      ReturnType<WorkspaceRunServicesRegistry["get"]>["changeSets"]
+    >["store"]
+  } | undefined {
+    if (this.getServerUrl()) return undefined
+    const services = this.workspaceRunServices.get(cwd)
+    const binding = services.changeSets
+    if (!binding) return undefined
+    const expectedWorkspaceId = hashWorkspaceIdentity(
+      canonicalProjectRoot(cwd),
+    )
+    if (binding.workspaceId !== expectedWorkspaceId) {
+      throw new Error(
+        "Workspace change-set storage does not match the active workspace",
+      )
     }
-    const existing = this.sessionUnacceptedEdits.findIndex((edit) => {
-      try {
-        return this.normalizePathKey(edit.path, this.getCwd()) === key
-      } catch {
-        return edit.path.replace(/\\/g, "/") === displayPath
-      }
+    const host = new VsCodeHost(cwd, () => {})
+    return {
+      store: binding.store,
+      service: new ChangeSetService({
+        workspaceId: binding.workspaceId,
+        store: binding.store,
+        files: {
+          readFileState: (filePath) => host.readFileState(filePath),
+          applyFileMutation: (mutation) =>
+            host.applyFileMutation(mutation),
+        },
+      }),
+    }
+  }
+
+  private async revertNexusChangesAfterCheckpoint(
+    entry: CheckpointEntry,
+  ): Promise<{
+    service: ChangeSetService
+    reverted: readonly ChangeSetRecord[]
+  }> {
+    if (!this.session) throw new Error("No active local session")
+    if (!entry.messageId) {
+      throw new Error(
+        "This legacy checkpoint is preview-only because it has no exact message binding.",
+      )
+    }
+    const review = this.localChangeSetReview(this.getCwd())
+    if (!review) {
+      throw new Error("Durable change ownership is unavailable")
+    }
+    const result = await revertEffectiveChangeSetsAfter({
+      service: review.service,
+      sessionId: this.session.id,
+      createdAtOrAfter: entry.ts,
     })
-    if (existing >= 0) {
-      const firstEdit = this.sessionUnacceptedEdits[existing]!
-      this.sessionUnacceptedEdits.splice(existing, 1)
-      if (!firstEdit.isNewFile && firstEdit.originalContent === newContent) {
-        return
+    if (result.status === "conflicted") {
+      throw new Error(
+        "File ownership conflict: " +
+        result.conflicts
+          .map((conflict) =>
+            `${conflict.paths.join(", ") || conflict.changeSetId}: ${conflict.message}`,
+          )
+          .join("; "),
+      )
+    }
+    return {
+      service: review.service,
+      reverted: result.reverted,
+    }
+  }
+
+  private async persistCheckpointChatRewind(input: {
+    rewind: () => void
+    isPersisted: () => boolean
+    service?: ChangeSetService
+    reverted?: readonly ChangeSetRecord[]
+  }): Promise<{ saveReportedError: boolean }> {
+    const session = this.session
+    if (!session) throw new Error("No active local session")
+    const recovery = session.captureRecoverySnapshot()
+    input.rewind()
+    try {
+      await session.save()
+      return { saveReportedError: false }
+    } catch (saveError) {
+      let persisted = false
+      try {
+        persisted = (await session.load()) && input.isPersisted()
+      } catch {
+        persisted = false
       }
-      this.sessionUnacceptedEdits.push({
-        path: firstEdit.path,
-        originalContent: firstEdit.originalContent,
-        newContent,
-        diffStats: simpleDiffStats(firstEdit.originalContent, newContent),
-        isNewFile: firstEdit.isNewFile,
-      })
+      if (persisted) return { saveReportedError: true }
+
+      session.restoreRecoverySnapshot(recovery)
+      const compensation =
+        input.service && (input.reverted?.length ?? 0) > 0
+          ? await reapplyRevertedChangeSets({
+              service: input.service,
+              reverted: input.reverted!,
+            })
+          : { stillReverted: [], conflicts: [] }
+      const compensationDetail =
+        compensation.conflicts.length === 0
+          ? "File changes were returned to their pre-restore state."
+          : "File compensation conflicts: " +
+            compensation.conflicts
+              .map((conflict) =>
+                `${conflict.paths.join(", ") || conflict.changeSetId}: ${conflict.message}`,
+              )
+              .join("; ")
+      throw new Error(
+        "Chat rewind could not be persisted. " +
+        `${compensationDetail} Save error: ${
+          saveError instanceof Error ? saveError.message : String(saveError)
+        }`,
+      )
+    }
+  }
+
+  private async resolveDurableChange(
+    changeSetId: string,
+    action: "accept" | "revert",
+  ): Promise<void> {
+    if (this.isRunning) {
+      throw new Error(
+        "Wait for the active turn to finish before accepting or reverting changes.",
+      )
+    }
+    if (this.getServerUrl()) {
+      const sessionId = this.serverSessionId ?? this.session?.id
+      if (!sessionId) throw new Error("No active server session")
+      await (
+        await this.createServerClient(this.getCwd())
+      ).resolveSessionChange(sessionId, changeSetId, action)
       return
     }
-    this.sessionUnacceptedEdits.push({
-      path: displayPath,
-      originalContent,
-      newContent,
-      diffStats: simpleDiffStats(originalContent, newContent),
-      isNewFile,
+    const review = this.localChangeSetReview(this.getCwd())
+    if (!review) throw new Error("Durable change service is unavailable")
+    const sessionId = this.session?.id
+    if (!sessionId) throw new Error("No active local session")
+    const recovered = await review.service.recoverInterrupted({
+      sessionId,
     })
+    const ambiguous = recovered.find(
+      (record) => record.state === "conflicted",
+    )
+    if (ambiguous) {
+      throw new Error(
+        `Interrupted change ${ambiguous.id} has ambiguous file state and requires manual review.`,
+      )
+    }
+    const resolved =
+      action === "accept"
+        ? await review.service.accept(changeSetId)
+        : await review.service.revert(changeSetId)
+    const expectedState = action === "accept" ? "accepted" : "reverted"
+    if (resolved.state !== expectedState) {
+      throw new Error(
+        `Durable change ${changeSetId} recovered to ` +
+        `${resolved.state} instead of ${expectedState}.`,
+      )
+    }
+  }
+
+  private async refreshSessionChangeSets(force = false): Promise<void> {
+    const session = this.session
+    if (!session) return
+    if (
+      !force &&
+      this.changeSetReviewSessionId === session.id
+    ) {
+      return
+    }
+    if (this.changeSetReviewRefresh) {
+      await this.changeSetReviewRefresh
+      if (!force) return
+    }
+    const sessionId = session.id
+    const cwd = this.getCwd()
+    const refresh = (async () => {
+      if (this.getServerUrl()) {
+        const snapshot = await (
+          await this.createServerClient(cwd)
+        ).getSessionChanges(sessionId)
+        if (this.session?.id !== sessionId || this.getCwd() !== cwd) return
+        const fileCountByChangeSet = new Map<string, number>()
+        for (const change of snapshot.changes) {
+          fileCountByChangeSet.set(
+            change.changeSetId,
+            (fileCountByChangeSet.get(change.changeSetId) ?? 0) + 1,
+          )
+        }
+        this.sessionUnacceptedEdits = snapshot.changes.map((change) => ({
+          path: change.path,
+          originalContent: change.originalContent ?? "",
+          newContent: change.newContent ?? "",
+          diffStats: change.diffStats,
+          isNewFile: change.isNewFile,
+          changeSetId: change.changeSetId,
+          changeSetFileCount:
+            fileCountByChangeSet.get(change.changeSetId) ?? 1,
+          proposalHash: change.proposalHash,
+          ...(change.contentOmitted ? { contentOmitted: true } : {}),
+        }))
+        this.changeSetReviewSessionId = sessionId
+        this.postStateToWebview()
+        return
+      }
+      const review = this.localChangeSetReview(cwd)
+      if (!review) return
+      const recovered = this.isRunning
+        ? []
+        : await review.service.recoverInterrupted({ sessionId })
+      const ambiguous = recovered.find(
+        (record) => record.state === "conflicted",
+      )
+      if (ambiguous) {
+        throw new Error(
+          `Interrupted change ${ambiguous.id} has ambiguous file state and requires manual review.`,
+        )
+      }
+      const records = await review.service.listEffectiveApplied({
+        sessionId,
+      })
+      const durable: SessionUnacceptedEdit[] = []
+      for (const record of records) {
+        for (const file of record.files) {
+          if (
+            file.path === ".nexus/plans" ||
+            file.path.startsWith(".nexus/plans/")
+          ) {
+            continue
+          }
+          const originalContent = file.before.exists
+            ? (await review.store.getBlob(file.before.blob)).toString("utf8")
+            : ""
+          const newContent = file.after.exists
+            ? (await review.store.getBlob(file.after.blob)).toString("utf8")
+            : ""
+          durable.push({
+            path: file.path,
+            originalContent,
+            newContent,
+            diffStats:
+              file.hunks.length > 0
+                ? exactChangeHunkDiffStats(file.hunks)
+                : exactLineDiffStats(originalContent, newContent),
+            isNewFile: !file.before.exists,
+            changeSetId: record.id,
+            changeSetFileCount: record.files.length,
+            proposalHash: record.proposalHash,
+          })
+        }
+      }
+      if (this.session?.id !== sessionId || this.getCwd() !== cwd) return
+      this.sessionUnacceptedEdits = durable
+      this.changeSetReviewSessionId = sessionId
+      this.postStateToWebview()
+    })()
+    this.changeSetReviewRefresh = refresh
+    try {
+      await refresh
+    } finally {
+      if (this.changeSetReviewRefresh === refresh) {
+        this.changeSetReviewRefresh = null
+      }
+    }
   }
 
   /** Push current state to webview (Cline-style postStateToWebview). */
@@ -1940,6 +2187,7 @@ export class Controller {
     }
     this.session = undefined
     this.sessionUnacceptedEdits = []
+    this.changeSetReviewSessionId = null
     this.serverSessionOldestLoadedOffset = undefined
     this.checkpoint = undefined
     this.serverSessionId = undefined
@@ -2328,25 +2576,21 @@ export class Controller {
           }
         })
         if (sessionEdit) {
+          if (sessionEdit.contentOmitted) {
+            vscode.window.showInformationMessage(
+              `NexusCode: The exact diff for ${sessionEdit.path} was omitted because it exceeds the remote review limit.`,
+            )
+            break
+          }
           await showSessionEditDiff(
             cwd,
             authorizedPath,
             sessionEdit.originalContent,
             sessionEdit.newContent,
+            { useWorkspaceAfterFile: false },
           )
         } else {
-          const pending = this.activeRunHost?.getPendingFileEdit(authorizedPath)
-          if (pending) {
-            await showSessionEditDiff(
-              cwd,
-              authorizedPath,
-              pending.originalContent,
-              pending.newContent,
-              { useWorkspaceAfterFile: false },
-            )
-          } else {
-            await this.openWorkspaceFile(cwd, authorizedPath)
-          }
+          await this.openWorkspaceFile(cwd, authorizedPath)
         }
         break
       }
@@ -2366,39 +2610,77 @@ export class Controller {
           }
         })
         if (entry) {
+          if (entry.contentOmitted) {
+            vscode.window.showInformationMessage(
+              `NexusCode: The exact diff for ${entry.path} was omitted because it exceeds the remote review limit.`,
+            )
+            break
+          }
           await showSessionEditDiff(
             cwd,
             key,
             entry.originalContent,
             entry.newContent,
+            { useWorkspaceAfterFile: false },
           )
         }
         break
       }
       case "undoSessionEdits": {
-        const cwd = this.getCwd()
-        const restoreHost = new VsCodeHost(cwd, () => {})
-        const remaining: typeof this.sessionUnacceptedEdits = []
-        for (const e of [...this.sessionUnacceptedEdits]) {
+        const remaining: SessionUnacceptedEdit[] = []
+        const durableIds = [
+          ...new Set(
+            this.sessionUnacceptedEdits.map((edit) => edit.changeSetId),
+          ),
+        ].reverse()
+        for (const changeSetId of durableIds) {
           try {
-            await restoreHost.revertSavedFileEdit(e.path, e)
+            await this.resolveDurableChange(changeSetId, "revert")
           } catch (error) {
-            remaining.push(e)
+            remaining.push(
+              ...this.sessionUnacceptedEdits.filter(
+                (edit) => edit.changeSetId === changeSetId,
+              ),
+            )
             const detail =
               error instanceof Error ? error.message : String(error)
             vscode.window.showErrorMessage(
-              `NexusCode: Could not undo ${e.path} — ${detail}`,
+              `NexusCode: Could not undo change ${changeSetId} — ${detail}`,
             )
           }
         }
         this.sessionUnacceptedEdits = remaining
+        this.changeSetReviewSessionId = null
+        await this.refreshSessionChangeSets(true).catch(() => undefined)
         this.postStateToWebview()
         break
       }
-      case "keepAllSessionEdits":
-        this.sessionUnacceptedEdits = []
+      case "keepAllSessionEdits": {
+        const ids = [
+          ...new Set(
+            this.sessionUnacceptedEdits.map((edit) => edit.changeSetId),
+          ),
+        ]
+        const failedIds = new Set<string>()
+        for (const id of ids) {
+          try {
+            await this.resolveDurableChange(id, "accept")
+          } catch (error) {
+            failedIds.add(id)
+            vscode.window.showErrorMessage(
+              `NexusCode: Could not accept change ${id} — ` +
+              (error instanceof Error ? error.message : String(error)),
+            )
+          }
+        }
+        this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter(
+          (edit) => failedIds.has(edit.changeSetId),
+        )
+        this.changeSetReviewSessionId = null
+        await this.refreshSessionChangeSets(true).catch(() => undefined)
         this.postStateToWebview()
         break
+      }
       case "revertSessionEditFile": {
         const cwd = this.getCwd()
         let key: string
@@ -2416,9 +2698,9 @@ export class Controller {
         })
         if (entry) {
           try {
-            await new VsCodeHost(cwd, () => {}).revertSavedFileEdit(
-              entry.path,
-              entry,
+            await this.resolveDurableChange(
+              entry.changeSetId,
+              "revert",
             )
           } catch (error) {
             const detail =
@@ -2437,6 +2719,8 @@ export class Controller {
               }
             },
           )
+          this.changeSetReviewSessionId = null
+          await this.refreshSessionChangeSets(true).catch(() => undefined)
           this.postStateToWebview()
         }
         break
@@ -2449,6 +2733,27 @@ export class Controller {
         } catch {
           break
         }
+        const entry = this.sessionUnacceptedEdits.find((candidate) => {
+          try {
+            return this.normalizePathKey(candidate.path, cwd) === key
+          } catch {
+            return false
+          }
+        })
+        if (entry) {
+          try {
+            await this.resolveDurableChange(
+              entry.changeSetId,
+              "accept",
+            )
+          } catch (error) {
+            vscode.window.showErrorMessage(
+              `NexusCode: Failed to accept ${entry.path} — ` +
+              (error instanceof Error ? error.message : String(error)),
+            )
+            break
+          }
+        }
         this.sessionUnacceptedEdits = this.sessionUnacceptedEdits.filter(
           (candidate) => {
             try {
@@ -2458,6 +2763,8 @@ export class Controller {
             }
           },
         )
+        this.changeSetReviewSessionId = null
+        await this.refreshSessionChangeSets(true).catch(() => undefined)
         this.postStateToWebview()
         break
       }
@@ -3150,9 +3457,16 @@ export class Controller {
 
     const restoresWorkspace =
       restoreType === "workspace" || restoreType === "taskAndWorkspace"
+    if (restoresWorkspace && !entry.messageId) {
+      vscode.window.showWarningMessage(
+        "NexusCode: This legacy checkpoint is preview-only because it has no exact message binding. Chat-only restore remains available.",
+        { modal: false },
+      )
+      return
+    }
     const confirmation = await vscode.window.showWarningMessage(
       restoresWorkspace
-        ? "Restore this checkpoint? This will discard current workspace changes, including unsaved editor buffers."
+        ? "Restore this checkpoint? Nexus will revert only pending, content-matched Nexus-owned edits after this point. Manual, accepted, ignored, and nested-repository changes will be preserved."
         : "Restore this checkpoint? This will discard chat messages created after it.",
       { modal: true },
       "Restore checkpoint",
@@ -3161,38 +3475,60 @@ export class Controller {
     if (confirmation !== "Restore checkpoint") return
 
     const checkpointTs = entry.ts
-
-    if (restoresWorkspace) {
-      this.abortController?.abort()
-      this.isRunning = false
+    let workspace:
+      | {
+          service: ChangeSetService
+          reverted: readonly ChangeSetRecord[]
+        }
+      | undefined
+    try {
+      if (restoresWorkspace) {
+        workspace = await this.revertNexusChangesAfterCheckpoint(entry)
+      }
+      if (
+        restoreType === "task" ||
+        restoreType === "taskAndWorkspace"
+      ) {
+        await this.persistCheckpointChatRewind({
+          rewind: () =>
+            this.session?.rewindToTimestamp(checkpointTs),
+          isPersisted: () =>
+            this.session?.messages.every((message) =>
+              message.ts <= checkpointTs,
+            ) ?? false,
+          ...(workspace
+            ? {
+                service: workspace.service,
+                reverted: workspace.reverted,
+              }
+            : {}),
+        })
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      vscode.window.showErrorMessage(
+        `NexusCode: Failed to restore checkpoint safely — ${message}`,
+      )
+      return
     }
 
     if (restoresWorkspace) {
       try {
-        await tracker.resetHead(hash)
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        vscode.window.showErrorMessage(`NexusCode: Failed to restore checkpoint — ${message}`)
-        return
+        this.sessionUnacceptedEdits = []
+        this.changeSetReviewSessionId = null
+        await this.refreshSessionChangeSets(true)
+      } catch {
+        // The durable store remains authoritative; the next state refresh can
+        // retry without changing any files.
       }
-    }
-
-    if ((restoreType === "task" || restoreType === "taskAndWorkspace") && this.session) {
-      this.session.rewindToTimestamp(checkpointTs)
-      await this.session.save().catch(() => {})
-    }
-
-    if (restoresWorkspace) {
-      await this.revertDirtyWorkspaceDocs(cwd)
-      this.sessionUnacceptedEdits = []
     }
 
     const msg =
       restoreType === "task"
         ? "Chat restored to checkpoint."
         : restoreType === "workspace"
-          ? "Workspace files restored to checkpoint."
-          : "Workspace and chat restored to checkpoint."
+          ? `Reverted ${workspace?.reverted.length ?? 0} pending Nexus-owned change set(s); unrelated changes were preserved.`
+          : `Chat restored and ${workspace?.reverted.length ?? 0} pending Nexus-owned change set(s) reverted; unrelated changes were preserved.`
     vscode.window.showInformationMessage(`NexusCode: ${msg}`, { modal: false })
     this.postStateToWebview()
   }
@@ -3819,6 +4155,7 @@ Return in this format:
       this.setServerConnectionState("connecting")
       let remoteTurn: VsCodeRemoteTurn | undefined
       let remoteAdmitted = false
+      let remotePrepared = false
       try {
         const client =
           remoteClientForRun ?? await this.createServerClient(cwd)
@@ -3852,6 +4189,20 @@ Return in this format:
             input: remoteInput,
             mode: runMode,
             signal: this.abortController!.signal,
+            onCommandPrepared: async (prepared) => {
+              acknowledgedSequence = Math.max(
+                acknowledgedSequence,
+                prepared.afterSequence,
+              )
+              await remoteState.savePrepared(sid, {
+                version: 1,
+                phase: "prepared",
+                ...prepared,
+                input: remoteInput,
+                mode: runMode,
+              })
+              remotePrepared = true
+            },
             onTurn: (identity) => {
               liveIdentity = identity
               remoteAdmitted = true
@@ -3865,7 +4216,7 @@ Return in this format:
               }
               admissionCursorWrite = remoteState.save(sid, {
                 ...identity,
-                afterSequence: 0,
+                afterSequence: acknowledgedSequence,
               })
             },
             onSequence: async (sequence) => {
@@ -3900,6 +4251,13 @@ Return in this format:
           await admissionCursorWrite
           if (error instanceof SessionTurnTerminalError) {
             await remoteState.clear(sid)
+          } else if (
+            !liveIdentity &&
+            error instanceof SessionProtocolError &&
+            !error.protocolError.retryable
+          ) {
+            await remoteState.clear(sid)
+            remotePrepared = false
           }
           throw error
         }
@@ -3911,7 +4269,7 @@ Return in this format:
           () => undefined,
         )
       } catch (err) {
-        if (!remoteAdmitted) {
+        if (!remoteAdmitted && !remotePrepared) {
           this.session?.rewindBeforeMessageId(userMessage.id)
         }
         const msg = err instanceof Error ? err.message : String(err)
@@ -3970,6 +4328,14 @@ Return in this format:
         if (isDelegatedAgentParentToolEndClear(event.tool, (event as { input?: Record<string, unknown> }).input)) {
           this.streamLastSpawnAgentPartId = null
         }
+        if (typeof event.metadata?.changeSetId === "string") {
+          void this.refreshSessionChangeSets(true).catch((error) => {
+            console.warn(
+              "[nexus] Failed to refresh durable change review:",
+              error,
+            )
+          })
+        }
       } else if (
         event.type === "subagent_start" ||
         event.type === "subagent_tool_start" ||
@@ -4016,14 +4382,6 @@ Return in this format:
       this.postStateToWebview()
     }, onWorkingDirectoryChangeRequested: async (nextCwd) => {
       await this.applyHostWorkingDirectoryChange(nextCwd)
-    }, onSessionEditSaved: (filePath, originalContent, newContent, isNewFile) => {
-      const norm = filePath.replace(/\\/g, "/")
-      if (norm.includes(".nexus/plans")) {
-        this.postStateToWebview()
-        return
-      }
-      this.addSessionUnacceptedEdit(filePath, originalContent, newContent, isNewFile)
-      this.postStateToWebview()
     } })
     this.activeRunHost = host
 
@@ -4173,6 +4531,14 @@ Return in this format:
       }
       await runAgentLoop({
         session: this.session,
+        executionIdentity: {
+          workspaceId: hashWorkspaceIdentity(
+            await fsPromises.realpath(cwd).catch(() => path.resolve(cwd)),
+          ),
+          sessionId: this.session.id,
+          turnId: `turn_${durableEventSink.runId}`,
+          runId: durableEventSink.runId,
+        },
         client,
         host,
         config: configForRun,
@@ -4463,6 +4829,12 @@ Return in this format:
   }
 
   private async compactHistory(): Promise<void> {
+    if (this.isRunning) {
+      vscode.window.showInformationMessage(
+        "NexusCode: Wait for the active turn to finish before compacting.",
+      )
+      return
+    }
     if (this.configurationError) {
       this.postMessageToWebview({
         type: "agentEvent",
@@ -4507,10 +4879,55 @@ Return in this format:
     ) as unknown as NexusConfig
     const client = createLLMClient(runtime.model)
     const compaction = createCompaction()
+    const abortController = new AbortController()
+    this.abortController = abortController
+    this.isRunning = true
     this.postMessageToWebview({ type: "agentEvent", event: { type: "compaction_start" } })
+    this.postStateToWebview()
     try {
-      await compaction.compact(this.session, client)
+      const result = await compactSessionAndPersist({
+        session: this.session,
+        client,
+        compaction,
+        signal: abortController.signal,
+        durableContext: {
+          mode: this.mode,
+          memoryCitations: [],
+          taskIds: [],
+        },
+        projection: {
+          cwd: this.getCwd(),
+          config: runtime,
+          orchestrationRuntime:
+            this.workspaceRunServices.get(this.getCwd())
+              .orchestrationRuntime,
+        },
+      })
+      if (result.status === "failed") throw result.error
+      if (result.status !== "compacted") {
+        throw new Error(
+          `Compaction did not produce a summary (${result.reason}).`,
+        )
+      }
+      vscode.window.showInformationMessage(
+        "NexusCode: Conversation compacted and saved.",
+      )
+    } catch (error) {
+      this.postMessageToWebview({
+        type: "agentEvent",
+        event: {
+          type: "error",
+          error: `Compaction failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          fatal: false,
+        },
+      })
     } finally {
+      if (this.abortController === abortController) {
+        this.abortController = undefined
+      }
+      this.isRunning = false
       this.postMessageToWebview({ type: "agentEvent", event: { type: "compaction_end" } })
       this.postStateToWebview()
     }
@@ -4694,6 +5111,7 @@ Return in this format:
     if (loaded) {
       this.session = loaded
       this.sessionUnacceptedEdits = []
+      this.changeSetReviewSessionId = null
       this.serverSessionId = undefined
       this.serverSessionOldestLoadedOffset = offset
       this.localSessionWindowed = offset > 0
@@ -4731,6 +5149,7 @@ Return in this format:
       this.serverSessionId = undefined
     }
     this.sessionUnacceptedEdits = []
+    this.changeSetReviewSessionId = null
     this.serverSessionOldestLoadedOffset = undefined
     this.localSessionWindowed = false
     this.pendingQuestionRequest = null

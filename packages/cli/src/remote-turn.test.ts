@@ -15,6 +15,7 @@ import {
   runRemoteCliTurn,
   type CliRemoteAttachClient,
   type CliRemoteTurnClient,
+  type RemotePreparedTurnRecord,
   type RemoteTurnCursorRecord,
   type RemoteTurnCursorStore,
 } from "./remote-turn.js"
@@ -31,12 +32,16 @@ function approvalEvent(partId = "part-visible"): AgentEvent {
   }
 }
 
-function memoryCursorStore(initial?: RemoteTurnCursorRecord): {
+function memoryCursorStore(
+  initial?: RemoteTurnCursorRecord,
+  initialPrepared?: RemotePreparedTurnRecord,
+): {
   store: RemoteTurnCursorStore
   saves: RemoteTurnCursorRecord[]
   clears: string[]
 } {
   let current = initial
+  let prepared = initialPrepared
   const saves: RemoteTurnCursorRecord[] = []
   const clears: string[] = []
   return {
@@ -46,12 +51,21 @@ function memoryCursorStore(initial?: RemoteTurnCursorRecord): {
       async load() {
         return current
       },
+      async loadPrepared() {
+        return prepared
+      },
       async save(_sessionId, record) {
         current = record
+        prepared = undefined
         saves.push(record)
+      },
+      async savePrepared(_sessionId, record) {
+        current = undefined
+        prepared = record
       },
       async clear(sessionId) {
         current = undefined
+        prepared = undefined
         clears.push(sessionId)
       },
     },
@@ -59,6 +73,61 @@ function memoryCursorStore(initial?: RemoteTurnCursorRecord): {
 }
 
 describe("remote CLI protocol-v2 turn", () => {
+  it("replays a prepared pre-POST outbox with its original identities", async () => {
+    const prepared: RemotePreparedTurnRecord = {
+      version: 1,
+      phase: "prepared",
+      commandId: "command-prepared",
+      inputId: "input-prepared",
+      afterSequence: 9,
+      input: [{ type: "text", text: "recover me" }],
+      mode: "debug",
+    }
+    const cursors = memoryCursorStore(undefined, prepared)
+    let receivedPrepared: unknown
+    const client: CliRemoteAttachClient = {
+      async getSessionProtocolSnapshot() {
+        throw new Error("prepared recovery must not snapshot before dispatch")
+      },
+      async *runSessionTurn(options) {
+        receivedPrepared = options.prepared
+        options.onTurn?.({
+          turnId: "turn-prepared",
+          runId: "run-prepared",
+        })
+      },
+      async *attachSessionTurn() {
+        throw new Error("prepared recovery dispatches the exact command")
+      },
+      async interruptSessionTurn() {
+        return false
+      },
+      async resolveSessionApproval() {
+        return
+      },
+    }
+
+    await expect(resumeRemoteCliTurn({
+      client,
+      sessionId: "session-prepared",
+      signal: new AbortController().signal,
+      cursorStore: cursors.store,
+      deliver: () => undefined,
+    })).resolves.toBe(true)
+
+    expect(receivedPrepared).toEqual({
+      commandId: "command-prepared",
+      inputId: "input-prepared",
+      afterSequence: 9,
+    })
+    expect(cursors.saves).toEqual([{
+      turnId: "turn-prepared",
+      runId: "run-prepared",
+      afterSequence: 9,
+    }])
+    expect(cursors.clears).toEqual(["session-prepared"])
+  })
+
   it("reattaches a streaming turn from the persisted cursor without starting another turn", async () => {
     let startCalls = 0
     let attachedAfterSequence: number | undefined

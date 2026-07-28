@@ -20,6 +20,7 @@ import type {
   DiagnosticItem,
   AgentInputMailbox,
   AgentMailboxMessage,
+  AgentExecutionIdentity,
 } from "../types.js"
 import type { LLMStreamEvent, LLMMessage, LLMToolDef } from "../provider/types.js"
 import { buildSystemPrompt, type PromptContext } from "./prompts/components/index.js"
@@ -77,18 +78,15 @@ import {
   filterPromptMemoryCandidates,
   selectRelevantMemories,
 } from "../orchestration/memory-selection.js"
-import { extractMemoriesFromCompactionSummary } from "../orchestration/memory-extraction.js"
 import { runPluginHooks } from "../plugins/runtime.js"
-import {
-  readSessionMemoryFile,
-  refreshSessionMemoryFile,
-  appendCompactionSnippetToSessionMemory,
-} from "../session/session-memory.js"
+import { readSessionMemoryFile } from "../session/session-memory.js"
 import {
   artifactCapabilityFromToolMetadata,
 } from "./tool-spill.js"
 import { getToolOutputSpill } from "../context/tool-output-registry.js"
 import { scheduleAutoMemoryDream } from "../context/auto-dream-scheduler.js"
+import { scheduleSessionMemoryRefresh } from "../context/session-memory-scheduler.js"
+import { projectPersistedCompactionSummary } from "../context/compaction-projection.js"
 import { importLegacyMemoryFiles } from "../context/legacy-memory-import.js"
 import type { NexusRunServices } from "./run-services.js"
 import {
@@ -96,6 +94,8 @@ import {
   type ToolExecutionOrigin,
 } from "./tool-pipeline.js"
 import { requestHostApproval } from "./approval-coordinator.js"
+import { assertAgentExecutionIdentity } from "./execution-identity.js"
+import { ChangeSetService } from "../changes/service.js"
 
 /** Generous tool budgets so multi-file tasks can complete. */
 const BASE_TOOL_CALL_BUDGET_BY_MODE: Record<Mode, number> = {
@@ -227,6 +227,91 @@ function activatedToolNamesFromMetadata(
   return normalized.length > 0 ? normalized : undefined
 }
 
+function changeSetCapabilityFromToolMetadata(
+  metadata: Record<string, unknown> | undefined,
+): Pick<
+  ToolPart,
+  "changeSetId" | "proposalHash" | "changeSetState" | "changeFiles"
+> | undefined {
+  const changeSetId = metadata?.changeSetId
+  const proposalHash = metadata?.proposalHash
+  const changeSetState = metadata?.changeSetState
+  if (
+    typeof changeSetId !== "string" ||
+    !changeSetId.trim() ||
+    typeof proposalHash !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(proposalHash) ||
+    ![
+      "proposed",
+      "approved",
+      "applying",
+      "applied",
+      "rejected",
+      "accepted",
+      "reverting",
+      "reverted",
+      "conflicted",
+    ].includes(String(changeSetState))
+  ) {
+    return undefined
+  }
+  const changeFiles = Array.isArray(metadata?.changeFiles)
+    ? metadata.changeFiles
+        .slice(0, 256)
+        .flatMap((value) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) {
+            return []
+          }
+          const file = value as Record<string, unknown>
+          const stats =
+            file.diffStats &&
+            typeof file.diffStats === "object" &&
+            !Array.isArray(file.diffStats)
+              ? file.diffStats as Record<string, unknown>
+              : undefined
+          const operation = String(file.operation)
+          if (
+            typeof file.path !== "string" ||
+            !file.path.trim() ||
+            !["create", "modify", "delete", "rename"].includes(operation) ||
+            typeof stats?.added !== "number" ||
+            !Number.isFinite(stats.added) ||
+            stats.added < 0 ||
+            typeof stats.removed !== "number" ||
+            !Number.isFinite(stats.removed) ||
+            stats.removed < 0 ||
+            typeof file.binary !== "boolean"
+          ) {
+            return []
+          }
+          return [{
+            path: file.path,
+            ...(typeof file.oldPath === "string" && file.oldPath.trim()
+              ? { oldPath: file.oldPath }
+              : {}),
+            operation: operation as
+              | "create"
+              | "modify"
+              | "delete"
+              | "rename",
+            diffStats: {
+              added: Math.floor(stats.added),
+              removed: Math.floor(stats.removed),
+            },
+            binary: file.binary,
+          }]
+        })
+    : []
+  return {
+    changeSetId,
+    proposalHash,
+    changeSetState: changeSetState as NonNullable<
+      ToolPart["changeSetState"]
+    >,
+    ...(changeFiles.length > 0 ? { changeFiles } : {}),
+  }
+}
+
 function persistedToolActivationNames(session: ISession): Set<string> {
   const names = new Set<string>()
   for (const message of session.messages) {
@@ -335,6 +420,8 @@ export interface AgentLoopOptions {
   host: IHost
   config: NexusConfig
   services: NexusRunServices
+  /** Durable immutable ownership allocated before this loop begins. */
+  executionIdentity: AgentExecutionIdentity
   mode: Mode
   tools: ToolDef[]
   skills: SkillDef[]
@@ -360,7 +447,51 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     session, client, host, config, services, mode,
     tools, skills, rulesContent, indexer, compaction,
     signal, gitBranch, checkpoint, createSkillMode, mailbox,
+    executionIdentity,
   } = opts
+
+  assertAgentExecutionIdentity(executionIdentity)
+  if (executionIdentity.sessionId !== session.id) {
+    throw new Error(
+      `Agent execution session ${executionIdentity.sessionId} does not match ${session.id}`,
+    )
+  }
+  let changeSetService: ChangeSetService | undefined
+  if (services.changeSets) {
+    if (services.changeSets.workspaceId !== executionIdentity.workspaceId) {
+      throw new Error(
+        `Agent execution workspace ${executionIdentity.workspaceId} does not match durable change store ${services.changeSets.workspaceId}`,
+      )
+    }
+    if (
+      typeof host.readFileState !== "function" ||
+      typeof host.applyFileMutation !== "function"
+    ) {
+      throw new Error(
+        "This workspace has durable change storage but its host lacks the CAS file-mutation port",
+      )
+    }
+    changeSetService = new ChangeSetService({
+      workspaceId: services.changeSets.workspaceId,
+      store: services.changeSets.store,
+      files: {
+        readFileState: (filePath) => host.readFileState!(filePath),
+        applyFileMutation: (mutation) => host.applyFileMutation!(mutation),
+      },
+    })
+    const recovered = await changeSetService.recoverInterrupted({
+      sessionId: executionIdentity.sessionId,
+    })
+    const ambiguous = recovered.filter(
+      (record) => record.state === "conflicted",
+    )
+    if (ambiguous.length > 0) {
+      throw new Error(
+        "Durable file-change recovery found ambiguous workspace state: " +
+        ambiguous.map((record) => record.id).join(", "),
+      )
+    }
+  }
 
   const activeClient = client
   const orchestrationRuntime = services.orchestrationRuntime
@@ -570,6 +701,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     session,
     config,
     services,
+    executionIdentityBase: executionIdentity,
+    ...(changeSetService ? { changeSetService } : {}),
     mode,
     indexer,
     signal,
@@ -637,7 +770,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const toolCallBudget = Math.max(8, effectiveToolBudget[mode] ?? BASE_TOOL_CALL_BUDGET_BY_MODE[mode])
   let executedToolCallsTotal = 0
   let sessionMemoryToolCallDebt = 0
-  let sessionMemoryRefreshBusy = false
   let sessionMemoryReadWarned = false
   let forceFinalAnswerNext = false
   let forceEmptyResponseRecoveryPromptNext = false
@@ -1540,6 +1672,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               )
 
               const artifactLoop = artifactCapabilityFromToolMetadata(result.metadata)
+              const changeSetLoop =
+                changeSetCapabilityFromToolMetadata(result.metadata)
               session.updateToolPart(newMessageId, partId, {
                 status: result.success ? "completed" : "error",
                 output: result.output,
@@ -1557,6 +1691,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                       outputArtifactOwnerSessionId: artifactLoop.ownerSessionId,
                     }
                   : {}),
+                ...(changeSetLoop ?? {}),
                 ...(result.success && (toolName === "Write" || toolName === "Edit")
                   ? {
                       path: extractWriteTargetPath(toolName, toolInput),
@@ -1824,6 +1959,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           )
 
           const artifactTextual = artifactCapabilityFromToolMetadata(result.metadata)
+          const changeSetTextual =
+            changeSetCapabilityFromToolMetadata(result.metadata)
           session.updateToolPart(newMessageId, partId, {
             status: result.success ? "completed" : "error",
             output: result.output,
@@ -1841,6 +1978,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                   outputArtifactOwnerSessionId: artifactTextual.ownerSessionId,
                 }
               : {}),
+            ...(changeSetTextual ?? {}),
             ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
               ? {
                   path: extractWriteTargetPath(call.toolName, call.toolInput),
@@ -2126,24 +2264,21 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     if (
       config.memory?.sessionMemoryEnabled !== false &&
       sessionMemoryToolCallDebt >= memMin &&
-      !sessionMemoryRefreshBusy &&
       toolDeltaThisIteration > 0
     ) {
-      sessionMemoryToolCallDebt = 0
-      sessionMemoryRefreshBusy = true
-      void refreshSessionMemoryFile({
+      const refresh = scheduleSessionMemoryRefresh({
         session,
         client: activeClient,
         cwd: host.cwd,
         config,
-        signal,
+        services,
       })
-        .catch((error) => {
+      if (refresh?.started) {
+        sessionMemoryToolCallDebt = 0
+        void refresh.promise.catch((error) => {
           if (!signal.aborted) console.warn("[nexus] Session memory refresh failed:", error)
         })
-        .finally(() => {
-          sessionMemoryRefreshBusy = false
-        })
+      }
     }
   }
 
@@ -2446,33 +2581,15 @@ async function handleCompaction(
     }
   }
 
-  const summaryMessage = session.messages.find(
-    (message) =>
-      message.id === result.summaryMessageId &&
-      message.summary &&
-      typeof message.content === "string",
-  )
-  if (summaryMessage && typeof summaryMessage.content === "string") {
-    const runtime = opts.orchestrationRuntime
-    const extracted = extractMemoriesFromCompactionSummary(
-      summaryMessage.content,
-      session.id,
-    )
-    for (const memory of extracted) {
-      await runtime.upsertMemoryByTitle(memory).catch((error) => {
-        console.warn("[nexus] Compaction memory projection failed:", error)
-        return null
-      })
-    }
-    await appendCompactionSnippetToSessionMemory(
-      session.id,
-      host.cwd,
-      summaryMessage.content,
-      config.memory?.sessionMemoryMaxChars ?? 48_000,
-    ).catch((error) => {
-      console.warn("[nexus] Compaction session-memory append failed:", error)
-      return null
-    })
+  const projected = await projectPersistedCompactionSummary({
+    session,
+    summaryMessageId: result.summaryMessageId,
+    cwd: host.cwd,
+    config,
+    orchestrationRuntime: opts.orchestrationRuntime,
+  })
+  for (const diagnostic of projected.diagnostics) {
+    console.warn(`[nexus] ${diagnostic}`)
   }
   return result
 }

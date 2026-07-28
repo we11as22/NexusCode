@@ -1,5 +1,6 @@
 import { z } from "zod"
 
+import { GitService } from "../../git/service.js"
 import type { ToolContext, ToolDef } from "../../types.js"
 
 const revisionSchema = z
@@ -48,32 +49,6 @@ const schema = z
 
 type GitInspectArgs = z.infer<typeof schema>
 
-function quoteShellArgument(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-function buildCommand({
-  operation,
-  revision,
-  path,
-  limit,
-}: GitInspectArgs): string {
-  const pathspec = path ? ` -- ${quoteShellArgument(path)}` : ""
-
-  switch (operation) {
-    case "status":
-      return `git status --short --branch${pathspec}`
-    case "diff":
-      return `git diff --no-ext-diff --no-color${revision ? ` ${quoteShellArgument(revision)}` : ""}${pathspec}`
-    case "show":
-      return `git show --no-ext-diff --no-color --format=fuller ${quoteShellArgument(revision ?? "HEAD")}${pathspec}`
-    case "log":
-      return `git log --no-color --decorate=short -n ${limit ?? 30}${revision ? ` ${quoteShellArgument(revision)}` : ""}${pathspec}`
-    case "blame":
-      return `git blame --no-color${revision ? ` ${quoteShellArgument(revision)}` : ""} -- ${quoteShellArgument(path!)}`
-  }
-}
-
 export const gitInspectTool: ToolDef<GitInspectArgs> = {
   name: "GitInspect",
   searchHint: "read-only git status diff show log blame repository inspection",
@@ -84,15 +59,63 @@ export const gitInspectTool: ToolDef<GitInspectArgs> = {
   modes: ["review"],
 
   async execute(args, ctx: ToolContext) {
-    const command = buildCommand(args)
-    const result = await ctx.host.runCommand(command, ctx.cwd, ctx.signal)
-    const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim()
+    const git = ctx.services.git ?? new GitService(ctx.cwd)
+
+    if (args.operation === "status") {
+      const status = await git.status()
+      return {
+        success: status.available,
+        output: status.available
+          ? JSON.stringify(status, null, 2)
+          : "Git repository is not available in this workspace.",
+        metadata: {
+          operation: args.operation,
+          available: status.available,
+        },
+      }
+    }
+
+    if (args.operation === "diff") {
+      const diff = await git.diff({
+        scope: args.revision ? "range" : "combined",
+        ...(args.revision
+          ? { from: args.revision, to: "HEAD" }
+          : {}),
+        ...(args.path ? { paths: [args.path] } : {}),
+        detail: "patch",
+      })
+      return {
+        success: diff.available,
+        output: diff.available
+          ? JSON.stringify(diff, null, 2)
+          : "Git repository is not available in this workspace.",
+        metadata: {
+          operation: args.operation,
+          available: diff.available,
+          fileCount: diff.files.length,
+          omissions: diff.omissions.length,
+        },
+      }
+    }
+
+    const result = await git.inspectText({
+      operation: args.operation,
+      ...(args.revision ? { revision: args.revision } : {}),
+      ...(args.path ? { path: args.path } : {}),
+      ...(args.limit ? { limit: args.limit } : {}),
+    })
     return {
       success: result.exitCode === 0,
-      output: output || (result.exitCode === 0 ? "(no output)" : `Git exited with code ${result.exitCode}`),
+      output:
+        result.output ||
+        (result.exitCode === 0
+          ? "(no output)"
+          : `Git exited with code ${result.exitCode}`),
       metadata: {
         operation: args.operation,
         exitCode: result.exitCode,
+        argv: result.argv,
+        truncated: result.truncated,
       },
     }
   },

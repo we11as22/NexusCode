@@ -2,6 +2,10 @@ import {
   canonicalProjectRoot,
   closeNexusRunServices,
   createNexusRunServices,
+  FileChangeSetStore,
+  getGlobalConfigDir,
+  GitService,
+  hashWorkspaceIdentity,
   OrchestrationRuntime,
   scheduleToolOutputMaintenance,
   type NexusRunServices,
@@ -25,8 +29,16 @@ export class WorkspaceRunServicesRegistry {
     const canonicalDirectory = canonicalProjectRoot(directory)
     const existing = this.#services.get(canonicalDirectory)
     if (existing) return existing
+    const workspaceId = hashWorkspaceIdentity(canonicalDirectory)
     const created = createNexusRunServices({
       orchestrationRuntime: new OrchestrationRuntime(canonicalDirectory),
+      changeSets: {
+        workspaceId,
+        store: new FileChangeSetStore(workspaceId, {
+          rootDir: getGlobalConfigDir(),
+        }),
+      },
+      git: new GitService(canonicalDirectory),
     })
     const toolOutputMaintenance = scheduleToolOutputMaintenance({
       cwd: canonicalDirectory,

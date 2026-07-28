@@ -119,6 +119,7 @@ vi.mock("vscode", () => {
 })
 
 import * as vscode from "vscode"
+import { hashFileContent } from "@nexuscode/core"
 import {
   VsCodeHost,
   resolveWebviewApproval,
@@ -193,6 +194,117 @@ afterEach(() => {
 })
 
 describe("VsCodeHost dirty editor authority", () => {
+  it("captures the authoritative dirty buffer for durable changes", async () => {
+    const workspace = makeWorkspace()
+    const filePath = path.join(workspace, "file.ts")
+    fs.writeFileSync(filePath, "disk")
+    vscodeState.disk.set(filePath, "disk")
+    const document = openDocument(filePath, "unsaved editor text")
+    const host = new VsCodeHost(workspace, () => {})
+
+    const captured = await host.readFileState("file.ts")
+
+    expect(captured).toEqual({
+      exists: true,
+      content: Buffer.from("unsaved editor text"),
+      mode: null,
+    })
+    expect(document.isDirty).toBe(true)
+    expect(vscodeState.disk.get(filePath)).toBe("disk")
+  })
+
+  it("compare-and-swaps an unchanged dirty buffer and saves it", async () => {
+    const workspace = makeWorkspace()
+    const filePath = path.join(workspace, "file.ts")
+    fs.writeFileSync(filePath, "disk")
+    vscodeState.disk.set(filePath, "disk")
+    const document = openDocument(filePath, "user draft")
+    const host = new VsCodeHost(workspace, () => {})
+    const expected = hashFileContent("user draft")
+
+    await host.applyFileMutation({
+      path: "file.ts",
+      expected: {
+        exists: true,
+        ...expected,
+        blob: expected.hash,
+        mode: null,
+      },
+      next: {
+        exists: true,
+        content: Buffer.from("agent result"),
+        mode: null,
+      },
+    })
+
+    expect(document.getText()).toBe("agent result")
+    expect(document.isDirty).toBe(false)
+    expect(vscodeState.disk.get(filePath)).toBe("agent result")
+  })
+
+  it("rejects a durable mutation after the editor buffer drifts", async () => {
+    const workspace = makeWorkspace()
+    const filePath = path.join(workspace, "file.ts")
+    fs.writeFileSync(filePath, "disk")
+    vscodeState.disk.set(filePath, "disk")
+    const document = openDocument(filePath, "prepared base")
+    const host = new VsCodeHost(workspace, () => {})
+    const expected = hashFileContent("prepared base")
+    document.setText("later user edit")
+
+    await expect(host.applyFileMutation({
+      path: "file.ts",
+      expected: {
+        exists: true,
+        ...expected,
+        blob: expected.hash,
+        mode: null,
+      },
+      next: {
+        exists: true,
+        content: Buffer.from("agent result"),
+        mode: null,
+      },
+    })).rejects.toThrow(/precondition failed/i)
+
+    expect(document.getText()).toBe("later user edit")
+    expect(document.isDirty).toBe(true)
+    expect(vscodeState.disk.get(filePath)).toBe("disk")
+    expect(vscodeState.applyCalls).toBe(0)
+  })
+
+  it("restores the approved baseline when saving the changed buffer fails", async () => {
+    const workspace = makeWorkspace()
+    const filePath = path.join(workspace, "file.ts")
+    fs.writeFileSync(filePath, "disk")
+    vscodeState.disk.set(filePath, "disk")
+    const document = openDocument(filePath, "user draft", {
+      saveResult: false,
+    })
+    const host = new VsCodeHost(workspace, () => {})
+    const expected = hashFileContent("user draft")
+
+    await expect(host.applyFileMutation({
+      path: "file.ts",
+      expected: {
+        exists: true,
+        ...expected,
+        blob: expected.hash,
+        mode: null,
+      },
+      next: {
+        exists: true,
+        content: Buffer.from("agent result"),
+        mode: null,
+      },
+    })).rejects.toThrow(/could not safely save/i)
+
+    expect(document.getText()).toBe("user draft")
+    expect(document.isDirty).toBe(true)
+    expect(vscodeState.disk.get(filePath)).toBe("disk")
+    expect(vscodeState.applyCalls).toBe(2)
+  })
+
   it("reads the authoritative open buffer without silently saving it", async () => {
     const workspace = makeWorkspace()
     const filePath = path.join(workspace, "file.ts")
@@ -206,53 +318,6 @@ describe("VsCodeHost dirty editor authority", () => {
     )
     expect(document.isDirty).toBe(true)
     expect(vscodeState.disk.get(filePath)).toBe("disk")
-  })
-
-  it("applies and saves an approved edit based on the unchanged dirty buffer", async () => {
-    const workspace = makeWorkspace()
-    const filePath = path.join(workspace, "file.ts")
-    fs.writeFileSync(filePath, "disk")
-    vscodeState.disk.set(filePath, "disk")
-    const document = openDocument(filePath, "user draft")
-    const host = new VsCodeHost(workspace, () => {})
-
-    await host.openFileEdit("file.ts", {
-      originalContent: "user draft",
-      newContent: "agent result",
-      isNewFile: false,
-    })
-    await host.saveFileEdit("file.ts")
-
-    expect(document.getText()).toBe("agent result")
-    expect(document.isDirty).toBe(false)
-    expect(vscodeState.disk.get(filePath)).toBe("agent result")
-    expect(vscodeState.applyCalls).toBe(1)
-    expect(host.getPendingFileEdit("file.ts")).toBeUndefined()
-  })
-
-  it("fails closed when the user changes the buffer after the diff was prepared", async () => {
-    const workspace = makeWorkspace()
-    const filePath = path.join(workspace, "file.ts")
-    fs.writeFileSync(filePath, "disk")
-    vscodeState.disk.set(filePath, "disk")
-    const document = openDocument(filePath, "prepared base")
-    const host = new VsCodeHost(workspace, () => {})
-
-    await host.openFileEdit("file.ts", {
-      originalContent: "prepared base",
-      newContent: "agent result",
-      isNewFile: false,
-    })
-    document.setText("new user edit")
-
-    await expect(host.saveFileEdit("file.ts")).rejects.toThrow(
-      /conflict.*changed in the editor/i,
-    )
-    expect(document.getText()).toBe("new user edit")
-    expect(document.isDirty).toBe(true)
-    expect(vscodeState.disk.get(filePath)).toBe("disk")
-    expect(vscodeState.applyCalls).toBe(0)
-    expect(host.getPendingFileEdit("file.ts")).toBeDefined()
   })
 
   it("never lets a direct host write overwrite a dirty editor buffer", async () => {
@@ -286,46 +351,6 @@ describe("VsCodeHost dirty editor authority", () => {
     expect(vscodeState.disk.get(filePath)).toBe("disk")
   })
 
-  it("reverts a saved edit only while the agent result is still current", async () => {
-    const workspace = makeWorkspace()
-    const filePath = path.join(workspace, "file.ts")
-    fs.writeFileSync(filePath, "agent result")
-    vscodeState.disk.set(filePath, "agent result")
-    const document = openDocument(filePath, "agent result", { dirty: false })
-    const host = new VsCodeHost(workspace, () => {})
-
-    await host.revertSavedFileEdit("file.ts", {
-      originalContent: "user draft",
-      newContent: "agent result",
-      isNewFile: false,
-    })
-
-    expect(document.getText()).toBe("user draft")
-    expect(document.isDirty).toBe(false)
-    expect(vscodeState.disk.get(filePath)).toBe("user draft")
-  })
-
-  it("keeps a tracked edit when later dirty-buffer changes conflict with revert", async () => {
-    const workspace = makeWorkspace()
-    const filePath = path.join(workspace, "file.ts")
-    fs.writeFileSync(filePath, "agent result")
-    vscodeState.disk.set(filePath, "agent result")
-    const document = openDocument(filePath, "later user edit")
-    const host = new VsCodeHost(workspace, () => {})
-
-    await expect(
-      host.revertSavedFileEdit("file.ts", {
-        originalContent: "user draft",
-        newContent: "agent result",
-        isNewFile: false,
-      }),
-    ).rejects.toThrow(/conflict.*changed in the editor/i)
-
-    expect(document.getText()).toBe("later user edit")
-    expect(document.isDirty).toBe(true)
-    expect(vscodeState.disk.get(filePath)).toBe("agent result")
-    expect(vscodeState.applyCalls).toBe(0)
-  })
 })
 
 describe("controller dirty-buffer wiring", () => {
@@ -349,17 +374,32 @@ describe("controller dirty-buffer wiring", () => {
     )
   })
 
-  it("retains session edits whose compare-before-revert check fails", () => {
+  it("retains durable session edits whose exact revert fails", () => {
     const start = controllerSource.indexOf('case "undoSessionEdits"')
     const end = controllerSource.indexOf('case "keepAllSessionEdits"', start)
     const body = controllerSource.slice(start, end)
 
-    expect(body).toContain("revertSavedFileEdit")
-    expect(body).toContain("remaining.push(e)")
+    expect(body).toContain('resolveDurableChange(changeSetId, "revert")')
+    expect(body).toContain("remaining.push(")
     expect(body).toContain("this.sessionUnacceptedEdits = remaining")
+    expect(body).not.toContain("activeRunHost")
   })
 
-  it("requires host confirmation before a checkpoint can discard dirty buffers", () => {
+  it("retains only durable edits whose bulk accept failed", () => {
+    const start = controllerSource.indexOf('case "keepAllSessionEdits"')
+    const end = controllerSource.indexOf(
+      'case "revertSessionEditFile"',
+      start,
+    )
+    const body = controllerSource.slice(start, end)
+
+    expect(body).toContain("const failedIds = new Set<string>()")
+    expect(body).toContain("failedIds.add(id)")
+    expect(body).toContain("failedIds.has(edit.changeSetId)")
+    expect(body).not.toContain("(edit) => Boolean(edit.changeSetId)")
+  })
+
+  it("restores checkpoints through exact Nexus-owned change sets only", () => {
     const start = controllerSource.indexOf(
       "private async restoreCheckpointToHash(",
     )
@@ -368,18 +408,18 @@ describe("controller dirty-buffer wiring", () => {
       start,
     )
     const body = controllerSource.slice(start, end)
-    const confirmation = body.indexOf("including unsaved editor buffers")
-    const reset = body.indexOf("await tracker.resetHead(hash)")
-    const dirtyRevert = body.indexOf("await this.revertDirtyWorkspaceDocs(cwd)")
 
     expect(start).toBeGreaterThanOrEqual(0)
     expect(end).toBeGreaterThan(start)
     expect(body).toContain("Stop the current run before restoring")
     expect(body).toContain("Refusing to restore an unknown checkpoint")
     expect(body).toContain('{ modal: true }')
-    expect(confirmation).toBeGreaterThanOrEqual(0)
-    expect(reset).toBeGreaterThan(confirmation)
-    expect(dirtyRevert).toBeGreaterThan(reset)
+    expect(body).toContain("if (restoresWorkspace && !entry.messageId)")
+    expect(body).toContain("await this.revertNexusChangesAfterCheckpoint(entry)")
+    expect(body).toContain("await this.persistCheckpointChatRewind({")
+    expect(body).toContain("Manual, accepted, ignored, and nested-repository changes will be preserved.")
+    expect(body).not.toContain("resetHead")
+    expect(body).not.toContain("revertDirtyWorkspaceDocs")
   })
 })
 

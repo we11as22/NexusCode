@@ -8,13 +8,19 @@ import { hashWorkingDir, validateWorkspacePath, writeExcludesFile } from "./util
 import { readCheckpointEntries, writeCheckpointEntries } from "./storage.js"
 
 const CHECKPOINT_WARN_MS = 7_000
-const GIT_DISABLED_SUFFIX = "_disabled"
+const MAX_NESTED_REPOSITORIES = 512
+
+export interface CheckpointTrackerOptions {
+  /** Isolated Nexus home for embedded hosts/tests. */
+  homeDir?: string
+}
 
 /**
- * Shadow git repository for checkpoints.
+ * Read-only shadow history for checkpoint previews.
  * - Shadow repo lives in ~/.nexus/checkpoints/{cwdHash}/.git
  * - core.worktree points to the workspace; no file copy — worktree is the workspace.
- * - saveCheckpoint = stage + commit in shadow; restore = git clean -fd + git reset --hard hash.
+ * - Workspace restoration is intentionally delegated to durable ChangeSet
+ *   ownership; this tracker never cleans or resets a user worktree.
  */
 export class CheckpointTracker {
   private git: SimpleGit | null = null
@@ -27,10 +33,15 @@ export class CheckpointTracker {
 
   constructor(
     private readonly taskId: string,
-    private readonly workspaceRoot: string
+    private readonly workspaceRoot: string,
+    private readonly options: CheckpointTrackerOptions = {},
   ) {
     this.cwdHash = hashWorkingDir(workspaceRoot)
-    this.shadowDir = path.join(os.homedir(), ".nexus", "checkpoints", this.cwdHash)
+    this.shadowDir = path.join(
+      options.homeDir ?? path.join(os.homedir(), ".nexus"),
+      "checkpoints",
+      this.cwdHash,
+    )
   }
 
   private getGit(): SimpleGit {
@@ -91,8 +102,12 @@ export class CheckpointTracker {
       if (configured !== this.workspaceRoot) {
         throw new Error(`Checkpoints can only be used in the original workspace: ${configured}`)
       }
-      await writeExcludesFile(gitPath)
-      this.entries = await readCheckpointEntries(this.workspaceRoot, this.taskId).catch(() => [])
+      await this.refreshCheckpointExcludes(gitPath)
+      this.entries = await readCheckpointEntries(
+        this.workspaceRoot,
+        this.taskId,
+        { homeDir: this.options.homeDir },
+      ).catch(() => [])
       return
     }
 
@@ -103,8 +118,12 @@ export class CheckpointTracker {
     await this.getGit().addConfig("user.email", "nexus@local")
     await this.getGit().addConfig("user.name", "NexusCode")
     await this.getGit().addConfig("commit.gpgSign", "false")
-    await writeExcludesFile(gitPath)
-    this.entries = await readCheckpointEntries(this.workspaceRoot, this.taskId).catch(() => [])
+    await this.refreshCheckpointExcludes(gitPath)
+    this.entries = await readCheckpointEntries(
+      this.workspaceRoot,
+      this.taskId,
+      { homeDir: this.options.homeDir },
+    ).catch(() => [])
 
     await this.addCheckpointFiles()
     try {
@@ -114,48 +133,64 @@ export class CheckpointTracker {
     }
   }
 
-  /** Stage files in worktree; temporarily renames nested .git dirs so git doesn't treat them as submodules. */
+  /**
+   * Stage preview files without ever touching nested repository metadata.
+   * Nested repositories are excluded as complete roots; old shadow indexes
+   * are migrated by removing those paths from the index only.
+   */
   private async addCheckpointFiles(): Promise<void> {
-    await this.renameNestedGitRepos(true)
-    try {
-      await this.getGit().add([".", "--ignore-errors"])
-    } finally {
-      await this.renameNestedGitRepos(false)
+    const gitPath = path.join(this.shadowDir, ".git")
+    const nestedRoots = await this.refreshCheckpointExcludes(gitPath)
+    if (nestedRoots.length > 0) {
+      await this.getGit().raw([
+        "rm",
+        "-r",
+        "-f",
+        "--cached",
+        "--ignore-unmatch",
+        "--",
+        ...nestedRoots,
+      ])
     }
+    await this.getGit().add([".", "--ignore-errors"])
   }
 
-  private async renameNestedGitRepos(disable: boolean): Promise<void> {
-    const pattern = disable ? "**/.git" : `**/.git${GIT_DISABLED_SUFFIX}`
-    let entries: string[]
-    try {
-      entries = await glob(pattern, {
-        cwd: this.workspaceRoot,
-        dot: true,
-        ignore: [".git"],
-      })
-    } catch {
-      return
+  private async refreshCheckpointExcludes(
+    gitPath: string,
+  ): Promise<string[]> {
+    const markers = await glob("**/.git", {
+      cwd: this.workspaceRoot,
+      dot: true,
+      ignore: [
+        ".git",
+        "node_modules/**",
+        ".nexus/**",
+        "dist/**",
+        "build/**",
+        ".next/**",
+        ".nuxt/**",
+        "coverage/**",
+      ],
+    })
+    const roots = [
+      ...new Set(
+        markers
+          .map((marker) =>
+            path.posix.dirname(marker.replaceAll("\\", "/")),
+          )
+          .filter((root) => root !== "."),
+      ),
+    ].sort()
+    if (roots.length > MAX_NESTED_REPOSITORIES) {
+      throw new Error(
+        `Checkpoint preview found more than ${MAX_NESTED_REPOSITORIES} nested repositories`,
+      )
     }
-    entries = entries.filter((rel) => rel !== ".git" && rel !== `.git${GIT_DISABLED_SUFFIX}`)
-    for (const rel of entries) {
-      const fullPath = path.join(this.workspaceRoot, rel)
-      try {
-        const st = await fs.stat(fullPath)
-        if (!st.isDirectory()) continue
-      } catch {
-        continue
-      }
-      const newPath = disable
-        ? fullPath + GIT_DISABLED_SUFFIX
-        : fullPath.endsWith(GIT_DISABLED_SUFFIX)
-          ? fullPath.slice(0, -GIT_DISABLED_SUFFIX.length)
-          : fullPath
-      try {
-        await fs.rename(fullPath, newPath)
-      } catch {
-        // permissions or in use
-      }
-    }
+    await writeExcludesFile(
+      gitPath,
+      roots.map((root) => `/${root}/`),
+    )
+    return roots
   }
 
   async commit(description?: string): Promise<string> {
@@ -185,21 +220,20 @@ export class CheckpointTracker {
       hash = (await this.getGit().revparse(["HEAD"])).trim()
     }
     this.entries.push({ hash, ts: Date.now(), description, messageId })
-    await writeCheckpointEntries(this.workspaceRoot, this.taskId, this.entries).catch(() => {})
+    await writeCheckpointEntries(
+      this.workspaceRoot,
+      this.taskId,
+      this.entries,
+      { homeDir: this.options.homeDir },
+    ).catch(() => {})
     return hash
   }
 
-  /**
-   * Restore workspace to a checkpoint.
-   * Runs git clean -fd then git reset --hard in the shadow repo; worktree = workspace so files are restored in place.
-   */
-  async resetHead(hash: string): Promise<void> {
-    await this.enqueue(async () => {
-      if (!this.initialized) throw new Error("Checkpoint not initialized")
-      const cleanHash = hash.startsWith("HEAD ") ? hash.slice(5) : hash.trim()
-      await this.getGit().clean("f", ["-d"])
-      await this.getGit().raw(["reset", "--hard", cleanHash])
-    })
+  /** Blanket shadow-Git restore is permanently disabled. */
+  async resetHead(_hash: string): Promise<never> {
+    throw new Error(
+      "Unsafe blanket checkpoint restore is disabled; use durable Nexus change ownership.",
+    )
   }
 
   async getDiff(fromHash: string, toHash?: string): Promise<ChangedFile[]> {

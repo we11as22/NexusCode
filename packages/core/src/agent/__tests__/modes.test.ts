@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 import { z } from "zod"
 
 import { getBuiltinToolsForMode } from "../modes.js"
+import { GitService } from "../../git/service.js"
+import type { GitCommandRunnerPort } from "../../git/types.js"
 import { ToolRegistry } from "../../tools/registry.js"
 import type { Mode, ToolDef } from "../../types.js"
 import {
@@ -130,17 +132,29 @@ describe("mode tool reachability", () => {
     ).toBe(false)
   })
 
-  it("assembles Git inspection from validated, shell-quoted arguments", async () => {
-    let command = ""
+  it("assembles Git inspection as validated argv without a shell", async () => {
+    let argv: readonly string[] = []
+    const runner: GitCommandRunnerPort = {
+      async run(value) {
+        argv = value
+        return {
+          argv: value,
+          stdout: Buffer.from("ok"),
+          stderr: Buffer.alloc(0),
+          exitCode: 0,
+          timedOut: false,
+          truncated: false,
+        }
+      },
+    }
     const host = createFakeHost({
-      async runCommand(value) {
-        command = value
-        return { stdout: "ok", stderr: "", exitCode: 0 }
+      async runCommand() {
+        throw new Error("GitInspect must not use the host shell")
       },
     })
     const tool = new ToolRegistry().get("GitInspect")!
     const args = tool.parameters.parse({
-      operation: "diff",
+      operation: "blame",
       revision: "HEAD~1",
       path: "src/it's-safe.ts",
     })
@@ -150,14 +164,21 @@ describe("mode tool reachability", () => {
       host,
       session: createFakeSession(host.cwd),
       config: createTestConfig(),
-      services: createNexusRunServices(),
+      services: createNexusRunServices({
+        git: new GitService(host.cwd, { runner }),
+      }),
       signal: new AbortController().signal,
       mode: "review",
     })
 
     expect(result.success).toBe(true)
-    expect(command).toBe(
-      "git diff --no-ext-diff --no-color 'HEAD~1' -- 'src/it'\\''s-safe.ts'",
-    )
+    expect(argv).toEqual([
+      "--no-optional-locks",
+      "blame",
+      "--no-color",
+      "HEAD~1",
+      "--",
+      "src/it's-safe.ts",
+    ])
   })
 })

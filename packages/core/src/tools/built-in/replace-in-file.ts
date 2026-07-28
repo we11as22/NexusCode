@@ -4,7 +4,13 @@ import * as diff from "diff"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { buildDiffHunks } from "./diff-hunks.js"
 import { isNexusPlansPath } from "../plan-paths.js"
-import { requestHostApproval } from "../../agent/approval-coordinator.js"
+import type { CapturedFileState } from "../../changes/types.js"
+import {
+  applyDurableTextFileChange,
+  buildDurableChangeHunks,
+  capturedText,
+  exactLineDiffStats,
+} from "../file-change-flow.js"
 
 const MAX_DIFF_PREVIEW_LINES = 80
 
@@ -101,11 +107,35 @@ When NOT to use:
 
   async execute({ file_path, old_string, new_string, replace_all, blocks }, ctx: ToolContext) {
     const filePath = file_path
+    if (
+      !ctx.changeSetService ||
+      !ctx.executionIdentity ||
+      typeof ctx.host.readFileState !== "function" ||
+      typeof ctx.host.applyFileMutation !== "function"
+    ) {
+      return {
+        success: false,
+        output:
+          `Failed to edit ${filePath}: durable ChangeSet support is required`,
+      }
+    }
+
     let originalContent: string
+    let captured: CapturedFileState
     try {
-      originalContent = await ctx.host.readFile(filePath)
-    } catch {
-      return { success: false, output: `File not found: ${filePath}` }
+      captured = await ctx.host.readFileState(filePath)
+      const text = capturedText(captured)
+      if (text === null) {
+        return { success: false, output: `File not found: ${filePath}` }
+      }
+      originalContent = text
+    } catch (error) {
+      return {
+        success: false,
+        output:
+          `Failed to read ${filePath}: ` +
+          (error instanceof Error ? error.message : String(error)),
+      }
     }
 
     const editBlocks =
@@ -157,20 +187,12 @@ When NOT to use:
       }
     }
 
-    const changesForStats = diff.diffLines(originalContent, content)
-    let addedLines = 0
-    let removedLines = 0
-    for (const c of changesForStats) {
-      const lineCount = c.value.split(/\r?\n/).length
-      if (c.added) addedLines += lineCount
-      if (c.removed) removedLines += lineCount
-    }
+    const {
+      added: addedLines,
+      removed: removedLines,
+    } = exactLineDiffStats(originalContent, content)
     const diffStats = { added: addedLines, removed: removedLines }
 
-    const useFileEditFlow =
-      typeof ctx.host.openFileEdit === "function" &&
-      typeof ctx.host.saveFileEdit === "function" &&
-      typeof ctx.host.revertFileEdit === "function"
     const modeAutoApprove = new Set(
       (ctx.mode ? ctx.config.modes?.[ctx.mode]?.autoApprove : undefined) ?? []
     )
@@ -181,37 +203,31 @@ When NOT to use:
     const approvalRequired =
       ctx.fileEditApproval?.required ?? !skipApprovalByConfig
 
-    if (useFileEditFlow) {
-      const diffPreview = createDiffPreview(originalContent, content, filePath)
-      await ctx.host.openFileEdit!(filePath, {
-        originalContent,
-        newContent: content,
-        isNewFile: false,
-      })
-      if (approvalRequired) {
-        const approval = await requestHostApproval(ctx.host, {
-          type: "write",
-          tool: "Edit",
-          description: `${ctx.fileEditApproval?.permissionRule ? "[Permission Rule] " : ""}Edit ${filePath}`,
-          content,
-          diff: diffPreview,
-          diffStats,
-        }, ctx.partId ?? "")
-        if (!approval.approved) {
-          await ctx.host.revertFileEdit!(filePath)
-          return { success: false, output: `User denied edit to ${filePath}` }
-        }
-      }
-      try {
-        await ctx.host.saveFileEdit!(filePath)
-      } catch (err) {
-        return { success: false, output: `Failed to write: ${(err as Error).message}` }
-      }
-    } else {
-      try {
-        await ctx.host.writeFile(filePath, content)
-      } catch (err) {
-        return { success: false, output: `Failed to write: ${(err as Error).message}` }
+    const diffPreview = createDiffPreview(
+      originalContent,
+      content,
+      filePath,
+    )
+    const diffHunks = buildDiffHunks(originalContent, content)
+    const durableHunks = buildDurableChangeHunks(
+      originalContent,
+      content,
+    )
+    const durable = await applyDurableTextFileChange(ctx, {
+      toolName: "Edit",
+      filePath,
+      original: captured,
+      content,
+      diff: diffPreview,
+      diffStats,
+      approvalRequired,
+      permissionRule: ctx.fileEditApproval?.permissionRule ?? false,
+      hunks: durableHunks,
+    })
+    if (!durable?.success) {
+      return durable ?? {
+        success: false,
+        output: `Failed to edit ${filePath}: durable change service is unavailable`,
       }
     }
 
@@ -223,7 +239,6 @@ When NOT to use:
       await ctx.indexer.refreshFile(absPath).catch(() => {})
     }
 
-    const diffHunks = buildDiffHunks(originalContent, content)
     const appliedReplacements = editBlocks.map((b) => ({
       oldSnippet: truncateForUiSnippet(b.old_string),
       newSnippet: truncateForUiSnippet(b.new_string),
@@ -237,6 +252,7 @@ When NOT to use:
         diffHunks,
         writtenContent: content,
         appliedReplacements,
+        ...durable.metadata,
       },
     }
   },

@@ -82,6 +82,16 @@ export interface ToolPart {
   path?: string
   /** Set from tool_end for write_to_file/replace_in_file */
   diffStats?: { added: number; removed: number }
+  changeSetId?: string
+  proposalHash?: string
+  changeSetState?: "proposed" | "approved" | "applying" | "applied" | "rejected" | "accepted" | "reverting" | "reverted" | "conflicted"
+  changeFiles?: Array<{
+    path: string
+    oldPath?: string
+    operation: "create" | "modify" | "delete" | "rename"
+    diffStats: { added: number; removed: number }
+    binary: boolean
+  }>
   /** Line-by-line diff for UI (red/green); set from tool_end when available */
   diffHunks?: Array<{ type: string; lineNum: number; line: string }>
   /** Edit tool: snippets that were replaced (compact preview); full +/- counts stay in diffStats */
@@ -130,10 +140,6 @@ export interface NexusConfigState {
     apiKey?: string
   }
   tools: {
-    /** @deprecated Compatibility-only; runtime uses deterministic ToolSearch. */
-    classifyToolsEnabled?: boolean
-    /** @deprecated Compatibility-only; runtime uses deterministic ToolSearch. */
-    classifyThreshold: number
     parallelReads: boolean
     maxParallelReads: number
     custom: string[]
@@ -141,10 +147,6 @@ export interface NexusConfigState {
     deferredLoadingThresholdPercent?: number
     deferredLoadingMinimumTools?: number
   }
-  /** @deprecated Compatibility-only; runtime uses deterministic skill lookup. */
-  skillClassifyEnabled?: boolean
-  /** @deprecated Compatibility-only; runtime uses deterministic skill lookup. */
-  skillClassifyThreshold: number
   mcp: {
     servers: Array<{
       name: string
@@ -445,7 +447,13 @@ interface ChatState {
   loadingOlderMessages: boolean
 
   /** Session unaccepted edits for "N Files" panel (Undo All / Keep All / Review). */
-  sessionUnacceptedEdits: Array<{ path: string; diffStats: { added: number; removed: number }; isNewFile?: boolean }>
+  sessionUnacceptedEdits: Array<{
+    path: string
+    diffStats: { added: number; removed: number }
+    isNewFile?: boolean
+    changeSetId: string
+    changeSetFileCount?: number
+  }>
 
   /** Models catalog from models.dev (for Select model in Settings). Same shape as core ModelsCatalog. */
   modelsCatalog: ModelsCatalogFromCore | null

@@ -1,8 +1,17 @@
 import {
   Session,
-  CheckpointTracker,
+  ChangeSetService,
+  FileChangeSetStore,
+  canonicalProjectRoot,
+  getGlobalConfigDir,
+  hashWorkspaceIdentity,
   readCheckpointEntries,
+  reapplyRevertedChangeSets,
+  revertEffectiveChangeSetsAfter,
+  type CheckpointEntry,
+  type SessionRecoverySnapshot,
 } from "@nexuscode/core"
+import { CliHost } from "./host.js"
 
 export type RestoreType = "task" | "workspace" | "taskAndWorkspace"
 
@@ -10,9 +19,9 @@ export type RestoreType = "task" | "workspace" | "taskAndWorkspace"
  * Resolve checkpoint id to an entry: numeric string = 1-based index, otherwise = hash prefix match.
  */
 export function findCheckpointEntry(
-  entries: Array<{ hash: string; ts: number; description?: string }>,
+  entries: readonly CheckpointEntry[],
   id: string
-): { hash: string; ts: number; description?: string } | null {
+): CheckpointEntry | null {
   const trimmed = id.trim()
   const asNum = parseInt(trimmed, 10)
   if (Number.isInteger(asNum) && asNum >= 1 && asNum <= entries.length) {
@@ -23,8 +32,12 @@ export function findCheckpointEntry(
 }
 
 type SessionRestoreTarget = {
+  readonly messages: Session["messages"]
   rewindToTimestamp: (timestamp: number) => void
   save: () => Promise<void>
+  load: () => Promise<boolean>
+  captureRecoverySnapshot: () => SessionRecoverySnapshot
+  restoreRecoverySnapshot: (snapshot: SessionRecoverySnapshot) => void
 }
 
 /**
@@ -38,7 +51,13 @@ export async function applyCheckpointRestore(
   checkpointId: string,
   restoreType: RestoreType
 ): Promise<
-  | { ok: true; hash: string; ts: number }
+  | {
+      ok: true
+      hash: string
+      ts: number
+      revertedChangeSets: number
+      revertedPaths: readonly string[]
+    }
   | { ok: false; error: string }
 > {
   const entries = await readCheckpointEntries(cwd, sessionId)
@@ -54,21 +73,100 @@ export async function applyCheckpointRestore(
     }
   }
 
-  const tracker = new CheckpointTracker(sessionId, cwd)
-  const ok = await tracker.init()
-  if (!ok) {
-    return { ok: false, error: "Checkpoint tracker init failed." }
+  const restoresWorkspace =
+    restoreType === "workspace" || restoreType === "taskAndWorkspace"
+  const restoresTask =
+    restoreType === "task" || restoreType === "taskAndWorkspace"
+  if (restoresWorkspace && !entry.messageId) {
+    return {
+      ok: false,
+      error:
+        "This legacy checkpoint is preview-only because it has no exact message binding. Chat-only restore remains available.",
+    }
   }
 
-  if (restoreType === "workspace" || restoreType === "taskAndWorkspace") {
-    await tracker.resetHead(entry.hash)
+  const root = canonicalProjectRoot(cwd)
+  const workspaceId = hashWorkspaceIdentity(root)
+  const store = new FileChangeSetStore(workspaceId, {
+    rootDir: getGlobalConfigDir(),
+  })
+  const service = new ChangeSetService({
+    workspaceId,
+    store,
+    files: new CliHost(root, () => {}),
+  })
+  const workspaceResult = restoresWorkspace
+    ? await revertEffectiveChangeSetsAfter({
+        service,
+        sessionId,
+        createdAtOrAfter: entry.ts,
+      })
+    : { status: "reverted" as const, reverted: [] }
+  if (workspaceResult.status === "conflicted") {
+    return {
+      ok: false,
+      error:
+        "Checkpoint restore stopped without rewinding chat because file ownership conflicted: " +
+        workspaceResult.conflicts
+          .map((conflict) =>
+            `${conflict.paths.join(", ") || conflict.changeSetId}: ${conflict.message}`,
+          )
+          .join("; "),
+    }
   }
-  if (restoreType === "task" || restoreType === "taskAndWorkspace") {
+
+  if (restoresTask) {
+    const recovery = session.captureRecoverySnapshot()
     session.rewindToTimestamp(entry.ts)
+    try {
+      await session.save()
+    } catch (saveError) {
+      let persisted = false
+      try {
+        persisted =
+          (await session.load()) &&
+          session.messages.every((message) => message.ts <= entry.ts)
+      } catch {
+        persisted = false
+      }
+      if (!persisted) {
+        session.restoreRecoverySnapshot(recovery)
+        const compensation = await reapplyRevertedChangeSets({
+          service,
+          reverted: workspaceResult.reverted,
+        })
+        const compensationDetail =
+          compensation.conflicts.length === 0
+            ? "File changes were returned to their pre-restore state."
+            : "File compensation conflicts: " +
+              compensation.conflicts
+                .map((conflict) =>
+                  `${conflict.paths.join(", ") || conflict.changeSetId}: ${conflict.message}`,
+                )
+                .join("; ")
+        return {
+          ok: false,
+          error:
+            "Checkpoint chat rewind could not be persisted; chat was restored in memory. " +
+            `${compensationDetail} Save error: ${
+              saveError instanceof Error
+                ? saveError.message
+                : String(saveError)
+            }`,
+        }
+      }
+    }
   }
 
-  await session.save().catch(() => {})
-  return { ok: true, hash: entry.hash, ts: entry.ts }
+  return {
+    ok: true,
+    hash: entry.hash,
+    ts: entry.ts,
+    revertedChangeSets: workspaceResult.reverted.length,
+    revertedPaths: workspaceResult.reverted.flatMap((record) =>
+      record.files.map((file) => file.path),
+    ),
+  }
 }
 
 /**
@@ -100,6 +198,8 @@ export async function runTaskRestore(
   }
 
   console.log(
-    `Restored ${restoreType}: ${result.hash.slice(0, 7)} (${new Date(result.ts).toISOString()})`
+    `Restored ${restoreType}: ${result.hash.slice(0, 7)} ` +
+    `(${new Date(result.ts).toISOString()}); reverted ` +
+    `${result.revertedChangeSets} Nexus-owned change set(s).`
   )
 }

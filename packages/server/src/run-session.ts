@@ -39,6 +39,9 @@ import {
   closeNexusRunServices,
   scheduleToolOutputMaintenance,
   OrchestrationRuntime,
+  FileChangeSetStore,
+  GitService,
+  hashWorkspaceIdentity,
   McpClient,
   resolveBundledMcpServers,
   resolveConfiguredAndPluginMcpServers,
@@ -48,6 +51,7 @@ import {
   selectProviderProfile,
   hydrateWorkspaceAuthority,
   type WorkspaceAuthorityStoreOptions,
+  type AgentExecutionIdentity,
 } from "@nexuscode/core"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
@@ -140,6 +144,8 @@ export interface RunSessionOptions {
   mode: Mode
   onEvent: (event: AgentEvent) => void
   signal: AbortSignal
+  /** Exact durable protocol turn/run ownership allocated before execution. */
+  executionIdentity: AgentExecutionIdentity
   configOverride?: Record<string, unknown>
   requestApproval?: (action: ApprovalAction) => Promise<PermissionResult>
   requestModeChange?: (
@@ -249,6 +255,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     services: workspaceServices,
     userMessageAdmitted = false,
     profileName,
+    executionIdentity,
   } = opts
 
   assertSupportedRemoteConfigOverride(configOverride)
@@ -374,6 +381,13 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
     : createNexusRunServices({
         orchestrationRuntime: new OrchestrationRuntime(cwd),
         mcpClient: mcpResult.client,
+        changeSets: {
+          workspaceId: hashWorkspaceIdentity(cwd),
+          store: new FileChangeSetStore(hashWorkspaceIdentity(cwd), {
+            rootDir: getGlobalConfigDir(),
+          }),
+        },
+        git: new GitService(cwd),
       })
   const contributionServices = await prepareServerToolContributions({
     cwd,
@@ -466,6 +480,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
   try {
     await runAgentLoop({
       session,
+      executionIdentity,
       client,
       host,
       config: configForRun,

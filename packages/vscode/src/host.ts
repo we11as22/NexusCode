@@ -3,7 +3,9 @@ import * as path from "path"
 import {
   approvalGrantKey,
   authorizeNetworkRequest as authorizePublicNetworkRequest,
+  FileMutationConflictError,
   grantWorkspaceAuthority,
+  hashFileContent,
   resolveAuthorizedWorkspacePath,
 } from "@nexuscode/core"
 import type {
@@ -29,13 +31,45 @@ import type {
   HostPathAccess,
   HostNetworkRequest,
   AuthorizedNetworkRequest,
+  CapturedFileState,
+  HostFileMutation,
   WorkspaceAuthorityStoreOptions,
 } from "@nexuscode/core"
 import { parseStrictExternalHttpUrl } from "./external-url-policy.js"
 
 const NEXUS_PREVIEW_SCHEME = "nexuscode-preview"
+const MAX_CHANGE_FILE_BYTES = 128 * 1_024 * 1_024
 const previewDocuments = new Map<string, string>()
 let previewProviderRegistration: vscode.Disposable | undefined
+
+function absentFileState(): CapturedFileState {
+  return { exists: false, content: null, mode: null }
+}
+
+function capturedMatchesExpected(
+  captured: CapturedFileState,
+  expected: HostFileMutation["expected"],
+): boolean {
+  if (captured.exists !== expected.exists) return false
+  if (!captured.exists || !expected.exists) return true
+  const digest = hashFileContent(captured.content)
+  return (
+    digest.hash === expected.hash &&
+    digest.byteLength === expected.byteLength &&
+    captured.mode === expected.mode
+  )
+}
+
+function decodeExactUtf8(content: Uint8Array): string {
+  const bytes = Buffer.from(content)
+  const text = bytes.toString("utf8")
+  if (!Buffer.from(text, "utf8").equals(bytes)) {
+    throw new Error(
+      "VS Code cannot apply binary bytes through an open text editor",
+    )
+  }
+  return text
+}
 
 export interface WebviewApprovalResolverSlot {
   current: {
@@ -115,22 +149,17 @@ export class VsCodeHost implements IHost {
   readonly cwd: string
   private alwaysApproved = new Set<string>()
   private sessionAutoApprove = false
-  private checkpointTracker?: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> }
+  private checkpointTracker?: {
+    commit(description?: string): Promise<string>
+    getEntries(): CheckpointEntry[]
+    getDiff(from: string, to?: string): Promise<ChangedFile[]>
+  }
   private useWebviewApproval: boolean
   private runCommandsInTerminal: boolean
   private approvalResolveRef: WebviewApprovalResolverSlot | null = null
   private emittedApprovalPartId: string | null = null
   private onCheckpointEntriesUpdated?: () => void
-  /** Called after an approved edit is written to disk; used to add to session unaccepted list. */
-  private onSessionEditSaved?: (path: string, originalContent: string, newContent: string, isNewFile: boolean) => void
   private authorityStoreOptions: WorkspaceAuthorityStoreOptions
-
-  private pendingFileEdits = new Map<string, { originalContent: string; newContent: string; isNewFile: boolean }>()
-
-  private normalizePendingEditKey(filePath: string): string {
-    const absPath = this.resolveWorkspacePath(filePath)
-    return path.normalize(absPath).replace(/\\/g, "/")
-  }
 
   constructor(
     cwd: string,
@@ -140,7 +169,6 @@ export class VsCodeHost implements IHost {
       runCommandsInTerminal?: boolean
       approvalResolveRef?: WebviewApprovalResolverSlot
       onCheckpointEntriesUpdated?: () => void
-      onSessionEditSaved?: (path: string, originalContent: string, newContent: string, isNewFile: boolean) => void
       onModeChangeRequested?: (mode: Mode, reason?: string) => Promise<void> | void
       onWorkingDirectoryChangeRequested?: (cwd: string, reason?: string) => Promise<void> | void
       authorityStoreOptions?: WorkspaceAuthorityStoreOptions
@@ -152,7 +180,6 @@ export class VsCodeHost implements IHost {
     this.runCommandsInTerminal = options?.runCommandsInTerminal ?? false
     this.approvalResolveRef = options?.approvalResolveRef ?? null
     this.onCheckpointEntriesUpdated = options?.onCheckpointEntriesUpdated
-    this.onSessionEditSaved = options?.onSessionEditSaved
     this.onModeChangeRequested = options?.onModeChangeRequested
     this.onWorkingDirectoryChangeRequested = options?.onWorkingDirectoryChangeRequested
     this.authorityStoreOptions = options?.authorityStoreOptions ?? {}
@@ -161,14 +188,12 @@ export class VsCodeHost implements IHost {
   private onModeChangeRequested?: (mode: Mode, reason?: string) => Promise<void> | void
   private onWorkingDirectoryChangeRequested?: (cwd: string, reason?: string) => Promise<void> | void
 
-  setCheckpoint(tracker: { commit(description?: string): Promise<string>; getEntries(): CheckpointEntry[]; resetHead(hash: string): Promise<void>; getDiff(from: string, to?: string): Promise<ChangedFile[]> } | undefined): void {
+  setCheckpoint(tracker: {
+    commit(description?: string): Promise<string>
+    getEntries(): CheckpointEntry[]
+    getDiff(from: string, to?: string): Promise<ChangedFile[]>
+  } | undefined): void {
     this.checkpointTracker = tracker
-  }
-
-  async restoreCheckpoint(hash: string): Promise<void> {
-    if (!this.checkpointTracker?.resetHead) return
-    const t = this.checkpointTracker as { resetHead(hash: string): Promise<void> }
-    await t.resetHead(hash)
   }
 
   async getCheckpointEntries(): Promise<CheckpointEntry[]> {
@@ -242,8 +267,26 @@ export class VsCodeHost implements IHost {
     }
     const saved = await document.save()
     if (!saved || document.isDirty || document.getText() !== content) {
+      const restore = new vscode.WorkspaceEdit()
+      restore.replace(
+        document.uri,
+        new vscode.Range(
+          document.positionAt(0),
+          document.positionAt(document.getText().length),
+        ),
+        before,
+      )
+      const restored =
+        await Promise.resolve(vscode.workspace.applyEdit(restore)).catch(
+          () => false,
+        )
+      if (!restored || document.getText() !== before) {
+        throw new Error(
+          `VS Code could not safely save or restore ${document.uri.fsPath}; the buffer requires manual review`,
+        )
+      }
       throw new Error(
-        `VS Code could not safely save ${document.uri.fsPath}; the buffer was left open for manual review`,
+        `VS Code could not safely save ${document.uri.fsPath}; the approved baseline was restored in the editor`,
       )
     }
   }
@@ -384,6 +427,98 @@ export class VsCodeHost implements IHost {
     }
     const content = await vscode.workspace.fs.readFile(uri)
     return Buffer.from(content).toString("utf8")
+  }
+
+  async readFileState(filePath: string): Promise<CapturedFileState> {
+    const absolutePath = this.resolveWorkspacePath(filePath)
+    const openDocument = this.findOpenTextDocument(absolutePath)
+    if (openDocument) {
+      const content = Buffer.from(openDocument.getText(), "utf8")
+      if (content.byteLength > MAX_CHANGE_FILE_BYTES) {
+        throw new Error(
+          `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+        )
+      }
+      return {
+        exists: true,
+        content,
+        mode: null,
+      }
+    }
+
+    const uri = vscode.Uri.file(absolutePath)
+    const stat = await Promise.resolve(vscode.workspace.fs.stat(uri)).catch(
+      () => undefined,
+    )
+    if (!stat) return absentFileState()
+    if (
+      (stat.type & vscode.FileType.Directory) !== 0 ||
+      (
+        "SymbolicLink" in vscode.FileType &&
+        (stat.type & vscode.FileType.SymbolicLink) !== 0
+      )
+    ) {
+      throw new Error(
+        `Durable file changes require a regular non-symbolic file: ${filePath}`,
+      )
+    }
+    if (stat.size > MAX_CHANGE_FILE_BYTES) {
+      throw new Error(
+        `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+      )
+    }
+    const content = Buffer.from(await vscode.workspace.fs.readFile(uri))
+    if (content.byteLength > MAX_CHANGE_FILE_BYTES) {
+      throw new Error(
+        `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+      )
+    }
+    return {
+      exists: true,
+      content,
+      mode: null,
+    }
+  }
+
+  async applyFileMutation(mutation: HostFileMutation): Promise<void> {
+    const absolutePath = this.resolveWorkspacePath(mutation.path)
+    const current = await this.readFileState(mutation.path)
+    if (!capturedMatchesExpected(current, mutation.expected)) {
+      throw new FileMutationConflictError(mutation.path)
+    }
+
+    const uri = vscode.Uri.file(absolutePath)
+    const document = this.findOpenTextDocument(absolutePath)
+    if (!mutation.next.exists) {
+      if (document?.isDirty) {
+        throw new Error(
+          `Refusing to delete ${absolutePath} while it has unsaved editor changes`,
+        )
+      }
+      await vscode.workspace.fs.delete(uri, { useTrash: true })
+      return
+    }
+
+    const content = Buffer.from(mutation.next.content)
+    if (content.byteLength > MAX_CHANGE_FILE_BYTES) {
+      throw new Error(
+        `File exceeds the ${MAX_CHANGE_FILE_BYTES}-byte durable change limit`,
+      )
+    }
+    if (document) {
+      await this.replaceOpenTextDocument(
+        document,
+        decodeExactUtf8(content),
+      )
+      return
+    }
+
+    await this.ensureParentDirectories(absolutePath)
+    const rechecked = await this.readFileState(mutation.path)
+    if (!capturedMatchesExpected(rechecked, mutation.expected)) {
+      throw new FileMutationConflictError(mutation.path)
+    }
+    await vscode.workspace.fs.writeFile(uri, content)
   }
 
   async writeFile(filePath: string, content: string): Promise<void> {
@@ -949,90 +1084,6 @@ export class VsCodeHost implements IHost {
     }
   }
 
-  async openFileEdit(filePath: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void> {
-    const key = this.normalizePendingEditKey(filePath)
-    // Store pending edit only; do not open diff/editor — user opens file by clicking in chat/UI.
-    this.pendingFileEdits.set(key, {
-      originalContent: options.originalContent,
-      newContent: options.newContent,
-      isNewFile: options.isNewFile,
-    })
-  }
-
-  /** Pending edit snapshot for preview before approval (used by controller showDiff). */
-  getPendingFileEdit(filePath: string): { originalContent: string; newContent: string; isNewFile: boolean } | undefined {
-    const key = this.normalizePendingEditKey(filePath)
-    return this.pendingFileEdits.get(key)
-  }
-
-  async saveFileEdit(filePath: string): Promise<void> {
-    const key = this.normalizePendingEditKey(filePath)
-    const pending = this.pendingFileEdits.get(key)
-    if (!pending) throw new Error(`No pending file edit for ${filePath}`)
-    const absolutePath = this.resolveWorkspacePath(filePath)
-    await this.writeAuthorizedFile(absolutePath, pending.newContent, {
-      originalContent: pending.originalContent,
-      isNewFile: pending.isNewFile,
-    })
-    this.onSessionEditSaved?.(filePath, pending.originalContent, pending.newContent, pending.isNewFile)
-    this.pendingFileEdits.delete(key)
-  }
-
-  /**
-   * Restore an already-saved agent edit only while its last written content is
-   * still authoritative. Controller Undo/Revert actions use this instead of
-   * writing through workspace.fs and potentially clobbering later user edits.
-   */
-  async revertSavedFileEdit(
-    filePath: string,
-    edit: {
-      originalContent: string
-      newContent: string
-      isNewFile: boolean
-    },
-  ): Promise<void> {
-    const absolutePath = this.resolveWorkspacePath(filePath)
-    if (!edit.isNewFile) {
-      await this.writeAuthorizedFile(absolutePath, edit.originalContent, {
-        originalContent: edit.newContent,
-        isNewFile: false,
-      })
-      return
-    }
-
-    const uri = vscode.Uri.file(absolutePath)
-    const document = this.findOpenTextDocument(absolutePath)
-    if (document) {
-      if (document.isDirty || document.getText() !== edit.newContent) {
-        throw new Error(
-          `File edit conflict: ${absolutePath} changed in the editor after the agent created it`,
-        )
-      }
-    } else {
-      const stat = await Promise.resolve(vscode.workspace.fs.stat(uri)).catch(
-        () => undefined,
-      )
-      if (!stat || (stat.type & vscode.FileType.Directory) !== 0) {
-        throw new Error(
-          `File edit conflict: ${absolutePath} no longer matches the saved agent edit`,
-        )
-      }
-      const current = Buffer.from(
-        await vscode.workspace.fs.readFile(uri),
-      ).toString("utf8")
-      if (current !== edit.newContent) {
-        throw new Error(
-          `File edit conflict: ${absolutePath} changed on disk after the agent created it`,
-        )
-      }
-    }
-    await vscode.workspace.fs.delete(uri, { useTrash: true })
-  }
-
-  async revertFileEdit(filePath: string): Promise<void> {
-    const key = this.normalizePendingEditKey(filePath)
-    this.pendingFileEdits.delete(key)
-  }
 }
 
 function getLanguageFromExtension(ext: string): string {

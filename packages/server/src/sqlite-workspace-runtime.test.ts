@@ -105,6 +105,11 @@ describe("SQLite workspace runtime factory", () => {
     expect(servicesFromFactory?.mcpClient).toBeDefined()
     expect(runtime.services.mcp).toBe(servicesFromFactory?.mcpClient)
     expect(runtime.services.agentRuns).toBe(servicesFromFactory)
+    expect(servicesFromFactory?.changeSets?.workspaceId).toMatch(
+      /^[a-f0-9]{64}$/u,
+    )
+    expect(servicesFromFactory?.changeSets?.store).toBeDefined()
+    expect(servicesFromFactory?.git).toBeDefined()
 
     await runtime.close()
     expect(runtime.closed).toBe(true)

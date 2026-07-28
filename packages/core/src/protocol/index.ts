@@ -39,3 +39,13 @@ export {
   selectActiveTurnResumeCursor,
   type PersistedTurnCursor,
 } from "./resume-cursor.js"
+export {
+  FileRemoteTurnRecoveryStore,
+  PreparedSessionTurnIdentitySchema,
+  RemotePreparedTurnRecordSchema,
+  type FileRemoteTurnRecoveryStoreOptions,
+  type PreparedSessionTurnIdentity,
+  type RemotePreparedTurnRecord,
+  type RemoteTurnCursorRecord,
+  type RemoteTurnRecoveryStore,
+} from "./remote-turn-store.js"

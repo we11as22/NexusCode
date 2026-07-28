@@ -4,7 +4,13 @@ import * as diff from "diff"
 import type { ToolDef, ToolContext } from "../../types.js"
 import { buildDiffHunks } from "./diff-hunks.js"
 import { isNexusPlansPath } from "../plan-paths.js"
-import { requestHostApproval } from "../../agent/approval-coordinator.js"
+import type { CapturedFileState } from "../../changes/types.js"
+import {
+  applyDurableTextFileChange,
+  buildDurableChangeHunks,
+  capturedText,
+  exactLineDiffStats,
+} from "../file-change-flow.js"
 
 const MAX_DIFF_PREVIEW_LINES = 80
 
@@ -45,44 +51,45 @@ WARNING: Write replaces the entire file. Provide complete final content, not a p
 
   async execute({ file_path: filePath, content }, ctx: ToolContext) {
     const absPath = path.resolve(ctx.cwd, filePath)
-
-    let oldContent: string | null = null
-    try {
-      const exists = await ctx.host.exists(filePath)
-      if (exists) {
-        oldContent = await ctx.host.readFile(filePath)
+    if (
+      !ctx.changeSetService ||
+      !ctx.executionIdentity ||
+      typeof ctx.host.readFileState !== "function" ||
+      typeof ctx.host.applyFileMutation !== "function"
+    ) {
+      return {
+        success: false,
+        output:
+          `Failed to write ${filePath}: durable ChangeSet support is required`,
       }
-    } catch {
-      // File does not exist — new file
+    }
+
+    let captured: CapturedFileState
+    let oldContent: string | null
+    try {
+      captured = await ctx.host.readFileState(filePath)
+      oldContent = capturedText(captured)
+    } catch (error) {
+      return {
+        success: false,
+        output:
+          `Failed to read ${filePath}: ` +
+          (error instanceof Error ? error.message : String(error)),
+      }
     }
 
     const originalContentStr = oldContent ?? ""
-    const isNewFile = oldContent == null
 
     const newLines = content.split(/\r?\n/).length
-    let addedLines: number
-    let removedLines: number
-    if (oldContent != null) {
-      // Full-file line diff for diffStats / approval — independent of buildDiffHunks (compact UI preview).
-      const changes = diff.diffLines(oldContent, content)
-      addedLines = 0
-      removedLines = 0
-      for (const c of changes) {
-        const lineCount = c.value.split(/\r?\n/).length
-        if (c.added) addedLines += lineCount
-        if (c.removed) removedLines += lineCount
-      }
-    } else {
-      addedLines = newLines
-      removedLines = 0
-    }
+    // Full-file line diff for approval/review. Unlike split/set-based
+    // projections this preserves duplicate lines and trailing-newline
+    // semantics.
+    const {
+      added: addedLines,
+      removed: removedLines,
+    } = exactLineDiffStats(originalContentStr, content)
     const diffStats = { added: addedLines, removed: removedLines }
 
-    // open → approve → save or revert (when host supports it)
-    const useFileEditFlow =
-      typeof ctx.host.openFileEdit === "function" &&
-      typeof ctx.host.saveFileEdit === "function" &&
-      typeof ctx.host.revertFileEdit === "function"
     const modeAutoApprove = new Set(
       (ctx.mode ? ctx.config.modes?.[ctx.mode]?.autoApprove : undefined) ?? []
     )
@@ -93,37 +100,31 @@ WARNING: Write replaces the entire file. Provide complete final content, not a p
     const approvalRequired =
       ctx.fileEditApproval?.required ?? !skipApprovalByConfig
 
-    if (useFileEditFlow) {
-      const diffPreview = createDiffPreview(originalContentStr, content, filePath)
-      await ctx.host.openFileEdit!(filePath, {
-        originalContent: originalContentStr,
-        newContent: content,
-        isNewFile,
-      })
-      if (approvalRequired) {
-        const approval = await requestHostApproval(ctx.host, {
-          type: "write",
-          tool: "Write",
-          description: `${ctx.fileEditApproval?.permissionRule ? "[Permission Rule] " : ""}Write to ${filePath}`,
-          content,
-          diff: diffPreview,
-          diffStats,
-        }, ctx.partId ?? "")
-        if (!approval.approved) {
-          await ctx.host.revertFileEdit!(filePath)
-          return { success: false, output: `User denied write to ${filePath}` }
-        }
-      }
-      try {
-        await ctx.host.saveFileEdit!(filePath)
-      } catch (err) {
-        return { success: false, output: `Failed to write ${filePath}: ${(err as Error).message}` }
-      }
-    } else {
-      try {
-        await ctx.host.writeFile(filePath, content)
-      } catch (err) {
-        return { success: false, output: `Failed to write ${filePath}: ${(err as Error).message}` }
+    const diffPreview = createDiffPreview(
+      originalContentStr,
+      content,
+      filePath,
+    )
+    const diffHunks = buildDiffHunks(originalContentStr, content)
+    const durableHunks = buildDurableChangeHunks(
+      originalContentStr,
+      content,
+    )
+    const durable = await applyDurableTextFileChange(ctx, {
+      toolName: "Write",
+      filePath,
+      original: captured,
+      content,
+      diff: diffPreview,
+      diffStats,
+      approvalRequired,
+      permissionRule: ctx.fileEditApproval?.permissionRule ?? false,
+      hunks: durableHunks,
+    })
+    if (!durable?.success) {
+      return durable ?? {
+        success: false,
+        output: `Failed to write ${filePath}: durable change service is unavailable`,
       }
     }
 
@@ -134,11 +135,16 @@ WARNING: Write replaces the entire file. Provide complete final content, not a p
       await ctx.indexer.refreshFile(absPath).catch(() => {})
     }
 
-    const diffHunks = buildDiffHunks(originalContentStr, content)
     return {
       success: true,
       output: `Successfully wrote ${filePath} (${newLines} lines)`,
-      metadata: { addedLines, removedLines, diffHunks, writtenContent: content },
+      metadata: {
+        addedLines,
+        removedLines,
+        diffHunks,
+        writtenContent: content,
+        ...durable.metadata,
+      },
     }
   },
 }

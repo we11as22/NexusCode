@@ -1,6 +1,6 @@
 # Nexus Change Ownership and Remote Recovery Design
 
-**Status:** approved direction, implementation in progress
+**Status:** implemented and verified at the 2026-07-28 checkpoint
 **Source basis:** Codex, OpenClaude, Kilo Code, Roo Code, Cline, OpenCode,
 Claw Code, Kimi Code, Kimi CLI, MiMo Code, and Qwen Code.
 
@@ -122,6 +122,11 @@ execution snapshot, replay anchor, and terminal outcome for one exact
 `turnId/runId`. Unknown or mismatched identities fail closed and never fall
 back to the session's current active turn.
 
+The implemented protocol reaches the same invariant through the exact
+prepared/admitted outbox, bounded pending projection, retained terminal event
+lookup, and idempotent server admission. It does not add a second competing
+turn-status data model.
+
 ## Surface behavior
 
 CLI and VS Code must share:
@@ -140,3 +145,19 @@ Tests use temporary workspaces, local SQLite databases, fake providers,
 in-memory HTTP streams, and fake host adapters. They must not run a live LLM,
 untrusted plugin, real remote MCP server, destructive repository command, or
 machine-wide preference mutation.
+
+## Checkpoint result
+
+- The shared ChangeSet state machine is bound to CLI, VS Code, and server
+  hosts; local storage is checksummed/content-addressed and server storage is
+  transactional SQLite.
+- Write, Edit, and ApplyPatch capture baselines before approval and mutate only
+  through host compare-and-swap.
+- Git status/diff is argv-only, bounded, helper-disabled, and side-effect-free.
+- Checkpoint restore is path-scoped and exact-message-bound; legacy ambiguous
+  checkpoints are preview-only.
+- CLI/server/VS Code render durable accept/revert state. One multi-file patch
+  remains one atomic review action; selective hunk/file acceptance is
+  deliberately deferred until it can create a new proposal hash.
+- Client commands are persisted before network admission and replay only by
+  exact identity.

@@ -479,6 +479,7 @@
     "sharp": "^0.33.5",
     "typescript": "^5.5.0",
     "esbuild": "^0.24.0",
+    "esbuild-wasm": "0.25.12",
     "vitest": "3.2.3"
   }
 }

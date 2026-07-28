@@ -3,6 +3,12 @@ import type { NexusRunServices } from "./agent/run-services.js"
 import type {
   PendingProjectAuthorityRequest,
 } from "./config/project-authority.js"
+import type {
+  CapturedFileState,
+  ChangeSetService,
+  ChangeSetState,
+  HostFileMutation,
+} from "./changes/index.js"
 
 // ─── Modes ───────────────────────────────────────────────────────────────────
 
@@ -168,12 +174,37 @@ export interface ToolActivationResult {
   rejected: string[]
 }
 
+/**
+ * Immutable ownership allocated before an agent loop starts. It identifies
+ * one admitted root/delegated execution without depending on mutable session
+ * or workspace service state.
+ */
+export interface AgentExecutionIdentity {
+  readonly workspaceId: string
+  readonly sessionId: string
+  readonly turnId: string
+  readonly runId: string
+}
+
+/** Exact ownership of one tool call inside an immutable agent execution. */
+export interface ToolExecutionIdentity extends AgentExecutionIdentity {
+  readonly messageId: string
+  readonly partId: string
+  readonly toolCallId: string
+}
+
 export interface ToolContext {
   cwd: string
   host: IHost
   session: ISession
   config: NexusConfig
   services: NexusRunServices
+  /** Immutable run-level identity; present for calls issued by agent loops. */
+  executionIdentityBase?: AgentExecutionIdentity
+  /** Exact identity assigned by the authoritative tool pipeline. */
+  executionIdentity?: ToolExecutionIdentity
+  /** Loop-bound durable change owner; absent only on legacy/non-file surfaces. */
+  changeSetService?: ChangeSetService
   /** Current loop mode (agent / plan / ask). Used e.g. by SpawnAgent to set sub-agent permissions. */
   mode?: Mode
   indexer?: IIndexer
@@ -197,7 +228,7 @@ export interface ToolContext {
   resolvedTools?: ToolDef[]
   /**
    * Mode-authorized discovery universe. This may include tools intentionally
-   * omitted from the current model manifest by deferred loading/classification.
+   * omitted from the current model manifest by deterministic deferred loading.
    */
   searchableTools?: ToolDef[]
   /**
@@ -440,8 +471,6 @@ export interface IHost {
   addAllowedMcpTool?(cwd: string, toolName: string): Promise<void>
   resolveAtMention?(mention: string): Promise<string | null>
   getProblems?(): Promise<DiagnosticItem[]>
-  /** Restore workspace to a checkpoint. Optional if host has no checkpoint. */
-  restoreCheckpoint?(hash: string): Promise<void>
   /** List checkpoint entries for UI. */
   getCheckpointEntries?(): Promise<CheckpointEntry[]>
   /** Get diff between two checkpoints for preview. */
@@ -457,15 +486,10 @@ export interface IHost {
   /** Generic MCP auth handoff (open browser / show instructions / complete login). */
   requestMcpAuthentication?(request: McpAuthRequest): Promise<McpAuthResult>
 
-  /**
-   * File edit flow: open → [approval] → save or revert.
-   * openFileEdit: open diff view (extension) or store pending edit (CLI). Do not write to disk yet.
-   * saveFileEdit: commit current pending edit to disk.
-   * revertFileEdit: discard pending edit; for new files do not create, for existing restore original (if view was opened).
-   */
-  openFileEdit?(path: string, options: { originalContent: string; newContent: string; isNewFile: boolean }): Promise<void>
-  saveFileEdit?(path: string): Promise<void>
-  revertFileEdit?(path: string): Promise<void>
+  /** Capture exact bytes and mode for durable change-set ownership. */
+  readFileState?(path: string): Promise<CapturedFileState>
+  /** Apply one compare-and-swap file mutation. */
+  applyFileMutation?(mutation: HostFileMutation): Promise<void>
 }
 
 export interface DiagnosticItem {
@@ -556,6 +580,14 @@ export interface ImagePart {
   mimeType: string
 }
 
+export interface ChangeFileSummary {
+  path: string
+  oldPath?: string
+  operation: "create" | "modify" | "delete" | "rename"
+  diffStats: { added: number; removed: number }
+  binary: boolean
+}
+
 export interface ToolPart {
   type: "tool"
   id: string
@@ -578,9 +610,15 @@ export interface ToolPart {
   outputArtifactId?: string
   /** Exact session whose private artifact directory owns this output. */
   outputArtifactOwnerSessionId?: string
-  /** Set when tool is Write/Edit and completed; used for session diff (e.g. CLI "N files" block). */
+  /** Set when a file mutation tool completes; used for session diff surfaces. */
   path?: string
   diffStats?: { added: number; removed: number }
+  /** Durable ownership for an exact file-change proposal and its review state. */
+  changeSetId?: string
+  proposalHash?: string
+  changeSetState?: ChangeSetState
+  /** Bounded per-file projection for multi-file diff surfaces. */
+  changeFiles?: ChangeFileSummary[]
   /** Copied from sub-agent session into parent for diff; omit from chat tool rows (CLI). */
   mergedFromSubagent?: boolean
   /**
@@ -1129,10 +1167,6 @@ export interface NexusConfig {
   skillsUrls?: string[]
   tools: {
     custom: string[]
-    /** @deprecated Parsed for old configs; ignored by the runtime. */
-    classifyToolsEnabled: boolean
-    /** @deprecated Parsed for old configs; ignored by the runtime. */
-    classifyThreshold: number
     parallelReads: boolean
     maxParallelReads: number
     /** Deferred tool loading strategy. auto = use ToolSearch only when deferred tools are materially large. */
@@ -1142,10 +1176,6 @@ export interface NexusConfig {
     /** In auto mode, always defer once at least this many tools are marked shouldDefer. */
     deferredLoadingMinimumTools?: number
   }
-  /** @deprecated Parsed for old configs; ignored by the runtime. */
-  skillClassifyEnabled: boolean
-  /** @deprecated Parsed for old configs; ignored by the runtime. */
-  skillClassifyThreshold: number
   structuredOutput: "auto" | "always" | "never"
   summarization: {
     auto: boolean
@@ -1296,7 +1326,11 @@ export interface SkillDef {
 export interface CheckpointEntry {
   hash: string
   ts: number
-  messageId: string
+  /**
+   * Exact user-message binding used to select Nexus-owned ChangeSets.
+   * Older persisted entries may omit it and are preview/chat-only.
+   */
+  messageId?: string
   description?: string
 }
 

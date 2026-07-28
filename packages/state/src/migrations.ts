@@ -402,6 +402,45 @@ CREATE TABLE session_next_mode (
 );
 `
 
+const CHANGE_SET_STORAGE_SQL = `
+CREATE TABLE IF NOT EXISTS change_blob (
+  hash TEXT PRIMARY KEY
+    CHECK(length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),
+  content BLOB NOT NULL,
+  byte_length INTEGER NOT NULL CHECK(byte_length >= 0),
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS change_set (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  proposal_hash TEXT NOT NULL
+    CHECK(
+      length(proposal_hash) = 64
+      AND proposal_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+  state TEXT NOT NULL CHECK(
+    state IN (
+      'proposed', 'approved', 'applying', 'applied', 'rejected',
+      'accepted', 'reverting', 'reverted', 'conflicted'
+    )
+  ),
+  revision INTEGER NOT NULL CHECK(revision >= 0),
+  record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK(updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS change_set_workspace_session_turn_idx
+  ON change_set(workspace_id, session_id, turn_id, created_at, id);
+
+CREATE INDEX IF NOT EXISTS change_set_workspace_state_idx
+  ON change_set(workspace_id, state, updated_at, id);
+`
+
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   {
     version: 1,
@@ -437,6 +476,11 @@ export const STATE_MIGRATIONS: readonly StateMigration[] = [
     version: 7,
     name: "session_next_mode",
     sql: SESSION_NEXT_MODE_SQL,
+  },
+  {
+    version: 8,
+    name: "change_set_storage",
+    sql: CHANGE_SET_STORAGE_SQL,
   },
 ]
 

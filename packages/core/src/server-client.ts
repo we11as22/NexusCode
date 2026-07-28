@@ -22,6 +22,9 @@ import {
   type SessionProtocolSnapshot,
   type UserInputPartV2,
 } from "./protocol/v2.js"
+import type {
+  PreparedSessionTurnIdentity,
+} from "./protocol/remote-turn-store.js"
 import {
   RemoteMcpPromptCatalogSchema,
   RemoteMcpPromptResolveRequestSchema,
@@ -37,10 +40,107 @@ export interface NexusServerClientOptions {
   token: string
 }
 
+export interface RemoteChangeReviewEntry {
+  changeSetId: string
+  proposalHash: string
+  path: string
+  operation: "create" | "modify" | "delete" | "rename"
+  originalContent?: string
+  newContent?: string
+  diffStats: { added: number; removed: number }
+  isNewFile: boolean
+  contentOmitted?: boolean
+}
+
+export interface RemoteChangeReviewSnapshot {
+  changes: RemoteChangeReviewEntry[]
+  truncated: boolean
+}
+
 export const NEXUS_SERVER_TOKEN_SECRET_KEY = "nexuscode_server_token"
 const MAX_PROTOCOL_RESPONSE_BYTES = 2 * 1024 * 1024
 const MAX_PROTOCOL_LINE_CHARACTERS = MAX_AGENT_EVENT_JSON_CHARS + 64 * 1024
 const MAX_PROTOCOL_RECONNECTS = 3
+
+function parseRemoteChangeReviewSnapshot(
+  value: unknown,
+): RemoteChangeReviewSnapshot {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !Array.isArray((value as { changes?: unknown }).changes) ||
+    typeof (value as { truncated?: unknown }).truncated !== "boolean"
+  ) {
+    throw new Error("Nexus durable change response is invalid")
+  }
+  const raw = value as {
+    changes: unknown[]
+    truncated: boolean
+  }
+  if (raw.changes.length > 200) {
+    throw new Error("Nexus durable change response exceeds its file limit")
+  }
+  const changes = raw.changes.map((candidate): RemoteChangeReviewEntry => {
+    if (!candidate || typeof candidate !== "object") {
+      throw new Error("Nexus durable change entry is invalid")
+    }
+    const entry = candidate as Record<string, unknown>
+    const stats = entry.diffStats as Record<string, unknown> | undefined
+    if (
+      typeof entry.changeSetId !== "string" ||
+      typeof entry.proposalHash !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(entry.proposalHash) ||
+      typeof entry.path !== "string" ||
+      !["create", "modify", "delete", "rename"].includes(
+        String(entry.operation),
+      ) ||
+      typeof entry.isNewFile !== "boolean" ||
+      !stats ||
+      typeof stats.added !== "number" ||
+      typeof stats.removed !== "number" ||
+      !Number.isSafeInteger(stats.added) ||
+      !Number.isSafeInteger(stats.removed) ||
+      stats.added < 0 ||
+      stats.removed < 0 ||
+      (
+        entry.originalContent !== undefined &&
+        typeof entry.originalContent !== "string"
+      ) ||
+      (
+        entry.newContent !== undefined &&
+        typeof entry.newContent !== "string"
+      ) ||
+      (
+        entry.contentOmitted !== undefined &&
+        typeof entry.contentOmitted !== "boolean"
+      )
+    ) {
+      throw new Error("Nexus durable change entry fields are invalid")
+    }
+    return {
+      changeSetId: entry.changeSetId,
+      proposalHash: entry.proposalHash,
+      path: entry.path,
+      operation:
+        entry.operation as RemoteChangeReviewEntry["operation"],
+      ...(typeof entry.originalContent === "string"
+        ? { originalContent: entry.originalContent }
+        : {}),
+      ...(typeof entry.newContent === "string"
+        ? { newContent: entry.newContent }
+        : {}),
+      diffStats: {
+        added: stats.added,
+        removed: stats.removed,
+      },
+      isNewFile: entry.isNewFile,
+      ...(entry.contentOmitted === true
+        ? { contentOmitted: true }
+        : {}),
+    }
+  })
+  return { changes, truncated: raw.truncated }
+}
 
 export interface SessionTurnIdentity {
   turnId: string
@@ -86,6 +186,19 @@ export interface RunSessionTurnOptions {
   onTurn?: (identity: SessionTurnIdentity) => void
   onApproval?: (identity: SessionApprovalIdentity) => void
   onSequence?: (sequence: number) => void | Promise<void>
+  /**
+   * Exact pre-dispatch identity and replay boundary from a durable client
+   * outbox. When present, Nexus retries this command instead of allocating a
+   * second idempotency identity.
+   */
+  prepared?: PreparedSessionTurnIdentity
+  /**
+   * Awaited after the initial snapshot and command identity allocation, but
+   * before the first POST. Throwing here guarantees the server was untouched.
+   */
+  onCommandPrepared?: (
+    prepared: PreparedSessionTurnIdentity,
+  ) => void | Promise<void>
 }
 
 export interface AttachSessionTurnOptions extends SessionTurnIdentity {
@@ -337,6 +450,73 @@ export class NexusServerClient {
     return snapshot
   }
 
+  async getSessionChanges(
+    sessionId: string,
+  ): Promise<RemoteChangeReviewSnapshot> {
+    const response = await this.request(
+      this.url(`${this.sessionV2Path(sessionId)}/changes`),
+      { headers: this.headers() },
+    )
+    if (!response.ok) return throwProtocolResponseError(response)
+    const raw = await readBoundedResponseText(response)
+    let value: unknown
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      throw new Error("Nexus durable change response is not valid JSON")
+    }
+    return parseRemoteChangeReviewSnapshot(value)
+  }
+
+  async resolveSessionChange(
+    sessionId: string,
+    changeSetId: string,
+    action: "accept" | "revert",
+  ): Promise<{
+    changeSetId: string
+    proposalHash: string
+    state: "accepted" | "reverted"
+  }> {
+    const response = await this.request(
+      this.url(
+        `${this.sessionV2Path(sessionId)}/changes/` +
+        `${encodeURIComponent(changeSetId)}/${action}`,
+      ),
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: "{}",
+      },
+    )
+    if (!response.ok) return throwProtocolResponseError(response)
+    const raw = await readBoundedResponseText(response)
+    let value: unknown
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      throw new Error("Nexus durable change action response is not valid JSON")
+    }
+    if (!value || typeof value !== "object") {
+      throw new Error("Nexus durable change action response is invalid")
+    }
+    const result = value as Record<string, unknown>
+    const expectedState =
+      action === "accept" ? "accepted" as const : "reverted" as const
+    if (
+      result.changeSetId !== changeSetId ||
+      typeof result.proposalHash !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(result.proposalHash) ||
+      result.state !== expectedState
+    ) {
+      throw new Error("Nexus durable change action ownership mismatch")
+    }
+    return {
+      changeSetId,
+      proposalHash: result.proposalHash,
+      state: expectedState,
+    }
+  }
+
   async getMcpPromptCatalog(
     sessionId: string,
   ): Promise<RemoteMcpPromptCatalog> {
@@ -480,16 +660,40 @@ export class NexusServerClient {
   async *runSessionTurn(
     options: RunSessionTurnOptions,
   ): AsyncGenerator<AgentEvent> {
-    const snapshot = await this.getSessionProtocolSnapshot(options.sessionId)
+    const prepared = options.prepared
+    if (
+      prepared &&
+      (
+        !Number.isSafeInteger(prepared.afterSequence) ||
+        prepared.afterSequence < 0
+      )
+    ) {
+      throw new RangeError(
+        "Prepared Nexus turn cursor must be a non-negative safe integer",
+      )
+    }
+    const snapshot = prepared
+      ? undefined
+      : await this.getSessionProtocolSnapshot(options.sessionId)
     const command: SessionCommandV2 = {
       version: PROTOCOL_VERSION,
-      commandId: protocolIdentifier("command"),
+      commandId:
+        prepared?.commandId ?? protocolIdentifier("command"),
       sessionId: options.sessionId,
       type: "start_turn",
-      inputId: protocolIdentifier("input"),
+      inputId: prepared?.inputId ?? protocolIdentifier("input"),
       input: [...options.input],
       mode: options.mode,
       ...(options.selection ? { selection: options.selection } : {}),
+    }
+    const replayBoundary =
+      prepared?.afterSequence ?? snapshot!.throughSequence
+    if (!prepared) {
+      await options.onCommandPrepared?.({
+        commandId: command.commandId,
+        inputId: command.inputId,
+        afterSequence: replayBoundary,
+      })
     }
 
     let receipt: SessionCommandReceipt | undefined
@@ -523,9 +727,9 @@ export class NexusServerClient {
       options.sessionId,
       identity,
       {
-        networkAfterSequence: snapshot.throughSequence,
-        deliverAfterSequence: snapshot.throughSequence,
-        snapshotThroughSequence: snapshot.throughSequence,
+        networkAfterSequence: replayBoundary,
+        deliverAfterSequence: replayBoundary,
+        snapshotThroughSequence: replayBoundary,
         pendingApprovals: [],
         signal: options.signal,
         onApproval: options.onApproval,

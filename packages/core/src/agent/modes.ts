@@ -38,6 +38,7 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
 export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   agent: ["PlanExit", "ExitPlanMode"],
   plan: [
+    "ApplyPatch",
     "Bash",
     "PowerShell",
     "EnterPlanMode",
@@ -61,6 +62,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   ask: [
     "Write",
     "Edit",
+    "ApplyPatch",
     "Bash",
     "PowerShell",
     "PlanExit",
@@ -98,6 +100,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   review: [
     "Write",
     "Edit",
+    "ApplyPatch",
     "Bash",
     "PowerShell",
     "EnterWorktree",
@@ -159,7 +162,7 @@ export const TOOL_GROUP_MEMBERS: Record<ToolGroup, string[]> = {
   always: ["AskFollowupQuestion", "TodoWrite", "Parallel", "SendUserMessage", "ToolSearch"],
   plan_enter: ["EnterPlanMode"],
   read:    ["Read", "ToolOutputRead", "List", "ListCodeDefinitions", "LSP", "ReadLints"],
-  write:   ["Write", "Edit"],
+  write:   ["Write", "Edit", "ApplyPatch"],
   execute: ["Bash", "PowerShell", "EnterWorktree", "ExitWorktree"],
   git_inspect: ["GitInspect"],
   search:  ["Grep", "CodebaseSearch", "WebFetch", "WebSearch", "Glob"],

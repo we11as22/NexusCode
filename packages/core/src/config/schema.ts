@@ -279,14 +279,6 @@ export const NexusConfigSchema = z.object({
       .array(z.string().trim().min(1).max(4_096))
       .max(128)
       .default([]),
-    /**
-     * @deprecated Parsed only so older configuration files remain valid.
-     * Runtime capability discovery is deterministic and never invokes an LLM
-     * pre-classifier.
-     */
-    classifyToolsEnabled: z.boolean().default(false),
-    /** @deprecated Compatibility-only companion to classifyToolsEnabled. */
-    classifyThreshold: z.number().int().positive().default(20),
     parallelReads: z.boolean().default(true),
     maxParallelReads: z.number().int().positive().default(5),
     /** Deferred tool loading strategy for MCP/custom heavy tools. */
@@ -296,11 +288,6 @@ export const NexusConfigSchema = z.object({
     /** In auto mode, always defer once this many tools are marked shouldDefer. */
     deferredLoadingMinimumTools: z.number().int().positive().default(8),
   }).default({}),
-
-  /** @deprecated Compatibility-only; skill discovery is deterministic. */
-  skillClassifyEnabled: z.boolean().default(false),
-  /** @deprecated Compatibility-only companion to skillClassifyEnabled. */
-  skillClassifyThreshold: z.number().int().positive().default(20),
 
   structuredOutput: z.enum(["auto", "always", "never"]).default("auto"),
 
@@ -313,7 +300,7 @@ export const NexusConfigSchema = z.object({
 
   parallelAgents: z.object({
     maxParallel: z.number().int().positive().default(4),
-    /** Deprecated: old SpawnAgents multi-task setting. Parallel sub-agent batching now uses Parallel + SpawnAgent calls. */
+    /** Maximum task/agent descriptors accepted by one parallel spawn call. */
     maxTasksPerCall: z.number().int().positive().default(12),
     maxDepth: z.number().int().min(0).max(8).default(2),
   }).default({}),

@@ -14,6 +14,7 @@ import type {
   SessionMessage,
   ToolPart,
   IHost,
+  ToolExecutionIdentity,
 } from "../types.js"
 import { Session } from "../session/index.js"
 import { loadAgentInstructionBundle } from "../context/agent-instructions.js"
@@ -38,6 +39,10 @@ import {
 } from "../context/tool-output-registry.js"
 import type { NexusRunServices } from "./run-services.js"
 import { atomicWriteJson } from "../storage/durable-fs.js"
+import {
+  delegatedAgentExecutionIdentity,
+} from "./execution-identity.js"
+import { hashWorkspaceIdentity } from "../changes/hash.js"
 
 export interface SubAgentResult {
   subagentId: string
@@ -83,6 +88,19 @@ export interface SubAgentRuntimeContext {
   services: NexusRunServices
   /** Session that owns and may observe/control the delegated run. */
   ownerSessionId: string
+  /** Exact parent tool call that owns this delegated run. */
+  executionIdentity?: ToolExecutionIdentity
+}
+
+function subAgentRuntimeContext(ctx: ToolContext): SubAgentRuntimeContext {
+  return {
+    host: ctx.host,
+    services: ctx.services,
+    ownerSessionId: ctx.session.id,
+    ...(ctx.executionIdentity
+      ? { executionIdentity: ctx.executionIdentity }
+      : {}),
+  }
 }
 
 /**
@@ -1520,6 +1538,22 @@ export class ParallelAgentManager {
 
       await runAgentLoop({
         session,
+        executionIdentity: runtimeContext.executionIdentity
+          ? delegatedAgentExecutionIdentity(
+              runtimeContext.executionIdentity,
+              {
+                sessionId: session.id,
+                subagentId,
+              },
+            )
+          : {
+              workspaceId: hashWorkspaceIdentity(
+                await fs.realpath(cwd).catch(() => path.resolve(cwd)),
+              ),
+              sessionId: session.id,
+              turnId: `subagent.${subagentId}`,
+              runId: subagentId,
+            },
         client,
         host: delegatedHost,
         config: taskConfig,
@@ -1893,11 +1927,7 @@ Max ${config.parallelAgents.maxParallel} concurrent agents (${manager.activeCoun
           ctx.partId,
           agentDefinition?.agentType,
           undefined,
-          {
-            host: ctx.host,
-            services: ctx.services,
-            ownerSessionId: ctx.session.id,
-          },
+          subAgentRuntimeContext(ctx),
         )
       }
 
@@ -1915,11 +1945,7 @@ Max ${config.parallelAgents.maxParallel} concurrent agents (${manager.activeCoun
           ctx.partId,
           agentDefinition?.agentType,
           undefined,
-          {
-            host: ctx.host,
-            services: ctx.services,
-            ownerSessionId: ctx.session.id,
-          },
+          subAgentRuntimeContext(ctx),
         )
         return {
           success: true,
@@ -2162,11 +2188,7 @@ export function createResumeAgentTool(manager: ParallelAgentManager, config: Nex
         ctx.config.parallelAgents.maxParallel,
         emit,
         ctx.partId,
-        {
-          host: ctx.host,
-          services: ctx.services,
-          ownerSessionId: ctx.session.id,
-        },
+        subAgentRuntimeContext(ctx),
         ctx.mode ?? "agent",
       )
       if ("background" in resumed) {
@@ -2217,11 +2239,7 @@ export function createTaskResumeTool(manager: ParallelAgentManager, config: Nexu
         ctx.config.parallelAgents.maxParallel,
         emit,
         ctx.partId,
-        {
-          host: ctx.host,
-          services: ctx.services,
-          ownerSessionId: ctx.session.id,
-        },
+        subAgentRuntimeContext(ctx),
         ctx.mode ?? "agent",
       )
       if ("background" in resumed) {
@@ -2369,11 +2387,7 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
             ctx.partId,
             agentDefinition?.agentType,
             undefined,
-            {
-              host: ctx.host,
-              services: ctx.services,
-              ownerSessionId: ctx.session.id,
-            },
+            subAgentRuntimeContext(ctx),
           )
           const task = await runtime.getTask(subagentId)
           if (task) {
@@ -2409,11 +2423,7 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
           ctx.partId,
           agentDefinition?.agentType,
           undefined,
-          {
-            host: ctx.host,
-            services: ctx.services,
-            ownerSessionId: ctx.session.id,
-          },
+          subAgentRuntimeContext(ctx),
         )
         const task = await runtime.getTask(result.subagentId)
         if (task) {
@@ -2536,11 +2546,7 @@ Max ${config.parallelAgents.maxParallel} agents (${manager.activeCount} active).
             ctx.partId,
             undefined,
             undefined,
-            {
-              host: ctx.host,
-              services: ctx.services,
-              ownerSessionId: ctx.session.id,
-            },
+            subAgentRuntimeContext(ctx),
           ),
         ),
       )

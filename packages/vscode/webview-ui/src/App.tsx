@@ -3531,10 +3531,6 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       apiKey: draft.vectorDbApiKey.trim() || undefined,
     },
     tools: {
-      // Compatibility fields are deliberately neutralized. Discovery uses
-      // the deterministic deferred catalog and never a preflight LLM call.
-      classifyToolsEnabled: false,
-      classifyThreshold: 20,
       parallelReads: draft.parallelReads,
       maxParallelReads: parsePositiveInt(draft.maxParallelReads, 5),
       deferredLoadingMode: draft.deferredLoadingMode,
@@ -3559,8 +3555,6 @@ function fromDraft(draft: SettingsDraft): Record<string, unknown> {
       denyCommandPatterns: linesToList(draft.denyCommandPatternsText),
       allowedMcpTools: linesToList(draft.allowedMcpToolsText),
     },
-    skillClassifyEnabled: false,
-    skillClassifyThreshold: 20,
     mcp: {
       servers: mcpServers,
     },
