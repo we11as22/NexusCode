@@ -215,7 +215,7 @@ function BashCommandBlock({
   }, [expanded, onListLayoutHint, part.output, part.status, part.error])
 
   return (
-    <div className="nexus-bash-command-block my-2 rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
+    <div className="nexus-bash-command-block rounded-lg border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] overflow-hidden">
       <button
         type="button"
         onClick={() => {
@@ -585,14 +585,13 @@ function RenderItemRow({
         onLayoutHint={onListLayoutHint}
       >
         {item.items.map((child) => (
-          <div className="message-list-item" key={child.key}>
-            <RenderItemRow
-              item={child}
-              pendingApproval={pendingApproval}
-              onResolveApproval={onResolveApproval}
-              onListLayoutHint={onListLayoutHint}
-            />
-          </div>
+          <RenderItemRow
+            key={child.key}
+            item={child}
+            pendingApproval={pendingApproval}
+            onResolveApproval={onResolveApproval}
+            onListLayoutHint={onListLayoutHint}
+          />
         ))}
       </CompletedWorkBlock>
     )

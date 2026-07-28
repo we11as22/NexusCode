@@ -87,6 +87,20 @@ describe("transcript exploration projection", () => {
           status: "completed",
           input: { pattern: "context_usage", path: "src" },
         },
+        {
+          type: "tool",
+          id: "glob-1",
+          tool: "Glob",
+          status: "completed",
+          input: { pattern: "**/*.ts", path: "src" },
+        },
+        {
+          type: "tool",
+          id: "semantic-1",
+          tool: "CodebaseSearch",
+          status: "completed",
+          input: { query: "context accounting", path: "src" },
+        },
       ],
     }
     const explored = buildChatRenderItems([assistant], false).find(
@@ -99,7 +113,7 @@ describe("transcript exploration projection", () => {
     expect(countExplorationMetricsFromItems(explored.prefixItems)).toEqual({
       filesCount: 1,
       listCount: 1,
-      searchesCount: 1,
+      searchesCount: 3,
     })
   })
 })

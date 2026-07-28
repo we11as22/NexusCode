@@ -8,6 +8,20 @@ export function formatWorkedDuration(durationMs: number): string {
   return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`
 }
 
+export function CompletedWorkDetails({
+  children,
+}: {
+  children?: React.ReactNode
+}) {
+  return (
+    <div className="nexus-worked-details">
+      {React.Children.map(children, (child) => (
+        <div className="nexus-worked-item">{child}</div>
+      ))}
+    </div>
+  )
+}
+
 export function CompletedWorkBlock({
   durationMs,
   children,
@@ -39,7 +53,7 @@ export function CompletedWorkBlock({
         </span>
       </button>
       {expanded ? (
-        <div className="nexus-worked-details">{children}</div>
+        <CompletedWorkDetails>{children}</CompletedWorkDetails>
       ) : null}
     </div>
   )

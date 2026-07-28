@@ -746,7 +746,7 @@ export function ExploredSummaryInline({
   return (
     <div
       data-explored-inline
-      className="nexus-explored-block my-2 overflow-hidden"
+      className="nexus-explored-block overflow-hidden"
     >
       <button
         type="button"

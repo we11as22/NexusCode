@@ -2639,7 +2639,7 @@ html, body, #root {
 }
 
 .message-list-item {
-  padding-bottom: 16px;
+  padding-bottom: 10px;
   min-width: 0;
   max-width: 100%;
   overflow-x: hidden;
@@ -2648,7 +2648,7 @@ html, body, #root {
 }
 
 .message-list-item:last-child {
-  padding-bottom: 12px;
+  padding-bottom: 8px;
 }
 
 .message-list {
@@ -3398,9 +3398,15 @@ input[type="text"]:focus-visible {
 .nexus-worked-details {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-  padding: 0.25rem 0 0.35rem 0.75rem;
+  gap: 8px;
+  padding: 4px 0 6px 12px;
   border-left: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-worked-item {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 @media (prefers-reduced-motion: reduce) {
