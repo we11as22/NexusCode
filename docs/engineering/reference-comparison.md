@@ -1,295 +1,357 @@
-# NexusCode reference-agent comparison
+# Сравнение NexusCode с эталонными агентами
 
-**Audit date:** 2026-07-28
+**Дата аудита:** 2026-07-28
 
-**Compared source trees:** Codex, OpenClaude, Kilo Code, Roo Code, Cline,
-OpenCode, Claw Code, Kimi Code, Kimi CLI, MiMo Code, and Qwen Code.
+**Сравниваемые исходные проекты:** Codex, OpenClaude, Kilo Code, Roo Code,
+Cline, OpenCode, Claw Code, Kimi Code, Kimi CLI, MiMo Code и Qwen Code.
 
-This document records implementation evidence, not README claims. The audit followed each capability through configuration, construction, execution, persistence, host rendering, and cleanup where those layers existed.
+Этот документ опирается на реализацию, а не на заявления из README. Для каждой
+возможности аудит прослеживал всю цепочку: конфигурацию, создание, выполнение,
+сохранение состояния, отображение в интерфейсе и очистку — везде, где эти слои
+присутствовали.
 
-**Audited revisions:** Codex `61a4488`, OpenClaude `a3dc345`, Kilo Code
+**Проверенные ревизии:** Codex `61a4488`, OpenClaude `a3dc345`, Kilo Code
 `614c21ee81`, Roo Code `b867ec9`, Cline `dd7a1c5`, OpenCode `7534d23`,
 Claw Code `4ea31c1`, Kimi Code `77618e3`, Kimi CLI `4a550ef`, MiMo Code
-`076b790`, and Qwen Code `3209b89`.
+`076b790` и Qwen Code `3209b89`.
 
-## Reference order
+## Приоритет эталонов
 
-Codex and OpenClaude are equal primary references, for different reasons:
+Codex и OpenClaude — два равнозначных главных эталона, но по разным причинам:
 
-- **Codex:** execution discipline, approvals, sandbox boundaries, durable rollouts, process lifecycle, remote protocol, and recovery invariants.
-- **OpenClaude:** instructions, skills, memory, hooks, plugins, subagents, teammates, background work, and terminal-agent ergonomics.
-- **Kilo Code:** broad provider support, practical OpenCode-derived runtime work, packaging, telemetry, and productized integrations.
-- **Roo Code:** VS Code behavior, Tree-sitter/Qdrant indexing, checkpoints, ignore rules, and tool UX.
-- **Cline, OpenCode, and Claw Code:** secondary sources for IDE host bridges,
-  browser/checkpoint UX, scoped services, durable prompt admission, MCP
-  recovery, and security diagnostics.
-- **Kimi Code, Kimi CLI, MiMo Code, and Qwen Code:** durable content baselines,
-  terminal history semantics, exact edit/rewind identity, reconnect cursors,
-  and complete side-effect-free Git review.
+- **Codex:** дисциплина выполнения, подтверждения, границы песочницы, долговечные
+  журналы выполнения, жизненный цикл процессов, удалённый протокол и инварианты
+  восстановления.
+- **OpenClaude:** инструкции, навыки, память, хуки, плагины, субагенты, команды
+  агентов, фоновая работа и удобство терминального агента.
+- **Kilo Code:** широкая поддержка провайдеров, практичный рантайм на основе
+  OpenCode, упаковка, телеметрия и продуктовые интеграции.
+- **Roo Code:** поведение расширения VS Code, индексация через
+  Tree-sitter/Qdrant, контрольные точки, правила игнорирования и UX инструментов.
+- **Cline, OpenCode и Claw Code:** дополнительные источники для мостов IDE,
+  UX браузера и контрольных точек, сервисов с ограниченной областью действия,
+  долговечного приёма промптов, восстановления MCP и диагностики безопасности.
+- **Kimi Code, Kimi CLI, MiMo Code и Qwen Code:** эталоны долговечного хранения
+  содержимого, семантики истории терминала, точной идентичности правок и отката,
+  курсоров переподключения и полного Git-обзора без побочных эффектов.
 
-Nexus does not copy one project wholesale. It uses one shared TypeScript core for CLI, VS Code, and server, and adopts a reference only when its invariant fits that portable runtime.
+Nexus не копирует какой-либо проект целиком. Он использует одно общее
+TypeScript-ядро для CLI, VS Code и сервера и заимствует решение только тогда,
+когда его инварианты подходят переносимому рантайму Nexus.
 
-## Per-project strengths and limits
+## Сильные стороны и ограничения проектов
 
-| Source | Strongest verified ideas | Limits or risks that Nexus does not copy |
+| Источник | Сильнейшие подтверждённые решения | Ограничения и риски, которые Nexus не переносит |
 | --- | --- | --- |
-| Codex | Central approval/sandbox/retry orchestrator; real platform sandbox brokers; rollout reconstruction; cancellation and multi-agent lifecycle; replacement compaction | The Rust/platform stack cannot be transplanted into a portable TypeScript extension wholesale; it is not the broadest reference for provider-neutral plugins, skills, or VS Code product UX |
-| OpenClaude | Deep instruction cascade, memory, skills, hooks, plugins, subagents, teams, mailboxes, background tasks, resume and terminal ergonomics | Several contracts are Anthropic/product-specific, and trusted local hooks still need a stronger OS capability boundary; Nexus keeps the behavior but removes provider coupling |
-| Kilo Code | Clean typed service composition, event-sourced session runner, permission rules, provider breadth, extension packaging and operational integrations | The V2 surface is evolving and coexists with older paths; large inherited extension/service breadth should not become a second Nexus core or duplicate policy |
-| Roo Code | Mature VS Code task UX, editor diff provider, Tree-sitter/Qdrant pipeline, ignore/watch behavior and checkpoints | Very large task/controller surfaces are hard to reason about; blanket shadow-repository reset/clean semantics are too broad for authoritative per-turn undo |
-| Cline | Polished diff/checkpoint/browser/terminal UX, MCP recovery, diagnostics and Extension Host lifecycle | Extension-centric architecture and checkpoint snapshots do not by themselves provide durable multi-agent coordination or exact multi-file ownership |
-| OpenCode | Scoped services, server/TUI separation, durable prompt admission, deterministic plugin ordering and operational SQL storage | Its service/database topology is useful on a server but unnecessary as mandatory local transcript storage; broad plugin execution still needs explicit trust boundaries |
-| Claw Code | Explicit security capability reporting, expiring approval concepts, degraded MCP diagnostics and path-scope tests | The repository mixes executable runtime with roadmap/experimental material; only behavior proven in code and tests is used |
-| Kimi Code | Layered agent-core-v2 services, event bus, session lifecycle, config overlays, plugins, exact edit/Git services and wire-oriented product boundaries | V2 and legacy services coexist, so architecture names alone are not evidence of one completed path; Nexus adopts tested invariants, not unfinished duplication |
-| Kimi CLI | Atomic file writes, ACP/wire sessions, fork/resume, conservative compaction, background jobs and validated subagent metadata | It is primarily a terminal/Python runtime and is not the reference for native VS Code diff UX or Codex-grade process sandboxing |
-| MiMo Code | Small Codex-like tool ABI, QuickJS composition, BM25 MCP/memory discovery, token-efficient output and message-bound patch history | Its own security/architecture notes acknowledge no OS shell sandbox and non-transactional multi-file patch risks; Nexus keeps deterministic discovery but uses durable atomic change sets |
-| Qwen Code | Stateless reusable AgentCore, explicit subagent tool restrictions, workflow journal, MCP transport pooling and complete side-effect-free Git enumeration | Intent classification can hide MCP/skill capabilities behind model behavior; Nexus uses deterministic BM25/exact activation and avoids parallel core variants |
+| Codex | Централизованный оркестратор подтверждений, песочницы и повторов; настоящие платформенные брокеры песочницы; восстановление журнала выполнения; отмена и жизненный цикл мультиагентности; замещающая компакция | Стек на Rust и платформенные компоненты нельзя целиком перенести в переносимое TypeScript-расширение; это не самый широкий эталон для независимых от провайдера плагинов, навыков и продуктового UX VS Code |
+| OpenClaude | Глубокий каскад инструкций, память, навыки, хуки, плагины, субагенты, команды, почтовые ящики, фоновые задачи, возобновление и удобство терминала | Некоторые контракты привязаны к Anthropic и конкретному продукту, а доверенным локальным хукам всё равно нужна более сильная граница возможностей ОС; Nexus сохраняет поведение, но устраняет привязку к провайдеру |
+| Kilo Code | Чистая типизированная композиция сервисов, событийный исполнитель сессий, правила разрешений, широта провайдеров, упаковка расширения и эксплуатационные интеграции | Поверхность V2 продолжает развиваться и сосуществует со старыми путями; большая унаследованная широта расширения и сервисов не должна превращаться во второе ядро Nexus или дублировать политики |
+| Roo Code | Зрелый UX задач в VS Code, провайдер редакторского diff, конвейер Tree-sitter/Qdrant, отслеживание и игнорирование файлов, контрольные точки | Очень крупные поверхности задач и контроллеров трудно анализировать; безусловные `reset/clean` теневого репозитория слишком широки для точного отката отдельного хода |
+| Cline | Качественный UX diff, контрольных точек, браузера и терминала; восстановление MCP; диагностика и жизненный цикл Extension Host | Архитектура, сосредоточенная на расширении, и снимки контрольных точек сами по себе не дают долговечной мультиагентной координации или точного владения изменениями нескольких файлов |
+| OpenCode | Сервисы с ограниченной областью действия, разделение сервера и TUI, долговечный приём промптов, детерминированный порядок плагинов и эксплуатационное хранилище SQL | Его топология сервисов и базы данных полезна на сервере, но избыточна как обязательное локальное хранилище диалога; широкое исполнение плагинов всё равно требует явных границ доверия |
+| Claw Code | Явный отчёт о доступных механизмах безопасности, концепции истекающих разрешений, диагностика деградации MCP и тесты областей путей | Репозиторий смешивает исполняемый рантайм с дорожной картой и экспериментами; используются только возможности, подтверждённые кодом и тестами |
+| Kimi Code | Многоуровневые сервисы `agent-core-v2`, шина событий, жизненный цикл сессии, наложение конфигураций, плагины, точные сервисы правок/Git и продуктовые границы, ориентированные на протокол | V2 и устаревшие сервисы сосуществуют, поэтому одни архитектурные названия не доказывают наличие единого законченного пути; Nexus заимствует проверенные инварианты, а не незавершённое дублирование |
+| Kimi CLI | Атомарная запись файлов, ACP/протокольные сессии, ветвление и возобновление, консервативная компакция, фоновые задания и проверенные метаданные субагентов | Это прежде всего терминальный Python-рантайм, а не эталон нативного diff в VS Code или песочницы процессов уровня Codex |
+| MiMo Code | Компактный ABI инструментов в стиле Codex, композиция через QuickJS, BM25-поиск по MCP и памяти, экономный по токенам вывод и история патчей, привязанная к сообщениям | Его документация по безопасности и архитектуре прямо отмечает отсутствие песочницы ОС для shell и нетранзакционные риски многофайловых патчей; Nexus сохраняет детерминированное обнаружение, но использует долговечные атомарные наборы изменений |
+| Qwen Code | Переиспользуемый stateless `AgentCore`, явные ограничения инструментов субагентов, журнал workflow, пул транспортов MCP и полный Git-обзор без побочных эффектов | Классификация намерений может скрывать возможности MCP и навыков за поведением модели; Nexus использует детерминированную BM25/точную активацию и избегает параллельных вариантов ядра |
 
-## Current capability matrix
+## Текущая матрица возможностей
 
-| Domain | NexusCode after hardening | Strongest references | Assessment |
+| Область | NexusCode после усиления | Сильнейшие эталоны | Оценка |
 | --- | --- | --- | --- |
-| Agent loop | One authoritative `runAgentLoop` and one tool-execution pipeline | Codex, OpenClaude | Implemented; dead duplicate permission engine removed |
-| Prompts and modes | Agent, plan, ask, debug, review with mode-specific prompt and exact resolved capability projection | Codex, OpenClaude, Kilo, Roo | Implemented and shared by all hosts; custom mode instructions are projected without expanding permissions, PLAN is read-only except its plan file/workflow, and mode cannot change during an active turn |
-| Compaction | Deterministic pruning/microcompaction before bounded LLM summary, CAS persistence and memory continuity | Codex, OpenClaude, Kilo, Kimi CLI | Implemented; failures do not destroy the previous transcript and active instructions are re-projected |
-| Sessions | Checksummed JSONL transcript plus built-in SQLite transactional coordination, repair, migration, bounded active context | Codex, OpenCode, MiMo | Implemented; JSONL remains portable history while SQLite owns leases, admission, approvals, queues, replay and orchestration |
-| Remote runs | Authenticated NDJSON, durable event replay, sequence reconnect, pre-request client outbox, exact turn identity, explicit abort and approval | Codex, OpenCode, Kimi Code | Implemented; the canonical command is persisted before POST, admission is idempotent, exact terminal replay survives lost responses and queued/active/terminal restart races, and failed/expired cursors cannot permanently block the surface |
-| Permissions | Mode policy, ordered rules, path/command checks, serialized interactive approvals, fail-closed server | Codex, OpenCode, Claw | Implemented at application boundary; privileged plugin and agent-hook actions cannot inherit read auto-approval; OS process sandbox remains a separate gap |
-| Tool lifecycle and large output | Validation, normalization, hooks, timeout/cancel, bounded previews, durable output spill/read and task events | Codex, Kilo, MiMo | Implemented; spilled data is outside the project tree, remains explicitly retrievable by opaque capability, and background task identity survives transcript replay |
-| Subagents | Task-first delegated runs, batches, snapshots, resume, worktree isolation, narrowed modes | OpenClaude, Codex, Cline | Implemented; approval requests are serialized across root/delegated hosts and agent-hook paths are confined |
-| Teams/orchestration | Durable tasks, teams, inbox, members, messages, worktrees, remote sessions | OpenClaude | Implemented with checksummed snapshot + journal |
-| Memory | Global/project/session/team and bound task/agent records, markdown import, scrolling memory, relevance retrieval, redaction, access accounting | OpenClaude, Kilo | Implemented; complete eligible scopes are ranked before prompt budgeting and private scopes fail closed |
-| Rules and skills | Managed/user/project cascade, includes, Claude compatibility, deferred skill discovery | OpenClaude, Codex | Implemented; server loading is bounded and fail-soft with visible diagnostics |
-| Plugins | Manifest validation, explicit trust, lifecycle hooks, agents, skills, commands, MCP, install/remove/reload, isolated custom-tool workers | OpenClaude, OpenCode, Roo | Implemented for trusted local plugins; trust/install/remove/manual hook calls require user approval, one-shot hooks are success-only and session-scoped, and the installed VSIX ships the cross-platform custom-tool compiler instead of depending on a source checkout or platform-native optional binary |
-| MCP | stdio/HTTP/SSE, timeout, pagination, resources, auth handoff, schema normalization, list-change refresh, safe reconnect | Cline, OpenCode | Implemented; dropped transports reconnect without replaying a possibly mutating call |
-| Code intelligence | Tree-sitter symbols, incremental tracking, optional embeddings/Qdrant, LSP in VS Code | Roo, Kilo | Implemented; semantic index is optional and the agent works without it |
-| Checkpoints and change review | Durable content-addressed change sets, exact proposal approval, CAS apply/revert/recovery, path-scoped checkpoint restore, bounded Git status/diff, and CLI/server/VS Code review | Codex, Kimi Code, Qwen, MiMo | Implemented; legacy shadow checkpoints without exact message binding are preview-only and no restore path runs blanket reset/clean or renames nested Git metadata |
-| File mutation | Write, Edit, and strict multi-file ApplyPatch share one proposal-first durable mutation flow | Codex, Kilo, Roo, MiMo | Implemented; ApplyPatch validates every exact hunk before one atomic review action, retains binary delete bytes, compensates partial host failures, and identifies grouped multi-file review actions honestly |
-| Terminal | Foreground/background tasks, output/stop lifecycle, integrated VS Code terminal, cancellation | Codex, Cline | Implemented; CLI projects the complete task lifecycle and VS Code renders bounded output, cwd, task id, duration, exit status and artifact availability |
-| Providers | Anthropic, OpenAI-compatible, OpenAI, Google, Azure, Bedrock and compatible gateways | Kilo, OpenCode | Implemented with compatibility tests for the AI SDK generation in this repository |
-| Config, credentials and first run | Layered YAML authority, destination-bound secrets, owner-only atomic CLI state and Kilo free-model default | Codex, Kimi CLI, Qwen, Kilo | Implemented; the installer selects the exact pinned Node runtime and does not persist the retired plaintext CLI key |
-| Install and packaging | Pinned Node/pnpm, reproducible monorepo build, wrapper CLI and self-contained VSIX assets | Kilo, Roo, Cline | Implemented and smoke-tested from a shell initially pointing at Node 20; the installed wrapper used Node 24.18.0 and created first-run state with directory/file modes 0700/0600 |
-| Browser | Web search/fetch built in; interactive browser only through a present plugin or MCP tool | Cline | Intentionally external; prompt no longer claims a nonexistent built-in browser |
-| Surface parity | Shared core in CLI, server, and VS Code; host-specific capability adapters | Codex app server, Cline SDK | Substantial parity; queued turns preserve text/images/mode/preset, modern task/background events are visible in both hosts, Exploring→Explored uses stable render identity, and VS Code secrets/workspace trust fail closed; deep real-host E2E coverage is still weaker than Cline |
+| Цикл агента | Один авторитетный `runAgentLoop` и единый конвейер выполнения инструментов | Codex, OpenClaude | Реализовано; мёртвый дублирующий движок разрешений удалён |
+| Промпты и режимы | Agent, plan, ask, debug и review с отдельными промптами режимов и точной проекцией доступных возможностей | Codex, OpenClaude, Kilo, Roo | Реализовано и используется всеми интерфейсами; пользовательские инструкции режима не расширяют разрешения, PLAN допускает запись только в файл/процесс плана, а режим нельзя менять во время активного хода |
+| Компакция | Детерминированная обрезка и микрокомпакция перед ограниченным LLM-резюме, CAS-сохранение и непрерывность памяти | Codex, OpenClaude, Kilo, Kimi CLI | Реализовано; сбой не уничтожает предыдущий диалог, активные инструкции проецируются повторно |
+| Сессии | Защищённый контрольными суммами JSONL-транскрипт и встроенная SQLite-координация с транзакциями, восстановлением, миграциями и ограниченным активным контекстом | Codex, OpenCode, MiMo | Реализовано; JSONL остаётся переносимой историей, а SQLite управляет арендой, приёмом запросов, разрешениями, очередями, повторным воспроизведением и оркестрацией |
+| Удалённые запуски | Аутентифицированный NDJSON, долговечное воспроизведение событий, переподключение по sequence, клиентский outbox до запроса, точная идентичность хода, явная отмена и подтверждения | Codex, OpenCode, Kimi Code | Реализовано; каноническая команда сохраняется до POST, приём идемпотентен, точное терминальное воспроизведение переживает потерянный ответ и гонки queued/active/terminal после перезапуска, а ошибочный или истёкший курсор не может навсегда заблокировать интерфейс |
+| Разрешения | Политика режима, упорядоченные правила, проверки путей и команд, сериализованные интерактивные подтверждения, fail-closed сервер | Codex, OpenCode, Claw | Реализовано на границе приложения; привилегированные действия плагинов и хуков агентов не наследуют автоматическое разрешение на чтение; песочница процессов ОС остаётся отдельным пробелом |
+| Жизненный цикл инструментов и большой вывод | Валидация, нормализация, хуки, тайм-аут/отмена, ограниченные превью, долговечное вынесение и чтение вывода, события задач | Codex, Kilo, MiMo | Реализовано; вынесенные данные хранятся вне дерева проекта, явно читаются по непрозрачной capability-ссылке, идентичность фоновой задачи переживает воспроизведение транскрипта |
+| Субагенты | Делегированные запуски от задачи, пакеты, снимки, возобновление, изоляция worktree и суженные режимы | OpenClaude, Codex, Cline | Реализовано; запросы разрешений сериализуются между корневым и делегированными хостами, пути хуков агентов ограничены |
+| Команды и оркестрация | Долговечные задачи, команды, входящие сообщения, участники, сообщения, worktree и удалённые сессии | OpenClaude | Реализовано через снимок с контрольной суммой и журнал |
+| Память | Глобальные, проектные, сессионные, командные и привязанные к задачам/агентам записи; импорт Markdown, прокручиваемая память, релевантный поиск, редактирование секретов и учёт доступа | OpenClaude, Kilo | Реализовано; все допустимые области ранжируются до применения бюджета промпта, приватные области работают fail-closed |
+| Правила и навыки | Каскад managed/user/project, подключения, совместимость с Claude, отложенное обнаружение навыков | OpenClaude, Codex | Реализовано; серверная загрузка ограничена, ошибки не валят систему и видны в диагностике |
+| Плагины | Проверка манифеста, явное доверие, хуки жизненного цикла, агенты, навыки, команды, MCP, установка/удаление/перезагрузка, изолированные workers пользовательских инструментов | OpenClaude, OpenCode, Roo | Реализовано для доверенных локальных плагинов; доверие, установка, удаление и ручные вызовы хуков требуют подтверждения пользователя, одноразовые хуки срабатывают только при успехе и ограничены сессией, установленный VSIX содержит кроссплатформенный компилятор пользовательских инструментов и не зависит от исходного checkout или платформенного optional binary |
+| MCP | stdio/HTTP/SSE, тайм-аут, пагинация, ресурсы, передача авторизации, нормализация схем, обновление при изменении списка, безопасное переподключение | Cline, OpenCode | Реализовано; разорванный транспорт переподключается без повторного запуска потенциально изменяющего состояния вызова |
+| Интеллект по коду | Символы Tree-sitter, инкрементальное отслеживание, опциональные embeddings/Qdrant, LSP в VS Code | Roo, Kilo | Реализовано; семантический индекс необязателен, агент работает без него |
+| Контрольные точки и проверка изменений | Долговечные content-addressed наборы изменений, подтверждение точного предложения, CAS-применение/откат/восстановление, восстановление контрольной точки в пределах путей, ограниченные Git status/diff и review в CLI/server/VS Code | Codex, Kimi Code, Qwen, MiMo | Реализовано; старые теневые контрольные точки без точной привязки к сообщению доступны только для просмотра, ни один путь восстановления не запускает безусловный reset/clean и не переименовывает метаданные вложенных Git-репозиториев |
+| Изменение файлов | Write, Edit и строгий многофайловый ApplyPatch используют единый долговечный поток «сначала предложение» | Codex, Kilo, Roo, MiMo | Реализовано; ApplyPatch проверяет каждый точный hunk до одного атомарного review-действия, сохраняет байты удаляемых бинарных файлов, компенсирует частичные сбои хоста и честно обозначает сгруппированные многофайловые действия |
+| Терминал | Активные и фоновые задачи, жизненный цикл вывода/остановки, встроенный терминал VS Code, отмена | Codex, Cline | Реализовано; CLI отображает полный жизненный цикл задачи, VS Code показывает ограниченный вывод, cwd, id задачи, длительность, код выхода и доступность артефакта |
+| Провайдеры | Anthropic, OpenAI-compatible, OpenAI, Google, Azure, Bedrock и совместимые шлюзы | Kilo, OpenCode | Реализовано с тестами совместимости для используемого в репозитории поколения AI SDK |
+| Конфигурация, учётные данные и первый запуск | Иерархия YAML, секреты с привязкой к назначению, атомарное CLI-состояние только для владельца и Kilo как источник бесплатных моделей по умолчанию | Codex, Kimi CLI, Qwen, Kilo | Реализовано; установщик выбирает точно закреплённую версию Node и не сохраняет удалённый открытый CLI-ключ |
+| Установка и упаковка | Закреплённые Node/pnpm, воспроизводимая сборка монорепозитория, CLI-wrapper и самодостаточные ресурсы VSIX | Kilo, Roo, Cline | Реализовано и проверено smoke-тестом из shell, изначально использующего Node 20; установленный wrapper выбрал Node 24.18.0 и создал состояние первого запуска с правами 0700/0600 для каталога/файла |
+| Браузер | Встроены Web search/fetch; интерактивный браузер доступен только через установленный плагин или MCP-инструмент | Cline | Намеренно внешний; промпт больше не заявляет отсутствующий встроенный браузер |
+| Паритет интерфейсов | Общее ядро в CLI, сервере и VS Code; адаптеры возможностей конкретных хостов | Codex app server, Cline SDK | Существенный паритет; очередь ходов сохраняет текст, изображения, режим и preset, современные события задач и фона видны в обоих интерфейсах, Exploring→Explored использует стабильную идентичность отображения, секреты VS Code и доверие workspace работают fail-closed; глубина настоящих host E2E всё ещё уступает Cline |
 
-## What Nexus took from each implementation
+## Что Nexus взял из каждой реализации
 
 ### Codex
 
-- Fail-closed privileged execution and explicit approval boundaries.
-- Durable, replayable run events rather than treating a live stream as the source of truth.
-- Session/run identity, cancellation trees, process cleanup, and idempotent reconnect semantics.
-- Worktree-aware delegated coding and truthful verification contracts.
-- Portable canonical transcripts with database-like projections kept conceptually separate from the transcript.
+- Fail-closed выполнение привилегированных действий и явные границы подтверждений.
+- Долговечные воспроизводимые события запуска вместо использования live stream
+  как источника истины.
+- Идентичность сессии и запуска, деревья отмены, очистку процессов и
+  идемпотентную семантику переподключения.
+- Делегированное программирование с учётом worktree и честные контракты проверки.
+- Переносимые канонические транскрипты, концептуально отделённые от
+  проекций, похожих на базу данных.
 
-Nexus uses portable JSONL as transcript/audit history and built-in `node:sqlite`
-for transactional coordination. This avoids a third-party native addon ABI
-while still providing leases, idempotent admission, approvals, queues, replay,
-orchestration mailboxes, and cleanup ledgers.
+Nexus использует переносимый JSONL как историю транскрипта и аудита, а
+встроенный `node:sqlite` — для транзакционной координации. Это исключает
+ABI-зависимость от стороннего нативного addon, сохраняя аренду, идемпотентный
+приём, разрешения, очереди, воспроизведение, почтовые ящики оркестрации и журналы
+очистки.
 
 ### OpenClaude
 
-- Instruction cascade, Claude-compatible rules, skills, auto-memory, session memory, and compaction continuity.
-- Plan workflow and explicit host handoff.
-- Hooks around prompts, tools, turns, task completion, and subagent lifecycle.
-- Task/subagent/team/inbox orchestration, snapshots, resume, remote state, and background work.
-- Plugin-provided agents, skills, commands, hooks, and MCP declarations.
-- Success-only one-shot hook lifecycle, scoped to the owning session rather than process-global state.
+- Каскад инструкций, совместимые с Claude правила, навыки, автоматическую память,
+  память сессии и непрерывность при компакции.
+- Workflow планирования и явную передачу управления хосту.
+- Хуки вокруг промптов, инструментов, ходов, завершения задач и жизненного цикла
+  субагентов.
+- Оркестрацию задач, субагентов, команд и входящих сообщений; снимки,
+  возобновление, удалённое состояние и фоновую работу.
+- Агенты, навыки, команды, хуки и MCP-декларации из плагинов.
+- Одноразовые хуки только для успешного выполнения, ограниченные владеющей
+  сессией, а не глобальным состоянием процесса.
 
-Nexus keeps these contracts provider-neutral and places them behind one tool policy. Plugin code is not trusted merely because it exists in the project.
+Nexus сохраняет эти контракты независимыми от провайдера и проводит их через
+единую политику инструментов. Код плагина не становится доверенным лишь потому,
+что находится в проекте.
 
 ### Kilo Code
 
-- Broad provider and gateway compatibility.
-- Recoverable tool-schema drift with useful validation feedback.
-- Practical multi-surface settings and packaging concerns.
-- OpenCode-derived task/storage ideas where they improve operational behavior.
-- Productized code-index controls and graceful optional-service behavior.
+- Широкую совместимость с провайдерами и шлюзами.
+- Восстановление после рассинхронизации схем инструментов с полезной обратной
+  связью о валидации.
+- Практические решения для настроек нескольких интерфейсов и упаковки.
+- Идеи задач и хранения из OpenCode там, где они улучшают эксплуатационное
+  поведение.
+- Продуктовые элементы управления индексом кода и корректную деградацию
+  опциональных сервисов.
 
-Nexus adopts the useful operational-database boundary without making SQLite the
-canonical conversation format: portable transcript history and transactional
-coordination have different failure and query requirements.
+Nexus использует полезную границу эксплуатационной базы данных, но не превращает
+SQLite в канонический формат диалога: у переносимой истории транскрипта и
+транзакционной координации разные требования к сбоям и запросам.
 
-Kilo and Roo also informed the per-file diff projection and extension tool
-metadata. Nexus keeps Codex-style whole-call ownership for a multi-file patch;
-the extension marks those files as one atomic patch instead of implying that a
-single row can be accepted independently.
+Kilo и Roo также повлияли на проекцию diff по файлам и метаданные инструментов
+расширения. Nexus сохраняет владение всем вызовом в стиле Codex для
+многофайлового патча: расширение помечает такие файлы как один атомарный патч,
+а не создаёт ложное впечатление, что отдельную строку можно принять независимо.
 
 ### Roo Code
 
-- Tree-sitter language coverage and query assets.
-- Qdrant-backed semantic search with local cache/tracker state.
-- Incremental indexing, ignore handling, failure thresholds, and partial-index policy.
-- Checkpoint and VS Code interaction patterns.
-- Cross-platform `esbuild-wasm` packaging for runtime-provided code tools.
+- Покрытие языков Tree-sitter и ресурсы запросов.
+- Семантический поиск на Qdrant с локальным состоянием кеша и трекера.
+- Инкрементальную индексацию, обработку ignore, пороги ошибок и политику
+  частичного индекса.
+- Паттерны контрольных точек и взаимодействия с VS Code.
+- Кроссплатформенную упаковку `esbuild-wasm` для инструментов кода,
+  предоставляемых во время исполнения.
 
-Nexus corrected its production packaging so Tree-sitter WASM/query files and
-the custom-tool compiler are present in the VSIX/build, rather than only
-working from a source checkout. Unlike Roo's direct compiler invocation, the
-Nexus bundler retains an import-resolution policy that rejects paths escaping
-the exact trusted tool tree before worker execution.
+В production-упаковке Nexus исправлено наличие WASM/query-ресурсов Tree-sitter
+и компилятора пользовательских инструментов в VSIX/build: теперь они работают
+не только из checkout исходников. В отличие от прямого запуска компилятора в
+Roo, bundler Nexus сохраняет политику разрешения импортов, которая до запуска
+worker отклоняет пути, выходящие за пределы точного доверенного дерева
+инструмента.
 
 ### Cline
 
-- Shadow-Git checkpoint UX and task/workspace restore distinction.
-- VS Code host bridge, diff/diagnostic integration, and integrated-terminal behavior.
-- Dynamic subagent definitions and rich subagent presentation.
-- MCP connection recovery and explicit host lifecycle cleanup.
-- A real interactive browser as evidence of what a browser feature requires.
+- UX контрольных точек через shadow Git и различие восстановления задачи и
+  workspace.
+- Мост VS Code host, интеграцию diff/диагностики и поведение встроенного
+  терминала.
+- Динамические определения субагентов и подробное отображение их работы.
+- Восстановление подключения MCP и явную очистку жизненного цикла host.
+- Настоящий интерактивный браузер как доказательство того, что требуется от
+  браузерной функции.
 
-Nexus adopted the lifecycle and UX lessons, but did not pretend WebFetch was equivalent to a browser. Interactive navigation, screenshots, and page actions require an installed browser plugin/MCP capability until a real bundled browser service is implemented.
+Nexus перенял уроки жизненного цикла и UX, но не выдаёт WebFetch за браузер.
+Интерактивная навигация, снимки экрана и действия на странице требуют
+установленного браузерного плагина или MCP-возможности, пока не появится
+настоящий встроенный браузерный сервис.
 
-### Kimi Code and Kimi CLI
+### Kimi Code и Kimi CLI
 
-- FIFO turn admission with stable client-owned identities.
-- Serialized undo, exact preconditions, and retained terminal results.
-- Step-request queues that deliver user answers at provider boundaries.
-- Tail-preserving compaction and durable transcript fork/truncation behavior.
+- FIFO-приём ходов со стабильными идентификаторами, принадлежащими клиенту.
+- Сериализованный undo, точные предусловия и сохранённые терминальные результаты.
+- Очереди `step-request`, доставляющие ответы пользователя на границах
+  провайдерских вызовов.
+- Компакцию с сохранением хвоста и долговечное ветвление/усечение транскрипта.
 
-Nexus uses those invariants in its queued-turn store, pre-request remote
-outbox, mailbox delivery, compaction CAS, and two-phase chat/file rewind.
+Nexus использует эти инварианты в хранилище очереди ходов, удалённом outbox до
+запроса, доставке через mailbox, CAS-компакции и двухфазном откате чата/файлов.
 
-### MiMo Code and Qwen Code
+### MiMo Code и Qwen Code
 
-- MiMo's message/part-bound patch history, server SQLite/WAL ownership, and
-  scoped restore validation.
-- Qwen's writer-lease discipline, fail-closed compaction tiers, complete Git
-  state enumeration, background agents, and permission-rule boundaries.
+- Из MiMo: историю патчей, привязанную к сообщениям и их частям; владение
+  серверным SQLite/WAL и проверку восстановления в заданной области.
+- Из Qwen: дисциплину writer lease, fail-closed уровни компакции, полный обзор
+  Git-состояния, фоновых агентов и границы правил разрешений.
 
-Nexus uses SQLite only where server concurrency needs transactions and keeps
-local CLI/extension history portable. It does not copy Qwen's intent
-classifier for MCP or skills: deterministic discovery and explicit activation
-are easier to audit and do not hide capabilities behind another model call.
+Nexus использует SQLite только там, где серверной конкурентности нужны
+транзакции, а локальную историю CLI/расширения сохраняет переносимой. Классификатор
+намерений Qwen для MCP и навыков не копируется: детерминированное обнаружение и
+явная активация проще для аудита и не скрывают возможности за дополнительным
+вызовом модели.
 
 ### OpenCode
 
-- Per-workspace scoped runtime services and deterministic disposal.
-- Separation between durable prompt admission and active execution.
-- Session busy/cancel state, permission requests, deterministic plugin ordering, and server/TUI protocol separation.
-- Durable operational storage concepts and explicit status events.
+- Сервисы рантайма с областью действия workspace и детерминированное освобождение
+  ресурсов.
+- Разделение долговечного приёма промпта и активного выполнения.
+- Состояния busy/cancel сессии, запросы разрешений, детерминированный порядок
+  плагинов и разделение протоколов server/TUI.
+- Концепции долговечного эксплуатационного хранилища и явные события состояния.
 
-The server now persists the user turn before provider/tool side effects and atomically grants only one request ownership of a `clientRunId`, closing a crash-loss and double-execution bug.
+Сервер теперь сохраняет пользовательский ход до побочных эффектов
+провайдера/инструментов и атомарно разрешает владение `clientRunId` только одному
+запросу, устраняя потерю данных при падении и двойное выполнение.
 
-The shared approval coordinator also treats the approval event and user dialog as one serialized operation. Parallel subagents can no longer overwrite a CLI/webview resolver or attach a response to the wrong privileged action.
+Общий координатор подтверждений также рассматривает событие разрешения и диалог
+с пользователем как одну сериализованную операцию. Параллельные субагенты больше
+не могут перезаписать resolver CLI/webview или привязать ответ не к тому
+привилегированному действию.
 
 ### Claw Code
 
-- Scoped, expiring, replay-resistant approval-token concepts.
-- Explicit sandbox capability reporting rather than claiming unsupported isolation.
-- Degraded MCP reports with phase-specific diagnostics.
-- Security verification maps and path-scope tests.
+- Концепции ограниченных по области, истекающих и защищённых от повторного
+  воспроизведения approval-токенов.
+- Явный отчёт о доступной песочнице вместо заявления неподдерживаемой изоляции.
+- Отчёты о деградации MCP с диагностикой по фазам.
+- Карты проверки безопасности и тесты областей путей.
 
-Claw contains a mixture of implemented Rust runtime and roadmap material, so Nexus adopted only invariants confirmed in executable code.
+Claw смешивает реализованный Rust-рантайм и материал дорожной карты, поэтому
+Nexus заимствует только инварианты, подтверждённые исполняемым кодом.
 
-## SQLite decision
+## Решение по SQLite
 
-SQLite is not a universal prerequisite for a coding agent:
+SQLite не является универсальной обязательной частью кодинг-агента:
 
-| Project | Actual SQLite role |
+| Проект | Фактическая роль SQLite |
 | --- | --- |
-| Codex | Rebuildable/local state projection and control-plane features alongside canonical rollout JSONL; not the code index |
-| OpenClaude | Optional Bun knowledge-graph acceleration with JSON durability/fallback |
-| Kilo Code | Operational session/event database; code-index cache remains separate from Qdrant |
-| Roo Code | No SQLite code index; local cache/tracker data plus Qdrant |
-| Cline | Core/CLI session metadata and discovery; checkpoints remain separate |
-| OpenCode | Operational SQLite/Drizzle database and durable event model |
-| Claw Code | Simple RAG store with linear cosine scan; Qdrant exists as the scale-up path |
-| Kimi Code / Kimi CLI | No SQLite requirement for the core terminal agent; portable session/event files own history |
-| MiMo Code | SQLite/WAL for server-side state and locks; patch history remains explicitly message-bound |
-| Qwen Code | Local operational/session persistence where useful, not a mandatory code-index backend |
-| NexusCode | Built-in SQLite for transactional runtime coordination; checksummed JSONL transcript/audit history; JSON index tracker; optional Qdrant vectors |
+| Codex | Восстанавливаемая локальная проекция состояния и функции control plane рядом с каноническим rollout JSONL; не индекс кода |
+| OpenClaude | Опциональное ускорение графа знаний на Bun с долговечностью/резервным JSON |
+| Kilo Code | Эксплуатационная база сессий и событий; кеш индекса кода остаётся отдельным от Qdrant |
+| Roo Code | SQLite не используется как индекс кода; локальный кеш/трекер плюс Qdrant |
+| Cline | Метаданные и обнаружение сессий core/CLI; контрольные точки хранятся отдельно |
+| OpenCode | Эксплуатационная SQLite/Drizzle-база и долговечная событийная модель |
+| Claw Code | Простое RAG-хранилище с линейным cosine-поиском; Qdrant предусмотрен для масштабирования |
+| Kimi Code / Kimi CLI | SQLite не требуется ядру терминального агента; историей владеют переносимые файлы сессий/событий |
+| MiMo Code | SQLite/WAL для серверного состояния и блокировок; история патчей остаётся явно привязанной к сообщениям |
+| Qwen Code | Локальное эксплуатационное/сессионное хранение там, где полезно, но не обязательный backend индекса кода |
+| NexusCode | Встроенная SQLite для транзакционной координации рантайма; JSONL с контрольными суммами для транскрипта/аудита; JSON-трекер индекса; опциональные векторы Qdrant |
 
-Nexus already uses built-in `node:sqlite`, with migrations and integrity-tested
-runtime repositories. It is not the code index and does not replace portable
-JSONL transcript history. Adding another SQLite FTS/index subsystem remains
-unjustified without a measured retrieval problem.
+Nexus уже использует встроенный `node:sqlite` с миграциями и
+проверенными на целостность runtime-репозиториями. Это не индекс кода и не замена
+переносимой истории транскрипта JSONL. Добавление ещё одной подсистемы
+SQLite FTS/индекса не оправдано без измеренной проблемы поиска.
 
-Full-text search is deliberately deferred. Existing agents operate successfully with targeted file search, AST/LSP navigation, bounded transcript loading, memory retrieval, and optional semantic search. FTS should be added only for a measured retrieval problem, not to justify a database.
+Полнотекстовый поиск намеренно отложен. Существующие агенты успешно работают с
+целевым поиском файлов, навигацией AST/LSP, ограниченной загрузкой транскрипта,
+поиском по памяти и опциональным семантическим поиском. FTS следует добавлять
+только для решения измеренной проблемы извлечения, а не ради оправдания наличия
+базы данных.
 
-## Verification performed
+## Выполненная проверка
 
-The audit finished with the repository-pinned Node `24.18.0`, not the older
-Node initially present in the user's shell:
+Аудит завершён на закреплённой в репозитории Node `24.18.0`, а не на старой
+версии Node, изначально доступной в shell пользователя:
 
-- monorepo typecheck: all six executable workspace packages passed;
-- monorepo tests: 1569 tests passed across core, state, webview, CLI, server,
-  and VS Code packages;
-- full production build passed, including the built-in SQLite dist import
-  checks;
-- runtime/storage portability suite: 12/12 passed;
-- deterministic feature census: 242 declared executable features, regenerated
-  and freshness-checked;
-- MCP/skills end-to-end validation passed;
-- VSIX packaged with 168 files, including Tree-sitter assets and the
-  cross-platform custom-tool compiler;
-- isolated installer smoke started with Node 20 first in `PATH`, selected the
-  pinned Node 24 binary, built the CLI, installed a temporary wrapper, and
-  completed config set/get with `0700` directory and `0600` file modes;
-- headless `nexus doctor` passed against `/Users/mac/Projects/nexus/test`
-  without opening Ink/raw mode or mutating the host authority store;
-- a loopback server smoke verified health, authentication failure, and
-  authenticated workspace-scoped session listing.
+- typecheck монорепозитория прошёл во всех шести исполняемых workspace-пакетах;
+- 1569 тестов монорепозитория прошли в пакетах core, state, webview, CLI, server
+  и VS Code;
+- полная production-сборка прошла, включая проверки импорта встроенной SQLite
+  из `dist`;
+- набор проверок переносимости рантайма/хранилища: 12/12;
+- детерминированная перепись возможностей: 242 заявленные исполняемые функции,
+  список пересоздан и проверен на актуальность;
+- end-to-end-проверка MCP/навыков прошла;
+- VSIX упакован со 168 файлами, включая ресурсы Tree-sitter и
+  кроссплатформенный компилятор пользовательских инструментов;
+- изолированный smoke-тест установщика начался с Node 20 первым в `PATH`, выбрал
+  закреплённый бинарник Node 24, собрал CLI, установил временный wrapper и
+  завершил set/get конфигурации с правами `0700` на каталог и `0600` на файл;
+- headless-команда `nexus doctor` прошла для `/Users/mac/Projects/nexus/test`,
+  не открывая Ink/raw mode и не изменяя основное хранилище настроек хоста;
+- loopback smoke-тест сервера проверил health, ошибку аутентификации и
+  аутентифицированный список сессий в пределах workspace.
 
-No paid/provider request, destructive workspace restore, or real arbitrary
-agent shell mutation was used for this validation. Those require explicit
-user-controlled staging and are not appropriate as unattended smoke tests.
+Для проверки не выполнялись платные запросы к провайдерам, разрушительное
+восстановление workspace или реальные произвольные shell-изменения от агента.
+Они требуют явно подготовленной пользователем тестовой среды и не подходят для
+автоматического smoke-теста без наблюдения.
 
-## Remaining real gaps
+## Оставшиеся реальные пробелы
 
-These are not hidden behind marketing language:
+Они не скрыты за маркетинговыми формулировками:
 
-1. **OS-level command sandbox.** Nexus has path confinement, command policy, approvals, server workspace roots, cancellation, and Docker-only permission bypass checks. It does not yet provide Codex-grade platform sandboxing for every local command.
-2. **Plugin capability isolation.** Plugins require explicit trust and declared paths, but a trusted hook still executes with the host process's OS privileges. Fine-grained capability grants and an isolated runner would improve this.
-3. **Interactive browser.** Cline has a real Chrome/Puppeteer service. Nexus intentionally exposes only WebSearch/WebFetch unless a browser plugin or MCP tool is present.
-4. **Crash continuation.** Durable events, admitted input, exact turn identity,
-   and change recovery survive process restarts. An in-flight provider stream
-   or arbitrary third-party tool cannot be resumed at the exact instruction
-   boundary after process death; it is marked interrupted and safely retried
-   or reviewed.
-5. **Host-level E2E depth.** Core/server/CLI/VS Code unit and integration tests
-   are broad, but real Extension Host UI automation remains shallower than
-   Cline's.
-6. **Multi-root IDE semantics.** Indexing supports multiple projects, but every
-   mutation, checkpoint, terminal, and review workflow is not yet proven
-   against complex VS Code multi-root workspaces.
-7. **Partial multi-file acceptance.** A multi-file ApplyPatch is intentionally
-   one proposal and one approval/revert boundary. The UI identifies that
-   grouping. Selecting only some hunks/files would require a new proposal hash
-   and is not silently emulated.
-8. **Large controller decomposition.** Core policy is already separated from
-   hosts, but the VS Code controller still contains too much UI orchestration.
-   Further extraction should be behavior-preserving and driven by real host
-   tests, not a speculative rewrite.
+1. **Песочница команд на уровне ОС.** В Nexus есть ограничение путей, политика
+   команд, подтверждения, корни workspace на сервере, отмена и проверки
+   Docker-only bypass разрешений. Песочницы уровня Codex для каждой локальной
+   команды пока нет.
+2. **Изоляция возможностей плагинов.** Плагины требуют явного доверия и
+   объявленных путей, но доверенный хук всё ещё выполняется с правами ОС
+   host-процесса. Нужны мелкозернистые capability-разрешения и изолированный
+   runner.
+3. **Интерактивный браузер.** У Cline есть настоящий сервис Chrome/Puppeteer.
+   Nexus намеренно предоставляет только WebSearch/WebFetch, если не установлен
+   браузерный плагин или MCP-инструмент.
+4. **Продолжение после падения процесса.** Долговечные события, принятый ввод,
+   точная идентичность хода и восстановление изменений переживают перезапуск.
+   Поток провайдера или произвольный сторонний инструмент нельзя возобновить
+   точно с границы инструкции после смерти процесса; ход помечается прерванным
+   и безопасно повторяется либо передаётся на review.
+5. **Глубина host-level E2E.** Unit- и integration-тесты core/server/CLI/VS Code
+   широки, но автоматизация настоящего UI Extension Host всё ещё слабее Cline.
+6. **Семантика multi-root IDE.** Индексация поддерживает несколько проектов, но
+   каждый workflow изменения, контрольной точки, терминала и review ещё не
+   проверен для сложных multi-root workspace VS Code.
+7. **Частичное принятие многофайловых изменений.** Многофайловый ApplyPatch
+   намеренно является одним предложением и одной границей подтверждения/отката.
+   UI показывает эту группировку. Выбор только части hunk или файлов потребует
+   нового хеша предложения и не имитируется скрыто.
+8. **Декомпозиция крупного контроллера.** Политика core уже отделена от хостов,
+   но контроллер VS Code всё ещё содержит слишком много оркестрации UI.
+   Дальнейшее выделение компонентов должно сохранять поведение и опираться на
+   реальные host-тесты, а не на умозрительную перепись.
 
-The first two are the highest-value next architectural milestone. They require a real platform process broker/isolated plugin runner rather than another application-level flag. Browser bundling and SQLite are not prerequisites for reliable coding behavior.
+Первые два пункта — следующий архитектурный этап с наибольшей ценностью. Для
+них нужен настоящий платформенный брокер процессов и изолированный runner
+плагинов, а не ещё один флаг на уровне приложения. Встроенный браузер и SQLite
+не являются обязательными условиями надёжного программирования.
 
-## Why the resulting Nexus architecture is distinct
+## Чем получившаяся архитектура Nexus отличается от остальных
 
-Nexus now combines features that are usually split across projects:
+Nexus объединяет возможности, которые обычно разделены между проектами:
 
-- Codex-style execution/replay/fail-closed boundaries;
-- OpenClaude-style memory, instructions, plugins, hooks, tasks, teams, and resume;
-- Kilo/OpenCode provider and operational breadth;
-- Roo's Tree-sitter/Qdrant and VS Code patterns;
-- Cline's checkpoint and host-lifecycle lessons;
-- one provider-neutral core shared by terminal, server, and extension.
+- выполнение, replay и fail-closed границы в стиле Codex;
+- память, инструкции, плагины, хуки, задачи, команды и resume в стиле
+  OpenClaude;
+- широту провайдеров и эксплуатации Kilo/OpenCode;
+- Tree-sitter/Qdrant и VS Code-паттерны Roo;
+- опыт Cline по контрольным точкам и жизненному циклу host;
+- одно независимое от провайдера ядро для терминала, сервера и расширения.
 
-The important distinction is not the raw feature count. The same session, tool, permission, plugin, MCP, memory, task, and run contracts are used across surfaces, and optional services fail visibly without making the base coding agent unusable.
+Главное отличие — не само количество функций. Все интерфейсы используют одни и
+те же контракты сессии, инструментов, разрешений, плагинов, MCP, памяти, задач и
+запусков, а опциональные сервисы деградируют явно и не делают базового
+кодинг-агента неработоспособным.
 
-## Code evidence map
+## Карта доказательств в коде
 
-The paths below are the principal implementation points inspected during this
-audit. They are intentionally narrower than each repository's documentation.
+Ниже перечислены основные точки реализации, проверенные во время аудита.
+Список намеренно уже документации каждого репозитория.
 
-| Concern | Reference implementation evidence | Nexus implementation evidence |
+| Область | Доказательства в эталонных реализациях | Доказательства в Nexus |
 | --- | --- | --- |
-| Agent loop and tool execution | `source_projects/codex/codex-rs/core/src/tools/orchestrator.rs`; `source_projects/openclaude/src/tools/AgentTool/runAgent.ts`; `source_projects/kilocode/packages/core/src/session/runner/index.ts`; `source_projects/qwen-code/packages/core/src/agents/runtime/agent-core.ts` | `packages/core/src/agent/loop.ts`; `packages/core/src/agent/tool-pipeline.ts`; `packages/core/src/agent/tool-execution.ts`; `packages/core/src/agent/run-services.ts` |
-| Turn mode, queue, and prompt projection | Codex `codex-rs/tui/src/chatwidget/input_flow.rs` and `interaction.rs`; Kilo `packages/opencode/src/cli/cmd/run/runtime.queue.ts`; Kimi Code `apps/kimi-code/src/tui/types.ts`; OpenClaude queued-command and plan-mode instruction paths | `packages/core/src/agent/modes.ts`; `packages/core/src/agent/prompts/components/index.ts`; `packages/core/src/session/plan-write-gate.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; `packages/cli/src/screens/REPL.tsx` |
-| Compaction | `source_projects/codex/codex-rs/core/src/compact.rs`; `source_projects/kilocode/packages/core/src/session/compaction.ts`; `source_projects/kimi-cli/src/kimi_cli/soul/compaction.py` | `packages/core/src/session/compaction.ts`; `packages/core/src/context/compaction-projection.ts` |
-| Sandbox and permissions | `source_projects/codex/codex-rs/core/src/tools/sandboxing.rs`; `source_projects/codex/codex-rs/core/src/tools/approvals.rs`; `source_projects/kilocode/packages/core/src/permission.ts`; `source_projects/MiMo-Code/SECURITY.md` | `packages/core/src/agent/approval-coordinator.ts`; `packages/core/src/agent/mode-input-policy.ts`; `packages/core/src/agent/tool-execution.ts`; host implementations under `packages/cli/src/host.ts`, `packages/vscode/src/host.ts`, and `packages/server/src/host.ts` |
-| Subagents and orchestration | `source_projects/codex/codex-rs/core/src/tools/handlers/multi_agents.rs`; `source_projects/openclaude/src/tools/AgentTool`; `source_projects/kimi-cli/src/kimi_cli/subagents`; `source_projects/qwen-code/packages/core/src/agents/runtime` | `packages/core/src/agent/parallel.ts`; `packages/core/src/orchestration/runtime.ts`; `packages/core/src/orchestration/agents.ts`; `packages/core/src/tools/built-in/orchestration-tools.ts` |
-| Memory and skills | `source_projects/openclaude/src/tools/AgentTool/agentMemory.ts`; `source_projects/openclaude/src/memdir`; `source_projects/openclaude/src/skills`; `source_projects/MiMo-Code/packages/opencode/src/tool/memory.ts` | `packages/core/src/context/auto-memory.ts`; `packages/core/src/session/session-memory.ts`; `packages/core/src/context/team-memory.ts`; `packages/core/src/memory/retrieval.ts`; `packages/core/src/skills/manager.ts` |
-| MCP, plugins and deferred discovery | `source_projects/openclaude/src/plugins`; `source_projects/openclaude/src/skills/mcpSkills.ts`; `source_projects/qwen-code/packages/core/src/tools/mcp-transport-pool.ts`; `source_projects/MiMo-Code/packages/opencode/src/tool/mcp-tool-search.ts`; Kimi Code `packages/agent-core-v2/src/app/plugin` | `packages/core/src/mcp/client.ts`; `packages/core/src/mcp/transport-factory.ts`; `packages/core/src/plugins/runtime.ts`; `packages/core/src/plugins/capabilities.ts`; `packages/core/src/skills/skill-tool-catalog.ts` |
-| Exact edits, Git and review | Roo `src/integrations/editor/DiffViewProvider.ts` and `src/services/checkpoints`; Kimi Code `packages/agent-core-v2/src/app/edit` and `src/app/git`; Qwen `packages/core/src` Git services; MiMo message-bound patch history | `packages/core/src/changes/service.ts`; `packages/core/src/changes/file-store.ts`; `packages/core/src/tools/file-change-flow.ts`; `packages/core/src/git`; CLI review in `packages/cli/src/change-review.ts`; VS Code host/controller in `packages/vscode/src` |
-| Durable transport and server state | Codex `codex-rs/core/src/rollout.rs`; Kimi CLI `src/kimi_cli/wire` and `src/kimi_cli/session.py`; OpenCode server/session services; MiMo SQLite/WAL services | `packages/core/src/run/event-store.ts`; `packages/core/src/protocol/remote-turn-store.ts`; `packages/server/src/session-protocol-service.ts`; `packages/server/src/sqlite-workspace-runtime.ts`; `packages/server/src/sqlite-change-set-store.ts` |
-| First-run persistence and packaging | Kimi CLI `src/kimi_cli/utils/io.py`; Qwen workflow/session stores; Kilo/Roo/Cline extension packaging | `packages/cli/src/utils/config.ts`; `scripts/install-nexus-cli.sh`; `scripts/runtime-version.test.mjs`; `packages/vscode/scripts/package-vsix.cjs` |
+| Цикл агента и выполнение инструментов | `source_projects/codex/codex-rs/core/src/tools/orchestrator.rs`; `source_projects/openclaude/src/tools/AgentTool/runAgent.ts`; `source_projects/kilocode/packages/core/src/session/runner/index.ts`; `source_projects/qwen-code/packages/core/src/agents/runtime/agent-core.ts` | `packages/core/src/agent/loop.ts`; `packages/core/src/agent/tool-pipeline.ts`; `packages/core/src/agent/tool-execution.ts`; `packages/core/src/agent/run-services.ts` |
+| Режим хода, очередь и проекция промпта | Codex `codex-rs/tui/src/chatwidget/input_flow.rs` и `interaction.rs`; Kilo `packages/opencode/src/cli/cmd/run/runtime.queue.ts`; Kimi Code `apps/kimi-code/src/tui/types.ts`; пути очереди команд и инструкций plan mode в OpenClaude | `packages/core/src/agent/modes.ts`; `packages/core/src/agent/prompts/components/index.ts`; `packages/core/src/session/plan-write-gate.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; `packages/cli/src/screens/REPL.tsx` |
+| Компакция | `source_projects/codex/codex-rs/core/src/compact.rs`; `source_projects/kilocode/packages/core/src/session/compaction.ts`; `source_projects/kimi-cli/src/kimi_cli/soul/compaction.py` | `packages/core/src/session/compaction.ts`; `packages/core/src/context/compaction-projection.ts` |
+| Песочница и разрешения | `source_projects/codex/codex-rs/core/src/tools/sandboxing.rs`; `source_projects/codex/codex-rs/core/src/tools/approvals.rs`; `source_projects/kilocode/packages/core/src/permission.ts`; `source_projects/MiMo-Code/SECURITY.md` | `packages/core/src/agent/approval-coordinator.ts`; `packages/core/src/agent/mode-input-policy.ts`; `packages/core/src/agent/tool-execution.ts`; реализации хостов в `packages/cli/src/host.ts`, `packages/vscode/src/host.ts` и `packages/server/src/host.ts` |
+| Субагенты и оркестрация | `source_projects/codex/codex-rs/core/src/tools/handlers/multi_agents.rs`; `source_projects/openclaude/src/tools/AgentTool`; `source_projects/kimi-cli/src/kimi_cli/subagents`; `source_projects/qwen-code/packages/core/src/agents/runtime` | `packages/core/src/agent/parallel.ts`; `packages/core/src/orchestration/runtime.ts`; `packages/core/src/orchestration/agents.ts`; `packages/core/src/tools/built-in/orchestration-tools.ts` |
+| Память и навыки | `source_projects/openclaude/src/tools/AgentTool/agentMemory.ts`; `source_projects/openclaude/src/memdir`; `source_projects/openclaude/src/skills`; `source_projects/MiMo-Code/packages/opencode/src/tool/memory.ts` | `packages/core/src/context/auto-memory.ts`; `packages/core/src/session/session-memory.ts`; `packages/core/src/context/team-memory.ts`; `packages/core/src/memory/retrieval.ts`; `packages/core/src/skills/manager.ts` |
+| MCP, плагины и отложенное обнаружение | `source_projects/openclaude/src/plugins`; `source_projects/openclaude/src/skills/mcpSkills.ts`; `source_projects/qwen-code/packages/core/src/tools/mcp-transport-pool.ts`; `source_projects/MiMo-Code/packages/opencode/src/tool/mcp-tool-search.ts`; Kimi Code `packages/agent-core-v2/src/app/plugin` | `packages/core/src/mcp/client.ts`; `packages/core/src/mcp/transport-factory.ts`; `packages/core/src/plugins/runtime.ts`; `packages/core/src/plugins/capabilities.ts`; `packages/core/src/skills/skill-tool-catalog.ts` |
+| Точные правки, Git и review | Roo `src/integrations/editor/DiffViewProvider.ts` и `src/services/checkpoints`; Kimi Code `packages/agent-core-v2/src/app/edit` и `src/app/git`; Git-сервисы Qwen в `packages/core/src`; привязанная к сообщениям история патчей MiMo | `packages/core/src/changes/service.ts`; `packages/core/src/changes/file-store.ts`; `packages/core/src/tools/file-change-flow.ts`; `packages/core/src/git`; CLI review в `packages/cli/src/change-review.ts`; host/controller VS Code в `packages/vscode/src` |
+| Долговечный транспорт и серверное состояние | Codex `codex-rs/core/src/rollout.rs`; Kimi CLI `src/kimi_cli/wire` и `src/kimi_cli/session.py`; сервисы server/session OpenCode; сервисы SQLite/WAL MiMo | `packages/core/src/run/event-store.ts`; `packages/core/src/protocol/remote-turn-store.ts`; `packages/server/src/session-protocol-service.ts`; `packages/server/src/sqlite-workspace-runtime.ts`; `packages/server/src/sqlite-change-set-store.ts` |
+| Первый запуск и упаковка | Kimi CLI `src/kimi_cli/utils/io.py`; workflow/session-хранилища Qwen; упаковка расширений Kilo/Roo/Cline | `packages/cli/src/utils/config.ts`; `scripts/install-nexus-cli.sh`; `scripts/runtime-version.test.mjs`; `packages/vscode/scripts/package-vsix.cjs` |
