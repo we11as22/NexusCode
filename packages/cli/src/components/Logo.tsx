@@ -44,7 +44,7 @@ export function Logo({
       >
         <Text>
           <Text color={theme.primary}>✻</Text> Welcome to{' '}
-          <Text bold>{PRODUCT_NAME}</Text> <Text>research preview!</Text>
+          <Text bold>{PRODUCT_NAME}</Text> <Text>development build</Text>
         </Text>
         <>
           <Box paddingLeft={2} flexDirection="column" gap={1}>

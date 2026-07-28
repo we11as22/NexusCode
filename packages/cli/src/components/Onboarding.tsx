@@ -140,11 +140,9 @@ export function Onboarding({ onDone }: Props): React.ReactNode {
       <Box flexDirection="column" width={70}>
         <OrderedList>
           <OrderedList.Item>
-            <Text>NexusCode is in research preview</Text>
+            <Text>NexusCode is under active development</Text>
             <Text color={theme.secondaryText} wrap="wrap">
               This version may have limitations or unexpected behaviors.
-              <Newline />
-              Run /bug at any time to report issues.
               <Newline />
             </Text>
           </OrderedList.Item>
@@ -158,13 +156,11 @@ export function Onboarding({ onDone }: Props): React.ReactNode {
             </Text>
           </OrderedList.Item>
           <OrderedList.Item>
-            <Text>
-              Due to prompt injection risks, only use it with code you trust
-            </Text>
+            <Text>Only use agent features with code you trust</Text>
             <Text color={theme.secondaryText} wrap="wrap">
-              For more details see:
-              <Newline />
-              <Link url="https://docs.anthropic.com/s/claude-code-security" />
+              Project instructions and tool output may contain prompt
+              injection. Review every requested write and command before
+              approving it.
             </Text>
           </OrderedList.Item>
         </OrderedList>
@@ -297,7 +293,7 @@ export function WelcomeBox(): React.ReactNode {
     >
       <Text>
         <Text color={theme.primary}>✻</Text> Welcome to{' '}
-        <Text bold>{PRODUCT_NAME}</Text> research preview!
+        <Text bold>{PRODUCT_NAME}</Text> development build
       </Text>
     </Box>
   )

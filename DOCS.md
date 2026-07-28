@@ -50,7 +50,9 @@ corepack enable && corepack prepare pnpm@latest --activate
 ```bash
 git clone <repo-url>
 cd NexusCode
-nvm use 20   # при использовании nvm
+source "$HOME/.nvm/nvm.sh" 2>/dev/null || true
+nvm install  # один раз; устанавливает точную версию из .nvmrc
+nvm use
 pnpm install
 pnpm build
 ```
@@ -74,12 +76,12 @@ Nexus не использует внешний нативный SQLite addon: ba
 Далее из **корня `NexusCode`**:
 
 ```bash
-nvm use 20
+nvm use
 pnpm build
 pnpm package:vscode
 ```
 
-Результат: **`packages/vscode/nexuscode-0.1.0.vsix`**. Установка: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**) → команда **Extensions: Install from VSIX…** (установка из файла) → указать этот `.vsix`. Нужен **Node.js 20** (сборка .vsix и нативные модули).
+Результат: **`packages/vscode/nexuscode-0.1.0.vsix`**. Установка: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**) → команда **Extensions: Install from VSIX…** (установка из файла) → указать этот `.vsix`. Для сборки используется точная закреплённая версия **Node.js 24.18.0**; внешний нативный SQLite addon не требуется.
 
 Скрипт `pnpm package:vscode` сам вызывает `pnpm build`; отдельный шаг `pnpm build` удобен, если вы явно делите этапы «собрать» и «упаковать».
 
@@ -109,7 +111,7 @@ nexus --mode ask -p "Как устроен слой конфигурации?"
 nexus --mode debug -p "Почему падает тест X?"
 ```
 
-**Важно:** в `packages/cli/src/entrypoints/cli.tsx` флаг `--mode` допускает только `agent` | `ask` | `plan` | `debug`. Значение `review` не распознаётся и сбрасывается в `agent`. Режим **review** в ядре есть; в интерактивном TUI его можно выбрать через **`/mode`** (см. `PromptInput.tsx`, `VALID_MODES`). Цикл **Shift+Tab** в `REPL.tsx` переключает только `agent → plan → ask → debug` (без `review`).
+Флаг `--mode`, команда **`/mode`** и цикл **Shift+Tab** используют один и тот же набор режимов: `agent` | `plan` | `ask` | `debug` | `review`.
 
 ### VS Code
 
@@ -262,7 +264,7 @@ model:
 | `-c, --cwd` | Текущая директория shell |
 | `--project <dir>` | Корень проекта (резолвится относительно cwd) |
 | `-p, --print` | Печать ответа и выход |
-| `--mode` | `agent` \| `ask` \| `plan` \| `debug` (см. ограничение для `review` выше) |
+| `--mode` | `agent` \| `plan` \| `ask` \| `debug` \| `review` |
 | `-m, --model` | Модель |
 | `--temperature`, `--reasoning-effort` | См. help |
 | `--no-index` | Отключить индексацию в bootstrap |
@@ -278,9 +280,13 @@ model:
 
 Команды верхнего уровня: `task` (чекпоинты), `config`, `approved-tools`, `mcp`, `doctor` — см. help Commander.
 
+`nexus doctor --cwd /path/to/project` — read-only проверка закреплённого Node,
+workspace, загрузки модельного конфига, Git и ripgrep. Команда не открывает
+интерактивный TUI и подходит для shell/CI.
+
 ### Горячие клавиши (Nexus TUI)
 
-Enter — отправить; Shift+Enter — новая строка; Shift+Tab — смена режима (четырёхрежимный цикл); Ctrl+S — компактизация; Ctrl+K — очистка чата; Ctrl+C — прервать/выход.
+Enter — отправить; Shift+Enter — новая строка; Shift+Tab — смена режима (`agent → plan → ask → debug → review`); Ctrl+S — компактизация; Ctrl+K — очистка чата; Ctrl+C — прервать/выход.
 
 ---
 
@@ -377,7 +383,7 @@ API: поток сообщений **NDJSON** с heartbeat и replay по `runId
 | Симптом | Что проверить |
 |---------|----------------|
 | `CodebaseSearch` «disabled» | `indexing.vector` и `vectorDb.enabled`, доступность Qdrant |
-| Неподдерживаемая версия Node | Выполнить `nvm use`; Nexus требует закреплённую версию из `.nvmrc` |
+| Неподдерживаемая версия Node | Выполнить `source "$HOME/.nvm/nvm.sh"` (если `nvm` не загружен), затем `nvm install` и `nvm use`; установщик также сам найдёт уже установленный Node 24.18.0 в `~/.nvm` |
 | Пустая коллекция после индексации | Нормализация ответа Qdrant `getCollection` (`vector.ts`) |
 | Сервер не стартует на Node 18 | `pnpm serve` требует 20+ (`check-node.js`) |
 

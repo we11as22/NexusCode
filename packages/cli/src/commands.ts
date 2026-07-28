@@ -1,10 +1,8 @@
-import bug from './commands/bug.js'
 import clear from './commands/clear.js'
 import compact from './commands/compact.js'
 import config from './commands/config.js'
 import cost from './commands/cost.js'
 import ctx_viz from './commands/ctx_viz.js'
-import doctor from './commands/doctor.js'
 import help from './commands/help.js'
 import init from './commands/init.js'
 import listen from './commands/listen.js'
@@ -77,13 +75,11 @@ const COMMANDS = memoize((): Command[] => [
   compact,
   config,
   cost,
-  doctor,
   help,
   init,
   onboarding,
   pr_comments,
   releaseNotes,
-  bug,
   review,
   terminalSetup,
   ...(isAnthropicAuthEnabled() ? [logout, login()] : []),

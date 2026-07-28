@@ -8,7 +8,6 @@ import {
 import { PRODUCT_NAME } from '../constants/product.js'
 import { logEvent } from '../services/statsig.js'
 import { useExitOnCtrlCD } from '../hooks/useExitOnCtrlCD.js'
-import Link from './Link.js'
 
 type Props = {
   workspacePath: string
@@ -67,14 +66,16 @@ export function TrustDialog({ workspacePath, onDone }: Props): React.ReactNode {
         <Box flexDirection="column" gap={1}>
           <Text>
             {PRODUCT_NAME} may read files in this folder. Reading untrusted
-            files may lead to {PRODUCT_NAME} to behave in an unexpected ways.
+            files may cause {PRODUCT_NAME} to behave unexpectedly.
           </Text>
           <Text>
             With your permission {PRODUCT_NAME} may execute files in this
             folder. Executing untrusted code is unsafe.
           </Text>
-
-          <Link url="https://docs.anthropic.com/s/claude-code-security" />
+          <Text dimColor>
+            Review requested writes and commands. Local command execution is
+            permission-gated, but it is not an OS-level sandbox.
+          </Text>
         </Box>
 
         <Select

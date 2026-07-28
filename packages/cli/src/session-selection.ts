@@ -1,5 +1,13 @@
 import type { Mode } from "@nexuscode/core"
 
+export const RUNTIME_MODES = [
+  "agent",
+  "plan",
+  "ask",
+  "debug",
+  "review",
+] as const satisfies readonly Mode[]
+
 export function resolveRuntimeServerUrl(
   explicit: string | null | undefined,
   environment: string | null | undefined,
@@ -9,16 +17,13 @@ export function resolveRuntimeServerUrl(
 }
 
 export function resolveRuntimeMode(raw: string | undefined): Mode {
-  if (
-    raw === "agent" ||
-    raw === "plan" ||
-    raw === "ask" ||
-    raw === "debug" ||
-    raw === "review"
-  ) {
-    return raw
-  }
+  if (RUNTIME_MODES.includes(raw as Mode)) return raw as Mode
   throw new Error(`Invalid mode: ${raw ?? ""}. Expected agent, plan, ask, debug, or review.`)
+}
+
+export function cycleRuntimeMode(current: string): Mode {
+  const index = RUNTIME_MODES.indexOf(current as Mode)
+  return RUNTIME_MODES[(index + 1) % RUNTIME_MODES.length] ?? "agent"
 }
 
 export async function selectSession<T extends { id: string }>(options: {

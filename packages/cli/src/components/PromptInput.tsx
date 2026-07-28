@@ -11,8 +11,6 @@ import TextInput from './TextInput.js'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { countCachedTokens, countTokens } from '../utils/tokens.js'
 import { SentryErrorBoundary } from './SentryErrorBoundary.js'
-import { AutoUpdater } from './AutoUpdater.js'
-import { AutoUpdaterResult } from '../utils/autoUpdater.js'
 import type { Command } from '../commands.js'
 import type { SetToolJSXFn, Tool, ToolUseContext } from '../Tool.js'
 import { TokenWarning, WARNING_THRESHOLD, MAX_TOKENS } from './TokenWarning.js'
@@ -39,8 +37,6 @@ type Props = {
   verbose: boolean
   messages: Message[]
   setToolJSX: SetToolJSXFn
-  onAutoUpdaterResult: (result: AutoUpdaterResult) => void
-  autoUpdaterResult: AutoUpdaterResult | null
   tools: Tool[]
   input: string
   onInputChange: (value: string) => void
@@ -150,8 +146,6 @@ function PromptInput({
   verbose,
   messages,
   setToolJSX,
-  onAutoUpdaterResult,
-  autoUpdaterResult,
   tools,
   input,
   onInputChange,
@@ -189,7 +183,6 @@ function PromptInput({
   resolveNexusPromptCommand,
   onOpenInEditor,
 }: Props): React.ReactNode {
-  const [isAutoUpdating, setIsAutoUpdating] = useState(false)
   const [exitMessage, setExitMessage] = useState<{
     show: boolean
     key?: string
@@ -704,7 +697,7 @@ description: <brief description>
 when_to_use: <trigger conditions>
 ---
 # <Skill Name>
-<detailed instructions for Claude to follow when this skill is active>
+<detailed instructions for the coding agent to follow when this skill is active>
 
 Create the skill ${pathNote}. Confirm the created file path.`
         : `Please create a new Nexus rule file ${pathNote}. Rule description: "${description}".
@@ -998,9 +991,7 @@ Create a .md rule file with a descriptive name. The rule file should define clea
           </Box>
           <SentryErrorBoundary>
             <Box justifyContent="flex-end" gap={1}>
-              {!autoUpdaterResult &&
-                !isAutoUpdating &&
-                !debug &&
+              {!debug &&
                 tokenUsage < WARNING_THRESHOLD && (
                   <Text dimColor>
                     {terminalSetup.isEnabled &&
@@ -1023,13 +1014,6 @@ Create a .md rule file with a descriptive name. The rule file should define clea
                 <Text dimColor>{contextFooterText}</Text>
               )}
               <TokenWarning tokenUsage={tokenUsage} />
-              <AutoUpdater
-                debug={debug}
-                onAutoUpdaterResult={onAutoUpdaterResult}
-                autoUpdaterResult={autoUpdaterResult}
-                isUpdating={isAutoUpdating}
-                onChangeIsUpdating={setIsAutoUpdating}
-              />
             </Box>
           </SentryErrorBoundary>
         </Box>

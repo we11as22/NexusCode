@@ -230,7 +230,7 @@ export function coerceLooseBoolean(value: unknown): boolean | undefined {
 const TOOL_BOOLEAN_ARG_KEYS: Record<string, readonly string[]> = {
   List: ["recursive"],
   Grep: ["-n", "-i", "multiline"],
-  Bash: ["run_in_background", "dangerouslyDisableSandbox"],
+  Bash: ["run_in_background"],
   TodoWrite: ["merge"],
   Edit: ["replace_all"],
 }

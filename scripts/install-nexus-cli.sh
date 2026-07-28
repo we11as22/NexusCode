@@ -6,15 +6,28 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 BIN_DIR="${NEXUS_BIN_DIR:-${HOME}/bin}"
+REQUIRED_NODE_VERSION="$(tr -d '\r\n' < "$ROOT/.nvmrc")"
 echo "[install-nexus-cli] ROOT=$ROOT" >&2
 
 find_node() {
-  for candidate in node nodejs "$(command -v node 2>/dev/null)" "$(command -v nodejs 2>/dev/null)" /usr/bin/node /usr/bin/nodejs; do
+  for candidate in \
+    node \
+    nodejs \
+    "$(command -v node 2>/dev/null)" \
+    "$(command -v nodejs 2>/dev/null)" \
+    "${NVM_DIR:-${HOME}/.nvm}/versions/node/v${REQUIRED_NODE_VERSION}/bin/node" \
+    "${HOME}/.nvm/versions/node/v${REQUIRED_NODE_VERSION}/bin/node" \
+    "${HOME}/.volta/bin/node" \
+    /usr/local/bin/node \
+    /opt/homebrew/bin/node \
+    /usr/bin/node \
+    /usr/bin/nodejs
+  do
     [ -z "$candidate" ] && continue
     N="$(command -v "$candidate" 2>/dev/null)" || N="$candidate"
     [ ! -x "$N" ] && continue
     N="$(cd "$(dirname "$N")" && pwd)/$(basename "$N")"
-    if "$N" -e 'if(typeof globalThis.Bun!=="undefined")process.exit(1)' 2>/dev/null; then
+    if "$N" "$ROOT/scripts/check-node.js" >/dev/null 2>&1; then
       echo "$N"
       return
     fi
@@ -22,17 +35,22 @@ find_node() {
   return 1
 }
 
-NODE_BIN=""
-if find_node >/dev/null 2>&1; then
-  NODE_BIN="$(find_node)"
-fi
+NODE_BIN="$(find_node || true)"
 if [ -z "$NODE_BIN" ]; then
-  echo "Error: could not find Node.js 24.18.0." >&2
+  echo "Error: could not find Node.js ${REQUIRED_NODE_VERSION}." >&2
+  echo "Install it with nvm: source \"${HOME}/.nvm/nvm.sh\" && nvm install ${REQUIRED_NODE_VERSION}" >&2
+  echo "If nvm is not installed, install Node ${REQUIRED_NODE_VERSION} and ensure its node binary is available in PATH." >&2
   exit 1
 fi
 
 echo "Using Node: $NODE_BIN ($("$NODE_BIN" -v))"
 "$NODE_BIN" "$ROOT/scripts/check-node.js"
+PATH="$(dirname "$NODE_BIN"):$PATH"
+export PATH
+if ! command -v corepack >/dev/null 2>&1; then
+  echo "Error: corepack is not available next to the selected Node runtime." >&2
+  exit 1
+fi
 
 echo "[1/3] Installing dependencies..."
 corepack pnpm install

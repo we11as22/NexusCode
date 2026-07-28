@@ -32,6 +32,16 @@ test("build and installer surfaces target the pinned Node 24 runtime", async () 
   assert.match(vscodeBuild, /target:\s*"node24"/)
   assert.match(installer, /corepack pnpm install/)
   assert.match(installer, /exec "\$NODE_BIN"/)
+  assert.match(
+    installer,
+    /\$\{HOME\}\/\.nvm\/versions\/node\/v\$\{REQUIRED_NODE_VERSION\}\/bin\/node/,
+    "installer must find the pinned nvm runtime even when the nvm shell function is not loaded",
+  )
+  assert.match(
+    installer,
+    /PATH="\$\(dirname "\$NODE_BIN"\):\$PATH"/,
+    "corepack and pnpm must run under the same pinned runtime selected for the wrapper",
+  )
   assert.doesNotMatch(
     installer,
     /bun\.sh|find_bun|BUN_BIN|@opentui|(?:^|\n)pnpm install\n/,

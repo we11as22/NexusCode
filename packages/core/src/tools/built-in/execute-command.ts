@@ -476,7 +476,6 @@ const schema = z.object({
   timeout: z.number().int().positive().max(600000).optional().describe("Optional timeout in milliseconds (max 600000). If not specified, commands will timeout after 120000ms (2 minutes)."),
   description: z.string().optional().describe("Clear, concise description of what this command does in active voice. For simple commands keep it brief (5-10 words). For complex commands add enough context to clarify what it does."),
   run_in_background: z.boolean().optional().describe("Set to true to run this command in the background. Use TaskOutput to read the output later."),
-  dangerouslyDisableSandbox: z.boolean().optional().describe("Set this to true to dangerously override sandbox mode and run commands without sandboxing."),
 })
 
 export const bashTool: ToolDef<z.infer<typeof schema>> = {

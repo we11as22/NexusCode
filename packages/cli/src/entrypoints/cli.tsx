@@ -31,7 +31,6 @@ import {
 import { cwd } from 'process'
 import { dateToFilename, logError } from '../utils/log.js'
 import { Onboarding } from '../components/Onboarding.js'
-import { Doctor } from '../screens/Doctor.js'
 import { ApproveApiKey } from '../components/ApproveApiKey.js'
 import { TrustDialog } from '../components/TrustDialog.js'
 import { checkHasTrustDialogAccepted } from '../utils/config.js'
@@ -94,6 +93,8 @@ import type { RenderOptionsWithFlicker } from '../utils/ink.js'
 import type { Command as SlashCommand } from '../commands.js'
 import { resolveRuntimeMode } from '../session-selection.js'
 import { coreMcpDisplayStatuses } from '../mcp-display.js'
+import { shouldReadPromptFromStdin } from '../stdin-policy.js'
+import { collectDoctorReport } from '../doctor-report.js'
 
 export function completeOnboarding(): void {
   const config = getGlobalConfig()
@@ -309,7 +310,6 @@ function NexusREPLWithConfigRefresh({
 async function setup(
   cwd: string,
   dangerouslySkipPermissions?: boolean,
-  nonInteractive = false,
 ): Promise<void> {
   await setCwd(cwd)
 
@@ -390,14 +390,9 @@ async function setup(
     })
   }
 
-  // Check auto-updater permissions
-  const autoUpdaterStatus = globalConfig.autoUpdaterStatus ?? 'not_configured'
-  if (autoUpdaterStatus === 'not_configured' && !nonInteractive) {
-    logEvent('tengu_setup_auto_updater_not_configured', {})
-    await new Promise<void>(resolve => {
-      render(<Doctor onDone={() => resolve()} />)
-    })
-  }
+  // Nexus is installed through the repository-pinned wrapper, not a global
+  // npm package. The inherited npm-prefix updater prompt is intentionally not
+  // part of startup; `nexus doctor` performs a non-interactive health check.
 }
 
 async function main() {
@@ -423,8 +418,7 @@ async function main() {
   if (
     !process.stdin.isTTY &&
     !process.env.CI &&
-    // Input hijacking breaks MCP.
-    !process.argv.includes('mcp')
+    shouldReadPromptFromStdin(process.argv.slice(2))
   ) {
     inputPrompt = await stdin()
     if (process.platform !== 'win32') {
@@ -538,7 +532,7 @@ ${commandList}`,
           debug: debug?.toString() ?? 'false',
           print: print?.toString() ?? 'false',
         })
-        await setup(effectiveCwd, dangerouslySkipPermissions, Boolean(print))
+        await setup(effectiveCwd, dangerouslySkipPermissions)
 
         assertMinVersion()
 
@@ -1004,14 +998,17 @@ ${commandList}`,
   // Doctor command - check installation health
   program
     .command('doctor')
-    .description('Check the health of your NexusCode auto-updater')
-    .action(async () => {
+    .description('Check the NexusCode runtime, workspace, and local tools')
+    .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
+    .action(async (_options, command) => {
+      const requestedDoctorCwd = command.optsWithGlobals().cwd
+      const doctorCwd =
+        typeof requestedDoctorCwd === 'string' ? requestedDoctorCwd : cwd()
       logEvent('tengu_doctor_command', {})
-
-      await new Promise<void>(resolve => {
-        render(<Doctor onDone={() => resolve()} doctorMode={true} />)
-      })
-      process.exit(0)
+      await setup(doctorCwd, false)
+      const report = await collectDoctorReport(doctorCwd)
+      console.log(report.lines.join('\n'))
+      process.exit(report.ok ? 0 : 1)
     })
 
   // ant-only commands

@@ -50,7 +50,6 @@ import {
 import type { AutoApprovePermissions } from '../nexus-query.js'
 import type { McpDisplayStatus } from '../mcp-display.js'
 import type { Tool } from '../Tool.js'
-import { AutoUpdaterResult } from '../utils/autoUpdater.js'
 import { getGlobalConfig, saveGlobalConfig } from '../utils/config.js'
 import { logEvent } from '../services/statsig.js'
 import { getNextAvailableLogForkNumber } from '../utils/log.js'
@@ -102,6 +101,7 @@ import {
   type CliChangeReviewItem,
 } from '../change-review.js'
 import { CliHost } from '../host.js'
+import { cycleRuntimeMode } from '../session-selection.js'
 import {
   Session,
   hadPlanExit,
@@ -116,12 +116,6 @@ import {
   buildChatTimeline,
   exploreSegmentShouldBeTransient,
 } from '../utils/exploreTimeline.js'
-
-const NEXUS_MODES = ['agent', 'plan', 'ask', 'debug'] as const
-function cycleNexusMode(current: string): string {
-  const i = NEXUS_MODES.indexOf(current as (typeof NEXUS_MODES)[number])
-  return NEXUS_MODES[(i + 1) % NEXUS_MODES.length] ?? 'agent'
-}
 
 type MessageRenderItem = {
   key: string
@@ -305,8 +299,6 @@ export function REPL({
     setAbortController(ac)
   }, [])
   const [isLoading, setIsLoading] = useState(false)
-  const [autoUpdaterResult, setAutoUpdaterResult] =
-    useState<AutoUpdaterResult | null>(null)
   const [toolJSX, setToolJSX] = useState<{
     jsx: React.ReactNode | null
     shouldHidePromptInput: boolean
@@ -380,7 +372,7 @@ export function REPL({
     Record<string, import('../nexus-subagents.js').SubAgentState[]>
   >({})
 
-  /** Nexus mode for the next run (agent/plan/ask/debug). Shown below input; Shift+Tab to change mode. */
+  /** Nexus mode for the next run. Shift+Tab cycles every supported mode. */
   const [nexusModeOverride, setNexusModeOverride] = useState<string>(
     () => nexusInitialMode ?? 'agent',
   )
@@ -1992,8 +1984,6 @@ export function REPL({
                 verbose={verbose}
                 messages={messages}
                 setToolJSX={setToolJSX}
-                onAutoUpdaterResult={setAutoUpdaterResult}
-                autoUpdaterResult={autoUpdaterResult}
                 input={inputValue}
                 onInputChange={setInputValue}
                 mode={inputMode}
@@ -2019,7 +2009,7 @@ export function REPL({
                 nexusContextUsage={nexusContextUsage}
                 onCycleNexusMode={
                   nexusBootstrap
-                    ? () => setNexusModeOverride(prev => cycleNexusMode(prev))
+                    ? () => setNexusModeOverride(prev => cycleRuntimeMode(prev))
                     : undefined
                 }
                 nexusAutoApprove={nexusAutoApprove}

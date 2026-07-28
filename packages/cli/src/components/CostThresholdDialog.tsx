@@ -2,7 +2,6 @@ import { Box, Text, useInput } from 'ink'
 import React from 'react'
 import { Select } from './CustomSelect/index.js'
 import { getTheme } from '../utils/theme.js'
-import Link from './Link.js'
 
 interface Props {
   onDone: () => void
@@ -25,10 +24,9 @@ export function CostThresholdDialog({ onDone }: Props): React.ReactNode {
     >
       <Box marginBottom={1} flexDirection="column">
         <Text bold>
-          You&apos;ve spent $5 on the Anthropic API this session.
+          Estimated provider usage for this session has reached $5.
         </Text>
-        <Text>Learn more about how to monitor your spending:</Text>
-        <Link url="https://docs.anthropic.com/s/claude-code-cost" />
+        <Text>Check your configured provider&apos;s billing dashboard for authoritative usage.</Text>
       </Box>
       <Box>
         <Select

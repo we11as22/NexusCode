@@ -55,7 +55,7 @@
 From the **repository root**, after clone and a first-time **`pnpm install`** if you have not installed dependencies yet:
 
 ```bash
-nvm use 20
+nvm use
 pnpm build
 pnpm package:vscode
 ```
@@ -74,7 +74,9 @@ Clone the repo, then a **single command** installs everything; `nexus` can be ru
 
 ```bash
 git clone <repo> NexusCode && cd NexusCode
-nvm use 20          # or: nvm use (if .nvmrc exists)
+source "$HOME/.nvm/nvm.sh" 2>/dev/null || true
+nvm install         # first time only; installs the exact version from .nvmrc
+nvm use
 pnpm run cli        # one command: install → build → install nexus to ~/bin
 ```
 
@@ -93,7 +95,7 @@ nexus
 To update after code changes (with the same pinned Node runtime):
 
 ```bash
-cd NexusCode && nvm use 20 && pnpm run cli
+cd NexusCode && nvm use && pnpm run cli
 ```
 
 The wrapper in `~/bin/nexus` remembers the Node binary used during installation. If that binary moves after an nvm change, run `pnpm run cli` again.
@@ -104,7 +106,7 @@ The wrapper in `~/bin/nexus` remembers the Node binary used during installation.
 
 **The only up-to-date NexusCode build is from this repo.** The project uses a **local store** (`.npmrc` → `store-dir=.pnpm-store`), so there is no conflict with the global pnpm store.
 
-From the repo root with **Node.js 20** (e.g. `nvm use 20`):
+From the repo root with the pinned **Node.js 24.18.0** (`nvm use`):
 
 ```bash
 pnpm run one
@@ -126,7 +128,7 @@ Does the same as `pnpm run one`, plus packages the extension and `npm link` for 
 
 ### Two-command CLI start
 
-From the repo root with **Node.js 20** (e.g. `nvm use`):
+From the repo root with the pinned **Node.js 24.18.0** (`nvm use`):
 
 ```bash
 pnpm run setup
@@ -156,7 +158,7 @@ Result: **CLI** — `nexus` is available globally; **extension** — `packages/v
 | **Node.js** | **24.18.0** | Pinned in `.nvmrc` and enforced by the repository scripts so CLI, server, and VSIX builds use one tested runtime. Nexus has no external native SQLite dependency; backend coordination state uses Node's built-in SQLite implementation. |
 | **pnpm** | **10.8.1** | Pinned through `packageManager`; Corepack is recommended. |
 
-The repo has **`.nvmrc`** set to `24.18.0`. With nvm, run in the root: `nvm use`. Check Node: `node -v`; install the pinned version with `nvm install` when necessary.
+The repo has **`.nvmrc`** set to `24.18.0`. If a terminal says `nvm: command not found` while `~/.nvm` already exists, load it with `source "$HOME/.nvm/nvm.sh"`. Then run `nvm install` once and `nvm use` in the repository root. The `pnpm run cli` installer also discovers an already installed `~/.nvm/versions/node/v24.18.0/bin/node` even when the shell function was not loaded.
 
 ---
 
@@ -209,7 +211,9 @@ pnpm package:vscode
 
 This runs `pnpm build` and then packages the extension into a single file. The file is created in `packages/vscode/` as **`nexuscode-0.1.0.vsix`**.
 
-**Node.js 20+** is required. If Node is below 20, the script will print an error and a hint.
+The repository-pinned **Node.js 24.18.0** is required. Any other runtime is
+rejected so CLI, server, tests, and VSIX packaging use the same tested
+implementation of `node:sqlite`.
 
 To package only from the extension directory (if everything is already built):
 

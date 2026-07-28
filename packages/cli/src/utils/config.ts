@@ -1,11 +1,19 @@
 import {
+  chmodSync,
+  closeSync,
   existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
+  renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'fs'
-import { resolve, join } from 'path'
+import { basename, dirname, resolve, join } from 'path'
 import { cloneDeep, memoize, pick } from 'lodash-es'
 import { homedir } from 'os'
 import { GLOBAL_CLAUDE_FILE } from './env.js'
@@ -161,7 +169,6 @@ export const GLOBAL_CONFIG_KEYS = [
   'showToolDetails',
   'showReasoning',
   'customApiKeyResponses',
-  'primaryApiKey',
   'preferredNotifChannel',
   'shiftEnterKeyBindingInstalled',
 ] as const
@@ -351,10 +358,83 @@ function saveConfig<A extends object>(
   const filteredConfig = Object.fromEntries(
     Object.entries(config).filter(
       ([key, value]) =>
+        key !== 'primaryApiKey' &&
         JSON.stringify(value) !== JSON.stringify(defaultConfig[key as keyof A]),
     ),
   )
-  writeFileSync(file, JSON.stringify(filteredConfig, null, 2), 'utf-8')
+  writeJsonAtomically(file, filteredConfig)
+}
+
+/**
+ * Persist the small synchronous CLI presentation-state document without ever
+ * exposing a partially written file. The TUI inherited synchronous config
+ * setters from its upstream, so this mirrors the durable tmp-file + fsync +
+ * rename pattern used by Kimi CLI, Qwen Code, and the async core stores.
+ */
+function writeJsonAtomically(file: string, value: unknown): void {
+  const target = resolve(file)
+  const directory = dirname(target)
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+
+  const directoryStat = lstatSync(directory)
+  if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
+    throw new Error(
+      `Refusing to write CLI state through a symbolic link or non-directory: ${directory}`,
+    )
+  }
+  if (process.platform !== 'win32') {
+    chmodSync(directory, 0o700)
+  }
+
+  if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
+    throw new Error(`Refusing to overwrite symbolic link: ${target}`)
+  }
+
+  const temporary = join(
+    directory,
+    `.${basename(target)}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`,
+  )
+  let descriptor: number | undefined
+  try {
+    descriptor = openSync(temporary, 'wx', 0o600)
+    writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    fsyncSync(descriptor)
+    closeSync(descriptor)
+    descriptor = undefined
+    renameSync(temporary, target)
+    if (process.platform !== 'win32') {
+      chmodSync(target, 0o600)
+    }
+
+    let directoryDescriptor: number | undefined
+    try {
+      directoryDescriptor = openSync(directory, 'r')
+      fsyncSync(directoryDescriptor)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (
+        code !== 'EINVAL' &&
+        code !== 'ENOTSUP' &&
+        code !== 'EISDIR' &&
+        code !== 'EPERM'
+      ) {
+        throw error
+      }
+    } finally {
+      if (directoryDescriptor !== undefined) {
+        closeSync(directoryDescriptor)
+      }
+    }
+  } finally {
+    if (descriptor !== undefined) {
+      closeSync(descriptor)
+    }
+    try {
+      unlinkSync(temporary)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
 }
 
 // Flag to track if config reading is allowed

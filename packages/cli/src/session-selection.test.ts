@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import {
+  cycleRuntimeMode,
   resolveRuntimeServerUrl,
   resolveRuntimeMode,
   selectSession,
@@ -19,6 +20,15 @@ describe("session selection", () => {
     expect(() => resolveRuntimeMode("typo")).toThrow(
       "Invalid mode: typo",
     )
+  })
+
+  it("cycles through every supported interactive mode", () => {
+    expect(cycleRuntimeMode("agent")).toBe("plan")
+    expect(cycleRuntimeMode("plan")).toBe("ask")
+    expect(cycleRuntimeMode("ask")).toBe("debug")
+    expect(cycleRuntimeMode("debug")).toBe("review")
+    expect(cycleRuntimeMode("review")).toBe("agent")
+    expect(cycleRuntimeMode("unknown")).toBe("agent")
   })
 
   it("fails clearly when an explicitly requested session does not exist", async () => {

@@ -43,7 +43,7 @@ export function Help({
 
       <Box marginTop={1} flexDirection="column">
         <Text>
-          {PRODUCT_NAME} is a beta research preview. Always review the
+          {PRODUCT_NAME} is under active development. Always review the
           assistant&apos;s responses, especially when running code. The assistant has read access to
           files in the current directory and can run commands and edit files
           with your permission.

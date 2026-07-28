@@ -1,6 +1,6 @@
 import { findActualExecutable } from 'spawn-rx'
 import { memoize } from 'lodash-es'
-import { fileURLToPath, resolve } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import * as path from 'path'
 import { logError } from './log.js'
 import { execFileNoThrow } from './execFileNoThrow.js'
@@ -8,10 +8,14 @@ import { execFile } from 'child_process'
 import debug from 'debug'
 
 const __filename = fileURLToPath(import.meta.url)
-const __dirname = resolve(
-  __filename,
-  process.env.NODE_ENV === 'test' ? '../..' : '.',
-)
+const __dirname = resolveCliRuntimeRoot(__filename, process.env.NODE_ENV)
+
+export function resolveCliRuntimeRoot(
+  filename: string,
+  nodeEnv: string | undefined,
+): string {
+  return path.resolve(path.dirname(filename), nodeEnv === 'test' ? '../..' : '.')
+}
 
 const d = debug('nexus:ripgrep')
 

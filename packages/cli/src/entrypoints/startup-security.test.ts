@@ -14,6 +14,10 @@ const bootstrapSource = readFileSync(
   path.join(process.cwd(), "src", "nexus-bootstrap.ts"),
   "utf8",
 )
+const promptInputSource = readFileSync(
+  path.join(process.cwd(), "src", "components", "PromptInput.tsx"),
+  "utf8",
+)
 
 describe("CLI startup authority ordering", () => {
   it("does not discover or connect project MCP while parsing arguments", () => {
@@ -68,5 +72,19 @@ describe("CLI startup authority ordering", () => {
     expect(bootstrapSource).toContain(
       "config.permissions.askCommandPatterns = permissions.ask",
     )
+  })
+
+  it("keeps administrative subcommands non-interactive", () => {
+    const setupStart = entrySource.indexOf("async function setup(")
+    const setupEnd = entrySource.indexOf("async function main()", setupStart)
+    expect(entrySource.slice(setupStart, setupEnd)).not.toContain("render(")
+    expect(entrySource).toContain("await setup(doctorCwd, false)")
+    expect(entrySource).not.toContain("<Doctor")
+  })
+
+  it("does not run the inherited global-package updater from the Nexus TUI", () => {
+    expect(promptInputSource).not.toContain("<AutoUpdater")
+    expect(promptInputSource).not.toContain("getLatestVersion")
+    expect(promptInputSource).not.toContain("installGlobalPackage")
   })
 })
