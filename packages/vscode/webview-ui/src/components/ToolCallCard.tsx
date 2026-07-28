@@ -252,6 +252,41 @@ export function InlineFileEditBlock({
   )
 }
 
+export function ApplyPatchFileChangesBlock({
+  part,
+  approval,
+  onLayoutHint,
+}: {
+  part: ToolPart
+  approval?: React.ReactNode
+  onLayoutHint?: () => void
+}) {
+  const files = part.changeFiles ?? []
+  if (files.length === 0) return null
+
+  return (
+    <div className="nexus-apply-patch-file-list">
+      {files.map((file, index) => (
+        <InlineFileEditBlock
+          key={`${file.oldPath ?? file.path}:${file.path}:${index}`}
+          part={{
+            type: "tool",
+            id: `${part.id}:file:${index}`,
+            tool: file.operation === "create" ? "Write" : "Edit",
+            status: part.status,
+            path: file.path,
+            diffStats: file.diffStats,
+            diffHunks: file.diffHunks,
+            compacted: part.compacted,
+          }}
+          onLayoutHint={onLayoutHint}
+        />
+      ))}
+      {approval}
+    </div>
+  )
+}
+
 /** File edit/add block: language badge + path + diff stats, then code with green/red highlights (reference design). When diffHunks present, shows line-by-line diff. */
 function FileEditBlock({ part }: { part: ToolPart }) {
   const path = getFileEditPath(part)

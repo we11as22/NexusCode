@@ -249,6 +249,42 @@ function backgroundTaskIdFromMetadata(
   return normalized ? normalized : undefined
 }
 
+function normalizedChangeFileDiffHunks(
+  value: unknown,
+  maxLines: number,
+): NonNullable<NonNullable<ToolPart["changeFiles"]>[number]["diffHunks"]> {
+  if (!Array.isArray(value) || maxLines <= 0) return []
+  const lines: NonNullable<
+    NonNullable<ToolPart["changeFiles"]>[number]["diffHunks"]
+  > = []
+  for (const candidate of value) {
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate)
+    ) {
+      continue
+    }
+    const line = candidate as Record<string, unknown>
+    if (
+      (line.type !== "add" && line.type !== "remove") ||
+      typeof line.lineNum !== "number" ||
+      !Number.isSafeInteger(line.lineNum) ||
+      line.lineNum < 0 ||
+      typeof line.line !== "string"
+    ) {
+      continue
+    }
+    lines.push({
+      type: line.type,
+      lineNum: line.lineNum,
+      line: line.line,
+    })
+    if (lines.length >= maxLines) break
+  }
+  return lines
+}
+
 function changeSetCapabilityFromToolMetadata(
   metadata: Record<string, unknown> | undefined,
 ): Pick<
@@ -277,53 +313,59 @@ function changeSetCapabilityFromToolMetadata(
   ) {
     return undefined
   }
-  const changeFiles = Array.isArray(metadata?.changeFiles)
-    ? metadata.changeFiles
-        .slice(0, 256)
-        .flatMap((value) => {
-          if (!value || typeof value !== "object" || Array.isArray(value)) {
-            return []
-          }
-          const file = value as Record<string, unknown>
-          const stats =
-            file.diffStats &&
-            typeof file.diffStats === "object" &&
-            !Array.isArray(file.diffStats)
-              ? file.diffStats as Record<string, unknown>
-              : undefined
-          const operation = String(file.operation)
-          if (
-            typeof file.path !== "string" ||
-            !file.path.trim() ||
-            !["create", "modify", "delete", "rename"].includes(operation) ||
-            typeof stats?.added !== "number" ||
-            !Number.isFinite(stats.added) ||
-            stats.added < 0 ||
-            typeof stats.removed !== "number" ||
-            !Number.isFinite(stats.removed) ||
-            stats.removed < 0 ||
-            typeof file.binary !== "boolean"
-          ) {
-            return []
-          }
-          return [{
-            path: file.path,
-            ...(typeof file.oldPath === "string" && file.oldPath.trim()
-              ? { oldPath: file.oldPath }
-              : {}),
-            operation: operation as
-              | "create"
-              | "modify"
-              | "delete"
-              | "rename",
-            diffStats: {
-              added: Math.floor(stats.added),
-              removed: Math.floor(stats.removed),
-            },
-            binary: file.binary,
-          }]
-        })
-    : []
+  const changeFiles: NonNullable<ToolPart["changeFiles"]> = []
+  let remainingDiffLines = 256
+  if (Array.isArray(metadata?.changeFiles)) {
+    for (const value of metadata.changeFiles.slice(0, 256)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        continue
+      }
+      const file = value as Record<string, unknown>
+      const stats =
+        file.diffStats &&
+        typeof file.diffStats === "object" &&
+        !Array.isArray(file.diffStats)
+          ? file.diffStats as Record<string, unknown>
+          : undefined
+      const operation = String(file.operation)
+      if (
+        typeof file.path !== "string" ||
+        !file.path.trim() ||
+        !["create", "modify", "delete", "rename"].includes(operation) ||
+        typeof stats?.added !== "number" ||
+        !Number.isFinite(stats.added) ||
+        stats.added < 0 ||
+        typeof stats.removed !== "number" ||
+        !Number.isFinite(stats.removed) ||
+        stats.removed < 0 ||
+        typeof file.binary !== "boolean"
+      ) {
+        continue
+      }
+      const diffHunks = normalizedChangeFileDiffHunks(
+        file.diffHunks,
+        Math.min(32, remainingDiffLines),
+      )
+      remainingDiffLines -= diffHunks.length
+      changeFiles.push({
+        path: file.path,
+        ...(typeof file.oldPath === "string" && file.oldPath.trim()
+          ? { oldPath: file.oldPath }
+          : {}),
+        operation: operation as
+          | "create"
+          | "modify"
+          | "delete"
+          | "rename",
+        diffStats: {
+          added: Math.floor(stats.added),
+          removed: Math.floor(stats.removed),
+        },
+        binary: file.binary,
+        ...(diffHunks.length > 0 ? { diffHunks } : {}),
+      })
+    }
+  }
   return {
     changeSetId,
     proposalHash,

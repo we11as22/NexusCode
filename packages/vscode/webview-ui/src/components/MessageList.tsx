@@ -2,7 +2,11 @@ import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useMe
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
+import {
+  ApplyPatchFileChangesBlock,
+  ToolCallCard,
+  InlineFileEditBlock,
+} from "./ToolCallCard.js"
 import { NEXUS_CHAT_LAYOUT_EVENT } from "../constants/chatLayoutEvent.js"
 import { NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX } from "../constants/questionnaire.js"
 import { ExploredSummaryInline } from "./ExploredProgressBlock.js"
@@ -1311,6 +1315,19 @@ function AssistantPartRow({
           <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
         ) : undefined
       return <InlineFileEditBlock part={toolPart} approval={approval} onLayoutHint={onListLayoutHint} />
+    }
+    if (toolPart.tool === "ApplyPatch" && (toolPart.changeFiles?.length ?? 0) > 0) {
+      const approval =
+        pendingApproval?.partId === toolPart.id ? (
+          <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+        ) : undefined
+      return (
+        <ApplyPatchFileChangesBlock
+          part={toolPart}
+          approval={approval}
+          onLayoutHint={onListLayoutHint}
+        />
+      )
     }
     if (toolPart.tool === "execute_command" || toolPart.tool === "Bash") {
       const approval =

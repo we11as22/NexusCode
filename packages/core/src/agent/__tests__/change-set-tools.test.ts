@@ -427,16 +427,42 @@ describe("Write/Edit/ApplyPatch durable change-set integration", () => {
             path: "src/new.ts",
             operation: "create",
             diffStats: { added: 1, removed: 0 },
+            diffHunks: [
+              {
+                type: "add",
+                lineNum: 1,
+                line: "export const added = true",
+              },
+            ],
           },
           {
             path: "src/current.ts",
             operation: "modify",
             diffStats: { added: 1, removed: 1 },
+            diffHunks: [
+              {
+                type: "remove",
+                lineNum: 1,
+                line: "export const current = 1",
+              },
+              {
+                type: "add",
+                lineNum: 1,
+                line: "export const current = 2",
+              },
+            ],
           },
           {
             path: "src/remove.ts",
             operation: "delete",
             diffStats: { added: 0, removed: 1 },
+            diffHunks: [
+              {
+                type: "remove",
+                lineNum: 1,
+                line: "remove me",
+              },
+            ],
           },
         ],
       },

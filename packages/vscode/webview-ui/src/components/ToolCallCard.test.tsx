@@ -3,7 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
 import type { ToolPart } from "../stores/chat.js"
-import { InlineFileEditBlock } from "./ToolCallCard.js"
+import {
+  ApplyPatchFileChangesBlock,
+  InlineFileEditBlock,
+} from "./ToolCallCard.js"
 
 function render(part: Partial<ToolPart>): string {
   return renderToStaticMarkup(
@@ -73,5 +76,50 @@ describe("InlineFileEditBlock", () => {
     expect(html).toContain("line-6")
     expect(html).not.toContain("line-7")
     expect(html).toContain("2 more changed lines")
+  })
+})
+
+describe("ApplyPatchFileChangesBlock", () => {
+  it("renders one exact compact preview per changed file", () => {
+    const html = renderToStaticMarkup(
+      <ApplyPatchFileChangesBlock
+        part={{
+          type: "tool",
+          id: "patch-1",
+          tool: "ApplyPatch",
+          status: "completed",
+          output: "Success. Updated the following files",
+          changeFiles: [
+            {
+              path: "src/new.ts",
+              operation: "create",
+              binary: false,
+              diffStats: { added: 1, removed: 0 },
+              diffHunks: [
+                { type: "add", lineNum: 1, line: "export const added = true" },
+              ],
+            },
+            {
+              path: "src/current.ts",
+              operation: "modify",
+              binary: false,
+              diffStats: { added: 1, removed: 1 },
+              diffHunks: [
+                { type: "remove", lineNum: 1, line: "const current = 1" },
+                { type: "add", lineNum: 1, line: "const current = 2" },
+              ],
+            },
+          ],
+        }}
+      />,
+    )
+
+    expect(html.match(/nexus-file-edit-block/g)).toHaveLength(2)
+    expect(html).toContain("new.ts")
+    expect(html).toContain("current.ts")
+    expect(html).toContain("export const added = true")
+    expect(html).toContain("const current = 1")
+    expect(html).toContain("const current = 2")
+    expect(html).not.toContain("Success. Updated the following files")
   })
 })

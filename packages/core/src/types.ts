@@ -631,6 +631,8 @@ export interface ChangeFileSummary {
   operation: "create" | "modify" | "delete" | "rename"
   diffStats: { added: number; removed: number }
   binary: boolean
+  /** Bounded exact changed-line projection for compact multi-file previews. */
+  diffHunks?: ToolDiffLine[]
 }
 
 export interface ToolDiffLine {

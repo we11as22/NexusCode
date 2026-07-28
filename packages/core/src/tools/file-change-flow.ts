@@ -9,7 +9,10 @@ import type {
   ChangeProposalExpectedState,
   ChangeSetRecord,
 } from "../changes/types.js"
-import type { ToolContext, ToolResult } from "../types.js"
+import type { ToolContext, ToolDiffLine, ToolResult } from "../types.js"
+
+const MAX_CHANGE_SET_PREVIEW_LINES = 256
+const MAX_CHANGE_FILE_PREVIEW_LINES = 32
 
 export interface DurableTextFileChangeInput {
   readonly toolName: "Write" | "Edit"
@@ -138,21 +141,68 @@ export function buildDurableChangeHunks(
   }))
 }
 
+function changedLinePreview(
+  hunks: readonly ChangeHunk[],
+  maxLines: number,
+): ToolDiffLine[] {
+  if (maxLines <= 0) return []
+  const lines: ToolDiffLine[] = []
+  for (const hunk of hunks) {
+    let oldLine = hunk.oldStart
+    let newLine = hunk.newStart
+    const patchLines = hunk.patch.split(/\r?\n/u)
+    const bodyStart = patchLines[0]?.startsWith("@@") ? 1 : 0
+    for (let index = bodyStart; index < patchLines.length; index++) {
+      const patchLine = patchLines[index] ?? ""
+      if (patchLine.startsWith("\\ No newline")) continue
+      if (patchLine.startsWith("-")) {
+        lines.push({
+          type: "remove",
+          lineNum: oldLine,
+          line: patchLine.slice(1),
+        })
+        oldLine += 1
+      } else if (patchLine.startsWith("+")) {
+        lines.push({
+          type: "add",
+          lineNum: newLine,
+          line: patchLine.slice(1),
+        })
+        newLine += 1
+      } else {
+        oldLine += 1
+        newLine += 1
+      }
+      if (lines.length >= maxLines) return lines
+    }
+  }
+  return lines
+}
+
 function changeMetadata(record: ChangeSetRecord): Record<string, unknown> {
+  let remainingPreviewLines = MAX_CHANGE_SET_PREVIEW_LINES
   return {
     changeSetId: record.id,
     proposalHash: record.proposalHash,
     changeSetState: record.state,
-    changeFiles: record.files.map((file) => ({
-      path: file.path,
-      ...(file.oldPath ? { oldPath: file.oldPath } : {}),
-      operation: file.operation,
-      beforeHash: file.before.hash,
-      afterHash: file.after.hash,
-      binary: file.binary,
-      diffStats: exactChangeHunkDiffStats(file.hunks),
-      ...(file.omission ? { omission: file.omission } : {}),
-    })),
+    changeFiles: record.files.map((file) => {
+      const diffHunks = changedLinePreview(
+        file.hunks,
+        Math.min(MAX_CHANGE_FILE_PREVIEW_LINES, remainingPreviewLines),
+      )
+      remainingPreviewLines -= diffHunks.length
+      return {
+        path: file.path,
+        ...(file.oldPath ? { oldPath: file.oldPath } : {}),
+        operation: file.operation,
+        beforeHash: file.before.hash,
+        afterHash: file.after.hash,
+        binary: file.binary,
+        diffStats: exactChangeHunkDiffStats(file.hunks),
+        ...(diffHunks.length > 0 ? { diffHunks } : {}),
+        ...(file.omission ? { omission: file.omission } : {}),
+      }
+    }),
   }
 }
 

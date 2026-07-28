@@ -130,6 +130,16 @@ describe("SessionStore journal v2", () => {
         appliedReplacements: [
           { oldSnippet: "BETA", newSnippet: "GAMMA" },
         ],
+        changeFiles: [{
+          path: "fixture.txt",
+          operation: "modify",
+          diffStats: { added: 1, removed: 1 },
+          binary: false,
+          diffHunks: [
+            { type: "remove", lineNum: 2, line: "BETA" },
+            { type: "add", lineNum: 2, line: "GAMMA" },
+          ],
+        }],
       }],
     }]
 

@@ -2208,6 +2208,13 @@ html, body, #root {
   box-sizing: border-box;
 }
 
+.nexus-apply-patch-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
 .nexus-file-edit-header {
   display: flex;
   align-items: center;

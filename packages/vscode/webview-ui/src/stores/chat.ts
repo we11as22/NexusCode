@@ -105,6 +105,7 @@ export interface ToolPart {
     operation: "create" | "modify" | "delete" | "rename"
     diffStats: { added: number; removed: number }
     binary: boolean
+    diffHunks?: Array<{ type: "add" | "remove"; lineNum: number; line: string }>
   }>
   /** Line-by-line diff for UI (red/green); set from tool_end when available */
   diffHunks?: Array<{ type: string; lineNum: number; line: string }>

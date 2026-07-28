@@ -35,6 +35,16 @@ describe("webview output projection", () => {
             appliedReplacements: [
               { oldSnippet: "BETA", newSnippet: "GAMMA" },
             ],
+            changeFiles: [{
+              path: "src/index.ts",
+              operation: "modify" as const,
+              diffStats: { added: 1, removed: 1 },
+              binary: false,
+              diffHunks: [
+                { type: "remove" as const, lineNum: 2, line: "BETA" },
+                { type: "add" as const, lineNum: 2, line: "GAMMA" },
+              ],
+            }],
           },
         ],
       },
@@ -57,6 +67,16 @@ describe("webview output projection", () => {
     expect(part.appliedReplacements).toEqual([
       { oldSnippet: "BETA", newSnippet: "GAMMA" },
     ])
+    expect(part.changeFiles).toEqual([{
+      path: "src/index.ts",
+      operation: "modify",
+      diffStats: { added: 1, removed: 1 },
+      binary: false,
+      diffHunks: [
+        { type: "remove", lineNum: 2, line: "BETA" },
+        { type: "add", lineNum: 2, line: "GAMMA" },
+      ],
+    }])
     expect(
       (messages[0]!.content[0] as { outputSpillPath?: string }).outputSpillPath,
     ).toContain("/Users/alice/")
