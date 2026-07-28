@@ -86,6 +86,7 @@ import {
   canonicalProjectRoot,
   computeContextUsageMetrics,
   estimateToolsDefinitionsTokens,
+  reconcilePersistedContextUsage,
   shouldUseDeferredToolLoading,
   getClaudeCompatibilityOptions,
   isDelegatedAgentParentTool,
@@ -392,6 +393,9 @@ export interface WebviewState {
   contextUsedTokens: number
   contextLimitTokens: number
   contextPercent: number
+  contextSource?: "provider" | "hybrid" | "estimated"
+  contextProviderTokens?: number
+  contextPendingTokens?: number
   serverUrl?: string
   /** When using server: connection state for UI indicator and retry. */
   connectionState?: ServerConnectionState
@@ -550,7 +554,16 @@ export class Controller {
   /** Server-stream shadow state: remembers latest SpawnAgent tool so subagent events can attach even before final server snapshot arrives. */
   private streamLastSpawnAgentPartId: string | null = null
   /** Last context_usage from agent loop (includes system prompt tokens). Used in getStateToPostToWebview so stateUpdate does not overwrite with session-only count. */
-  private lastContextUsage: { usedTokens: number; limitTokens: number; percent: number; sessionId: string } | null = null
+  private lastContextUsage: {
+    usedTokens: number
+    limitTokens: number
+    percent: number
+    source?: "provider" | "hybrid" | "estimated"
+    providerTokens?: number
+    pendingTokens?: number
+    modelId?: string
+    sessionId: string
+  } | null = null
   /** Bounded, path-redacted diagnostics for the most recently prepared local integration snapshot. */
   private toolContributionDiagnostics: ToolContributionDiagnosticView[] = []
   /** Coalesce frequent state snapshots during agent streaming to avoid UI thrash. */
@@ -875,6 +888,18 @@ export class Controller {
               error,
             )
           })
+        }
+        return
+      }
+
+      case "done": {
+        if (
+          typeof event.durationMs === "number" &&
+          Number.isFinite(event.durationMs) &&
+          event.durationMs >= 0
+        ) {
+          const message = this.ensureShadowAssistantMessage(event.messageId)
+          if (message) message.durationMs = Math.floor(event.durationMs)
         }
         return
       }
@@ -1518,6 +1543,10 @@ export class Controller {
         usedTokens: event.usedTokens,
         limitTokens: event.limitTokens,
         percent: event.percent,
+        source: event.source,
+        providerTokens: event.providerTokens,
+        pendingTokens: event.pendingTokens,
+        modelId: event.modelId,
         sessionId: this.session?.id ?? "",
       }
     }
@@ -1734,8 +1763,11 @@ export class Controller {
         indexReady: status.state === "ready",
         indexStatus: status,
         contextUsedTokens: 0,
-        contextLimitTokens: 128000,
+        contextLimitTokens: 0,
         contextPercent: 0,
+        contextSource: "estimated",
+        contextProviderTokens: 0,
+        contextPendingTokens: 0,
         serverUrl: this.getServerUrl(),
         connectionState: this.serverConnectionState,
         serverConnectionError: this.serverConnectionError,
@@ -1766,16 +1798,29 @@ export class Controller {
     let contextUsedTokens: number
     let contextLimitTokens: number
     let contextPercent: number
+    let contextSource: "provider" | "hybrid" | "estimated" | undefined
+    let contextProviderTokens: number | undefined
+    let contextPendingTokens: number | undefined
     if (useLastContext) {
       contextUsedTokens = this.lastContextUsage!.usedTokens
       contextLimitTokens = this.lastContextUsage!.limitTokens
       contextPercent = this.lastContextUsage!.percent
+      contextSource = this.lastContextUsage!.source
+      contextProviderTokens = this.lastContextUsage!.providerTokens
+      contextPendingTokens = this.lastContextUsage!.pendingTokens
     } else {
-      const snap = this.session.getLastContextUsageSnapshot()
+      const snap = reconcilePersistedContextUsage(
+        this.session.getLastContextUsageSnapshot(),
+        this.config.model.id,
+        this.config.model.contextWindow,
+      )
       if (snap) {
         contextUsedTokens = snap.usedTokens
         contextLimitTokens = snap.limitTokens
         contextPercent = snap.percent
+        contextSource = snap.source
+        contextProviderTokens = snap.providerTokens
+        contextPendingTokens = snap.pendingTokens
       } else {
         const toolRegistry = new ToolRegistry()
         const { builtin, dynamic } = toolRegistry.getForMode(this.mode)
@@ -1796,10 +1841,14 @@ export class Controller {
           toolsDefinitionTokens: toolsTok,
           modelId: this.config.model.id,
           configuredContextWindow: this.config.model.contextWindow,
+          providerAnchor: this.session.getProviderContextAnchor(),
         })
         contextUsedTokens = m.usedTokens
         contextLimitTokens = m.limitTokens
         contextPercent = m.percent
+        contextSource = m.source
+        contextProviderTokens = m.providerTokens
+        contextPendingTokens = m.pendingTokens
       }
     }
     const messages = stripModeReminderFromMessages(this.session.messages)
@@ -1817,6 +1866,9 @@ export class Controller {
       contextUsedTokens,
       contextLimitTokens,
       contextPercent,
+      contextSource,
+      contextProviderTokens,
+      contextPendingTokens,
       serverUrl: this.getServerUrl(),
       connectionState: this.serverConnectionState,
       serverConnectionError: this.serverConnectionError,
@@ -4420,6 +4472,10 @@ Return in this format:
           usedTokens: event.usedTokens,
           limitTokens: event.limitTokens,
           percent: event.percent,
+          source: event.source,
+          providerTokens: event.providerTokens,
+          pendingTokens: event.pendingTokens,
+          modelId: event.modelId,
           sessionId: this.session?.id ?? "",
         }
       }

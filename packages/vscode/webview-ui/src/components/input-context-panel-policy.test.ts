@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 
-import { inputContextPanelKind } from "./input-context-panel-policy.js"
+import {
+  inputContextPanelKind,
+  reviewActionForFileCount,
+} from "./input-context-panel-policy.js"
 
 describe("inputContextPanelKind", () => {
   it("keeps pending approval controls owned by the matching tool card", () => {
@@ -28,5 +31,12 @@ describe("inputContextPanelKind", () => {
         appliedEditCount: 1,
       }),
     ).toBe("none")
+  })
+})
+
+describe("reviewActionForFileCount", () => {
+  it("opens a single diff directly and expands multi-file changes", () => {
+    expect(reviewActionForFileCount(1)).toBe("open-single")
+    expect(reviewActionForFileCount(2)).toBe("expand-list")
   })
 })

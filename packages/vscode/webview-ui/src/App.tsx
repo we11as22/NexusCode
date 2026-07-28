@@ -232,11 +232,21 @@ function ChatView() {
   }
 
   const contextColor =
-    store.contextPercent >= 90
+    store.contextLimitTokens > 0 && store.contextPercent >= 90
       ? "text-red-400"
-      : store.contextPercent >= 75
+      : store.contextLimitTokens > 0 && store.contextPercent >= 75
         ? "text-yellow-300"
         : "text-emerald-300"
+  const contextLabel =
+    store.contextLimitTokens > 0
+      ? `ctx ${formatTokens(store.contextUsedTokens)}/${formatTokens(store.contextLimitTokens)} (${store.contextPercent}%)`
+      : `ctx ${formatTokens(store.contextUsedTokens)}/—`
+  const contextTitle =
+    store.contextSource === "hybrid"
+      ? `${formatTokens(store.contextUsedTokens)} used of ${formatTokens(store.contextLimitTokens)}; ${formatTokens(store.contextProviderTokens ?? 0)} provider-reported + ${formatTokens(store.contextPendingTokens ?? 0)} estimated pending`
+      : store.contextLimitTokens > 0
+        ? `${formatTokens(store.contextUsedTokens)} used of ${formatTokens(store.contextLimitTokens)}`
+        : `${formatTokens(store.contextUsedTokens)} used; model context window is unknown`
 
   return (
     <>
@@ -256,8 +266,11 @@ function ChatView() {
           <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
             session {formatSessionLabel(store.sessionId)}
           </span>
-          <span className={`text-[10px] ${contextColor} truncate`}>
-            ctx {formatTokens(store.contextUsedTokens)}/{formatTokens(store.contextLimitTokens)} ({store.contextPercent}%)
+          <span
+            className={`text-[10px] ${contextColor} truncate`}
+            title={contextTitle}
+          >
+            {contextLabel}
           </span>
         </div>
         <div className="chat-messages-wrapper">
@@ -849,7 +862,11 @@ function ChatBottomBar() {
           <button
             type="button"
             className="nexus-context-ring-btn"
-            title={contextPercent != null ? `${Math.round(contextPercent)}% context used` : "Context"}
+            title={
+              store.contextLimitTokens > 0
+                ? `${Math.round(contextPercent)}% context used`
+                : `${formatTokens(store.contextUsedTokens)} used; model context window unknown`
+            }
             aria-label="Context"
           >
             <ContextRingIcon className="w-4 h-4" percent={contextPercent} />
@@ -1795,7 +1812,9 @@ function SettingsView({
                 ))}
               </div>
             ) : null}
-            <div className="nexus-muted text-[10px]">Default context window fallback: 128k tokens.</div>
+            <div className="nexus-muted text-[10px]">
+              Context windows come from provider/catalog metadata; unknown models show an unknown limit instead of a guessed value.
+            </div>
           </section>
 
           <section className="nexus-section border-t border-[var(--vscode-widget-border)] pt-3 mt-3">

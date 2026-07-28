@@ -34,3 +34,70 @@ describe("Session message identity", () => {
     ).toThrow("already exists")
   })
 })
+
+describe("Session provider context anchor", () => {
+  it("keeps the provider anchor across a pending user message", () => {
+    const session = new Session(
+      "session-anchor",
+      process.cwd(),
+      [
+        {
+          id: "assistant-1",
+          ts: 1,
+          role: "assistant",
+          content: "done",
+        },
+      ],
+      undefined,
+      true,
+    )
+    session.recordProviderContextAnchor({
+      messageId: "assistant-1",
+      usedTokens: 12_000,
+      manifestTokens: 2_000,
+      modelId: "kilo-auto/free",
+      recordedAt: 2,
+    })
+
+    session.addMessage(
+      { role: "user", content: "next request" },
+      { id: "user-2", ts: 3 },
+    )
+
+    expect(session.getProviderContextAnchor()).toEqual({
+      messageId: "assistant-1",
+      usedTokens: 12_000,
+      manifestTokens: 2_000,
+      modelId: "kilo-auto/free",
+      recordedAt: 2,
+    })
+  })
+
+  it("clears an anchor when rewind removes its assistant message", () => {
+    const session = new Session(
+      "session-anchor",
+      process.cwd(),
+      [
+        { id: "user-1", ts: 1, role: "user", content: "hello" },
+        {
+          id: "assistant-1",
+          ts: 2,
+          role: "assistant",
+          content: "done",
+        },
+      ],
+      undefined,
+      true,
+    )
+    session.recordProviderContextAnchor({
+      messageId: "assistant-1",
+      usedTokens: 12_000,
+      manifestTokens: 2_000,
+      recordedAt: 3,
+    })
+
+    session.rewindBeforeMessageId("assistant-1")
+
+    expect(session.getProviderContextAnchor()).toBeUndefined()
+  })
+})

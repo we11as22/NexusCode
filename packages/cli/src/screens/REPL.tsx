@@ -109,6 +109,7 @@ import {
   formatQuestionnaireAnswersForAgent,
   computeContextUsageMetrics,
   estimateToolsDefinitionsTokens,
+  reconcilePersistedContextUsage,
   shouldUseDeferredToolLoading,
 } from '@nexuscode/core'
 import type { SessionDiffEntry } from '../components/NexusSessionDiffBlock.js'
@@ -220,10 +221,21 @@ type Props = {
 /** Footer context bar: same formula as agent loop (persisted snapshot, else session + tools; system included after last emit). */
 function computeNexusContextFooter(
   bootstrap: import('../nexus-bootstrap.js').NexusBootstrapResult,
-): { usedTokens: number; limitTokens: number; percent: number } {
-  const snap = bootstrap.session.getLastContextUsageSnapshot()
-  if (snap) return snap
+): {
+  usedTokens: number
+  limitTokens: number
+  percent: number
+  source?: 'provider' | 'hybrid' | 'estimated'
+  providerTokens?: number
+  pendingTokens?: number
+} {
   const model = bootstrap.config.model
+  const snap = reconcilePersistedContextUsage(
+    bootstrap.session.getLastContextUsageSnapshot(),
+    model.id,
+    model.contextWindow,
+  )
+  if (snap) return snap
   const { builtin, dynamic } = bootstrap.toolRegistry.getForMode(bootstrap.mode)
   const visibleTools = [...builtin, ...dynamic]
   const deferredTools = visibleTools.filter(
@@ -242,11 +254,15 @@ function computeNexusContextFooter(
     toolsDefinitionTokens: toolsTok,
     modelId: model.id,
     configuredContextWindow: model.contextWindow,
+    providerAnchor: bootstrap.session.getProviderContextAnchor(),
   })
   return {
     usedTokens: m.usedTokens,
     limitTokens: m.limitTokens,
     percent: m.percent,
+    source: m.source,
+    providerTokens: m.providerTokens,
+    pendingTokens: m.pendingTokens,
   }
 }
 
@@ -391,6 +407,9 @@ export function REPL({
     usedTokens: number
     limitTokens: number
     percent: number
+    source?: 'provider' | 'hybrid' | 'estimated'
+    providerTokens?: number
+    pendingTokens?: number
   } | null>(null)
 
   /** Subagents per SpawnAgent tool partId. Updated via onSubagentEvent from queryNexus. */
@@ -1147,6 +1166,9 @@ export function REPL({
               usedTokens: context.usedTokens,
               limitTokens: context.limitTokens,
               percent: context.percent,
+              source: context.source,
+              providerTokens: context.providerTokens,
+              pendingTokens: context.pendingTokens,
             })
           } else if (
             message &&
@@ -1314,6 +1336,9 @@ export function REPL({
               usedTokens: ctx.usedTokens,
               limitTokens: ctx.limitTokens,
               percent: ctx.percent,
+              source: ctx.source,
+              providerTokens: ctx.providerTokens,
+              pendingTokens: ctx.pendingTokens,
             })
             continue
           }
@@ -1497,6 +1522,9 @@ export function REPL({
             usedTokens: ctx.usedTokens,
             limitTokens: ctx.limitTokens,
             percent: ctx.percent,
+            source: ctx.source,
+            providerTokens: ctx.providerTokens,
+            pendingTokens: ctx.pendingTokens,
           })
           continue
         }

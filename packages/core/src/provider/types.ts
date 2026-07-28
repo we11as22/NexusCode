@@ -1,6 +1,20 @@
 import type { LanguageModelV1 } from "ai"
 import type { z } from "zod"
 
+export interface NormalizedLLMUsage {
+  /** Non-cached input tokens. */
+  inputTokens: number
+  /** Visible output tokens, excluding reasoning when the provider separates it. */
+  outputTokens: number
+  reasoningTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  /** Full provider-visible context represented by this response. */
+  totalTokens: number
+  /** Actual response model when the provider reports it. */
+  modelId?: string
+}
+
 export interface LLMStreamEvent {
   type:
     | "text_delta"
@@ -23,7 +37,7 @@ export interface LLMStreamEvent {
   toolOutput?: string
   // finish event
   finishReason?: "stop" | "length" | "tool_calls" | "error"
-  usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+  usage?: NormalizedLLMUsage
   // error event
   error?: Error
 }

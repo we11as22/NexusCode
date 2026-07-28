@@ -301,6 +301,11 @@ type StoredContextUsage = {
     usedTokens: number;
     limitTokens: number;
     percent: number;
+    source?: "provider" | "hybrid" | "estimated";
+    providerTokens?: number;
+    pendingTokens?: number;
+    /** Model identity that makes the persisted usage/limit safe to restore. */
+    modelId?: string;
 };
 interface StoredSession {
     id: string;
@@ -309,6 +314,7 @@ interface StoredSession {
     title?: string;
     todo?: string;
     contextUsage?: StoredContextUsage;
+    providerContextAnchor?: ProviderContextAnchor;
     messages: SessionMessage[];
     /** Monotonic durable journal revision. Legacy v1 files load as revision 0. */
     revision?: number;
@@ -423,6 +429,7 @@ interface SessionRecoverySnapshot {
     readonly messages: readonly SessionMessage[];
     readonly todo: string;
     readonly contextUsageSnapshot: StoredContextUsage | null;
+    readonly providerContextAnchor: ProviderContextAnchor | null;
 }
 /** Derive session title from first user message. */
 declare function deriveSessionTitle(messages: SessionMessage[]): string;
@@ -440,9 +447,11 @@ declare class Session implements ISession {
     private _tokenEstimateCache;
     /** Last context_usage from agent (full formula). Cleared when messages change. */
     private _contextUsageSnapshot;
+    /** Last exact provider response boundary used as the hybrid context baseline. */
+    private _providerContextAnchor;
     /** Last verified durable journal revision used for optimistic concurrency. */
     private _revision;
-    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean, contextUsageSnapshot?: StoredContextUsage | null, revision?: number);
+    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean, contextUsageSnapshot?: StoredContextUsage | null, revision?: number, providerContextAnchor?: ProviderContextAnchor | null);
     get messages(): SessionMessage[];
     invalidateTokenEstimate(): void;
     private clearContextUsageSnapshot;
@@ -458,6 +467,10 @@ declare class Session implements ISession {
     getTokenEstimate(): number;
     getLastContextUsageSnapshot(): StoredContextUsage | undefined;
     recordContextUsage(snapshot: StoredContextUsage): void;
+    getProviderContextAnchor(): ProviderContextAnchor | undefined;
+    recordProviderContextAnchor(anchor: ProviderContextAnchor): void;
+    clearProviderContextAnchor(): void;
+    private clearAnchorIfMessageMissing;
     fork(messageId: string): ISession;
     /** Rewind chat to timestamp. Keeps only messages with ts <= timestamp. */
     rewindToTimestamp(timestamp: number): void;
@@ -2261,6 +2274,14 @@ interface DiagnosticItem {
     message: string;
     source?: string;
 }
+interface ProviderContextAnchor {
+    messageId: string;
+    usedTokens: number;
+    /** Estimated system prompt plus active tool-definition tokens for this request. */
+    manifestTokens: number;
+    modelId?: string;
+    recordedAt: number;
+}
 interface ISession {
     readonly id: string;
     readonly messages: SessionMessage[];
@@ -2279,13 +2300,25 @@ interface ISession {
         usedTokens: number;
         limitTokens: number;
         percent: number;
+        source?: "provider" | "hybrid" | "estimated";
+        providerTokens?: number;
+        pendingTokens?: number;
+        modelId?: string;
     } | undefined;
     /** Called by agent loop when emitting context_usage so resume/switch session can show the same numbers. */
     recordContextUsage(snapshot: {
         usedTokens: number;
         limitTokens: number;
         percent: number;
+        source?: "provider" | "hybrid" | "estimated";
+        providerTokens?: number;
+        pendingTokens?: number;
+        modelId?: string;
     }): void;
+    /** Last exact provider-visible context boundary for hybrid pending-tail estimates. */
+    getProviderContextAnchor(): ProviderContextAnchor | undefined;
+    recordProviderContextAnchor(anchor: ProviderContextAnchor): void;
+    clearProviderContextAnchor(): void;
     fork(messageId: string): ISession;
     /** Rewind chat to timestamp; keeps only messages with ts <= timestamp (for checkpoint restore). */
     rewindToTimestamp(timestamp: number): void;
@@ -2303,6 +2336,8 @@ interface SessionMessage {
     ts: number;
     role: SessionRole;
     content: string | MessagePart[];
+    /** End-to-end duration of the completed user turn that produced this answer. */
+    durationMs?: number;
     /** Durable delegated-agent inbox id accepted into this transcript. */
     mailboxMessageId?: string;
     /** Exact root session that owns the delegated-agent inbox. */
@@ -2810,6 +2845,10 @@ type AgentEvent = {
     usedTokens: number;
     limitTokens: number;
     percent: number;
+    source?: "provider" | "hybrid" | "estimated";
+    providerTokens?: number;
+    pendingTokens?: number;
+    modelId?: string;
 } | {
     type: "error";
     error: string;
@@ -2817,6 +2856,7 @@ type AgentEvent = {
 } | {
     type: "done";
     messageId: string;
+    durationMs?: number;
 } | {
     type: "todo_updated";
     todo: string;
@@ -3176,28 +3216,28 @@ declare const modelEndpointPayloadSchema: z.ZodObject<{
         apiVersion: z.ZodOptional<z.ZodString>;
         extra: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     }, "strict", z.ZodTypeAny, {
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         baseUrl?: string | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }, {
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         baseUrl?: string | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }>, {
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         baseUrl?: string | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
         apiVersion?: string | undefined;
         extra?: Record<string, unknown> | undefined;
     }, {
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         baseUrl?: string | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -3206,7 +3246,7 @@ declare const modelEndpointPayloadSchema: z.ZodObject<{
     }>;
 }, "strict", z.ZodTypeAny, {
     model: {
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         baseUrl?: string | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -3215,7 +3255,7 @@ declare const modelEndpointPayloadSchema: z.ZodObject<{
     };
 }, {
     model: {
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         baseUrl?: string | undefined;
         resourceName?: string | undefined;
         deploymentId?: string | undefined;
@@ -3231,30 +3271,30 @@ declare const embeddingsEndpointPayloadSchema: z.ZodObject<{
         dimensions: z.ZodOptional<z.ZodNumber>;
         region: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
+        provider: "local" | "bedrock" | "openai" | "openrouter" | "openai-compatible" | "google" | "ollama" | "mistral";
         model: string;
-        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
         region?: string | undefined;
     }, {
+        provider: "local" | "bedrock" | "openai" | "openrouter" | "openai-compatible" | "google" | "ollama" | "mistral";
         model: string;
-        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
         region?: string | undefined;
     }>;
 }, "strict", z.ZodTypeAny, {
     embeddings: {
+        provider: "local" | "bedrock" | "openai" | "openrouter" | "openai-compatible" | "google" | "ollama" | "mistral";
         model: string;
-        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
         region?: string | undefined;
     };
 }, {
     embeddings: {
+        provider: "local" | "bedrock" | "openai" | "openrouter" | "openai-compatible" | "google" | "ollama" | "mistral";
         model: string;
-        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
         region?: string | undefined;
@@ -3469,7 +3509,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         extra: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     }, "strip", z.ZodTypeAny, {
         id: string;
-        provider: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         reasoningEffort: string;
         reasoningHistoryMode: "inline" | "auto" | "reasoning_content" | "reasoning_details";
         temperature?: number | undefined;
@@ -3482,7 +3522,7 @@ declare const NexusConfigSchema: z.ZodObject<{
         extra?: Record<string, unknown> | undefined;
     }, {
         id: string;
-        provider: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         temperature?: number | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -3503,15 +3543,15 @@ declare const NexusConfigSchema: z.ZodObject<{
         /** AWS region for Bedrock */
         region: z.ZodOptional<z.ZodString>;
     }, "strip", z.ZodTypeAny, {
+        provider: "local" | "bedrock" | "openai" | "openrouter" | "openai-compatible" | "google" | "ollama" | "mistral";
         model: string;
-        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
         region?: string | undefined;
     }, {
+        provider: "local" | "bedrock" | "openai" | "openrouter" | "openai-compatible" | "google" | "ollama" | "mistral";
         model: string;
-        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
@@ -4637,8 +4677,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         extra: z.ZodOptional<z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
     }, "strip", z.ZodTypeAny, {
         id?: string | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         temperature?: number | undefined;
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         reasoningEffort?: string | undefined;
@@ -4650,8 +4690,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         extra?: Record<string, unknown> | undefined;
     }, {
         id?: string | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         temperature?: number | undefined;
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         reasoningEffort?: string | undefined;
@@ -4731,7 +4771,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     };
     model: {
         id: string;
-        provider: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         reasoningEffort: string;
         reasoningHistoryMode: "inline" | "auto" | "reasoning_content" | "reasoning_details";
         temperature?: number | undefined;
@@ -4891,8 +4931,8 @@ declare const NexusConfigSchema: z.ZodObject<{
     };
     profiles: Record<string, {
         id?: string | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         temperature?: number | undefined;
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         reasoningEffort?: string | undefined;
@@ -4904,8 +4944,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         extra?: Record<string, unknown> | undefined;
     }>;
     embeddings?: {
+        provider: "local" | "bedrock" | "openai" | "openrouter" | "openai-compatible" | "google" | "ollama" | "mistral";
         model: string;
-        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
@@ -4992,7 +5032,7 @@ declare const NexusConfigSchema: z.ZodObject<{
     } | undefined;
     model?: {
         id: string;
-        provider: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
+        provider: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity";
         temperature?: number | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
@@ -5019,8 +5059,8 @@ declare const NexusConfigSchema: z.ZodObject<{
         } | undefined;
     } | undefined;
     embeddings?: {
+        provider: "local" | "bedrock" | "openai" | "openrouter" | "openai-compatible" | "google" | "ollama" | "mistral";
         model: string;
-        provider: "local" | "bedrock" | "openrouter" | "openai-compatible" | "openai" | "google" | "ollama" | "mistral";
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         dimensions?: number | undefined;
@@ -5218,8 +5258,8 @@ declare const NexusConfigSchema: z.ZodObject<{
     } | undefined;
     profiles?: Record<string, {
         id?: string | undefined;
+        provider?: "anthropic" | "bedrock" | "openai" | "openai-compatible" | "minimax" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         temperature?: number | undefined;
-        provider?: "anthropic" | "bedrock" | "openai-compatible" | "minimax" | "openai" | "google" | "ollama" | "azure" | "groq" | "mistral" | "xai" | "deepinfra" | "cerebras" | "cohere" | "togetherai" | "perplexity" | undefined;
         apiKey?: string | undefined;
         baseUrl?: string | undefined;
         reasoningEffort?: string | undefined;
@@ -5906,6 +5946,19 @@ declare class DurableRunEventSink {
     finish(status: Exclude<RunStatus, "running">): Promise<DurableRunRecord>;
 }
 
+interface NormalizedLLMUsage {
+    /** Non-cached input tokens. */
+    inputTokens: number;
+    /** Visible output tokens, excluding reasoning when the provider separates it. */
+    outputTokens: number;
+    reasoningTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    /** Full provider-visible context represented by this response. */
+    totalTokens: number;
+    /** Actual response model when the provider reports it. */
+    modelId?: string;
+}
 interface LLMStreamEvent {
     type: "text_delta" | "reasoning_start" | "reasoning_delta" | "reasoning_end" | "tool_input_start" | "tool_call" | "tool_result" | "finish" | "error";
     delta?: string;
@@ -5916,12 +5969,7 @@ interface LLMStreamEvent {
     toolInput?: Record<string, unknown>;
     toolOutput?: string;
     finishReason?: "stop" | "length" | "tool_calls" | "error";
-    usage?: {
-        inputTokens: number;
-        outputTokens: number;
-        cacheReadTokens?: number;
-        cacheWriteTokens?: number;
-    };
+    usage?: NormalizedLLMUsage;
     error?: Error;
 }
 interface LLMMessage {
@@ -7508,16 +7556,28 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
     usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
     limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
     percent: z.ZodEffects<z.ZodNumber, number, number>;
+    source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+    providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    modelId: z.ZodOptional<z.ZodString>;
 }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
     type: z.ZodLiteral<"context_usage">;
     usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
     limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
     percent: z.ZodEffects<z.ZodNumber, number, number>;
+    source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+    providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    modelId: z.ZodOptional<z.ZodString>;
 }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
     type: z.ZodLiteral<"context_usage">;
     usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
     limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
     percent: z.ZodEffects<z.ZodNumber, number, number>;
+    source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+    providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    modelId: z.ZodOptional<z.ZodString>;
 }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
     type: z.ZodLiteral<"error">;
     error: z.ZodString;
@@ -7533,12 +7593,15 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
 }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
     type: z.ZodLiteral<"done">;
     messageId: z.ZodString;
+    durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
 }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
     type: z.ZodLiteral<"done">;
     messageId: z.ZodString;
+    durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
 }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
     type: z.ZodLiteral<"done">;
     messageId: z.ZodString;
+    durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
 }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
     type: z.ZodLiteral<"todo_updated">;
     todo: z.ZodString;
@@ -7843,6 +7906,10 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
     usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
     limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
     percent: z.ZodEffects<z.ZodNumber, number, number>;
+    source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+    providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    modelId: z.ZodOptional<z.ZodString>;
 }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
     type: z.ZodLiteral<"error">;
     error: z.ZodString;
@@ -7850,6 +7917,7 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
 }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
     type: z.ZodLiteral<"done">;
     messageId: z.ZodString;
+    durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
 }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
     type: z.ZodLiteral<"todo_updated">;
     todo: z.ZodString;
@@ -8044,6 +8112,10 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
     usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
     limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
     percent: z.ZodEffects<z.ZodNumber, number, number>;
+    source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+    providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+    modelId: z.ZodOptional<z.ZodString>;
 }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
     type: z.ZodLiteral<"error">;
     error: z.ZodString;
@@ -8051,6 +8123,7 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
 }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
     type: z.ZodLiteral<"done">;
     messageId: z.ZodString;
+    durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
 }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
     type: z.ZodLiteral<"todo_updated">;
     todo: z.ZodString;
@@ -8699,16 +8772,28 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
         usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
         limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
         percent: z.ZodEffects<z.ZodNumber, number, number>;
+        source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+        providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        modelId: z.ZodOptional<z.ZodString>;
     }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
         type: z.ZodLiteral<"context_usage">;
         usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
         limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
         percent: z.ZodEffects<z.ZodNumber, number, number>;
+        source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+        providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        modelId: z.ZodOptional<z.ZodString>;
     }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
         type: z.ZodLiteral<"context_usage">;
         usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
         limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
         percent: z.ZodEffects<z.ZodNumber, number, number>;
+        source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+        providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        modelId: z.ZodOptional<z.ZodString>;
     }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
         type: z.ZodLiteral<"error">;
         error: z.ZodString;
@@ -8724,12 +8809,15 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
     }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
         type: z.ZodLiteral<"done">;
         messageId: z.ZodString;
+        durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
     }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
         type: z.ZodLiteral<"done">;
         messageId: z.ZodString;
+        durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
     }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
         type: z.ZodLiteral<"done">;
         messageId: z.ZodString;
+        durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
     }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
         type: z.ZodLiteral<"todo_updated">;
         todo: z.ZodString;
@@ -9034,6 +9122,10 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
         usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
         limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
         percent: z.ZodEffects<z.ZodNumber, number, number>;
+        source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+        providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        modelId: z.ZodOptional<z.ZodString>;
     }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
         type: z.ZodLiteral<"error">;
         error: z.ZodString;
@@ -9041,6 +9133,7 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
     }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
         type: z.ZodLiteral<"done">;
         messageId: z.ZodString;
+        durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
     }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
         type: z.ZodLiteral<"todo_updated">;
         todo: z.ZodString;
@@ -9235,6 +9328,10 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
         usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
         limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
         percent: z.ZodEffects<z.ZodNumber, number, number>;
+        source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+        providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        modelId: z.ZodOptional<z.ZodString>;
     }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
         type: z.ZodLiteral<"error">;
         error: z.ZodString;
@@ -9242,6 +9339,7 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
     }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
         type: z.ZodLiteral<"done">;
         messageId: z.ZodString;
+        durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
     }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
         type: z.ZodLiteral<"todo_updated">;
         todo: z.ZodString;
@@ -9439,6 +9537,10 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
         usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
         limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
         percent: z.ZodEffects<z.ZodNumber, number, number>;
+        source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+        providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        modelId: z.ZodOptional<z.ZodString>;
     }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
         type: z.ZodLiteral<"error">;
         error: z.ZodString;
@@ -9446,6 +9548,7 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
     }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
         type: z.ZodLiteral<"done">;
         messageId: z.ZodString;
+        durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
     }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
         type: z.ZodLiteral<"todo_updated">;
         todo: z.ZodString;
@@ -9643,6 +9746,10 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
         usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
         limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
         percent: z.ZodEffects<z.ZodNumber, number, number>;
+        source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+        providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+        modelId: z.ZodOptional<z.ZodString>;
     }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
         type: z.ZodLiteral<"error">;
         error: z.ZodString;
@@ -9650,6 +9757,7 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
     }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
         type: z.ZodLiteral<"done">;
         messageId: z.ZodString;
+        durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
     }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
         type: z.ZodLiteral<"todo_updated">;
         todo: z.ZodString;
@@ -10435,16 +10543,28 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
             type: z.ZodLiteral<"context_usage">;
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
             type: z.ZodLiteral<"context_usage">;
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
             type: z.ZodLiteral<"error">;
             error: z.ZodString;
@@ -10460,12 +10580,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
         }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough">>, z.ZodObject<{
             type: z.ZodLiteral<"todo_updated">;
             todo: z.ZodString;
@@ -10770,6 +10893,10 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"error">;
             error: z.ZodString;
@@ -10777,6 +10904,7 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"todo_updated">;
             todo: z.ZodString;
@@ -10971,6 +11099,10 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"error">;
             error: z.ZodString;
@@ -10978,6 +11110,7 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"todo_updated">;
             todo: z.ZodString;
@@ -11175,6 +11308,10 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"error">;
             error: z.ZodString;
@@ -11182,6 +11319,7 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"todo_updated">;
             todo: z.ZodString;
@@ -11379,6 +11517,10 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"error">;
             error: z.ZodString;
@@ -11386,6 +11528,7 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"todo_updated">;
             todo: z.ZodString;
@@ -11744,6 +11887,10 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"error">;
             error: z.ZodString;
@@ -11751,6 +11898,7 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"todo_updated">;
             todo: z.ZodString;
@@ -12040,6 +12188,10 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"error">;
             error: z.ZodString;
@@ -12047,6 +12199,7 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"todo_updated">;
             todo: z.ZodString;
@@ -12336,6 +12489,10 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"error">;
             error: z.ZodString;
@@ -12343,6 +12500,7 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough"> | z.objectOutputType<{
             type: z.ZodLiteral<"todo_updated">;
             todo: z.ZodString;
@@ -12632,6 +12790,10 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
             usedTokens: z.ZodEffects<z.ZodNumber, number, number>;
             limitTokens: z.ZodEffects<z.ZodNumber, number, number>;
             percent: z.ZodEffects<z.ZodNumber, number, number>;
+            source: z.ZodOptional<z.ZodEnum<["provider", "hybrid", "estimated"]>>;
+            providerTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            pendingTokens: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
+            modelId: z.ZodOptional<z.ZodString>;
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"error">;
             error: z.ZodString;
@@ -12639,6 +12801,7 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"done">;
             messageId: z.ZodString;
+            durationMs: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
         }, z.ZodTypeAny, "passthrough"> | z.objectInputType<{
             type: z.ZodLiteral<"todo_updated">;
             todo: z.ZodString;
@@ -14506,23 +14669,47 @@ declare function getContextWindowLimit(modelId: string, configuredLimit?: number
  */
 declare function estimateActiveContextSessionTokens(messages: SessionMessage[]): number;
 /**
- * Rough token overhead for tool definitions sent with each request (name + description + schema fudge).
+ * Conservative estimate of the exact tool definitions sent to the provider.
  */
 declare function estimateToolsDefinitionsTokens(tools: Array<{
     name: string;
     description: string;
+    parameters?: z.ZodType<unknown>;
 }>): number;
 type ContextUsageSnapshot = {
     usedTokens: number;
     limitTokens: number;
     percent: number;
+    source: "provider" | "hybrid" | "estimated";
+    providerTokens: number;
+    pendingTokens: number;
+    modelId: string;
 };
+type PersistedContextUsage = {
+    usedTokens: number;
+    limitTokens: number;
+    percent: number;
+    source?: "provider" | "hybrid" | "estimated";
+    providerTokens?: number;
+    pendingTokens?: number;
+    modelId?: string;
+};
+/**
+ * A persisted usage sample is only meaningful for the model that produced it.
+ * Legacy samples had no model identity and could keep an obsolete 128k limit
+ * on screen after a provider/catalog update. Reject those samples and let the
+ * caller rebuild usage from the active session. For a matching model, retain
+ * the provider-measured used tokens but refresh the limit from current model
+ * metadata.
+ */
+declare function reconcilePersistedContextUsage(snapshot: PersistedContextUsage | undefined, modelId: string, configuredContextWindow?: number): PersistedContextUsage | undefined;
 declare function computeContextUsageMetrics(opts: {
     sessionMessages: SessionMessage[];
     systemPromptText?: string;
     toolsDefinitionTokens?: number;
     modelId: string;
     configuredContextWindow?: number;
+    providerAnchor?: ProviderContextAnchor;
 }): ContextUsageSnapshot & {
     sessionTokens: number;
     systemTokens: number;
@@ -14701,6 +14888,8 @@ interface CatalogModel {
     free: boolean;
     /** Provider-advertised total context window in tokens. */
     contextWindow?: number;
+    /** Provider-advertised maximum completion size in tokens. */
+    maxOutputTokens?: number;
     /** Optional sort order for recommended (lower first) */
     recommendedIndex?: number;
 }
@@ -14720,6 +14909,7 @@ interface ModelsCatalog {
         name: string;
         free: boolean;
         contextWindow?: number;
+        maxOutputTokens?: number;
     }>;
 }
 declare function getModelsUrl(): string;
@@ -15396,4 +15586,4 @@ declare class GitStatusParseError extends Error {
 }
 declare function parseGitStatusV2(output: Uint8Array): ParsedGitStatus;
 
-export { type AdmitSessionInputCommand, type AdmittedSessionInput, type AgentDefinition, type AgentEvent, type AgentExecutionIdentity, type AppliedReplacementSnippet, type ApprovalAction, type AtomicWriteOptions, type AttachSessionTurnOptions, type AuthorizedNetworkRequest, BROWSER_TOOLS, type BackgroundProcessRecord, BackgroundProcessSupervisor, type BackgroundTaskRecord, type CapturedFileState, type CatalogModel, type CatalogProvider, type ChangeFileRecord, type ChangeHunk, type ChangeIdentity, type ChangeOmission, type ChangeProposalAfterState, type ChangeProposalFile, ChangeSetApprovalError, type ChangeSetBatchConflict, type ChangeSetBatchRevertResult, type ChangeSetBlobPruneResult, ChangeSetConflictError, type ChangeSetFailure, type ChangeSetFilePort, type ChangeSetListQuery, type ChangeSetRecord, ChangeSetService, type ChangeSetServiceOptions, type ChangeSetState, ChangeSetStorageCorruptionError, type ChangeSetStore, ChangeSetStoreConflictError, type ChangedFile, type CheckpointEntry, type CheckpointStorageOptions, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type CompactionProjectionResult, ConfigFileError, ConfigSubstitutionError, ConfigValidationError, type ContextUsageSnapshot, type CoordinatorEvent, type CreateChangeProposal, type CredentialIdentity, type CredentialPurpose, type CustomToolTrustEvaluation, type CustomToolTrustGrant, type CustomToolTrustReason, CustomToolTrustStore, CustomToolTrustStoreError, type CustomToolTrustStoreOptions, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_EXECUTABLE_TREE_LIMITS, DEFAULT_GIT_DIFF_LIMITS, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, DEFAULT_PLUGIN_FINGERPRINT_LIMITS, type DeferredToolDef, type DeleteSessionOptions, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, DurableRunEventSink, type DurableRunEventSinkOptions, type DurableRunRecord, type DurableSessionTurn, type EmbeddingClient, type EmbeddingConfig, type ExecutableTreeLimits, type ExecutableTreeSnapshot, FileChangeSetStore, type FileChangeSetStoreOptions, type FileLockOptions, FileLockTimeoutError, FileMutationConflictError, FileRemoteTurnRecoveryStore, type FileRemoteTurnRecoveryStoreOptions, type FileStateRef, type FinalizeConfigCredentialsOptions, type FinishTurnCommit, GitCommandExecutionError, type GitCommandFailureKind, type GitCommandLimits, type GitCommandResult, GitCommandRunner, type GitCommandRunnerOptions, type GitCommandRunnerPort, type GitDiffLimits, type GitDiffRequest, type GitDiffResult, type GitDiffScope, type GitFileDiff, type GitIgnoredStatusEntry, type GitIndexStatus, type GitOmission, type GitOperation, type GitOrdinaryStatusEntry, type GitRenameStatusEntry, GitService, type GitServiceOptions, type GitStatusEntry, GitStatusParseError, type GitStatusSnapshot, type GitSubmoduleStatus, type GitUnmergedStatusEntry, type GitUntrackedStatusEntry, type HostFileMutation, type HostFileMutationNext, type HostNetworkRequest, type HostPathAccess, type HostReadFileOptions, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type IndexerFactoryOptions, type InterruptTurnCommand, InterruptTurnCommandSchema, type JsonRecoveryResult, type LLMClient, LegacyAgentEventSchema, type LegacyMemoryImportResult, type LegacyMemoryRecord, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MAX_AGENT_EVENT_JSON_CHARS, MAX_IMAGES_PER_INPUT, MAX_IMAGE_BASE64_CHARS, MAX_INPUT_PARTS, MAX_MEMORY_CONTENT_CHARS, MAX_MEMORY_IDENTIFIER_CHARS, MAX_MEMORY_RELATION_IDS, MAX_MEMORY_SOURCE_URI_CHARS, MAX_MEMORY_TITLE_CHARS, MAX_MODEL_TOOL_NAME_CHARS, MAX_REMOTE_MCP_PROMPT_ARGUMENTS, MAX_REMOTE_MCP_PROMPT_ARGUMENT_VALUE_CHARS, MAX_REMOTE_MCP_PROMPT_CATALOG_CHARS, MAX_REMOTE_MCP_PROMPT_COMMANDS, MAX_USER_INPUT_TEXT_CHARS, MEMORY_SCHEMA_VERSION, MODES, MODE_TOOL_GROUPS, ManagedWorkspaceRuntime, type McpAuthRequest, type McpAuthResult, type McpAuthorizedFetchOptions, McpClient, type McpClientOptions, type McpConnectionState, type McpNodeRequestFactory, type McpPinnedNodeHopOptions, type McpPromptArgument, type McpPromptContent, type McpPromptMessage, type McpPromptRef, type McpPromptResult, type McpRemoteAuthorizationRequest, type McpRemoteFetchHop, type McpRemoteFetchHopRequest, type McpRemoteRequestAuthorizer, type McpResourceClient, type McpResourceContent, type McpResourceRef, type McpResourceTemplateRef, type McpServerConfig, McpServerConfigSchema, type McpServerStatus, type McpTool, type McpTransportFactoryOptions, type MemoryRecord, type MemoryRetrievalOptions, type MemoryRetrievalResult, MemoryValueLimitError, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, ModeSchema, ModelSelectionSchema, type ModelSelectionSnapshot, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, NEXUS_SERVER_TOKEN_SECRET_KEY, NetworkPolicyError, type NetworkPolicyErrorCode, type NetworkPolicyOptions, NetworkRequestError, type NetworkRequestErrorCode, type NetworkRequestOptions, type NetworkRequestPurpose, type NetworkResolver, type NetworkResourceResponse, type NetworkTransport, type NetworkTransportRequest, type NetworkTransportResponse, type NexusConfig, NexusConfigSchema, type NexusRunServices, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationCorruptionError, type OrchestrationDiagnostic, type OrchestrationDiagnosticCode, OrchestrationInvariantError, OrchestrationRuntime, type OrchestrationRuntimeOptions, PROJECT_AUTHORITY_REQUEST_KINDS, PROTOCOL_VERSION, ParallelAgentManager, type ParseSessionCommandResult, type ParsedGitStatus, type PendingProjectAuthorityRequest, type PendingProjectMcpServer, type PendingRunApproval, type PendingSessionApproval, PendingSessionApprovalSchema, type PendingSessionApprovalSnapshot, type PermissionResult, type PersistSecretsOptions, type PersistedToolOutputProtection, type PersistedTurnCursor, type PluginCapabilityDiagnostic, type PluginDiagnostic, type PluginDiscoveryResult, type PluginFingerprintLimits, type PluginManifestRecord, type PluginMcpCapabilityResult, type PluginTrustEvaluation, type PluginTrustGrant, type PluginTrustReason, PluginTrustStoreCorruptionError, type PluginTrustStoreOptions, type PreparedSessionTurnIdentity, PreparedSessionTurnIdentitySchema, ProfileCredentialCollisionError, type ProfileCredentialRemoval, type ProjectAuthorityPayloadByKind, type ProjectAuthorityRequestKind, ProjectRegistry, type ProjectSettings, type ProtocolEnvelope, ProtocolEnvelopeSchema, type ProtocolError, ProtocolErrorCodeSchema, ProtocolErrorSchema, ProtocolPayloadSchema, ProtocolPersistenceSchema, type ProviderConfig, type ProviderName, type QuestionOptionRow, type QueueTurnCommand, QueueTurnCommandSchema, READ_ONLY_TOOLS, type RegistrationResult, type RemoteChangeReviewEntry, type RemoteChangeReviewSnapshot, type RemoteMcpPromptArgument, RemoteMcpPromptArgumentSchema, type RemoteMcpPromptCatalog, RemoteMcpPromptCatalogSchema, type RemoteMcpPromptCommand, RemoteMcpPromptCommandSchema, type RemoteMcpPromptResolveRequest, RemoteMcpPromptResolveRequestSchema, type RemoteMcpPromptResolveResponse, RemoteMcpPromptResolveResponseSchema, type RemotePreparedTurnRecord, RemotePreparedTurnRecordSchema, type RemoteSessionRecord, type RemoteTurnCursorRecord, type RemoteTurnRecoveryStore, type ResolveApprovalCommand, ResolveApprovalCommandSchema, type ResolveBundledOptions, type ResolvedCredential, type ResolvedNetworkAddress, type ResolvedSkillBody, type RetrievedMemory, type RunEventDiagnostic, type RunEventEnvelope, RunEventStore, type RunEventStoreOptions, type RunSessionTurnOptions, type RunStatus, type RunToolArtifact, SESSION_COORDINATOR_STORAGE_PORT_VERSION, SESSION_PROTOCOL_SERVICE_PORT_VERSION, type SanitizedMemoryValue, type SaveSessionOptions, SecretsCorruptionError, type SecretsCorruptionReason, type SecretsRemoval, Session, type SessionApprovalIdentity, type SessionCommandReceipt, SessionCommandReceiptSchema, SessionCommandSchema, type SessionCommandV2, SessionConflictError, SessionCoordinator, SessionCoordinatorError, type SessionCoordinatorOptions, type SessionCoordinatorStorage, SessionCorruptionError, type SessionInputPart, type SessionMessage, type SessionMode, type SessionOwnershipFence, type SessionPhase, SessionProtocolError, type SessionProtocolService, type SessionProtocolSnapshot, SessionProtocolSnapshotSchema, type SessionRecoverySnapshot, type SessionRuntimeSnapshot, type SessionStorageDiagnostic, type SessionStorageDiagnosticCode, SessionStore, type SessionStoreOptions, type SessionTurnIdentity, SessionTurnTerminalError, type SkillAuthority, type SkillDef, type SkillLoadDiagnostic, type SkillLoadDiagnosticCode, type SkillLoadOptions, SkillNameAmbiguityError, type SkillToolDescriptionRow, type SlashCommandResolution, type StartTurnCommand, StartTurnCommandSchema, type SteerTurnCommand, SteerTurnCommandSchema, StorageCorruptionError, type StorageDiagnostic, type StorageDiagnosticCode, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SubAgentRuntimeContext, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskKind, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolContributionDiagnostic, type ToolContributionDiagnosticCode, type ToolContributionSnapshot, type ToolDef, type ToolExecutionEnvironment, type ToolExecutionIdentity, type ToolExecutionOrigin, type ToolExecutionOutcome, type ToolExecutionRequest, type ToolIntegrationProvenance, type ToolOutputMaintenanceOptions, type ToolOutputMaintenanceResult, type ToolPart, ToolRegistry, type ToolResult, type ToolSpillRegistryEntry, type TurnEpochSnapshot, type TurnExecutionSnapshot, TurnExecutionSnapshotSchema, type TurnHandle, type TurnRunner, type TurnRunnerContext, type TurnRunnerResult, UnsafeConfigWriteError, UnsafeCustomToolSourceError, UnsafePluginContentError, UnsafeSessionIdError, UnsupportedSecretsVersionError, UserInputPartSchema, type UserInputPartV2, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, WORKSPACE_AUTHORITY_STORE_VERSION, type WorkingDirectoryChangeResult, type WorkspaceAuthorityGrant, type WorkspaceAuthorityGrants, type WorkspaceAuthorityIdentity, type WorkspaceAuthorityRecord, WorkspaceAuthorityStoreError, type WorkspaceAuthorityStoreErrorCode, type WorkspaceAuthorityStoreOptions, type WorkspaceOwnedService, WorkspacePathAuthorizationError, type WorkspacePathAuthorizationErrorCode, type WorkspaceProjectAuthorityApproval, type WorkspaceRuntime, type WorkspaceRuntimeFactory, type WorkspaceRuntimeHandle, WorkspaceRuntimeRegistry, type WorkspaceRuntimeServices, type WorkspaceTaskHandle, WorkspaceTaskSupervisor, WorkspaceToolContributionManager, WorkspaceToolContributionManagerClosedError, type WorkspaceToolContributionManagerOptions, type WorktreeSession, appendCompactionSnippetToSessionMemory, applyPluginRuntimeSettings, applySecretsToConfig, applyWorkspaceAuthorityGrants, approvalGrantKey, approveWorkspaceProjectAuthority, assertAgentExecutionIdentity, assertChangeSetTransition, assertMemoryWriteInput, atomicWriteFile, atomicWriteJson, authorizeNetworkRequest, buildDurableChangeHunks, buildIndexWatcherGlobPattern, buildMcpToolSchema, buildRemoteMcpPromptCatalog, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, callableMcpToolName, canonParallelInnerRecipient, canonicalProjectRoot, canonicalizeCredentialDestination, canonicalizeNexusServerBaseUrl, catalogSelectionToModel, clearToolSpillsForSession, closeNexusRunServices, collectGitDiff, compactSessionAndPersist, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpAuthorizedFetch, createMcpPinnedLookup, createMcpResourceTools, createMcpTransport, createNexusRunServices, createNodePinnedMcpFetchHop, createPendingProjectAuthorityRequest, createResumeAgentTool, createSanitizedGitEnvironment, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, createTaskCreateBatchTool, createTaskResumeTool, createTaskSnapshotTool, credentialIdentityKey, delegatedAgentDescriptionFromParallelInnerParams, delegatedAgentExecutionIdentity, deleteSession, deriveSessionTitle, discoverPluginManifests, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, ensureTeamMemberForTask, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, evaluatePluginTrust, exactChangeHunkDiffStats, exactLineDiffStats, executeToolPipeline, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, finalizeConfigCredentials, fingerprintExecutableTree, fingerprintProjectAuthorityPayload, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getConfigEnvironment, getContextWindowLimit, getDefaultAutoMemoryDir, getEmbeddingCredentialIdentity, getFileLockPath, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getNexusServerTokenSecretKey, getOrchestrationRuntime, getParallelDelegatedAgentTaskDescriptions, getPendingProjectAuthorityRequests, getPendingProjectMcpServers, getPlanContentForFollowup, getPluginTrustStorePath, getProjectHash, getProviderCredentialIdentity, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMemoryFilePath, getSessionMeta, getSessionStorageDiagnostics, getToolOutputDir, getToolOutputSpill, getTreeSitterLanguageWasmsDir, getWebTreeSitterWasmPath, getWorkspaceAuthorityIdentity, getWorkspaceAuthorityStorePath, grantPluginTrust, grantWorkspaceAuthority, hadPlanExit, handleCompletedTaskSideEffects, hashChangeProposal, hashFileContent, hashWorkspaceIdentity, hydrateWorkspaceAuthority, importLegacyMemoryFiles, inheritSpillRegistryForMergedToolPart, interpretShellCommandResult, isDelegatedAgentParentTool, isDelegatedAgentParentToolEndClear, isLoopbackNexusServerDestination, isPublicNetworkAddress, isPureSubagentParallelInput, isValidPendingProjectAuthorityRequest, listPluginTrustGrants, listSessions, listToolSpillsForSession, listWorkspaceAuthorities, loadAgentDefinitions, loadAgentInstructionBundle, loadAutoMemoryMarkdown, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginMcpServers, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, loadTeamMemoryMarkdown, loadTrustedPluginRuntimeRecords, loadWorkspaceAuthority, mcpPromptCommandName, mcpPromptOpaqueId, mergeEmbeddingConfigSafely, mergeModelPresetSelection, mergeNexusConfigLayers, mergeProviderConfigPartialSafely, mergeProviderConfigSafely, mutateSession, nodePinnedTransport, normalizeAwsRegion, normalizeAzureResourceName, normalizeChangePath, normalizeMemoryRecord, normalizedAppliedReplacementsFromMetadata, parallelInnerUseIsDelegatedAgent, parseGitStatusV2, parseMentions, parseSessionCommand, patchGlobalConfig, patchProjectConfig, persistSecretsFromConfig, projectPersistedCompactionSummary, readCheckpointEntries, readJsonWithRecovery, readSessionMemoryFile, reapplyRevertedChangeSets, redactMemorySecrets, refreshSessionMemoryFile, registerInheritedRunTools, registerToolContributionSnapshot, registerToolOutputSpill, renderMcpPromptResult, renderSlashCommandPrompt, requestNetworkResource, resolveAuthorizedWorkspacePath, resolveAutoMemoryDirectory, resolveBundledMcpServers, resolveConfiguredAndPluginMcpServers, resolveEmbeddingCredential, resolvePluginDeclaredPath, resolveProviderCredential, resolveSkillBody, resolveSlashCommand, restrictDelegatedMode, retrieveMemories, revertEffectiveChangeSetsAfter, revokePluginTrust, revokeWorkspaceAuthority, revokeWorkspaceProjectAuthority, runAgentLoop, runAutoMemoryDreamIfDue, runPluginHooks, runScopedHooks, sameChangeIdentity, sampleSkillSiblingFiles, sanitizeMemoryValue, saveSession, scheduleSessionMemoryRefresh, scheduleToolOutputMaintenance, selectActiveTurnResumeCursor, selectProviderProfile, setIndexTelemetrySink, settleRuntimeDependency, shouldUseDeferredToolLoading, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, tokenizeMemoryText, toolExecutionIdentity, validatePluginManifestFile, withFileLock, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AdmitSessionInputCommand, type AdmittedSessionInput, type AgentDefinition, type AgentEvent, type AgentExecutionIdentity, type AppliedReplacementSnippet, type ApprovalAction, type AtomicWriteOptions, type AttachSessionTurnOptions, type AuthorizedNetworkRequest, BROWSER_TOOLS, type BackgroundProcessRecord, BackgroundProcessSupervisor, type BackgroundTaskRecord, type CapturedFileState, type CatalogModel, type CatalogProvider, type ChangeFileRecord, type ChangeHunk, type ChangeIdentity, type ChangeOmission, type ChangeProposalAfterState, type ChangeProposalFile, ChangeSetApprovalError, type ChangeSetBatchConflict, type ChangeSetBatchRevertResult, type ChangeSetBlobPruneResult, ChangeSetConflictError, type ChangeSetFailure, type ChangeSetFilePort, type ChangeSetListQuery, type ChangeSetRecord, ChangeSetService, type ChangeSetServiceOptions, type ChangeSetState, ChangeSetStorageCorruptionError, type ChangeSetStore, ChangeSetStoreConflictError, type ChangedFile, type CheckpointEntry, type CheckpointStorageOptions, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type CompactionProjectionResult, ConfigFileError, ConfigSubstitutionError, ConfigValidationError, type ContextUsageSnapshot, type CoordinatorEvent, type CreateChangeProposal, type CredentialIdentity, type CredentialPurpose, type CustomToolTrustEvaluation, type CustomToolTrustGrant, type CustomToolTrustReason, CustomToolTrustStore, CustomToolTrustStoreError, type CustomToolTrustStoreOptions, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_EXECUTABLE_TREE_LIMITS, DEFAULT_GIT_DIFF_LIMITS, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, DEFAULT_PLUGIN_FINGERPRINT_LIMITS, type DeferredToolDef, type DeleteSessionOptions, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, DurableRunEventSink, type DurableRunEventSinkOptions, type DurableRunRecord, type DurableSessionTurn, type EmbeddingClient, type EmbeddingConfig, type ExecutableTreeLimits, type ExecutableTreeSnapshot, FileChangeSetStore, type FileChangeSetStoreOptions, type FileLockOptions, FileLockTimeoutError, FileMutationConflictError, FileRemoteTurnRecoveryStore, type FileRemoteTurnRecoveryStoreOptions, type FileStateRef, type FinalizeConfigCredentialsOptions, type FinishTurnCommit, GitCommandExecutionError, type GitCommandFailureKind, type GitCommandLimits, type GitCommandResult, GitCommandRunner, type GitCommandRunnerOptions, type GitCommandRunnerPort, type GitDiffLimits, type GitDiffRequest, type GitDiffResult, type GitDiffScope, type GitFileDiff, type GitIgnoredStatusEntry, type GitIndexStatus, type GitOmission, type GitOperation, type GitOrdinaryStatusEntry, type GitRenameStatusEntry, GitService, type GitServiceOptions, type GitStatusEntry, GitStatusParseError, type GitStatusSnapshot, type GitSubmoduleStatus, type GitUnmergedStatusEntry, type GitUntrackedStatusEntry, type HostFileMutation, type HostFileMutationNext, type HostNetworkRequest, type HostPathAccess, type HostReadFileOptions, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type IndexerFactoryOptions, type InterruptTurnCommand, InterruptTurnCommandSchema, type JsonRecoveryResult, type LLMClient, LegacyAgentEventSchema, type LegacyMemoryImportResult, type LegacyMemoryRecord, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MAX_AGENT_EVENT_JSON_CHARS, MAX_IMAGES_PER_INPUT, MAX_IMAGE_BASE64_CHARS, MAX_INPUT_PARTS, MAX_MEMORY_CONTENT_CHARS, MAX_MEMORY_IDENTIFIER_CHARS, MAX_MEMORY_RELATION_IDS, MAX_MEMORY_SOURCE_URI_CHARS, MAX_MEMORY_TITLE_CHARS, MAX_MODEL_TOOL_NAME_CHARS, MAX_REMOTE_MCP_PROMPT_ARGUMENTS, MAX_REMOTE_MCP_PROMPT_ARGUMENT_VALUE_CHARS, MAX_REMOTE_MCP_PROMPT_CATALOG_CHARS, MAX_REMOTE_MCP_PROMPT_COMMANDS, MAX_USER_INPUT_TEXT_CHARS, MEMORY_SCHEMA_VERSION, MODES, MODE_TOOL_GROUPS, ManagedWorkspaceRuntime, type McpAuthRequest, type McpAuthResult, type McpAuthorizedFetchOptions, McpClient, type McpClientOptions, type McpConnectionState, type McpNodeRequestFactory, type McpPinnedNodeHopOptions, type McpPromptArgument, type McpPromptContent, type McpPromptMessage, type McpPromptRef, type McpPromptResult, type McpRemoteAuthorizationRequest, type McpRemoteFetchHop, type McpRemoteFetchHopRequest, type McpRemoteRequestAuthorizer, type McpResourceClient, type McpResourceContent, type McpResourceRef, type McpResourceTemplateRef, type McpServerConfig, McpServerConfigSchema, type McpServerStatus, type McpTool, type McpTransportFactoryOptions, type MemoryRecord, type MemoryRetrievalOptions, type MemoryRetrievalResult, MemoryValueLimitError, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, ModeSchema, ModelSelectionSchema, type ModelSelectionSnapshot, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, NEXUS_SERVER_TOKEN_SECRET_KEY, NetworkPolicyError, type NetworkPolicyErrorCode, type NetworkPolicyOptions, NetworkRequestError, type NetworkRequestErrorCode, type NetworkRequestOptions, type NetworkRequestPurpose, type NetworkResolver, type NetworkResourceResponse, type NetworkTransport, type NetworkTransportRequest, type NetworkTransportResponse, type NexusConfig, NexusConfigSchema, type NexusRunServices, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationCorruptionError, type OrchestrationDiagnostic, type OrchestrationDiagnosticCode, OrchestrationInvariantError, OrchestrationRuntime, type OrchestrationRuntimeOptions, PROJECT_AUTHORITY_REQUEST_KINDS, PROTOCOL_VERSION, ParallelAgentManager, type ParseSessionCommandResult, type ParsedGitStatus, type PendingProjectAuthorityRequest, type PendingProjectMcpServer, type PendingRunApproval, type PendingSessionApproval, PendingSessionApprovalSchema, type PendingSessionApprovalSnapshot, type PermissionResult, type PersistSecretsOptions, type PersistedContextUsage, type PersistedToolOutputProtection, type PersistedTurnCursor, type PluginCapabilityDiagnostic, type PluginDiagnostic, type PluginDiscoveryResult, type PluginFingerprintLimits, type PluginManifestRecord, type PluginMcpCapabilityResult, type PluginTrustEvaluation, type PluginTrustGrant, type PluginTrustReason, PluginTrustStoreCorruptionError, type PluginTrustStoreOptions, type PreparedSessionTurnIdentity, PreparedSessionTurnIdentitySchema, ProfileCredentialCollisionError, type ProfileCredentialRemoval, type ProjectAuthorityPayloadByKind, type ProjectAuthorityRequestKind, ProjectRegistry, type ProjectSettings, type ProtocolEnvelope, ProtocolEnvelopeSchema, type ProtocolError, ProtocolErrorCodeSchema, ProtocolErrorSchema, ProtocolPayloadSchema, ProtocolPersistenceSchema, type ProviderConfig, type ProviderContextAnchor, type ProviderName, type QuestionOptionRow, type QueueTurnCommand, QueueTurnCommandSchema, READ_ONLY_TOOLS, type RegistrationResult, type RemoteChangeReviewEntry, type RemoteChangeReviewSnapshot, type RemoteMcpPromptArgument, RemoteMcpPromptArgumentSchema, type RemoteMcpPromptCatalog, RemoteMcpPromptCatalogSchema, type RemoteMcpPromptCommand, RemoteMcpPromptCommandSchema, type RemoteMcpPromptResolveRequest, RemoteMcpPromptResolveRequestSchema, type RemoteMcpPromptResolveResponse, RemoteMcpPromptResolveResponseSchema, type RemotePreparedTurnRecord, RemotePreparedTurnRecordSchema, type RemoteSessionRecord, type RemoteTurnCursorRecord, type RemoteTurnRecoveryStore, type ResolveApprovalCommand, ResolveApprovalCommandSchema, type ResolveBundledOptions, type ResolvedCredential, type ResolvedNetworkAddress, type ResolvedSkillBody, type RetrievedMemory, type RunEventDiagnostic, type RunEventEnvelope, RunEventStore, type RunEventStoreOptions, type RunSessionTurnOptions, type RunStatus, type RunToolArtifact, SESSION_COORDINATOR_STORAGE_PORT_VERSION, SESSION_PROTOCOL_SERVICE_PORT_VERSION, type SanitizedMemoryValue, type SaveSessionOptions, SecretsCorruptionError, type SecretsCorruptionReason, type SecretsRemoval, Session, type SessionApprovalIdentity, type SessionCommandReceipt, SessionCommandReceiptSchema, SessionCommandSchema, type SessionCommandV2, SessionConflictError, SessionCoordinator, SessionCoordinatorError, type SessionCoordinatorOptions, type SessionCoordinatorStorage, SessionCorruptionError, type SessionInputPart, type SessionMessage, type SessionMode, type SessionOwnershipFence, type SessionPhase, SessionProtocolError, type SessionProtocolService, type SessionProtocolSnapshot, SessionProtocolSnapshotSchema, type SessionRecoverySnapshot, type SessionRuntimeSnapshot, type SessionStorageDiagnostic, type SessionStorageDiagnosticCode, SessionStore, type SessionStoreOptions, type SessionTurnIdentity, SessionTurnTerminalError, type SkillAuthority, type SkillDef, type SkillLoadDiagnostic, type SkillLoadDiagnosticCode, type SkillLoadOptions, SkillNameAmbiguityError, type SkillToolDescriptionRow, type SlashCommandResolution, type StartTurnCommand, StartTurnCommandSchema, type SteerTurnCommand, SteerTurnCommandSchema, StorageCorruptionError, type StorageDiagnostic, type StorageDiagnosticCode, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SubAgentRuntimeContext, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskKind, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolContributionDiagnostic, type ToolContributionDiagnosticCode, type ToolContributionSnapshot, type ToolDef, type ToolExecutionEnvironment, type ToolExecutionIdentity, type ToolExecutionOrigin, type ToolExecutionOutcome, type ToolExecutionRequest, type ToolIntegrationProvenance, type ToolOutputMaintenanceOptions, type ToolOutputMaintenanceResult, type ToolPart, ToolRegistry, type ToolResult, type ToolSpillRegistryEntry, type TurnEpochSnapshot, type TurnExecutionSnapshot, TurnExecutionSnapshotSchema, type TurnHandle, type TurnRunner, type TurnRunnerContext, type TurnRunnerResult, UnsafeConfigWriteError, UnsafeCustomToolSourceError, UnsafePluginContentError, UnsafeSessionIdError, UnsupportedSecretsVersionError, UserInputPartSchema, type UserInputPartV2, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, WORKSPACE_AUTHORITY_STORE_VERSION, type WorkingDirectoryChangeResult, type WorkspaceAuthorityGrant, type WorkspaceAuthorityGrants, type WorkspaceAuthorityIdentity, type WorkspaceAuthorityRecord, WorkspaceAuthorityStoreError, type WorkspaceAuthorityStoreErrorCode, type WorkspaceAuthorityStoreOptions, type WorkspaceOwnedService, WorkspacePathAuthorizationError, type WorkspacePathAuthorizationErrorCode, type WorkspaceProjectAuthorityApproval, type WorkspaceRuntime, type WorkspaceRuntimeFactory, type WorkspaceRuntimeHandle, WorkspaceRuntimeRegistry, type WorkspaceRuntimeServices, type WorkspaceTaskHandle, WorkspaceTaskSupervisor, WorkspaceToolContributionManager, WorkspaceToolContributionManagerClosedError, type WorkspaceToolContributionManagerOptions, type WorktreeSession, appendCompactionSnippetToSessionMemory, applyPluginRuntimeSettings, applySecretsToConfig, applyWorkspaceAuthorityGrants, approvalGrantKey, approveWorkspaceProjectAuthority, assertAgentExecutionIdentity, assertChangeSetTransition, assertMemoryWriteInput, atomicWriteFile, atomicWriteJson, authorizeNetworkRequest, buildDurableChangeHunks, buildIndexWatcherGlobPattern, buildMcpToolSchema, buildRemoteMcpPromptCatalog, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, callableMcpToolName, canonParallelInnerRecipient, canonicalProjectRoot, canonicalizeCredentialDestination, canonicalizeNexusServerBaseUrl, catalogSelectionToModel, clearToolSpillsForSession, closeNexusRunServices, collectGitDiff, compactSessionAndPersist, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpAuthorizedFetch, createMcpPinnedLookup, createMcpResourceTools, createMcpTransport, createNexusRunServices, createNodePinnedMcpFetchHop, createPendingProjectAuthorityRequest, createResumeAgentTool, createSanitizedGitEnvironment, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, createTaskCreateBatchTool, createTaskResumeTool, createTaskSnapshotTool, credentialIdentityKey, delegatedAgentDescriptionFromParallelInnerParams, delegatedAgentExecutionIdentity, deleteSession, deriveSessionTitle, discoverPluginManifests, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, ensureTeamMemberForTask, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, evaluatePluginTrust, exactChangeHunkDiffStats, exactLineDiffStats, executeToolPipeline, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, finalizeConfigCredentials, fingerprintExecutableTree, fingerprintProjectAuthorityPayload, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getConfigEnvironment, getContextWindowLimit, getDefaultAutoMemoryDir, getEmbeddingCredentialIdentity, getFileLockPath, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getNexusServerTokenSecretKey, getOrchestrationRuntime, getParallelDelegatedAgentTaskDescriptions, getPendingProjectAuthorityRequests, getPendingProjectMcpServers, getPlanContentForFollowup, getPluginTrustStorePath, getProjectHash, getProviderCredentialIdentity, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMemoryFilePath, getSessionMeta, getSessionStorageDiagnostics, getToolOutputDir, getToolOutputSpill, getTreeSitterLanguageWasmsDir, getWebTreeSitterWasmPath, getWorkspaceAuthorityIdentity, getWorkspaceAuthorityStorePath, grantPluginTrust, grantWorkspaceAuthority, hadPlanExit, handleCompletedTaskSideEffects, hashChangeProposal, hashFileContent, hashWorkspaceIdentity, hydrateWorkspaceAuthority, importLegacyMemoryFiles, inheritSpillRegistryForMergedToolPart, interpretShellCommandResult, isDelegatedAgentParentTool, isDelegatedAgentParentToolEndClear, isLoopbackNexusServerDestination, isPublicNetworkAddress, isPureSubagentParallelInput, isValidPendingProjectAuthorityRequest, listPluginTrustGrants, listSessions, listToolSpillsForSession, listWorkspaceAuthorities, loadAgentDefinitions, loadAgentInstructionBundle, loadAutoMemoryMarkdown, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginMcpServers, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, loadTeamMemoryMarkdown, loadTrustedPluginRuntimeRecords, loadWorkspaceAuthority, mcpPromptCommandName, mcpPromptOpaqueId, mergeEmbeddingConfigSafely, mergeModelPresetSelection, mergeNexusConfigLayers, mergeProviderConfigPartialSafely, mergeProviderConfigSafely, mutateSession, nodePinnedTransport, normalizeAwsRegion, normalizeAzureResourceName, normalizeChangePath, normalizeMemoryRecord, normalizedAppliedReplacementsFromMetadata, parallelInnerUseIsDelegatedAgent, parseGitStatusV2, parseMentions, parseSessionCommand, patchGlobalConfig, patchProjectConfig, persistSecretsFromConfig, projectPersistedCompactionSummary, readCheckpointEntries, readJsonWithRecovery, readSessionMemoryFile, reapplyRevertedChangeSets, reconcilePersistedContextUsage, redactMemorySecrets, refreshSessionMemoryFile, registerInheritedRunTools, registerToolContributionSnapshot, registerToolOutputSpill, renderMcpPromptResult, renderSlashCommandPrompt, requestNetworkResource, resolveAuthorizedWorkspacePath, resolveAutoMemoryDirectory, resolveBundledMcpServers, resolveConfiguredAndPluginMcpServers, resolveEmbeddingCredential, resolvePluginDeclaredPath, resolveProviderCredential, resolveSkillBody, resolveSlashCommand, restrictDelegatedMode, retrieveMemories, revertEffectiveChangeSetsAfter, revokePluginTrust, revokeWorkspaceAuthority, revokeWorkspaceProjectAuthority, runAgentLoop, runAutoMemoryDreamIfDue, runPluginHooks, runScopedHooks, sameChangeIdentity, sampleSkillSiblingFiles, sanitizeMemoryValue, saveSession, scheduleSessionMemoryRefresh, scheduleToolOutputMaintenance, selectActiveTurnResumeCursor, selectProviderProfile, setIndexTelemetrySink, settleRuntimeDependency, shouldUseDeferredToolLoading, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, tokenizeMemoryText, toolExecutionIdentity, validatePluginManifestFile, withFileLock, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

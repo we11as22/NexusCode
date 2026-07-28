@@ -83,6 +83,9 @@ export interface WebviewState {
   contextUsedTokens: number
   contextLimitTokens: number
   contextPercent: number
+  contextSource?: "provider" | "hybrid" | "estimated"
+  contextProviderTokens?: number
+  contextPendingTokens?: number
   /** NexusCode server URL (from nexuscode.serverUrl). When set, extension uses server for sessions and runs. */
   serverUrl?: string
   /** When using server: connection state for UI (connecting/streaming/error). */

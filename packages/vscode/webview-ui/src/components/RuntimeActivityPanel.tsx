@@ -10,6 +10,12 @@ const TERMINAL_STATUSES = new Set([
   "deleted",
 ])
 
+export function selectVisibleRuntimeTasks(
+  tasks: RuntimeTaskActivity[],
+): RuntimeTaskActivity[] {
+  return tasks.filter((task) => !TERMINAL_STATUSES.has(task.status))
+}
+
 function statusLabel(task: RuntimeTaskActivity): string {
   if (task.currentTool) return task.currentTool
   if (task.exitCode != null) return `exit ${task.exitCode}`
@@ -22,14 +28,7 @@ export function RuntimeActivityPanel({
   tasks: RuntimeTaskActivity[]
 }) {
   const [expanded, setExpanded] = useState(false)
-  const visible = useMemo(() => {
-    const active = tasks.filter((task) => !TERMINAL_STATUSES.has(task.status))
-    const terminal = tasks
-      .filter((task) => TERMINAL_STATUSES.has(task.status))
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, active.length > 0 ? 2 : 3)
-    return [...active, ...terminal]
-  }, [tasks])
+  const visible = useMemo(() => selectVisibleRuntimeTasks(tasks), [tasks])
 
   if (visible.length === 0) return null
   const shown = expanded ? visible : visible.slice(0, 3)
@@ -59,11 +58,6 @@ export function RuntimeActivityPanel({
       </button>
       <div className="mt-1.5 flex flex-col gap-1">
         {shown.map((task) => {
-          const running = !TERMINAL_STATUSES.has(task.status)
-          const failed =
-            task.status === "failed" ||
-            task.status === "killed" ||
-            task.status === "cancelled"
           return (
             <div
               key={task.id}
@@ -71,13 +65,7 @@ export function RuntimeActivityPanel({
               title={task.description || task.subject}
             >
               <span
-                className={
-                  running
-                    ? "codicon codicon-loading codicon-modifier-spin text-[var(--vscode-progressBar-background)]"
-                    : failed
-                      ? "codicon codicon-error text-[var(--vscode-errorForeground)]"
-                      : "codicon codicon-pass text-[var(--vscode-testing-iconPassed)]"
-                }
+                className="codicon codicon-loading codicon-modifier-spin text-[var(--vscode-progressBar-background)]"
                 aria-hidden="true"
               />
               <span className="min-w-0 flex-1 truncate text-[var(--vscode-foreground)]">

@@ -79,6 +79,34 @@ describe("SessionStore journal v2", () => {
     })
   })
 
+  it("round-trips a provider context anchor and ignores malformed legacy data", async () => {
+    const { root, cwd } = await fixture()
+    const store = new SessionStore({ homeDir: root })
+    const anchored: StoredSession = {
+      ...stored("session_anchor", cwd, [
+        {
+          id: "assistant-1",
+          ts: 1,
+          role: "assistant",
+          content: "done",
+        },
+      ]),
+      providerContextAnchor: {
+        messageId: "assistant-1",
+        usedTokens: 24_000,
+        manifestTokens: 3_000,
+        modelId: "kilo-auto/free",
+        recordedAt: 2,
+      },
+    }
+
+    await store.saveSession(anchored, { expectedRevision: 0 })
+
+    await expect(store.loadSession("session_anchor", cwd)).resolves.toMatchObject({
+      providerContextAnchor: anchored.providerContextAnchor,
+    })
+  })
+
   it.each(["../escape", "..", "a/b", "a\\b", "", ".hidden", "x".repeat(129)])(
     "rejects unsafe session id %j",
     async (sessionId) => {

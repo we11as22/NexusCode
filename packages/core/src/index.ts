@@ -69,7 +69,7 @@ export type {
   Mode, IHost, ISession, IIndexer, SkillAuthority,
   AgentEvent, ToolDef, ToolResult, ToolContext, ToolIntegrationProvenance,
   AgentExecutionIdentity, ToolExecutionIdentity,
-  SessionMessage, ToolPart, MessagePart, TextPart,
+  SessionMessage, ProviderContextAnchor, ToolPart, MessagePart, TextPart,
   IndexSearchResult, IndexSearchOptions, IndexStatus, SymbolKind,
   CheckpointEntry, ChangedFile,
   DiagnosticItem, ApprovalAction, PermissionResult, UserQuestionRequest, UserQuestionItem, UserQuestionOption, UserQuestionAnswer,
@@ -492,8 +492,12 @@ export {
   estimateToolsDefinitionsTokens,
   estimateActiveContextSessionTokens,
   getContextWindowLimit,
+  reconcilePersistedContextUsage,
 } from "./context/context-usage.js"
-export type { ContextUsageSnapshot } from "./context/context-usage.js"
+export type {
+  ContextUsageSnapshot,
+  PersistedContextUsage,
+} from "./context/context-usage.js"
 
 // Skills
 export { loadSkills } from "./skills/manager.js"

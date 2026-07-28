@@ -11,6 +11,7 @@ import {
   type ApprovalAction,
   type MessagePart,
   type NexusRunServices,
+  type ProviderContextAnchor,
   type SessionMessage,
   type StoredContextUsage,
   type TurnRunner,
@@ -90,6 +91,7 @@ export interface ServerTurnSessionStore {
     title?: string
     todo?: string
     contextUsage?: StoredContextUsage
+    providerContextAnchor?: ProviderContextAnchor
   }>
   checkpoint(
     sessionId: string,
@@ -99,6 +101,7 @@ export interface ServerTurnSessionStore {
       title?: string
       todo?: string
       contextUsage?: StoredContextUsage
+      providerContextAnchor?: ProviderContextAnchor
     },
     expectedRevision: number,
   ): Promise<number>
@@ -119,6 +122,7 @@ class DurableServerSession extends Session {
     title?: string
     todo?: string
     contextUsage?: StoredContextUsage
+    providerContextAnchor?: ProviderContextAnchor
     store: ServerTurnSessionStore
   }) {
     // Persistence is owned by this adapter, not Session's global store.
@@ -130,6 +134,7 @@ class DurableServerSession extends Session {
       true,
       input.contextUsage,
       input.revision,
+      input.providerContextAnchor,
     )
     this.#store = input.store
     this.#sessionId = input.sessionId
@@ -143,6 +148,7 @@ class DurableServerSession extends Session {
       this.#title ?? (deriveSessionTitle(this.messages) || undefined)
     const messages = structuredClone(this.messages)
     const contextUsage = this.getLastContextUsageSnapshot()
+    const providerContextAnchor = this.getProviderContextAnchor()
     this.#revision = await this.#store.checkpoint(
       this.#sessionId,
       this.#cwd,
@@ -151,6 +157,9 @@ class DurableServerSession extends Session {
         ...(title ? { title } : {}),
         ...(this.getTodo() ? { todo: this.getTodo() } : {}),
         ...(contextUsage ? { contextUsage: { ...contextUsage } } : {}),
+        ...(providerContextAnchor
+          ? { providerContextAnchor: { ...providerContextAnchor } }
+          : {}),
       },
       this.#revision,
     )
@@ -185,6 +194,9 @@ export class ServerTurnRunner implements TurnRunner {
           ...(stored.contextUsage
             ? { contextUsage: stored.contextUsage }
             : {}),
+          ...(stored.providerContextAnchor
+            ? { providerContextAnchor: stored.providerContextAnchor }
+            : {}),
         }
       },
       checkpoint: async (
@@ -202,6 +214,9 @@ export class ServerTurnRunner implements TurnRunner {
           ...(snapshot.todo ? { todo: snapshot.todo } : {}),
           ...(snapshot.contextUsage
             ? { contextUsage: snapshot.contextUsage }
+            : {}),
+          ...(snapshot.providerContextAnchor
+            ? { providerContextAnchor: snapshot.providerContextAnchor }
             : {}),
         },
         { expectedRevision },
@@ -228,6 +243,9 @@ export class ServerTurnRunner implements TurnRunner {
       ...(stored.todo ? { todo: stored.todo } : {}),
       ...(stored.contextUsage
         ? { contextUsage: stored.contextUsage }
+        : {}),
+      ...(stored.providerContextAnchor
+        ? { providerContextAnchor: stored.providerContextAnchor }
         : {}),
     })
     const content = inputContent(context)

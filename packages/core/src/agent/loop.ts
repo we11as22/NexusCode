@@ -501,6 +501,7 @@ export interface AgentLoopOptions {
  * No artificial step limit. Doom loop detection protects against infinite loops.
  */
 export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
+  const turnStartedAt = Date.now()
   const {
     session, client, host, config, services, mode,
     tools, skills, rulesContent, indexer, compaction,
@@ -881,6 +882,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   }
   /** Full system prompt from the last completed loop iteration (for context bar + next iteration's pre-build estimate). */
   let lastBuiltSystemPrompt = ""
+  const initialProviderAnchor = session.getProviderContextAnchor()
+  if (
+    initialProviderAnchor?.modelId &&
+    initialProviderAnchor.modelId !== activeClient.modelId
+  ) {
+    session.clearProviderContextAnchor()
+  }
   const emitContextUsage = (systemPromptText?: string) => {
     const text = systemPromptText ?? lastBuiltSystemPrompt
     const metrics = computeContextUsageMetrics({
@@ -889,17 +897,26 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       toolsDefinitionTokens,
       modelId: activeClient.modelId,
       configuredContextWindow: config.model.contextWindow,
+      providerAnchor: session.getProviderContextAnchor(),
     })
     session.recordContextUsage({
       usedTokens: metrics.usedTokens,
       limitTokens: metrics.limitTokens,
       percent: metrics.percent,
+      source: metrics.source,
+      providerTokens: metrics.providerTokens,
+      pendingTokens: metrics.pendingTokens,
+      modelId: metrics.modelId,
     })
     host.emit({
       type: "context_usage",
       usedTokens: metrics.usedTokens,
       limitTokens: metrics.limitTokens,
       percent: metrics.percent,
+      source: metrics.source,
+      providerTokens: metrics.providerTokens,
+      pendingTokens: metrics.pendingTokens,
+      modelId: metrics.modelId,
     })
   }
   const continueForMailboxBeforeCompletion = async (): Promise<boolean> => {
@@ -1046,6 +1063,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       toolsDefinitionTokens,
       modelId: activeClient.modelId,
       configuredContextWindow: config.model.contextWindow,
+      providerAnchor: session.getProviderContextAnchor(),
     })
     const limitTokens = rollingCtx.limitTokens
     const usedTokens = rollingCtx.usedTokens
@@ -1192,6 +1210,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         toolsDefinitionTokens,
         modelId: activeClient.modelId,
         configuredContextWindow: config.model.contextWindow,
+        providerAnchor: session.getProviderContextAnchor(),
       })
       if (compaction.isOverflow(roll.usedTokens, limitCtx, sumTh)) {
         compaction.prune(session)
@@ -1201,6 +1220,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           toolsDefinitionTokens,
           modelId: activeClient.modelId,
           configuredContextWindow: config.model.contextWindow,
+          providerAnchor: session.getProviderContextAnchor(),
         })
         if (compaction.isOverflow(roll2.usedTokens, limitCtx, sumTh)) {
           if (compactedSinceLastProviderSuccess) {
@@ -1851,6 +1871,23 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                   cacheWrite: event.usage.cacheWriteTokens,
                 },
               })
+              if (event.usage.totalTokens > 0) {
+                const requestMetrics = computeContextUsageMetrics({
+                  sessionMessages: session.messages,
+                  systemPromptText: lastBuiltSystemPrompt || undefined,
+                  toolsDefinitionTokens,
+                  modelId: activeClient.modelId,
+                  configuredContextWindow: config.model.contextWindow,
+                })
+                session.recordProviderContextAnchor({
+                  messageId: newMessageId,
+                  usedTokens: event.usage.totalTokens,
+                  manifestTokens:
+                    requestMetrics.systemTokens + requestMetrics.toolsTokens,
+                  modelId: activeClient.modelId,
+                  recordedAt: Date.now(),
+                })
+              }
             }
             emitContextUsage()
 
@@ -2281,6 +2318,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       toolsDefinitionTokens,
       modelId: activeClient.modelId,
       configuredContextWindow: config.model.contextWindow,
+      providerAnchor: session.getProviderContextAnchor(),
     })
     const limitEnd = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
     if (
@@ -2411,6 +2449,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       session.updateTodo("")
       host.emit({ type: "todo_updated", todo: "" })
     }
+    const durationMs = Math.max(0, Date.now() - turnStartedAt)
+    session.updateMessage(lastAssistantMessageId, { durationMs })
     await session.save()
     host.emit({ type: "session_saved", sessionId: session.id })
     const autoDream = scheduleAutoMemoryDream({
@@ -2424,7 +2464,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     })
     doneEmitted = true
     emitContextUsage()
-    host.emit({ type: "done", messageId: lastAssistantMessageId })
+    host.emit({
+      type: "done",
+      messageId: lastAssistantMessageId,
+      durationMs,
+    })
   }
 }
 
@@ -2625,6 +2669,7 @@ async function handleCompaction(
     toolsDefinitionTokens: opts.toolsDefinitionTokens,
     modelId: client.modelId,
     configuredContextWindow: config.model.contextWindow,
+    providerAnchor: session.getProviderContextAnchor(),
   })
   const shouldSummarize =
     opts.forceSummary ||
@@ -2645,6 +2690,7 @@ async function handleCompaction(
     durableContext: opts.durableContext,
   })
   if (result.status !== "compacted") return result
+  session.clearProviderContextAnchor()
 
   // The next provider attempt must never rely on a summary that exists only
   // in RAM. Codex persists replacement history before resuming; Nexus keeps

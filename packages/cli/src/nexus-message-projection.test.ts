@@ -121,6 +121,27 @@ describe("CLI assistant stream projection", () => {
     })
   })
 
+  it("flushes the final partial line at a semantic stream boundary", () => {
+    const result = decideAssistantDraftPublish(
+      {
+        messageId: "assistant-final-fragment",
+        reasoning: "private unfinished reasoning",
+        text: "Done without a trailing newline",
+      },
+      false,
+      null,
+      true,
+    )
+
+    expect(result).toEqual({
+      publish: true,
+      nextVisible: {
+        reasoning: "",
+        text: "Done without a trailing newline",
+      },
+    })
+  })
+
   it("projects only the approved visible preview, never hidden reasoning or a partial tail", () => {
     const projected = projectVisibleAssistantDraft(
       {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   MAX_IMAGE_BASE64_CHARS,
   MAX_USER_INPUT_TEXT_CHARS,
+  LegacyAgentEventSchema,
   PROTOCOL_VERSION,
   ProtocolEnvelopeSchema,
   ProtocolPayloadSchema,
@@ -18,6 +19,56 @@ const base = {
 }
 
 describe("protocol v2", () => {
+  it("validates enriched context usage while accepting the legacy shape", () => {
+    expect(
+      LegacyAgentEventSchema.parse({
+        type: "context_usage",
+        usedTokens: 29_300,
+        limitTokens: 256_000,
+        percent: 11,
+        source: "hybrid",
+        providerTokens: 27_800,
+        pendingTokens: 1_500,
+        modelId: "kilo-auto/free",
+      }),
+    ).toEqual({
+      type: "context_usage",
+      usedTokens: 29_300,
+      limitTokens: 256_000,
+      percent: 11,
+      source: "hybrid",
+      providerTokens: 27_800,
+      pendingTokens: 1_500,
+      modelId: "kilo-auto/free",
+    })
+    expect(
+      LegacyAgentEventSchema.safeParse({
+        type: "context_usage",
+        usedTokens: 10,
+        limitTokens: 0,
+        percent: 0,
+      }).success,
+    ).toBe(true)
+    expect(
+      LegacyAgentEventSchema.safeParse({
+        type: "context_usage",
+        usedTokens: 10,
+        limitTokens: 0,
+        percent: 0,
+        source: "guessed",
+      }).success,
+    ).toBe(false)
+    expect(
+      LegacyAgentEventSchema.safeParse({
+        type: "context_usage",
+        usedTokens: 10,
+        limitTokens: 256_000,
+        percent: 0,
+        modelId: "x".repeat(1_025),
+      }).success,
+    ).toBe(false)
+  })
+
   it("round-trips typed input and a non-secret stable model selection", () => {
     const command = SessionCommandSchema.parse({
       ...base,

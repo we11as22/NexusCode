@@ -16,6 +16,8 @@ export interface CatalogModel {
   free: boolean
   /** Provider-advertised total context window in tokens. */
   contextWindow?: number
+  /** Provider-advertised maximum completion size in tokens. */
+  maxOutputTokens?: number
   /** Optional sort order for recommended (lower first) */
   recommendedIndex?: number
 }
@@ -37,6 +39,31 @@ export interface ModelsCatalog {
     name: string
     free: boolean
     contextWindow?: number
+    maxOutputTokens?: number
+  }>
+}
+
+interface NexusGatewayModel {
+  id: string
+  name?: string
+  contextWindow?: number
+  maxOutputTokens?: number
+  free?: boolean
+}
+
+interface NexusGatewayModelsResponse {
+  data?: Array<{
+    id?: unknown
+    name?: unknown
+    context_length?: unknown
+    top_provider?: {
+      context_length?: unknown
+      max_completion_tokens?: unknown
+    }
+    pricing?: {
+      prompt?: unknown
+      completion?: unknown
+    }
   }>
 }
 
@@ -100,12 +127,12 @@ export async function getModelsCatalog(): Promise<ModelsCatalog> {
   }
 
   const [gatewaySettled, urlSettled, pathSettled] = await Promise.allSettled([
-    getNexusGatewayModelIds(),
+    getNexusGatewayModels(),
     fetchUrl(),
     readPath(),
   ])
 
-  const gatewayModelIds =
+  const gatewayModels =
     gatewaySettled.status === "fulfilled" ? gatewaySettled.value : null
 
   const rawDataSources: Record<string, unknown>[] = []
@@ -113,15 +140,16 @@ export async function getModelsCatalog(): Promise<ModelsCatalog> {
   if (pathSettled.status === "fulfilled" && pathSettled.value)
     rawDataSources.push(pathSettled.value)
 
-  if (rawDataSources.length === 0) {
+  if (rawDataSources.length === 0 && !gatewayModels?.size) {
     cachedCatalog = getFallbackCatalog()
     cachedAt = now
     return cachedCatalog
   }
 
-  const catalogs = rawDataSources.map((data) =>
-    parseCatalog(data, gatewayModelIds)
-  )
+  const catalogs =
+    rawDataSources.length > 0
+      ? rawDataSources.map((data) => parseCatalog(data, gatewayModels))
+      : [parseCatalog({}, gatewayModels)]
   cachedCatalog = mergeCatalogs(catalogs)
   cachedAt = now
   return cachedCatalog
@@ -180,7 +208,46 @@ function mergeCatalogs(catalogs: ModelsCatalog[]): ModelsCatalog {
   return { providers, recommended }
 }
 
-async function getNexusGatewayModelIds(): Promise<Set<string> | null> {
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined
+}
+
+function zeroPrice(value: unknown): boolean {
+  if (typeof value === "number") return value === 0
+  return typeof value === "string" && value.trim() !== "" && Number(value) === 0
+}
+
+function parseNexusGatewayModels(
+  json: NexusGatewayModelsResponse,
+): Map<string, NexusGatewayModel> | null {
+  const models = new Map<string, NexusGatewayModel>()
+  for (const raw of json.data ?? []) {
+    if (typeof raw?.id !== "string" || raw.id.trim() === "") continue
+    const contextWindow =
+      positiveInteger(raw.context_length) ??
+      positiveInteger(raw.top_provider?.context_length)
+    const maxOutputTokens = positiveInteger(
+      raw.top_provider?.max_completion_tokens,
+    )
+    const free =
+      raw.id.endsWith("/free") ||
+      (zeroPrice(raw.pricing?.prompt) && zeroPrice(raw.pricing?.completion))
+    models.set(raw.id, {
+      id: raw.id,
+      ...(typeof raw.name === "string" && raw.name.trim()
+        ? { name: raw.name }
+        : {}),
+      ...(contextWindow ? { contextWindow } : {}),
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
+      ...(free ? { free: true } : {}),
+    })
+  }
+  return models.size > 0 ? models : null
+}
+
+async function getNexusGatewayModels(): Promise<Map<string, NexusGatewayModel> | null> {
   try {
     const res = await fetch(`${NEXUS_GATEWAY_BASE_URL}/models`, {
       signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS),
@@ -190,18 +257,25 @@ async function getNexusGatewayModelIds(): Promise<Set<string> | null> {
       },
     })
     if (!res.ok) return null
-    const json = (await res.json()) as { data?: Array<{ id?: string }> }
-    const ids = new Set<string>()
-    for (const model of json.data ?? []) {
-      if (model?.id && typeof model.id === "string") ids.add(model.id)
-    }
-    return ids.size > 0 ? ids : null
+    return parseNexusGatewayModels(
+      (await res.json()) as NexusGatewayModelsResponse,
+    )
   } catch {
     return null
   }
 }
 
-function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string> | null): ModelsCatalog {
+export function parseCatalogData(
+  data: Record<string, unknown>,
+  gatewayResponse?: NexusGatewayModelsResponse,
+): ModelsCatalog {
+  return parseCatalog(data, parseNexusGatewayModels(gatewayResponse ?? {}))
+}
+
+function parseCatalog(
+  data: Record<string, unknown>,
+  gatewayModels: Map<string, NexusGatewayModel> | null,
+): ModelsCatalog {
   const providers: CatalogProvider[] = []
   const recommended: ModelsCatalog["recommended"] = []
 
@@ -223,22 +297,32 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
     const providerId = providerKey === "kilo" ? "nexus" : providerKey
     const api = prov.api ?? ""
 
-    const baseUrl = api.trim() || OPENROUTER_BASE_URL
+    const baseUrl =
+      providerId === "nexus"
+        ? NEXUS_GATEWAY_BASE_URL
+        : api.trim() || OPENROUTER_BASE_URL
     const name = providerId === "nexus" ? "Nexus Gateway" : (prov.name ?? providerId) as string
     const models: CatalogModel[] = []
     for (const [modelKey, m] of Object.entries(prov.models)) {
       if (!m || typeof m !== "object") continue
       const id = (m.id ?? modelKey) as string
-      if (providerId === "nexus" && gatewayModelIds && !gatewayModelIds.has(id)) continue
-      const free = isFreeModel(m)
+      const gatewayModel =
+        providerId === "nexus" ? gatewayModels?.get(id) : undefined
+      if (providerId === "nexus" && gatewayModels && !gatewayModel) continue
+      const free = gatewayModel?.free ?? isFreeModel(m)
       const catalogModel: CatalogModel = {
         id,
-        name: (m.name ?? id) as string,
+        name: gatewayModel?.name ?? (m.name ?? id) as string,
         free,
-        ...(typeof m.limit?.context === "number" &&
-        Number.isFinite(m.limit.context) &&
-        m.limit.context > 0
-          ? { contextWindow: Math.floor(m.limit.context) }
+        ...(gatewayModel?.contextWindow
+          ? { contextWindow: gatewayModel.contextWindow }
+          : typeof m.limit?.context === "number" &&
+              Number.isFinite(m.limit.context) &&
+              m.limit.context > 0
+            ? { contextWindow: Math.floor(m.limit.context) }
+          : {}),
+        ...(gatewayModel?.maxOutputTokens
+          ? { maxOutputTokens: gatewayModel.maxOutputTokens }
           : {}),
         recommendedIndex: typeof (m as { recommendedIndex?: number }).recommendedIndex === "number"
           ? (m as { recommendedIndex: number }).recommendedIndex
@@ -254,7 +338,44 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
           ...(catalogModel.contextWindow
             ? { contextWindow: catalogModel.contextWindow }
             : {}),
+          ...(catalogModel.maxOutputTokens
+            ? { maxOutputTokens: catalogModel.maxOutputTokens }
+            : {}),
         })
+      }
+    }
+
+    if (providerId === "nexus" && gatewayModels) {
+      const existingIds = new Set(models.map((model) => model.id))
+      for (const gatewayModel of gatewayModels.values()) {
+        if (existingIds.has(gatewayModel.id)) continue
+        const catalogModel: CatalogModel = {
+          id: gatewayModel.id,
+          name: gatewayModel.name ?? gatewayModel.id,
+          free: gatewayModel.free ?? false,
+          ...(gatewayModel.contextWindow
+            ? { contextWindow: gatewayModel.contextWindow }
+            : {}),
+          ...(gatewayModel.maxOutputTokens
+            ? { maxOutputTokens: gatewayModel.maxOutputTokens }
+            : {}),
+          recommendedIndex: undefined,
+        }
+        models.push(catalogModel)
+        if (catalogModel.free) {
+          recommended.push({
+            providerId,
+            modelId: catalogModel.id,
+            name: catalogModel.name,
+            free: true,
+            ...(catalogModel.contextWindow
+              ? { contextWindow: catalogModel.contextWindow }
+              : {}),
+            ...(catalogModel.maxOutputTokens
+              ? { maxOutputTokens: catalogModel.maxOutputTokens }
+              : {}),
+          })
+        }
       }
     }
 
@@ -276,6 +397,49 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
     }
   }
 
+  if (
+    gatewayModels?.size &&
+    !providers.some((provider) => provider.id === "nexus")
+  ) {
+    const models = [...gatewayModels.values()]
+      .map<CatalogModel>((model) => ({
+        id: model.id,
+        name: model.name ?? model.id,
+        free: model.free ?? false,
+        ...(model.contextWindow
+          ? { contextWindow: model.contextWindow }
+          : {}),
+        ...(model.maxOutputTokens
+          ? { maxOutputTokens: model.maxOutputTokens }
+          : {}),
+        recommendedIndex: undefined,
+      }))
+      .sort((a, b) => {
+        if (a.free !== b.free) return a.free ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
+    providers.push({
+      id: "nexus",
+      name: "Nexus Gateway",
+      baseUrl: NEXUS_GATEWAY_BASE_URL,
+      models,
+    })
+    for (const model of models.filter((candidate) => candidate.free)) {
+      recommended.push({
+        providerId: "nexus",
+        modelId: model.id,
+        name: model.name,
+        free: true,
+        ...(model.contextWindow
+          ? { contextWindow: model.contextWindow }
+          : {}),
+        ...(model.maxOutputTokens
+          ? { maxOutputTokens: model.maxOutputTokens }
+          : {}),
+      })
+    }
+  }
+
   recommended.sort((a, b) => {
     if (a.free !== b.free) return a.free ? -1 : 1
     if (a.providerId !== b.providerId) {
@@ -291,7 +455,13 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
 /** Fallback when fetch fails: default free models so "Select model" still works */
 function getFallbackCatalog(): ModelsCatalog {
   const recommended: ModelsCatalog["recommended"] = [
-    { providerId: "nexus", modelId: "kilo-auto/free", name: "Kilo Auto (free)", free: true },
+    {
+      providerId: "nexus",
+      modelId: "kilo-auto/free",
+      name: "Kilo Auto (free)",
+      free: true,
+      contextWindow: 256_000,
+    },
     { providerId: "nexus", modelId: "openrouter/free", name: "OpenRouter Free Router", free: true },
   ]
   return {
@@ -300,7 +470,12 @@ function getFallbackCatalog(): ModelsCatalog {
         id: "nexus",
         name: "Nexus Gateway",
         baseUrl: NEXUS_GATEWAY_BASE_URL,
-        models: recommended.map((r) => ({ id: r.modelId, name: r.name, free: r.free })),
+        models: recommended.map((r) => ({
+          id: r.modelId,
+          name: r.name,
+          free: r.free,
+          ...(r.contextWindow ? { contextWindow: r.contextWindow } : {}),
+        })),
       },
     ],
     recommended,

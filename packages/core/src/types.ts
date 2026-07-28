@@ -514,6 +514,15 @@ export interface DiagnosticItem {
 
 // ─── Session Interface ────────────────────────────────────────────────────────
 
+export interface ProviderContextAnchor {
+  messageId: string
+  usedTokens: number
+  /** Estimated system prompt plus active tool-definition tokens for this request. */
+  manifestTokens: number
+  modelId?: string
+  recordedAt: number
+}
+
 export interface ISession {
   readonly id: string
   readonly messages: SessionMessage[]
@@ -528,9 +537,29 @@ export interface ISession {
   getTodo(): string
   getTokenEstimate(): number
   /** Last full context bar values from agent (session + system + tools); undefined if stale or never recorded. */
-  getLastContextUsageSnapshot(): { usedTokens: number; limitTokens: number; percent: number } | undefined
+  getLastContextUsageSnapshot(): {
+    usedTokens: number
+    limitTokens: number
+    percent: number
+    source?: "provider" | "hybrid" | "estimated"
+    providerTokens?: number
+    pendingTokens?: number
+    modelId?: string
+  } | undefined
   /** Called by agent loop when emitting context_usage so resume/switch session can show the same numbers. */
-  recordContextUsage(snapshot: { usedTokens: number; limitTokens: number; percent: number }): void
+  recordContextUsage(snapshot: {
+    usedTokens: number
+    limitTokens: number
+    percent: number
+    source?: "provider" | "hybrid" | "estimated"
+    providerTokens?: number
+    pendingTokens?: number
+    modelId?: string
+  }): void
+  /** Last exact provider-visible context boundary for hybrid pending-tail estimates. */
+  getProviderContextAnchor(): ProviderContextAnchor | undefined
+  recordProviderContextAnchor(anchor: ProviderContextAnchor): void
+  clearProviderContextAnchor(): void
   fork(messageId: string): ISession
   /** Rewind chat to timestamp; keeps only messages with ts <= timestamp (for checkpoint restore). */
   rewindToTimestamp(timestamp: number): void
@@ -550,6 +579,8 @@ export interface SessionMessage {
   ts: number
   role: SessionRole
   content: string | MessagePart[]
+  /** End-to-end duration of the completed user turn that produced this answer. */
+  durationMs?: number
   /** Durable delegated-agent inbox id accepted into this transcript. */
   mailboxMessageId?: string
   /** Exact root session that owns the delegated-agent inbox. */
@@ -1016,9 +1047,18 @@ export type AgentEvent =
   | { type: "vector_db_progress"; message?: string }
   | { type: "vector_db_ready" }
   | { type: "session_saved"; sessionId: string }
-  | { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
+  | {
+      type: "context_usage"
+      usedTokens: number
+      limitTokens: number
+      percent: number
+      source?: "provider" | "hybrid" | "estimated"
+      providerTokens?: number
+      pendingTokens?: number
+      modelId?: string
+    }
   | { type: "error"; error: string; fatal?: boolean }
-  | { type: "done"; messageId: string }
+  | { type: "done"; messageId: string; durationMs?: number }
   | { type: "todo_updated"; todo: string }
   | { type: "doom_loop_detected"; tool: string }
   | { type: "plan_followup_ask"; planText: string }

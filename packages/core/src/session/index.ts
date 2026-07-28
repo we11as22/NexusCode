@@ -1,5 +1,11 @@
 import * as crypto from "node:crypto"
-import type { ISession, SessionMessage, ToolPart, MessagePart } from "../types.js"
+import type {
+  ISession,
+  MessagePart,
+  ProviderContextAnchor,
+  SessionMessage,
+  ToolPart,
+} from "../types.js"
 import {
   saveSession,
   loadSession,
@@ -18,6 +24,7 @@ export interface SessionRecoverySnapshot {
   readonly messages: readonly SessionMessage[]
   readonly todo: string
   readonly contextUsageSnapshot: StoredContextUsage | null
+  readonly providerContextAnchor: ProviderContextAnchor | null
 }
 
 /** Derive session title from first user message. */
@@ -49,6 +56,8 @@ export class Session implements ISession {
   private _tokenEstimateCache: number | null = null
   /** Last context_usage from agent (full formula). Cleared when messages change. */
   private _contextUsageSnapshot: StoredContextUsage | null = null
+  /** Last exact provider response boundary used as the hybrid context baseline. */
+  private _providerContextAnchor: ProviderContextAnchor | null = null
   /** Last verified durable journal revision used for optimistic concurrency. */
   private _revision: number
 
@@ -60,6 +69,7 @@ export class Session implements ISession {
     ephemeral = false,
     contextUsageSnapshot?: StoredContextUsage | null,
     revision = 0,
+    providerContextAnchor?: ProviderContextAnchor | null,
   ) {
     this.id = id
     this.cwd = canonicalProjectRoot(cwd)
@@ -67,6 +77,13 @@ export class Session implements ISession {
     this._todo = typeof initialTodo === "string" ? initialTodo : ""
     this._ephemeral = ephemeral
     this._contextUsageSnapshot = contextUsageSnapshot ?? null
+    this._providerContextAnchor =
+      providerContextAnchor &&
+      this._messages.some(
+        (message) => message.id === providerContextAnchor.messageId,
+      )
+        ? { ...providerContextAnchor }
+        : null
     this._revision = revision
   }
 
@@ -172,10 +189,55 @@ export class Session implements ISession {
     this._contextUsageSnapshot = { ...snapshot }
   }
 
+  getProviderContextAnchor(): ProviderContextAnchor | undefined {
+    return this._providerContextAnchor
+      ? { ...this._providerContextAnchor }
+      : undefined
+  }
+
+  recordProviderContextAnchor(anchor: ProviderContextAnchor): void {
+    if (!this._messages.some((message) => message.id === anchor.messageId)) {
+      this._providerContextAnchor = null
+      return
+    }
+    this._providerContextAnchor = { ...anchor }
+  }
+
+  clearProviderContextAnchor(): void {
+    this._providerContextAnchor = null
+  }
+
+  private clearAnchorIfMessageMissing(): void {
+    if (
+      this._providerContextAnchor &&
+      !this._messages.some(
+        (message) => message.id === this._providerContextAnchor?.messageId,
+      )
+    ) {
+      this._providerContextAnchor = null
+    }
+  }
+
   fork(messageId: string): ISession {
     const idx = this._messages.findIndex(m => m.id === messageId)
     const messages = idx === -1 ? [...this._messages] : this._messages.slice(0, idx + 1)
-    return new Session(generateSessionId(), this.cwd, JSON.parse(JSON.stringify(messages)), undefined, false, null, 0)
+    const anchor =
+      this._providerContextAnchor &&
+      messages.some(
+        (message) => message.id === this._providerContextAnchor?.messageId,
+      )
+        ? this._providerContextAnchor
+        : null
+    return new Session(
+      generateSessionId(),
+      this.cwd,
+      JSON.parse(JSON.stringify(messages)),
+      undefined,
+      false,
+      null,
+      0,
+      anchor,
+    )
   }
 
   /** Rewind chat to timestamp. Keeps only messages with ts <= timestamp. */
@@ -185,6 +247,7 @@ export class Session implements ISession {
       this._messages = keep
       this.invalidateTokenEstimate()
       this.clearContextUsageSnapshot()
+      this.clearAnchorIfMessageMissing()
     }
   }
 
@@ -195,6 +258,7 @@ export class Session implements ISession {
       this._messages = keep
       this.invalidateTokenEstimate()
       this.clearContextUsageSnapshot()
+      this.clearAnchorIfMessageMissing()
     }
   }
 
@@ -206,12 +270,14 @@ export class Session implements ISession {
         this._messages = []
         this.invalidateTokenEstimate()
         this.clearContextUsageSnapshot()
+        this.clearAnchorIfMessageMissing()
       }
       return
     }
     this._messages = this._messages.slice(0, idx)
     this.invalidateTokenEstimate()
     this.clearContextUsageSnapshot()
+    this.clearAnchorIfMessageMissing()
   }
 
   captureRecoverySnapshot(): SessionRecoverySnapshot {
@@ -220,6 +286,9 @@ export class Session implements ISession {
       todo: this._todo,
       contextUsageSnapshot: this._contextUsageSnapshot
         ? { ...this._contextUsageSnapshot }
+        : null,
+      providerContextAnchor: this._providerContextAnchor
+        ? { ...this._providerContextAnchor }
         : null,
     }
   }
@@ -230,6 +299,10 @@ export class Session implements ISession {
     this._contextUsageSnapshot = snapshot.contextUsageSnapshot
       ? { ...snapshot.contextUsageSnapshot }
       : null
+    this._providerContextAnchor = snapshot.providerContextAnchor
+      ? { ...snapshot.providerContextAnchor }
+      : null
+    this.clearAnchorIfMessageMissing()
     this.invalidateTokenEstimate()
   }
 
@@ -243,6 +316,9 @@ export class Session implements ISession {
       title: title || undefined,
       todo: this._todo,
       ...(this._contextUsageSnapshot ? { contextUsage: this._contextUsageSnapshot } : {}),
+      ...(this._providerContextAnchor
+        ? { providerContextAnchor: this._providerContextAnchor }
+        : {}),
       messages: this._messages,
     }
     this._revision = await saveSession(stored, { expectedRevision: this._revision })
@@ -254,6 +330,14 @@ export class Session implements ISession {
     this._messages = stored.messages
     this._todo = typeof stored.todo === "string" ? stored.todo : ""
     this._contextUsageSnapshot = stored.contextUsage ?? null
+    this._providerContextAnchor =
+      stored.providerContextAnchor &&
+      stored.messages.some(
+        (message) =>
+          message.id === stored.providerContextAnchor?.messageId,
+      )
+        ? { ...stored.providerContextAnchor }
+        : null
     this._revision = stored.revision ?? 0
     this.invalidateTokenEstimate()
     return true
@@ -290,6 +374,7 @@ export class Session implements ISession {
       false,
       stored.contextUsage ?? null,
       stored.revision ?? 0,
+      stored.providerContextAnchor ?? null,
     )
   }
 

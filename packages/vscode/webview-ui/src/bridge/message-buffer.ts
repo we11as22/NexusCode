@@ -40,6 +40,66 @@ function messageSeq(message: ExtensionMessage): number {
   return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : Number.MAX_SAFE_INTEGER
 }
 
+function coalescibleAgentDelta(
+  left: ExtensionMessage,
+  right: ExtensionMessage,
+): boolean {
+  if (left.type !== "agentEvent" || right.type !== "agentEvent") return false
+  const leftEvent = left.event as {
+    type?: string
+    messageId?: string
+    reasoningId?: string
+  }
+  const rightEvent = right.event as {
+    type?: string
+    messageId?: string
+    reasoningId?: string
+  }
+  if (
+    leftEvent.type !== rightEvent.type ||
+    leftEvent.messageId !== rightEvent.messageId
+  ) {
+    return false
+  }
+  if (leftEvent.type === "text_delta") return true
+  return (
+    leftEvent.type === "reasoning_delta" &&
+    (leftEvent.reasoningId ?? "") === (rightEvent.reasoningId ?? "")
+  )
+}
+
+function mergeAgentDeltas(
+  left: ExtensionMessage,
+  right: ExtensionMessage,
+): ExtensionMessage {
+  if (left.type !== "agentEvent" || right.type !== "agentEvent") return right
+  const leftEvent = left.event as {
+    delta?: string
+    user_message_delta?: string
+  }
+  const rightEvent = right.event as {
+    delta?: string
+    user_message_delta?: string
+  }
+  return {
+    ...right,
+    event: {
+      ...left.event,
+      ...right.event,
+      delta: `${leftEvent.delta ?? ""}${rightEvent.delta ?? ""}`,
+      ...(
+        leftEvent.user_message_delta != null ||
+        rightEvent.user_message_delta != null
+          ? {
+              user_message_delta:
+                `${leftEvent.user_message_delta ?? ""}${rightEvent.user_message_delta ?? ""}`,
+            }
+          : {}
+      ),
+    },
+  } as ExtensionMessage
+}
+
 function dispatchExtensionMessage(store: ChatStoreApi, msg: ExtensionMessage): void {
   switch (msg.type) {
     case "stateUpdate":
@@ -143,13 +203,34 @@ export function createExtensionMessageBuffer(store: ChatStoreApi) {
     if (pending.length === 0) return
     const queued = pending.splice(0, pending.length)
     queued.sort((a, b) => messageSeq(a) - messageSeq(b))
-    for (const msg of queued) {
-      // The host stamps one identity on a concrete outbound delivery and
-      // preserves it across retries. Only that exact retry is a duplicate;
-      // equal event payloads at different sequences are legitimate chunks.
-      if (wasDelivered(msg)) continue
-      dispatchExtensionMessage(store, msg)
-      rememberDelivered(msg)
+    const seenSequences = new Set<number>()
+    const deliverable = queued.filter((message) => {
+      if (wasDelivered(message)) return false
+      const sequence = (message as { seq?: unknown }).seq
+      if (
+        typeof sequence === "number" &&
+        Number.isSafeInteger(sequence) &&
+        sequence >= 0
+      ) {
+        if (seenSequences.has(sequence)) return false
+        seenSequences.add(sequence)
+      }
+      return true
+    })
+    for (let index = 0; index < deliverable.length; index += 1) {
+      let merged = deliverable[index]!
+      const originals = [merged]
+      while (
+        index + 1 < deliverable.length &&
+        coalescibleAgentDelta(merged, deliverable[index + 1]!)
+      ) {
+        index += 1
+        const next = deliverable[index]!
+        originals.push(next)
+        merged = mergeAgentDeltas(merged, next)
+      }
+      dispatchExtensionMessage(store, merged)
+      for (const original of originals) rememberDelivered(original)
     }
   }
 

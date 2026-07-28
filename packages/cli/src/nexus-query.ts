@@ -73,6 +73,7 @@ import {
   projectAssistantDraft,
   projectVisibleAssistantDraft,
   reduceAssistantDraft,
+  upsertTimelineMessage,
   type NexusAssistantDraft,
   type NexusAssistantDraftPreview,
 } from './nexus-message-projection.js'
@@ -97,6 +98,9 @@ export type NexusContextMessage = {
   usedTokens: number
   limitTokens: number
   percent: number
+  source?: 'provider' | 'hybrid' | 'estimated'
+  providerTokens?: number
+  pendingTokens?: number
 }
 export type NexusSessionSyncMessage = {
   type: 'nexus_session_sync'
@@ -173,7 +177,7 @@ function buildAssistantMessageFromSession(msg: SessionMessage): AssistantMessage
   return {
     type: 'assistant',
     costUSD: 0,
-    durationMs: 0,
+    durationMs: msg.durationMs ?? 0,
     uuid: nexusAssistantMessageUuid(msg.id),
     message: {
       id: msg.id,
@@ -639,12 +643,14 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         if (
           draft &&
           (event.type === 'text_delta' ||
-            event.type === 'reasoning_delta')
+            event.type === 'reasoning_delta' ||
+            event.type === 'reasoning_end')
         ) {
           const decision = decideAssistantDraftPublish(
             draft,
             showReasoning,
             assistantDraftPreviews.get(event.messageId) ?? null,
+            event.type === 'reasoning_end',
           )
           if (decision.publish && decision.nextVisible) {
             assistantDraftPreviews.set(
@@ -658,6 +664,18 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           }
         }
         continue
+      }
+      for (const draft of assistantDrafts.values()) {
+        const decision = decideAssistantDraftPublish(
+          draft,
+          showReasoning,
+          assistantDraftPreviews.get(draft.messageId) ?? null,
+          true,
+        )
+        if (decision.publish && decision.nextVisible) {
+          assistantDraftPreviews.set(draft.messageId, decision.nextVisible)
+          yield projectVisibleAssistantDraft(draft, decision.nextVisible)
+        }
       }
       if (event.type === 'todo_updated') {
         yield { type: 'nexus_todo', todo: event.todo ?? '' }
@@ -699,6 +717,9 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           usedTokens: event.usedTokens,
           limitTokens: event.limitTokens,
           percent: event.percent,
+          source: event.source,
+          providerTokens: event.providerTokens,
+          pendingTokens: event.pendingTokens,
         }
         continue
       }
@@ -883,6 +904,17 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         yield am
         if (event.fatal) return true
       } else if (event.type === 'done') {
+        const completed = session.messages.find(
+          (message) =>
+            message.id === event.messageId &&
+            message.role === 'assistant',
+        )
+        if (completed) {
+          const am = buildAssistantMessageFromSession(completed)
+          const nextConsumed = upsertTimelineMessage(consumed, am)
+          consumed.splice(0, consumed.length, ...nextConsumed)
+          yield am
+        }
         onRunComplete?.(host)
         return true
       } else if (

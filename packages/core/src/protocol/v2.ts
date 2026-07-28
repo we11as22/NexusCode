@@ -274,6 +274,12 @@ const LegacyAgentEventValueSchema = z.discriminatedUnion("type", [
       usedTokens: NonnegativeSafeIntegerSchema,
       limitTokens: NonnegativeSafeIntegerSchema,
       percent: FiniteNumberSchema,
+      source: z
+        .enum(["provider", "hybrid", "estimated"])
+        .optional(),
+      providerTokens: NonnegativeSafeIntegerSchema.optional(),
+      pendingTokens: NonnegativeSafeIntegerSchema.optional(),
+      modelId: z.string().min(1).max(1_024).optional(),
     })
     .passthrough(),
   z
@@ -287,6 +293,7 @@ const LegacyAgentEventValueSchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("done"),
       messageId: LegacyEventIdentifierSchema,
+      durationMs: NonnegativeSafeIntegerSchema.optional(),
     })
     .passthrough(),
   z

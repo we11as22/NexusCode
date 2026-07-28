@@ -1,6 +1,9 @@
 import React, { useMemo, useState } from "react"
 import { useChatStore } from "../stores/chat.js"
-import { inputContextPanelKind } from "./input-context-panel-policy.js"
+import {
+  inputContextPanelKind,
+  reviewActionForFileCount,
+} from "./input-context-panel-policy.js"
 
 /** File icon (document) for context panel */
 function FileIcon({ className }: { className?: string }) {
@@ -19,7 +22,7 @@ function FileIcon({ className }: { className?: string }) {
 export function InputContextPanel() {
   const store = useChatStore()
   const { pendingApproval, mode, sessionUnacceptedEdits, openSessionEditDiff, undoSessionEdits, keepAllSessionEdits, revertSessionEditFile, acceptSessionEditFile } = store
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
 
   const sessionEditsForPanel = useMemo(
     () =>
@@ -35,7 +38,7 @@ export function InputContextPanel() {
     appliedEditCount: sessionEditsForPanel.length,
   })
 
-  // Applied session edits: N files, Revert All / Keep All / Review Diff
+  // Applied session edits: compact Cursor-style Undo / Keep / Review strip.
   if (panelKind === "applied-changes") {
     const n = sessionEditsForPanel.length
     const fileLabel = n === 1 ? "1 File" : `${n} Files`
@@ -60,7 +63,7 @@ export function InputContextPanel() {
                 onClick={() => undoSessionEdits()}
                 title="Revert all files to state before edits"
               >
-                Revert All
+                Undo
               </button>
               <button
                 type="button"
@@ -68,15 +71,21 @@ export function InputContextPanel() {
                 onClick={() => keepAllSessionEdits()}
                 title="Accept all changes in listed files"
               >
-                Keep All
+                Keep
               </button>
               <button
                 type="button"
                 className="nexus-input-context-btn nexus-input-context-btn-active"
-                title="Expand to review files; click a file to open full diff in editor"
-                onClick={() => setExpanded(true)}
+                title={n === 1 ? "Open the file diff" : "Expand the file list to review diffs"}
+                onClick={() => {
+                  if (reviewActionForFileCount(n) === "open-single") {
+                    openSessionEditDiff(sessionEditsForPanel[0]!.path)
+                  } else {
+                    setExpanded(true)
+                  }
+                }}
               >
-                Review Diffs
+                Review
               </button>
             </div>
           </div>

@@ -5,6 +5,7 @@ import type {
   LLMStreamEvent,
   StreamOptions,
   GenerateOptions,
+  NormalizedLLMUsage,
   ReasoningHistoryMode,
 } from "./types.js"
 import {
@@ -472,13 +473,21 @@ export class BaseLLMClient implements LLMClient {
           }
           const usage = result.usage
           const usageData = await usage.catch(() => null)
+          const providerMetadata = await optionalResultPromise<
+            Record<string, Record<string, unknown>>
+          >(result, "providerMetadata")
+          const response = await optionalResultPromise<{ modelId?: string }>(
+            result,
+            "response",
+          )
           yield {
             type: "finish",
             finishReason: finishPart.finishReason ?? "stop",
-            usage: {
-              inputTokens: usageData?.promptTokens ?? 0,
-              outputTokens: usageData?.completionTokens ?? 0,
-            },
+            usage: normalizeLLMUsage(
+              usageData,
+              providerMetadata,
+              response?.modelId,
+            ),
           }
           break
         }
@@ -558,19 +567,109 @@ export class BaseLLMClient implements LLMClient {
 
       const usage = result.usage
       const usageData = await usage.catch(() => null)
+      const providerMetadata = await optionalResultPromise<
+        Record<string, Record<string, unknown>>
+      >(result, "providerMetadata")
+      const response = await optionalResultPromise<{ modelId?: string }>(
+        result,
+        "response",
+      )
       yield {
         type: "finish",
         finishReason: "stop",
-        usage: {
-          inputTokens: usageData?.promptTokens ?? 0,
-          outputTokens: usageData?.completionTokens ?? 0,
-        },
+        usage: normalizeLLMUsage(
+          usageData,
+          providerMetadata,
+          response?.modelId,
+        ),
       }
     }
   }
 
   async generateStructured<T>(opts: GenerateOptions<T>): Promise<T> {
     return generateStructuredWithFallback(this, opts)
+  }
+}
+
+async function optionalResultPromise<T>(
+  result: unknown,
+  key: string,
+): Promise<T | undefined> {
+  const candidate = asRecord(result)?.[key]
+  if (!candidate || typeof (candidate as Promise<T>).then !== "function") {
+    return undefined
+  }
+  try {
+    return await (candidate as Promise<T>)
+  } catch {
+    return undefined
+  }
+}
+
+function finiteTokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0
+}
+
+/**
+ * Normalize AI SDK v4 usage at the provider boundary.
+ *
+ * OpenAI includes cached input in promptTokens and reasoning in
+ * completionTokens. Anthropic excludes cache creation/read from promptTokens.
+ * Splitting the buckets here prevents every downstream consumer from
+ * reinterpreting provider metadata and, critically, prevents double counting.
+ */
+export function normalizeLLMUsage(
+  usage:
+    | {
+        promptTokens?: unknown
+        completionTokens?: unknown
+        totalTokens?: unknown
+      }
+    | null
+    | undefined,
+  providerMetadata:
+    | Record<string, Record<string, unknown>>
+    | null
+    | undefined,
+  modelId?: string,
+): NormalizedLLMUsage {
+  const promptTokens = finiteTokenCount(usage?.promptTokens)
+  const completionTokens = finiteTokenCount(usage?.completionTokens)
+  const openai = asRecord(providerMetadata?.["openai"])
+  const anthropic = asRecord(providerMetadata?.["anthropic"])
+
+  const openaiCacheRead = finiteTokenCount(openai?.["cachedPromptTokens"])
+  const reasoningTokens = finiteTokenCount(openai?.["reasoningTokens"])
+  const anthropicCacheRead = finiteTokenCount(
+    anthropic?.["cacheReadInputTokens"],
+  )
+  const anthropicCacheWrite = finiteTokenCount(
+    anthropic?.["cacheCreationInputTokens"],
+  )
+
+  const cacheReadTokens = Math.max(openaiCacheRead, anthropicCacheRead)
+  const cacheWriteTokens = anthropicCacheWrite
+  const inputTokens = Math.max(0, promptTokens - openaiCacheRead)
+  const outputTokens = Math.max(0, completionTokens - reasoningTokens)
+  const totalTokens =
+    inputTokens +
+    outputTokens +
+    reasoningTokens +
+    cacheReadTokens +
+    cacheWriteTokens
+
+  return {
+    inputTokens,
+    outputTokens,
+    ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+    ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+    totalTokens,
+    ...(typeof modelId === "string" && modelId.trim()
+      ? { modelId }
+      : {}),
   }
 }
 

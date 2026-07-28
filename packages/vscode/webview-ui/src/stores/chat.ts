@@ -64,6 +64,7 @@ export interface SessionMessage {
   ts: number
   role: "user" | "assistant" | "system" | "tool"
   content: string | MessagePart[]
+  durationMs?: number
   summary?: boolean
   presetName?: string
 }
@@ -297,6 +298,9 @@ interface ChatState {
   contextUsedTokens: number
   contextLimitTokens: number
   contextPercent: number
+  contextSource?: "provider" | "hybrid" | "estimated"
+  contextProviderTokens?: number
+  contextPendingTokens?: number
   inputValue: string
   view: AppView
   /** Images attached to the next message (base64 data, no data URL prefix). */
@@ -511,7 +515,15 @@ export type AgentEvent =
   | { type: "index_update"; status: IndexStatusKind }
   | { type: "vector_db_progress"; message?: string }
   | { type: "vector_db_ready" }
-  | { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
+  | {
+      type: "context_usage"
+      usedTokens: number
+      limitTokens: number
+      percent: number
+      source?: "provider" | "hybrid" | "estimated"
+      providerTokens?: number
+      pendingTokens?: number
+    }
   | { type: "run_context"; mode: Mode; memoryCitations: string[]; taskIds: string[] }
   | { type: "session_saved"; sessionId: string }
   | { type: "plan_followup_ask"; planText: string }
@@ -527,7 +539,7 @@ export type AgentEvent =
   | { type: "remote_session_updated"; remoteSession: Record<string, unknown> }
   | { type: "plugin_hook"; pluginName: string; hookEvent: string; output: string; success: boolean }
   | { type: "error"; error: string; fatal?: boolean }
-  | { type: "done"; messageId: string }
+  | { type: "done"; messageId: string; durationMs?: number }
   | { type: "todo_updated"; todo: string }
   | { type: "doom_loop_detected"; tool: string }
 
@@ -627,8 +639,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   indexStatus: { state: "idle" },
   vectorDbProgressMessage: null,
   contextUsedTokens: 0,
-  contextLimitTokens: 128000,
+  contextLimitTokens: 0,
   contextPercent: 0,
+  contextSource: "estimated",
+  contextProviderTokens: 0,
+  contextPendingTokens: 0,
   inputValue: "",
   view: "chat",
   attachedImages: [],
@@ -973,7 +988,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Context usage belongs to the selected session. Reset it immediately so
     // an in-flight host response cannot make a blank new chat look like it
     // inherited the previous session's context.
-    set({ view: "chat", contextUsedTokens: 0, contextPercent: 0 })
+    set({
+      view: "chat",
+      contextUsedTokens: 0,
+      contextLimitTokens: 0,
+      contextPercent: 0,
+      contextSource: "estimated",
+      contextProviderTokens: 0,
+      contextPendingTokens: 0,
+    })
   },
 
   deleteSession: (sessionId) => {
@@ -1805,6 +1828,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           contextUsedTokens: event.usedTokens,
           contextLimitTokens: event.limitTokens,
           contextPercent: event.percent,
+          contextSource: event.source,
+          contextProviderTokens: event.providerTokens,
+          contextPendingTokens: event.pendingTokens,
         })
         break
 
@@ -1849,6 +1875,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 content: cleanedParts,
               }
             }
+            if (
+              typeof event.durationMs === "number" &&
+              Number.isFinite(event.durationMs) &&
+              event.durationMs >= 0
+            ) {
+              msgs[assistantIndex] = {
+                ...msgs[assistantIndex]!,
+                durationMs: Math.floor(event.durationMs),
+              }
+            }
           }
 
           const latestAssistant = msgs[assistantIndex]
@@ -1864,6 +1900,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ts: Date.now(),
               role: "assistant",
               content: fallbackText,
+              ...(typeof event.durationMs === "number" &&
+              Number.isFinite(event.durationMs) &&
+              event.durationMs >= 0
+                ? { durationMs: Math.floor(event.durationMs) }
+                : {}),
             })
           }
 

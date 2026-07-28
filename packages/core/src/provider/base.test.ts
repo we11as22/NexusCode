@@ -11,7 +11,7 @@ vi.mock("ai", async (importOriginal) => {
   }
 })
 
-import { BaseLLMClient } from "./base.js"
+import { BaseLLMClient, normalizeLLMUsage } from "./base.js"
 import type { LLMStreamEvent } from "./types.js"
 
 function streamResult(
@@ -78,7 +78,11 @@ describe("BaseLLMClient stream retry boundary", () => {
       {
         type: "finish",
         finishReason: "stop",
-        usage: { inputTokens: 1, outputTokens: 1 },
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          totalTokens: 2,
+        },
       },
     ])
   })
@@ -133,5 +137,72 @@ describe("BaseLLMClient stream retry boundary", () => {
     expect(events.filter((event) => event.type === "text_delta")).toEqual([
       { type: "text_delta", delta: "NEXUS_OK" },
     ])
+  })
+})
+
+describe("normalizeLLMUsage", () => {
+  it("splits OpenAI cached input and reasoning without double counting", () => {
+    expect(
+      normalizeLLMUsage(
+        { promptTokens: 100, completionTokens: 30 },
+        {
+          openai: {
+            cachedPromptTokens: 40,
+            reasoningTokens: 10,
+          },
+        },
+        "gpt-5",
+      ),
+    ).toEqual({
+      inputTokens: 60,
+      outputTokens: 20,
+      reasoningTokens: 10,
+      cacheReadTokens: 40,
+      totalTokens: 130,
+      modelId: "gpt-5",
+    })
+  })
+
+  it("adds Anthropic cache creation and read buckets to current context", () => {
+    expect(
+      normalizeLLMUsage(
+        { promptTokens: 20, completionTokens: 5 },
+        {
+          anthropic: {
+            cacheCreationInputTokens: 50,
+            cacheReadInputTokens: 100,
+          },
+        },
+        "claude-sonnet",
+      ),
+    ).toEqual({
+      inputTokens: 20,
+      outputTokens: 5,
+      cacheReadTokens: 100,
+      cacheWriteTokens: 50,
+      totalTokens: 175,
+      modelId: "claude-sonnet",
+    })
+  })
+
+  it("clamps invalid usage buckets", () => {
+    expect(
+      normalizeLLMUsage(
+        {
+          promptTokens: Number.NaN,
+          completionTokens: -4,
+        },
+        {
+          openai: {
+            cachedPromptTokens: -1,
+            reasoningTokens: Number.POSITIVE_INFINITY,
+          },
+        },
+      ),
+    ).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    })
   })
 })

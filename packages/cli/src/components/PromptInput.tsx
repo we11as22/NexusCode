@@ -72,6 +72,9 @@ type Props = {
     usedTokens: number
     limitTokens: number
     percent: number
+    source?: 'provider' | 'hybrid' | 'estimated'
+    providerTokens?: number
+    pendingTokens?: number
   } | null
   /** Granular auto-approve state for Nexus actions. */
   nexusAutoApprove?: {
@@ -870,13 +873,18 @@ Create a .md rule file with a descriptive name. The rule file should define clea
   }, [])
 
   const contextFooterText = useMemo(() => {
-    if (nexusContextUsage && nexusContextUsage.limitTokens > 0) {
-      return `ctx: ${formatCompactTokens(nexusContextUsage.usedTokens)}/${formatCompactTokens(nexusContextUsage.limitTokens)} (${Math.min(100, Math.round(nexusContextUsage.percent))}%)`
+    if (nexusContextUsage) {
+      if (nexusContextUsage.limitTokens > 0) {
+        return `ctx: ${formatCompactTokens(nexusContextUsage.usedTokens)}/${formatCompactTokens(nexusContextUsage.limitTokens)} (${Math.min(100, Math.round(nexusContextUsage.percent))}%)`
+      }
+      return `ctx: ${formatCompactTokens(nexusContextUsage.usedTokens)}/—`
     }
     return `ctx: ${Math.min(100, Math.round((tokenUsage / MAX_TOKENS) * 100))}%`
   }, [formatCompactTokens, nexusContextUsage, tokenUsage])
   const compactContextFooterText = nexusContextUsage
-    ? `ctx ${Math.min(100, Math.round(nexusContextUsage.percent))}%`
+    ? nexusContextUsage.limitTokens > 0
+      ? `ctx ${Math.min(100, Math.round(nexusContextUsage.percent))}%`
+      : `ctx ${formatCompactTokens(nexusContextUsage.usedTokens)}/—`
     : `ctx ${Math.min(100, Math.round((tokenUsage / MAX_TOKENS) * 100))}%`
   const displaySessionId =
     nexusSessionId && nexusSessionId.length > 12

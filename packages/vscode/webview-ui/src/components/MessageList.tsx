@@ -5,8 +5,9 @@ import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
 import { NEXUS_CHAT_LAYOUT_EVENT } from "../constants/chatLayoutEvent.js"
 import { NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX } from "../constants/questionnaire.js"
-import { ExploredSummaryInline, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
+import { ExploredSummaryInline } from "./ExploredProgressBlock.js"
 import { ThoughtBlock } from "./ThoughtBlock.js"
+import { CompletedWorkBlock } from "./CompletedWorkBlock.js"
 import { MermaidBlock } from "./MermaidBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
@@ -16,7 +17,10 @@ import {
   type ApprovalActionView,
 } from "../types/approval.js"
 import { useChatStore } from "../stores/chat.js"
-import { buildChatRenderItems as buildProjectedChatRenderItems } from "../transcript/renderProjection.js"
+import {
+  buildChatRenderItems as buildProjectedChatRenderItems,
+  type ChatRenderItem as ProjectedChatRenderItem,
+} from "../transcript/renderProjection.js"
 import {
   getParallelDelegatedAgentTaskDescriptions,
   isPureSubagentParallelInput,
@@ -329,31 +333,7 @@ interface Props {
 }
 
 type ChatRenderItem =
-  | {
-      type: "message"
-      key: string
-      message: SessionMessage
-      messageIndex: number
-      isComplete: boolean
-    }
-  | {
-      type: "assistant_part"
-      key: string
-      message: SessionMessage
-      messageIndex: number
-      isComplete: boolean
-      parts: MessagePart[]
-      part: MessagePart
-      partIndex: number
-      canonicalReplyIndex: number
-      isLastPart: boolean
-    }
-  | {
-      type: "explored"
-      key: string
-      prefixItems: ExploredPrefixItem[]
-      isRunning: boolean
-    }
+  | ProjectedChatRenderItem
   | {
       type: "compaction_live"
       key: string
@@ -595,6 +575,26 @@ function RenderItemRow({
           onLayoutHint={onListLayoutHint}
         />
       </div>
+    )
+  }
+
+  if (item.type === "completed_work") {
+    return (
+      <CompletedWorkBlock
+        durationMs={item.durationMs}
+        onLayoutHint={onListLayoutHint}
+      >
+        {item.items.map((child) => (
+          <div className="message-list-item" key={child.key}>
+            <RenderItemRow
+              item={child}
+              pendingApproval={pendingApproval}
+              onResolveApproval={onResolveApproval}
+              onListLayoutHint={onListLayoutHint}
+            />
+          </div>
+        ))}
+      </CompletedWorkBlock>
     )
   }
 

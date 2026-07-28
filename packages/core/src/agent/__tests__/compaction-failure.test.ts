@@ -123,6 +123,13 @@ async function runWith(options: {
     client: options.client,
     host,
     config: createTestConfig({
+      // These tests exercise overflow lifecycle rather than model discovery.
+      // Production now treats an unknown model window as unknown, so provide
+      // the explicit capability that the fixture previously inherited from
+      // the removed generic 128k fallback.
+      model: {
+        contextWindow: 128_000,
+      },
       summarization: {
         auto: options.auto ?? true,
       },
@@ -139,6 +146,30 @@ async function runWith(options: {
 }
 
 describe("agent compaction failure safety", () => {
+  it("persists and emits one turn duration on completion", async () => {
+    const compaction = compactionDouble({
+      result: { status: "skipped", reason: "no_new_messages" },
+      overflowTrueCount: 0,
+    })
+    const client = finalAnswerClient()
+
+    const { host, session } = await runWith({
+      compaction: compaction.value,
+      client: client.value,
+    })
+
+    const assistant = session.messages.find(
+      (message) => message.role === "assistant",
+    )
+    const done = host.events.find((event) => event.type === "done")
+    expect(assistant?.durationMs).toEqual(expect.any(Number))
+    expect(done).toMatchObject({
+      type: "done",
+      messageId: assistant?.id,
+      durationMs: assistant?.durationMs,
+    })
+  })
+
   it("honors summarization.auto=false without starting automatic compaction", async () => {
     const failure = new Error("must not compact")
     const compaction = compactionDouble({

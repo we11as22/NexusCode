@@ -4,7 +4,7 @@ import { getAssistantDisplaySegments, type ExploredPrefixItem } from "../compone
 const TODO_TOOL_NAMES = new Set(["TodoWrite", "update_todo_list"])
 const PLACEHOLDER_TEXT = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
 
-export type ChatRenderItem =
+export type ChatRenderLeaf =
   | {
       type: "message"
       key: string
@@ -29,6 +29,14 @@ export type ChatRenderItem =
       key: string
       prefixItems: ExploredPrefixItem[]
       isRunning: boolean
+    }
+export type ChatRenderItem =
+  | ChatRenderLeaf
+  | {
+      type: "completed_work"
+      key: string
+      durationMs: number
+      items: ChatRenderLeaf[]
     }
 
 function getCanonicalReplyIndex(parts: MessagePart[]): number {
@@ -75,10 +83,13 @@ function explorationSegmentIsRunning(
   })
 }
 
-export function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): ChatRenderItem[] {
-  const renderItems: ChatRenderItem[] = []
-
-  messages.forEach((message, messageIndex) => {
+function buildMessageRenderItems(
+  message: SessionMessage,
+  messageIndex: number,
+  messages: SessionMessage[],
+  isRunning: boolean,
+): ChatRenderLeaf[] {
+  const renderItems: ChatRenderLeaf[] = []
     const isComplete = !isRunning || messageIndex < messages.length - 1
 
     if (message.role !== "assistant" || typeof message.content === "string" || !Array.isArray(message.content)) {
@@ -89,7 +100,7 @@ export function buildChatRenderItems(messages: SessionMessage[], isRunning: bool
         messageIndex,
         isComplete,
       })
-      return
+      return renderItems
     }
 
     const parts = message.content as MessagePart[]
@@ -130,7 +141,118 @@ export function buildChatRenderItems(messages: SessionMessage[], isRunning: bool
         isLastPart: partIndex === parts.length - 1,
       })
     })
-  })
+
+  return renderItems
+}
+
+function nextUserMessageIndex(
+  messages: SessionMessage[],
+  startIndex: number,
+): number {
+  for (let index = startIndex + 1; index < messages.length; index += 1) {
+    if (messages[index]?.role === "user") return index
+  }
+  return messages.length
+}
+
+function completedAssistantIndex(
+  messages: SessionMessage[],
+  startIndex: number,
+  endIndex: number,
+): number {
+  for (let index = endIndex - 1; index > startIndex; index -= 1) {
+    const message = messages[index]
+    if (
+      message?.role === "assistant" &&
+      typeof message.durationMs === "number" &&
+      Number.isFinite(message.durationMs) &&
+      message.durationMs >= 0
+    ) {
+      return index
+    }
+  }
+  return -1
+}
+
+export function buildChatRenderItems(
+  messages: SessionMessage[],
+  isRunning: boolean,
+): ChatRenderItem[] {
+  const renderItems: ChatRenderItem[] = []
+
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex]!
+    if (message.role !== "user") {
+      renderItems.push(
+        ...buildMessageRenderItems(
+          message,
+          messageIndex,
+          messages,
+          isRunning,
+        ),
+      )
+      continue
+    }
+
+    renderItems.push(
+      ...buildMessageRenderItems(
+        message,
+        messageIndex,
+        messages,
+        isRunning,
+      ),
+    )
+    const endIndex = nextUserMessageIndex(messages, messageIndex)
+    const finalAssistantIndex = completedAssistantIndex(
+      messages,
+      messageIndex,
+      endIndex,
+    )
+    if (finalAssistantIndex < 0) continue
+
+    const technicalItems: ChatRenderLeaf[] = []
+    const finalAnswerItems: ChatRenderLeaf[] = []
+    for (
+      let turnMessageIndex = messageIndex + 1;
+      turnMessageIndex < endIndex;
+      turnMessageIndex += 1
+    ) {
+      const turnMessage = messages[turnMessageIndex]!
+      const messageItems = buildMessageRenderItems(
+        turnMessage,
+        turnMessageIndex,
+        messages,
+        isRunning,
+      )
+      if (turnMessageIndex !== finalAssistantIndex) {
+        technicalItems.push(...messageItems)
+        continue
+      }
+
+      for (const item of messageItems) {
+        if (
+          item.type === "message" ||
+          (item.type === "assistant_part" &&
+            item.part.type === "text" &&
+            item.partIndex === item.canonicalReplyIndex)
+        ) {
+          finalAnswerItems.push(item)
+        } else {
+          technicalItems.push(item)
+        }
+      }
+    }
+
+    const finalAssistant = messages[finalAssistantIndex]!
+    renderItems.push({
+      type: "completed_work",
+      key: `${message.id}-worked`,
+      durationMs: Math.floor(finalAssistant.durationMs ?? 0),
+      items: technicalItems,
+    })
+    renderItems.push(...finalAnswerItems)
+    messageIndex = endIndex - 1
+  }
 
   return renderItems
 }

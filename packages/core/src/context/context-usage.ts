@@ -2,12 +2,20 @@
  * Unified context / token display for CLI, VS Code, and agent loop.
  * Aligns with what we send to the model: active message window, capped tool outputs, system prompt, tools list overhead.
  */
+import { zodSchema } from "ai"
+import type { z } from "zod"
 import { estimateTokens } from "./condense.js"
 import { getMessagesForActiveContext } from "../session/active-context.js"
-import type { SessionMessage, MessagePart, ToolPart, ReasoningPart, ImagePart } from "../types.js"
+import type {
+  ImagePart,
+  MessagePart,
+  ProviderContextAnchor,
+  ReasoningPart,
+  SessionMessage,
+  ToolPart,
+} from "../types.js"
 
-/** Heuristic extra tokens per tool for JSON-schema / wire overhead (per tool, on top of name+description). */
-const TOOL_SCHEMA_OVERHEAD_TOKENS = 750
+const PENDING_ESTIMATE_SAFETY_FACTOR = 1.1
 
 /**
  * Model context window limit: config override or known defaults by model id substring.
@@ -22,6 +30,7 @@ export function getContextWindowLimit(modelId: string, configuredLimit?: number)
   // conservative when the route is unknown.
   if (lower.includes("minimax-m2.5")) return 196_608
   if (lower.includes("minimax-m2.7")) return 204_800
+  if (lower.includes("kilo-auto/free")) return 256_000
   if (lower.includes("qwen3-coder-plus")) return 1_000_000
   if (lower.includes("qwen3-coder-next")) return 262_144
   if (lower.includes("gpt-5")) return 272_000
@@ -33,7 +42,34 @@ export function getContextWindowLimit(modelId: string, configuredLimit?: number)
   if (lower.includes("gpt-3.5")) return 16_000
   if (lower.includes("gemini-2")) return 1_000_000
   if (lower.includes("gemini")) return 200_000
-  return 128_000
+  return 0
+}
+
+function estimateToolResultTokens(part: ToolPart): number {
+  if (part.compacted) return estimateTokens("[Old tool result content cleared]")
+  return part.output ? estimateTokens(part.output) : 0
+}
+
+function estimateMessageTokens(message: SessionMessage): number {
+  if (typeof message.content === "string") {
+    return estimateTokens(message.content)
+  }
+  let total = 0
+  for (const part of message.content as MessagePart[]) {
+    if (part.type === "text") {
+      total += estimateTokens(part.text)
+    } else if (part.type === "reasoning") {
+      total += estimateTokens((part as ReasoningPart).text ?? "")
+    } else if (part.type === "image") {
+      const image = part as ImagePart
+      total += Math.ceil((image.data?.length ?? 0) / 4)
+    } else if (part.type === "tool") {
+      const tool = part as ToolPart
+      if (tool.input) total += estimateTokens(JSON.stringify(tool.input))
+      total += estimateToolResultTokens(tool)
+    }
+  }
+  return total
 }
 
 /**
@@ -53,50 +89,108 @@ export function estimateActiveContextSessionTokens(messages: SessionMessage[]): 
       }
       continue
     }
-    if (typeof msg.content === "string") {
-      total += estimateTokens(msg.content)
-      continue
-    }
-    for (const part of msg.content as MessagePart[]) {
-      if (part.type === "text") {
-        total += estimateTokens(part.text)
-      } else if (part.type === "reasoning") {
-        total += estimateTokens((part as ReasoningPart).text ?? "")
-      } else if (part.type === "image") {
-        const ip = part as ImagePart
-        total += Math.ceil((ip.data?.length ?? 0) / 4)
-      } else if (part.type === "tool") {
-        const tp = part as ToolPart
-        if (tp.input) {
-          total += estimateTokens(JSON.stringify(tp.input))
-        }
-        if (tp.compacted) {
-          total += estimateTokens("[Old tool result content cleared]")
-        } else if (tp.output) {
-          total += estimateTokens(tp.output)
-        }
-      }
-    }
+    total += estimateMessageTokens(msg)
   }
   return total
 }
 
 /**
- * Rough token overhead for tool definitions sent with each request (name + description + schema fudge).
+ * Conservative estimate of the exact tool definitions sent to the provider.
  */
-export function estimateToolsDefinitionsTokens(tools: Array<{ name: string; description: string }>): number {
+export function estimateToolsDefinitionsTokens(
+  tools: Array<{
+    name: string
+    description: string
+    parameters?: z.ZodType<unknown>
+  }>,
+): number {
   let n = 0
   for (const t of tools) {
-    n += estimateTokens(`${t.name}\n${t.description}`)
-    n += TOOL_SCHEMA_OVERHEAD_TOKENS
+    const schema = t.parameters
+      ? zodSchema(t.parameters).jsonSchema
+      : { type: "object", properties: {} }
+    n += estimateTokens(
+      JSON.stringify({
+        name: t.name,
+        description: t.description,
+        parameters: schema,
+      }),
+    )
   }
-  return n
+  return Math.ceil(n * PENDING_ESTIMATE_SAFETY_FACTOR)
 }
 
 export type ContextUsageSnapshot = {
   usedTokens: number
   limitTokens: number
   percent: number
+  source: "provider" | "hybrid" | "estimated"
+  providerTokens: number
+  pendingTokens: number
+  modelId: string
+}
+
+export type PersistedContextUsage = {
+  usedTokens: number
+  limitTokens: number
+  percent: number
+  source?: "provider" | "hybrid" | "estimated"
+  providerTokens?: number
+  pendingTokens?: number
+  modelId?: string
+}
+
+/**
+ * A persisted usage sample is only meaningful for the model that produced it.
+ * Legacy samples had no model identity and could keep an obsolete 128k limit
+ * on screen after a provider/catalog update. Reject those samples and let the
+ * caller rebuild usage from the active session. For a matching model, retain
+ * the provider-measured used tokens but refresh the limit from current model
+ * metadata.
+ */
+export function reconcilePersistedContextUsage(
+  snapshot: PersistedContextUsage | undefined,
+  modelId: string,
+  configuredContextWindow?: number,
+): PersistedContextUsage | undefined {
+  if (!snapshot?.modelId || snapshot.modelId !== modelId) return undefined
+  const limitTokens = getContextWindowLimit(modelId, configuredContextWindow)
+  return {
+    ...snapshot,
+    limitTokens,
+    percent:
+      limitTokens > 0
+        ? Math.min(100, Math.round((snapshot.usedTokens / limitTokens) * 100))
+        : 0,
+  }
+}
+
+function estimatePendingAfterAnchor(
+  messages: SessionMessage[],
+  anchor: ProviderContextAnchor,
+): number | null {
+  const activeMessages = getMessagesForActiveContext(messages)
+  const anchorIndex = activeMessages.findIndex(
+    (message) => message.id === anchor.messageId,
+  )
+  if (anchorIndex < 0) return null
+
+  let pending = 0
+  const anchorMessage = activeMessages[anchorIndex]
+  if (
+    anchorMessage?.role === "assistant" &&
+    Array.isArray(anchorMessage.content)
+  ) {
+    for (const part of anchorMessage.content as MessagePart[]) {
+      if (part.type === "tool") {
+        pending += estimateToolResultTokens(part as ToolPart)
+      }
+    }
+  }
+  for (let index = anchorIndex + 1; index < activeMessages.length; index++) {
+    pending += estimateMessageTokens(activeMessages[index]!)
+  }
+  return pending
 }
 
 export function computeContextUsageMetrics(opts: {
@@ -105,12 +199,56 @@ export function computeContextUsageMetrics(opts: {
   toolsDefinitionTokens?: number
   modelId: string
   configuredContextWindow?: number
+  providerAnchor?: ProviderContextAnchor
 }): ContextUsageSnapshot & { sessionTokens: number; systemTokens: number; toolsTokens: number } {
   const sessionTokens = estimateActiveContextSessionTokens(opts.sessionMessages)
   const systemTokens = opts.systemPromptText ? estimateTokens(opts.systemPromptText) : 0
   const toolsTokens = opts.toolsDefinitionTokens ?? 0
-  const usedTokens = sessionTokens + systemTokens + toolsTokens
+  const manifestTokens = systemTokens + toolsTokens
+  const anchor =
+    opts.providerAnchor &&
+    (!opts.providerAnchor.modelId ||
+      opts.providerAnchor.modelId === opts.modelId)
+      ? opts.providerAnchor
+      : undefined
+  const pendingAfterAnchor = anchor
+    ? estimatePendingAfterAnchor(opts.sessionMessages, anchor)
+    : null
+  const manifestDelta = anchor
+    ? Math.max(0, manifestTokens - anchor.manifestTokens)
+    : 0
+  const rawPending =
+    pendingAfterAnchor == null
+      ? 0
+      : pendingAfterAnchor + manifestDelta
+  const pendingTokens =
+    rawPending > 0
+      ? Math.ceil(rawPending * PENDING_ESTIMATE_SAFETY_FACTOR)
+      : 0
+  const providerTokens =
+    anchor && pendingAfterAnchor != null ? anchor.usedTokens : 0
+  const source: ContextUsageSnapshot["source"] =
+    providerTokens > 0
+      ? pendingTokens > 0
+        ? "hybrid"
+        : "provider"
+      : "estimated"
+  const usedTokens =
+    source === "estimated"
+      ? sessionTokens + manifestTokens
+      : providerTokens + pendingTokens
   const limitTokens = getContextWindowLimit(opts.modelId, opts.configuredContextWindow)
   const percent = limitTokens > 0 ? Math.min(100, Math.round((usedTokens / limitTokens) * 100)) : 0
-  return { sessionTokens, systemTokens, toolsTokens, usedTokens, limitTokens, percent }
+  return {
+    sessionTokens,
+    systemTokens,
+    toolsTokens,
+    usedTokens,
+    limitTokens,
+    percent,
+    source,
+    providerTokens,
+    pendingTokens,
+    modelId: opts.modelId,
+  }
 }

@@ -3233,3 +3233,55 @@ input[type="text"]:focus-visible {
 .nexus-checkpoint-popover-confirm:hover {
   background: var(--vscode-button-hoverBackground);
 }
+
+.nexus-worked-block {
+  min-width: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-worked-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.75rem;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.nexus-worked-toggle:hover {
+  color: var(--vscode-foreground);
+}
+
+.nexus-worked-toggle:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.nexus-worked-chevron {
+  display: inline-block;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.nexus-worked-chevron--open {
+  transform: rotate(90deg);
+}
+
+.nexus-worked-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.25rem 0 0.35rem 0.75rem;
+  border-left: 1px solid var(--vscode-panel-border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nexus-worked-chevron {
+    transition: none;
+  }
+}

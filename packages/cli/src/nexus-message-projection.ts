@@ -73,10 +73,15 @@ export function decideAssistantDraftPublish(
   draft: NexusAssistantDraft,
   showReasoning: boolean,
   lastVisible: NexusAssistantDraftPreview | null,
+  force = false,
 ): NexusAssistantDraftPublishDecision {
   const nextVisible = {
-    reasoning: showReasoning ? completeLines(draft.reasoning) : "",
-    text: completeLines(draft.text),
+    reasoning: showReasoning
+      ? force
+        ? draft.reasoning
+        : completeLines(draft.reasoning)
+      : "",
+    text: force ? draft.text : completeLines(draft.text),
   }
   const hasVisibleContent =
     nextVisible.reasoning.length > 0 || nextVisible.text.length > 0

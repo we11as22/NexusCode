@@ -20,6 +20,27 @@ beforeEach(() => {
 })
 
 describe("agent-event delivery", () => {
+  it("preserves provider and pending context diagnostics", () => {
+    useChatStore.getState().handleAgentEvent({
+      type: "context_usage",
+      usedTokens: 29_300,
+      limitTokens: 256_000,
+      percent: 11,
+      source: "hybrid",
+      providerTokens: 27_800,
+      pendingTokens: 1_500,
+    })
+
+    expect(useChatStore.getState()).toMatchObject({
+      contextUsedTokens: 29_300,
+      contextLimitTokens: 256_000,
+      contextPercent: 11,
+      contextSource: "hybrid",
+      contextProviderTokens: 27_800,
+      contextPendingTokens: 1_500,
+    })
+  })
+
   it("clears session-scoped context immediately when creating a new session", () => {
     useChatStore.setState({
       messages: [
@@ -238,7 +259,48 @@ describe("agent-event delivery", () => {
     )
   })
 
-  it("deduplicates only an exact repeated transport sequence", () => {
+  it("keeps the turn duration on a generated fallback answer", () => {
+    useChatStore.setState({
+      messages: [
+        {
+          id: "user_tool_only",
+          ts: 1,
+          role: "user",
+          content: "Inspect it",
+        },
+        {
+          id: "assistant_tool_only",
+          ts: 2,
+          role: "assistant",
+          content: [
+            {
+              type: "tool",
+              id: "read-1",
+              tool: "Read",
+              status: "completed",
+              input: { path: "src/index.ts" },
+              output: "source",
+            },
+          ],
+        },
+      ],
+      isRunning: true,
+    })
+
+    useChatStore.getState().handleAgentEvent({
+      type: "done",
+      messageId: "assistant_tool_only",
+      durationMs: 4_200,
+    })
+
+    expect(useChatStore.getState().messages.at(-1)).toMatchObject({
+      role: "assistant",
+      durationMs: 4_200,
+      content: expect.stringContaining("completed without a final"),
+    })
+  })
+
+  it("deduplicates exact retries and coalesces distinct adjacent deltas", () => {
     const animationFrames: FrameRequestCallback[] = []
     vi.stubGlobal("window", {
       requestAnimationFrame(callback: FrameRequestCallback) {
@@ -286,7 +348,89 @@ describe("agent-event delivery", () => {
     })
     animationFrames.shift()?.(0)
 
-    expect(events).toHaveLength(2)
+    expect(events).toEqual([
+      {
+        type: "text_delta",
+        messageId: "assistant-sequence",
+        delta: "samesame",
+      },
+    ])
+    buffer.dispose()
+    vi.unstubAllGlobals()
+  })
+
+  it("flushes coalesced text before a terminal boundary event", () => {
+    const animationFrames: FrameRequestCallback[] = []
+    vi.stubGlobal("window", {
+      requestAnimationFrame(callback: FrameRequestCallback) {
+        animationFrames.push(callback)
+        return animationFrames.length
+      },
+      cancelAnimationFrame() {},
+    })
+    const events: unknown[] = []
+    const store = {
+      handleStateUpdate() {},
+      handleSubmissionResult() {},
+      handleAgentEvent(event: unknown) {
+        events.push(event)
+      },
+      handleIndexStatus() {},
+      handleSessionList() {},
+      handleSessionListLoading() {},
+      handleConfigLoaded() {},
+      handleMcpServerStatus() {},
+      handleSlashCommandCatalog() {},
+      handlePendingApproval() {},
+      appendToInput() {},
+      handleModelsCatalog() {},
+      handleAgentPresets() {},
+      handleAgentPresetOptions() {},
+      handleSkillDefinitions() {},
+      setView() {},
+    }
+    const buffer = createExtensionMessageBuffer(store)
+    buffer.enqueue({
+      type: "agentEvent",
+      seq: 1,
+      event: {
+        type: "text_delta",
+        messageId: "assistant-1",
+        delta: "smooth ",
+      },
+    })
+    buffer.enqueue({
+      type: "agentEvent",
+      seq: 2,
+      event: {
+        type: "text_delta",
+        messageId: "assistant-1",
+        delta: "stream",
+      },
+    })
+    buffer.enqueue({
+      type: "agentEvent",
+      seq: 3,
+      event: {
+        type: "done",
+        messageId: "assistant-1",
+        durationMs: 20,
+      },
+    })
+    animationFrames.shift()?.(0)
+
+    expect(events).toEqual([
+      {
+        type: "text_delta",
+        messageId: "assistant-1",
+        delta: "smooth stream",
+      },
+      {
+        type: "done",
+        messageId: "assistant-1",
+        durationMs: 20,
+      },
+    ])
     buffer.dispose()
     vi.unstubAllGlobals()
   })

@@ -12,6 +12,7 @@ import * as os from "node:os"
 import * as crypto from "node:crypto"
 import type {
   MessagePart,
+  ProviderContextAnchor,
   SessionMessage,
   ToolPart,
 } from "../types.js"
@@ -62,7 +63,16 @@ export function getSessionsDir(cwd: string, homeDir = path.join(os.homedir(), ".
   return path.join(homeDir, "sessions", projectHash(cwd))
 }
 
-export type StoredContextUsage = { usedTokens: number; limitTokens: number; percent: number }
+export type StoredContextUsage = {
+  usedTokens: number
+  limitTokens: number
+  percent: number
+  source?: "provider" | "hybrid" | "estimated"
+  providerTokens?: number
+  pendingTokens?: number
+  /** Model identity that makes the persisted usage/limit safe to restore. */
+  modelId?: string
+}
 
 export interface StoredSession {
   id: string
@@ -71,6 +81,7 @@ export interface StoredSession {
   title?: string
   todo?: string
   contextUsage?: StoredContextUsage
+  providerContextAnchor?: ProviderContextAnchor
   messages: SessionMessage[]
   /** Monotonic durable journal revision. Legacy v1 files load as revision 0. */
   revision?: number
@@ -196,10 +207,47 @@ function assertSafeSessionId(sessionId: string): void {
 function isContextUsage(value: unknown): value is StoredContextUsage {
   if (!value || typeof value !== "object") return false
   const candidate = value as Partial<StoredContextUsage>
-  return (
+  const validBase =
     typeof candidate.usedTokens === "number" &&
     typeof candidate.limitTokens === "number" &&
     typeof candidate.percent === "number"
+  const validSource =
+    candidate.source === undefined ||
+    candidate.source === "provider" ||
+    candidate.source === "hybrid" ||
+    candidate.source === "estimated"
+  const validOptionalCount = (count: unknown) =>
+    count === undefined ||
+    (typeof count === "number" && Number.isFinite(count) && count >= 0)
+  return (
+    validBase &&
+    validSource &&
+    validOptionalCount(candidate.providerTokens) &&
+    validOptionalCount(candidate.pendingTokens) &&
+    (candidate.modelId === undefined ||
+      typeof candidate.modelId === "string")
+  )
+}
+
+function isProviderContextAnchor(
+  value: unknown,
+): value is ProviderContextAnchor {
+  if (!value || typeof value !== "object") return false
+  const candidate = value as Partial<ProviderContextAnchor>
+  return (
+    typeof candidate.messageId === "string" &&
+    candidate.messageId.length > 0 &&
+    typeof candidate.usedTokens === "number" &&
+    Number.isFinite(candidate.usedTokens) &&
+    candidate.usedTokens >= 0 &&
+    typeof candidate.manifestTokens === "number" &&
+    Number.isFinite(candidate.manifestTokens) &&
+    candidate.manifestTokens >= 0 &&
+    typeof candidate.recordedAt === "number" &&
+    Number.isSafeInteger(candidate.recordedAt) &&
+    candidate.recordedAt >= 0 &&
+    (candidate.modelId === undefined ||
+      typeof candidate.modelId === "string")
   )
 }
 
@@ -222,6 +270,9 @@ function normalizeStoredSession(
     ...(typeof value.title === "string" ? { title: value.title } : {}),
     todo: typeof value.todo === "string" ? value.todo : "",
     ...(isContextUsage(value.contextUsage) ? { contextUsage: value.contextUsage } : {}),
+    ...(isProviderContextAnchor(value.providerContextAnchor)
+      ? { providerContextAnchor: value.providerContextAnchor }
+      : {}),
     messages: value.messages as SessionMessage[],
     revision,
   }
@@ -251,6 +302,9 @@ function createSnapshot(
     ...(typeof session.title === "string" ? { title: session.title } : {}),
     todo: typeof session.todo === "string" ? session.todo : "",
     ...(session.contextUsage ? { contextUsage: session.contextUsage } : {}),
+    ...(session.providerContextAnchor
+      ? { providerContextAnchor: session.providerContextAnchor }
+      : {}),
     messages: session.messages,
   }
   return {
