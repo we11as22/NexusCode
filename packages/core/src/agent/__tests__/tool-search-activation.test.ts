@@ -111,7 +111,10 @@ describe("ToolSearch run-local activation", () => {
     const deferredTool: ToolDef = {
       name: "DeferredWidget",
       description: "Inspect a deferred widget by id.",
-      parameters: z.object({ id: z.string() }),
+      parameters: z.object({
+        id: z.string(),
+        tags: z.array(z.string()).optional(),
+      }),
       readOnly: true,
       shouldDefer: true,
       async execute({ id }) {
@@ -156,7 +159,7 @@ describe("ToolSearch run-local activation", () => {
       getModel: () => ({}),
     } as unknown as LLMClient
 
-    await runWithTools({
+    const session = await runWithTools({
       tools: [toolSearchTool, deferredTool],
       client,
       config: createTestConfig({
@@ -169,6 +172,7 @@ describe("ToolSearch run-local activation", () => {
     expect(requests[0]).not.toContain("DeferredWidget")
     expect(requests[1]).toContain("DeferredWidget")
     expect(deferredExecutions).toBe(1)
+    expect(lastToolOutput(session, "ToolSearch")).toContain('"type": "array"')
   })
 
   it("does not execute a newly discovered schema in the same provider response", async () => {
@@ -315,6 +319,93 @@ describe("ToolSearch run-local activation", () => {
 
     expect(requests[0]).toContain("DeferredResume")
     expect(requests[0]).not.toContain("ForbiddenOldName")
+  })
+
+  it("restores a read-only discovery across compaction but re-filters it by the current mode", async () => {
+    const cwd = process.cwd()
+    const session = createFakeSession(cwd)
+    const priorAssistant = session.addMessage({
+      role: "assistant",
+      content: "",
+    })
+    session.addToolPart(priorAssistant.id, {
+      type: "tool",
+      id: "persisted-before-compaction",
+      tool: "ToolSearch",
+      status: "completed",
+      input: { query: "select:DeferredReadOnly,DeferredMutating" },
+      output: "DeferredReadOnly\nDeferredMutating",
+      activatedToolNames: ["DeferredReadOnly", "DeferredMutating"],
+    })
+    session.addMessage({
+      role: "assistant",
+      content: "Prior context was compacted.",
+      summary: true,
+    })
+    session.addMessage({ role: "user", content: "continue in read-only mode" })
+    const requests: string[][] = []
+    const readOnlyTool: ToolDef = {
+      name: "DeferredReadOnly",
+      description: "Inspect a value without mutation.",
+      parameters: z.object({}),
+      readOnly: true,
+      shouldDefer: true,
+      async execute() {
+        return { success: true, output: "available" }
+      },
+    }
+    const mutatingTool: ToolDef = {
+      name: "DeferredMutating",
+      description: "Mutate a value.",
+      parameters: z.object({}),
+      readOnly: false,
+      shouldDefer: true,
+      async execute() {
+        throw new Error("forbidden tool executed")
+      },
+    }
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream(request: StreamOptions) {
+        requests.push(toolNames(request))
+        yield { type: "text_delta" as const, delta: "resumed safely" }
+        yield { type: "finish" as const, finishReason: "stop" as const }
+      },
+      async generateStructured() {
+        return { selected: [] }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
+      client,
+      host: createFakeHost({ cwd }),
+      config: createTestConfig({
+        memory: { sessionMemoryEnabled: false },
+        tools: { deferredLoadingMode: "always" },
+      }),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "ask",
+      tools: [toolSearchTool, readOnlyTool, mutatingTool],
+      skills: [],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(requests[0]).toContain("DeferredReadOnly")
+    expect(requests[0]).not.toContain("DeferredMutating")
   })
 
   it("uses deterministic MCP discovery without the legacy LLM classifier", async () => {

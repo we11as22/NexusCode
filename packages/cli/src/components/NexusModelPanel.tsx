@@ -224,6 +224,7 @@ export function NexusModelPanel({
             provider: resolved.provider as ProviderConfig['provider'],
             id: resolved.id,
             baseUrl: resolved.baseUrl,
+            contextWindow: resolved.contextWindow,
           } as ProviderConfig,
         })
           .then(() => onClose({ saved: true }))

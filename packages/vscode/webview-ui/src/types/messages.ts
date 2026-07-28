@@ -8,9 +8,21 @@ export interface ModelsCatalogFromCore {
     id: string
     name: string
     baseUrl: string
-    models: Array<{ id: string; name: string; free: boolean; recommendedIndex?: number }>
+    models: Array<{
+      id: string
+      name: string
+      free: boolean
+      contextWindow?: number
+      recommendedIndex?: number
+    }>
   }>
-  recommended: Array<{ providerId: string; modelId: string; name: string; free: boolean }>
+  recommended: Array<{
+    providerId: string
+    modelId: string
+    name: string
+    free: boolean
+    contextWindow?: number
+  }>
 }
 
 /** Agent preset (vector + skills + MCP + rules from .nexus/agent-configs.json). */

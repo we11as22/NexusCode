@@ -41,9 +41,9 @@ describe("CLI agent-event stream", () => {
     expect(replSource).toContain("nexusBootstrap && !isLoading")
   })
 
-  it("replaces the TUI transcript from compacted session state", () => {
+  it("replaces the live TUI with a bounded compaction boundary", () => {
     expect(source).toContain("type: 'nexus_session_sync'")
-    expect(source).toContain("replMessagesFromSession(session.messages)")
+    expect(source).toContain("compactTimelineAfterBoundary(consumed)")
     expect(replSource.match(/message\.type === 'nexus_session_sync'/g)).toHaveLength(3)
   })
 })

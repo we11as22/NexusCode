@@ -19,7 +19,7 @@ export const globFileSearchTool: ToolDef<z.infer<typeof globSchema>> = {
 - Returns matching file paths sorted by modification time (newest first). Capped at 500 results.
 - Use this tool when you need to find files by name or path pattern. Prefer Glob over List when you know the pattern (e.g. all .ts files, all package.json).
 - When NOT to use: finding by content → Grep; finding by meaning → CodebaseSearch; listing directory structure → List.
-- For open-ended discovery that may require multiple rounds, run multiple Glob/Grep/CodebaseSearch calls in parallel in one turn, or use SpawnAgent for broad research when that will clearly save context.
+- For open-ended discovery that may require multiple rounds, run multiple Glob/Grep/CodebaseSearch calls in parallel in one turn, or use TaskCreate(kind: "agent") for broad research when that will clearly save context.
 - You can call multiple tools in a single response. Prefer batching multiple Glob (or Glob + Grep) calls in parallel when they are independent.`,
   parameters: globSchema,
   readOnly: true,

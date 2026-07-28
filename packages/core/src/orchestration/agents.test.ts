@@ -63,9 +63,23 @@ describe("agent definition discovery", () => {
 
     expect(explore).toMatchObject({
       builtin: true,
+      preferredMode: "ask",
       tools: expect.arrayContaining(["Read", "Grep"]),
     })
     expect(explore?.systemPrompt).toBeUndefined()
+  })
+
+  it("keeps built-in research roles read-only by default", async () => {
+    const root = await fixture()
+    const agents = await loadAgentDefinitions(root)
+    const plan = agents.find((agent) => agent.agentType === "Plan")
+
+    expect(agents.find((agent) => agent.agentType === "Explore")?.preferredMode)
+      .toBe("ask")
+    expect(plan?.preferredMode).toBe("ask")
+    expect(plan?.tools).not.toContain("TaskUpdate")
+    expect(agents.find((agent) => agent.agentType === "GeneralPurpose")?.preferredMode)
+      .toBeUndefined()
   })
 
   it("loads trusted plugin agents but lets an explicit project agent override a plugin default", async () => {

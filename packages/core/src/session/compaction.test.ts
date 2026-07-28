@@ -5,6 +5,78 @@ import {
   compactSessionAndPersist,
   createCompaction,
 } from "./compaction.js"
+import { getMessagesForActiveContext } from "./active-context.js"
+
+describe("session compaction boundaries", () => {
+  it("uses the model-window percentage capped by the response reserve", () => {
+    const compaction = createCompaction()
+
+    expect(compaction.isOverflow(169_999, 200_000, 0.85)).toBe(false)
+    expect(compaction.isOverflow(170_000, 200_000, 0.85)).toBe(true)
+    // On a small window the fixed reserve is the tighter safety boundary.
+    expect(compaction.isOverflow(79_999, 100_000, 0.85)).toBe(false)
+    expect(compaction.isOverflow(80_000, 100_000, 0.85)).toBe(true)
+  })
+
+  it("summarizes the old head and preserves recent turns verbatim", async () => {
+    const session = createFakeSession()
+    const originalIds: string[] = []
+    for (let turn = 0; turn < 6; turn++) {
+      originalIds.push(
+        session.addMessage({
+          role: "user",
+          content: `user-${turn}`,
+        }).id,
+      )
+      originalIds.push(
+        session.addMessage({
+          role: "assistant",
+          content: `assistant-${turn}`,
+        }).id,
+      )
+    }
+    let requestText = ""
+    const client = {
+      providerName: "test",
+      modelId: "minimax/minimax-m2.5",
+      async *stream(request: {
+        messages: Array<{ role: string; content: string }>
+      }) {
+        requestText = request.messages.map((message) => message.content).join("\n")
+        yield {
+          type: "text_delta" as const,
+          delta: "## Primary Request and Intent\nContinue safely.",
+        }
+        yield { type: "finish" as const }
+      },
+    } as unknown as LLMClient
+
+    const result = await createCompaction().compact(
+      session,
+      client,
+      undefined,
+      {
+        force: true,
+        keepRecentMessages: 4,
+        inputTokenBudget: 100_000,
+      },
+    )
+
+    expect(result.status).toBe("compacted")
+    expect(requestText).toContain("user-0")
+    expect(requestText).toContain("assistant-3")
+    expect(requestText).not.toContain("user-4")
+
+    const active = getMessagesForActiveContext(session.messages)
+    expect(active[0]?.summary).toBe(true)
+    expect(active.slice(1).map((message) => message.id)).toEqual(
+      originalIds.slice(-4),
+    )
+    expect(session.messages.filter((message) => !message.summary)).toHaveLength(
+      originalIds.length,
+    )
+  })
+})
 
 describe("session compaction recovery state", () => {
   it("appends exact structured mode, task, memory, and artifact references", async () => {

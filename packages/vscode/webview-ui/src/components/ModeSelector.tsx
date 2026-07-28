@@ -18,10 +18,14 @@ export function ModeSelector() {
         {MODES.map(m => (
           <button
             key={m.id}
-            onClick={() => setMode(m.id)}
-            title={m.description}
+            onClick={() => {
+              if (!isRunning) setMode(m.id)
+            }}
+            disabled={isRunning}
+            title={isRunning ? "Mode can be changed after this turn." : m.description}
             className={`
               flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold transition-colors
+              disabled:cursor-not-allowed disabled:opacity-60
               ${mode === m.id
                 ? "bg-[var(--nexus-accent)] text-white"
                 : "text-[var(--vscode-descriptionForeground)] hover:bg-[var(--vscode-list-hoverBackground)] hover:text-[var(--vscode-foreground)]"

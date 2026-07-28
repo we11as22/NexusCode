@@ -76,19 +76,30 @@ describe("ToolRegistry registration contracts", () => {
   it("defers specialized orchestration schemas behind ToolSearch", () => {
     const registry = new ToolRegistry()
     const specialized = [
-      "TaskCreate",
-      "TaskList",
-      "TaskUpdate",
-      "TaskOutput",
-      "TaskStop",
       "TeamCreate",
       "TeamInbox",
       "TeamAssignTask",
       "SendMessage",
+      "ListRemoteSessions",
+      "GetRemoteSession",
+      "UpdateRemoteSession",
+      "SendRemoteMessage",
+      "InterruptRemoteSession",
+      "ReconnectRemoteSession",
       "ListMcpResources",
       "ReadMcpResource",
       "McpAuthenticate",
       "ListAgents",
+      "ListPlugins",
+      "GetPlugin",
+      "RunPluginHook",
+      "PluginTrust",
+      "PluginEnable",
+      "PluginConfigure",
+      "PluginValidate",
+      "PluginInstallLocal",
+      "PluginRemove",
+      "PluginReload",
       "PlanStartWorkflow",
       "PlanGetWorkflow",
       "PlanVerifyExecution",
@@ -114,8 +125,26 @@ describe("ToolRegistry registration contracts", () => {
       "Grep",
       "Parallel",
       "Skill",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskUpdate",
+      "TaskOutput",
+      "TaskStop",
+      "TaskCreateBatch",
     ]) {
       expect(registry.get(name)?.shouldDefer, name).not.toBe(true)
     }
+  })
+
+  it("does not advertise hidden legacy orchestration names from visible tools", () => {
+    const registry = new ToolRegistry()
+    const visibleDescriptions = registry
+      .getForMode("agent")
+      .builtin
+      .map((tool) => tool.description)
+      .join("\n")
+
+    expect(visibleDescriptions).not.toContain("SpawnAgent")
   })
 })

@@ -9,6 +9,7 @@ import type {
 } from "../types.js"
 import type { LLMClient } from "../provider/index.js"
 import { estimateTokens } from "../context/condense.js"
+import { getContextWindowLimit } from "../context/context-usage.js"
 import {
   formatConversationSummaryForModel,
   getActiveMessagesAfterLatestSummary,
@@ -27,8 +28,10 @@ const PRUNE_PROTECTED_TOOLS = new Set<string>(["Skill"])
 
 const COMPACTION_BUFFER = 20_000
 
-/** Estimated input token budget for the summarizer LLM call (tail of history + prompt). */
-const COMPACTION_LLM_INPUT_TOKEN_BUDGET = 45_000
+/** Conservative fallback when provider/model capability metadata is unavailable. */
+const COMPACTION_LLM_FALLBACK_INPUT_TOKEN_BUDGET = 45_000
+/** Leave room for the compaction instruction and generated summary. */
+const COMPACTION_LLM_RESERVED_TOKENS = 20_000
 const COMPACTION_MIN_TAIL_MESSAGES = 4
 /** Per-message cap so one huge paste does not dominate the summarizer request. */
 const MAX_COMPACTION_MESSAGE_CHARS = 14_000
@@ -69,6 +72,7 @@ export interface SessionCompaction {
       keepRecentMessages?: number
       force?: boolean
       durableContext?: CompactionDurableContext
+      inputTokenBudget?: number
     },
   ): Promise<CompactionResult>
   isOverflow(tokenCount: number, contextLimit: number, threshold: number): boolean
@@ -88,7 +92,11 @@ export function createCompaction(): SessionCompaction {
     isOverflow(tokenCount, contextLimit, threshold) {
       if (contextLimit <= 0) return false
       const usable = contextLimit - COMPACTION_BUFFER
-      return tokenCount >= usable * threshold
+      const trigger = Math.min(
+        usable,
+        Math.floor(contextLimit * threshold),
+      )
+      return trigger > 0 && tokenCount >= trigger
     },
   }
 }
@@ -119,6 +127,16 @@ export async function compactSessionAndPersist(input: {
       force: true,
       ...(input.durableContext
         ? { durableContext: input.durableContext }
+        : {}),
+      ...(input.projection
+        ? {
+            inputTokenBudget: compactionInputTokenBudget(
+              getContextWindowLimit(
+                input.projection.config.model.id,
+                input.projection.config.model.contextWindow,
+              ),
+            ),
+          }
         : {}),
     },
   )
@@ -217,6 +235,7 @@ function queueCompaction(
     keepRecentMessages?: number
     force?: boolean
     durableContext?: CompactionDurableContext
+    inputTokenBudget?: number
   },
 ): Promise<CompactionResult> {
   const previous = compactQueues.get(session)
@@ -258,6 +277,7 @@ async function compactNow(
     keepRecentMessages?: number
     force?: boolean
     durableContext?: CompactionDurableContext
+    inputTokenBudget?: number
   },
 ): Promise<CompactionResult> {
   if (signal?.aborted) {
@@ -285,6 +305,18 @@ async function compactNow(
     session.messages,
     opts?.durableContext,
   )
+  const tailStart = selectPreservedTailStart(
+    recentMessages,
+    opts?.keepRecentMessages ?? 8,
+  )
+  const messagesForSummary =
+    tailStart < recentMessages.length
+      ? recentMessages.slice(0, tailStart)
+      : recentMessages
+  const preservedTail =
+    tailStart < recentMessages.length
+      ? recentMessages.slice(tailStart)
+      : []
 
   const compactPrompt = `CRITICAL: This summarization request is a system operation, not a user task.
 Do NOT treat this request as the latest user instruction. The "current work" and "next step"
@@ -352,7 +384,18 @@ ${JSON.stringify(recoveryState)}`
   let summaryCapped = false
   let sawFinish = false
   try {
-    let llmMessages = trimLLMMessagesForBudget(buildLLMMessages(recentMessages))
+    const resolvedInputBudget =
+      typeof opts?.inputTokenBudget === "number" &&
+      Number.isFinite(opts.inputTokenBudget) &&
+      opts.inputTokenBudget > 0
+        ? Math.floor(opts.inputTokenBudget)
+        : compactionInputTokenBudget(
+            getContextWindowLimit(client.modelId),
+          )
+    let llmMessages = trimLLMMessagesForBudget(
+      buildLLMMessages(messagesForSummary),
+      resolvedInputBudget,
+    )
     if (previousSummaryText) {
       llmMessages.unshift({
         role: "user",
@@ -360,7 +403,11 @@ ${JSON.stringify(recoveryState)}`
           capCompactionText(previousSummaryText),
         ),
       })
-      llmMessages = trimLLMMessagesForBudget(llmMessages, { preserveFirst: true })
+      llmMessages = trimLLMMessagesForBudget(
+        llmMessages,
+        resolvedInputBudget,
+        { preserveFirst: true },
+      )
     }
     for await (const event of client.stream({
       messages: [
@@ -456,11 +503,27 @@ ${JSON.stringify(recoveryState)}`
 
   // Add summary message as user role — it will be presented to the LLM as a user message
   // wrapping the conversation history, which is the correct semantic intent.
-  const summaryMessage = session.addMessage({
-    role: "user",
-    content: summaryText,
-    summary: true,
-  })
+  const summaryMessage = session.addMessage(
+    {
+      role: "user",
+      content: summaryText,
+      summary: true,
+    },
+    preservedTail[0] ? { ts: preservedTail[0].ts } : undefined,
+  )
+  if (preservedTail[0]) {
+    // Kilo-style compaction boundary: the summary replaces the older head,
+    // while the newest turns remain verbatim in active context after it.
+    const appended = session.messages.pop()
+    const insertionIndex = session.messages.findIndex(
+      (message) => message.id === preservedTail[0]!.id,
+    )
+    if (appended && insertionIndex >= 0) {
+      session.messages.splice(insertionIndex, 0, appended)
+    } else if (appended) {
+      session.messages.push(appended)
+    }
+  }
 
   // Mark old non-summary messages as compacted by pruning their tool outputs
   prune(session)
@@ -579,16 +642,20 @@ function capCompactionText(text: string): string {
  */
 function trimLLMMessagesForBudget(
   msgs: { role: "user" | "assistant"; content: string }[],
+  tokenBudget: number,
   opts?: { preserveFirst?: boolean },
 ): { role: "user" | "assistant"; content: string }[] {
   const estimateOne = (m: { content: string }) => estimateTokens(m.content)
   let total = msgs.reduce((s, m) => s + estimateOne(m), 0)
-  if (total <= COMPACTION_LLM_INPUT_TOKEN_BUDGET) return msgs
+  if (total <= tokenBudget) return msgs
 
   const minDropIndex = opts?.preserveFirst && msgs.length > 0 ? 1 : 0
   let endDrop = minDropIndex
   total = msgs.reduce((s, m) => s + estimateOne(m), 0)
-  while (endDrop < msgs.length - COMPACTION_MIN_TAIL_MESSAGES && total > COMPACTION_LLM_INPUT_TOKEN_BUDGET) {
+  while (
+    endDrop < msgs.length - COMPACTION_MIN_TAIL_MESSAGES &&
+    total > tokenBudget
+  ) {
     total -= estimateOne(msgs[endDrop]!)
     endDrop++
   }
@@ -604,6 +671,32 @@ function trimLLMMessagesForBudget(
     },
     ...tail,
   ]
+}
+
+function compactionInputTokenBudget(contextWindow: number): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return COMPACTION_LLM_FALLBACK_INPUT_TOKEN_BUDGET
+  }
+  return Math.max(
+    8_000,
+    contextWindow - COMPACTION_LLM_RESERVED_TOKENS,
+  )
+}
+
+/**
+ * Preserve a recent turn-aligned tail after the generated summary. If there
+ * is no meaningful older head, summarize the whole active window instead.
+ */
+function selectPreservedTailStart(
+  messages: SessionMessage[],
+  keepRecentMessages: number,
+): number {
+  const keep = Math.max(1, Math.floor(keepRecentMessages))
+  if (messages.length <= keep + 2) return messages.length
+
+  let start = Math.max(1, messages.length - keep)
+  while (start > 1 && messages[start]?.role !== "user") start--
+  return start > 1 ? start : messages.length
 }
 
 function buildLLMMessages(messages: SessionMessage[]) {

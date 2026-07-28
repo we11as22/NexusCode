@@ -12,6 +12,7 @@ function prompt(text: string): QueuedPrompt {
     id: text,
     text,
     mode: "prompt",
+    nexusMode: "agent",
     pastedText: null,
     pastedImage: null,
     isSubmittingSlashCommand: false,
@@ -38,6 +39,15 @@ describe("CLI prompt queue", () => {
     }
 
     expect(shiftPrompt(enqueuePrompt([], queued)).item).toEqual(queued)
+  })
+
+  it("keeps the Nexus mode that was active when the prompt was queued", () => {
+    const queued = {
+      ...prompt("inspect only"),
+      nexusMode: "ask",
+    }
+
+    expect(shiftPrompt(enqueuePrompt([], queued)).item?.nexusMode).toBe("ask")
   })
 
   it("does not mutate the existing queue", () => {

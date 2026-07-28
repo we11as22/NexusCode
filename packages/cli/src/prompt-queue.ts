@@ -2,6 +2,8 @@ export interface QueuedPrompt {
   id: string
   text: string
   mode: "bash" | "prompt"
+  /** Agent mode captured when the user queued this prompt. */
+  nexusMode?: string
   pastedText: string | null
   pastedImage: string | null
   isSubmittingSlashCommand: boolean

@@ -642,6 +642,12 @@ export interface ToolPart {
    * Persisted so deferred discovery survives compaction and session resume.
    */
   activatedToolNames?: string[]
+  /**
+   * Exact skill loaded by a successful, approved Skill call. Persisted so the
+   * selected instructions can be re-projected after compaction and resume
+   * without automatically trusting every discovered SKILL.md.
+   */
+  activatedSkillName?: string
 }
 
 export type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart

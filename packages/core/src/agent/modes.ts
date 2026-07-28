@@ -61,6 +61,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
     "UpdateRemoteSession",
     "SendRemoteMessage",
     "InterruptRemoteSession",
+    "ReconnectRemoteSession",
     "RunPluginHook",
   ],
   ask: [
@@ -84,6 +85,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
     "UpdateRemoteSession",
     "SendRemoteMessage",
     "InterruptRemoteSession",
+    "ReconnectRemoteSession",
     "PluginTrust",
     "PluginEnable",
     "PluginConfigure",
@@ -136,6 +138,7 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
     "UpdateRemoteSession",
     "SendRemoteMessage",
     "InterruptRemoteSession",
+    "ReconnectRemoteSession",
     "PlanStartWorkflow",
     "PlanAnswerWorkflow",
     "PlanCreateResearchTasks",

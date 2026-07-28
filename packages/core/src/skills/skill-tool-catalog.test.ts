@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import type { NexusConfig } from "../types.js"
 import {
+  buildSkillToolDynamicDescription,
   resolveSkillBody,
   sampleSkillSiblingFiles,
 } from "./skill-tool-catalog.js"
@@ -75,6 +76,22 @@ describe("skill tool catalog resolution", () => {
       name: "SkillNameAmbiguityError",
       candidates: ["foo-bar", "foo-baz"],
     })
+  })
+
+  it("keeps the model-facing discovery catalog within a fixed budget", () => {
+    const rows = Array.from({ length: 300 }, (_, index) => ({
+      name: `skill-${String(index).padStart(3, "0")}`,
+      description: `Description ${index} ${"x".repeat(400)}`,
+      location: `/workspace/skills/${index}/SKILL.md`,
+    }))
+
+    const description = buildSkillToolDynamicDescription(rows)
+
+    expect(description.length).toBeLessThanOrEqual(8_000)
+    expect(description).toContain("<available_skills>")
+    expect(description).toContain("skill-000")
+    expect(description).toMatch(/omitted|additional_skill_names/)
+    expect(description).not.toContain("x".repeat(300))
   })
 })
 

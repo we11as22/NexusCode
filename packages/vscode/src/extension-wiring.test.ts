@@ -105,6 +105,23 @@ describe("VS Code command wiring", () => {
     expect(extensionSource.slice(start, start + 260)).toContain(action)
   })
 
+  it("clears live context usage before publishing a newly-created session", () => {
+    const start = controllerSource.indexOf(
+      "private async createNewSession(): Promise<void>",
+    )
+    const end = controllerSource.indexOf(
+      "private async deleteSession(",
+      start,
+    )
+    const body = controllerSource.slice(start, end)
+
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(body).toContain("this.lastContextUsage = null")
+    expect(body.indexOf("this.lastContextUsage = null")).toBeLessThan(
+      body.indexOf("this.postStateToWebview()"),
+    )
+  })
+
   it("does not write an activation log unless debug logging is enabled", () => {
     const activationBody = extensionSource.slice(
       extensionSource.indexOf("export function activate"),
@@ -412,6 +429,18 @@ describe("VS Code command wiring", () => {
     )
     expect(clearChatCase).toContain("await this.createNewSession()")
     expect(clearChatCase).not.toContain("Session.create(")
+  })
+
+  it("does not let a stale webview switch the active run mode mid-turn", () => {
+    const setModeCase = controllerSource.slice(
+      controllerSource.indexOf('case "setMode"'),
+      controllerSource.indexOf('case "setProfile"'),
+    )
+
+    expect(setModeCase).toContain("if (this.isRunning)")
+    expect(setModeCase.indexOf("if (this.isRunning)")).toBeLessThan(
+      setModeCase.indexOf("this.mode = msg.mode"),
+    )
   })
 
   it("uses the real session lifecycle for the /clear command", () => {

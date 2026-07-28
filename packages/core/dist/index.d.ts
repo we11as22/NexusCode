@@ -2401,6 +2401,12 @@ interface ToolPart {
      * Persisted so deferred discovery survives compaction and session resume.
      */
     activatedToolNames?: string[];
+    /**
+     * Exact skill loaded by a successful, approved Skill call. Persisted so the
+     * selected instructions can be re-projected after compaction and resume
+     * without automatically trusting every discovered SKILL.md.
+     */
+    activatedSkillName?: string;
 }
 type MessagePart = TextPart | ToolPart | ReasoningPart | ImagePart;
 type TaskStatus = "pending" | "in_progress" | "completed" | "failed" | "killed" | "cancelled" | "deleted";
@@ -6033,6 +6039,7 @@ interface SessionCompaction {
         keepRecentMessages?: number;
         force?: boolean;
         durableContext?: CompactionDurableContext;
+        inputTokenBudget?: number;
     }): Promise<CompactionResult>;
     isOverflow(tokenCount: number, contextLimit: number, threshold: number): boolean;
 }
@@ -14692,6 +14699,8 @@ interface CatalogModel {
     name: string;
     /** Zero-cost / free tier */
     free: boolean;
+    /** Provider-advertised total context window in tokens. */
+    contextWindow?: number;
     /** Optional sort order for recommended (lower first) */
     recommendedIndex?: number;
 }
@@ -14710,6 +14719,7 @@ interface ModelsCatalog {
         modelId: string;
         name: string;
         free: boolean;
+        contextWindow?: number;
     }>;
 }
 declare function getModelsUrl(): string;
@@ -14727,6 +14737,7 @@ declare function catalogSelectionToModel(providerId: string, modelId: string, ca
     provider: string;
     id: string;
     baseUrl: string;
+    contextWindow?: number;
 };
 
 interface DiffHunk {

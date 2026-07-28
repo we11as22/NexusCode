@@ -15,6 +15,7 @@ import type {
   ToolPart,
   IHost,
   ToolExecutionIdentity,
+  AgentDefinition,
 } from "../types.js"
 import { Session } from "../session/index.js"
 import { loadAgentInstructionBundle } from "../context/agent-instructions.js"
@@ -118,6 +119,38 @@ export function restrictDelegatedMode(
     )
     ? "ask"
     : requestedMode
+}
+
+/**
+ * A delegated role is trusted run configuration, not a user turn. Keep it in
+ * the system instruction bundle so compaction/resume cannot drop it and so the
+ * child never mistakes its parent-facing assignment for an end-user chat.
+ */
+export function buildDelegatedRulesContent(
+  projectRules: string,
+  agentDefinition?: Pick<
+    AgentDefinition,
+    "agentType" | "systemPrompt"
+  >,
+): string {
+  const blocks = [
+    projectRules.trim(),
+    [
+      "## Delegated agent contract",
+      "",
+      "You are running as a delegated agent. The parent agent is your caller and receives your final response.",
+      "Do not address the end user directly and do not ask the end user questions. If the assignment is ambiguous, report the ambiguity and supporting evidence to the parent.",
+      "Stay within the exact tool manifest and mode supplied for this run. Return a concise, evidence-backed result that the parent can integrate.",
+    ].join("\n"),
+  ]
+  const role = agentDefinition?.systemPrompt?.trim()
+  const agentType = agentDefinition?.agentType
+  if (role && agentType) {
+    blocks.push(
+      `## Delegated agent role: ${agentType}\n\n${role}`,
+    )
+  }
+  return blocks.filter(Boolean).join("\n\n")
 }
 
 /**
@@ -1274,10 +1307,6 @@ export class ParallelAgentManager {
       ? (await loadAgentDefinitions(cwd, claudeCompatibility, taskConfig))
           .find((candidate) => candidate.agentType.toLowerCase() === agentType.toLowerCase())
       : undefined
-    if (!resumeSeed && agentDefinition?.systemPrompt?.trim()) {
-      userContent =
-        `${userContent}\n\n---\n\nAgent role (${agentDefinition.agentType}):\n${agentDefinition.systemPrompt.trim()}`
-    }
     if (!resumeSeed) {
       session.addMessage({ role: "user", content: userContent })
     }
@@ -1299,7 +1328,15 @@ export class ParallelAgentManager {
       tools = tools.filter((tool) => !deny.has(tool.name))
     }
 
-    const rulesContent = await loadAgentInstructionBundle(cwd, taskConfig.rules.files, taskConfig, claudeCompatibility)
+    const rulesContent = buildDelegatedRulesContent(
+      await loadAgentInstructionBundle(
+        cwd,
+        taskConfig.rules.files,
+        taskConfig,
+        claudeCompatibility,
+      ),
+      agentDefinition,
+    )
     const skills = await loadSkills(
       taskConfig.skills,
       cwd,
@@ -2342,7 +2379,6 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
   return {
     name: "TaskCreateBatch",
     description: "Create multiple delegated agent tasks and run them concurrently as one coordinated batch. Use this for independent delegated work items that can safely run in parallel without touching the same files.",
-    shouldDefer: true,
     parameters: taskCreateBatchSchema,
     async execute({ tasks, block }, ctx: ToolContext) {
       const parentMode = ctx.mode ?? "agent"

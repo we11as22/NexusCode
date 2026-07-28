@@ -65,13 +65,18 @@ import {
   type NexusModeMessage,
 } from './nexus-mode-transition.js'
 import {
+  compactTimelineAfterBoundary,
+  decideAssistantDraftPublish,
   enqueueProjectedAgentEvent,
   isStreamingDraftEvent,
   nexusAssistantMessageUuid,
   projectAssistantDraft,
+  projectVisibleAssistantDraft,
   reduceAssistantDraft,
   type NexusAssistantDraft,
+  type NexusAssistantDraftPreview,
 } from './nexus-message-projection.js'
+import { getGlobalConfig } from './utils/config.js'
 import {
   waitForEventWake,
   waitForStreamFrame,
@@ -610,6 +615,11 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
 
   const consumed: MessageType[] = []
   const assistantDrafts = new Map<string, NexusAssistantDraft>()
+  const assistantDraftPreviews = new Map<
+    string,
+    NexusAssistantDraftPreview
+  >()
+  const showReasoning = getGlobalConfig().showReasoning ?? false
 
   function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage | NexusSessionSyncMessage | NexusModeMessage, boolean, unknown> {
     while (eventQueue.length > 0) {
@@ -631,7 +641,21 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           (event.type === 'text_delta' ||
             event.type === 'reasoning_delta')
         ) {
-          yield projectAssistantDraft(draft)
+          const decision = decideAssistantDraftPublish(
+            draft,
+            showReasoning,
+            assistantDraftPreviews.get(event.messageId) ?? null,
+          )
+          if (decision.publish && decision.nextVisible) {
+            assistantDraftPreviews.set(
+              event.messageId,
+              decision.nextVisible,
+            )
+            yield projectVisibleAssistantDraft(
+              draft,
+              decision.nextVisible,
+            )
+          }
         }
         continue
       }
@@ -649,7 +673,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           text: '● Conversation compaction finished.',
           clearAfterMs: 4500,
         }
-        const compactedMessages = replMessagesFromSession(session.messages)
+        const compactedMessages = compactTimelineAfterBoundary(consumed)
         consumed.splice(0, consumed.length, ...compactedMessages)
         yield {
           type: 'nexus_session_sync',
@@ -765,6 +789,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
             message.role === 'assistant',
         )
         assistantDrafts.delete(event.messageId)
+        assistantDraftPreviews.delete(event.messageId)
         if (completed) {
           const am = buildAssistantMessageFromSession(completed)
           consumed.push(am)

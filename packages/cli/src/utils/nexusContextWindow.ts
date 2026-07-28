@@ -13,6 +13,11 @@ export function nexusContextWindowLimit(
     return Math.floor(configuredLimit)
   }
   const lower = modelId.toLowerCase()
+  if (lower.includes('minimax-m2.5')) return 196608
+  if (lower.includes('minimax-m2.7')) return 204800
+  if (lower.includes('qwen3-coder-plus')) return 1000000
+  if (lower.includes('qwen3-coder-next')) return 262144
+  if (lower.includes('gpt-5')) return 272000
   if (
     lower.includes('claude-3') ||
     lower.includes('claude-4') ||

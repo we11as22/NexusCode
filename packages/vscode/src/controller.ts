@@ -2371,6 +2371,13 @@ export class Controller {
         await this.createNewSession()
         break
       case "setMode":
+        if (this.isRunning) {
+          // The run captured its mode at admission. Ignore stale/forged UI
+          // updates until it finishes so the displayed mode cannot diverge
+          // from the prompt and backend tool policy currently executing.
+          this.postStateToWebview()
+          break
+        }
         this.mode = msg.mode
         this.forcedRemoteModeForNextRun = null
         this.postStateToWebview()
@@ -5249,6 +5256,7 @@ Return in this format:
     this.localSessionWindowed = false
     this.pendingQuestionRequest = null
     this.checkpoint = undefined
+    this.lastContextUsage = null
     this.postStateToWebview()
     void this.postSlashCommandCatalog().catch(() => undefined)
     await this.sendSessionList()

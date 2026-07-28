@@ -7,6 +7,7 @@ import { createFakeHost, createFakeSession, createTestConfig } from "../../test/
 import type { ISession, ToolContext } from "../../types.js"
 import { ToolRegistry } from "../../tools/registry.js"
 import {
+  buildDelegatedRulesContent,
   createDelegatedHost,
   createTaskCreateBatchTool,
   ParallelAgentManager,
@@ -16,6 +17,22 @@ import { createNexusRunServices } from "../run-services.js"
 import { OrchestrationRuntime } from "../../orchestration/runtime.js"
 
 describe("delegated agent host boundary", () => {
+  it("keeps the delegated role in the system instruction bundle across resume", () => {
+    const rules = buildDelegatedRulesContent(
+      "Project rules.",
+      {
+        agentType: "SecurityReview",
+        systemPrompt: "Inspect trust boundaries and report evidence.",
+      },
+    )
+
+    expect(rules).toContain("Project rules.")
+    expect(rules).toContain("Delegated agent contract")
+    expect(rules).toContain("SecurityReview")
+    expect(rules).toContain("Inspect trust boundaries and report evidence.")
+    expect(rules).toContain("Do not address the end user directly")
+  })
+
   it("inherits only the root turn MCP snapshot, never the mutable live client catalog", () => {
     const allowed = {
       name: "allowed__read",

@@ -22,6 +22,7 @@ import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
 import { NEXUS_CUSTOM_OPTION_ID } from "./constants/questionnaire.js"
 import { MarketplacePanel } from "./components/marketplace/MarketplacePanel.js"
 import { createExtensionMessageBuffer } from "./bridge/message-buffer.js"
+import { formatSessionLabel } from "./utils/session-label.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
@@ -253,7 +254,7 @@ function ChatView() {
             {store.provider}/{store.model}
           </span>
           <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
-            session {store.sessionId.slice(0, 8)}
+            session {formatSessionLabel(store.sessionId)}
           </span>
           <span className={`text-[10px] ${contextColor} truncate`}>
             ctx {formatTokens(store.contextUsedTokens)}/{formatTokens(store.contextLimitTokens)} ({store.contextPercent}%)
@@ -1245,14 +1246,26 @@ function ModelPickerModal({
   loading: boolean
   query: string
   onQueryChange: (q: string) => void
-  onSelect: (providerId: string, modelId: string, baseUrl: string) => void
+  onSelect: (
+    providerId: string,
+    modelId: string,
+    baseUrl: string,
+    contextWindow?: number,
+  ) => void
   onClose: () => void
 }) {
   const options = useMemo(() => {
     if (!catalog) return []
     const q = query.trim().toLowerCase()
     const recommendedKeys = new Set(catalog.recommended.map((r) => `${r.providerId}:${r.modelId}`))
-    const list: Array<{ providerId: string; modelId: string; name: string; free: boolean; category: string }> = []
+    const list: Array<{
+      providerId: string
+      modelId: string
+      name: string
+      free: boolean
+      category: string
+      contextWindow?: number
+    }> = []
     for (const r of catalog.recommended) {
       list.push({
         ...r,
@@ -1268,6 +1281,7 @@ function ModelPickerModal({
           name: m.name,
           free: m.free,
           category: prov.name,
+          contextWindow: m.contextWindow,
         })
       }
     }
@@ -1333,7 +1347,14 @@ function ModelPickerModal({
                     key={`${opt.providerId}/${opt.modelId}`}
                     type="button"
                     className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-[var(--vscode-list-hoverBackground)] flex items-center justify-between gap-2 flex-wrap"
-                    onClick={() => onSelect(opt.providerId, opt.modelId, baseUrl)}
+                    onClick={() =>
+                      onSelect(
+                        opt.providerId,
+                        opt.modelId,
+                        baseUrl,
+                        opt.contextWindow,
+                      )
+                    }
                   >
                     <span className="truncate text-[var(--vscode-foreground)] flex items-center gap-1.5">
                       {displayName(opt.name)}
@@ -1694,13 +1715,15 @@ function SettingsView({
                 loading={modelsCatalogLoading}
                 query={modelPickerQuery}
                 onQueryChange={setModelPickerQuery}
-                onSelect={(providerId, modelId, baseUrl) => {
+                onSelect={(providerId, modelId, baseUrl, contextWindow) => {
                   if (draft) {
                     setDraft({
                       ...draft,
                       modelProvider: "openrouter",
                       modelId,
                       modelBaseUrl: baseUrl || "https://openrouter.ai/api/v1",
+                      modelContextWindow:
+                        contextWindow != null ? String(contextWindow) : "",
                     })
                   }
                   setModelPickerOpen(false)
@@ -1833,7 +1856,7 @@ function SettingsView({
                         loading={modelsCatalogLoading}
                         query={acModelPickerQuery}
                         onQueryChange={setAcModelPickerQuery}
-                        onSelect={(providerId, modelId, baseUrl) => {
+                        onSelect={(providerId, modelId, baseUrl, contextWindow) => {
                           postMessage({
                             type: "setAutocompleteExtensionSettings",
                             patch: {
@@ -1841,6 +1864,8 @@ function SettingsView({
                               modelProvider: providerId,
                               modelId,
                               modelBaseUrl: baseUrl || "",
+                              modelContextWindow:
+                                contextWindow != null ? String(contextWindow) : "",
                             },
                           })
                           setAcModelPickerOpen(false)

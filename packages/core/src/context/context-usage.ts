@@ -17,6 +17,14 @@ export function getContextWindowLimit(modelId: string, configuredLimit?: number)
     return Math.floor(configuredLimit)
   }
   const lower = modelId.toLowerCase()
+  // Prefer provider/catalog metadata through configuredLimit. These fallbacks
+  // cover common manually-entered model ids and intentionally stay
+  // conservative when the route is unknown.
+  if (lower.includes("minimax-m2.5")) return 196_608
+  if (lower.includes("minimax-m2.7")) return 204_800
+  if (lower.includes("qwen3-coder-plus")) return 1_000_000
+  if (lower.includes("qwen3-coder-next")) return 262_144
+  if (lower.includes("gpt-5")) return 272_000
   if (lower.includes("claude-3") || lower.includes("claude-4") || lower.includes("claude-sonnet") || lower.includes("claude-opus")) {
     return 200_000
   }

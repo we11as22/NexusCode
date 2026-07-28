@@ -57,8 +57,22 @@ import { modeSpecificToolInputError } from "../../agent/mode-input-policy.js"
 
 const MAX_PLAN_BYTES = 5 * 1024 * 1024
 
-function zodPreview(schema: z.ZodTypeAny): unknown {
-  const def = (schema as z.ZodTypeAny & { _def?: { typeName?: string; shape?: () => Record<string, z.ZodTypeAny>; innerType?: z.ZodTypeAny; options?: z.ZodTypeAny[]; values?: readonly string[] } })._def
+function zodPreview(schema: z.ZodTypeAny | undefined): unknown {
+  if (!schema) return { type: "unknown" }
+  const def = (schema as z.ZodTypeAny & {
+    _def?: {
+      typeName?: string
+      shape?: (() => Record<string, z.ZodTypeAny>) | Record<string, z.ZodTypeAny>
+      innerType?: z.ZodTypeAny
+      type?: z.ZodTypeAny
+      schema?: z.ZodTypeAny
+      options?: z.ZodTypeAny[]
+      values?: readonly string[]
+      value?: unknown
+      valueType?: z.ZodTypeAny
+      items?: z.ZodTypeAny[]
+    }
+  })._def
   switch (def?.typeName) {
     case z.ZodFirstPartyTypeKind.ZodString:
       return { type: "string" }
@@ -70,13 +84,21 @@ function zodPreview(schema: z.ZodTypeAny): unknown {
       return { type: "enum", values: def.values ?? [] }
     case z.ZodFirstPartyTypeKind.ZodOptional:
       return { optional: true, inner: zodPreview(def.innerType as z.ZodTypeAny) }
+    case z.ZodFirstPartyTypeKind.ZodNullable:
+      return { nullable: true, inner: zodPreview(def.innerType) }
+    case z.ZodFirstPartyTypeKind.ZodDefault:
+      return { default: true, inner: zodPreview(def.innerType) }
     case z.ZodFirstPartyTypeKind.ZodArray:
-      return { type: "array", items: zodPreview(def.innerType as z.ZodTypeAny) }
+      // Zod 3 stores the element schema in `_def.type`; some newer builds use
+      // `_def.innerType`. Never recurse into an absent child: ToolSearch is a
+      // runtime capability boundary and must not fail while formatting a
+      // harmless schema preview.
+      return { type: "array", items: zodPreview(def.type ?? def.innerType) }
     case z.ZodFirstPartyTypeKind.ZodObject: {
-      const shape =
+      const shape: Record<string, z.ZodTypeAny> =
         typeof def.shape === "function"
           ? (def.shape() as Record<string, z.ZodTypeAny>)
-          : {}
+          : ((def.shape ?? {}) as Record<string, z.ZodTypeAny>)
       return {
         type: "object",
         properties: Object.fromEntries(
@@ -86,6 +108,20 @@ function zodPreview(schema: z.ZodTypeAny): unknown {
     }
     case z.ZodFirstPartyTypeKind.ZodUnion:
       return { oneOf: ((def.options ?? []) as z.ZodTypeAny[]).map((item: z.ZodTypeAny) => zodPreview(item)) }
+    case z.ZodFirstPartyTypeKind.ZodRecord:
+      return {
+        type: "record",
+        values: zodPreview(def.valueType),
+      }
+    case z.ZodFirstPartyTypeKind.ZodTuple:
+      return {
+        type: "tuple",
+        items: ((def.items ?? []) as z.ZodTypeAny[]).map((item) => zodPreview(item)),
+      }
+    case z.ZodFirstPartyTypeKind.ZodLiteral:
+      return { type: "literal", value: def.value }
+    case z.ZodFirstPartyTypeKind.ZodEffects:
+      return zodPreview(def.schema)
     default:
       return { type: "unknown" }
   }

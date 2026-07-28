@@ -227,6 +227,15 @@ function activatedToolNamesFromMetadata(
   return normalized.length > 0 ? normalized : undefined
 }
 
+function activatedSkillNameFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): string | undefined {
+  const name = metadata?.name
+  return typeof name === "string" && name.trim()
+    ? name.trim()
+    : undefined
+}
+
 function backgroundTaskIdFromMetadata(
   metadata: Record<string, unknown> | undefined,
 ): string | undefined {
@@ -341,6 +350,42 @@ function persistedToolActivationNames(session: ISession): Set<string> {
     }
   }
   return names
+}
+
+function activatedSkillsForPrompt(
+  session: ISession,
+  discoveredSkills: readonly SkillDef[],
+): SkillDef[] {
+  const byName = new Map(
+    discoveredSkills.map((skill) => [skill.name.toLowerCase(), skill]),
+  )
+  const selected: SkillDef[] = []
+  const seen = new Set<string>()
+  for (let messageIndex = session.messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const message = session.messages[messageIndex]
+    if (!message || !Array.isArray(message.content)) continue
+    const parts = message.content as MessagePart[]
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
+      const part = parts[partIndex]
+      if (
+        part?.type !== "tool" ||
+        part.tool !== "Skill" ||
+        part.status !== "completed"
+      ) continue
+      const requestedName =
+        part.activatedSkillName ??
+        (typeof part.input?.["name"] === "string"
+          ? part.input["name"]
+          : undefined)
+      if (!requestedName) continue
+      const skill = byName.get(requestedName.trim().toLowerCase())
+      if (!skill || seen.has(skill.name.toLowerCase())) continue
+      selected.push(skill)
+      seen.add(skill.name.toLowerCase())
+      if (selected.length >= 4) return selected.reverse()
+    }
+  }
+  return selected.reverse()
 }
 
 /** User message from plan-followup "revise" (extension/CLI); must match controller copy. */
@@ -576,8 +621,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   // Keep every mode-authorized capability in the local catalog; ToolSearch is
   // the sole run-local deferred-loading boundary.
   const resolvedDynamicTools = dynamicTools
-  const resolvedSkills = skills
-
   const blockedFallbackTools: ToolDef[] = []
   for (const blockedName of blockedTools) {
     if (builtinTools.some((t) => t.name === blockedName) || resolvedDynamicTools.some((t) => t.name === blockedName)) continue
@@ -1081,6 +1124,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             return ""
           })
         : ""
+    const resolvedSkills = activatedSkillsForPrompt(session, skills)
     const promptCtx: PromptContext = {
       mode, // same mode used for tool resolution above; system prompt block and Environment "Current mode" come from this
       config,
@@ -1103,7 +1147,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       backgroundJobsSummary: mergedBackgroundSummary || undefined,
       createSkillMode: createSkillMode === true,
       supportsStructuredOutput: activeClient.supportsStructuredOutput(),
-      enabledToolNames: resolvedTools.map((tool) => tool.name),
+      // The prompt must describe the exact provider-visible manifest. Hidden
+      // compatibility fallbacks remain executable for old transcripts, but
+      // advertising them here creates a false capability after mode switches.
+      enabledToolNames: getResolvedToolsForLlm().map((tool) => tool.name),
       sessionMemoryContent: sessionMemoryText || undefined,
       planModeSparseReminder: mode === "plan" && planSparseReminderAfterCompaction ? true : undefined,
     }
@@ -1220,20 +1267,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       sessionId: session.id,
       emphasizeToolSpillPaths: config.memory?.emphasizeToolSpillPaths !== false,
     })
-
-    // On the very first iteration of a new agent invocation that has prior history, inject a brief
-    // context annotation (Codex-style: environment context as a message event, not just system prompt).
-    // This is ephemeral — not stored in session — so it doesn't affect compaction or token estimates.
-    if (loopIterations === 1) {
-      const priorTurns = session.messages.filter(m => m.role === "user" || m.role === "assistant")
-      if (priorTurns.length > 1) {
-        const today = new Date().toISOString().split("T")[0]
-        messages.push({
-          role: "user",
-          content: `[Context: New agent turn — mode: ${mode}, cwd: ${host.cwd}, date: ${today}]`,
-        })
-      }
-    }
 
     // No separate "reflection" or "thinking" step between tool runs: we do not call the LLM again
     // just to reflect between tools. One iteration = one stream(); reasoning comes only from the model's own stream (reasoning_delta) if supported.
@@ -1370,6 +1403,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             ? {
                 activatedToolNames:
                   activatedToolNamesFromMetadata(result.metadata),
+              }
+            : {}),
+          ...(result.success && tc.toolName === "Skill"
+            ? {
+                activatedSkillName:
+                  activatedSkillNameFromMetadata(result.metadata),
               }
             : {}),
           ...(artifactFlush
@@ -1706,6 +1745,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                         activatedToolNamesFromMetadata(result.metadata),
                     }
                   : {}),
+                ...(result.success && toolName === "Skill"
+                  ? {
+                      activatedSkillName:
+                        activatedSkillNameFromMetadata(result.metadata),
+                    }
+                  : {}),
                 ...(artifactLoop
                   ? {
                       outputArtifactId: artifactLoop.artifactId,
@@ -1999,6 +2044,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               ? {
                   activatedToolNames:
                     activatedToolNamesFromMetadata(result.metadata),
+                }
+              : {}),
+            ...(result.success && call.toolName === "Skill"
+              ? {
+                  activatedSkillName:
+                    activatedSkillNameFromMetadata(result.metadata),
                 }
               : {}),
             ...(artifactTextual
@@ -2585,6 +2636,9 @@ async function handleCompaction(
 
   const result = await compaction.compact(session, client, signal, {
     keepRecentMessages: config.summarization?.keepRecentMessages ?? 8,
+    // Use the configured/provider model window, not a generic summarizer cap.
+    // Keep the same 20k response/safety reserve as the overflow policy.
+    inputTokenBudget: Math.max(8_000, contextLimit - 20_000),
     // Once the caller has established pressure (or the user explicitly ran
     // Condense), summarize even a short/one-message active window.
     force: true,

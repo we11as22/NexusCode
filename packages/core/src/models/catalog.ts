@@ -14,6 +14,8 @@ export interface CatalogModel {
   name: string
   /** Zero-cost / free tier */
   free: boolean
+  /** Provider-advertised total context window in tokens. */
+  contextWindow?: number
   /** Optional sort order for recommended (lower first) */
   recommendedIndex?: number
 }
@@ -29,7 +31,13 @@ export interface CatalogProvider {
 export interface ModelsCatalog {
   providers: CatalogProvider[]
   /** Flat list: free models first (Recommended), then rest */
-  recommended: Array<{ providerId: string; modelId: string; name: string; free: boolean }>
+  recommended: Array<{
+    providerId: string
+    modelId: string
+    name: string
+    free: boolean
+    contextWindow?: number
+  }>
 }
 
 let cachedCatalog: ModelsCatalog | null = null
@@ -197,7 +205,18 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
   const providers: CatalogProvider[] = []
   const recommended: ModelsCatalog["recommended"] = []
 
-  const rawProviders = data as Record<string, { id?: string; name?: string; api?: string; models?: Record<string, { id?: string; name?: string; cost?: { input?: number }; recommendedIndex?: number }> }>
+  const rawProviders = data as Record<string, {
+    id?: string
+    name?: string
+    api?: string
+    models?: Record<string, {
+      id?: string
+      name?: string
+      cost?: { input?: number }
+      limit?: { context?: number }
+      recommendedIndex?: number
+    }>
+  }>
   for (const [providerKey, prov] of Object.entries(rawProviders)) {
     if (!prov || typeof prov !== "object" || !prov.models) continue
     if (!isSupportedProvider(providerKey, prov)) continue
@@ -216,6 +235,11 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
         id,
         name: (m.name ?? id) as string,
         free,
+        ...(typeof m.limit?.context === "number" &&
+        Number.isFinite(m.limit.context) &&
+        m.limit.context > 0
+          ? { contextWindow: Math.floor(m.limit.context) }
+          : {}),
         recommendedIndex: typeof (m as { recommendedIndex?: number }).recommendedIndex === "number"
           ? (m as { recommendedIndex: number }).recommendedIndex
           : undefined,
@@ -227,6 +251,9 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
           modelId: id,
           name: catalogModel.name,
           free,
+          ...(catalogModel.contextWindow
+            ? { contextWindow: catalogModel.contextWindow }
+            : {}),
         })
       }
     }
@@ -284,8 +311,18 @@ function getFallbackCatalog(): ModelsCatalog {
  * Resolve a catalog selection to Nexus model config (provider + id + baseUrl).
  * Selection is from getModelsCatalog().recommended or .providers[].models.
  */
-export function catalogSelectionToModel(providerId: string, modelId: string, catalog: ModelsCatalog): { provider: string; id: string; baseUrl: string } {
+export function catalogSelectionToModel(
+  providerId: string,
+  modelId: string,
+  catalog: ModelsCatalog,
+): {
+  provider: string
+  id: string
+  baseUrl: string
+  contextWindow?: number
+} {
   const prov = catalog.providers.find((p) => p.id === providerId)
+  const selected = prov?.models.find((model) => model.id === modelId)
   const baseUrl =
     prov?.baseUrl ??
     (providerId === "nexus" || providerId === "kilo" ? NEXUS_GATEWAY_BASE_URL : OPENROUTER_BASE_URL)
@@ -293,5 +330,8 @@ export function catalogSelectionToModel(providerId: string, modelId: string, cat
     provider: "openai-compatible",
     id: modelId,
     baseUrl,
+    ...(selected?.contextWindow
+      ? { contextWindow: selected.contextWindow }
+      : {}),
   }
 }

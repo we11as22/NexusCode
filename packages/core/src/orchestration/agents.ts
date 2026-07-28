@@ -13,13 +13,15 @@ const BUILTIN_AGENTS: AgentDefinition[] = [
     agentType: "Explore",
     whenToUse: "Use for read-only codebase exploration, search, and architectural mapping.",
     builtin: true,
+    preferredMode: "ask",
     tools: ["Read", "List", "ListCodeDefinitions", "ReadLints", "Grep", "CodebaseSearch", "Glob", "WebFetch", "WebSearch", "Skill", "ToolSearch"],
   },
   {
     agentType: "Plan",
     whenToUse: "Use for planning, breaking down implementation, and producing execution-ready plans.",
     builtin: true,
-    tools: ["Read", "List", "ListCodeDefinitions", "ReadLints", "Grep", "CodebaseSearch", "Glob", "WebFetch", "WebSearch", "Skill", "ToolSearch", "TaskCreate", "TaskList", "TaskUpdate"],
+    preferredMode: "ask",
+    tools: ["Read", "List", "ListCodeDefinitions", "ReadLints", "Grep", "CodebaseSearch", "Glob", "WebFetch", "WebSearch", "Skill", "ToolSearch", "TaskCreate", "TaskList"],
   },
   {
     agentType: "Verification",

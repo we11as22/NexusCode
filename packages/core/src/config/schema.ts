@@ -293,7 +293,7 @@ export const NexusConfigSchema = z.object({
 
   summarization: z.object({
     auto: z.boolean().default(true),
-    threshold: z.number().min(0.1).max(1).default(0.80),
+    threshold: z.number().min(0.1).max(1).default(0.85),
     keepRecentMessages: z.number().int().positive().default(8),
     model: z.string().default(""),
   }).default({}),

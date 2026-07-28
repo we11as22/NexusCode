@@ -117,7 +117,10 @@ import {
   buildChatTimeline,
   exploreSegmentShouldBeTransient,
 } from '../utils/exploreTimeline.js'
-import { upsertTimelineMessage } from '../nexus-message-projection.js'
+import {
+  compactTimelineAfterBoundary,
+  upsertTimelineMessage,
+} from '../nexus-message-projection.js'
 import {
   shouldAnimateNexusActivity,
   shouldCancelActiveNexusRun,
@@ -897,7 +900,7 @@ export function REPL({
           `Compaction did not produce a summary (${result.reason}).`,
         )
       }
-      setMessages(replMessagesFromSession(nexusBootstrap.session.messages))
+      setMessages(current => compactTimelineAfterBoundary(current))
       applyNexusBanner({
         type: 'nexus_banner',
         text: '● Conversation compacted. Summary was added to session context.',
@@ -997,9 +1000,12 @@ export function REPL({
   )
 
   const getNexusModeForUserMessage = useCallback(
-    (message: MessageType): string => {
+    (message: MessageType, queuedMode?: string): string => {
       if (extractTagFromMessage(message, 'command-name') === 'review') {
         return 'review'
+      }
+      if (queuedMode) {
+        return queuedMode
       }
       const forced = forcedNexusModeForNextRunRef.current
       if (forced) {
@@ -1368,6 +1374,7 @@ export function REPL({
   async function onQuery(
     newMessages: MessageType[],
     abortController: AbortController,
+    queuedNexusMode?: string,
   ) {
     if (
       nexusBootstrap &&
@@ -1439,7 +1446,10 @@ export function REPL({
         setIsLoading(false)
         return
       }
-      const modeOverrideForRun = getNexusModeForUserMessage(lastMessage)
+      const modeOverrideForRun = getNexusModeForUserMessage(
+        lastMessage,
+        queuedNexusMode,
+      )
       for await (const message of queryNexus({
         nexus: nexusBootstrap,
         userPrompt,

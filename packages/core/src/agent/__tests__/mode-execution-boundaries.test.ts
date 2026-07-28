@@ -99,6 +99,250 @@ describe("runtime mode boundaries", () => {
     expect(restrictDelegatedMode("agent", "debug")).toBe("debug")
   })
 
+  it("does not advertise hidden compatibility fallbacks in the mode prompt", async () => {
+    let capturedTools: string[] = []
+    let capturedSystemPrompt = ""
+    const bash: ToolDef = {
+      name: "Bash",
+      description: "Run an arbitrary command.",
+      parameters: z.object({ command: z.string() }),
+      async execute() {
+        throw new Error("forbidden tool executed")
+      },
+    }
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream(request: {
+        tools?: Array<{ name: string }>
+        systemPrompt?: string
+      }) {
+        capturedTools = (request.tools ?? []).map((tool) => tool.name)
+        capturedSystemPrompt = request.systemPrompt ?? ""
+        yield { type: "text_delta" as const, delta: "read-only" }
+        yield { type: "finish" as const, finishReason: "stop" as const }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+    const cwd = process.cwd()
+    const session = createFakeSession(cwd)
+    session.addMessage({ role: "user", content: "inspect only" })
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
+      client,
+      host: createFakeHost({ cwd }),
+      config: createTestConfig({
+        memory: { sessionMemoryEnabled: false },
+      }),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "ask",
+      tools: [bash],
+      skills: [],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(capturedTools).not.toContain("Bash")
+    expect(capturedSystemPrompt).not.toContain(
+      "Enabled tools for this turn: `Bash`.",
+    )
+    expect(capturedSystemPrompt).not.toContain(
+      "## Bash / Terminal — Safe Usage",
+    )
+  })
+
+  it("keeps the real latest user turn last in a continued conversation", async () => {
+    let capturedMessages: Array<{ role: string; content: unknown }> = []
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream(request: {
+        messages: Array<{ role: string; content: unknown }>
+      }) {
+        capturedMessages = request.messages
+        yield { type: "text_delta" as const, delta: "focused answer" }
+        yield { type: "finish" as const, finishReason: "stop" as const }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+    const cwd = process.cwd()
+    const session = createFakeSession(cwd)
+    session.addMessage({ role: "user", content: "older request" })
+    session.addMessage({ role: "assistant", content: "older response" })
+    session.addMessage({ role: "user", content: "answer this latest question" })
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
+      client,
+      host: createFakeHost({ cwd }),
+      config: createTestConfig({
+        memory: { sessionMemoryEnabled: false },
+      }),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "ask",
+      tools: [],
+      skills: [],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(capturedMessages.at(-1)).toEqual({
+      role: "user",
+      content: "answer this latest question",
+    })
+    expect(capturedMessages).not.toContainEqual(
+      expect.objectContaining({
+        role: "user",
+        content: expect.stringContaining("[Context: New agent turn"),
+      }),
+    )
+  })
+
+  it("does not inject discovered skill bodies before an approved Skill call", async () => {
+    let capturedSystemPrompt = ""
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream(request: { systemPrompt?: string }) {
+        capturedSystemPrompt = request.systemPrompt ?? ""
+        yield { type: "text_delta" as const, delta: "answer" }
+        yield { type: "finish" as const, finishReason: "stop" as const }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+    const cwd = process.cwd()
+    const session = createFakeSession(cwd)
+    session.addMessage({ role: "user", content: "answer without loading skills" })
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
+      client,
+      host: createFakeHost({ cwd }),
+      config: createTestConfig({
+        memory: { sessionMemoryEnabled: false },
+      }),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "ask",
+      tools: [],
+      skills: [{
+        name: "dangerous-unloaded-skill",
+        path: `${cwd}/SKILL.md`,
+        summary: "not active",
+        content: "UNAPPROVED_SKILL_BODY_MUST_NOT_APPEAR",
+      }],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(capturedSystemPrompt).not.toContain(
+      "UNAPPROVED_SKILL_BODY_MUST_NOT_APPEAR",
+    )
+    expect(capturedSystemPrompt).not.toContain(
+      "## Active Skills",
+    )
+  })
+
+  it("re-projects an approved skill after compaction and resume", async () => {
+    let capturedSystemPrompt = ""
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream(request: { systemPrompt?: string }) {
+        capturedSystemPrompt = request.systemPrompt ?? ""
+        yield { type: "text_delta" as const, delta: "answer" }
+        yield { type: "finish" as const, finishReason: "stop" as const }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+    const cwd = process.cwd()
+    const session = createFakeSession(cwd)
+    const priorAssistant = session.addMessage({
+      role: "assistant",
+      content: [],
+    })
+    session.addToolPart(priorAssistant.id, {
+      type: "tool",
+      id: "skill-call",
+      tool: "Skill",
+      status: "completed",
+      input: { name: "safe-review" },
+      output: "<skill_content>...</skill_content>",
+      activatedSkillName: "safe-review",
+    })
+    session.addMessage({
+      role: "assistant",
+      content: "Earlier conversation summary.",
+      summary: true,
+    })
+    session.addMessage({ role: "user", content: "continue after compaction" })
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
+      client,
+      host: createFakeHost({ cwd }),
+      config: createTestConfig({
+        memory: { sessionMemoryEnabled: false },
+      }),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "ask",
+      tools: [],
+      skills: [{
+        name: "safe-review",
+        path: `${cwd}/safe-review/SKILL.md`,
+        summary: "review safely",
+        content: "APPROVED_SKILL_BODY_SURVIVES_COMPACTION",
+      }],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(capturedSystemPrompt).toContain("## Active Skills")
+    expect(capturedSystemPrompt).toContain(
+      "APPROVED_SKILL_BODY_SURVIVES_COMPACTION",
+    )
+  })
+
   it("ends the current response immediately after EnterPlanMode", async () => {
     let bashExecutions = 0
     const bash: ToolDef = {

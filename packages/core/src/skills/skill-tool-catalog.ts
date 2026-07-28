@@ -4,7 +4,6 @@
 import type { BigIntStats } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import { pathToFileURL } from "node:url"
 import type {
   NexusConfig,
   SkillAuthority,
@@ -140,6 +139,9 @@ function escapeXml(s: string): string {
     .replace(/"/g, "&quot;")
 }
 
+const SKILL_DISCOVERY_DESCRIPTION_MAX_CHARS = 8_000
+const SKILL_DISCOVERY_ENTRY_DESCRIPTION_MAX_CHARS = 250
+
 /** Dynamic `Skill` tool description: lists discoverable skills for the LLM. */
 export function buildSkillToolDynamicDescription(rows: SkillToolDescriptionRow[]): string {
   if (rows.length === 0) {
@@ -150,7 +152,7 @@ export function buildSkillToolDynamicDescription(rows: SkillToolDescriptionRow[]
     .slice(0, 3)
     .join(", ")
   const hint = examples ? ` (e.g. ${examples}, ...)` : ""
-  return [
+  const prefix = [
     "Load a specialized skill that provides domain-specific instructions and workflows.",
     "",
     "When a task matches one of the skills below, call this tool with the exact `name` to load the full markdown body into the conversation.",
@@ -158,17 +160,79 @@ export function buildSkillToolDynamicDescription(rows: SkillToolDescriptionRow[]
     'The response uses a `<skill_content name="...">` block plus a sampled `<skill_files>` list under the skill directory.',
     "",
     "<available_skills>",
-    ...rows.flatMap((skill) => [
-      `  <skill>`,
-      `    <name>${escapeXml(skill.name)}</name>`,
-      `    <description>${escapeXml(skill.description)}</description>`,
-      `    <location>${pathToFileURL(skill.location).href}</location>`,
-      `  </skill>`,
-    ]),
+  ].join("\n")
+  const suffix = [
     "</available_skills>",
     "",
-    `Use parameter \`name\` — must match a skill name above${hint}.`,
+    `Use parameter \`name\` — must match a listed skill name${hint}.`,
   ].join("\n")
+  const entries: string[] = []
+  let used = prefix.length + suffix.length + 2
+  let listedCount = 0
+  for (const skill of rows) {
+    const description =
+      skill.description.length > SKILL_DISCOVERY_ENTRY_DESCRIPTION_MAX_CHARS
+        ? `${skill.description.slice(
+            0,
+            SKILL_DISCOVERY_ENTRY_DESCRIPTION_MAX_CHARS - 1,
+          )}…`
+        : skill.description
+    const entry = [
+      "  <skill>",
+      `    <name>${escapeXml(skill.name)}</name>`,
+      `    <description>${escapeXml(description)}</description>`,
+      "  </skill>",
+    ].join("\n")
+    if (
+      used + entry.length + 1 >
+      SKILL_DISCOVERY_DESCRIPTION_MAX_CHARS
+    ) break
+    entries.push(entry)
+    listedCount += 1
+    used += entry.length + 1
+  }
+
+  const remaining = rows.slice(listedCount)
+  if (remaining.length > 0) {
+    const compactNames: string[] = []
+    for (const skill of remaining) {
+      const candidate = escapeXml(skill.name)
+      const marker = [
+        "  <additional_skill_names>",
+        compactNames.concat(candidate).join(", "),
+        "  </additional_skill_names>",
+      ].join("\n")
+      const omission = `  <omitted count="${remaining.length - compactNames.length - 1}"/>`
+      if (
+        used + marker.length + omission.length + 2 >
+        SKILL_DISCOVERY_DESCRIPTION_MAX_CHARS
+      ) break
+      compactNames.push(candidate)
+    }
+    if (compactNames.length > 0) {
+      const marker = [
+        "  <additional_skill_names>",
+        compactNames.join(", "),
+        "  </additional_skill_names>",
+      ].join("\n")
+      entries.push(marker)
+      used += marker.length + 1
+    }
+    const omitted = remaining.length - compactNames.length
+    if (omitted > 0) {
+      const marker = `  <omitted count="${omitted}"/>`
+      if (
+        used + marker.length + 1 <=
+        SKILL_DISCOVERY_DESCRIPTION_MAX_CHARS
+      ) {
+        entries.push(marker)
+      }
+    }
+  }
+
+  return [prefix, ...entries, suffix]
+    .join("\n")
+    .slice(0, SKILL_DISCOVERY_DESCRIPTION_MAX_CHARS)
 }
 
 const SAMPLE_LIMIT = 10

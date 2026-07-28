@@ -38,6 +38,7 @@ type Props = {
   onQuery: (
     newMessages: Message[],
     abortController: AbortController,
+    queuedNexusMode?: string,
   ) => Promise<void>
   debug: boolean
   verbose: boolean
@@ -403,6 +404,7 @@ function PromptInput({
           id: `queued-${Date.now()}-${queue.length}`,
           text: input,
           mode,
+          nexusMode,
           pastedText,
           pastedImage,
           isSubmittingSlashCommand,
@@ -600,7 +602,7 @@ function PromptInput({
 
     if (messages.length) {
       clearSubmittedComposer()
-      void onQuery(messages, abortController)
+      void onQuery(messages, abortController, queuedPrompt?.nexusMode)
     } else {
       // Local JSX commands (e.g. /model panel): close without adding messages.
       // Clear loading state and input so the spinner stops and the slash command
@@ -950,6 +952,7 @@ Create a .md rule file with a descriptive name. The rule file should define clea
               <Text key={queued.id} dimColor>
                 {index + 1}. {queued.mode === 'bash' ? '! ' : ''}
                 {visible}
+                {queued.nexusMode ? ` · ${queued.nexusMode}` : ''}
               </Text>
             )
           })}

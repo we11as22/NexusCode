@@ -20,6 +20,43 @@ beforeEach(() => {
 })
 
 describe("agent-event delivery", () => {
+  it("clears session-scoped context immediately when creating a new session", () => {
+    useChatStore.setState({
+      messages: [
+        {
+          id: "old-user",
+          ts: 1,
+          role: "user",
+          content: "old session",
+        },
+      ],
+      sessionId: "session-old",
+      contextUsedTokens: 24_500,
+      contextLimitTokens: 128_000,
+      contextPercent: 19,
+      todo: "old todo",
+      subagents: [
+        {
+          id: "agent-old",
+          mode: "ask",
+          task: "old task",
+          status: "completed",
+          toolHistory: [],
+          toolUsesCount: 0,
+          startedAt: 1,
+        },
+      ],
+    })
+
+    useChatStore.getState().createNewSession()
+
+    expect(useChatStore.getState()).toMatchObject({
+      contextUsedTokens: 0,
+      contextPercent: 0,
+      view: "chat",
+    })
+  })
+
   it("derives the actionable approval state from the authoritative agent event", () => {
     const action = {
       type: "execute" as const,
@@ -256,6 +293,17 @@ describe("agent-event delivery", () => {
 })
 
 describe("message admission", () => {
+  it("keeps the active run mode immutable in the webview store", () => {
+    useChatStore.setState({
+      isRunning: true,
+      mode: "debug",
+    })
+
+    useChatStore.getState().setMode("ask")
+
+    expect(useChatStore.getState().mode).toBe("debug")
+  })
+
   it("queues the complete next-turn payload while a run is active", () => {
     useChatStore.setState({
       isRunning: true,

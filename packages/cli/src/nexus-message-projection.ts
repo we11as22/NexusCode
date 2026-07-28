@@ -1,4 +1,4 @@
-import type { UUID } from "node:crypto"
+import { randomUUID, type UUID } from "node:crypto"
 
 import type { AgentEvent } from "@nexuscode/core"
 import type { AssistantMessage, Message } from "./query.js"
@@ -7,6 +7,98 @@ export interface NexusAssistantDraft {
   messageId: string
   reasoning: string
   text: string
+}
+
+export interface NexusAssistantDraftPreview {
+  reasoning: string
+  text: string
+}
+
+export interface NexusAssistantDraftPublishDecision {
+  publish: boolean
+  nextVisible: NexusAssistantDraftPreview | null
+}
+
+export const NEXUS_COMPACTION_BOUNDARY_TEXT =
+  "Conversation compacted. Earlier messages remain in the saved session, but were removed from the live terminal view."
+
+/**
+ * Stock Ink repaints every mounted row. Keeping an unbounded pre-compaction
+ * transcript mounted makes each spinner tick and keystroke rewrite the entire
+ * terminal. OpenClaude establishes a compact boundary and drops the older
+ * non-fullscreen rows; Nexus does the same while the durable Session remains
+ * authoritative on disk.
+ */
+export function compactTimelineAfterBoundary(
+  _messages: readonly Message[],
+): Message[] {
+  const id = randomUUID()
+  return [
+    {
+      type: "assistant",
+      costUSD: 0,
+      durationMs: 0,
+      uuid: id,
+      message: {
+        id: `compaction-boundary-${id}`,
+        model: "",
+        role: "assistant",
+        stop_reason: "end_turn",
+        stop_sequence: "",
+        type: "message",
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+        content: [{ type: "text", text: NEXUS_COMPACTION_BOUNDARY_TEXT }],
+      },
+    },
+  ]
+}
+
+function completeLines(value: string): string {
+  const lastNewline = value.lastIndexOf("\n")
+  return lastNewline < 0 ? "" : value.slice(0, lastNewline + 1)
+}
+
+/**
+ * The official OpenClaude renderer keeps the full stream in a ref but only
+ * publishes complete visible lines into React. Nexus keeps the authoritative
+ * draft in `assistantDrafts`; this decision prevents hidden reasoning and a
+ * changing trailing line from repainting the entire Ink transcript.
+ */
+export function decideAssistantDraftPublish(
+  draft: NexusAssistantDraft,
+  showReasoning: boolean,
+  lastVisible: NexusAssistantDraftPreview | null,
+): NexusAssistantDraftPublishDecision {
+  const nextVisible = {
+    reasoning: showReasoning ? completeLines(draft.reasoning) : "",
+    text: completeLines(draft.text),
+  }
+  const hasVisibleContent =
+    nextVisible.reasoning.length > 0 || nextVisible.text.length > 0
+  const changed =
+    lastVisible?.reasoning !== nextVisible.reasoning ||
+    lastVisible?.text !== nextVisible.text
+
+  if (!hasVisibleContent || !changed) {
+    return { publish: false, nextVisible: lastVisible }
+  }
+  return { publish: true, nextVisible }
+}
+
+export function projectVisibleAssistantDraft(
+  draft: NexusAssistantDraft,
+  preview: NexusAssistantDraftPreview,
+): AssistantMessage {
+  return projectAssistantDraft({
+    messageId: draft.messageId,
+    reasoning: preview.reasoning,
+    text: preview.text,
+  })
 }
 
 export function isStreamingDraftEvent(event: AgentEvent): boolean {

@@ -811,6 +811,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   })),
 
   setMode: (mode) => {
+    if (get().isRunning) return
     set({ mode })
     postMessage({ type: "setMode", mode })
   },
@@ -969,7 +970,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   createNewSession: () => {
     postMessage({ type: "createNewSession" })
-    set({ view: "chat" })
+    // Context usage belongs to the selected session. Reset it immediately so
+    // an in-flight host response cannot make a blank new chat look like it
+    // inherited the previous session's context.
+    set({ view: "chat", contextUsedTokens: 0, contextPercent: 0 })
   },
 
   deleteSession: (sessionId) => {
