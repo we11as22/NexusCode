@@ -204,6 +204,69 @@ function sessionUserPlainText(msg: SessionMessage): string {
   return lines.join('\n').trimEnd()
 }
 
+type CliToolResultProjectionInput = {
+  tool: string
+  output: string
+  path?: string
+  diffStats?: { added: number; removed: number }
+  diffHunks?: Array<{ type: string; lineNum: number; line: string }>
+  appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>
+  compacted?: boolean
+  metadata?: Record<string, unknown>
+  success: boolean
+}
+
+function projectCliToolResultData(input: CliToolResultProjectionInput): Record<string, unknown> {
+  const mergedMetadata = { ...(input.metadata ?? {}) }
+  if (input.appliedReplacements?.length) {
+    mergedMetadata.appliedReplacements = input.appliedReplacements
+  }
+
+  return {
+    tool: input.tool,
+    output: input.output,
+    path: input.path,
+    diffStats: input.diffStats,
+    diffHunks: input.diffHunks,
+    compacted: input.compacted,
+    metadata: Object.keys(mergedMetadata).length > 0 ? mergedMetadata : undefined,
+    success: input.success,
+  }
+}
+
+function restoredToolResultMessage(part: ToolPart): MessageType | null {
+  if (part.mergedFromSubagent) return null
+  if (TODO_TOOL_NAMES.has(part.tool)) return null
+  if (shouldHideSubagentToolDisplay(part.tool, part.input)) return null
+  if (part.status !== 'completed' && part.status !== 'error') return null
+
+  const success = part.status === 'completed'
+  const output = part.output ?? part.error ?? ''
+  return createUserMessage(
+    [
+      {
+        type: 'tool_result',
+        tool_use_id: part.id,
+        content: output,
+        is_error: !success,
+      },
+    ],
+    {
+      data: projectCliToolResultData({
+        tool: part.tool,
+        output,
+        path: part.path,
+        diffStats: part.diffStats,
+        diffHunks: part.diffHunks,
+        appliedReplacements: part.appliedReplacements,
+        compacted: part.compacted,
+        success,
+      }),
+      resultForAssistant: output,
+    },
+  )
+}
+
 /**
  * Rebuild REPL timeline messages from persisted session (after checkpoint restore / rewind).
  */
@@ -217,6 +280,13 @@ export function replMessagesFromSession(messages: SessionMessage[]): MessageType
       }
     } else if (msg.role === 'assistant') {
       out.push(buildAssistantMessageFromSession(msg))
+      if (Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          if (part.type !== 'tool') continue
+          const result = restoredToolResultMessage(part as ToolPart)
+          if (result) out.push(result)
+        }
+      }
     }
   }
   return out
@@ -866,24 +936,17 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         // parent spawn tool_end; they fall back to lastSpawnAgentPartId when parentPartId is absent.
         if (shouldHideSubagentToolDisplay(event.tool)) continue
         const toolResultText = event.output ?? (event.error ?? '')
-        const mergedMetadata: Record<string, unknown> =
-          event.metadata && typeof event.metadata === "object" && !Array.isArray(event.metadata)
-            ? { ...(event.metadata as Record<string, unknown>) }
-            : {}
-        if (Array.isArray(event.appliedReplacements) && event.appliedReplacements.length > 0) {
-          mergedMetadata.appliedReplacements = event.appliedReplacements
-        }
-        const toolResultData = {
+        const toolResultData = projectCliToolResultData({
           tool: event.tool,
           output: toolResultText,
           path: event.path,
           diffStats: event.diffStats,
           diffHunks: event.diffHunks,
+          appliedReplacements: event.appliedReplacements,
           compacted: event.compacted,
-          writtenContent: event.writtenContent,
-          metadata: Object.keys(mergedMetadata).length > 0 ? mergedMetadata : event.metadata,
+          metadata: event.metadata,
           success: event.success,
-        }
+        })
         const userMsg = createUserMessage([
           {
             type: 'tool_result',
