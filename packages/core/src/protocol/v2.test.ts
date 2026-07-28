@@ -19,6 +19,39 @@ const base = {
 }
 
 describe("protocol v2", () => {
+  it("accepts exact file-change previews and rejects semantic or numeric impostors", () => {
+    const exact = {
+      type: "tool_end",
+      tool: "Edit",
+      partId: "part-1",
+      messageId: "message-1",
+      success: true,
+      path: "fixture.txt",
+      diffStats: { added: 1, removed: 1 },
+      diffHunks: [
+        { type: "remove", lineNum: 2, line: "BETA" },
+        { type: "add", lineNum: 2, line: "GAMMA" },
+      ],
+      appliedReplacements: [
+        { oldSnippet: "BETA", newSnippet: "GAMMA" },
+      ],
+    }
+
+    expect(LegacyAgentEventSchema.parse(exact)).toEqual(exact)
+    expect(
+      LegacyAgentEventSchema.safeParse({
+        ...exact,
+        diffHunks: [{ type: "context", lineNum: 2, line: "BETA" }],
+      }).success,
+    ).toBe(false)
+    expect(
+      LegacyAgentEventSchema.safeParse({
+        ...exact,
+        diffHunks: [{ type: "add", lineNum: 1.5, line: "GAMMA" }],
+      }).success,
+    ).toBe(false)
+  })
+
   it("validates enriched context usage while accepting the legacy shape", () => {
     expect(
       LegacyAgentEventSchema.parse({

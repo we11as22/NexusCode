@@ -166,7 +166,7 @@ const LegacyAgentEventValueSchema = z.discriminatedUnion("type", [
         .array(
           z
             .object({
-              type: LegacyEventIdentifierSchema,
+              type: z.enum(["add", "remove"]),
               lineNum: NonnegativeSafeIntegerSchema,
               line: LegacyEventTextSchema,
             })

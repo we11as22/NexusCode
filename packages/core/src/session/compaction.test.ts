@@ -363,10 +363,19 @@ describe("session compaction recovery state", () => {
       session.addToolPart(assistant.id, {
         type: "tool",
         id: `part-${turn}`,
-        tool: "Grep",
+        tool: "Edit",
         status: "completed",
-        input: { pattern: "needle" },
+        input: { file_path: `fixture-${turn}.txt` },
         output: `evidence-${turn}:${"x".repeat(120_000)}`,
+        path: `fixture-${turn}.txt`,
+        diffStats: { added: 1, removed: 1 },
+        diffHunks: [
+          { type: "remove", lineNum: 1, line: "before" },
+          { type: "add", lineNum: 1, line: "after" },
+        ],
+        appliedReplacements: [
+          { oldSnippet: "before", newSnippet: "after" },
+        ],
       })
     }
 
@@ -381,6 +390,14 @@ describe("session compaction recovery state", () => {
     expect(compacted.length).toBeGreaterThan(0)
     for (const part of compacted) {
       expect(part.output).toMatch(/^evidence-\d:/)
+      expect(part.diffStats).toEqual({ added: 1, removed: 1 })
+      expect(part.diffHunks).toEqual([
+        { type: "remove", lineNum: 1, line: "before" },
+        { type: "add", lineNum: 1, line: "after" },
+      ])
+      expect(part.appliedReplacements).toEqual([
+        { oldSnippet: "before", newSnippet: "after" },
+      ])
     }
   })
 

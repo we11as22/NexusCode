@@ -27,6 +27,14 @@ describe("webview output projection", () => {
             outputArtifactOwnerSessionId: "private-session-id",
             backgroundTaskId: "bash-task-1",
             path: "src/index.ts",
+            diffStats: { added: 1, removed: 1 },
+            diffHunks: [
+              { type: "remove" as const, lineNum: 2, line: "BETA" },
+              { type: "add" as const, lineNum: 2, line: "GAMMA" },
+            ],
+            appliedReplacements: [
+              { oldSnippet: "BETA", newSnippet: "GAMMA" },
+            ],
           },
         ],
       },
@@ -42,6 +50,13 @@ describe("webview output projection", () => {
     )
     expect(part.path).toBe("src/index.ts")
     expect(part.backgroundTaskId).toBe("bash-task-1")
+    expect(part.diffHunks).toEqual([
+      { type: "remove", lineNum: 2, line: "BETA" },
+      { type: "add", lineNum: 2, line: "GAMMA" },
+    ])
+    expect(part.appliedReplacements).toEqual([
+      { oldSnippet: "BETA", newSnippet: "GAMMA" },
+    ])
     expect(
       (messages[0]!.content[0] as { outputSpillPath?: string }).outputSpillPath,
     ).toContain("/Users/alice/")

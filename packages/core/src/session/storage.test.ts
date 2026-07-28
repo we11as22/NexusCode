@@ -107,6 +107,42 @@ describe("SessionStore journal v2", () => {
     })
   })
 
+  it("round-trips bounded file-change previews without full file contents", async () => {
+    const { root, cwd } = await fixture()
+    const store = new SessionStore({ homeDir: root })
+    const messages: SessionMessage[] = [{
+      id: "assistant-diff",
+      ts: 1,
+      role: "assistant",
+      content: [{
+        type: "tool",
+        id: "part-edit",
+        tool: "Edit",
+        status: "completed",
+        input: { file_path: "fixture.txt" },
+        output: "Successfully updated fixture.txt",
+        path: "fixture.txt",
+        diffStats: { added: 1, removed: 1 },
+        diffHunks: [
+          { type: "remove", lineNum: 2, line: "BETA" },
+          { type: "add", lineNum: 2, line: "GAMMA" },
+        ],
+        appliedReplacements: [
+          { oldSnippet: "BETA", newSnippet: "GAMMA" },
+        ],
+      }],
+    }]
+
+    await store.saveSession(
+      stored("session_file_change", cwd, messages),
+      { expectedRevision: 0 },
+    )
+
+    const loaded = await store.loadSession("session_file_change", cwd)
+    expect(loaded?.messages).toEqual(messages)
+    expect(JSON.stringify(loaded)).not.toContain("writtenContent")
+  })
+
   it.each(["../escape", "..", "a/b", "a\\b", "", ".hidden", "x".repeat(129)])(
     "rejects unsafe session id %j",
     async (sessionId) => {
