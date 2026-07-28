@@ -66,7 +66,7 @@ import {
 } from "../context/context-usage.js"
 import { findLastOpenReasoningPartIndex } from "./reasoning-segment-utils.js"
 import * as path from "node:path"
-import { normalizedAppliedReplacementsFromMetadata } from "../tools/applied-replacements.js"
+import { projectFileChangeToolResult } from "./file-change-projection.js"
 import {
   buildReasoningProviderOptions,
   getDefaultTemperature,
@@ -1754,6 +1754,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 backgroundTaskIdFromMetadata(result.metadata)
               const changeSetLoop =
                 changeSetCapabilityFromToolMetadata(result.metadata)
+              const fileChangeProjectionLoop = result.success
+                ? projectFileChangeToolResult(
+                    toolName,
+                    toolInput,
+                    result.metadata,
+                  )
+                : {}
               session.updateToolPart(newMessageId, partId, {
                 status: result.success ? "completed" : "error",
                 output: result.output,
@@ -1781,18 +1788,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                   ? { backgroundTaskId: backgroundTaskIdLoop }
                   : {}),
                 ...(changeSetLoop ?? {}),
-                ...(result.success && (toolName === "Write" || toolName === "Edit")
-                  ? {
-                      path: extractWriteTargetPath(toolName, toolInput),
-                      ...(typeof (result.metadata as { addedLines?: number; removedLines?: number })?.addedLines === "number" &&
-                      typeof (result.metadata as { addedLines?: number; removedLines?: number })?.removedLines === "number"
-                        ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
-                        : {}),
-                    }
-                  : {}),
+                ...fileChangeProjectionLoop,
               })
-
-              const appliedReplacements = normalizedAppliedReplacementsFromMetadata(result.metadata)
 
               host.emit({
                 type: "tool_end",
@@ -1807,18 +1804,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 metadata: result.metadata,
                 ...(result.success && (toolName === "Write" || toolName === "Edit")
                   ? {
-                      path: extractWriteTargetPath(toolName, toolInput),
+                      ...fileChangeProjectionLoop,
                       writtenContent: typeof (result as { metadata?: { writtenContent?: string } }).metadata?.writtenContent === "string"
                         ? (result.metadata as { writtenContent: string }).writtenContent
                         : undefined,
-                      ...(typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.addedLines === "number" &&
-                      typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.removedLines === "number"
-                        ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
-                        : {}),
-                      ...(Array.isArray((result.metadata as { diffHunks?: unknown[] })?.diffHunks)
-                        ? { diffHunks: (result.metadata as { diffHunks: Array<{ type: string; lineNum: number; line: string }> }).diffHunks }
-                        : {}),
-                      ...(appliedReplacements ? { appliedReplacements } : {}),
                     }
                   : {}),
               })
@@ -2072,6 +2061,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             backgroundTaskIdFromMetadata(result.metadata)
           const changeSetTextual =
             changeSetCapabilityFromToolMetadata(result.metadata)
+          const fileChangeProjectionTextual = result.success
+            ? projectFileChangeToolResult(
+                call.toolName,
+                call.toolInput,
+                result.metadata,
+              )
+            : {}
           session.updateToolPart(newMessageId, partId, {
             status: result.success ? "completed" : "error",
             output: result.output,
@@ -2099,18 +2095,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               ? { backgroundTaskId: backgroundTaskIdTextual }
               : {}),
             ...(changeSetTextual ?? {}),
-            ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
-              ? {
-                  path: extractWriteTargetPath(call.toolName, call.toolInput),
-                  ...(typeof (result.metadata as { addedLines?: number; removedLines?: number })?.addedLines === "number" &&
-                  typeof (result.metadata as { addedLines?: number; removedLines?: number })?.removedLines === "number"
-                    ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
-                    : {}),
-                }
-              : {}),
+            ...fileChangeProjectionTextual,
           })
-
-          const appliedReplacementsFollowUp = normalizedAppliedReplacementsFromMetadata(result.metadata)
 
           host.emit({
             type: "tool_end",
@@ -2125,18 +2111,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             metadata: result.metadata,
             ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
               ? {
-                  path: extractWriteTargetPath(call.toolName, call.toolInput),
+                  ...fileChangeProjectionTextual,
                   writtenContent: typeof (result as { metadata?: { writtenContent?: string } }).metadata?.writtenContent === "string"
                     ? (result.metadata as { writtenContent: string }).writtenContent
                     : undefined,
-                  ...(typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.addedLines === "number" &&
-                  typeof (result as { metadata?: { addedLines?: number; removedLines?: number } }).metadata?.removedLines === "number"
-                    ? { diffStats: { added: (result.metadata as { addedLines: number; removedLines: number }).addedLines, removed: (result.metadata as { addedLines: number; removedLines: number }).removedLines } }
-                    : {}),
-                  ...(Array.isArray((result.metadata as { diffHunks?: unknown[] })?.diffHunks)
-                    ? { diffHunks: (result.metadata as { diffHunks: Array<{ type: string; lineNum: number; line: string }> }).diffHunks }
-                    : {}),
-                  ...(appliedReplacementsFollowUp ? { appliedReplacements: appliedReplacementsFollowUp } : {}),
                 }
               : {}),
           })
@@ -3085,10 +3063,4 @@ function isContextOverflowError(message: string): boolean {
     lower.includes("too long") ||
     lower.includes("token limit")
   )
-}
-
-function extractWriteTargetPath(toolName: string, toolInput: Record<string, unknown>): string | undefined {
-  const pathVal = toolInput["file_path"] ?? toolInput["path"]
-  if (typeof pathVal === "string" && pathVal) return pathVal
-  return undefined
 }

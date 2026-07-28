@@ -633,6 +633,17 @@ export interface ChangeFileSummary {
   binary: boolean
 }
 
+export interface ToolDiffLine {
+  type: "add" | "remove"
+  lineNum: number
+  line: string
+}
+
+export interface AppliedReplacement {
+  oldSnippet: string
+  newSnippet: string
+}
+
 export interface ToolPart {
   type: "tool"
   id: string
@@ -660,6 +671,10 @@ export interface ToolPart {
   /** Set when a file mutation tool completes; used for session diff surfaces. */
   path?: string
   diffStats?: { added: number; removed: number }
+  /** Bounded exact changed-line projection retained across compaction/reload. */
+  diffHunks?: ToolDiffLine[]
+  /** Bounded snippets actually replaced by Edit, used for compact previews. */
+  appliedReplacements?: AppliedReplacement[]
   /** Durable ownership for an exact file-change proposal and its review state. */
   changeSetId?: string
   proposalHash?: string
