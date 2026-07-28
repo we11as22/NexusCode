@@ -32,7 +32,12 @@ describe("mode tool reachability", () => {
     expect(visibleNames("plan")).not.toContain("Bash")
     expect(visibleNames("ask")).not.toContain("McpAuthenticate")
     expect(visibleNames("review")).not.toContain("McpAuthenticate")
-    expect(visibleNames("plan")).toContain("McpAuthenticate")
+    expect(visibleNames("plan")).not.toContain("McpAuthenticate")
+    expect(visibleNames("plan")).toContain("MemoryList")
+    expect(visibleNames("plan")).toContain("MemoryGet")
+    expect(visibleNames("plan")).not.toContain("MemoryCreate")
+    expect(visibleNames("plan")).not.toContain("MemoryUpdate")
+    expect(visibleNames("plan")).not.toContain("MemoryDelete")
   })
 
   it("uses one canonical plan-completion tool", () => {

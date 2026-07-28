@@ -813,6 +813,14 @@ export class Controller {
             ...(Array.isArray(event.appliedReplacements) && event.appliedReplacements.length > 0
               ? { appliedReplacements: event.appliedReplacements }
               : {}),
+            ...(typeof event.metadata?.artifactId === "string"
+              ? { outputArtifactId: event.metadata.artifactId }
+              : {}),
+            ...(typeof event.metadata?.task_id === "string"
+              ? { backgroundTaskId: event.metadata.task_id }
+              : typeof event.metadata?.bash_id === "string"
+                ? { backgroundTaskId: event.metadata.bash_id }
+                : {}),
             ...(typeof event.metadata?.changeSetId === "string"
               ? {
                   changeSetId: event.metadata.changeSetId,
@@ -823,6 +831,12 @@ export class Controller {
                     ? {
                         changeSetState:
                           event.metadata.changeSetState as ToolPart["changeSetState"],
+                      }
+                    : {}),
+                  ...(Array.isArray(event.metadata.changeFiles)
+                    ? {
+                        changeFiles:
+                          event.metadata.changeFiles as ToolPart["changeFiles"],
                       }
                     : {}),
                 }

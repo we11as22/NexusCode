@@ -43,6 +43,10 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
     "PowerShell",
     "EnterPlanMode",
     "ExitPlanMode",
+    "MemoryCreate",
+    "MemoryUpdate",
+    "MemoryDelete",
+    "McpAuthenticate",
     "TeamCreate",
     "TeamDelete",
     "TeamAddMember",
@@ -314,7 +318,7 @@ export function getModeToolPolicySummary(mode: Mode): string {
     case "agent":
       return "Read/write/edit, shell & worktrees, search & web, MCP, skills, full task/team/remote/plugin/plan/memory orchestration, Condense, EnterPlanMode. PlanExit is disabled (use Plan mode for handoff)."
     case "plan":
-      return "Read/search/web/MCP/skills; Write/Edit only for .nexus/plans/*.md|txt; PlanExit; tasks & plan workflows & memories; list/get plugins & remotes. No shell, EnterPlanMode, team mutations, plugin install/trust, remote interrupt/send, RunPluginHook."
+      return "Read/search/web/MCP resources/skills; Write/Edit only for .nexus/plans/*.md|txt; PlanExit; research tasks, plan workflows, and MemoryList/Get; list/get plugins & remotes. No MCP authentication, shell, EnterPlanMode, memory writes, team mutations, plugin install/trust, remote interrupt/send, RunPluginHook."
     case "ask":
       return "Read/search/web/MCP resources/skills, Condense, Parallel, todos; TaskCreate/Batch/Output/Stop/Resume/Snapshot, TaskGet/List; list-only teams/remotes/plugins; PlanGetWorkflow; MemoryList/Get only. No MCP authentication, files, shell, plan exit, memory writes, orchestration mutations, RunPluginHook."
     case "debug":
@@ -411,7 +415,7 @@ export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   agent:
     "AGENT mode: full access — read/write files, run commands, search, web, MCP, skills, tasks, teams, remotes, plugins, plan-memory tools, EnterPlanMode. Execute end-to-end. PlanExit is not available here (switch to Plan mode to hand off a plan).",
   plan:
-    "PLAN mode: study the repo (read/search/web/MCP/skills), write only plan files under .nexus/plans/*.md|.txt, use PlanExit when ready. Tasks and plan workflows allowed; shell, plugin install/trust, team mutations, remote control, and EnterPlanMode are disabled.",
+    "PLAN mode: study the repo (read/search/web/MCP resources/skills), write only plan files under .nexus/plans/*.md|.txt, use PlanExit when ready. Research tasks, plan workflows, and MemoryList/Get are allowed; MCP authentication, shell, memory writes, plugin install/trust, team mutations, remote control, and EnterPlanMode are disabled.",
   ask:
     "ASK mode: read-only answers — read/search/web/MCP resources/skills, delegated TaskCreate (read-only subagents), TaskOutput/TaskStop/TaskResume, list/get state for tasks/teams/remotes/plugins and PlanGetWorkflow, MemoryList/MemoryGet. No MCP authentication, file edits, shell, PlanExit/EnterPlanMode, memory writes, team/plugin/remote mutations, or mutating plan workflow tools.",
   debug:

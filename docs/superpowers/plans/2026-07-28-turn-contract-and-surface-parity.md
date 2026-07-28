@@ -101,7 +101,7 @@ API, pnpm 10.8.1, Node 24.18.0.
    exits.
 6. Run the full core agent test directory.
 
-## Task 5: Define complete queued-turn and active/next-mode state
+## Task 5: Define complete queued-turn and immutable active-mode state
 
 **Files:**
 
@@ -116,7 +116,8 @@ API, pnpm 10.8.1, Node 24.18.0.
 **Steps:**
 
 1. Replace `{id,text}` queue items with full immutable message payloads.
-2. Split `activeRunMode` from `nextMode`.
+2. Disable mode switching while a turn is active; snapshot the selected mode
+   into every admitted or queued turn.
 3. Queue on explicit user intent while running; never remove and reinsert the
    same item as a fake immediate-send action.
 4. Admit exactly one queued turn after the current terminal event.

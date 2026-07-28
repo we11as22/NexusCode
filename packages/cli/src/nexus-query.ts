@@ -627,7 +627,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         }
         continue
       }
-      if (event.type === 'task_updated') {
+      if (event.type === 'task_created' || event.type === 'task_updated') {
         yield {
           type: 'nexus_banner',
           text: `Task ${event.task.id}: ${event.task.status} — ${event.task.subject}`,
@@ -648,6 +648,22 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           type: 'nexus_banner',
           text: `Task ${event.task.id}: ${event.task.status} — ${event.task.subject}`,
           clearAfterMs: 3500,
+        }
+        continue
+      }
+      if (event.type === 'task_tool_start') {
+        yield {
+          type: 'nexus_banner',
+          text: `Task ${event.taskId}: running ${event.tool}`,
+          clearAfterMs: 2500,
+        }
+        continue
+      }
+      if (event.type === 'task_tool_end') {
+        yield {
+          type: 'nexus_banner',
+          text: `Task ${event.taskId}: ${event.tool} ${event.success ? 'completed' : 'failed'}`,
+          clearAfterMs: 2500,
         }
         continue
       }

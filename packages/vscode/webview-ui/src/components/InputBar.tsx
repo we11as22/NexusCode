@@ -49,6 +49,7 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
     awaitingApproval,
     setInputValue,
     sendMessage,
+    addToQueue,
     abort,
     addAttachedImage,
     attachedImages,
@@ -224,12 +225,16 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      if (!configurationError && !isRunning && !awaitingApproval && (inputValue.trim() || attachedImages.length > 0)) {
+      if (!configurationError && !awaitingApproval && (inputValue.trim() || attachedImages.length > 0)) {
         let expanded = inputValue
         for (const block of pasteBlocks) {
           expanded = expanded.split(block.token).join(block.text)
         }
-        sendMessage(expanded.trim(), { displayText: expanded.trim() })
+        if (isRunning) {
+          addToQueue(expanded.trim())
+        } else {
+          sendMessage(expanded.trim(), { displayText: expanded.trim() })
+        }
         setPasteBlocks([])
       }
       return
@@ -517,7 +522,7 @@ export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTr
                   : configurationError
                     ? "Fix the workspace configuration, then reload it"
                   : isRunning
-                    ? "Running… (Esc to abort)"
+                    ? "Add a follow-up · Enter queues it · Esc stops"
                     : "Add a follow-up"
               }
               disabled={Boolean(configurationError)}

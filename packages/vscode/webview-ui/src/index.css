@@ -2,19 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
-/* VS Code + Cursor-style chat — NexusCode theme is blue (not orange) */
+/* Inherit the host's light/dark/high-contrast palette. */
 :root {
-  color-scheme: dark;
-  --nexus-accent: #0078d4;
-  --nexus-accent-hover: #106ebe;
-  --nexus-accent-muted: rgba(0, 120, 212, 0.15);
+  --nexus-accent: var(--vscode-textLink-foreground, #0078d4);
+  --nexus-accent-hover: var(--vscode-textLink-activeForeground, #106ebe);
+  --nexus-accent-muted: color-mix(in srgb, var(--nexus-accent) 15%, transparent);
   /* Horizontal inset for assistant “cards” (bash, tools, diffs, code) — symmetric in the chat column */
   --nexus-content-inset: 12px;
-  /* Slightly darker than VSCode sidebar for extension/chat area */
-  --nexus-panel-bg: color-mix(in srgb, var(--vscode-sideBar-background, #1a1a1a) 88%, #000 12%);
-  --nexus-chat-bg: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 92%, #000 8%);
-  --nexus-user-bubble: rgba(0, 120, 212, 0.25);
-  --nexus-assistant-bubble: var(--vscode-editor-inactiveSelectionBackground, rgba(255, 255, 255, 0.06));
+  --nexus-panel-bg: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  --nexus-chat-bg: var(--vscode-editor-background);
+  --nexus-user-bubble: color-mix(in srgb, var(--nexus-accent) 20%, transparent);
+  --nexus-assistant-bubble: var(--vscode-editor-inactiveSelectionBackground, transparent);
 }
 
 * {

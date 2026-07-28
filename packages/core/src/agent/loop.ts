@@ -227,6 +227,19 @@ function activatedToolNamesFromMetadata(
   return normalized.length > 0 ? normalized : undefined
 }
 
+function backgroundTaskIdFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): string | undefined {
+  const candidate =
+    typeof metadata?.task_id === "string"
+      ? metadata.task_id
+      : typeof metadata?.bash_id === "string"
+        ? metadata.bash_id
+        : undefined
+  const normalized = candidate?.trim()
+  return normalized ? normalized : undefined
+}
+
 function changeSetCapabilityFromToolMetadata(
   metadata: Record<string, unknown> | undefined,
 ): Pick<
@@ -1090,6 +1103,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       backgroundJobsSummary: mergedBackgroundSummary || undefined,
       createSkillMode: createSkillMode === true,
       supportsStructuredOutput: activeClient.supportsStructuredOutput(),
+      enabledToolNames: resolvedTools.map((tool) => tool.name),
       sessionMemoryContent: sessionMemoryText || undefined,
       planModeSparseReminder: mode === "plan" && planSparseReminderAfterCompaction ? true : undefined,
     }
@@ -1345,6 +1359,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         // CRITICAL: update the tool part in the session with the result
         // This is what buildMessagesFromSession reads to include in the next LLM call
         const artifactFlush = artifactCapabilityFromToolMetadata(result.metadata)
+        const backgroundTaskIdFlush =
+          backgroundTaskIdFromMetadata(result.metadata)
         session.updateToolPart(newMessageId, partId, {
           status: result.success ? "completed" : "error",
           output: result.output,
@@ -1361,6 +1377,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 outputArtifactId: artifactFlush.artifactId,
                 outputArtifactOwnerSessionId: artifactFlush.ownerSessionId,
               }
+            : {}),
+          ...(backgroundTaskIdFlush
+            ? { backgroundTaskId: backgroundTaskIdFlush }
             : {}),
         })
 
@@ -1672,6 +1691,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               )
 
               const artifactLoop = artifactCapabilityFromToolMetadata(result.metadata)
+              const backgroundTaskIdLoop =
+                backgroundTaskIdFromMetadata(result.metadata)
               const changeSetLoop =
                 changeSetCapabilityFromToolMetadata(result.metadata)
               session.updateToolPart(newMessageId, partId, {
@@ -1690,6 +1711,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                       outputArtifactId: artifactLoop.artifactId,
                       outputArtifactOwnerSessionId: artifactLoop.ownerSessionId,
                     }
+                  : {}),
+                ...(backgroundTaskIdLoop
+                  ? { backgroundTaskId: backgroundTaskIdLoop }
                   : {}),
                 ...(changeSetLoop ?? {}),
                 ...(result.success && (toolName === "Write" || toolName === "Edit")
@@ -1756,7 +1780,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                 await flushPendingReads()
                 break streamLoop
               }
-              if (toolName === MANDATORY_END_TOOL[mode]) {
+              if (
+                result.success &&
+                toolName === MANDATORY_END_TOOL[mode]
+              ) {
                 attemptedCompletionThisIteration = true
                 await flushPendingReads()
                 break streamLoop
@@ -1959,6 +1986,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           )
 
           const artifactTextual = artifactCapabilityFromToolMetadata(result.metadata)
+          const backgroundTaskIdTextual =
+            backgroundTaskIdFromMetadata(result.metadata)
           const changeSetTextual =
             changeSetCapabilityFromToolMetadata(result.metadata)
           session.updateToolPart(newMessageId, partId, {
@@ -1977,6 +2006,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
                   outputArtifactId: artifactTextual.artifactId,
                   outputArtifactOwnerSessionId: artifactTextual.ownerSessionId,
                 }
+              : {}),
+            ...(backgroundTaskIdTextual
+              ? { backgroundTaskId: backgroundTaskIdTextual }
               : {}),
             ...(changeSetTextual ?? {}),
             ...(result.success && (call.toolName === "Write" || call.toolName === "Edit")
@@ -2040,7 +2072,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             attemptedCompletionThisIteration = true
             break
           }
-          if (call.toolName === MANDATORY_END_TOOL[mode]) {
+          if (
+            result.success &&
+            call.toolName === MANDATORY_END_TOOL[mode]
+          ) {
             attemptedCompletionThisIteration = true
           }
         }
@@ -2100,11 +2135,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     }
 
     // Check if done — mandatory end tool (per mode) ends the turn: plan_exit (plan only). Agent/ask/debug have no mandatory tool.
-    const mandatoryEnd = MANDATORY_END_TOOL[mode]
-    if (
-      attemptedCompletionThisIteration ||
-      (mandatoryEnd && lastToolName === mandatoryEnd)
-    ) {
+    if (attemptedCompletionThisIteration) {
       if (await continueForMailboxBeforeCompletion()) continue
       break
     }
@@ -2129,9 +2160,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       }
       const alreadyCalled = messageHasMandatoryEndTool(session, newMessageId, mode)
       if (mandatoryTool && !alreadyCalled && resolvedTools.some((t) => t.name === mandatoryTool)) {
-        if (!resolvedTools.some((t) => t.name === mandatoryTool)) {
-          break
-        }
         flushAssistantContent()
         const syntheticId = `forced_end_${loopIterations}_${Date.now()}`
         const partId = `part_${syntheticId}`
@@ -2183,7 +2211,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           setReportToUserMessage(session, newMessageId, forcedResult.output)
         }
         lastToolName = mandatoryTool
-        if (mandatoryTool === MANDATORY_END_TOOL[mode]) {
+        if (
+          forcedResult.success &&
+          mandatoryTool === MANDATORY_END_TOOL[mode]
+        ) {
           attemptedCompletionThisIteration = true
         }
       }
@@ -2325,11 +2356,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       mode,
     })
     // When mandatory end tool was executed, clear todo so it's removed from session.
-    const mandatoryEndTool = MANDATORY_END_TOOL[mode]
-    if (
-      attemptedCompletionThisIteration ||
-      (Boolean(mandatoryEndTool) && lastToolName === mandatoryEndTool)
-    ) {
+    if (attemptedCompletionThisIteration) {
       session.updateTodo("")
       host.emit({ type: "todo_updated", todo: "" })
     }

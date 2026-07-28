@@ -25,6 +25,7 @@ describe("webview output projection", () => {
             outputArtifactId:
               "artifact_00000000-0000-4000-8000-000000000000",
             outputArtifactOwnerSessionId: "private-session-id",
+            backgroundTaskId: "bash-task-1",
             path: "src/index.ts",
           },
         ],
@@ -40,6 +41,7 @@ describe("webview output projection", () => {
       "artifact_00000000-0000-4000-8000-000000000000",
     )
     expect(part.path).toBe("src/index.ts")
+    expect(part.backgroundTaskId).toBe("bash-task-1")
     expect(
       (messages[0]!.content[0] as { outputSpillPath?: string }).outputSpillPath,
     ).toContain("/Users/alice/")

@@ -2363,6 +2363,8 @@ interface ToolPart {
     outputArtifactId?: string;
     /** Exact session whose private artifact directory owns this output. */
     outputArtifactOwnerSessionId?: string;
+    /** Public task handle for a background shell/tool execution. */
+    backgroundTaskId?: string;
     /** Set when a file mutation tool completes; used for session diff surfaces. */
     path?: string;
     diffStats?: {
@@ -13786,6 +13788,8 @@ interface PromptContext {
     createSkillMode?: boolean;
     /** Capability flag from provider; reserved for future prompt branching. */
     supportsStructuredOutput?: boolean;
+    /** Exact tool manifest exposed to the provider for this turn. */
+    enabledToolNames?: readonly string[];
 }
 /**
  * Assemble the full system prompt from blocks.

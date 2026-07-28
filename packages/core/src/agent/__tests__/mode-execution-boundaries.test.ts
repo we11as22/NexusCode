@@ -12,6 +12,7 @@ import {
   enterPlanModeTool,
   taskCreateTool,
 } from "../../tools/built-in/orchestration-tools.js"
+import { ToolRegistry } from "../../tools/registry.js"
 import type { ToolContext, ToolDef } from "../../types.js"
 import {
   restrictDelegatedMode,
@@ -174,5 +175,132 @@ describe("runtime mode boundaries", () => {
     expect(host.events.some(
       (event) => event.type === "tool_start" && event.tool === "Bash",
     )).toBe(false)
+  })
+
+  it("rejects a forced synthetic PlanExit when no plan file was written", async () => {
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream() {
+        yield { type: "text_delta" as const, delta: "I have a plan in mind." }
+        yield { type: "finish" as const, finishReason: "stop" as const }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+    const cwd = process.cwd()
+    const host = createFakeHost({ cwd })
+    const session = createFakeSession(cwd)
+    session.addMessage({ role: "user", content: "plan this task" })
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
+      client,
+      host,
+      config: createTestConfig(),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "plan",
+      tools: [new ToolRegistry().get("PlanExit")!],
+      skills: [],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    const forcedExit = host.events.find(
+      (event) => event.type === "tool_end" && event.tool === "PlanExit",
+    )
+    expect(forcedExit).toMatchObject({
+      type: "tool_end",
+      tool: "PlanExit",
+      success: false,
+    })
+    expect(
+      session.messages.some(
+        (message) =>
+          Array.isArray(message.content) &&
+          message.content.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "PlanExit" &&
+              part.status === "completed",
+          ),
+      ),
+    ).toBe(false)
+  })
+
+  it("does not treat a rejected explicit PlanExit as turn completion", async () => {
+    let streamCalls = 0
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream() {
+        streamCalls += 1
+        if (streamCalls === 1) {
+          yield {
+            type: "tool_call" as const,
+            toolCallId: "premature-plan-exit",
+            toolName: "PlanExit",
+            toolInput: { summary: "not materialized" },
+          }
+          yield {
+            type: "finish" as const,
+            finishReason: "tool_calls" as const,
+          }
+          return
+        }
+        yield {
+          type: "text_delta" as const,
+          delta: "I still need to materialize the plan.",
+        }
+        yield { type: "finish" as const, finishReason: "stop" as const }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+    const cwd = process.cwd()
+    const host = createFakeHost({ cwd })
+    const session = createFakeSession(cwd)
+    session.addMessage({ role: "user", content: "plan this task" })
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
+      client,
+      host,
+      config: createTestConfig(),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "plan",
+      tools: [new ToolRegistry().get("PlanExit")!],
+      skills: [],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(streamCalls).toBe(2)
+    expect(
+      host.events.filter(
+        (event) =>
+          event.type === "tool_end" &&
+          event.tool === "PlanExit" &&
+          !event.success,
+      ),
+    ).toHaveLength(2)
   })
 })

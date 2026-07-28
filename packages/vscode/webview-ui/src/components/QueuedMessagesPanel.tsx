@@ -35,7 +35,13 @@ function TrashIcon({ className }: { className?: string }) {
 /** Panel above input: "N Queued" with list of planned messages and Edit / Send now / Delete. */
 export function QueuedMessagesPanel() {
   const store = useChatStore()
-  const { queuedMessages, removeFromQueue, editQueuedToInput, sendQueuedImmediately } = store
+  const {
+    queuedMessages,
+    removeFromQueue,
+    editQueuedToInput,
+    sendQueuedImmediately,
+    isRunning,
+  } = store
   const [expanded, setExpanded] = useState(true)
 
   if (queuedMessages.length === 0) return null
@@ -70,6 +76,11 @@ export function QueuedMessagesPanel() {
                   <span className="nexus-queued-circle w-3 h-3 rounded-full border border-[var(--vscode-foreground)] opacity-60 flex-shrink-0" aria-hidden />
                   <span className="nexus-input-context-file-name truncate flex-1 min-w-0">
                     {preview}
+                    <span className="ml-1 opacity-60">
+                      · {item.mode}
+                      {item.presetName !== "Default" ? ` · ${item.presetName}` : ""}
+                      {item.images.length > 0 ? ` · ${item.images.length} image${item.images.length === 1 ? "" : "s"}` : ""}
+                    </span>
                   </span>
                   <button
                     type="button"
@@ -84,8 +95,8 @@ export function QueuedMessagesPanel() {
                     type="button"
                     className="nexus-input-context-file-btn p-1 rounded"
                     onClick={() => sendQueuedImmediately(item.id)}
-                    title="Send now"
-                    aria-label="Send now"
+                    title={isRunning ? "Move to next" : "Send now"}
+                    aria-label={isRunning ? "Move queued message to next" : "Send now"}
                   >
                     <ArrowUpIcon className="w-3.5 h-3.5" />
                   </button>

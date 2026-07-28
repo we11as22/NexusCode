@@ -16,6 +16,7 @@ import { QueuedMessagesPanel } from "./components/QueuedMessagesPanel.js"
 import { ModeDropdown } from "./components/ModeDropdown.js"
 import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
+import { RuntimeActivityPanel } from "./components/RuntimeActivityPanel.js"
 import type { AutocompleteExtensionUiState, ExtensionMessage } from "./types/messages.js"
 import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
 import { NEXUS_CUSTOM_OPTION_ID } from "./constants/questionnaire.js"
@@ -276,6 +277,7 @@ function ChatView() {
             )}
           </div>
         )}
+        <RuntimeActivityPanel tasks={store.runtimeTasks} />
 
         <div className="chat-input">
           <QueuedMessagesPanel />
@@ -778,6 +780,11 @@ function ChatBottomBar() {
     !store.isRunning &&
     !store.awaitingApproval &&
     (store.inputValue.trim().length > 0 || store.attachedImages.length > 0)
+  const canQueue =
+    !store.configurationError &&
+    store.isRunning &&
+    !store.awaitingApproval &&
+    (store.inputValue.trim().length > 0 || store.attachedImages.length > 0)
   const contextPercent = store.contextPercent
 
   const planChoice = (
@@ -858,14 +865,28 @@ function ChatBottomBar() {
             </button>
           ) : null}
           {store.isRunning || store.awaitingApproval ? (
-            <button
-              type="button"
-              onClick={store.abort}
-              title="Stop (Esc)"
-              className="nexus-send-btn nexus-send-btn-stop"
-            >
-              <StopIcon />
-            </button>
+            <>
+              {canQueue ? (
+                <button
+                  type="button"
+                  onClick={() => store.addToQueue(store.inputValue)}
+                  title="Queue follow-up (Enter)"
+                  aria-label="Queue follow-up"
+                  className="nexus-send-btn nexus-send-btn-primary"
+                >
+                  <SendIcon />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={store.abort}
+                title="Stop (Esc)"
+                aria-label="Stop active run"
+                className="nexus-send-btn nexus-send-btn-stop"
+              >
+                <StopIcon />
+              </button>
+            </>
           ) : hideChatInput ? (
             <span className="w-8 h-8 flex-shrink-0" aria-hidden />
           ) : (

@@ -63,6 +63,18 @@ function assistantPartStableKey(messageId: string, part: MessagePart, partIndex:
   return `${messageId}-part-${partIndex}`
 }
 
+function explorationSegmentIsRunning(
+  prefixItems: ExploredPrefixItem[],
+): boolean {
+  return prefixItems.some((item) => {
+    if (item.type === "tool") {
+      return item.part.status === "pending" || item.part.status === "running"
+    }
+    if (item.type === "reasoning") return item.durationMs == null
+    return false
+  })
+}
+
 export function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): ChatRenderItem[] {
   const renderItems: ChatRenderItem[] = []
 
@@ -84,16 +96,19 @@ export function buildChatRenderItems(messages: SessionMessage[], isRunning: bool
     const canonicalReplyIndex = getCanonicalReplyIndex(parts)
     const segments = getAssistantDisplaySegments(parts)
 
-    segments.forEach((segment, segmentIndex) => {
+    segments.forEach((segment) => {
       if (segment.type === "explored") {
         if (segment.prefixItems.length === 0) return
-        const isTrailingSegment = segmentIndex === segments.length - 1
         renderItems.push({
           type: "explored",
           // Stable across streaming appends within the same wave (endIndex grows); avoids Virtuoso remount flicker.
           key: `${message.id}-explored-${segment.startIndex}`,
           prefixItems: segment.prefixItems,
-          isRunning: Boolean(isRunning && !isComplete && isTrailingSegment),
+          isRunning: Boolean(
+            isRunning &&
+            !isComplete &&
+            explorationSegmentIsRunning(segment.prefixItems),
+          ),
         })
         return
       }

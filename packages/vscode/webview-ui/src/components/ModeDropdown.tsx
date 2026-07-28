@@ -132,8 +132,16 @@ export function ModeDropdown() {
       <button
         ref={buttonRef}
         type="button"
-        onClick={() => setOpen((o) => !o)}
-        title={current.description}
+        onClick={() => {
+          if (!isRunning) setOpen((o) => !o)
+        }}
+        disabled={isRunning}
+        title={
+          isRunning
+            ? `Running in ${current.label} mode. Mode can be changed after this turn.`
+            : current.description
+        }
+        aria-label={`Mode ${current.label}${isRunning ? "; unavailable while running" : ""}`}
         className="nexus-mode-pill flex items-center gap-1.5"
       >
         <span className="flex items-center justify-center w-4 h-4 text-[var(--vscode-foreground)]">

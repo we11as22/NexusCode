@@ -5,11 +5,11 @@ import remarkGfm from "remark-gfm"
 import { ToolCallCard, InlineFileEditBlock } from "./ToolCallCard.js"
 import { NEXUS_CHAT_LAYOUT_EVENT } from "../constants/chatLayoutEvent.js"
 import { NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX } from "../constants/questionnaire.js"
-import { ExploredSummaryInline, getAssistantDisplaySegments, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
+import { ExploredSummaryInline, type ExploredPrefixItem } from "./ExploredProgressBlock.js"
 import { ThoughtBlock } from "./ThoughtBlock.js"
 import { MermaidBlock } from "./MermaidBlock.js"
 import { postMessage } from "../vscode.js"
-import type { SessionMessage, MessagePart, ToolPart, ReasoningPart } from "../stores/chat.js"
+import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 import type { SubAgentState } from "../stores/chat.js"
 import type { ApprovalActionView } from "../types/approval.js"
 import { useChatStore } from "../stores/chat.js"
@@ -151,6 +151,7 @@ function BashCommandBlock({
 }) {
   // null = follow auto logic; true/false = user override
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
+  const [copied, setCopied] = useState<"command" | "output" | "artifact" | null>(null)
   // Auto-expand when command completes; stay collapsed while pending/running (so approval doesn't look like edit field)
   const isDone = part.status === "completed" || part.status === "error"
   const expanded = userExpanded !== null ? userExpanded : isDone
@@ -166,6 +167,30 @@ function BashCommandBlock({
       ? `${((part.timeEnd - part.timeStart) / 1000).toFixed(1)}s`
       : null
   const shortCommand = command.length > 72 ? command.slice(0, 69) + "…" : command
+  const cwd =
+    typeof part.input?.cwd === "string"
+      ? part.input.cwd
+      : typeof part.input?.working_directory === "string"
+        ? part.input.working_directory
+        : ""
+  const exitCodeMatch = output.match(/^\[exit:\s*(-?\d+)\]$/m)
+  const exitCode = exitCodeMatch ? Number(exitCodeMatch[1]) : undefined
+  const isBackground =
+    Boolean(part.backgroundTaskId) ||
+    part.input?.run_in_background === true
+  const copy = async (
+    kind: "command" | "output" | "artifact",
+    value: string,
+  ) => {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(kind)
+      window.setTimeout(() => setCopied(null), 1500)
+    } catch {
+      setCopied(null)
+    }
+  }
 
   useLayoutEffect(() => {
     onListLayoutHint?.()
@@ -181,27 +206,99 @@ function BashCommandBlock({
         }}
         className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-[var(--vscode-foreground)] hover:bg-[var(--vscode-list-hoverBackground)]"
       >
-        <span className="flex-shrink-0" title="bash">⌨️</span>
+        <span
+          className={`codicon ${
+            part.status === "running" || part.status === "pending"
+              ? "codicon-loading codicon-modifier-spin"
+              : part.status === "completed"
+                ? "codicon-terminal"
+                : "codicon-error"
+          } flex-shrink-0`}
+          title="Bash"
+          aria-hidden="true"
+        />
         <span className="flex-shrink-0 font-mono">bash</span>
         <span className="flex-1 min-w-0 truncate font-mono text-[var(--vscode-descriptionForeground)]" title={command}>
           {shortCommand || "—"}
         </span>
         {elapsed && <span className="flex-shrink-0 text-[var(--vscode-descriptionForeground)]">{elapsed}</span>}
+        {isBackground && (
+          <span className="flex-shrink-0 rounded border border-[var(--vscode-panel-border)] px-1 text-[10px] text-[var(--vscode-descriptionForeground)]">
+            background
+          </span>
+        )}
+        {exitCode != null && (
+          <span
+            className={`flex-shrink-0 font-mono ${
+              exitCode === 0
+                ? "text-[var(--vscode-testing-iconPassed)]"
+                : "text-[var(--vscode-errorForeground)]"
+            }`}
+          >
+            exit {exitCode}
+          </span>
+        )}
         <span className="flex-shrink-0 text-[var(--vscode-descriptionForeground)]">{expanded ? "▼" : "▶"}</span>
       </button>
-        {expanded && (output || part.error) && (
+      {expanded && (
         <div className="border-t border-[var(--vscode-panel-border)] px-3 py-2">
+          {(cwd || part.backgroundTaskId) && (
+            <div className="mb-1 flex min-w-0 items-center gap-2 text-[10px] text-[var(--vscode-descriptionForeground)]">
+              {cwd ? <span className="truncate" title={cwd}>cwd: {cwd}</span> : null}
+              {part.backgroundTaskId ? (
+                <span className="truncate font-mono" title={part.backgroundTaskId}>
+                  task: {part.backgroundTaskId}
+                </span>
+              ) : null}
+            </div>
+          )}
           {showTail && (
             <div className="text-[10px] text-[var(--vscode-descriptionForeground)] mb-1">
               … last {BASH_OUTPUT_TAIL_LINES} lines (of {lines.length})
             </div>
           )}
-          <pre className="nexus-output-pre text-[11px] font-mono whitespace-pre-wrap break-words overflow-x-auto max-h-64 overflow-y-auto bg-[var(--vscode-textCodeBlock-background)] rounded">
-            {displayOutput || " "}
-          </pre>
+          {(output || part.error) ? (
+            <pre className="nexus-output-pre text-[11px] font-mono whitespace-pre-wrap break-words overflow-x-auto max-h-64 overflow-y-auto bg-[var(--vscode-textCodeBlock-background)] rounded">
+              {displayOutput || " "}
+            </pre>
+          ) : (
+            <div className="text-[11px] text-[var(--vscode-descriptionForeground)]">
+              {part.status === "running" || part.status === "pending"
+                ? "Command is running…"
+                : "No output"}
+            </div>
+          )}
           {part.error && (
             <div className="mt-1 text-red-400 text-[11px] bg-red-500/10 rounded p-2 px-3">{part.error}</div>
           )}
+          <div className="mt-2 flex flex-wrap items-center gap-1">
+            <button
+              type="button"
+              className="nexus-input-context-file-btn rounded px-1.5 py-0.5 text-[10px]"
+              onClick={() => void copy("command", command)}
+              disabled={!command}
+            >
+              {copied === "command" ? "Copied" : "Copy command"}
+            </button>
+            <button
+              type="button"
+              className="nexus-input-context-file-btn rounded px-1.5 py-0.5 text-[10px]"
+              onClick={() => void copy("output", output)}
+              disabled={!output}
+            >
+              {copied === "output" ? "Copied" : "Copy output"}
+            </button>
+            {part.outputArtifactId ? (
+              <button
+                type="button"
+                className="nexus-input-context-file-btn rounded px-1.5 py-0.5 text-[10px]"
+                title="Copy the opaque ToolOutputRead artifact id"
+                onClick={() => void copy("artifact", part.outputArtifactId!)}
+              >
+                {copied === "artifact" ? "Artifact ID copied" : "Copy full-output ID"}
+              </button>
+            ) : null}
+          </div>
         </div>
       )}
       {approval}
@@ -252,105 +349,6 @@ type ChatRenderItem =
       key: string
       durationSec: number
     }
-
-function getCanonicalReplyIndex(parts: MessagePart[]): number {
-  const textPartIndices = parts
-    .map((part, index) => (part.type === "text" ? index : -1))
-    .filter((index) => index >= 0)
-
-  if (textPartIndices.length === 0) return -1
-
-  const withUserMessage = textPartIndices.filter(
-    (index) => (parts[index] as { user_message?: string }).user_message?.trim()
-  )
-
-  if (withUserMessage.length > 0) return withUserMessage[withUserMessage.length - 1]!
-  return textPartIndices[textPartIndices.length - 1]!
-}
-
-function hasVisibleTextPart(part: MessagePart): boolean {
-  if (part.type !== "text") return false
-  const textPart = part as { text?: string; user_message?: string }
-  return Boolean(textPart.text?.trim() || textPart.user_message?.trim())
-}
-
-function isReasoningPartRenderable(part: MessagePart): boolean {
-  if (part.type !== "reasoning") return false
-  const reasoning = part as { text?: string }
-  const PLACEHOLDER_TEXT = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
-  return Boolean(reasoning.text?.trim()) && reasoning.text !== PLACEHOLDER_TEXT
-}
-
-/** Virtuoso row keys must stay stable when parts reorder; index-only keys reuse wrong rows (duplicate/ghost tool UI). */
-function assistantPartStableKey(messageId: string, part: MessagePart, partIndex: number): string {
-  if (part.type === "tool") {
-    return `${messageId}-tool-${(part as ToolPart).id}`
-  }
-  if (part.type === "reasoning") {
-    const r = part as ReasoningPart
-    return `${messageId}-reasoning-${r.reasoningId ?? "noid"}-${partIndex}`
-  }
-  if (part.type === "text") {
-    return `${messageId}-text-${partIndex}`
-  }
-  return `${messageId}-part-${partIndex}`
-}
-
-function buildChatRenderItems(messages: SessionMessage[], isRunning: boolean): ChatRenderItem[] {
-  const renderItems: ChatRenderItem[] = []
-
-  messages.forEach((message, messageIndex) => {
-    const isComplete = !isRunning || messageIndex < messages.length - 1
-
-    if (message.role !== "assistant" || typeof message.content === "string" || !Array.isArray(message.content)) {
-      renderItems.push({
-        type: "message",
-        key: message.id,
-        message,
-        messageIndex,
-        isComplete,
-      })
-      return
-    }
-
-    const parts = message.content as MessagePart[]
-    const canonicalReplyIndex = getCanonicalReplyIndex(parts)
-    const segments = getAssistantDisplaySegments(parts)
-
-    segments.forEach((segment, segmentIndex) => {
-      if (segment.type === "explored") {
-        if (segment.prefixItems.length === 0) return
-        const isTrailingSegment = segmentIndex === segments.length - 1
-        renderItems.push({
-          type: "explored",
-          key: `${message.id}-explored-${segment.startIndex}-${segment.endIndex}`,
-          prefixItems: segment.prefixItems,
-          isRunning: Boolean(isRunning && !isComplete && isTrailingSegment),
-        })
-        return
-      }
-
-      const { part, index: partIndex } = segment
-      if (part.type === "tool" && TODO_TOOL_NAMES.has((part as ToolPart).tool)) return
-      if (part.type === "reasoning" && !isReasoningPartRenderable(part)) return
-      if (part.type === "text" && !hasVisibleTextPart(part)) return
-      renderItems.push({
-        type: "assistant_part",
-        key: assistantPartStableKey(message.id, part, partIndex),
-        message,
-        messageIndex,
-        isComplete,
-        parts,
-        part,
-        partIndex,
-        canonicalReplyIndex,
-        isLastPart: partIndex === parts.length - 1,
-      })
-    })
-  })
-
-  return renderItems
-}
 
 export function MessageList({ messages, isRunning = false, hasOlderMessages = false, loadingOlderMessages = false }: Props) {
   const virtuosoRef = useRef<VirtuosoHandle>(null)

@@ -17,7 +17,7 @@ function FileIcon({ className }: { className?: string }) {
 
 const CODE_WRITING_MODES = ["agent", "plan", "debug"] as const
 
-/** Floating panel above input: pending approval (1 file) OR "N Files" + Undo / Keep All / Review. */
+/** Floating panel above input: proposed changes or applied changes awaiting keep/revert. */
 export function InputContextPanel() {
   const store = useChatStore()
   const { pendingApproval, resolveApproval, mode, sessionUnacceptedEdits, openSessionEditDiff, undoSessionEdits, keepAllSessionEdits, revertSessionEditFile, acceptSessionEditFile } = store
@@ -133,25 +133,25 @@ export function InputContextPanel() {
                 className="nexus-input-context-btn"
                 onClick={() => resolveApproval(false)}
               >
-                Undo
+                Reject
               </button>
               <button
                 type="button"
                 className="nexus-input-context-btn"
                 onClick={() => resolveApproval(true)}
               >
-                Keep
+                Apply
               </button>
               <button
                 type="button"
                 className="nexus-input-context-btn nexus-input-context-btn-active"
-                title="Review the change above"
+                title="Review the proposed diff"
                 onClick={() => {
                   if (pendingPath) postMessage({ type: "showDiff", path: pendingPath })
                 }}
                 disabled={!pendingPath}
               >
-                Review
+                Review Diff
               </button>
             </div>
           </div>
@@ -162,8 +162,8 @@ export function InputContextPanel() {
                 {fileLabel}
                 {hasDiff && (
                   <span className="nexus-input-context-file-diff">
-                    {diffStats.added > 0 && <span className="text-green-500">+{diffStats.added}</span>}
-                    {diffStats.removed > 0 && <span className="text-red-400">-{diffStats.removed}</span>}
+                    {diffStats.added > 0 && <span className="text-[var(--vscode-gitDecoration-addedResourceForeground)]">+{diffStats.added}</span>}
+                    {diffStats.removed > 0 && <span className="text-[var(--vscode-gitDecoration-deletedResourceForeground)]">-{diffStats.removed}</span>}
                   </span>
                 )}
               </span>
@@ -192,7 +192,7 @@ export function InputContextPanel() {
     )
   }
 
-  // Session unaccepted edits: N files, Undo All / Keep All / Review
+  // Applied session edits: N files, Revert All / Keep All / Review Diff
   if (showSessionEditsPanel && sessionEditsForPanel.length > 0) {
     const n = sessionEditsForPanel.length
     const fileLabel = n === 1 ? "1 File" : `${n} Files`
@@ -217,7 +217,7 @@ export function InputContextPanel() {
                 onClick={() => undoSessionEdits()}
                 title="Revert all files to state before edits"
               >
-                Undo All
+                Revert All
               </button>
               <button
                 type="button"
@@ -233,7 +233,7 @@ export function InputContextPanel() {
                 title="Expand to review files; click a file to open full diff in editor"
                 onClick={() => setExpanded(true)}
               >
-                Review
+                Review Diffs
               </button>
             </div>
           </div>
@@ -259,8 +259,8 @@ export function InputContextPanel() {
                         {name}
                         {hasDiff && (
                           <span className="nexus-input-context-file-diff">
-                            {edit.diffStats.added > 0 && <span className="text-green-500">+{edit.diffStats.added}</span>}
-                            {edit.diffStats.removed > 0 && <span className="text-red-400">-{edit.diffStats.removed}</span>}
+                            {edit.diffStats.added > 0 && <span className="text-[var(--vscode-gitDecoration-addedResourceForeground)]">+{edit.diffStats.added}</span>}
+                            {edit.diffStats.removed > 0 && <span className="text-[var(--vscode-gitDecoration-deletedResourceForeground)]">-{edit.diffStats.removed}</span>}
                           </span>
                         )}
                         {groupedChange && (

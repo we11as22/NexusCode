@@ -1,5 +1,6 @@
 import { z } from "zod"
 import type { ToolDef, ToolContext } from "../../types.js"
+import { planExitWriteGateSatisfied } from "../../session/plan-write-gate.js"
 
 /**
  * Condense — compress conversation context.
@@ -58,7 +59,28 @@ When NOT to use:
   parameters: planExitSchema,
   modes: ["plan"],
 
-  async execute(args, _ctx: ToolContext) {
+  async execute(args, ctx: ToolContext) {
+    if (ctx.mode !== "plan") {
+      return {
+        success: false,
+        output: `PlanExit is disabled in ${ctx.mode} mode.`,
+      }
+    }
+    if (
+      !ctx.toolExecutionMessageId ||
+      !planExitWriteGateSatisfied(
+        ctx.session,
+        ctx.toolExecutionMessageId,
+        ctx.cwd,
+      )
+    ) {
+      return {
+        success: false,
+        output:
+          "PlanExit requires at least one completed Write or Edit to " +
+          "`.nexus/plans/*.md` or `.txt` in this session.",
+      }
+    }
     const summary = args.summary?.trim() ?? "Plan is ready."
     return { success: true, output: `Plan complete.\n\n${summary}` }
   },

@@ -610,6 +610,8 @@ export interface ToolPart {
   outputArtifactId?: string
   /** Exact session whose private artifact directory owns this output. */
   outputArtifactOwnerSessionId?: string
+  /** Public task handle for a background shell/tool execution. */
+  backgroundTaskId?: string
   /** Set when a file mutation tool completes; used for session diff surfaces. */
   path?: string
   diffStats?: { added: number; removed: number }

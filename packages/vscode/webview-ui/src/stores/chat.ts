@@ -25,11 +25,21 @@ const pendingMessageSubmissions = new Map<
   {
     content: string
     images: Array<{ id: string; data: string; mimeType: string }>
+    mode: Mode
+    presetName: string
   }
 >()
 
 export type Mode = "agent" | "plan" | "ask" | "debug" | "review"
 export type AppView = "chat" | "sessions" | "settings"
+export interface QueuedTurn {
+  id: string
+  text: string
+  images: Array<{ id: string; data: string; mimeType: string }>
+  mode: Mode
+  presetName: string
+  createdAt: number
+}
 
 export type IndexStatusKind =
   | { state: "idle" }
@@ -74,6 +84,9 @@ export interface ToolPart {
   status: "pending" | "running" | "completed" | "error"
   input?: Record<string, unknown>
   output?: string
+  /** Opaque capability for retrieving a spilled full output; never a filesystem path. */
+  outputArtifactId?: string
+  backgroundTaskId?: string
   error?: string
   timeStart?: number
   timeEnd?: number
@@ -239,93 +252,24 @@ export interface SubAgentState {
   error?: string
 }
 
-function shortenSubagentValue(value: unknown, max = 52): string {
-  if (typeof value !== "string") return ""
-  const one = value.replace(/\s+/g, " ").trim()
-  return one.length <= max ? one : `${one.slice(0, max - 1)}…`
-}
-
-function getSubagentToolLabel(tool: string, input?: Record<string, unknown>): string {
-  const path = shortenSubagentValue(input?.path ?? input?.file_path)
-  const pattern = shortenSubagentValue(input?.pattern ?? input?.query)
-  const command = shortenSubagentValue(input?.command, 44)
-  const normalized = tool.trim()
-  if (normalized === "Read" || normalized === "read_file") return path ? `Read(${path})` : "Read(file)"
-  if (normalized === "List" || normalized === "list_dir") return path ? `List(${path})` : "List(.)"
-  if (normalized === "Grep" || normalized === "grep") return pattern ? `Grep(${pattern})` : "Grep"
-  if (normalized === "Glob" || normalized === "glob") return pattern ? `Glob(${pattern})` : "Glob"
-  if (normalized === "Bash" || normalized === "execute_command") return command ? `Bash(${command})` : "Bash"
-  return normalized
-}
-
-function reduceSubagentState(list: SubAgentState[], event:
-  | { type: "subagent_start"; subagentId: string; mode: Mode; task: string }
-  | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown> }
-  | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean }
-  | { type: "subagent_done"; subagentId: string; success: boolean; error?: string }): SubAgentState[] {
-  switch (event.type) {
-    case "subagent_start": {
-      const next = list.filter((item) => item.id !== event.subagentId)
-      next.push({
-        id: event.subagentId,
-        mode: event.mode,
-        task: event.task,
-        status: "running",
-        currentTool: undefined,
-        toolHistory: [],
-        toolUsesCount: 0,
-        startedAt: Date.now(),
-      })
-      return next
-    }
-    case "subagent_tool_start": {
-      const label = getSubagentToolLabel(event.tool, event.input)
-      return list.map((item) =>
-        item.id === event.subagentId
-          ? {
-              ...item,
-              status: "running" as const,
-              currentTool: label,
-              toolUsesCount: item.toolUsesCount + 1,
-              toolHistory: [...item.toolHistory, label].slice(-16),
-            }
-          : item
-      )
-    }
-    case "subagent_tool_end":
-      return list.map((item) =>
-        item.id === event.subagentId
-          ? {
-              ...item,
-              status: (event.success ? "running" : "error") as "running" | "error",
-              currentTool: event.success ? undefined : event.tool,
-            }
-          : item
-      )
-    case "subagent_done":
-      return list.map((item) =>
-        item.id === event.subagentId
-          ? {
-              ...item,
-              status: (event.success ? "completed" : "error") as "completed" | "error",
-              currentTool: undefined,
-              finishedAt: Date.now(),
-              error: event.error,
-            }
-          : item
-      )
-  }
-}
-
-function findToolPartIndexForSubagent(parts: MessagePart[], subagentId: string, parentPartId?: string | null): number {
-  const byExistingSubagent = parts.findIndex(
-    (part) => part.type === "tool" && (part as ToolPart).subagents?.some((subagent) => subagent.id === subagentId)
-  )
-  if (byExistingSubagent >= 0) return byExistingSubagent
-  if (parentPartId && parentPartId.trim().length > 0) {
-    return parts.findIndex((part) => part.type === "tool" && (part as ToolPart).id === parentPartId)
-  }
-  return -1
+export interface RuntimeTaskActivity {
+  id: string
+  kind: "agent" | "shell" | "tracking" | "workflow" | "external"
+  subject: string
+  description?: string
+  status:
+    | "pending"
+    | "in_progress"
+    | "running"
+    | "completed"
+    | "failed"
+    | "killed"
+    | "cancelled"
+    | "deleted"
+  currentTool?: string
+  outputPreview?: string
+  exitCode?: number
+  updatedAt: number
 }
 
 type ApprovalAction = {
@@ -365,7 +309,7 @@ interface ChatState {
   /** Images attached to the next message (base64 data, no data URL prefix). */
   attachedImages: Array<{ id: string; data: string; mimeType: string }>
   /** Queued messages to send one by one when agent finishes. */
-  queuedMessages: Array<{ id: string; text: string }>
+  queuedMessages: QueuedTurn[]
   sessions: SessionPreview[]
   /** True while session list is being fetched (e.g. from server). */
   sessionsLoading: boolean
@@ -379,6 +323,8 @@ interface ChatState {
   /** Completed compaction rows (chronological, like collapsed Thought). */
   compactionLog: Array<{ id: string; durationSec: number }>
   subagents: SubAgentState[]
+  /** Modern task/background lifecycle projected independently of legacy subagent events. */
+  runtimeTasks: RuntimeTaskActivity[]
   /** partId of the last tool_start for delegated agent tasks; used to attach subagent_start to that part */
   lastSpawnAgentPartId: string | null
   selectedProfile: string
@@ -506,7 +452,15 @@ interface ChatState {
   sendQueuedImmediately: (id: string) => void
   setMode: (mode: Mode) => void
   setProfile: (profileName: string) => void
-  sendMessage: (content: string, options?: { displayText?: string }) => void
+  sendMessage: (
+    content: string,
+    options?: {
+      displayText?: string
+      mode?: Mode
+      images?: Array<{ id: string; data: string; mimeType: string }>
+      presetName?: string
+    },
+  ) => void
   abort: () => void
   compact: () => void
   clearChat: () => void
@@ -552,7 +506,7 @@ export type AgentEvent =
   | { type: "reasoning_delta"; delta: string; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "reasoning_end"; messageId: string; reasoningId?: string; providerMetadata?: Record<string, unknown> }
   | { type: "tool_start"; tool: string; partId: string; messageId: string; input?: Record<string, unknown> }
-  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }> }
+  | { type: "tool_end"; tool: string; partId: string; messageId: string; success: boolean; output?: string; error?: string; compacted?: boolean; path?: string; diffStats?: { added: number; removed: number }; diffHunks?: Array<{ type: string; lineNum: number; line: string }>; appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>; metadata?: Record<string, unknown> }
   | { type: "subagent_start"; subagentId: string; mode: Mode; task: string; parentPartId?: string }
   | { type: "subagent_tool_start"; subagentId: string; tool: string; input?: Record<string, unknown>; parentPartId?: string }
   | { type: "subagent_tool_end"; subagentId: string; tool: string; success: boolean; parentPartId?: string }
@@ -565,12 +519,97 @@ export type AgentEvent =
   | { type: "vector_db_progress"; message?: string }
   | { type: "vector_db_ready" }
   | { type: "context_usage"; usedTokens: number; limitTokens: number; percent: number }
+  | { type: "run_context"; mode: Mode; memoryCitations: string[]; taskIds: string[] }
+  | { type: "session_saved"; sessionId: string }
+  | { type: "plan_followup_ask"; planText: string }
+  | { type: "task_created"; task: RuntimeTaskEventRecord }
+  | { type: "task_updated"; task: RuntimeTaskEventRecord }
+  | { type: "task_progress"; task: RuntimeTaskEventRecord; outputPreview?: string }
+  | { type: "task_tool_start"; taskId: string; taskKind: RuntimeTaskActivity["kind"]; tool: string; input?: Record<string, unknown>; parentPartId?: string }
+  | { type: "task_tool_end"; taskId: string; taskKind: RuntimeTaskActivity["kind"]; tool: string; success: boolean; parentPartId?: string }
+  | { type: "task_completed"; task: RuntimeTaskEventRecord; outputPreview?: string }
+  | { type: "team_updated"; team: Record<string, unknown> }
+  | { type: "team_message"; message: Record<string, unknown> }
+  | { type: "background_task_updated"; task: BackgroundTaskEventRecord }
+  | { type: "remote_session_updated"; remoteSession: Record<string, unknown> }
+  | { type: "plugin_hook"; pluginName: string; hookEvent: string; output: string; success: boolean }
   | { type: "error"; error: string; fatal?: boolean }
   | { type: "done"; messageId: string }
   | { type: "todo_updated"; todo: string }
   | { type: "doom_loop_detected"; tool: string }
 
 const THOUGHT_PLACEHOLDER = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
+
+interface RuntimeTaskEventRecord {
+  id: string
+  kind: RuntimeTaskActivity["kind"]
+  subject: string
+  description?: string
+  status: Exclude<RuntimeTaskActivity["status"], "running">
+  updatedAt: number
+  exitCode?: number
+  output?: string
+  error?: string
+}
+
+interface BackgroundTaskEventRecord {
+  id: string
+  kind: "bash" | "subagent" | "workflow" | "external"
+  status: "pending" | "running" | "completed" | "failed" | "killed"
+  description?: string
+  updatedAt: number
+  exitCode?: number
+  output?: string
+  outputPreview?: string
+  error?: string
+}
+
+function upsertRuntimeTask(
+  tasks: RuntimeTaskActivity[],
+  next: RuntimeTaskActivity,
+): RuntimeTaskActivity[] {
+  const index = tasks.findIndex((task) => task.id === next.id)
+  if (index < 0) return [...tasks, next].slice(-24)
+  const copy = [...tasks]
+  copy[index] = { ...copy[index], ...next }
+  return copy
+}
+
+function runtimeTaskFromRecord(
+  task: RuntimeTaskEventRecord,
+  outputPreview?: string,
+): RuntimeTaskActivity {
+  return {
+    id: task.id,
+    kind: task.kind,
+    subject: task.subject,
+    description: task.description,
+    status: task.status,
+    outputPreview: outputPreview ?? task.error ?? task.output,
+    exitCode: task.exitCode,
+    updatedAt: task.updatedAt,
+  }
+}
+
+function runtimeTaskFromBackground(
+  task: BackgroundTaskEventRecord,
+): RuntimeTaskActivity {
+  return {
+    id: task.id,
+    kind:
+      task.kind === "bash"
+        ? "shell"
+        : task.kind === "subagent"
+          ? "agent"
+          : task.kind,
+    subject: task.description?.trim() || `${task.kind} task`,
+    description: task.description,
+    status: task.status,
+    outputPreview: task.outputPreview ?? task.output ?? task.error,
+    exitCode: task.exitCode,
+    updatedAt: task.updatedAt,
+  }
+}
 
 /** Index from the end of `parts` of the open reasoning segment for `reasoningId` (no durationMs yet). */
 function findOpenReasoningReverseIndex(parts: MessagePart[], reasoningId: string): number {
@@ -609,6 +648,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   compactionStartTime: null,
   compactionLog: [],
   subagents: [],
+  runtimeTasks: [],
   lastSpawnAgentPartId: null,
   selectedProfile: "",
   projectDir: "",
@@ -697,12 +737,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   addToQueue: (text) => set((prev) => {
     const trimmed = text.trim()
-    if (!trimmed) return prev
+    if (!trimmed && prev.attachedImages.length === 0) return prev
+    const createdAt = Date.now()
     return {
       queuedMessages: [
         ...prev.queuedMessages,
-        { id: `q_${Date.now()}_${Math.random().toString(36).slice(2)}`, text: trimmed },
+        {
+          id: `q_${createdAt}_${Math.random().toString(36).slice(2)}`,
+          text: trimmed,
+          images: prev.attachedImages.map((image) => ({ ...image })),
+          mode: prev.mode,
+          presetName: prev.activePresetName,
+          createdAt,
+        },
       ],
+      inputValue: "",
+      attachedImages: [],
     }
   }),
   removeFromQueue: (id) => set((prev) => ({
@@ -710,12 +760,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   })),
   addToQueueFront: (text) => set((prev) => {
     const trimmed = text.trim()
-    if (!trimmed) return prev
+    if (!trimmed && prev.attachedImages.length === 0) return prev
+    const createdAt = Date.now()
     return {
       queuedMessages: [
-        { id: `q_${Date.now()}_${Math.random().toString(36).slice(2)}`, text: trimmed },
+        {
+          id: `q_${createdAt}_${Math.random().toString(36).slice(2)}`,
+          text: trimmed,
+          images: prev.attachedImages.map((image) => ({ ...image })),
+          mode: prev.mode,
+          presetName: prev.activePresetName,
+          createdAt,
+        },
         ...prev.queuedMessages,
       ],
+      inputValue: "",
+      attachedImages: [],
     }
   }),
   editQueuedToInput: (id) => {
@@ -723,17 +783,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (item) {
       set((prev) => ({
         inputValue: item.text,
+        attachedImages: item.images.map((image) => ({ ...image })),
+        mode: item.mode,
+        activePresetName: item.presetName,
         queuedMessages: prev.queuedMessages.filter((q) => q.id !== id),
       }))
+      postMessage({ type: "setMode", mode: item.mode })
+      postMessage({ type: "setChatPreset", presetName: item.presetName })
     }
   },
   sendQueuedImmediately: (id) => {
     const item = get().queuedMessages.find((q) => q.id === id)
     if (!item) return
-    const { isRunning, sendMessage, removeFromQueue, addToQueueFront } = get()
+    const { isRunning, sendMessage, removeFromQueue } = get()
+    if (isRunning) {
+      set((prev) => ({
+        queuedMessages: [
+          item,
+          ...prev.queuedMessages.filter((queued) => queued.id !== id),
+        ],
+      }))
+      return
+    }
     removeFromQueue(id)
-    if (isRunning) addToQueueFront(item.text)
-    else sendMessage(item.text)
+    sendMessage(item.text, {
+      mode: item.mode,
+      images: item.images,
+      presetName: item.presetName,
+    })
   },
 
   appendToInput: (v) => set((prev) => ({
@@ -760,30 +837,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
       configurationError,
     } = get()
     if (isRunning || configurationError) return
+    const messageImages = options?.images ?? attachedImages
     const text = (typeof content === "string" ? content : "").trim()
-    if (!text && attachedImages.length === 0) return
+    if (!text && messageImages.length === 0) return
     const displayText = (options?.displayText ?? text).trim()
     const optimisticDisplay =
       displayText ||
-      `[Attached ${attachedImages.length} image${attachedImages.length === 1 ? "" : "s"}]`
+      `[Attached ${messageImages.length} image${messageImages.length === 1 ? "" : "s"}]`
     if (isSlashCommand(text, "compact")) {
       compact()
       set({ inputValue: "", attachedImages: [] })
       return
     }
     const reviewRequested = isSlashCommand(text, "review")
-    const runMode: Mode = reviewRequested ? "review" : mode
+    const runMode: Mode = reviewRequested
+      ? "review"
+      : (options?.mode ?? mode)
     const runContent = reviewRequested ? buildReviewPromptFromSlash(text) : text
+    const runPresetName = options?.presetName ?? activePresetName
     const clientMessageId =
       `local_user_${Date.now()}_${Math.random().toString(36).slice(2)}`
     pendingMessageSubmissions.set(clientMessageId, {
       content: text,
-      images: attachedImages.map((image) => ({ ...image })),
+      images: messageImages.map((image) => ({ ...image })),
+      mode: runMode,
+      presetName: runPresetName,
     })
     set((prev) => ({
       inputValue: "",
       attachedImages: [],
       isRunning: true,
+      mode: runMode,
+      activePresetName: runPresetName,
       view: "chat",
       messages: [
         ...prev.messages,
@@ -792,7 +877,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ts: Date.now(),
           role: "user",
           content: optimisticDisplay,
-          presetName: activePresetName,
+          presetName: runPresetName,
         },
       ],
     }))
@@ -801,8 +886,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       clientMessageId,
       content: runContent,
       mode: runMode,
-      images: attachedImages.length > 0 ? attachedImages.map((img) => ({ data: img.data, mimeType: img.mimeType })) : undefined,
-      presetName: activePresetName,
+      images: messageImages.length > 0 ? messageImages.map((img) => ({ data: img.data, mimeType: img.mimeType })) : undefined,
+      presetName: runPresetName,
     })
   },
 
@@ -812,6 +897,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     pendingMessageSubmissions.delete(clientMessageId)
     if (accepted) return
 
+    postMessage({ type: "setMode", mode: pending.mode })
+    postMessage({
+      type: "setChatPreset",
+      presetName: pending.presetName,
+    })
     set((prev) => {
       const restoredText =
         pending.content.length === 0
@@ -834,6 +924,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...prev.attachedImages,
         ],
         isRunning: false,
+        mode: pending.mode,
+        activePresetName: pending.presetName,
       }
     })
   },
@@ -860,6 +952,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       todo: "",
       view: "chat",
       subagents: [],
+      runtimeTasks: [],
       lastSpawnAgentPartId: null,
       planCompleted: false,
       planFollowupText: null,
@@ -967,6 +1060,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         next.compactionLog = []
         next.compactionUi = "none"
         next.compactionStartTime = null
+        next.runtimeTasks = []
       }
       if (state.pendingQuestionRequest !== undefined) {
         const inc = state.pendingQuestionRequest
@@ -1108,6 +1202,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { messages } = get()
 
     switch (event.type) {
+      case "run_context":
+        set({ isRunning: true })
+        break
+
       case "assistant_message_started": {
         const { list, index } = ensureAssistantMessageFromHelpers(messages, event.messageId)
         set({ messages: list })
@@ -1233,6 +1331,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           diffStats?: { added: number; removed: number }
           diffHunks?: Array<{ type: string; lineNum: number; line: string }>
           appliedReplacements?: Array<{ oldSnippet: string; newSnippet: string }>
+          metadata?: Record<string, unknown>
         }
         if (isDelegatedAgentParentToolEndClearFromHelpers(event.tool, (event as { input?: Record<string, unknown> }).input)) set({ lastSpawnAgentPartId: null })
         set((s) => ({ ...s, pendingApproval: null, awaitingApproval: false }))
@@ -1253,6 +1352,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...(Array.isArray(ev.appliedReplacements) && ev.appliedReplacements.length > 0
                   ? { appliedReplacements: ev.appliedReplacements }
                   : {}),
+                ...(typeof ev.metadata?.artifactId === "string"
+                  ? { outputArtifactId: ev.metadata.artifactId }
+                  : {}),
+                ...(typeof ev.metadata?.task_id === "string"
+                  ? { backgroundTaskId: ev.metadata.task_id }
+                  : typeof ev.metadata?.bash_id === "string"
+                    ? { backgroundTaskId: ev.metadata.bash_id }
+                    : {}),
+                ...(typeof ev.metadata?.changeSetId === "string"
+                  ? {
+                      changeSetId: ev.metadata.changeSetId,
+                      ...(typeof ev.metadata.proposalHash === "string"
+                        ? { proposalHash: ev.metadata.proposalHash }
+                        : {}),
+                      ...(typeof ev.metadata.changeSetState === "string"
+                        ? {
+                            changeSetState:
+                              ev.metadata.changeSetState as ToolPart["changeSetState"],
+                          }
+                        : {}),
+                      ...(Array.isArray(ev.metadata.changeFiles)
+                        ? { changeFiles: ev.metadata.changeFiles as ToolPart["changeFiles"] }
+                        : {}),
+                    }
+                  : {}),
               } as ToolPart
             }
             return p
@@ -1265,6 +1389,90 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "todo_updated":
         set({ todo: (event as { type: "todo_updated"; todo: string }).todo ?? "" })
+        break
+
+      case "task_created":
+      case "task_updated":
+      case "task_progress":
+      case "task_completed":
+        set((state) => ({
+          runtimeTasks: upsertRuntimeTask(
+            state.runtimeTasks,
+            runtimeTaskFromRecord(
+              event.task,
+              "outputPreview" in event ? event.outputPreview : undefined,
+            ),
+          ),
+        }))
+        break
+
+      case "task_tool_start":
+        set((state) => {
+          const existing = state.runtimeTasks.find(
+            (task) => task.id === event.taskId,
+          )
+          return {
+            runtimeTasks: upsertRuntimeTask(state.runtimeTasks, {
+              id: event.taskId,
+              kind: event.taskKind,
+              subject: existing?.subject ?? `${event.taskKind} task`,
+              description: existing?.description,
+              status: "running",
+              currentTool: event.tool,
+              outputPreview: existing?.outputPreview,
+              exitCode: existing?.exitCode,
+              updatedAt: Date.now(),
+            }),
+          }
+        })
+        break
+
+      case "task_tool_end":
+        set((state) => {
+          const existing = state.runtimeTasks.find(
+            (task) => task.id === event.taskId,
+          )
+          return {
+            runtimeTasks: upsertRuntimeTask(state.runtimeTasks, {
+              id: event.taskId,
+              kind: event.taskKind,
+              subject: existing?.subject ?? `${event.taskKind} task`,
+              description: existing?.description,
+              status: event.success ? "in_progress" : "failed",
+              currentTool: undefined,
+              outputPreview: existing?.outputPreview,
+              exitCode: existing?.exitCode,
+              updatedAt: Date.now(),
+            }),
+          }
+        })
+        break
+
+      case "background_task_updated":
+        set((state) => ({
+          runtimeTasks: upsertRuntimeTask(
+            state.runtimeTasks,
+            runtimeTaskFromBackground(event.task),
+          ),
+        }))
+        break
+
+      case "plan_followup_ask":
+        set({
+          planCompleted: true,
+          planFollowupText: event.planText,
+          planPanelCollapsed: true,
+        })
+        break
+
+      case "session_saved":
+      case "team_updated":
+      case "team_message":
+      case "remote_session_updated":
+      case "plugin_hook":
+        // These events update durable host projections or diagnostics. Keeping
+        // the explicit cases prevents new protocol events from disappearing
+        // through an accidental incomplete union.
         break
 
       case "tool_approval_needed":
@@ -1652,7 +1860,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (state.queuedMessages.length > 0) {
           const first = state.queuedMessages[0]
           state.removeFromQueue(first!.id)
-          state.sendMessage(first!.text)
+          state.sendMessage(first!.text, {
+            mode: first!.mode,
+            images: first!.images,
+            presetName: first!.presetName,
+          })
         }
         break
 

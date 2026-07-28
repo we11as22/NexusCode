@@ -72,14 +72,11 @@ Built-in and custom modes resolve through one profile:
 They are inserted in a stable, labelled position and are preserved after
 compaction. They may narrow behavior but cannot re-enable a denied tool.
 
-The extension tracks:
-
-- `activeRunMode`: immutable mode of the running turn;
-- `nextMode`: composer selection for a future or queued turn.
-
-Changing the selector during a run updates `nextMode` only. The transcript and
-run header continue to show the true `activeRunMode`. A queued message stores
-its own mode snapshot.
+The extension exposes one selected mode and disables mode switching while a
+turn is active, matching Codex's fail-closed interaction. A queued message
+stores its own mode snapshot together with its full payload, matching the
+turn-bound queue behavior in Kilo and Kimi. Nexus therefore does not need a
+second global `nextMode` state machine.
 
 ## 3. Capability-driven prompt composition
 

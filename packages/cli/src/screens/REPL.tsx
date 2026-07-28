@@ -372,7 +372,7 @@ export function REPL({
     Record<string, import('../nexus-subagents.js').SubAgentState[]>
   >({})
 
-  /** Nexus mode for the next run. Shift+Tab cycles every supported mode. */
+  /** Nexus mode captured when the next turn starts. It cannot change during an active turn. */
   const [nexusModeOverride, setNexusModeOverride] = useState<string>(
     () => nexusInitialMode ?? 'agent',
   )
@@ -2008,7 +2008,7 @@ export function REPL({
                 nexusSessionId={nexusSessionId}
                 nexusContextUsage={nexusContextUsage}
                 onCycleNexusMode={
-                  nexusBootstrap
+                  nexusBootstrap && !isLoading
                     ? () => setNexusModeOverride(prev => cycleRuntimeMode(prev))
                     : undefined
                 }

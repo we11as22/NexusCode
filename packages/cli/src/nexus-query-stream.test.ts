@@ -6,6 +6,10 @@ const source = readFileSync(
   path.join(process.cwd(), "src", "nexus-query.ts"),
   "utf8",
 )
+const replSource = readFileSync(
+  path.join(process.cwd(), "src", "screens", "REPL.tsx"),
+  "utf8",
+)
 
 describe("CLI agent-event stream", () => {
   it("does not suppress legitimate events by content fingerprints", () => {
@@ -17,5 +21,23 @@ describe("CLI agent-event stream", () => {
     expect(body).not.toContain("seenRecently")
     expect(body).not.toContain("Coarse fingerprint")
     expect(body).not.toContain("(e.todo ?? '').length")
+  })
+
+  it("projects every task lifecycle event into the terminal surface", () => {
+    for (const eventType of [
+      "task_created",
+      "task_updated",
+      "task_progress",
+      "task_tool_start",
+      "task_tool_end",
+      "task_completed",
+      "background_task_updated",
+    ]) {
+      expect(source).toContain(`event.type === '${eventType}'`)
+    }
+  })
+
+  it("does not expose mode cycling while a turn is active", () => {
+    expect(replSource).toContain("nexusBootstrap && !isLoading")
   })
 })

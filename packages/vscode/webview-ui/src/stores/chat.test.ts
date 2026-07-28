@@ -7,16 +7,65 @@ import { useChatStore } from "./chat.js"
 beforeEach(() => {
   useChatStore.setState({
     messages: [],
+    mode: "agent",
     isRunning: true,
     awaitingApproval: false,
     pendingApproval: null,
     queuedMessages: [],
+    activePresetName: "Default",
     subagents: [],
+    runtimeTasks: [],
     lastSpawnAgentPartId: null,
   })
 })
 
 describe("agent-event delivery", () => {
+  it("projects modern task and background lifecycle events", () => {
+    const handle = useChatStore.getState().handleAgentEvent
+    handle({
+      type: "task_created",
+      task: {
+        id: "task-1",
+        kind: "agent",
+        subject: "Inspect permissions",
+        status: "pending",
+        updatedAt: 10,
+      },
+    })
+    handle({
+      type: "task_tool_start",
+      taskId: "task-1",
+      taskKind: "agent",
+      tool: "Grep",
+    })
+    handle({
+      type: "background_task_updated",
+      task: {
+        id: "bash-1",
+        kind: "bash",
+        status: "completed",
+        description: "Run typecheck",
+        updatedAt: 20,
+        exitCode: 0,
+        outputPreview: "Done",
+      },
+    })
+
+    expect(useChatStore.getState().runtimeTasks).toEqual([
+      expect.objectContaining({
+        id: "task-1",
+        status: "running",
+        currentTool: "Grep",
+      }),
+      expect.objectContaining({
+        id: "bash-1",
+        kind: "shell",
+        status: "completed",
+        exitCode: 0,
+      }),
+    ])
+  })
+
   it("preserves identical text chunks delivered at distinct transport sequences", () => {
     const handle = useChatStore.getState().handleAgentEvent
     handle({
@@ -105,9 +154,45 @@ describe("agent-event delivery", () => {
 })
 
 describe("message admission", () => {
+  it("queues the complete next-turn payload while a run is active", () => {
+    useChatStore.setState({
+      isRunning: true,
+      mode: "debug",
+      activePresetName: "Careful",
+      inputValue: "follow up",
+      attachedImages: [
+        {
+          id: "image-queued",
+          data: "aGVsbG8=",
+          mimeType: "image/png",
+        },
+      ],
+    })
+
+    useChatStore.getState().addToQueue("follow up")
+
+    expect(useChatStore.getState().queuedMessages).toEqual([
+      expect.objectContaining({
+        text: "follow up",
+        mode: "debug",
+        presetName: "Careful",
+        images: [
+          expect.objectContaining({
+            id: "image-queued",
+            mimeType: "image/png",
+          }),
+        ],
+      }),
+    ])
+    expect(useChatStore.getState().inputValue).toBe("")
+    expect(useChatStore.getState().attachedImages).toEqual([])
+  })
+
   it("rolls back an optimistic row and restores its draft after rejection", () => {
     useChatStore.setState({
       isRunning: false,
+      mode: "agent",
+      activePresetName: "Default",
       inputValue: "inspect this",
       attachedImages: [
         {
@@ -118,7 +203,10 @@ describe("message admission", () => {
       ],
     })
 
-    useChatStore.getState().sendMessage("inspect this")
+    useChatStore.getState().sendMessage("inspect this", {
+      mode: "debug",
+      presetName: "Careful",
+    })
     const optimistic = useChatStore.getState().messages.at(-1)
     expect(optimistic?.id).toMatch(/^local_user_/u)
 
@@ -136,6 +224,8 @@ describe("message admission", () => {
       expect.objectContaining({ id: "image-1" }),
     ])
     expect(state.isRunning).toBe(false)
+    expect(state.mode).toBe("debug")
+    expect(state.activePresetName).toBe("Careful")
   })
 
   it("keeps an optimistic row after durable admission", () => {
