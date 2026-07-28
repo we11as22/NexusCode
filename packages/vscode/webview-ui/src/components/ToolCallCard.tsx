@@ -7,6 +7,7 @@ import {
   normalizeParallelRecipientName as normalizeParallelRecipientNameMeta,
   toolDisplayName as toolDisplayNameMeta,
 } from "../transcript/toolMeta.js"
+import { buildFileChangePreview } from "./fileChangePreview.js"
 
 /** Extract path:line pairs from search/codebase output for "Open in editor" links */
 function extractPathLinePairs(output: string): Array<{ path: string; line: number }> {
@@ -96,33 +97,11 @@ function getAppliedReplacementsPreviewLines(
   return out
 }
 
-function countAppliedReplacementChangeLines(applied: Array<{ oldSnippet: string; newSnippet: string }>): number {
-  let n = 0
-  for (const { oldSnippet, newSnippet } of applied) {
-    n += oldSnippet.split(/\r?\n/).length + newSnippet.split(/\r?\n/).length
-  }
-  return n
-}
-
 const DIFF_PREVIEW_LINE_HEIGHT = 1.4
-const DIFF_PREVIEW_MAX_LINES = 4
+const DIFF_PREVIEW_MAX_LINES = 6
 const diffPreviewMaxHeightRem = DIFF_PREVIEW_MAX_LINES * DIFF_PREVIEW_LINE_HEIGHT
 /** Larger cap for expanded file-edit card (still snippet-based for Edit when appliedReplacements set). */
 const FILE_EDIT_EXPANDED_MAX_LINES = 120
-
-/** Parse "Successfully updated path\n...\n<updated_content>\n...\n</updated_content>" for fallback. */
-function parseSuccessfullyUpdatedOutput(output: string): { content: string } | null {
-  const contentMatch = output.match(/<updated_content>\s*([\s\S]*?)<\/updated_content>/)
-  const content = contentMatch?.[1]?.trim() ?? ""
-  if (!content) return null
-  return { content }
-}
-
-/** Fallback diff hunks from raw content when diffHunks missing — first N lines as "add". */
-function buildFallbackDiffHunks(content: string, maxLines = 4): Array<{ type: "add"; lineNum: number; line: string }> {
-  const lines = content.split(/\r?\n/)
-  return lines.slice(0, maxLines).map((line, i) => ({ type: "add" as const, lineNum: i + 1, line: line || " " }))
-}
 
 function getFileEditPath(part: ToolPart): string | null {
   if (part.path != null && String(part.path).trim()) return String(part.path).trim()
@@ -177,38 +156,17 @@ export function InlineFileEditBlock({
   const output = part.output ?? ""
   const [expanded, setExpanded] = useState(true)
   if (!path && !output && !(part.diffHunks?.length)) return null
-  const lang = path ? getLangBadge(path) : "FILE"
   const fileName = path ? path.split("/").pop() ?? path : "file"
-  const statLabel = getEditStatLabel(part)
-  const applied =
-    (part.tool === "Edit" || part.tool === "replace_in_file") &&
-    Array.isArray(part.appliedReplacements) &&
-    part.appliedReplacements.length > 0
-      ? part.appliedReplacements
-      : null
-  const hasDiffHunks = Array.isArray(part.diffHunks) && part.diffHunks.length > 0
-  const fallback = !hasDiffHunks && !applied ? parseSuccessfullyUpdatedOutput(output) : null
-  const previewHunks = applied
-    ? getAppliedReplacementsPreviewLines(applied, DIFF_PREVIEW_MAX_LINES)
-    : hasDiffHunks
-      ? getDiffPreviewHunks(part.diffHunks!)
-      : fallback
-        ? buildFallbackDiffHunks(fallback.content, DIFF_PREVIEW_MAX_LINES)
-        : []
-  const showDiffPreview = previewHunks.length > 0
-  const totalHunks = applied
-    ? countAppliedReplacementChangeLines(applied)
-    : hasDiffHunks
-      ? part.diffHunks!.filter((h) => h.type === "add" || h.type === "remove").length
-      : 0
-  const hiddenLinesCount = totalHunks > previewHunks.length ? totalHunks - previewHunks.length : 0
+  const preview = buildFileChangePreview(part, DIFF_PREVIEW_MAX_LINES)
 
   return (
-    <div className="nexus-file-edit-block nexus-chat-column-frame my-2">
+    <div className="nexus-file-edit-block nexus-chat-column-frame">
       <div
-        className="nexus-file-edit-header flex items-center gap-2"
+        className="nexus-file-edit-header"
         role="button"
         tabIndex={0}
+        aria-label={`Toggle diff preview for ${fileName}`}
+        aria-expanded={expanded}
         onClick={() => {
           setExpanded((prev) => !prev)
           onLayoutHint?.()
@@ -220,11 +178,17 @@ export function InlineFileEditBlock({
           }
         }}
       >
-        <span className="nexus-file-edit-badge flex-shrink-0">{lang}</span>
+        <span className="nexus-file-edit-icon" aria-hidden="true">
+          <svg viewBox="0 0 16 16" focusable="false">
+            <path d="M3.5 1.5h5l4 4v9h-9z" />
+            <path d="M8.5 1.5v4h4" />
+            <path d="M5.5 8h5M5.5 10.5h5" />
+          </svg>
+        </span>
         <div className="nexus-file-edit-title-cluster">
           <button
             type="button"
-            className="nexus-file-edit-path min-w-0 max-w-full text-left font-medium text-[var(--vscode-foreground)] hover:underline cursor-pointer border-0 bg-transparent p-0"
+            className="nexus-file-edit-path"
             onClick={(e) => {
               e.stopPropagation()
               if (path) postMessage({ type: "showDiff", path })
@@ -232,59 +196,54 @@ export function InlineFileEditBlock({
           >
             {fileName}
           </button>
-          {part.diffStats != null ? (
-            <span className="nexus-file-edit-stats flex-shrink-0 flex items-center gap-1">
-              {part.diffStats.added > 0 && <span className="text-green-500">+{part.diffStats.added}</span>}
-              {part.diffStats.removed > 0 && <span className="text-red-400">-{part.diffStats.removed}</span>}
-            </span>
-          ) : statLabel ? (
-            <span className="nexus-file-edit-stats flex-shrink-0">
-              {statLabel.startsWith("+") && !statLabel.includes("-") ? (
-                <span className="text-green-500">{statLabel}</span>
-              ) : (
-                statLabel
-              )}
-            </span>
-          ) : null}
+          <span className="nexus-file-edit-stats">
+            {preview.stats.added > 0 && (
+              <span className="nexus-file-edit-additions">+{preview.stats.added}</span>
+            )}
+            {preview.stats.removed > 0 && (
+              <span className="nexus-file-edit-deletions">-{preview.stats.removed}</span>
+            )}
+          </span>
         </div>
+        <span
+          aria-hidden="true"
+          className={`nexus-file-edit-chevron${expanded ? " nexus-file-edit-chevron--open" : ""}`}
+        >
+          ›
+        </span>
       </div>
       {expanded && (
         <div className="nexus-file-edit-content">
-          {showDiffPreview ? (
-            <div className="nexus-diff-view rounded overflow-hidden border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)]">
+          {!preview.statusOnly ? (
+            <div className="nexus-diff-view">
               <pre
-                className="p-0 overflow-x-auto text-[11px] leading-relaxed font-mono overflow-y-auto nexus-diff-preview-pre"
+                className="nexus-diff-preview-pre"
                 style={{ lineHeight: DIFF_PREVIEW_LINE_HEIGHT, maxHeight: `${diffPreviewMaxHeightRem}rem` }}
               >
-                {previewHunks.map((h, i) => {
-                  if (h.type === "add") {
-                    return (
-                      <div key={i} className="px-2 py-0.5 bg-green-500/15 text-green-600 dark:text-green-400 whitespace-pre">
-                        <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
-                        <span className="text-green-600 dark:text-green-400">+</span> {h.line || " "}
-                      </div>
-                    )
-                  }
-                  if (h.type === "remove") {
-                    return (
-                      <div key={i} className="px-2 py-0.5 bg-red-500/15 text-red-600 dark:text-red-400 whitespace-pre">
-                        <span className="inline-block w-8 text-right mr-2 text-[var(--vscode-descriptionForeground)] select-none">{h.lineNum}</span>
-                        <span className="text-red-600 dark:text-red-400">-</span> {h.line || " "}
-                      </div>
-                    )
-                  }
-                  return null
-                })}
+                {preview.lines.map((line, index) => (
+                  <div
+                    key={`${line.type}-${line.lineNum}-${index}`}
+                    className={`nexus-diff-line nexus-diff-line--${line.type}`}
+                    data-change-kind={line.type}
+                  >
+                    <span className="nexus-diff-line-number">{line.lineNum}</span>
+                    <span className="nexus-diff-line-marker">
+                      {line.type === "add" ? "+" : "-"}
+                    </span>
+                    <span className="nexus-diff-line-text">{line.line || " "}</span>
+                  </div>
+                ))}
               </pre>
-              {hiddenLinesCount > 0 && (
-                <div className="nexus-diff-hidden-lines flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] text-[var(--vscode-descriptionForeground)] border-t border-[var(--vscode-panel-border)]">
-                  <span>{hiddenLinesCount} hidden lines</span>
-                  <span className="text-[10px]">▼</span>
+              {preview.hiddenLineCount > 0 && (
+                <div className="nexus-diff-hidden-lines">
+                  <span>{preview.hiddenLineCount} more changed lines</span>
                 </div>
               )}
             </div>
           ) : (
-            <ToolOutputBlock output={output} compacted={part.compacted} />
+            <div className="nexus-file-edit-status-only">
+              Diff preview unavailable
+            </div>
           )}
         </div>
       )}

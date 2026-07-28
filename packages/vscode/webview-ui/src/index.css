@@ -2198,27 +2198,51 @@ html, body, #root {
   font-size: 10px;
 }
 
-/* File edit/add block — language badge + path + diff stats, code with green/red (reference design) */
+/* Compact file mutation row: exact durable diff, Cursor-like density. */
 .nexus-file-edit-block {
-  border-radius: 10px;
-  border: 1px solid var(--vscode-panel-border);
-  background: var(--vscode-editor-background);
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 82%, transparent);
+  background: color-mix(in srgb, var(--vscode-editor-background) 97%, var(--vscode-foreground) 3%);
   overflow: hidden;
-  margin: 6px 0 0;
+  margin: 0;
   box-sizing: border-box;
 }
 
 .nexus-file-edit-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-panel-border) 8%);
+  gap: 7px;
+  min-height: 32px;
+  padding: 4px 9px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-foreground) 4%);
   border-bottom: 1px solid var(--vscode-panel-border);
-  font-size: 11px;
+  font-size: 12px;
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
+  cursor: pointer;
+}
+
+.nexus-file-edit-header:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.nexus-file-edit-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.nexus-file-edit-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* Name + +/- stats stay together; name truncates, stats never hug the far edge */
@@ -2245,41 +2269,140 @@ html, body, #root {
 }
 
 .nexus-file-edit-path {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
   font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
   color: var(--vscode-foreground);
   min-width: 0;
   flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+}
+
+.nexus-file-edit-path:hover {
+  text-decoration: underline;
 }
 
 .nexus-file-edit-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex-shrink: 0;
   font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
   color: var(--vscode-descriptionForeground);
-  font-size: 10px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
+.nexus-file-edit-additions {
+  color: var(--vscode-gitDecoration-addedResourceForeground, #49b675);
+}
+
+.nexus-file-edit-deletions {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, #e06c75);
+}
+
+.nexus-file-edit-chevron {
+  flex: 0 0 auto;
+  color: var(--vscode-descriptionForeground);
+  font-size: 16px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.nexus-file-edit-chevron--open {
+  transform: rotate(90deg);
+}
+
 .nexus-diff-hidden-lines {
+  padding: 4px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--vscode-panel-border) 72%, transparent);
   background: var(--vscode-editor-inactiveSelectionBackground, rgba(255, 255, 255, 0.04));
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  text-align: center;
 }
 
 .nexus-file-edit-content {
   padding: 0;
 }
 
-.nexus-file-edit-content .diff-output,
-.nexus-file-edit-content pre {
+.nexus-file-edit-content .diff-output {
   margin: 0;
   border-radius: 0;
   max-height: 280px;
 }
 
-.nexus-file-edit-content .diff-output > div {
-  padding: 0 10px;
-  line-height: 1.45;
+.nexus-diff-view {
+  min-width: 0;
+  background: var(--vscode-editor-background);
+}
+
+.nexus-diff-preview-pre {
+  display: block;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: auto;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+}
+
+.nexus-diff-line {
+  display: grid;
+  grid-template-columns: 2.5rem 0.75rem minmax(max-content, 1fr);
+  min-height: 20px;
+  padding: 1px 9px 1px 0;
+  white-space: pre;
+}
+
+.nexus-diff-line--add {
+  color: var(--vscode-diffEditor-insertedTextForeground, var(--vscode-foreground));
+  background: var(--vscode-diffEditor-insertedLineBackground, rgba(46, 160, 67, 0.18));
+}
+
+.nexus-diff-line--remove {
+  color: var(--vscode-diffEditor-removedTextForeground, var(--vscode-foreground));
+  background: var(--vscode-diffEditor-removedLineBackground, rgba(248, 81, 73, 0.18));
+}
+
+.nexus-diff-line-number {
+  padding-right: 7px;
+  color: var(--vscode-editorLineNumber-foreground, var(--vscode-descriptionForeground));
+  text-align: right;
+  user-select: none;
+}
+
+.nexus-diff-line-marker {
+  font-weight: 600;
+  user-select: none;
+}
+
+.nexus-diff-line--add .nexus-diff-line-marker {
+  color: var(--vscode-gitDecoration-addedResourceForeground, #49b675);
+}
+
+.nexus-diff-line--remove .nexus-diff-line-marker {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, #e06c75);
+}
+
+.nexus-diff-line-text {
+  min-width: 0;
+}
+
+.nexus-file-edit-status-only {
+  padding: 7px 10px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .nexus-tool-elapsed {
