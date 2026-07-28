@@ -9,7 +9,12 @@ const help = {
   isEnabled: true,
   isHidden: false,
   async call(onDone, { options: { commands } }) {
-    return <Help commands={commands} onClose={onDone} />
+    return (
+      <Help
+        commands={commands}
+        onClose={() => onDone({ cancelled: true })}
+      />
+    )
   },
   userFacingName() {
     return 'help'

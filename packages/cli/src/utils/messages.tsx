@@ -348,18 +348,23 @@ async function getMessagesForSlashCommand(
         return new Promise(resolve => {
           command
             .call(async r => {
-              setToolJSX(null)
               // Model panel (and similar) close without adding messages to chat
               if (
                 r &&
                 typeof r === 'object' &&
                 ('cancelled' in r || 'saved' in r)
               ) {
-                const ctx = context as { onNexusConfigSaved?: () => void | Promise<void> }
-                await ctx.onNexusConfigSaved?.()
+                if (r.saved) {
+                  const ctx = context as {
+                    onNexusConfigSaved?: () => void | Promise<void>
+                  }
+                  await ctx.onNexusConfigSaved?.()
+                }
+                setToolJSX(null)
                 resolve([])
                 return
               }
+              setToolJSX(null)
               resolve([
                 createUserMessage(`<command-name>${command.userFacingName()}</command-name>
           <command-message>${command.userFacingName()}</command-message>

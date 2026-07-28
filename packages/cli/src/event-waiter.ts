@@ -20,3 +20,27 @@ export function waitForEventWake(options: {
     }
   })
 }
+
+export function waitForStreamFrame(
+  signal: AbortSignal,
+  delayMs: number,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      signal.removeEventListener("abort", finish)
+      resolve()
+    }
+
+    signal.addEventListener("abort", finish, { once: true })
+    if (signal.aborted) {
+      finish()
+      return
+    }
+    timer = setTimeout(finish, Math.max(0, delayMs))
+  })
+}

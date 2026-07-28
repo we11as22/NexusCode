@@ -124,6 +124,10 @@ import {
   shouldEnableGlobalCancelInput,
 } from '../cancel-policy.js'
 import type { QueuedPrompt } from '../prompt-queue.js'
+import {
+  canShowPrimarySpinner,
+  canShowPromptInput,
+} from './prompt-visibility.js'
 
 type MessageRenderItem = {
   key: string
@@ -1898,11 +1902,15 @@ export function REPL({
             {toolJSX.jsx}
           </Box>
         ) : null}
-        {!toolJSX &&
-          !toolUseConfirm &&
-          !binaryFeedbackContext &&
-          !nexusApprovalAction &&
-          isLoading && (
+        {canShowPrimarySpinner({
+          isLoading,
+          input: inputValue,
+          hasCompetingSurface:
+            toolJSX != null ||
+            toolUseConfirm != null ||
+            binaryFeedbackContext != null ||
+            nexusApprovalAction != null,
+        }) && (
           <Spinner />
         )}
         {!toolJSX && binaryFeedbackContext && !isMessageSelectorVisible && (
@@ -1972,7 +1980,10 @@ export function REPL({
           )}
 
         {!toolUseConfirm &&
-          shouldShowPromptInput &&
+          canShowPromptInput({
+            requested: shouldShowPromptInput,
+            toolOverlay: toolJSX,
+          }) &&
           !isMessageSelectorVisible &&
           !binaryFeedbackContext &&
           !nexusApprovalAction &&

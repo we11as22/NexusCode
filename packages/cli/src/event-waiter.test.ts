@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest"
 
-import { waitForEventWake } from "./event-waiter.js"
+import {
+  waitForEventWake,
+  waitForStreamFrame,
+} from "./event-waiter.js"
 
 describe("CLI event waiter", () => {
   it("removes the abort listener after a normal event wake", async () => {
@@ -53,5 +56,22 @@ describe("CLI event waiter", () => {
     controller.abort()
     await waiting
     expect(wakeRef.current).toBeNull()
+  })
+
+  it("cancels a pending stream-frame delay without retaining an abort listener", async () => {
+    vi.useFakeTimers()
+    try {
+      const controller = new AbortController()
+      const remove = vi.spyOn(controller.signal, "removeEventListener")
+      const waiting = waitForStreamFrame(controller.signal, 50)
+
+      controller.abort()
+      await waiting
+
+      expect(remove).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -82,7 +82,9 @@ describe("CLI startup authority ordering", () => {
     const setupStart = entrySource.indexOf("async function setup(")
     const setupEnd = entrySource.indexOf("async function main()", setupStart)
     expect(entrySource.slice(setupStart, setupEnd)).not.toContain("render(")
-    expect(entrySource).toContain("await setup(doctorCwd, false)")
+    expect(entrySource).toContain(
+      "await setup(doctorCwd, false, 'administrative')",
+    )
     expect(entrySource).not.toContain("<Doctor")
   })
 

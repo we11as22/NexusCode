@@ -4,6 +4,7 @@ import type { AgentEvent } from "@nexuscode/core"
 import type { Message } from "./query.js"
 import {
   enqueueProjectedAgentEvent,
+  isStreamingDraftEvent,
   nexusAssistantMessageUuid,
   projectAssistantDraft,
   reduceAssistantDraft,
@@ -11,6 +12,27 @@ import {
 } from "./nexus-message-projection.js"
 
 describe("CLI assistant stream projection", () => {
+  it("coalesces only high-frequency draft events, never control events", () => {
+    expect(
+      isStreamingDraftEvent({
+        type: "text_delta",
+        messageId: "assistant-1",
+        delta: "x",
+      }),
+    ).toBe(true)
+    expect(
+      isStreamingDraftEvent({
+        type: "tool_approval_needed",
+        partId: "part-1",
+        action: {
+          type: "execute",
+          tool: "Bash",
+          description: "Run pwd",
+        },
+      }),
+    ).toBe(false)
+  })
+
   it("coalesces adjacent stream deltas before the TUI can fall behind", () => {
     const queue: AgentEvent[] = []
 

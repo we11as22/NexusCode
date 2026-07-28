@@ -103,8 +103,10 @@ export function Help({
 
           <Box flexDirection="column">
             {filteredCommands.map((cmd, i) => (
-              <Box key={i} marginLeft={1}>
-                <Text bold>{`/${cmd.name}`}</Text>
+              <Box key={i} marginLeft={1} alignItems="flex-start">
+                <Box flexShrink={0}>
+                  <Text bold>{`/${cmd.name}`}</Text>
+                </Box>
                 <Text> - {cmd.description}</Text>
               </Box>
             ))}

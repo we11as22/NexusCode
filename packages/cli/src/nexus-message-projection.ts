@@ -9,6 +9,10 @@ export interface NexusAssistantDraft {
   text: string
 }
 
+export function isStreamingDraftEvent(event: AgentEvent): boolean {
+  return event.type === "text_delta" || event.type === "reasoning_delta"
+}
+
 export function enqueueProjectedAgentEvent(
   queue: AgentEvent[],
   event: AgentEvent,

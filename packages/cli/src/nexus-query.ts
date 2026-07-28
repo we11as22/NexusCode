@@ -66,12 +66,20 @@ import {
 } from './nexus-mode-transition.js'
 import {
   enqueueProjectedAgentEvent,
+  isStreamingDraftEvent,
   nexusAssistantMessageUuid,
   projectAssistantDraft,
   reduceAssistantDraft,
   type NexusAssistantDraft,
 } from './nexus-message-projection.js'
-import { waitForEventWake } from './event-waiter.js'
+import {
+  waitForEventWake,
+  waitForStreamFrame,
+} from './event-waiter.js'
+
+// Kimi Code uses the same 50 ms window: token deltas stay visually fluid while
+// expensive full Ink frames are coalesced before reaching VS Code Terminal.
+const STREAMING_UI_FLUSH_MS = 50
 
 export type NexusApprovalMessage = { type: 'nexus_approval'; action: ApprovalAction; partId: string }
 /** Shown above input (e.g. Compacting…). text empty clears. clearAfterMs auto-clears success lines. */
@@ -869,6 +877,10 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   }
 
   while (!signal.aborted) {
+    if (eventQueue[0] && isStreamingDraftEvent(eventQueue[0])) {
+      await waitForStreamFrame(signal, STREAMING_UI_FLUSH_MS)
+      if (signal.aborted) break
+    }
     const gen = drainQueue()
     let result = gen.next()
     while (!result.done) {

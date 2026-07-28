@@ -95,6 +95,10 @@ import { resolveRuntimeMode } from '../session-selection.js'
 import { coreMcpDisplayStatuses } from '../mcp-display.js'
 import { shouldReadPromptFromStdin } from '../stdin-policy.js'
 import { collectDoctorReport } from '../doctor-report.js'
+import {
+  shouldRunMutableStartupEffects,
+  type CliStartupMode,
+} from './startup-mode.js'
 
 export function completeOnboarding(): void {
   const config = getGlobalConfig()
@@ -310,6 +314,7 @@ function NexusREPLWithConfigRefresh({
 async function setup(
   cwd: string,
   dangerouslySkipPermissions?: boolean,
+  mode: CliStartupMode = 'session',
 ): Promise<void> {
   await setCwd(cwd)
 
@@ -345,6 +350,10 @@ async function setup(
   }
 
   if (process.env.NODE_ENV === 'test') {
+    return
+  }
+
+  if (!shouldRunMutableStartupEffects(mode)) {
     return
   }
 
@@ -741,7 +750,7 @@ ${commandList}`,
     .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
     .option('-g, --global', 'Use global config')
     .action(async (key, { cwd, global }) => {
-      await setup(cwd, false)
+      await setup(cwd, false, 'administrative')
       console.log(getConfigForCLI(key, global ?? false))
       process.exit(0)
     })
@@ -752,7 +761,7 @@ ${commandList}`,
     .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
     .option('-g, --global', 'Use global config')
     .action(async (key, value, { cwd, global }) => {
-      await setup(cwd, false)
+      await setup(cwd, false, 'administrative')
       setConfigForCLI(key, value, global ?? false)
       console.log(`Set ${key} to ${value}`)
       process.exit(0)
@@ -764,7 +773,7 @@ ${commandList}`,
     .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
     .option('-g, --global', 'Use global config')
     .action(async (key, { cwd, global }) => {
-      await setup(cwd, false)
+      await setup(cwd, false, 'administrative')
       deleteConfigForCLI(key, global ?? false)
       console.log(`Removed ${key}`)
       process.exit(0)
@@ -776,7 +785,7 @@ ${commandList}`,
     .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
     .option('-g, --global', 'Use global config', false)
     .action(async ({ cwd, global }) => {
-      await setup(cwd, false)
+      await setup(cwd, false, 'administrative')
       console.log(
         JSON.stringify(listConfigForCLI((global as true) ?? false), null, 2),
       )
@@ -831,7 +840,7 @@ ${commandList}`,
       }
 
       try {
-        await setup(providedCwd, false)
+        await setup(providedCwd, false, 'administrative')
         await startMCPServer(providedCwd)
       } catch (error) {
         console.error('Error: Failed to start MCP server:', error)
@@ -1005,7 +1014,7 @@ ${commandList}`,
       const doctorCwd =
         typeof requestedDoctorCwd === 'string' ? requestedDoctorCwd : cwd()
       logEvent('tengu_doctor_command', {})
-      await setup(doctorCwd, false)
+      await setup(doctorCwd, false, 'administrative')
       const report = await collectDoctorReport(doctorCwd)
       console.log(report.lines.join('\n'))
       process.exit(report.ok ? 0 : 1)
@@ -1082,7 +1091,7 @@ ${commandList}`,
       )
       .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
       .action(async (number, { cwd }) => {
-        await setup(cwd, false)
+        await setup(cwd, false, 'administrative')
         logEvent('tengu_view_logs', { number: number?.toString() ?? '' })
         const context: { unmount?: () => void } = {}
         const { unmount } = render(
@@ -1105,7 +1114,7 @@ ${commandList}`,
       )
       .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
       .action(async (number, { cwd }) => {
-        await setup(cwd, false)
+        await setup(cwd, false, 'administrative')
         logEvent('tengu_view_errors', { number: number?.toString() ?? '' })
         const context: { unmount?: () => void } = {}
         const { unmount } = render(
@@ -1127,7 +1136,7 @@ ${commandList}`,
       .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
       .description('Get a value from context')
       .action(async (key, { cwd }) => {
-        await setup(cwd, false)
+        await setup(cwd, false, 'administrative')
         logEvent('tengu_context_get', { key })
         const context = omit(
           await getContext(),
@@ -1143,7 +1152,7 @@ ${commandList}`,
       .description('Set a value in context')
       .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
       .action(async (key, value, { cwd }) => {
-        await setup(cwd, false)
+        await setup(cwd, false, 'administrative')
         logEvent('tengu_context_set', { key })
         setContext(key, value)
         console.log(`Set context.${key} to "${value}"`)
@@ -1155,7 +1164,7 @@ ${commandList}`,
       .description('List all context values')
       .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
       .action(async ({ cwd }) => {
-        await setup(cwd, false)
+        await setup(cwd, false, 'administrative')
         logEvent('tengu_context_list', {})
         const context = omit(
           await getContext(),
@@ -1172,7 +1181,7 @@ ${commandList}`,
       .description('Remove a value from context')
       .option('-c, --cwd <cwd>', 'The current working directory', String, cwd())
       .action(async (key, { cwd }) => {
-        await setup(cwd, false)
+        await setup(cwd, false, 'administrative')
         logEvent('tengu_context_delete', { key })
         removeContext(key)
         console.log(`Removed context.${key}`)
