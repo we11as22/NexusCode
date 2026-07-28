@@ -22,6 +22,12 @@ import terminalSetup, {
   isShiftEnterKeyBindingInstalled,
 } from '../commands/terminalSetup.js'
 import type { RestoreType } from '../task-restore.js'
+import {
+  enqueuePrompt,
+  popLastPrompt,
+  shiftPrompt,
+  type QueuedPrompt,
+} from '../prompt-queue.js'
 
 type Props = {
   commands: Command[]
@@ -118,6 +124,8 @@ type Props = {
   onOpenInEditor?: (filePath: string) => Promise<void>
   /** Resolve project/user/plugin prompt commands through the Nexus core loader. */
   resolveNexusPromptCommand?: ToolUseContext['options']['resolvePromptCommand']
+  queuedPrompts: QueuedPrompt[]
+  setQueuedPrompts: React.Dispatch<React.SetStateAction<QueuedPrompt[]>>
 }
 
 function getPastedTextPrompt(text: string): string {
@@ -182,6 +190,8 @@ function PromptInput({
   onSetNexusMode,
   resolveNexusPromptCommand,
   onOpenInEditor,
+  queuedPrompts,
+  setQueuedPrompts,
 }: Props): React.ReactNode {
   const [exitMessage, setExitMessage] = useState<{
     show: boolean
@@ -201,6 +211,7 @@ function PromptInput({
     setCursorOffset(off)
   }, [])
   const [pastedText, setPastedText] = useState<string | null>(null)
+  const queuedPromptDispatchPendingRef = React.useRef(false)
   /** Pending create-skill/rule scope selection: { description, isSkill } */
   const [pendingCreate, setPendingCreate] = useState<{
     description: string
@@ -254,6 +265,7 @@ function PromptInput({
     })
   }, [])
   const { columns, rows } = useTerminalSize()
+  const compactFooter = columns < 100
 
   const {
     suggestions,
@@ -350,6 +362,18 @@ function PromptInput({
 
   // Only use history navigation when there are 0 or 1 slash command suggestions
   const handleHistoryUp = () => {
+    if (isLoading && input === '' && queuedPrompts.length > 0) {
+      const { item, queue } = popLastPrompt(queuedPrompts)
+      if (item) {
+        setQueuedPrompts(queue)
+        onInputChange(item.text)
+        onModeChange(item.mode)
+        setPastedText(item.pastedText)
+        setPastedImage(item.pastedImage)
+        setCursorOffsetAndRef(item.text.length)
+        return
+      }
+    }
     if (suggestions.length <= 1) {
       onHistoryUp()
     }
@@ -361,7 +385,11 @@ function PromptInput({
     }
   }
 
-  async function onSubmit(input: string, isSubmittingSlashCommand = false) {
+  async function onSubmit(
+    input: string,
+    isSubmittingSlashCommand = false,
+    queuedPrompt?: QueuedPrompt,
+  ) {
     if (input === '') {
       return
     }
@@ -369,10 +397,27 @@ function PromptInput({
       return
     }
     if (isLoading) {
+      if (queuedPrompt) return
+      setQueuedPrompts((queue) =>
+        enqueuePrompt(queue, {
+          id: `queued-${Date.now()}-${queue.length}`,
+          text: input,
+          mode,
+          pastedText,
+          pastedImage,
+          isSubmittingSlashCommand,
+        }),
+      )
+      onInputChange('')
+      onModeChange('prompt')
+      clearSuggestions()
+      setPastedImage(null)
+      setPastedText(null)
+      setCursorOffsetAndRef(0)
       return
     }
 
-    if (onNexusPlanFollowupSubmit) {
+    if (!queuedPrompt && onNexusPlanFollowupSubmit) {
       const consumed = await onNexusPlanFollowupSubmit(input)
       if (consumed) {
         onInputChange('')
@@ -381,7 +426,11 @@ function PromptInput({
         return
       }
     }
-    if (suggestions.length > 0 && !isSubmittingSlashCommand) {
+    if (
+      !queuedPrompt &&
+      suggestions.length > 0 &&
+      !isSubmittingSlashCommand
+    ) {
       return
     }
 
@@ -390,18 +439,27 @@ function PromptInput({
       exit()
     }
 
+    const submissionMode = queuedPrompt?.mode ?? mode
+    const submissionPastedText = queuedPrompt?.pastedText ?? pastedText
+    const submissionPastedImage = queuedPrompt?.pastedImage ?? pastedImage
+    const clearSubmittedComposer = () => {
+      if (!queuedPrompt) onInputChange('')
+    }
+
     let finalInput = input
-    if (pastedText) {
-      const pastedPrompt = getPastedTextPrompt(pastedText)
+    if (submissionPastedText) {
+      const pastedPrompt = getPastedTextPrompt(submissionPastedText)
       if (finalInput.includes(pastedPrompt)) {
-        finalInput = finalInput.replace(pastedPrompt, pastedText)
+        finalInput = finalInput.replace(pastedPrompt, submissionPastedText)
       }
     }
     // Don't clear input yet for slash commands that open a panel; clear only when sending messages
-    onModeChange('prompt')
-    clearSuggestions()
-    setPastedImage(null)
-    setPastedText(null)
+    if (!queuedPrompt) {
+      onModeChange('prompt')
+      clearSuggestions()
+      setPastedImage(null)
+      setPastedText(null)
+    }
     onSubmitCountChange(_ => _ + 1)
 
     const trimmed = finalInput.trim()
@@ -409,7 +467,7 @@ function PromptInput({
       /^\/(changes|accept|revert)(?:\s+(.*))?$/i,
     )
     if (changeReviewMatch && onNexusChangeReview) {
-      onInputChange('')
+      clearSubmittedComposer()
       addToHistory(trimmed)
       resetHistory()
       setIsLoading(true)
@@ -425,7 +483,7 @@ function PromptInput({
       return
     }
     if (/^\/undo(\s|$)/i.test(trimmed) && onNexusUndo) {
-      onInputChange('')
+      clearSubmittedComposer()
       addToHistory(trimmed)
       resetHistory()
       if (nexusListCheckpoints && onNexusCheckpointRestore) {
@@ -442,7 +500,7 @@ function PromptInput({
 
     if (/^\/compact(\s|$)/i.test(trimmed) && onNexusCompact) {
       await onNexusCompact()
-      onInputChange('')
+      clearSubmittedComposer()
       setIsLoading(false)
       addToHistory(trimmed)
       return
@@ -462,7 +520,7 @@ function PromptInput({
           } else {
             onCycleNexusMode?.()
           }
-          onInputChange('')
+          clearSubmittedComposer()
           setIsLoading(false)
           addToHistory(trimmed)
           resetHistory()
@@ -470,7 +528,7 @@ function PromptInput({
         }
         case 'diff': {
           onToggleSessionDiffPanel?.()
-          onInputChange('')
+          clearSubmittedComposer()
           setIsLoading(false)
           addToHistory(trimmed)
           resetHistory()
@@ -488,25 +546,25 @@ function PromptInput({
           break
         case 'create-skill': {
           if (!vcArg) {
-            onInputChange('/create-skill ')
+            if (!queuedPrompt) onInputChange('/create-skill ')
             setIsLoading(false)
             return
           }
           // Show scope selection panel
           setPendingCreate({ description: vcArg, isSkill: true, scopeIndex: 0 })
-          onInputChange('')
+          clearSubmittedComposer()
           setIsLoading(false)
           return
         }
         case 'create-rule': {
           if (!vcArg) {
-            onInputChange('/create-rule ')
+            if (!queuedPrompt) onInputChange('/create-rule ')
             setIsLoading(false)
             return
           }
           // Show scope selection panel
           setPendingCreate({ description: vcArg, isSkill: false, scopeIndex: 0 })
-          onInputChange('')
+          clearSubmittedComposer()
           setIsLoading(false)
           return
         }
@@ -518,7 +576,7 @@ function PromptInput({
     const model = await getSlowAndCapableModel()
     const messages = await processUserInput(
       finalInput,
-      mode,
+      submissionMode,
       setToolJSX,
       {
         options: {
@@ -537,18 +595,18 @@ function PromptInput({
         setForkConvoWithMessagesOnTheNextRender,
         onNexusConfigSaved,
       },
-      pastedImage ?? null,
+      submissionPastedImage ?? null,
     )
 
     if (messages.length) {
-      onInputChange('')
-      onQuery(messages, abortController)
+      clearSubmittedComposer()
+      void onQuery(messages, abortController)
     } else {
       // Local JSX commands (e.g. /model panel): close without adding messages.
       // Clear loading state and input so the spinner stops and the slash command
       // text is not left in the input (avoid accidental submit on next Enter).
       setIsLoading(false)
-      onInputChange('')
+      clearSubmittedComposer()
       addToHistory(input)
       resetHistory()
       return
@@ -556,12 +614,39 @@ function PromptInput({
 
     for (const message of messages) {
       if (message.type === 'user') {
-        const inputToAdd = mode === 'bash' ? `!${input}` : input
+        const inputToAdd = submissionMode === 'bash' ? `!${input}` : input
         addToHistory(inputToAdd)
         resetHistory()
       }
     }
   }
+
+  useEffect(() => {
+    if (
+      isLoading ||
+      isDisabled ||
+      queuedPromptDispatchPendingRef.current ||
+      queuedPrompts.length === 0
+    ) {
+      return
+    }
+    const { item, queue } = shiftPrompt(queuedPrompts)
+    if (!item) return
+
+    // Match Kimi's dispatch guard: the item is removed before its deferred send,
+    // so a synchronous idle render must not dispatch another queued prompt.
+    queuedPromptDispatchPendingRef.current = true
+    setQueuedPrompts(queue)
+    queueMicrotask(() => {
+      void onSubmit(
+        item.text,
+        item.isSubmittingSlashCommand,
+        item,
+      ).finally(() => {
+        queuedPromptDispatchPendingRef.current = false
+      })
+    })
+  }, [isDisabled, isLoading, queuedPrompts])
 
   function onImagePaste(image: string) {
     onModeChange('prompt')
@@ -788,6 +873,13 @@ Create a .md rule file with a descriptive name. The rule file should define clea
     }
     return `ctx: ${Math.min(100, Math.round((tokenUsage / MAX_TOKENS) * 100))}%`
   }, [formatCompactTokens, nexusContextUsage, tokenUsage])
+  const compactContextFooterText = nexusContextUsage
+    ? `ctx ${Math.min(100, Math.round(nexusContextUsage.percent))}%`
+    : `ctx ${Math.min(100, Math.round((tokenUsage / MAX_TOKENS) * 100))}%`
+  const displaySessionId =
+    nexusSessionId && nexusSessionId.length > 12
+      ? `…${nexusSessionId.slice(-8)}`
+      : nexusSessionId
 
   const createScopeOptions = ['Create global (~/.nexus/)', 'Create local (.nexus/)', 'Cancel']
 
@@ -843,6 +935,29 @@ Create a .md rule file with a descriptive name. The rule file should define clea
           />
         </Box>
       </Box>
+      {queuedPrompts.length > 0 ? (
+        <Box flexDirection="column" paddingX={2} marginTop={1}>
+          <Text dimColor>
+            Queued ({queuedPrompts.length}) · sent in order · ↑ edit last
+          </Text>
+          {queuedPrompts.slice(0, 3).map((queued, index) => {
+            const preview = queued.text.replace(/\s+/g, ' ').trim()
+            const visible =
+              preview.length > Math.max(20, columns - 12)
+                ? `${preview.slice(0, Math.max(19, columns - 13))}…`
+                : preview
+            return (
+              <Text key={queued.id} dimColor>
+                {index + 1}. {queued.mode === 'bash' ? '! ' : ''}
+                {visible}
+              </Text>
+            )
+          })}
+          {queuedPrompts.length > 3 ? (
+            <Text dimColor>…and {queuedPrompts.length - 3} more</Text>
+          ) : null}
+        </Box>
+      ) : null}
       {pendingCreate && (
         <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.secondaryBorder} paddingX={1}>
           <Box flexDirection="column" marginBottom={1}>
@@ -939,26 +1054,46 @@ Create a .md rule file with a descriptive name. The rule file should define clea
         </Box>
       )}
       {nexusMode != null && suggestions.length === 0 && (
-        <Box paddingX={2} paddingY={0} width={columns} overflow="hidden">
-          <Text dimColor>Nexus:</Text>
-          {nexusModel != null && (
-            <>
-              <Text dimColor> · model=</Text>
-              <Text bold>{nexusModel}</Text>
-            </>
-          )}
-          {nexusIndexEnabled != null && (
-            <Text dimColor> · index={nexusIndexEnabled ? 'on' : 'off'}</Text>
-          )}
-          {nexusSessionId != null && (
-            <>
-              <Text dimColor> · session=</Text>
-              <Text bold>{nexusSessionId}</Text>
-            </>
-          )}
+        <Box
+          height={1}
+          paddingX={2}
+          paddingY={0}
+          width={columns}
+          overflow="hidden"
+        >
+          <Text dimColor wrap="truncate-end">
+            Nexus
+            {nexusModel != null ? ` · model=${nexusModel}` : ''}
+            {nexusIndexEnabled != null
+              ? ` · index=${nexusIndexEnabled ? 'on' : 'off'}`
+              : ''}
+            {displaySessionId != null
+              ? ` · session=${displaySessionId}`
+              : ''}
+          </Text>
         </Box>
       )}
-      {suggestions.length === 0 && (
+      {suggestions.length === 0 && compactFooter && (
+        <Box
+          flexDirection="column"
+          paddingX={2}
+          paddingY={0}
+          width={columns}
+          overflow="hidden"
+        >
+          <Box height={1}>
+            <Text dimColor wrap="truncate-end">
+              {exitMessage.show
+                ? `Press ${exitMessage.key} again to exit`
+                : message.show
+                  ? message.text
+                  : `! bash · / cmd · Esc undo · Ctrl+O output:${toolOutputsVisible ? 'on' : 'off'} · Ctrl+I diff:${sessionDiffPanelVisible ? 'on' : 'off'} · ${compactContextFooterText}`}
+            </Text>
+          </Box>
+          <TokenWarning tokenUsage={tokenUsage} />
+        </Box>
+      )}
+      {suggestions.length === 0 && !compactFooter && (
         <Box
           flexDirection="row"
           justifyContent="space-between"

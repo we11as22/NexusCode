@@ -605,7 +605,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   )
   const deferredLoadingEnabled =
     toolSearchAvailable &&
-    shouldUseDeferredLoading(
+    shouldUseDeferredToolLoading(
       deferredCandidates,
       activeClient.modelId,
       config,
@@ -2669,7 +2669,7 @@ function getLatestUserTextForPrompt(session: ISession): string {
   return ""
 }
 
-function shouldUseDeferredLoading(
+export function shouldUseDeferredToolLoading(
   deferredTools: ToolDef[],
   modelId: string,
   config: NexusConfig,

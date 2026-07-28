@@ -64,6 +64,14 @@ import {
   nexusModeMessageFromAgentEvent,
   type NexusModeMessage,
 } from './nexus-mode-transition.js'
+import {
+  enqueueProjectedAgentEvent,
+  nexusAssistantMessageUuid,
+  projectAssistantDraft,
+  reduceAssistantDraft,
+  type NexusAssistantDraft,
+} from './nexus-message-projection.js'
+import { waitForEventWake } from './event-waiter.js'
 
 export type NexusApprovalMessage = { type: 'nexus_approval'; action: ApprovalAction; partId: string }
 /** Shown above input (e.g. Compacting…). text empty clears. clearAfterMs auto-clears success lines. */
@@ -76,6 +84,10 @@ export type NexusContextMessage = {
   usedTokens: number
   limitTokens: number
   percent: number
+}
+export type NexusSessionSyncMessage = {
+  type: 'nexus_session_sync'
+  messages: MessageType[]
 }
 
 type ContentBlockParam = APIAssistantMessage['content'][number]
@@ -149,7 +161,7 @@ function buildAssistantMessageFromSession(msg: SessionMessage): AssistantMessage
     type: 'assistant',
     costUSD: 0,
     durationMs: 0,
-    uuid: randomUUID(),
+    uuid: nexusAssistantMessageUuid(msg.id),
     message: {
       id: msg.id,
       model: '',
@@ -217,7 +229,7 @@ export interface QueryNexusOptions {
  * Yields NexusApprovalMessage when tool_approval_needed so REPL can show the approval panel and resolve tuiApprovalRef.
  * Loads config from disk at start so that model/LLM settings saved in the CLI are applied.
  */
-export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage | NexusModeMessage, void> {
+export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage | NexusSessionSyncMessage | NexusModeMessage, void> {
   const {
     nexus,
     userPrompt,
@@ -359,7 +371,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     autoApprovePermissions.browser === true
 
   const deliverEvent = (event: AgentEvent) => {
-    eventQueue.push(event)
+    enqueueProjectedAgentEvent(eventQueue, event)
     wakeWaitingConsumer()
   }
   const durableEventSink = !serverUrl
@@ -444,7 +456,10 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           throw new Error('Remote turn cursor store is not configured')
         }
         const deliverRemoteEvent = async (event: AgentEvent) => {
-          if (event.type === 'assistant_content_complete') {
+          if (
+            event.type === 'assistant_content_complete' ||
+            event.type === 'compaction_end'
+          ) {
             try {
               const msgs = await serverClient.getRecentMessages(sid)
               session = new Session(sid, nexus.cwd, msgs, undefined, true)
@@ -586,10 +601,32 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   }
 
   const consumed: MessageType[] = []
+  const assistantDrafts = new Map<string, NexusAssistantDraft>()
 
-  function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage | NexusModeMessage, boolean, unknown> {
+  function* drainQueue(): Generator<MessageType | NexusApprovalMessage | NexusBannerMessage | NexusTodoMessage | NexusQuestionMessage | NexusContextMessage | NexusSessionSyncMessage | NexusModeMessage, boolean, unknown> {
     while (eventQueue.length > 0) {
       const event = eventQueue.shift()!
+      if (
+        event.type === 'assistant_message_started' ||
+        event.type === 'text_delta' ||
+        event.type === 'reasoning_start' ||
+        event.type === 'reasoning_delta' ||
+        event.type === 'reasoning_end'
+      ) {
+        const draft = reduceAssistantDraft(
+          assistantDrafts.get(event.messageId),
+          event,
+        )
+        if (draft) assistantDrafts.set(event.messageId, draft)
+        if (
+          draft &&
+          (event.type === 'text_delta' ||
+            event.type === 'reasoning_delta')
+        ) {
+          yield projectAssistantDraft(draft)
+        }
+        continue
+      }
       if (event.type === 'todo_updated') {
         yield { type: 'nexus_todo', todo: event.todo ?? '' }
         continue
@@ -601,8 +638,14 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
       if (event.type === 'compaction_end') {
         yield {
           type: 'nexus_banner',
-          text: '● Conversation compacted. Summary was added to session context.',
+          text: '● Conversation compaction finished.',
           clearAfterMs: 4500,
+        }
+        const compactedMessages = replMessagesFromSession(session.messages)
+        consumed.splice(0, consumed.length, ...compactedMessages)
+        yield {
+          type: 'nexus_session_sync',
+          messages: compactedMessages,
         }
         continue
       }
@@ -708,9 +751,14 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
         continue
       }
       if (event.type === 'assistant_content_complete') {
-        const last = session.messages[session.messages.length - 1]
-        if (last && last.role === 'assistant') {
-          const am = buildAssistantMessageFromSession(last)
+        const completed = session.messages.find(
+          (message) =>
+            message.id === event.messageId &&
+            message.role === 'assistant',
+        )
+        assistantDrafts.delete(event.messageId)
+        if (completed) {
+          const am = buildAssistantMessageFromSession(completed)
           consumed.push(am)
           yield am
         }
@@ -835,18 +883,12 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     }
     if (runSettled) break
 
-    await new Promise<void>((resolve) => {
-      resolveNext = resolve
-      if (eventQueue.length > 0) {
-        resolveNext = null
-        resolve()
-      }
-      signal.addEventListener('abort', () => {
-        if (resolveNext) {
-          resolveNext = null
-          resolve()
-        }
-      }, { once: true })
+    await waitForEventWake({
+      signal,
+      setWake: (wake) => {
+        resolveNext = wake
+      },
+      hasQueuedEvent: () => eventQueue.length > 0,
     })
   }
 

@@ -74,6 +74,10 @@ const EMBEDDING_PROVIDERS = new Set<NonNullable<NexusConfig["embeddings"]>["prov
 ])
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+const DEFAULT_KILO_FREE_MODEL_ID = "kilo-auto/free"
+const DISCONTINUED_KILO_FREE_MODEL_IDS = new Set([
+  "minimax/minimax-m2.5:free",
+])
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined
@@ -86,6 +90,33 @@ function finiteNumber(value: unknown): number | undefined {
 function positiveInteger(value: unknown): number | undefined {
   const number = finiteNumber(value)
   return number !== undefined && number > 0 ? Math.floor(number) : undefined
+}
+
+export function normalizeKiloFreeModelId(
+  provider: unknown,
+  modelId: string,
+  baseUrl: unknown,
+): string {
+  if (
+    String(provider ?? "") !== "openai-compatible" ||
+    !DISCONTINUED_KILO_FREE_MODEL_IDS.has(modelId.trim().toLowerCase()) ||
+    typeof baseUrl !== "string"
+  ) {
+    return modelId
+  }
+  try {
+    const url = new URL(baseUrl.trim())
+    if (
+      url.protocol === "https:" &&
+      url.hostname.toLowerCase().replace(/\.+$/, "") === "api.kilo.ai" &&
+      url.pathname.replace(/\/+$/, "") === "/api/openrouter"
+    ) {
+      return DEFAULT_KILO_FREE_MODEL_ID
+    }
+  } catch {
+    // Invalid destinations remain unchanged and are rejected by core config.
+  }
+  return modelId
 }
 
 function configuredBoolean(
@@ -135,6 +166,11 @@ export function applyExplicitConfigOverrides(
   if (Object.keys(modelPatch).length > 0) {
     config.model = mergeProviderConfigSafely(config.model, modelPatch)
   }
+  config.model.id = normalizeKiloFreeModelId(
+    config.model.provider,
+    config.model.id,
+    config.model.baseUrl,
+  )
 
   const enableCheckpoints = configuredBoolean(read, "enableCheckpoints")
   if (enableCheckpoints !== undefined) config.checkpoint.enabled = enableCheckpoints

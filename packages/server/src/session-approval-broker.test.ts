@@ -58,4 +58,22 @@ describe("SessionApprovalBroker", () => {
     ).toThrow(/different content/i)
     broker.close()
   })
+
+  it("treats the structured write path as approval identity", () => {
+    const broker = new SessionApprovalBroker()
+    broker.register({
+      approvalId: "approval-path",
+      turnId: "turn-1",
+      action: { ...action, path: "src/first.ts" },
+    })
+
+    expect(() =>
+      broker.register({
+        approvalId: "approval-path",
+        turnId: "turn-1",
+        action: { ...action, path: "src/second.ts" },
+      }),
+    ).toThrow(/different content/i)
+    broker.close()
+  })
 })

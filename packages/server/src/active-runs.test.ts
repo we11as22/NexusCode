@@ -202,6 +202,49 @@ describe("durable active runs", () => {
     await finishRun(created.id)
   })
 
+  it("does not claim a write approval with a different structured path", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-active-run-"))
+    roots.push(root)
+    const cwd = path.join(root, "workspace")
+    const homeDir = path.join(root, ".nexus")
+    await mkdir(cwd)
+    const created = await createActiveRun("session-path-approval", cwd, "agent", {
+      homeDir,
+    })
+    const action = {
+      type: "write" as const,
+      tool: "Write",
+      description: "write source",
+      path: "src/actual.ts",
+      content: "actual\n",
+    }
+    appendRunEvent(created.id, {
+      type: "tool_approval_needed",
+      partId: "part_path_approval",
+      action,
+    })
+
+    await expect(
+      waitForRunApproval(
+        created.id,
+        { ...action, path: "src/other.ts" },
+        created.abortController.signal,
+      ),
+    ).resolves.toEqual({ approved: false })
+    const waiting = waitForRunApproval(
+      created.id,
+      action,
+      created.abortController.signal,
+    )
+    expect(
+      resolveRunApproval(created.id, "part_path_approval", {
+        approved: true,
+      }),
+    ).toBe(true)
+    await expect(waiting).resolves.toEqual({ approved: true })
+    await finishRun(created.id)
+  })
+
   it("fails pending approvals closed when the run is aborted", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "nexus-active-run-"))
     roots.push(root)

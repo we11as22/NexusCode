@@ -18,6 +18,10 @@ const promptInputSource = readFileSync(
   path.join(process.cwd(), "src", "components", "PromptInput.tsx"),
   "utf8",
 )
+const replSource = readFileSync(
+  path.join(process.cwd(), "src", "screens", "REPL.tsx"),
+  "utf8",
+)
 
 describe("CLI startup authority ordering", () => {
   it("does not discover or connect project MCP while parsing arguments", () => {
@@ -86,5 +90,28 @@ describe("CLI startup authority ordering", () => {
     expect(promptInputSource).not.toContain("<AutoUpdater")
     expect(promptInputSource).not.toContain("getLatestVersion")
     expect(promptInputSource).not.toContain("installGlobalPackage")
+  })
+
+  it("shows the effective runtime index state instead of the saved preference", () => {
+    expect(replSource).toContain(
+      "nexusBootstrap ? !nexusNoIndex : undefined",
+    )
+  })
+
+  it("keeps runtime and control footers single-line in narrow terminals", () => {
+    const footerStart = promptInputSource.indexOf(
+      "{nexusMode != null && suggestions.length === 0",
+    )
+    const footerEnd = promptInputSource.indexOf(
+      "{suggestions.length > 0",
+      footerStart,
+    )
+    const footer = promptInputSource.slice(footerStart, footerEnd)
+
+    expect(promptInputSource).toContain("const compactFooter = columns < 100")
+    expect(footer.match(/wrap=\"truncate-end\"/g)?.length ?? 0)
+      .toBeGreaterThanOrEqual(2)
+    expect(footer).toContain("Ctrl+O output:")
+    expect(footer).toContain("Ctrl+I diff:")
   })
 })

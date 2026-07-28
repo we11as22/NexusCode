@@ -419,7 +419,12 @@ export class BaseLLMClient implements LLMClient {
                 thoughtOpen = false
                 currentReasoningId = null
               }
-              yield { type: "text_delta", delta: chunk.text }
+              if (chunk.text) {
+                emittedVisibleText = true
+                sawAnyTextDelta = true
+                streamedTextBuffer += chunk.text
+                yield { type: "text_delta", delta: chunk.text }
+              }
             }
           }
 
@@ -1272,12 +1277,30 @@ function getHeaderValue(
   return undefined
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error("Aborted"))
+  }
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms)
-    signal?.addEventListener("abort", () => {
+    let settled = false
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort)
+    }
+    const finish = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve()
+    }
+    const onAbort = () => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
+      cleanup()
       reject(new Error("Aborted"))
-    })
+    }
+    const timer = setTimeout(finish, ms)
+    signal?.addEventListener("abort", onAbort, { once: true })
+    if (signal?.aborted) onAbort()
   })
 }

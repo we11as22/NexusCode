@@ -55,6 +55,11 @@ export function createFakeHost(overrides: Partial<IHost> = {}): FakeHost {
     files,
     approvals,
     events,
+    async resolveRipgrepCommand() {
+      return overrides.resolveRipgrepCommand
+        ? overrides.resolveRipgrepCommand()
+        : null
+    },
     async resolvePath(requestedPath, access) {
       if (overrides.resolvePath) {
         return overrides.resolvePath(requestedPath, access)

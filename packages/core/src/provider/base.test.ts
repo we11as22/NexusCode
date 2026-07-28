@@ -14,13 +14,17 @@ vi.mock("ai", async (importOriginal) => {
 import { BaseLLMClient } from "./base.js"
 import type { LLMStreamEvent } from "./types.js"
 
-function streamResult(parts: Array<Record<string, unknown>>, error?: Error) {
+function streamResult(
+  parts: Array<Record<string, unknown>>,
+  error?: Error,
+  text = "",
+) {
   return {
     fullStream: (async function* () {
       for (const part of parts) yield part
       if (error) throw error
     })(),
-    text: Promise.resolve(""),
+    text: Promise.resolve(text),
     usage: Promise.resolve({ promptTokens: 1, completionTokens: 1 }),
   }
 }
@@ -107,5 +111,27 @@ describe("BaseLLMClient stream retry boundary", () => {
     })
     await expect(iterator.next()).rejects.toThrow("provider overloaded")
     expect(streamTextMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not repeat short buffered text when the finish fallback resolves", async () => {
+    streamTextMock.mockImplementationOnce(() =>
+      streamResult(
+        [
+          { type: "text-delta", textDelta: "NEXUS_OK" },
+          { type: "finish", finishReason: "stop" },
+        ],
+        undefined,
+        "NEXUS_OK",
+      ),
+    )
+
+    const events: LLMStreamEvent[] = []
+    for await (const event of createClient().stream(streamOptions)) {
+      events.push(event)
+    }
+
+    expect(events.filter((event) => event.type === "text_delta")).toEqual([
+      { type: "text_delta", delta: "NEXUS_OK" },
+    ])
   })
 })

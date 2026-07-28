@@ -52,6 +52,7 @@ export interface VsCodeRemoteTurnOptions {
 }
 
 export interface RunVsCodeRemoteTurnOptions {
+  inputId?: string
   input: readonly UserInputPartV2[]
   mode: Mode
   signal: AbortSignal
@@ -181,6 +182,7 @@ export class VsCodeRemoteTurn {
       (hooks) =>
         this.options.client.runSessionTurn({
           sessionId: this.options.sessionId,
+          ...(options.inputId ? { inputId: options.inputId } : {}),
           input: options.input,
           mode: options.mode,
           ...(this.options.selection

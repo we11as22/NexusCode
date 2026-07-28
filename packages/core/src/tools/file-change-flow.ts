@@ -1,6 +1,7 @@
 import { requestHostApproval } from "../agent/approval-coordinator.js"
 import { hashFileContent } from "../changes/hash.js"
 import { diffLines, structuredPatch } from "diff"
+import * as path from "node:path"
 import type {
   CapturedFileState,
   ChangeHunk,
@@ -33,6 +34,7 @@ export interface DurableFileChangeSetInput {
   readonly approvalRequired: boolean
   readonly approval: {
     readonly description: string
+    readonly path?: string
     readonly content?: string
     readonly diff?: string
     readonly diffStats?: {
@@ -83,6 +85,28 @@ export function exactChangeHunkDiffStats(
     }
   }
   return { added, removed }
+}
+
+/**
+ * Durable change records are workspace-scoped and therefore store portable
+ * relative paths even when a model uses an absolute path accepted by Read.
+ */
+export function workspaceRelativeChangePath(
+  cwd: string,
+  filePath: string,
+): string {
+  const root = path.resolve(cwd)
+  const absolute = path.resolve(root, filePath)
+  const relative = path.relative(root, absolute)
+  if (
+    relative.length === 0 ||
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`)
+  ) {
+    throw new Error(`Change path is outside the workspace: ${filePath}`)
+  }
+  return relative.replace(/\\/gu, "/")
 }
 
 /**
@@ -190,6 +214,7 @@ export async function applyDurableTextFileChange(
       description:
         `${input.permissionRule ? "[Permission Rule] " : ""}` +
         `${input.toolName === "Write" ? "Write to" : "Edit"} ${input.filePath}`,
+      path: workspaceRelativeChangePath(ctx.cwd, input.filePath),
       content: input.content,
       diff: input.diff,
       diffStats: input.diffStats,
@@ -214,9 +239,16 @@ export async function applyDurableFileChangeSet(
 
   let proposed: ChangeSetRecord
   try {
+    const files = input.files.map((file) => ({
+      ...file,
+      path: workspaceRelativeChangePath(ctx.cwd, file.path),
+      ...(file.oldPath
+        ? { oldPath: workspaceRelativeChangePath(ctx.cwd, file.oldPath) }
+        : {}),
+    }))
     proposed = await service.propose({
       identity: ctx.executionIdentity,
-      files: input.files,
+      files,
     })
   } catch (error) {
     return {
@@ -252,6 +284,9 @@ export async function applyDurableFileChangeSet(
           type: "write",
           tool: input.toolName,
           description: input.approval.description,
+          ...(input.approval.path
+            ? { path: input.approval.path }
+            : {}),
           ...(input.approval.content
             ? { content: input.approval.content }
             : {}),

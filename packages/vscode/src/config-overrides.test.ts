@@ -38,6 +38,20 @@ describe("applyExplicitConfigOverrides", () => {
     expect(target).toEqual(before)
   })
 
+  it("migrates a discontinued Kilo model stored in VS Code settings", () => {
+    const target = config()
+
+    applyExplicitConfigOverrides(target, reader({
+      model: "minimax/minimax-m2.5:free",
+    }))
+
+    expect(target.model).toMatchObject({
+      provider: "openai-compatible",
+      id: "kilo-auto/free",
+      baseUrl: "https://api.kilo.ai/api/openrouter",
+    })
+  })
+
   it("merges explicit model, permissions, indexing, vector and local embedding settings", () => {
     const target = config()
 

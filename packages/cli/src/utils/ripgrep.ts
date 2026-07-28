@@ -6,6 +6,10 @@ import { logError } from './log.js'
 import { execFileNoThrow } from './execFileNoThrow.js'
 import { execFile } from 'child_process'
 import debug from 'debug'
+import {
+  resolveRipgrepCommand,
+  type RipgrepCommand,
+} from './ripgrep-path.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = resolveCliRuntimeRoot(__filename, process.env.NODE_ENV)
@@ -24,32 +28,42 @@ if (useBuiltinRipgrep) {
   d('Using builtin ripgrep because USE_BUILTIN_RIPGREP is set')
 }
 
-const ripgrepPath = memoize(() => {
+export const getRipgrepCommand = memoize((): RipgrepCommand => {
   const { cmd } = findActualExecutable('rg', [])
   d(`ripgrep initially resolved as: ${cmd}`)
-
-  if (cmd !== 'rg' && !useBuiltinRipgrep) {
-    // NB: If we're able to find ripgrep in $PATH, cmd will be an absolute
-    // path rather than just returning 'rg'
-    return cmd
-  } else {
-    // Use the one we ship in-box
-    const rgRoot = path.resolve(__dirname, 'vendor', 'ripgrep')
-    if (process.platform === 'win32') {
-      // NB: Ripgrep doesn't ship an aarch64 binary for Windows, boooooo
-      return path.resolve(rgRoot, 'x64-win32', 'rg.exe')
-    }
-
-    const ret = path.resolve(
-      rgRoot,
-      `${process.arch}-${process.platform}`,
-      'rg',
-    )
-
-    d('internal ripgrep resolved as: %s', ret)
-    return ret
-  }
+  const resolved = resolveRipgrepCommand({
+    runtimeRoot: __dirname,
+    systemExecutablePath: cmd,
+    forceBundled: useBuiltinRipgrep,
+  })
+  d('%s ripgrep resolved as: %s', resolved.source, resolved.command)
+  return resolved
 })
+
+export function ripgrepPath(): string {
+  return getRipgrepCommand().command
+}
+
+export async function getRipgrepStatus(): Promise<{
+  available: boolean
+  source: RipgrepCommand["source"] | "missing"
+  version?: string
+}> {
+  let command: RipgrepCommand
+  try {
+    command = getRipgrepCommand()
+  } catch {
+    return { available: false, source: "missing" }
+  }
+  const result = await execFileNoThrow(command.command, [
+    ...command.args,
+    "--version",
+  ])
+  const version = result.stdout.split("\n")[0]?.trim()
+  return result.code === 0 && version
+    ? { available: true, source: command.source, version }
+    : { available: false, source: command.source }
+}
 
 export async function ripGrep(
   args: string[],
@@ -57,16 +71,16 @@ export async function ripGrep(
   abortSignal: AbortSignal,
 ): Promise<string[]> {
   await codesignRipgrepIfNecessary()
-  const rg = ripgrepPath()
-  d('ripgrep called: %s %o', rg, target, args)
+  const rg = getRipgrepCommand()
+  d('ripgrep called: %s %o', rg.command, target, args)
 
   // NB: When running interactively, ripgrep does not require a path as its last
   // argument, but when run non-interactively, it will hang unless a path or file
   // pattern is provided
   return new Promise(resolve => {
     execFile(
-      ripgrepPath(),
-      [...args, target],
+      rg.command,
+      [...rg.args, ...args, target],
       {
         maxBuffer: 1_000_000,
         signal: abortSignal,

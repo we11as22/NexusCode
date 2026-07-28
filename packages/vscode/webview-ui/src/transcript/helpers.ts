@@ -171,27 +171,12 @@ function mergeOptimisticUserMessages(previous: SessionMessage[], incoming: Sessi
       .filter((message) => !message.id.startsWith("local_user_"))
       .map((message) => message.id),
   )
-  let lastKnownIncomingIndex = -1
-  for (let index = 0; index < incoming.length; index += 1) {
-    if (knownDurableIds.has(incoming[index]!.id)) {
-      lastKnownIncomingIndex = index
-    }
-  }
-  const incomingUserIndexes = incoming
-    .map((message, index) => message.role === "user" ? index : -1)
-    .filter((index) => index >= 0)
-  const eligibleIndexes = new Set(
-    lastKnownIncomingIndex >= 0
-      ? incomingUserIndexes.filter((index) => index > lastKnownIncomingIndex)
-      : incomingUserIndexes.slice(-optimistic.length),
-  )
   const consumedOptimisticIds = new Set<string>()
 
-  return incoming.map((message, index) => {
+  return incoming.map((message) => {
     if (
       message.role !== "user" ||
-      knownDurableIds.has(message.id) ||
-      !eligibleIndexes.has(index)
+      knownDurableIds.has(message.id)
     ) {
       return message
     }

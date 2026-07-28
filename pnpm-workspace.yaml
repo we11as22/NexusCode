@@ -8,4 +8,5 @@ overrides:
 
 # pnpm 10 build-script allowlist.
 onlyBuiltDependencies:
+  - '@vscode/ripgrep'
   - esbuild

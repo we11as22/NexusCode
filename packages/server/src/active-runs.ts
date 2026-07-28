@@ -9,6 +9,7 @@ import {
   type Mode,
   type PermissionResult,
 } from "@nexuscode/core"
+import { approvalActionsMatch } from "./approval-action-identity.js"
 
 export interface StreamEnvelope {
   seq: number
@@ -282,14 +283,6 @@ export function appendRunEvent(runId: string, event: AgentEvent, idempotencyKey?
   run.sink?.emit(event, idempotencyKey)
 }
 
-function actionMatches(left: ApprovalAction, right: ApprovalAction): boolean {
-  return (
-    left.type === right.type &&
-    left.tool === right.tool &&
-    left.description === right.description
-  )
-}
-
 export async function waitForRunApproval(
   runId: string,
   action: ApprovalAction,
@@ -298,7 +291,9 @@ export async function waitForRunApproval(
   const run = activeRuns.get(runId)
   const pending = run
     ? [...run.pendingApprovals.values()].find(
-        (candidate) => !candidate.claimed && actionMatches(candidate.action, action),
+        (candidate) =>
+          !candidate.claimed &&
+          approvalActionsMatch(candidate.action, action),
       )
     : undefined
   if (!pending) return { approved: false }

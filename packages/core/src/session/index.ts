@@ -82,11 +82,31 @@ export class Session implements ISession {
     this._contextUsageSnapshot = null
   }
 
-  addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage {
+  addMessage(
+    msg: Omit<SessionMessage, "id" | "ts">,
+    identity?: { id?: string; ts?: number },
+  ): SessionMessage {
+    const id =
+      identity?.id ??
+      `msg_${crypto.randomBytes(6).toString("hex")}`
+    if (
+      id.length === 0 ||
+      id.length > 512 ||
+      /[\u0000-\u001f\u007f]/u.test(id)
+    ) {
+      throw new Error("Session message id is invalid")
+    }
+    if (this._messages.some((message) => message.id === id)) {
+      throw new Error(`Session message id already exists: ${id}`)
+    }
+    const ts = identity?.ts ?? Date.now()
+    if (!Number.isSafeInteger(ts) || ts < 0) {
+      throw new Error("Session message timestamp is invalid")
+    }
     const full: SessionMessage = {
       ...msg,
-      id: `msg_${crypto.randomBytes(6).toString("hex")}`,
-      ts: Date.now(),
+      id,
+      ts,
     }
     this._messages.push(full)
     this.invalidateTokenEstimate()

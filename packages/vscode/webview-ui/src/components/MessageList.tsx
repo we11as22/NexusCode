@@ -11,7 +11,10 @@ import { MermaidBlock } from "./MermaidBlock.js"
 import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 import type { SubAgentState } from "../stores/chat.js"
-import type { ApprovalActionView } from "../types/approval.js"
+import {
+  approvalActionPath,
+  type ApprovalActionView,
+} from "../types/approval.js"
 import { useChatStore } from "../stores/chat.js"
 import { buildChatRenderItems as buildProjectedChatRenderItems } from "../transcript/renderProjection.js"
 import {
@@ -65,6 +68,7 @@ function ApprovalInline({
   const [showRedirect, setShowRedirect] = useState(false)
   const [redirectText, setRedirectText] = useState("")
   const supportsScopedApproval = !useChatStore((s) => Boolean(s.serverUrl))
+  const reviewPath = approvalActionPath(action)
 
   const label =
     action.type === "execute"
@@ -122,6 +126,16 @@ function ApprovalInline({
       </div>
       {/* Action buttons row */}
       <div className="flex items-center gap-1 flex-wrap">
+        {action.type === "write" && reviewPath ? (
+          <button
+            type="button"
+            className={BTN_NEUTRAL}
+            onClick={() => postMessage({ type: "showDiff", path: reviewPath })}
+            title="Review the exact proposed diff"
+          >
+            Review Diff
+          </button>
+        ) : null}
         <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true)} title="Allow once">✓ Allow</button>
         {supportsScopedApproval && (
           <>

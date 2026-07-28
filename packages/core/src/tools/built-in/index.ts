@@ -78,8 +78,50 @@ import {
   memoryDeleteTool,
 } from "./orchestration-tools.js"
 
+/**
+ * Keep the first provider request focused on common coding primitives.
+ * Specialized workflow surfaces remain deterministically discoverable through
+ * ToolSearch and become executable only at the next provider boundary.
+ */
+const DEFERRED_BUILTIN_TOOL_NAMES = new Set([
+  "PowerShell",
+  "EnterWorktree",
+  "ExitWorktree",
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskUpdate",
+  "TaskOutput",
+  "TaskStop",
+  "TeamCreate",
+  "TeamList",
+  "TeamGet",
+  "TeamInbox",
+  "TeamAddMember",
+  "TeamAssignTask",
+  "TeamSetMemberStatus",
+  "TeamDelete",
+  "SendMessage",
+  "ListMcpResources",
+  "ReadMcpResource",
+  "McpAuthenticate",
+  "ListAgents",
+  "PlanStartWorkflow",
+  "PlanGetWorkflow",
+  "PlanAnswerWorkflow",
+  "PlanCreateResearchTasks",
+  "PlanDraftWorkflow",
+  "PlanMaterializeTasks",
+  "PlanVerifyExecution",
+  "MemoryCreate",
+  "MemoryList",
+  "MemoryGet",
+  "MemoryUpdate",
+  "MemoryDelete",
+])
+
 export function getAllBuiltinTools(): ToolDef[] {
-  return [
+  const tools: ToolDef[] = [
     askFollowupTool,
     todoWriteTool,
     sendUserMessageTool,
@@ -160,6 +202,11 @@ export function getAllBuiltinTools(): ToolDef[] {
 
     useSkillTool,
   ]
+  return tools.map((tool) =>
+    DEFERRED_BUILTIN_TOOL_NAMES.has(tool.name)
+      ? { ...tool, shouldDefer: true }
+      : tool,
+  )
 }
 
 export {

@@ -264,11 +264,8 @@ function parseCatalog(data: Record<string, unknown>, gatewayModelIds: Set<string
 /** Fallback when fetch fails: default free models so "Select model" still works */
 function getFallbackCatalog(): ModelsCatalog {
   const recommended: ModelsCatalog["recommended"] = [
-    { providerId: "nexus", modelId: "minimax/minimax-m2.5:free", name: "MiniMax M2.5 (free)", free: true },
-    { providerId: "nexus", modelId: "moonshotai/kimi-k2.5:free", name: "Kimi K2.5 (free)", free: true },
-    { providerId: "nexus", modelId: "arcee-ai/trinity-large-preview:free", name: "Arcee Trinity Large Preview (free)", free: true },
-    { providerId: "nexus", modelId: "stepfun/step-3.5-flash:free", name: "Step 3.5 Flash (free)", free: true },
-    { providerId: "nexus", modelId: "corethink:free", name: "CoreThink (free)", free: true },
+    { providerId: "nexus", modelId: "kilo-auto/free", name: "Kilo Auto (free)", free: true },
+    { providerId: "nexus", modelId: "openrouter/free", name: "OpenRouter Free Router", free: true },
   ]
   return {
     providers: [

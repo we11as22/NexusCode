@@ -116,6 +116,7 @@ describe("NexusServerClient protocol v2", () => {
 
     for await (const _event of client.runSessionTurn({
       sessionId: "session-test",
+      inputId: "local_user_123",
       input: [{ type: "text", text: "durable" }],
       mode: "agent",
       onCommandPrepared: async (record) => {
@@ -129,8 +130,9 @@ describe("NexusServerClient protocol v2", () => {
     expect(order).toEqual(["snapshot", "persist", "post", "4"])
     expect(posted).toMatchObject({
       commandId: prepared!.commandId,
-      inputId: prepared!.inputId,
+      inputId: "local_user_123",
     })
+    expect(prepared!.inputId).toBe("local_user_123")
 
     order.length = 0
     for await (const _event of client.runSessionTurn({

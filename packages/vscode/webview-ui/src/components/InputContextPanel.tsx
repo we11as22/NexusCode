@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react"
 import { useChatStore } from "../stores/chat.js"
-import { postMessage } from "../vscode.js"
+import { inputContextPanelKind } from "./input-context-panel-policy.js"
 
 /** File icon (document) for context panel */
 function FileIcon({ className }: { className?: string }) {
@@ -15,12 +15,10 @@ function FileIcon({ className }: { className?: string }) {
   )
 }
 
-const CODE_WRITING_MODES = ["agent", "plan", "debug"] as const
-
 /** Floating panel above input: proposed changes or applied changes awaiting keep/revert. */
 export function InputContextPanel() {
   const store = useChatStore()
-  const { pendingApproval, resolveApproval, mode, sessionUnacceptedEdits, openSessionEditDiff, undoSessionEdits, keepAllSessionEdits, revertSessionEditFile, acceptSessionEditFile } = store
+  const { pendingApproval, mode, sessionUnacceptedEdits, openSessionEditDiff, undoSessionEdits, keepAllSessionEdits, revertSessionEditFile, acceptSessionEditFile } = store
   const [expanded, setExpanded] = useState(true)
 
   const sessionEditsForPanel = useMemo(
@@ -31,169 +29,14 @@ export function InputContextPanel() {
     [sessionUnacceptedEdits],
   )
 
-  const showSessionEditsPanel =
-    CODE_WRITING_MODES.includes(mode as (typeof CODE_WRITING_MODES)[number]) &&
-    sessionEditsForPanel.length > 0 &&
-    !pendingApproval
-
-  // Pending approval
-  if (pendingApproval) {
-    const { action } = pendingApproval
-
-    if (action.type !== "write") {
-      const approvalLabel =
-        action.type === "execute"
-          ? "Command approval"
-          : action.type === "browser"
-            ? "Network approval"
-            : action.type === "mcp"
-              ? "MCP tool approval"
-              : action.type === "plugin"
-                ? "Plugin approval"
-                : action.type === "doom_loop"
-                  ? "Loop safety check"
-                  : `${action.tool} approval`
-      const detail = action.shortDescription?.trim() || action.description
-
-      return (
-        <div className={`nexus-input-context-panel ${!expanded ? "nexus-input-context-panel-collapsed" : ""}`}>
-          <div className="nexus-input-context-panel-inner">
-            <div className="nexus-input-context-top-row">
-              <button
-                type="button"
-                className="nexus-input-context-files-toggle"
-                onClick={() => setExpanded((value) => !value)}
-                aria-expanded={expanded}
-              >
-                <span className="nexus-input-context-chevron">{expanded ? "▼" : "▶"}</span>
-                <span>{approvalLabel}</span>
-              </button>
-              <div className="nexus-input-context-actions">
-                <button
-                  type="button"
-                  className="nexus-input-context-btn"
-                  onClick={() => resolveApproval(false)}
-                >
-                  Deny
-                </button>
-                <button
-                  type="button"
-                  className="nexus-input-context-btn nexus-input-context-btn-active"
-                  onClick={() => resolveApproval(true)}
-                >
-                  Allow
-                </button>
-              </div>
-            </div>
-            {expanded && (
-              <div className="px-3 pb-2 text-xs text-[var(--vscode-descriptionForeground)]">
-                <div className="break-words text-[var(--vscode-foreground)]" title={action.description}>
-                  {detail}
-                </div>
-                {action.content && action.content !== detail && (
-                  <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-all rounded bg-[var(--vscode-textCodeBlock-background)] px-2 py-1 font-mono text-[11px]">
-                    {action.content}
-                  </pre>
-                )}
-                {action.warning && (
-                  <div className="mt-1 text-[var(--vscode-editorWarning-foreground)]">
-                    {action.warning}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )
-    }
-
-    // Pending file approval
-    const pendingPath = extractPathFromApprovalDescription(action.description)
-    const fileLabel =
-      action.description?.split(/[/\\]/).pop() ?? action.description ?? "File"
-    const diffStats = action.diffStats
-    const hasDiff = diffStats != null && (diffStats.added > 0 || diffStats.removed > 0)
-
-    return (
-      <div className={`nexus-input-context-panel ${!expanded ? "nexus-input-context-panel-collapsed" : ""}`}>
-        <div className="nexus-input-context-panel-inner">
-          <div className="nexus-input-context-top-row">
-            <button
-              type="button"
-              className="nexus-input-context-files-toggle"
-              onClick={() => setExpanded((e) => !e)}
-              aria-expanded={expanded}
-            >
-              <span className="nexus-input-context-chevron">{expanded ? "▼" : "▶"}</span>
-              <span>1 File</span>
-            </button>
-            <div className="nexus-input-context-actions">
-              <button
-                type="button"
-                className="nexus-input-context-btn"
-                onClick={() => resolveApproval(false)}
-              >
-                Reject
-              </button>
-              <button
-                type="button"
-                className="nexus-input-context-btn"
-                onClick={() => resolveApproval(true)}
-              >
-                Apply
-              </button>
-              <button
-                type="button"
-                className="nexus-input-context-btn nexus-input-context-btn-active"
-                title="Review the proposed diff"
-                onClick={() => {
-                  if (pendingPath) postMessage({ type: "showDiff", path: pendingPath })
-                }}
-                disabled={!pendingPath}
-              >
-                Review Diff
-              </button>
-            </div>
-          </div>
-          {expanded && (
-            <div className="nexus-input-context-file-row">
-              <FileIcon className="nexus-input-context-file-icon" />
-              <span className="nexus-input-context-file-name" title={action.description}>
-                {fileLabel}
-                {hasDiff && (
-                  <span className="nexus-input-context-file-diff">
-                    {diffStats.added > 0 && <span className="text-[var(--vscode-gitDecoration-addedResourceForeground)]">+{diffStats.added}</span>}
-                    {diffStats.removed > 0 && <span className="text-[var(--vscode-gitDecoration-deletedResourceForeground)]">-{diffStats.removed}</span>}
-                  </span>
-                )}
-              </span>
-              <button
-                type="button"
-                className="nexus-input-context-file-btn nexus-input-context-file-dismiss"
-                onClick={() => resolveApproval(false)}
-                title="Deny"
-                aria-label="Deny"
-              >
-                ✕
-              </button>
-              <button
-                type="button"
-                className="nexus-input-context-file-btn nexus-input-context-file-allow"
-                onClick={() => resolveApproval(true)}
-                title="Allow"
-                aria-label="Allow"
-              >
-                ✓
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    )
-  }
+  const panelKind = inputContextPanelKind({
+    hasPendingApproval: Boolean(pendingApproval),
+    mode,
+    appliedEditCount: sessionEditsForPanel.length,
+  })
 
   // Applied session edits: N files, Revert All / Keep All / Review Diff
-  if (showSessionEditsPanel && sessionEditsForPanel.length > 0) {
+  if (panelKind === "applied-changes") {
     const n = sessionEditsForPanel.length
     const fileLabel = n === 1 ? "1 File" : `${n} Files`
 
@@ -301,17 +144,5 @@ export function InputContextPanel() {
     )
   }
 
-  return null
-}
-
-function extractPathFromApprovalDescription(description: string | undefined): string | null {
-  if (!description) return null
-  const trimmed = description.trim()
-  if (!trimmed) return null
-  const prefixed = trimmed.match(/^(?:Write to|Edit|Edit file:|Write file:)\s+(.+)$/i)
-  if (prefixed?.[1]) return prefixed[1].trim()
-  // Fallback: description can include path at the end.
-  const pathLike = trimmed.match(/((?:\.{0,2}\/)?[A-Za-z0-9_.\-\/\\]+\.[A-Za-z0-9]+)$/)
-  if (pathLike?.[1]) return pathLike[1].trim()
   return null
 }

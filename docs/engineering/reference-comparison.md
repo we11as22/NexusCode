@@ -76,6 +76,8 @@ TypeScript-ядро для CLI, VS Code и сервера и заимствуе�
 | Контрольные точки и проверка изменений | Долговечные content-addressed наборы изменений, подтверждение точного предложения, CAS-применение/откат/восстановление, восстановление контрольной точки в пределах путей, ограниченные Git status/diff и review в CLI/server/VS Code | Codex, Kimi Code, Qwen, MiMo | Реализовано; старые теневые контрольные точки без точной привязки к сообщению доступны только для просмотра, ни один путь восстановления не запускает безусловный reset/clean и не переименовывает метаданные вложенных Git-репозиториев |
 | Изменение файлов | Write, Edit и строгий многофайловый ApplyPatch используют единый долговечный поток «сначала предложение» | Codex, Kilo, Roo, MiMo | Реализовано; ApplyPatch проверяет каждый точный hunk до одного атомарного review-действия, сохраняет байты удаляемых бинарных файлов, компенсирует частичные сбои хоста и честно обозначает сгруппированные многофайловые действия |
 | Терминал | Активные и фоновые задачи, жизненный цикл вывода/остановки, встроенный терминал VS Code, отмена | Codex, Cline | Реализовано; CLI отображает полный жизненный цикл задачи, VS Code показывает ограниченный вывод, cwd, id задачи, длительность, код выхода и доступность артефакта |
+| CLI/TUI и очередь ввода | Стабильная проекция потокового ответа без дублей, FIFO-очередь с сохранением режима/вставок, отзыв последнего элемента через ↑, раздельное владение Escape модальным подтверждением и активным ходом | Codex, Kimi Code, Qwen Code | Реализовано; завершённый ответ заменяет live-черновик по стабильному id, очередь защищена от двойной отправки на синхронном idle-render, а подтверждение Bash не может случайно отменить весь ход |
+| Нагрузка TUI и память | Коалесинг соседних deltas, ограниченная частота анимации, пауза фоновых спиннеров под modal/primary spinner, замещение transcript после компакции, симметричная очистка AbortSignal-listeners | Qwen Code, Codex, Kimi Code | Реализовано; длинная история больше не перерисовывается каждые 120 мс из-за каждого спиннера, UI не удерживает отброшенную компакцией историю, а тестовый monorepo-параллелизм ограничен |
 | Провайдеры | Anthropic, OpenAI-compatible, OpenAI, Google, Azure, Bedrock и совместимые шлюзы | Kilo, OpenCode | Реализовано с тестами совместимости для используемого в репозитории поколения AI SDK |
 | Конфигурация, учётные данные и первый запуск | Иерархия YAML, секреты с привязкой к назначению, атомарное CLI-состояние только для владельца и Kilo как источник бесплатных моделей по умолчанию | Codex, Kimi CLI, Qwen, Kilo | Реализовано; установщик выбирает точно закреплённую версию Node и не сохраняет удалённый открытый CLI-ключ |
 | Установка и упаковка | Закреплённые Node/pnpm, воспроизводимая сборка монорепозитория, CLI-wrapper и самодостаточные ресурсы VSIX | Kilo, Roo, Cline | Реализовано и проверено smoke-тестом из shell, изначально использующего Node 20; установленный wrapper выбрал Node 24.18.0 и создал состояние первого запуска с правами 0700/0600 для каталога/файла |
@@ -174,6 +176,8 @@ Nexus перенял уроки жизненного цикла и UX, но не
 ### Kimi Code и Kimi CLI
 
 - FIFO-приём ходов со стабильными идентификаторами, принадлежащими клиенту.
+- FIFO-очередь терминального ввода, защиту `queuedMessageDispatchPending` от
+  двойного dispatch и отзыв последнего queued prompt для редактирования.
 - Сериализованный undo, точные предусловия и сохранённые терминальные результаты.
 - Очереди `step-request`, доставляющие ответы пользователя на границах
   провайдерских вызовов.
@@ -187,7 +191,9 @@ Nexus использует эти инварианты в хранилище о�
 - Из MiMo: историю патчей, привязанную к сообщениям и их частям; владение
   серверным SQLite/WAL и проверку восстановления в заданной области.
 - Из Qwen: дисциплину writer lease, fail-closed уровни компакции, полный обзор
-  Git-состояния, фоновых агентов и границы правил разрешений.
+  Git-состояния, фоновых агентов и границы правил разрешений; для Ink TUI —
+  разделение append-only истории и ограниченной live-области, чтобы длинный
+  поток не заставлял терминал многократно перерисовывать весь transcript.
 
 Nexus использует SQLite только там, где серверной конкурентности нужны
 транзакции, а локальную историю CLI/расширения сохраняет переносимой. Классификатор
@@ -259,11 +265,12 @@ SQLite FTS/индекса не оправдано без измеренной п
 версии Node, изначально доступной в shell пользователя:
 
 - typecheck монорепозитория прошёл во всех шести исполняемых workspace-пакетах;
-- 1569 тестов монорепозитория прошли в пакетах core, state, webview, CLI, server
+- 1627 тестов монорепозитория прошли в пакетах core, state, webview, CLI, server
   и VS Code;
 - полная production-сборка прошла, включая проверки импорта встроенной SQLite
   из `dist`;
-- набор проверок переносимости рантайма/хранилища: 12/12;
+- набор проверок переносимости рантайма/хранилища и безопасной инкрементальной
+  установки: 13/13;
 - детерминированная перепись возможностей: 242 заявленные исполняемые функции,
   список пересоздан и проверен на актуальность;
 - end-to-end-проверка MCP/навыков прошла;
@@ -272,6 +279,9 @@ SQLite FTS/индекса не оправдано без измеренной п
 - изолированный smoke-тест установщика начался с Node 20 первым в `PATH`, выбрал
   закреплённый бинарник Node 24, собрал CLI, установил временный wrapper и
   завершил set/get конфигурации с правами `0700` на каталог и `0600` на файл;
+- полный тестовый прогон, CLI-инсталляция и production-упаковка VSIX не
+  увеличили системный счётчик swapout; параллелизм workspace и Vitest
+  ограничен, а обычная установка больше не удаляет dependency store;
 - headless-команда `nexus doctor` прошла для `/Users/mac/Projects/nexus/test`,
   не открывая Ink/raw mode и не изменяя основное хранилище настроек хоста;
 - loopback smoke-тест сервера проверил health, ошибку аутентификации и
@@ -347,6 +357,7 @@ Nexus объединяет возможности, которые обычно �
 | --- | --- | --- |
 | Цикл агента и выполнение инструментов | `source_projects/codex/codex-rs/core/src/tools/orchestrator.rs`; `source_projects/openclaude/src/tools/AgentTool/runAgent.ts`; `source_projects/kilocode/packages/core/src/session/runner/index.ts`; `source_projects/qwen-code/packages/core/src/agents/runtime/agent-core.ts` | `packages/core/src/agent/loop.ts`; `packages/core/src/agent/tool-pipeline.ts`; `packages/core/src/agent/tool-execution.ts`; `packages/core/src/agent/run-services.ts` |
 | Режим хода, очередь и проекция промпта | Codex `codex-rs/tui/src/chatwidget/input_flow.rs` и `interaction.rs`; Kilo `packages/opencode/src/cli/cmd/run/runtime.queue.ts`; Kimi Code `apps/kimi-code/src/tui/types.ts`; пути очереди команд и инструкций plan mode в OpenClaude | `packages/core/src/agent/modes.ts`; `packages/core/src/agent/prompts/components/index.ts`; `packages/core/src/session/plan-write-gate.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; `packages/cli/src/screens/REPL.tsx` |
+| Потоковый TUI, очередь и ограничение перерисовок | Codex `codex-rs/tui/src/streaming/controller.rs`; Kimi Code `apps/kimi-code/src/tui/controllers/streaming-ui.ts` и `editor-keyboard.ts`; Qwen Code `packages/cli/src/ui/hooks/useGeminiStream.ts` и `utils/MarkdownDisplay.tsx` | `packages/cli/src/nexus-message-projection.ts`; `packages/cli/src/prompt-queue.ts`; `packages/cli/src/cancel-policy.ts`; `packages/cli/src/event-waiter.ts`; `packages/cli/src/components/Spinner.tsx`; `packages/cli/src/screens/REPL.tsx` |
 | Компакция | `source_projects/codex/codex-rs/core/src/compact.rs`; `source_projects/kilocode/packages/core/src/session/compaction.ts`; `source_projects/kimi-cli/src/kimi_cli/soul/compaction.py` | `packages/core/src/session/compaction.ts`; `packages/core/src/context/compaction-projection.ts` |
 | Песочница и разрешения | `source_projects/codex/codex-rs/core/src/tools/sandboxing.rs`; `source_projects/codex/codex-rs/core/src/tools/approvals.rs`; `source_projects/kilocode/packages/core/src/permission.ts`; `source_projects/MiMo-Code/SECURITY.md` | `packages/core/src/agent/approval-coordinator.ts`; `packages/core/src/agent/mode-input-policy.ts`; `packages/core/src/agent/tool-execution.ts`; реализации хостов в `packages/cli/src/host.ts`, `packages/vscode/src/host.ts` и `packages/server/src/host.ts` |
 | Субагенты и оркестрация | `source_projects/codex/codex-rs/core/src/tools/handlers/multi_agents.rs`; `source_projects/openclaude/src/tools/AgentTool`; `source_projects/kimi-cli/src/kimi_cli/subagents`; `source_projects/qwen-code/packages/core/src/agents/runtime` | `packages/core/src/agent/parallel.ts`; `packages/core/src/orchestration/runtime.ts`; `packages/core/src/orchestration/agents.ts`; `packages/core/src/tools/built-in/orchestration-tools.ts` |

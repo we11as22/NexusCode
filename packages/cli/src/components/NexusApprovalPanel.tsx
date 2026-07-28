@@ -319,7 +319,9 @@ export function NexusApprovalPanel({
         {action.type === 'write' && (
           <>
             <Box marginTop={1}>
-              <Text bold>• Update({getWriteFilePath(action.description)})</Text>
+              <Text bold>
+                • Update({action.path ?? getWriteFilePath(action.description)})
+              </Text>
             </Box>
             {action.diffStats && (
               <Box marginTop={0}>

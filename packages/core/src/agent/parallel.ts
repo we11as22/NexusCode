@@ -2223,6 +2223,7 @@ export function createTaskResumeTool(manager: ParallelAgentManager, config: Nexu
   return {
     name: "TaskResume",
     description: "Resume or fork a prior delegated agent task using its stored output, lineage, and snapshot context. Use this when prior delegated work is relevant and you want continuity instead of starting a fresh agent task.",
+    shouldDefer: true,
     parameters: taskResumeSchema,
     async execute({ task_id, instruction, fork, block }, ctx: ToolContext) {
       const emit = (event: AgentEvent) => ctx.host.emit(event)
@@ -2304,6 +2305,7 @@ export function createTaskSnapshotTool(manager: ParallelAgentManager): ToolDef<z
   return {
     name: "TaskSnapshot",
     description: "Read the stored snapshot or execution summary for a delegated or background task. Use this to inspect prior task context before resuming, debugging, or summarizing its result.",
+    shouldDefer: true,
     parameters: taskSnapshotSchema,
     readOnly: true,
     async execute({ task_id, format }, ctx: ToolContext) {
@@ -2340,6 +2342,7 @@ export function createTaskCreateBatchTool(manager: ParallelAgentManager, config:
   return {
     name: "TaskCreateBatch",
     description: "Create multiple delegated agent tasks and run them concurrently as one coordinated batch. Use this for independent delegated work items that can safely run in parallel without touching the same files.",
+    shouldDefer: true,
     parameters: taskCreateBatchSchema,
     async execute({ tasks, block }, ctx: ToolContext) {
       const parentMode = ctx.mode ?? "agent"

@@ -133,7 +133,10 @@ describe("credential destination identity", () => {
   it("generates the Kilo sentinel only for a recognized free route", () => {
     vi.stubEnv("KILO_API_KEY", "")
     expect(resolveProviderCredential(model({
-      id: "minimax/minimax-m2.5:free",
+      id: "kilo-auto/free",
+    }))).toMatchObject({ apiKey: "dummy", source: "kilo-free" })
+    expect(resolveProviderCredential(model({
+      id: "openrouter/free",
     }))).toMatchObject({ apiKey: "dummy", source: "kilo-free" })
     expect(() => resolveProviderCredential(model({
       id: "paid/model",

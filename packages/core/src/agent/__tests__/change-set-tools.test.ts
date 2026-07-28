@@ -225,7 +225,7 @@ describe("Write/Edit/ApplyPatch durable change-set integration", () => {
   })
 
   it("persists, exactly approves, and applies a Write proposal", async () => {
-    const { context, service, states } = await harness()
+    const { approvals, context, service, states } = await harness()
 
     const result = await writeFileTool.execute({
       file_path: "file.ts",
@@ -241,6 +241,14 @@ describe("Write/Edit/ApplyPatch durable change-set integration", () => {
       },
     })
     expect(states.get("file.ts")).toEqual(present("created\n"))
+    expect(approvals).toEqual([
+      expect.objectContaining({
+        type: "write",
+        tool: "Write",
+        path: "file.ts",
+        content: "created\n",
+      }),
+    ])
     await expect(
       service.get(String(result.metadata?.changeSetId)),
     ).resolves.toMatchObject({

@@ -1,5 +1,6 @@
 import * as vscode from "vscode"
 import { createLLMClient, type NexusConfig, type ProviderConfig, type ProviderName } from "@nexuscode/core"
+import { normalizeKiloFreeModelId } from "../../config-overrides.js"
 import { ResponseMetaData } from "./types"
 
 const FIM_SYSTEM = `You are an inline code completion engine. The user shows code before the cursor (PREFIX) and after the cursor (SUFFIX). Output ONLY the raw text to insert at the gap — no quotes, no markdown code fences, no explanation. Prefer a natural stopping point (end of statement, closing bracket, or line). If nothing sensible fits, output nothing.`
@@ -41,11 +42,12 @@ export function buildAutocompleteOverrideModel(apiKey?: string): ProviderConfig 
     return null
   }
   const norm = normalizeAutocompleteProvider(c.get<string>("nexuscode.autocomplete.provider") ?? "")
-  const id = (c.get<string>("nexuscode.autocomplete.model") ?? "").trim()
-  if (!norm || !id) return null
+  const configuredId = (c.get<string>("nexuscode.autocomplete.model") ?? "").trim()
+  if (!norm || !configuredId) return null
 
   let baseUrl = (c.get<string>("nexuscode.autocomplete.baseUrl") ?? "").trim() || undefined
   if (!baseUrl && norm.defaultBaseUrl) baseUrl = norm.defaultBaseUrl
+  const id = normalizeKiloFreeModelId(norm.provider, configuredId, baseUrl)
 
   const temp = c.get<number>("nexuscode.autocomplete.temperature")
   const reasoningEffort = (c.get<string>("nexuscode.autocomplete.reasoningEffort") ?? "").trim() || undefined

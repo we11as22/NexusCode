@@ -40,4 +40,10 @@ describe("CLI agent-event stream", () => {
   it("does not expose mode cycling while a turn is active", () => {
     expect(replSource).toContain("nexusBootstrap && !isLoading")
   })
+
+  it("replaces the TUI transcript from compacted session state", () => {
+    expect(source).toContain("type: 'nexus_session_sync'")
+    expect(source).toContain("replMessagesFromSession(session.messages)")
+    expect(replSource.match(/message\.type === 'nexus_session_sync'/g)).toHaveLength(3)
+  })
 })

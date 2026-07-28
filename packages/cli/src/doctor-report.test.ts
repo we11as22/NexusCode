@@ -17,6 +17,11 @@ describe("headless CLI doctor", () => {
     const root = await mkdtemp(path.join(tmpdir(), "nexus-doctor-"))
     roots.push(root)
     const commandVersion = vi.fn(async (command: string) => command === "git")
+    const ripgrepStatus = vi.fn(async () => ({
+      available: true,
+      source: "bundled" as const,
+      version: "ripgrep 14.1.1",
+    }))
 
     const report = await collectDoctorReport(root, {
       runtimeVersion: "24.18.0",
@@ -24,13 +29,17 @@ describe("headless CLI doctor", () => {
         model: { provider: "openai-compatible", id: "model:free" },
       })),
       commandVersion,
+      ripgrepStatus,
     })
 
     expect(report.ok).toBe(true)
     expect(report.lines.join("\n")).toContain("✓ Model openai-compatible/model:free")
     expect(report.lines.join("\n")).toContain("✓ Git available")
-    expect(report.lines.join("\n")).toContain("ripgrep unavailable")
-    expect(commandVersion).toHaveBeenCalledTimes(2)
+    expect(report.lines.join("\n")).toContain(
+      "✓ ripgrep 14.1.1 (bundled)",
+    )
+    expect(commandVersion).toHaveBeenCalledTimes(1)
+    expect(ripgrepStatus).toHaveBeenCalledTimes(1)
   })
 
   it("fails clearly on an unpinned runtime", async () => {

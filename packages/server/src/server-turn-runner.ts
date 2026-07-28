@@ -231,13 +231,16 @@ export class ServerTurnRunner implements TurnRunner {
         : {}),
     })
     const content = inputContent(context)
-    session.addMessage({
-      role: "user",
-      content,
-      ...(context.execution.selection
-        ? { presetName: context.execution.selection.profileId }
-        : {}),
-    })
+    session.addMessage(
+      {
+        role: "user",
+        content,
+        ...(context.execution.selection
+          ? { presetName: context.execution.selection.profileId }
+          : {}),
+      },
+      { id: context.input.id },
+    )
     // The admitted input must be durable before provider/tool execution begins.
     await session.save()
 

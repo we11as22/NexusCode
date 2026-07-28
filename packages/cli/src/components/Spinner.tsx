@@ -81,7 +81,10 @@ export function Spinner(): React.ReactNode {
   useEffect(() => {
     const timer = setInterval(() => {
       setFrame(f => (f + 1) % frames.length)
-    }, 120)
+    // This Ink tree includes the live transcript. A fast animation can force
+    // full-frame terminal repaints when the live region exceeds the viewport.
+    // Keep feedback responsive without flooding VS Code's terminal renderer.
+    }, 500)
 
     return () => clearInterval(timer)
   }, [frames.length])
@@ -114,7 +117,7 @@ export function SimpleSpinner(): React.ReactNode {
   useEffect(() => {
     const timer = setInterval(() => {
       setFrame(f => (f + 1) % frames.length)
-    }, 120)
+    }, 500)
 
     return () => clearInterval(timer)
   }, [frames.length])

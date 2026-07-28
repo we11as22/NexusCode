@@ -86,7 +86,7 @@ import {
   canonicalProjectRoot,
   computeContextUsageMetrics,
   estimateToolsDefinitionsTokens,
-  getAllBuiltinTools,
+  shouldUseDeferredToolLoading,
   getClaudeCompatibilityOptions,
   isDelegatedAgentParentTool,
   isDelegatedAgentParentToolEndClear,
@@ -153,6 +153,10 @@ import {
 import {
   remoteModeTransitionFromAgentEvent,
 } from "./remote-mode-transition.js"
+import {
+  pendingWriteApprovalPreviewFromEvent,
+  type PendingWriteApprovalPreview,
+} from "./pending-approval-preview.js"
 
 export type { WebviewMessage } from "./webview-protocol.js"
 
@@ -541,8 +545,8 @@ export class Controller {
   private sessionUnacceptedEdits: SessionUnacceptedEdit[] = []
   private changeSetReviewSessionId: string | null = null
   private changeSetReviewRefresh: Promise<void> | null = null
-  /** Active host for the running local loop; used for pending write/edit previews before approval. */
-  private activeRunHost: VsCodeHost | null = null
+  /** Exact proposed single-file content owned by the current approval event. */
+  private pendingWriteApprovalPreview: PendingWriteApprovalPreview | null = null
   /** Server-stream shadow state: remembers latest SpawnAgent tool so subagent events can attach even before final server snapshot arrives. */
   private streamLastSpawnAgentPartId: string | null = null
   /** Last context_usage from agent loop (includes system prompt tokens). Used in getStateToPostToWebview so stateUpdate does not overwrite with session-only count. */
@@ -561,6 +565,23 @@ export class Controller {
     return this.webviewPathCapabilities
       .resolveWorkspacePath(cwd, filePath)
       .replace(/\\/g, "/")
+  }
+
+  private updatePendingWriteApprovalPreview(event: AgentEvent): void {
+    if (event.type === "tool_approval_needed") {
+      this.pendingWriteApprovalPreview =
+        pendingWriteApprovalPreviewFromEvent(event)
+      return
+    }
+    if (
+      this.pendingWriteApprovalPreview &&
+      ((event.type === "tool_end" &&
+        event.partId === this.pendingWriteApprovalPreview.partId) ||
+        event.type === "done" ||
+        (event.type === "error" && event.fatal))
+    ) {
+      this.pendingWriteApprovalPreview = null
+    }
   }
 
   private workspaceUriForAuthorizedPath(
@@ -1482,6 +1503,7 @@ export class Controller {
   }
 
   private forwardServerEvent(event: AgentEvent): void {
+    this.updatePendingWriteApprovalPreview(event)
     const nextMode =
       remoteModeTransitionFromAgentEvent(event)
     if (nextMode) {
@@ -1610,6 +1632,7 @@ export class Controller {
       if (this.abortController === abortController) {
         this.abortController = undefined
       }
+      this.pendingWriteApprovalPreview = null
       this.isRunning = false
       if (this.serverConnectionState !== "error") {
         this.serverConnectionState = "idle"
@@ -1754,8 +1777,20 @@ export class Controller {
         contextLimitTokens = snap.limitTokens
         contextPercent = snap.percent
       } else {
-        const mcpN = Array.isArray(this.config.mcp?.servers) ? this.config.mcp.servers.length : 0
-        const toolsTok = estimateToolsDefinitionsTokens(getAllBuiltinTools()) + mcpN * 1200
+        const toolRegistry = new ToolRegistry()
+        const { builtin, dynamic } = toolRegistry.getForMode(this.mode)
+        const visibleTools = [...builtin, ...dynamic]
+        const deferredTools = visibleTools.filter(
+          (tool) => tool.shouldDefer && !tool.alwaysLoad,
+        )
+        const initialTools = shouldUseDeferredToolLoading(
+          deferredTools,
+          this.config.model.id,
+          this.config,
+        )
+          ? visibleTools.filter((tool) => !deferredTools.includes(tool))
+          : visibleTools
+        const toolsTok = estimateToolsDefinitionsTokens(initialTools)
         const m = computeContextUsageMetrics({
           sessionMessages: this.session.messages,
           toolsDefinitionTokens: toolsTok,
@@ -2313,6 +2348,7 @@ export class Controller {
             msg.images,
             msg.presetName,
             reportAdmission,
+            msg.clientMessageId,
           )
         } finally {
           reportAdmission(false)
@@ -2582,6 +2618,22 @@ export class Controller {
           break
         }
         const key = authorizedPath.replace(/\\/g, "/")
+        const pendingPreview =
+          this.pendingWriteApprovalPreview &&
+          (() => {
+            try {
+              return (
+                this.normalizePathKey(
+                  this.pendingWriteApprovalPreview.path,
+                  cwd,
+                ) === key
+              )
+            } catch {
+              return false
+            }
+          })()
+            ? this.pendingWriteApprovalPreview
+            : null
         const sessionEdit = this.sessionUnacceptedEdits.find((entry) => {
           try {
             return this.normalizePathKey(entry.path, cwd) === key
@@ -2589,7 +2641,21 @@ export class Controller {
             return false
           }
         })
-        if (sessionEdit) {
+        if (pendingPreview) {
+          const uri = this.workspaceUriForAuthorizedPath(cwd, authorizedPath)
+          const before = await Promise.resolve(
+            vscode.workspace.openTextDocument(uri),
+          )
+            .then((document) => document.getText())
+            .catch(() => "")
+          await showSessionEditDiff(
+            cwd,
+            authorizedPath,
+            before,
+            pendingPreview.content,
+            { useWorkspaceAfterFile: false },
+          )
+        } else if (sessionEdit) {
           if (sessionEdit.contentOmitted) {
             vscode.window.showInformationMessage(
               `NexusCode: The exact diff for ${sessionEdit.path} was omitted because it exceeds the remote review limit.`,
@@ -3176,12 +3242,18 @@ export class Controller {
           )
         ) {
           // Exact local tool-part approval resolved.
+          if (this.pendingWriteApprovalPreview?.partId === msg.partId) {
+            this.pendingWriteApprovalPreview = null
+          }
         } else if (
           this.getServerUrl() &&
           this.activeRemoteTurn
         ) {
           try {
             await this.activeRemoteTurn.resolveApproval(msg.partId, result)
+            if (this.pendingWriteApprovalPreview?.partId === msg.partId) {
+              this.pendingWriteApprovalPreview = null
+            }
           } catch (error) {
             this.reportServerError(error)
           }
@@ -3946,6 +4018,7 @@ export class Controller {
     images?: Array<{ data: string; mimeType: string }>,
     presetName?: string,
     onAdmission?: (accepted: boolean) => void,
+    clientMessageId?: string,
   ): Promise<void> {
     if (this.isRunning) return
     if (this.configurationError) {
@@ -4159,7 +4232,14 @@ Return in this format:
             ...images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType })),
           ]
         : actualContent
-    const userMessage = this.session.addMessage({ role: "user", content: userContent, presetName: effectivePresetName })
+    const userMessage = this.session.addMessage(
+      {
+        role: "user",
+        content: userContent,
+        presetName: effectivePresetName,
+      },
+      clientMessageId ? { id: clientMessageId } : undefined,
+    )
     if (!serverUrl) onAdmission?.(true)
     this.postStateToWebview()
 
@@ -4200,6 +4280,7 @@ Return in this format:
         let admissionCursorWrite: Promise<void> = Promise.resolve()
         try {
           for await (const event of remoteTurn.run({
+            ...(clientMessageId ? { inputId: clientMessageId } : {}),
             input: remoteInput,
             mode: runMode,
             signal: this.abortController!.signal,
@@ -4295,6 +4376,7 @@ Return in this format:
         if (this.activeRemoteTurn === remoteTurn) {
           this.activeRemoteTurn = undefined
         }
+        this.pendingWriteApprovalPreview = null
         this.isRunning = false
         if (this.serverConnectionState !== "error") {
           this.serverConnectionState = "idle"
@@ -4322,6 +4404,7 @@ Return in this format:
     }
     const deliverLocalEvent = (event: AgentEvent) => {
       rememberFatalRunError(event)
+      this.updatePendingWriteApprovalPreview(event)
       if (event.type === "question_request") {
         this.pendingQuestionRequest = event.request
       }
@@ -4397,8 +4480,6 @@ Return in this format:
     }, onWorkingDirectoryChangeRequested: async (nextCwd) => {
       await this.applyHostWorkingDirectoryChange(nextCwd)
     } })
-    this.activeRunHost = host
-
     let durableRunStatus: "completed" | "failed" | "aborted" = "completed"
     const timeoutMs = 10 * 60_000
     const timeout = setTimeout(() => {
@@ -4589,7 +4670,7 @@ Return in this format:
       await durableEventSink.finish(durableRunStatus).catch((error) => {
         console.error("[nexus] Failed to finalize durable local run:", error)
       })
-      this.activeRunHost = null
+      this.pendingWriteApprovalPreview = null
       this.isRunning = false
       await this.session!.save().catch(() => {})
       this.postStateToWebview()

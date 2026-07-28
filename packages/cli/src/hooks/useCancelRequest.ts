@@ -18,6 +18,7 @@ export function useCancelRequest(
   onCancel: () => void,
   isMessageSelectorVisibleRef: MutableRefObject<boolean>,
   cancelScope: NexusCancelRequestScope,
+  isActive = true,
 ) {
   const scopeRef = useRef(cancelScope)
   scopeRef.current = cancelScope
@@ -32,26 +33,29 @@ export function useCancelRequest(
     [],
   )
 
-  useInput((_, key) => {
-    if (!key.escape) {
-      return
-    }
-    if (isMessageSelectorVisibleRef.current) {
-      return
-    }
-    const scope = stableScope
-    if (!scope.isCancellable()) {
-      return
-    }
-    const ac = scope.getAbortController()
-    if (ac?.signal.aborted) {
-      return
-    }
-    // Active run (main loop and/or sub-agents): Escape must abort even if a tool JSX shell is open.
-    logEvent('tengu_cancel', {})
-    setToolJSX(null)
-    setToolUseConfirm(null)
-    setBinaryFeedbackContext(null)
-    onCancelRef.current()
-  })
+  useInput(
+    (_, key) => {
+      if (!key.escape) {
+        return
+      }
+      if (isMessageSelectorVisibleRef.current) {
+        return
+      }
+      const scope = stableScope
+      if (!scope.isCancellable()) {
+        return
+      }
+      const ac = scope.getAbortController()
+      if (ac?.signal.aborted) {
+        return
+      }
+      // Active run (main loop and/or sub-agents): Escape must abort even if a tool JSX shell is open.
+      logEvent('tengu_cancel', {})
+      setToolJSX(null)
+      setToolUseConfirm(null)
+      setBinaryFeedbackContext(null)
+      onCancelRef.current()
+    },
+    { isActive },
+  )
 }

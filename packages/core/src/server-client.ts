@@ -176,6 +176,8 @@ export interface SessionApprovalIdentity extends SessionTurnIdentity {
 
 export interface RunSessionTurnOptions {
   sessionId: string
+  /** Caller-owned user-message identity, reused by the durable protocol. */
+  inputId?: string
   input: readonly UserInputPartV2[]
   mode: Mode
   selection?: {
@@ -681,7 +683,10 @@ export class NexusServerClient {
         prepared?.commandId ?? protocolIdentifier("command"),
       sessionId: options.sessionId,
       type: "start_turn",
-      inputId: prepared?.inputId ?? protocolIdentifier("input"),
+      inputId:
+        prepared?.inputId ??
+        options.inputId ??
+        protocolIdentifier("input"),
       input: [...options.input],
       mode: options.mode,
       ...(options.selection ? { selection: options.selection } : {}),

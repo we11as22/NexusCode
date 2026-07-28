@@ -11,5 +11,7 @@ export default defineConfig({
     // The continuedev subtree is imported upstream code with its own fixture
     // assumptions. Nexus-owned extension tests live at the src root.
     include: ["src/*.test.ts"],
+    minWorkers: 1,
+    maxWorkers: 2,
   },
 })

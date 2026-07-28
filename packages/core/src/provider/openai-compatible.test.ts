@@ -110,7 +110,7 @@ describe("OpenAI-compatible endpoint credential isolation", () => {
 
     const client = createOpenAICompatibleClient({
       provider: "openai-compatible",
-      id: "minimax/minimax-m2.5:free",
+      id: "kilo-auto/free",
       baseUrl: "https://api.kilo.ai/api/openrouter",
     })
 

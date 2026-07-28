@@ -16,7 +16,7 @@ describe("credential-safe config loading", () => {
     if (cwd) await rm(cwd, { recursive: true, force: true })
   })
 
-  it("resolves the Kilo selection without materializing unrelated ambient keys", async () => {
+  it("migrates the discontinued Kilo free model without materializing unrelated ambient keys", async () => {
     cwd = await mkdtemp(join(tmpdir(), "nexus-config-credentials-"))
     await mkdir(join(cwd, ".nexus"), { recursive: true })
     await writeFile(join(cwd, ".nexus", "nexus.yaml"), [
@@ -34,7 +34,7 @@ describe("credential-safe config loading", () => {
 
     expect(loaded.model).toMatchObject({
       provider: "openai-compatible",
-      id: "minimax/minimax-m2.5:free",
+      id: "kilo-auto/free",
       baseUrl: "https://api.kilo.ai/api/openrouter",
     })
     expect(loaded.model.apiKey).toBeUndefined()
@@ -55,7 +55,27 @@ describe("credential-safe config loading", () => {
 
     expect(loaded.model).toMatchObject({
       provider: "openai-compatible",
-      id: "minimax/minimax-m2.5:free",
+      id: "kilo-auto/free",
+      baseUrl: "https://api.kilo.ai/api/openrouter",
+    })
+  })
+
+  it("migrates discontinued model ids inside trusted profiles", async () => {
+    cwd = await mkdtemp(join(tmpdir(), "nexus-config-kilo-profile-"))
+    const globalConfigPath = join(cwd, "global.yaml")
+    await writeFile(globalConfigPath, [
+      "profiles:",
+      "  legacy-free:",
+      "    provider: openai-compatible",
+      "    id: minimax/minimax-m2.5:free",
+      "    baseUrl: https://api.kilo.ai/api/openrouter",
+    ].join("\n"))
+
+    const loaded = await loadConfig(cwd, { globalConfigPath })
+
+    expect(loaded.profiles["legacy-free"]).toMatchObject({
+      provider: "openai-compatible",
+      id: "kilo-auto/free",
       baseUrl: "https://api.kilo.ai/api/openrouter",
     })
   })
@@ -100,7 +120,7 @@ describe("credential-safe config loading", () => {
 
     expect(loaded.model).toMatchObject({
       provider: "openai-compatible",
-      id: "minimax/minimax-m2.5:free",
+      id: "kilo-auto/free",
       baseUrl: "https://api.kilo.ai/api/openrouter",
     })
     expect(loaded.model.apiKey).toBeUndefined()

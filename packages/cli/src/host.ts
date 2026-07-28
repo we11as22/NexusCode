@@ -28,6 +28,7 @@ import type {
   CapturedFileState,
   HostFileMutation,
 } from "@nexuscode/core"
+import { getRipgrepCommand } from "./utils/ripgrep.js"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
@@ -115,6 +116,10 @@ export class CliHost implements IHost {
     const absPath = this.resolve(filePath)
     this.checkPathSecurity(absPath, access === "list" ? "read" : access)
     return absPath
+  }
+
+  async resolveRipgrepCommand() {
+    return getRipgrepCommand()
   }
 
   async authorizeNetworkRequest(

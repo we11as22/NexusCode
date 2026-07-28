@@ -272,14 +272,7 @@ export interface RuntimeTaskActivity {
   updatedAt: number
 }
 
-type ApprovalAction = {
-  type: "write" | "execute" | "mcp" | "browser" | "read" | "doom_loop"
-  tool: string
-  description: string
-  content?: string
-  diff?: string
-  diffStats?: { added: number; removed: number }
-}
+type ApprovalAction = ApprovalActionView
 
 interface SessionPreview {
   id: string
@@ -1476,7 +1469,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
 
       case "tool_approval_needed":
-        set({ awaitingApproval: true })
+        set({
+          pendingApproval: {
+            partId: event.partId,
+            action: event.action,
+          },
+          awaitingApproval: true,
+        })
         break
 
       case "subagent_start": {
@@ -1807,13 +1806,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "done":
         set((state) => {
-          const msgs = [...state.messages]
-          const last = msgs[msgs.length - 1]
-          if (last?.role === "assistant") {
-            if (typeof last.content === "string") {
-              msgs[msgs.length - 1] = { ...last, content: stripToolCallMarkup(last.content) }
-            } else if (Array.isArray(last.content)) {
-              const cleanedParts = (last.content as MessagePart[])
+          const msgs = dedupeMessagesByStableId(state.messages)
+          const exactAssistantIndex = msgs.findIndex(
+            (message) =>
+              message.id === event.messageId &&
+              message.role === "assistant",
+          )
+          let assistantIndex = exactAssistantIndex
+          if (assistantIndex < 0) {
+            for (let index = msgs.length - 1; index >= 0; index -= 1) {
+              if (msgs[index]?.role === "assistant") {
+                assistantIndex = index
+                break
+              }
+            }
+          }
+          const assistant = msgs[assistantIndex]
+          if (assistant?.role === "assistant") {
+            if (typeof assistant.content === "string") {
+              msgs[assistantIndex] = {
+                ...assistant,
+                content: stripToolCallMarkup(assistant.content),
+              }
+            } else if (Array.isArray(assistant.content)) {
+              const cleanedParts = (assistant.content as MessagePart[])
                 .filter(
                   (p) =>
                     (p.type !== "text" ||
@@ -1824,11 +1840,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       (p as ReasoningPart).text !== THOUGHT_PLACEHOLDER)
                 )
                 .map((p) => (p.type === "text" ? { ...p, text: stripToolCallMarkup((p as TextPart).text) } : p))
-              msgs[msgs.length - 1] = { ...last, content: cleanedParts }
+              msgs[assistantIndex] = {
+                ...assistant,
+                content: cleanedParts,
+              }
             }
           }
 
-          const latestAssistant = msgs[msgs.length - 1]
+          const latestAssistant = msgs[assistantIndex]
           const hasAssistantText =
             latestAssistant?.role === "assistant" &&
             hasRenderableAssistantContent(latestAssistant.content)
@@ -2107,6 +2126,33 @@ function collapseAdjacentDuplicateMessages(messages: SessionMessage[]): SessionM
     collapsed.push(message)
   }
   return collapsed
+}
+
+function dedupeMessagesByStableId(
+  messages: SessionMessage[],
+): SessionMessage[] {
+  const deduped: SessionMessage[] = []
+  const positions = new Map<string, number>()
+  for (const message of messages) {
+    const existingIndex = positions.get(message.id)
+    if (existingIndex === undefined) {
+      positions.set(message.id, deduped.length)
+      deduped.push(message)
+      continue
+    }
+    const existing = deduped[existingIndex]
+    if (!existing || existing.role !== message.role) continue
+    deduped[existingIndex] = {
+      ...existing,
+      ...message,
+      ts: Math.max(existing.ts, message.ts),
+      content:
+        message.role === "assistant"
+          ? mergeAssistantContent(existing.content, message.content)
+          : message.content,
+    }
+  }
+  return deduped
 }
 
 /**

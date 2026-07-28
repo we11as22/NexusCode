@@ -247,7 +247,10 @@ export type {
 } from "./server-client.js"
 
 // Agent
-export { runAgentLoop } from "./agent/loop.js"
+export {
+  runAgentLoop,
+  shouldUseDeferredToolLoading,
+} from "./agent/loop.js"
 export {
   BROWSER_TOOLS,
   MODE_TOOL_GROUPS,

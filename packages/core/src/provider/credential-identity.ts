@@ -626,10 +626,15 @@ function isRecognizedKiloFreeRoute(
   config: ProviderConfig,
   identity: CredentialIdentity,
 ): boolean {
+  const modelId = config.id.trim().toLowerCase()
   return (
     config.provider === "openai-compatible" &&
     identity.destination === KILO_BASE_URL &&
-    config.id.toLowerCase().endsWith(":free")
+    (
+      modelId.endsWith(":free") ||
+      modelId === "kilo-auto/free" ||
+      modelId === "openrouter/free"
+    )
   )
 }
 

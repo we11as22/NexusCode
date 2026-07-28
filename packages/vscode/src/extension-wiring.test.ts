@@ -22,10 +22,6 @@ const vscodeIgnore = readFileSync(
   path.join(process.cwd(), ".vscodeignore"),
   "utf8",
 )
-const inputContextPanelSource = readFileSync(
-  path.join(process.cwd(), "webview-ui", "src", "components", "InputContextPanel.tsx"),
-  "utf8",
-)
 const webviewAppSource = readFileSync(
   path.join(process.cwd(), "webview-ui", "src", "App.tsx"),
   "utf8",
@@ -52,25 +48,23 @@ describe("VS Code command wiring", () => {
   })
 
   it("does not present non-file approvals as editable files", () => {
-    const genericStart = inputContextPanelSource.indexOf(
-      'if (action.type !== "write")',
+    const approvalStart = messageListSource.indexOf(
+      "function ApprovalInline(",
     )
-    const fileApprovalStart = inputContextPanelSource.indexOf(
-      "// Pending file approval",
-      genericStart,
+    const approvalEnd = messageListSource.indexOf(
+      "function ",
+      approvalStart + "function ApprovalInline(".length,
     )
-    expect(genericStart).toBeGreaterThanOrEqual(0)
-    expect(fileApprovalStart).toBeGreaterThan(genericStart)
-    const genericBranch = inputContextPanelSource.slice(
-      genericStart,
-      fileApprovalStart,
-    )
-    expect(genericBranch).toContain("Allow")
-    expect(genericBranch).toContain("Deny")
-    expect(genericBranch).not.toContain("1 File")
-    expect(genericBranch).not.toContain("Undo")
-    expect(genericBranch).not.toContain("Keep")
-    expect(genericBranch).not.toContain("Review")
+    expect(approvalStart).toBeGreaterThanOrEqual(0)
+    expect(approvalEnd).toBeGreaterThan(approvalStart)
+    const approvalCard = messageListSource.slice(approvalStart, approvalEnd)
+    expect(approvalCard).toContain("approvalActionPath(action)")
+    expect(approvalCard).toContain('action.type === "write" && reviewPath')
+    expect(approvalCard).toContain("Allow")
+    expect(approvalCard).toContain("Deny")
+    expect(approvalCard).not.toContain("1 File")
+    expect(approvalCard).not.toContain("Undo")
+    expect(approvalCard).not.toContain("Keep")
   })
 
   it("does not run the coding agent in an untrusted VS Code workspace", () => {

@@ -2,6 +2,7 @@ import type {
   ApprovalAction,
   PermissionResult,
 } from "@nexuscode/core"
+import { approvalActionsMatch } from "./approval-action-identity.js"
 
 interface PendingApproval {
   readonly approvalId: string
@@ -10,20 +11,6 @@ interface PendingApproval {
   readonly promise: Promise<PermissionResult>
   readonly resolve: (result: PermissionResult) => void
   claimed: boolean
-}
-
-function actionMatches(left: ApprovalAction, right: ApprovalAction): boolean {
-  return (
-    left.type === right.type &&
-    left.tool === right.tool &&
-    left.description === right.description &&
-    left.content === right.content &&
-    left.shortDescription === right.shortDescription &&
-    left.warning === right.warning &&
-    left.diff === right.diff &&
-    left.diffStats?.added === right.diffStats?.added &&
-    left.diffStats?.removed === right.diffStats?.removed
-  )
 }
 
 export class SessionApprovalBroker {
@@ -43,7 +30,7 @@ export class SessionApprovalBroker {
     if (existing) {
       if (
         existing.turnId !== input.turnId ||
-        !actionMatches(existing.action, input.action)
+        !approvalActionsMatch(existing.action, input.action)
       ) {
         throw new Error(
           `Approval ${input.approvalId} was registered with different content`,
@@ -72,7 +59,7 @@ export class SessionApprovalBroker {
       (candidate) =>
         candidate.turnId === turnId &&
         !candidate.claimed &&
-        actionMatches(candidate.action, action),
+        approvalActionsMatch(candidate.action, action),
     )
     if (!pending || signal?.aborted) return { approved: false }
     pending.claimed = true

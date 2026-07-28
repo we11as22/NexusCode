@@ -4,6 +4,7 @@ import {
   buildDurableChangeHunks,
   exactChangeHunkDiffStats,
   exactLineDiffStats,
+  workspaceRelativeChangePath,
 } from "./file-change-flow.js"
 
 describe("exactLineDiffStats", () => {
@@ -42,5 +43,25 @@ describe("exactLineDiffStats", () => {
       added: 1,
       removed: 2,
     })
+  })
+})
+
+describe("workspaceRelativeChangePath", () => {
+  it("normalizes an absolute in-workspace tool path for durable storage", () => {
+    expect(
+      workspaceRelativeChangePath(
+        "/workspace/project",
+        "/workspace/project/src/index.ts",
+      ),
+    ).toBe("src/index.ts")
+  })
+
+  it("rejects paths outside the execution workspace", () => {
+    expect(() =>
+      workspaceRelativeChangePath(
+        "/workspace/project",
+        "/workspace/other.txt",
+      ),
+    ).toThrow("outside")
   })
 })

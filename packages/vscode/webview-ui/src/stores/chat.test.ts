@@ -20,6 +20,29 @@ beforeEach(() => {
 })
 
 describe("agent-event delivery", () => {
+  it("derives the actionable approval state from the authoritative agent event", () => {
+    const action = {
+      type: "execute" as const,
+      tool: "Bash",
+      description: "Run pwd",
+      content: "pwd",
+    }
+
+    useChatStore.getState().handleAgentEvent({
+      type: "tool_approval_needed",
+      partId: "tool-bash-1",
+      action,
+    })
+
+    expect(useChatStore.getState()).toMatchObject({
+      awaitingApproval: true,
+      pendingApproval: {
+        partId: "tool-bash-1",
+        action,
+      },
+    })
+  })
+
   it("projects modern task and background lifecycle events", () => {
     const handle = useChatStore.getState().handleAgentEvent
     handle({
@@ -96,6 +119,85 @@ describe("agent-event delivery", () => {
     expect(useChatStore.getState().isRunning).toBe(true)
     expect(useChatStore.getState().messages.at(-1)?.content).toContain(
       "[MCP optional] unavailable",
+    )
+  })
+
+  it("does not add a false fallback when a stale optimistic user row trails the completed reply", () => {
+    useChatStore.setState({
+      messages: [
+        {
+          id: "local_user_1",
+          ts: 1,
+          role: "user",
+          content: "Reply exactly",
+        },
+        {
+          id: "assistant_1",
+          ts: 2,
+          role: "assistant",
+          content: [{ type: "text", text: "VSCODE_OK" }],
+        },
+        {
+          id: "local_user_1",
+          ts: 1,
+          role: "user",
+          content: "Reply exactly",
+        },
+      ],
+      isRunning: true,
+    })
+
+    useChatStore.getState().handleAgentEvent({
+      type: "done",
+      messageId: "assistant_1",
+    })
+
+    expect(useChatStore.getState().messages).toEqual([
+      expect.objectContaining({ id: "local_user_1", role: "user" }),
+      expect.objectContaining({
+        id: "assistant_1",
+        role: "assistant",
+        content: [{ type: "text", text: "VSCODE_OK" }],
+      }),
+    ])
+  })
+
+  it("uses the completed message id instead of transcript tail when deciding fallback", () => {
+    useChatStore.setState({
+      messages: [
+        {
+          id: "durable_user_1",
+          ts: 1,
+          role: "user",
+          content: "Reply exactly",
+        },
+        {
+          id: "assistant_1",
+          ts: 2,
+          role: "assistant",
+          content: [{ type: "text", text: "VSCODE_OK" }],
+        },
+        {
+          id: "local_user_1",
+          ts: 1,
+          role: "user",
+          content: "Reply exactly",
+        },
+      ],
+      isRunning: true,
+    })
+
+    useChatStore.getState().handleAgentEvent({
+      type: "done",
+      messageId: "assistant_1",
+    })
+
+    expect(useChatStore.getState().messages).toHaveLength(3)
+    expect(useChatStore.getState().messages).not.toContainEqual(
+      expect.objectContaining({
+        role: "assistant",
+        content: expect.stringContaining("completed without a final"),
+      }),
     )
   })
 
@@ -321,6 +423,55 @@ describe("transcript reconciliation", () => {
       "server_user_old",
       "server_assistant_old",
       "local_user_new",
+    ])
+  })
+
+  it("reconciles a new durable user even when its completed assistant is already known", () => {
+    const previous = [
+      {
+        id: "server_user_old",
+        ts: 10,
+        role: "user" as const,
+        content: "older",
+      },
+      {
+        id: "server_assistant_old",
+        ts: 20,
+        role: "assistant" as const,
+        content: "older reply",
+      },
+      {
+        id: "local_user_new",
+        ts: 30,
+        role: "user" as const,
+        content: "new turn",
+      },
+      {
+        id: "server_assistant_new",
+        ts: 40,
+        role: "assistant" as const,
+        content: "new reply",
+      },
+    ]
+    const incoming = [
+      previous[0]!,
+      previous[1]!,
+      {
+        id: "server_user_new",
+        ts: 35,
+        role: "user" as const,
+        content: "new turn",
+      },
+      previous[3]!,
+    ]
+
+    expect(
+      mergeStateMessagesForStream(previous, incoming).map((message) => message.id),
+    ).toEqual([
+      "server_user_old",
+      "server_assistant_old",
+      "local_user_new",
+      "server_assistant_new",
     ])
   })
 })

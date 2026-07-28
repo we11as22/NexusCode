@@ -38,6 +38,10 @@ const GLOBAL_CONFIG_DIR = path.join(os.homedir(), ".nexus")
 const GLOBAL_CONFIG_PATH = path.join(GLOBAL_CONFIG_DIR, "nexus.yaml")
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 const DEFAULT_FREE_MODELS_BASE_URL = "https://api.kilo.ai/api/openrouter"
+export const DEFAULT_FREE_MODEL_ID = "kilo-auto/free"
+const DISCONTINUED_KILO_FREE_MODEL_IDS = new Set([
+  "minimax/minimax-m2.5:free",
+])
 const EFFECTIVE_CONFIG_MARKER = Symbol("nexus.effective-config")
 const SCOPED_ENVIRONMENT_MARKER = Symbol.for(
   "@nexuscode/config/scoped-environment",
@@ -501,7 +505,7 @@ function applyEnvOverrides(
   // so we can fill apiKey from env (OPENROUTER_API_KEY etc.) — like OpenCode/KiloCode "works out of the box"
   if (!isNonEmptyString(model["provider"]) && !isNonEmptyString(model["id"])) {
     model["provider"] = "openai-compatible"
-    model["id"] = "minimax/minimax-m2.5:free"
+    model["id"] = DEFAULT_FREE_MODEL_ID
     model["baseUrl"] = DEFAULT_FREE_MODELS_BASE_URL
   }
 
@@ -518,7 +522,7 @@ function applyEnvOverrides(
       provider === "openai-compatible" &&
       isKiloBaseUrl(model["baseUrl"])
     ) {
-      model["id"] = "minimax/minimax-m2.5:free"
+      model["id"] = DEFAULT_FREE_MODEL_ID
     }
   }
 
@@ -662,6 +666,17 @@ function normalizeProviderAliases(
     ) {
       replaceModelSelection(config, { baseUrl: DEFAULT_FREE_MODELS_BASE_URL })
     }
+    const effectiveModel = asRecord(config["model"])
+    if (
+      effectiveModel &&
+      String(effectiveModel["provider"] ?? "") === "openai-compatible" &&
+      isKiloBaseUrl(effectiveModel["baseUrl"]) &&
+      DISCONTINUED_KILO_FREE_MODEL_IDS.has(
+        String(effectiveModel["id"] ?? ""),
+      )
+    ) {
+      effectiveModel["id"] = DEFAULT_FREE_MODEL_ID
+    }
   }
 
   const embeddings = asRecord(config["embeddings"])
@@ -679,6 +694,11 @@ function normalizeProviderAliases(
       if (String(profile["provider"] ?? "") === "openrouter") {
         profile["provider"] = "openai-compatible"
         if (!isNonEmptyString(profile["baseUrl"])) profile["baseUrl"] = OPENROUTER_BASE_URL
+      }
+      if (
+        DISCONTINUED_KILO_FREE_MODEL_IDS.has(String(profile["id"] ?? ""))
+      ) {
+        profile["id"] = DEFAULT_FREE_MODEL_ID
       }
     }
   }
@@ -927,7 +947,7 @@ export function mergeNexusConfigLayers(
   if (!asProviderConfig(trustedBase["model"])) {
     trustedBase["model"] = {
       provider: "openai-compatible",
-      id: "minimax/minimax-m2.5:free",
+      id: DEFAULT_FREE_MODEL_ID,
       baseUrl: DEFAULT_FREE_MODELS_BASE_URL,
     }
   }

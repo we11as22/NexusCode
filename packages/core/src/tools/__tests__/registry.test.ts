@@ -72,4 +72,50 @@ describe("ToolRegistry registration contracts", () => {
     expect(registry.get("TaskResume")).toBeDefined()
     expect(unresolved).toEqual([])
   })
+
+  it("defers specialized orchestration schemas behind ToolSearch", () => {
+    const registry = new ToolRegistry()
+    const specialized = [
+      "TaskCreate",
+      "TaskList",
+      "TaskUpdate",
+      "TaskOutput",
+      "TaskStop",
+      "TeamCreate",
+      "TeamInbox",
+      "TeamAssignTask",
+      "SendMessage",
+      "ListMcpResources",
+      "ReadMcpResource",
+      "McpAuthenticate",
+      "ListAgents",
+      "PlanStartWorkflow",
+      "PlanGetWorkflow",
+      "PlanVerifyExecution",
+      "MemoryCreate",
+      "MemoryList",
+      "MemoryGet",
+      "MemoryUpdate",
+      "MemoryDelete",
+      "EnterWorktree",
+      "ExitWorktree",
+      "PowerShell",
+    ]
+
+    for (const name of specialized) {
+      expect(registry.get(name)?.shouldDefer, name).toBe(true)
+    }
+    for (const name of [
+      "ToolSearch",
+      "Read",
+      "Write",
+      "Edit",
+      "Bash",
+      "Grep",
+      "Parallel",
+      "Skill",
+    ]) {
+      expect(registry.get(name)?.shouldDefer, name).not.toBe(true)
+    }
+  })
 })

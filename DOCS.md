@@ -50,14 +50,29 @@ corepack enable && corepack prepare pnpm@latest --activate
 ```bash
 git clone <repo-url>
 cd NexusCode
-source "$HOME/.nvm/nvm.sh" 2>/dev/null || true
-nvm install  # один раз; устанавливает точную версию из .nvmrc
-nvm use
-pnpm install
-pnpm build
+corepack pnpm run cli
+corepack pnpm run extension
 ```
 
-Одна команда «всё для CLI»: `pnpm run cli` (см. README). Полная переустановка: `pnpm run one`; CLI + .vsix: `pnpm run ready`.
+- **`pnpm run cli`** одной командой устанавливает зависимости, собирает
+  core/CLI, добавляет проверенный platform-specific ripgrep и устанавливает
+  `nexus` в `~/bin`.
+- **`pnpm run extension`** одной командой устанавливает зависимости, собирает
+  и проверяет VSIX, а затем устанавливает его через найденный CLI
+  VS Code/Insiders/Cursor/Codium. Если CLI редактора недоступен, готовый
+  проверенный VSIX остаётся в `packages/vscode/nexuscode-0.1.0.vsix`, а
+  установщик печатает точную ручную инструкцию.
+- Для одной только сборки VSIX без установки:
+  `NEXUS_VSCODE_INSTALL=0 pnpm run extension`.
+
+Установщики сами находят Node `24.18.0` в `~/.nvm`, даже если функция `nvm` не
+загружена в текущий shell. Homebrew-версия `rg` не обязательна: CLI поставляет
+собственный ripgrep.
+
+Старый вспомогательный `pnpm run one` теперь также работает инкрементально:
+он не удаляет `node_modules` и `.pnpm-store` при каждом запуске. Это исключает
+ненужный пик дисковой активности, CPU и памяти. Для обычной установки CLI и
+расширения следует использовать две явные команды выше.
 
 ### Глобальная команда `nexus`
 
@@ -69,21 +84,21 @@ Nexus не использует внешний нативный SQLite addon: ba
 
 ## Гайд по запуску
 
-Минимальная последовательность для сборки **VS Code-расширения** в файл `.vsix` из корня репозитория.
-
-**Перед первым запуском** после `git clone` выполните **`pnpm install`** (зависимости монорепозитория).
-
-Далее из **корня `NexusCode`**:
+Основной путь для сборки и локальной установки **VS Code-расширения** из корня
+репозитория:
 
 ```bash
-nvm use
-pnpm build
-pnpm package:vscode
+corepack pnpm run extension
 ```
 
-Результат: **`packages/vscode/nexuscode-0.1.0.vsix`**. Установка: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**) → команда **Extensions: Install from VSIX…** (установка из файла) → указать этот `.vsix`. Для сборки используется точная закреплённая версия **Node.js 24.18.0**; внешний нативный SQLite addon не требуется.
+Команда сама выбирает Node **24.18.0**, устанавливает зависимости, выполняет
+production-сборку, проверяет архив и устанавливает VSIX через найденный CLI
+редактора. Результат всегда сохраняется в
+**`packages/vscode/nexuscode-0.1.0.vsix`**.
 
-Скрипт `pnpm package:vscode` сам вызывает `pnpm build`; отдельный шаг `pnpm build` удобен, если вы явно делите этапы «собрать» и «упаковать».
+Если CLI редактора не найден, установите получившийся файл через
+**Cmd/Ctrl+Shift+P → Extensions: Install from VSIX…**. Низкоуровневая команда
+`pnpm package:vscode` остаётся доступной для CI и только упаковки.
 
 ### Расширение VS Code (дополнительно)
 
@@ -96,7 +111,7 @@ pnpm package:vscode
 
 ### CLI
 
-По умолчанию в `NexusConfigSchema` задан бесплатный маршрут Kilo/OpenRouter (`minimax/minimax-m2.5:free`, `https://api.kilo.ai/api/openrouter`) — отдельный API-ключ для старта не обязателен.
+По умолчанию в `NexusConfigSchema` задан автоматически обновляемый бесплатный маршрут Kilo (`kilo-auto/free`, `https://api.kilo.ai/api/openrouter`) — отдельный API-ключ для старта не обязателен. Старый снятый с бесплатного доступа `minimax/minimax-m2.5:free` автоматически мигрирует на этот маршрут при загрузке конфигурации.
 
 ```bash
 cd /path/to/your/project
@@ -135,7 +150,7 @@ nexus --mode debug -p "Почему падает тест X?"
 ```yaml
 model:
   provider: openai-compatible
-  id: minimax/minimax-m2.5:free
+  id: kilo-auto/free
   baseUrl: https://api.kilo.ai/api/openrouter
 ```
 
@@ -146,7 +161,7 @@ model:
 | Секция | Ключ | По умолчанию / тип | Комментарий |
 |--------|------|-------------------|-------------|
 | **model** | provider | `openai-compatible` | см. список в schema |
-| | id | `minimax/minimax-m2.5:free` | |
+| | id | `kilo-auto/free` | |
 | | baseUrl | `https://api.kilo.ai/api/openrouter` | |
 | | reasoningEffort | `"auto"` | |
 | | reasoningHistoryMode | `"auto"` | `auto` \| `inline` \| `reasoning_content` \| `reasoning_details` |
@@ -281,7 +296,8 @@ model:
 Команды верхнего уровня: `task` (чекпоинты), `config`, `approved-tools`, `mcp`, `doctor` — см. help Commander.
 
 `nexus doctor --cwd /path/to/project` — read-only проверка закреплённого Node,
-workspace, загрузки модельного конфига, Git и ripgrep. Команда не открывает
+workspace, загрузки модельного конфига, Git и фактически выбранного
+system/bundled ripgrep. Команда не открывает
 интерактивный TUI и подходит для shell/CI.
 
 ### Горячие клавиши (Nexus TUI)

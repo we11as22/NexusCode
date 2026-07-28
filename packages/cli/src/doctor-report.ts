@@ -1,6 +1,7 @@
 import { getWorkspaceTrustIdentity } from "./utils/config.js"
 import { execFileNoThrow } from "./utils/execFileNoThrow.js"
 import { loadCliWorkspaceConfig } from "./nexus-bootstrap.js"
+import { getRipgrepStatus } from "./utils/ripgrep.js"
 
 const REQUIRED_NODE_VERSION = "24.18.0"
 
@@ -13,6 +14,11 @@ interface DoctorDependencies {
   runtimeVersion: string
   loadConfig(cwd: string): Promise<{ model: { provider: string; id: string } }>
   commandVersion(command: string): Promise<boolean>
+  ripgrepStatus(): Promise<{
+    available: boolean
+    source: "system" | "bundled" | "missing"
+    version?: string
+  }>
 }
 
 const defaultDependencies: DoctorDependencies = {
@@ -28,6 +34,7 @@ const defaultDependencies: DoctorDependencies = {
     const result = await execFileNoThrow(command, ["--version"])
     return result.code === 0
   },
+  ripgrepStatus: getRipgrepStatus,
 }
 
 export async function collectDoctorReport(
@@ -69,20 +76,25 @@ export async function collectDoctorReport(
     )
   }
 
-  const [hasGit, hasRipgrep] = await Promise.all([
+  const [hasGit, ripgrep] = await Promise.all([
     dependencies.commandVersion("git"),
-    dependencies.commandVersion("rg"),
+    dependencies.ripgrepStatus(),
   ])
   lines.push(
     hasGit
       ? "✓ Git available"
       : "• Git unavailable; checkpoints and Git review are limited",
   )
-  lines.push(
-    hasRipgrep
-      ? "✓ ripgrep available"
-      : "• ripgrep unavailable; filesystem fallbacks remain available",
-  )
+  if (ripgrep.available) {
+    lines.push(
+      `✓ ${ripgrep.version ?? "ripgrep available"} (${ripgrep.source})`,
+    )
+  } else {
+    ok = false
+    lines.push(
+      "✗ ripgrep unavailable; rerun `pnpm run cli` to repair the packaged search runtime",
+    )
+  }
 
   return { ok, lines }
 }

@@ -42,7 +42,7 @@ import {
 } from '../query.js'
 import type { ToolUseBlockParam } from '../provider/message-schema.js'
 import { queryNexus, replMessagesFromSession } from '../nexus-query.js'
-import type { NexusApprovalMessage, NexusBannerMessage, NexusTodoMessage, NexusQuestionMessage, NexusContextMessage } from '../nexus-query.js'
+import type { NexusApprovalMessage, NexusBannerMessage, NexusTodoMessage, NexusQuestionMessage, NexusContextMessage, NexusSessionSyncMessage } from '../nexus-query.js'
 import {
   commitNexusModeTransition,
   type NexusModeMessage,
@@ -109,6 +109,7 @@ import {
   formatQuestionnaireAnswersForAgent,
   computeContextUsageMetrics,
   estimateToolsDefinitionsTokens,
+  shouldUseDeferredToolLoading,
 } from '@nexuscode/core'
 import type { SessionDiffEntry } from '../components/NexusSessionDiffBlock.js'
 import { NexusSessionDiffBlock } from '../components/NexusSessionDiffBlock.js'
@@ -116,6 +117,13 @@ import {
   buildChatTimeline,
   exploreSegmentShouldBeTransient,
 } from '../utils/exploreTimeline.js'
+import { upsertTimelineMessage } from '../nexus-message-projection.js'
+import {
+  shouldAnimateNexusActivity,
+  shouldCancelActiveNexusRun,
+  shouldEnableGlobalCancelInput,
+} from '../cancel-policy.js'
+import type { QueuedPrompt } from '../prompt-queue.js'
 
 type MessageRenderItem = {
   key: string
@@ -209,11 +217,19 @@ function computeNexusContextFooter(
   const snap = bootstrap.session.getLastContextUsageSnapshot()
   if (snap) return snap
   const model = bootstrap.config.model
-  const mcpN = Array.isArray(bootstrap.configSnapshot.mcp?.servers)
-    ? bootstrap.configSnapshot.mcp.servers.length
-    : 0
-  const toolsTok =
-    estimateToolsDefinitionsTokens(bootstrap.toolRegistry.getAll()) + mcpN * 1200
+  const { builtin, dynamic } = bootstrap.toolRegistry.getForMode(bootstrap.mode)
+  const visibleTools = [...builtin, ...dynamic]
+  const deferredTools = visibleTools.filter(
+    (tool) => tool.shouldDefer && !tool.alwaysLoad,
+  )
+  const initialTools = shouldUseDeferredToolLoading(
+    deferredTools,
+    model.id,
+    bootstrap.config,
+  )
+    ? visibleTools.filter((tool) => !deferredTools.includes(tool))
+    : visibleTools
+  const toolsTok = estimateToolsDefinitionsTokens(initialTools)
   const m = computeContextUsageMetrics({
     sessionMessages: bootstrap.session.messages,
     toolsDefinitionTokens: toolsTok,
@@ -309,6 +325,7 @@ export function REPL({
   const [messages, setMessages] = useState<MessageType[]>(initialMessages ?? [])
   const [inputValue, setInputValue] = useState('')
   const [inputMode, setInputMode] = useState<'bash' | 'prompt'>('prompt')
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([])
   const [submitCount, setSubmitCount] = useState(0)
   const [isMessageSelectorVisible, setIsMessageSelectorVisible] =
     useState(false)
@@ -326,6 +343,8 @@ export function REPL({
   const [nexusApprovalAction, setNexusApprovalAction] = useState<
     { action: import('@nexuscode/core').ApprovalAction; partId: string } | null
   >(null)
+  const nexusApprovalActionRef = useRef(nexusApprovalAction)
+  nexusApprovalActionRef.current = nexusApprovalAction
   /** Host from last completed Nexus run; used by /undo to revert file edits. */
   const lastNexusHostRef = useRef<import('../host.js').CliHost | null>(null)
   /**
@@ -433,7 +452,11 @@ export function REPL({
   const nexusCancelScope = useMemo(
     () => ({
       isCancellable: () =>
-        isLoadingRef.current || hasRunningSubagentRef.current,
+        shouldCancelActiveNexusRun({
+          isLoading: isLoadingRef.current,
+          hasRunningSubagent: hasRunningSubagentRef.current,
+          hasApprovalPanel: nexusApprovalActionRef.current != null,
+        }),
       getAbortController: () => abortControllerRef.current,
     }),
     [],
@@ -1027,6 +1050,9 @@ export function REPL({
     onCancel,
     isMessageSelectorVisibleRef,
     nexusCancelScope,
+    shouldEnableGlobalCancelInput({
+      hasApprovalPanel: nexusApprovalAction != null,
+    }),
   )
 
   useEffect(() => {
@@ -1112,11 +1138,16 @@ export function REPL({
               limitTokens: context.limitTokens,
               percent: context.percent,
             })
+          } else if (
+            message &&
+            'type' in message &&
+            message.type === 'nexus_session_sync'
+          ) {
+            setMessages((message as NexusSessionSyncMessage).messages)
           } else {
-            setMessages((current) => [
-              ...current,
-              message as MessageType,
-            ])
+            setMessages((current) =>
+              upsertTimelineMessage(current, message as MessageType),
+            )
           }
         }
         if (attached) {
@@ -1276,7 +1307,13 @@ export function REPL({
             })
             continue
           }
-          setMessages(oldMessages => [...oldMessages, message as MessageType])
+          if (message && 'type' in message && message.type === 'nexus_session_sync') {
+            setMessages((message as NexusSessionSyncMessage).messages)
+            continue
+          }
+            setMessages(oldMessages =>
+              upsertTimelineMessage(oldMessages, message as MessageType),
+            )
         }
         if (modeOverrideForRun === 'plan' && hadPlanExit(nexusBootstrap.session)) {
           const planText = await getPlanContentForFollowup(nexusBootstrap.session, nexusBootstrap.cwd)
@@ -1449,7 +1486,13 @@ export function REPL({
           })
           continue
         }
-        setMessages(oldMessages => [...oldMessages, message as MessageType])
+        if (message && 'type' in message && message.type === 'nexus_session_sync') {
+          setMessages((message as NexusSessionSyncMessage).messages)
+          continue
+        }
+        setMessages(oldMessages =>
+          upsertTimelineMessage(oldMessages, message as MessageType),
+        )
       }
       if (modeOverrideForRun === 'plan' && hadPlanExit(nexusBootstrap.session)) {
         const planText = await getPlanContentForFollowup(nexusBootstrap.session, nexusBootstrap.cwd)
@@ -1615,6 +1658,14 @@ export function REPL({
     [normalizedMessages],
   )
 
+  const nexusActivityAnimationEnabled = shouldAnimateNexusActivity({
+    hasApprovalPanel: nexusApprovalAction != null,
+    hasLegacyPermissionPanel: toolUseConfirm != null,
+    hasToolShell: toolJSX != null,
+    messageSelectorVisible: isMessageSelectorVisible,
+    primarySpinnerVisible: isLoading,
+  })
+
   const messagesJSX = useMemo<MessageRenderItem[]>(() => {
     // Unsplit messages so explore waves are not broken by text-only rows from
     // normalizeMessages' per-block splitting.
@@ -1710,9 +1761,7 @@ export function REPL({
                 inProgressToolUseIDs={inProgressToolUseIDs}
                 unresolvedToolUseIDs={unresolvedToolUseIDs}
                 shouldAnimate={
-                  !toolJSX &&
-                  !toolUseConfirm &&
-                  !isMessageSelectorVisible &&
+                  nexusActivityAnimationEnabled &&
                   inProgressToolUseIDs.has(_.toolUseID)
                 }
                 shouldShowDot={true}
@@ -1731,9 +1780,7 @@ export function REPL({
               erroredToolUseIDs={erroredToolUseIDs}
               inProgressToolUseIDs={inProgressToolUseIDs}
               shouldAnimate={
-                !toolJSX &&
-                !toolUseConfirm &&
-                !isMessageSelectorVisible &&
+                nexusActivityAnimationEnabled &&
                 (!toolUseID || inProgressToolUseIDs.has(toolUseID))
               }
               shouldShowDot={true}
@@ -1783,6 +1830,7 @@ export function REPL({
     debug,
     erroredToolUseIDs,
     inProgressToolUseIDs,
+    nexusActivityAnimationEnabled,
     toolJSX,
     toolUseConfirm,
     isMessageSelectorVisible,
@@ -1850,7 +1898,11 @@ export function REPL({
             {toolJSX.jsx}
           </Box>
         ) : null}
-        {!toolJSX && !toolUseConfirm && !binaryFeedbackContext && isLoading && (
+        {!toolJSX &&
+          !toolUseConfirm &&
+          !binaryFeedbackContext &&
+          !nexusApprovalAction &&
+          isLoading && (
           <Spinner />
         )}
         {!toolJSX && binaryFeedbackContext && !isMessageSelectorVisible && (
@@ -2002,8 +2054,7 @@ export function REPL({
                 nexusMode={nexusBootstrap ? nexusModeOverride : undefined}
                 nexusModel={nexusConfigSnapshot?.model?.id}
                 nexusIndexEnabled={
-                  nexusConfigSnapshot?.indexing?.enabled ??
-                  (nexusBootstrap ? nexusBootstrap.indexEnabled : undefined)
+                  nexusBootstrap ? !nexusNoIndex : undefined
                 }
                 nexusSessionId={nexusSessionId}
                 nexusContextUsage={nexusContextUsage}
@@ -2046,6 +2097,8 @@ export function REPL({
                 resolveNexusPromptCommand={
                   nexusBootstrap?.resolvePromptCommand
                 }
+                queuedPrompts={queuedPrompts}
+                setQueuedPrompts={setQueuedPrompts}
               />
               ) : null}
             </>

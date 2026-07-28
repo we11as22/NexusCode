@@ -252,6 +252,8 @@ export interface ApprovalAction {
   type: "write" | "execute" | "mcp" | "plugin" | "browser" | "read" | "doom_loop"
   tool: string
   description: string
+  /** Workspace-relative target for single-file write approvals. */
+  path?: string
   content?: string
   /** Short human-readable description for approval UI (e.g. "List prompts and built-in tools"). */
   shortDescription?: string
@@ -435,6 +437,15 @@ export interface AuthorizedNetworkRequest {
 export interface IHost {
   readonly cwd: string
   /**
+   * Resolve the trusted ripgrep runtime supplied by this host. GUI hosts
+   * should not assume that the user's interactive-shell PATH is inherited.
+   */
+  resolveRipgrepCommand?(): Promise<{
+    command: string
+    args: string[]
+    source: string
+  } | null>
+  /**
    * Resolve and authorize a caller-controlled path before a core service uses
    * a lower-level filesystem/process API. Remote hosts must enforce their
    * canonical workspace capability here, including symlink escapes.
@@ -506,7 +517,10 @@ export interface DiagnosticItem {
 export interface ISession {
   readonly id: string
   readonly messages: SessionMessage[]
-  addMessage(msg: Omit<SessionMessage, "id" | "ts">): SessionMessage
+  addMessage(
+    msg: Omit<SessionMessage, "id" | "ts">,
+    identity?: { id?: string; ts?: number },
+  ): SessionMessage
   updateMessage(id: string, updates: Partial<SessionMessage>): void
   addToolPart(messageId: string, part: ToolPart): void
   updateToolPart(messageId: string, partId: string, updates: Partial<ToolPart>): void

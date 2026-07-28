@@ -35,7 +35,9 @@ import type {
   HostFileMutation,
   WorkspaceAuthorityStoreOptions,
 } from "@nexuscode/core"
+import { sanitizeTerminalOutput } from "./terminal-output.js"
 import { parseStrictExternalHttpUrl } from "./external-url-policy.js"
+import { resolveRipgrepPath } from "./services/indexing/list-absolute-paths-rg.js"
 
 const NEXUS_PREVIEW_SCHEME = "nexuscode-preview"
 const MAX_CHANGE_FILE_BYTES = 128 * 1_024 * 1_024
@@ -384,6 +386,13 @@ export class VsCodeHost implements IHost {
     return this.resolveWorkspacePath(filePath)
   }
 
+  async resolveRipgrepCommand() {
+    const command = await resolveRipgrepPath()
+    return command
+      ? { command, args: [], source: "vscode" }
+      : null
+  }
+
   async authorizeNetworkRequest(
     request: HostNetworkRequest,
   ): Promise<AuthorizedNetworkRequest> {
@@ -704,8 +713,9 @@ export class VsCodeHost implements IHost {
       const exitCode = await Promise.race([ended, aborted])
       await Promise.race([reader, new Promise<void>((resolve) => setTimeout(resolve, 500))])
       return {
-        stdout: `${outputTruncated ? "[output truncated to last 2000000 characters]\n" : ""}${output}`
-          .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, ""),
+        stdout: sanitizeTerminalOutput(
+          `${outputTruncated ? "[output truncated to last 2000000 characters]\n" : ""}${output}`,
+        ),
         stderr: readError,
         exitCode,
       }

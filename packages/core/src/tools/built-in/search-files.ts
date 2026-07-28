@@ -65,7 +65,8 @@ Usage:
       const seen = new Set<string>()
       let matchCount = 0
 
-      const args = ["--json", "-e", pattern]
+      const ripgrep = await ctx.host.resolveRipgrepCommand?.()
+      const args = [...(ripgrep?.args ?? []), "--json", "-e", pattern]
       if (case_sensitive !== true) args.push("--ignore-case")
       if (include) {
         args.push("--glob", include)
@@ -78,7 +79,10 @@ Usage:
       if (context_lines) args.push("--context", String(context_lines))
       args.push(target)
 
-      const { stdout } = await execa("rg", args, { cwd: ctx.cwd, reject: false })
+      const { stdout } = await execa(ripgrep?.command ?? "rg", args, {
+        cwd: ctx.cwd,
+        reject: false,
+      })
       if (!stdout) {
         return { success: true, output: `No matches found for: ${pattern}` }
       }

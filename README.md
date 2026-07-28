@@ -50,19 +50,28 @@
 
 ---
 
-## Quick launch: VS Code extension (.vsix)
+## One-command installs
 
-From the **repository root**, after clone and a first-time **`pnpm install`** if you have not installed dependencies yet:
+Both installers find the repository-pinned Node **24.18.0** even when the
+`nvm` shell function has not been loaded. From the repository root:
 
 ```bash
-nvm use
-pnpm build
-pnpm package:vscode
+corepack pnpm run cli
+corepack pnpm run extension
 ```
 
-Output: **`packages/vscode/nexuscode-0.1.0.vsix`**. Install in VS Code: **Ctrl+Shift+P** (macOS: **Cmd+Shift+P**) → **Extensions: Install from VSIX...** → choose that file. Use the repository-pinned **Node 24.18.0** runtime for reproducible builds.
+- `pnpm run cli` installs dependencies, builds core/CLI, bundles and verifies
+  the platform-specific ripgrep search runtime, and installs `nexus` into
+  `~/bin`.
+- `pnpm run extension` installs dependencies, builds every required package,
+  creates and validates `packages/vscode/nexuscode-0.1.0.vsix`, then installs
+  it through `code`, `code-insiders`, Cursor, Codium, or their standard macOS
+  application paths. If no compatible editor CLI can be found, it keeps the
+  verified VSIX and prints the exact manual installation instruction instead
+  of reporting a false installation success.
 
-`pnpm package:vscode` already runs `pnpm build` internally; keeping both steps matches a clear “build, then package” flow and is safe if you ever run `pnpm build` alone first.
+Set `NEXUS_VSCODE_INSTALL=0` when you only want to build/package the VSIX
+without installing it.
 
 ---
 
@@ -70,7 +79,7 @@ Output: **`packages/vscode/nexuscode-0.1.0.vsix`**. Install in VS Code: **Ctrl+S
 
 Clone the repo, then a **single command** installs everything; `nexus` can be run from anywhere afterward.
 
-**Important:** use the repository-pinned **Node 24.18.0** for install, build, and `nexus`. The CLI uses Ink on Node and does not require Bun or an external native SQLite addon; the managed backend uses the SQLite implementation built into Node.
+**Important:** use the repository-pinned **Node 24.18.0** for install, build, and `nexus`. The CLI uses Ink on Node and does not require Bun or an external native SQLite addon; the managed backend uses the SQLite implementation built into Node. The CLI ships its own platform-specific ripgrep binary, so Homebrew/system `rg` is optional.
 
 ```bash
 git clone <repo> NexusCode && cd NexusCode
@@ -98,11 +107,11 @@ To update after code changes (with the same pinned Node runtime):
 cd NexusCode && nvm use && pnpm run cli
 ```
 
-The wrapper in `~/bin/nexus` remembers the Node binary used during installation. If that binary moves after an nvm change, run `pnpm run cli` again.
+The wrapper in `~/bin/nexus` remembers the Node binary used during installation. If that binary moves after an nvm change, run `pnpm run cli` again. `nexus doctor` reports whether search uses a system or bundled ripgrep runtime.
 
 ---
 
-## One-command full install (clean reinstall)
+## One-command full workspace build
 
 **The only up-to-date NexusCode build is from this repo.** The project uses a **local store** (`.npmrc` → `store-dir=.pnpm-store`), so there is no conflict with the global pnpm store.
 
@@ -112,7 +121,10 @@ From the repo root with the pinned **Node.js 24.18.0** (`nvm use`):
 pnpm run one
 ```
 
-This single command removes `node_modules` and `.pnpm-store`, installs dependencies, and performs a full build. Then run the CLI: `node packages/cli/dist/index.js` (or make a global command: `cd packages/cli && npm link`).
+This single command incrementally installs dependencies and performs a bounded
+full build. It deliberately preserves `node_modules` and `.pnpm-store`; routine
+setup must not create a destructive dependency reinstall or a large avoidable
+resource spike. For a globally available CLI, prefer `pnpm run cli`.
 
 **Option “everything at once” (global CLI + .vsix extension):**
 
@@ -120,7 +132,9 @@ This single command removes `node_modules` and `.pnpm-store`, installs dependenc
 pnpm run ready
 ```
 
-Does the same as `pnpm run one`, plus packages the extension and `npm link` for the `nexus` command. Result: **CLI** — `nexus` from any directory; **extension** — install `packages/vscode/nexuscode-0.1.0.vsix` via **Ctrl+Shift+P** → **Extensions: Install from VSIX...** (macOS: **Cmd+Shift+P**).
+Performs the same incremental build, packages the extension and links the CLI.
+For the validated installers used in normal development, prefer the explicit
+commands `pnpm run cli` and `pnpm run extension`.
 
 ---
 
@@ -135,7 +149,9 @@ pnpm run setup
 nexus
 ```
 
-`pnpm run setup` runs `pnpm install` and then `pnpm build`. For a clean install without store issues, prefer **`pnpm run one`** (full reinstall into the local store).
+`pnpm run setup` runs `pnpm install` and then `pnpm build`. For normal local
+installation, prefer **`pnpm run cli`**. A genuinely corrupt dependency store
+should be diagnosed and repaired explicitly rather than deleted on every setup.
 
 CLI after setup: `node packages/cli/dist/index.js` (or `nexus` if you ran `cd packages/cli && npm link`).
 
@@ -307,12 +323,12 @@ After `npm link`, the `nexus` command is available globally in the terminal.
 
 ## Configuration
 
-By default NexusCode uses the **Nexus free-model gateway** with `minimax/minimax-m2.5:free`:
+By default NexusCode uses the **Nexus free-model gateway** with the rotating `kilo-auto/free` route:
 
 ```yaml
 model:
   provider: openai-compatible
-  id: minimax/minimax-m2.5:free
+  id: kilo-auto/free
   baseUrl: https://api.kilo.ai/api/openrouter
 ```
 
@@ -328,7 +344,7 @@ Example — keep default (free gateway):
 # Optional: only if you want to override defaults
 model:
   provider: openai-compatible
-  id: minimax/minimax-m2.5:free
+  id: kilo-auto/free
   baseUrl: https://api.kilo.ai/api/openrouter
 ```
 
