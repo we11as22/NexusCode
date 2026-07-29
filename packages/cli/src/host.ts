@@ -27,6 +27,7 @@ import type {
   WorkspaceAuthorityStoreOptions,
   CapturedFileState,
   HostFileMutation,
+  HostCapabilities,
 } from "@nexuscode/core"
 import { getRipgrepCommand } from "./utils/ripgrep.js"
 
@@ -82,6 +83,7 @@ export interface CliFileRevertResult {
  */
 export class CliHost implements IHost {
   readonly cwd: string
+  readonly capabilities: HostCapabilities
   private eventEmitter: (event: AgentEvent) => void
   private autoApprove: boolean
   /** When set, approval is resolved via this ref (TUI mode — no readline). */
@@ -107,6 +109,9 @@ export class CliHost implements IHost {
     this.eventEmitter = onEvent
     this.autoApprove = autoApprove
     this.tuiApprovalRef = tuiApprovalRef
+    this.capabilities = {
+      interactiveQuestions: tuiApprovalRef !== undefined,
+    }
   }
 
   async resolvePath(

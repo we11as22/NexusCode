@@ -52,6 +52,9 @@ export function createFakeHost(overrides: Partial<IHost> = {}): FakeHost {
 
   return {
     cwd,
+    capabilities: overrides.capabilities ?? {
+      interactiveQuestions: true,
+    },
     files,
     approvals,
     events,

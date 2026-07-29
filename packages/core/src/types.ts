@@ -434,8 +434,15 @@ export interface AuthorizedNetworkRequest {
   addresses: readonly ResolvedNetworkAddress[]
 }
 
+export interface HostCapabilities {
+  /** Whether the current client can render and resolve question_request events. */
+  interactiveQuestions: boolean
+}
+
 export interface IHost {
   readonly cwd: string
+  /** Explicit client capabilities; absent capabilities fail closed. */
+  readonly capabilities?: HostCapabilities
   /**
    * Resolve the trusted ripgrep runtime supplied by this host. GUI hosts
    * should not assume that the user's interactive-shell PATH is inherited.

@@ -506,7 +506,13 @@ function buildToolUseGuide(mode: Mode, enabledTools: ReadonlySet<string>): strin
     `Enabled tools for this turn: ${enabled.map((name) => `\`${name}\``).join(", ")}.`
 
   if (mode === "agent" || mode === "debug") {
-    return TOOL_USE_GUIDE.replace(
+    const capabilityAwareGuide = enabledTools.has("AskFollowupQuestion")
+      ? TOOL_USE_GUIDE
+      : TOOL_USE_GUIDE.replace(
+          /\n- \*\*AskFollowupQuestion\*\* —[^\n]+/,
+          "",
+        )
+    return capabilityAwareGuide.replace(
       "## Tool Usage",
       `## Tool Usage\n\n${manifest}`,
     )
@@ -519,8 +525,15 @@ function buildToolUseGuide(mode: Mode, enabledTools: ReadonlySet<string>): strin
     "The manifest above is authoritative. Never call or recommend an absent tool as if it were available in this turn.",
     "",
     "- Before each logical batch of tool calls, write one brief progress line, then execute the batch.",
-    "- End with a clear text response unless AskFollowupQuestion or PlanExit has explicitly paused or handed off the turn.",
   ]
+
+  const handoffTools = ["AskFollowupQuestion", "PlanExit"]
+    .filter((name) => enabledTools.has(name))
+  lines.push(
+    handoffTools.length > 0
+      ? `- End with a clear text response unless ${handoffTools.map((name) => `\`${name}\``).join(" or ")} has explicitly paused or handed off the turn.`
+      : "- End with a clear text response.",
+  )
 
   const discoveryTools = ["Grep", "CodebaseSearch", "Glob", "ListCodeDefinitions", "LSP"]
     .filter((name) => enabledTools.has(name))

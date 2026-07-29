@@ -149,6 +149,7 @@ async function openReadonlyPreviewDocument(content: string, filePath: string, la
 export class VsCodeHost implements IHost {
   private eventEmitter: (event: AgentEvent) => void
   readonly cwd: string
+  readonly capabilities = { interactiveQuestions: true } as const
   private alwaysApproved = new Set<string>()
   private sessionAutoApprove = false
   private checkpointTracker?: {

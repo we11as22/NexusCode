@@ -36,6 +36,7 @@ import {
   PLAN_MODE_ALLOWED_WRITE_PATTERN,
   MANDATORY_END_TOOL,
 } from "./modes.js"
+import { filterToolsForHostCapabilities } from "./host-tool-capabilities.js"
 import {
   formatToolValidationError,
   normalizeToolInputForParse,
@@ -607,7 +608,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   if (!config.indexing?.vector || !config.vectorDb?.enabled) {
     builtinToolNames.delete("CodebaseSearch")
   }
-  const builtinTools = tools.filter(t => builtinToolNames.has(t.name) && !blockedTools.has(t.name))
+  const builtinTools = filterToolsForHostCapabilities(
+    tools.filter((tool) =>
+      builtinToolNames.has(tool.name) && !blockedTools.has(tool.name),
+    ),
+    host.capabilities,
+  )
   const dynamicTools = tools.filter(
     (tool) =>
       !isKnownBuiltinToolName(tool.name) &&

@@ -54,6 +54,7 @@ function capturedMatchesExpected(
  */
 export class ServerHost implements IHost {
   readonly cwd: string
+  readonly capabilities = { interactiveQuestions: true } as const
   private onEvent: (event: AgentEvent) => void
   private requestApproval?: (action: ApprovalAction) => Promise<PermissionResult>
   private persistModeChange?: (

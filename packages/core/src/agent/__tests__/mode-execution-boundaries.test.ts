@@ -12,6 +12,7 @@ import {
   enterPlanModeTool,
   taskCreateTool,
 } from "../../tools/built-in/orchestration-tools.js"
+import { askFollowupTool } from "../../tools/built-in/report-and-control.js"
 import { ToolRegistry } from "../../tools/registry.js"
 import type { ToolContext, ToolDef } from "../../types.js"
 import {
@@ -160,6 +161,59 @@ describe("runtime mode boundaries", () => {
     expect(capturedSystemPrompt).not.toContain(
       "## Bash / Terminal — Safe Usage",
     )
+  })
+
+  it("does not advertise questions when the client cannot answer them", async () => {
+    let capturedTools: string[] = []
+    let capturedSystemPrompt = ""
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream(request: {
+        tools?: Array<{ name: string }>
+        systemPrompt?: string
+      }) {
+        capturedTools = (request.tools ?? []).map((tool) => tool.name)
+        capturedSystemPrompt = request.systemPrompt ?? ""
+        yield { type: "text_delta" as const, delta: "using an assumption" }
+        yield { type: "finish" as const, finishReason: "stop" as const }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+    const cwd = process.cwd()
+    const session = createFakeSession(cwd)
+    session.addMessage({ role: "user", content: "continue non-interactively" })
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn-no-questions",
+        runId: "test-run-no-questions",
+      },
+      client,
+      host: createFakeHost({
+        cwd,
+        capabilities: { interactiveQuestions: false },
+      }),
+      config: createTestConfig({
+        memory: { sessionMemoryEnabled: false },
+      }),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "agent",
+      tools: [askFollowupTool],
+      skills: [],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(capturedTools).not.toContain("AskFollowupQuestion")
+    expect(capturedSystemPrompt).not.toContain("AskFollowupQuestion")
   })
 
   it("keeps the real latest user turn last in a continued conversation", async () => {

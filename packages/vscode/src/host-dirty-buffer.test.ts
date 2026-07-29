@@ -194,6 +194,14 @@ afterEach(() => {
 })
 
 describe("VsCodeHost dirty editor authority", () => {
+  it("advertises structured interactive questions to core", () => {
+    const host = new VsCodeHost(makeWorkspace(), () => {})
+
+    expect(host.capabilities).toEqual({
+      interactiveQuestions: true,
+    })
+  })
+
   it("captures the authoritative dirty buffer for durable changes", async () => {
     const workspace = makeWorkspace()
     const filePath = path.join(workspace, "file.ts")

@@ -26,6 +26,14 @@ async function workspace(): Promise<string> {
 }
 
 describe("ServerHost durable file mutations", () => {
+  it("advertises question events supported by the session stream", async () => {
+    const host = new ServerHost(await workspace(), () => {})
+
+    expect(host.capabilities).toEqual({
+      interactiveQuestions: true,
+    })
+  })
+
   it("atomically applies an exact compare-and-swap and preserves mode", async () => {
     const cwd = await workspace()
     const file = path.join(cwd, "file.ts")

@@ -25,6 +25,27 @@ function action(type: ApprovalAction["type"]): ApprovalAction {
 }
 
 describe("non-interactive approvals", () => {
+  it("does not advertise interactive questions without the TUI", () => {
+    const host = new CliHost(process.cwd(), () => {})
+
+    expect(host.capabilities).toEqual({
+      interactiveQuestions: false,
+    })
+  })
+
+  it("advertises interactive questions when a TUI resolver is attached", () => {
+    const host = new CliHost(
+      process.cwd(),
+      () => {},
+      false,
+      { current: null },
+    )
+
+    expect(host.capabilities).toEqual({
+      interactiveQuestions: true,
+    })
+  })
+
   it("denies privileged actions regardless of read policy", () => {
     const policy = { read: true }
 
