@@ -344,9 +344,10 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug' | 'review'
 
   let session = bootstrapSession
+  session.setMode(mode)
   // Local loop mutates this Session; server persists via HTTP and adds the user turn in runSession.
   if (!serverUrl) {
-    session.addMessage({ role: 'user', content: userPrompt })
+    session.addMessage({ role: 'user', content: userPrompt, mode })
   }
 
   let config = await loadCliWorkspaceConfig(nexus.cwd, {

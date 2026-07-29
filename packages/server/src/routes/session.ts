@@ -18,6 +18,7 @@ import {
   appendMessages as fsAppendMessages,
   deleteSession as fsDeleteSession,
   updateSessionTitle as fsUpdateSessionTitle,
+  updateSessionMode as fsUpdateSessionMode,
 } from "../session-fs-store.js"
 import { runSession } from "../run-session.js"
 import {
@@ -73,6 +74,7 @@ sessionRoutes.post("/", async (c) => {
     ts: meta.ts,
     messageCount: meta.messageCount,
     revision: meta.revision,
+    mode: meta.mode,
   })
 })
 
@@ -88,7 +90,32 @@ sessionRoutes.get("/:id", async (c) => {
     ts: session.ts,
     messageCount: session.messageCount,
     revision: session.revision,
+    mode: session.mode,
   })
+})
+
+sessionRoutes.patch("/:id/mode", async (c) => {
+  const cwd = getCwd(c)
+  const id = c.req.param("id")
+  const activeRun = getLatestRunForSession(id, cwd)
+  if (activeRun && !activeRun.done) {
+    return c.json({ error: "Session has an active run" }, 409)
+  }
+  const body = (await c.req.json().catch(() => ({}))) as { mode?: Mode }
+  const mode = body.mode
+  if (
+    mode !== "agent" &&
+    mode !== "plan" &&
+    mode !== "ask" &&
+    mode !== "debug" &&
+    mode !== "review"
+  ) {
+    return c.json({ error: "Invalid mode" }, 400)
+  }
+  const session = await fsGetSession(id, cwd)
+  if (!session) return c.json({ error: "Session not found" }, 404)
+  await fsUpdateSessionMode(id, cwd, mode)
+  return c.json({ ok: true, mode })
 })
 
 // GET /session/:id/message — paginated messages
@@ -260,6 +287,7 @@ sessionRoutes.post("/:id/message", async (c) => {
           role: "user",
           content,
           presetName: presetName || "Default",
+          mode,
         })
         await fsAppendMessages(id, cwd, [admitted])
         messageCountBeforeRun = session.messages.length

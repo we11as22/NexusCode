@@ -52,6 +52,24 @@ function stored(id: string, cwd: string, messages: SessionMessage[] = []): Store
 }
 
 describe("SessionStore journal v2", () => {
+  it("round-trips the selected execution mode even without messages", async () => {
+    const { root, cwd } = await fixture()
+    const store = new SessionStore({ homeDir: root })
+
+    await store.saveSession(
+      { ...stored("session_mode", cwd), mode: "plan" },
+      { expectedRevision: 0 },
+    )
+
+    await expect(store.loadSession("session_mode", cwd)).resolves.toMatchObject({
+      mode: "plan",
+      messages: [],
+    })
+    await expect(store.getSessionMeta("session_mode", cwd)).resolves.toMatchObject({
+      mode: "plan",
+    })
+  })
+
   it("round-trips a checksummed revision and increments monotonically", async () => {
     const { root, cwd } = await fixture()
     const store = new SessionStore({ homeDir: root })

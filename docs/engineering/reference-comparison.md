@@ -61,6 +61,7 @@ TypeScript-ядро для CLI, VS Code и сервера и заимствуе�
 | --- | --- | --- | --- |
 | Цикл агента | Один авторитетный `runAgentLoop` и единый конвейер выполнения инструментов | Codex, OpenClaude | Реализовано; мёртвый дублирующий движок разрешений удалён |
 | Промпты и режимы | Agent, plan, ask, debug и review с отдельными промптами режимов и точной проекцией доступных возможностей | Codex, OpenClaude, Kilo, Roo | Реализовано и используется всеми интерфейсами; пользовательские инструкции режима не расширяют разрешения, PLAN допускает запись только в файл/процесс плана, а режим нельзя менять во время активного хода |
+| Plan workflow | Пять фаз исследования и проектирования, отдельный plan-файл, `PlanExit`, долговечный режим сессии и три явных решения пользователя: реализовать, доработать, выйти без реализации | OpenClaude, Kimi CLI, Kilo, MiMo | Реализовано одинаково в CLI и VS Code; запись текущего plan-файла не попадает в общий approval-тупик, `Esc` ничего не одобряет и сохраняет Plan, resume восстанавливает transcript и незавершённую карточку согласования, а явный выход сохраняет Agent и не поднимает старый Plan после reload |
 | Построение контекста | Стабильные cacheable-блоки идентичности/правил и динамические блоки среды, памяти, задач, диагностик и mentions; настоящий последний user-turn остаётся последним сообщением | Codex, OpenClaude, Kimi CLI | Реализовано; служебная среда больше не подменяет последнюю реплику пользователя, а данные из mentions, памяти, инструментов и компакции явно отделены от инструкций |
 | Компакция | Порог от реального окна модели, микрокомпакция и ограниченное LLM-резюме старой головы с дословно сохранённым свежим хвостом, CAS-сохранение и непрерывность памяти | Codex, OpenClaude, Kilo, Kimi CLI, Qwen | Реализовано; автоматический порог — минимум из 85% окна и резерва 20k, бюджет summarizer зависит от модели, сбой не уничтожает диалог, а режим, активные навыки, задачи, memory/artifact-ссылки проецируются повторно |
 | Сессии | Защищённый контрольными суммами JSONL-транскрипт и встроенная SQLite-координация с транзакциями, восстановлением, миграциями и ограниченным активным контекстом | Codex, OpenCode, MiMo | Реализовано; JSONL остаётся переносимой историей, а SQLite управляет арендой, приёмом запросов, разрешениями, очередями, повторным воспроизведением и оркестрацией |
@@ -115,6 +116,15 @@ memory citations, активные навыки и доступный для н�
 изменяющие инструменты, а возврат к прежнему режиму не зависит от случайного
 LLM-классификатора.
 
+Plan не является одним лишь текстом системного промпта. Это состояние сессии,
+проверяемое на каждой границе выполнения. CLI, сервер и VS Code сохраняют его
+отдельно от последнего сообщения, поэтому restart/resume не сбрасывает режим
+из-за значения по умолчанию интерфейса. `PlanExit` только предъявляет
+сохранённый plan-файл пользователю; выполнение начинается исключительно после
+явного решения. Закрытие/`Esc` оставляет Plan активным, доработка возвращает
+feedback модели в Plan, а «выйти без реализации» переводит сессию в Agent без
+скрытого модельного хода.
+
 ## Что Nexus взял из каждой реализации
 
 ### Codex
@@ -138,7 +148,12 @@ ABI-зависимость от стороннего нативного addon, �
 
 - Каскад инструкций, совместимые с Claude правила, навыки, автоматическую память,
   память сессии и непрерывность при компакции.
-- Workflow планирования и явную передачу управления хосту.
+- Пятифазный workflow планирования, отдельный файл плана, запрет применять
+  обычные разрешения поверх Plan и явную передачу управления хосту через
+  `ExitPlanMode`.
+- Терминальный принцип: согласование плана — отдельная модальная граница;
+  обычный prompt не должен одновременно владеть клавиатурой, а незавершённое
+  согласование должно переживать восстановление сессии.
 - Хуки вокруг промптов, инструментов, ходов, завершения задач и жизненного цикла
   субагентов.
 - Оркестрацию задач, субагентов, команд и входящих сообщений; снимки,
@@ -216,15 +231,21 @@ Nexus перенял уроки жизненного цикла и UX, но не
 - Очереди `step-request`, доставляющие ответы пользователя на границах
   провайдерских вызовов.
 - Компакцию с сохранением хвоста и долговечное ветвление/усечение транскрипта.
+- Долговечный Plan-state при resume, точный путь plan-файла и раздельные
+  исходы «одобрить», «отклонить и остаться в Plan», «отклонить и выйти»,
+  «доработать с feedback». Отсутствие выбора не считается одобрением.
 
 Nexus использует эти инварианты в хранилище очереди ходов, удалённом outbox до
-запроса, доставке через mailbox, CAS-компакции и двухфазном откате чата/файлов.
+запроса, доставке через mailbox, CAS-компакции, двухфазном откате чата/файлов и
+общем CLI/VS Code контракте Plan approval.
 
 ### MiMo Code и Qwen Code
 
 - Из MiMo: историю патчей, привязанную к сообщениям и их частям; владение
   серверным SQLite/WAL, загрузку явно упомянутых навыков вместо безусловного
-  добавления всех тел и проверку восстановления в заданной области.
+  добавления всех тел, проверку восстановления в заданной области и backend
+  backstop, который запрещает изменения вне plan-файла даже при ошибке
+  prompt/UI-слоя.
 - Из Qwen: дисциплину writer lease, fail-closed уровни компакции, полный обзор
   Git-состояния, фоновых агентов и границы правил разрешений; для Ink TUI —
   разделение append-only истории и ограниченной live-области, чтобы длинный
@@ -300,7 +321,7 @@ SQLite FTS/индекса не оправдано без измеренной п
 версии Node, изначально доступной в shell пользователя:
 
 - typecheck монорепозитория прошёл во всех шести исполняемых workspace-пакетах;
-- 1722 теста монорепозитория прошли в пакетах core, state, webview, CLI, server
+- 1782 теста монорепозитория прошли в пакетах core, state, webview, CLI, server
   и VS Code;
 - полная production-сборка прошла, включая проверки импорта встроенной SQLite
   из `dist`;
@@ -330,11 +351,28 @@ SQLite FTS/индекса не оправдано без измеренной п
 - реальный API smoke прошёл и в `--print` (`CLI_API_OK`), и в интерактивном Ink
   (`CLI_INTERACTIVE_OK`) с отключённой индексацией; в VS Code модельный контекст
   определился из каталога как `256.0k`, а не из старого fallback `128k`;
+- реальный CLI `--continue` восстановил transcript и незавершённый `PlanExit`,
+  показал OpenClaude-подобную карточку `Ready to code?`, оставил Plan активным
+  после `Esc`, сохранил явный выход без реализации как Agent и не поднял старую
+  карточку при следующем запуске;
+- тот же session-mode был проверен в установленном VSIX: выбранный локальный чат
+  восстановился после reload, Plan-карточка показала три явных исхода в общей
+  горизонтальной сетке, `Exit Plan without implementing` вернул обычный input,
+  а следующий reload сохранил Agent и `256.0k` контекст;
+- живое сравнение с Cursor подтвердило контракт вопросника: modal владеет
+  вводом, варианты и custom-ответ находятся в одной карточке, а основной
+  composer остаётся отдельным. Безопасный reference-запрос остановился на
+  вопросе и не менял файлы;
+- установленный VSIX повторно проверен на реальном сохранённом Plan-turn:
+  соседние provider continuation с двумя `List` теперь отображаются одним
+  блоком `Explored 2 lists`, без дублирующихся `Explored 1 list`; diff,
+  reasoning и `PlanExit` сохранили хронологический порядок;
 - loopback smoke-тест сервера проверил health, ошибку аутентификации и
   аутентифицированный список сессий в пределах workspace.
 
-Для проверки использовалась только настроенная бесплатная модель Kilo. Не
-выполнялись платные запросы, разрушительное восстановление workspace,
+Для реальных запросов Nexus использовалась только настроенная бесплатная модель
+Kilo. Не выполнялись прямые платные запросы Nexus, разрушительное восстановление
+workspace,
 неограниченная индексация или произвольные shell-изменения от агента. Все
 наблюдаемые файловые изменения были ограничены `/Users/mac/Projects/nexus/test`
 и возвращены через Undo.
@@ -405,7 +443,7 @@ Nexus объединяет возможности, которые обычно �
 | Область | Доказательства в эталонных реализациях | Доказательства в Nexus |
 | --- | --- | --- |
 | Цикл агента и выполнение инструментов | `source_projects/codex/codex-rs/core/src/tools/orchestrator.rs`; `source_projects/openclaude/src/tools/AgentTool/runAgent.ts`; `source_projects/kilocode/packages/core/src/session/runner/index.ts`; `source_projects/qwen-code/packages/core/src/agents/runtime/agent-core.ts` | `packages/core/src/agent/loop.ts`; `packages/core/src/agent/tool-pipeline.ts`; `packages/core/src/agent/tool-execution.ts`; `packages/core/src/agent/run-services.ts` |
-| Режим хода, очередь и проекция промпта | Codex `codex-rs/tui/src/chatwidget/input_flow.rs` и `interaction.rs`; Kilo `packages/opencode/src/cli/cmd/run/runtime.queue.ts`; Kimi Code `apps/kimi-code/src/tui/types.ts`; пути очереди команд и инструкций plan mode в OpenClaude | `packages/core/src/agent/modes.ts`; `packages/core/src/agent/prompts/components/index.ts`; `packages/core/src/session/plan-write-gate.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; `packages/cli/src/screens/REPL.tsx` |
+| Режим хода, Plan, очередь и проекция промпта | Codex `codex-rs/tui/src/chatwidget/input_flow.rs` и `interaction.rs`; OpenClaude `src/utils/messages/planMode.ts`, `src/tools/ExitPlanModeTool` и `src/components/permissions/ExitPlanModePermissionRequest`; Kilo `packages/opencode/src/session/prompt/plan-mode.txt` и `packages/opencode/src/cli/cmd/run/runtime.queue.ts`; Kimi CLI `src/kimi_cli/soul/dynamic_injections/plan_mode.py` и `src/kimi_cli/tools/plan`; MiMo `docs/compose/reports/plan-mode-edit-write-backstop.md` | `packages/core/src/agent/modes.ts`; `packages/core/src/agent/prompts/components/index.ts`; `packages/core/src/session/plan-write-gate.ts`; `packages/core/src/session/plan-followup.ts`; `packages/core/src/session/storage.ts`; `packages/vscode/src/controller.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; `packages/cli/src/screens/REPL.tsx` |
 | Лента VS Code, автоскролл и live/snapshot reconciliation | Kilo `packages/ui/src/hooks/create-auto-scroll.tsx` и `packages/kilo-vscode/webview-ui/src/components/chat/MessageList.tsx`; Codex item/message identity; OpenClaude streaming refs; Roo `webview-ui` Virtuoso lifecycle как пример сложности, которую не следует переносить без необходимости | `packages/vscode/webview-ui/src/components/MessageList.tsx`; `packages/vscode/webview-ui/src/components/native-scroll-policy.ts`; `packages/vscode/webview-ui/src/transcript/helpers.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; соответствующие тесты рядом |
 | Потоковый TUI, очередь и ограничение перерисовок | Codex `codex-rs/tui/src/streaming/controller.rs`; Kimi Code `apps/kimi-code/src/tui/controllers/streaming-ui.ts` и `editor-keyboard.ts`; Qwen Code `packages/cli/src/ui/hooks/useGeminiStream.ts` и `utils/MarkdownDisplay.tsx` | `packages/cli/src/nexus-message-projection.ts`; `packages/cli/src/prompt-queue.ts`; `packages/cli/src/cancel-policy.ts`; `packages/cli/src/event-waiter.ts`; `packages/cli/src/components/Spinner.tsx`; `packages/cli/src/screens/REPL.tsx` |
 | Компакция | `source_projects/codex/codex-rs/core/src/compact.rs`; `source_projects/kilocode/packages/core/src/session/compaction.ts`; `source_projects/kimi-cli/src/kimi_cli/soul/compaction.py` | `packages/core/src/session/compaction.ts`; `packages/core/src/context/compaction-projection.ts` |

@@ -1102,14 +1102,14 @@ export class NexusServerClient {
     return res.json() as Promise<Array<{ id: string; ts: number; title?: string; messageCount: number; revision: number }>>
   }
 
-  async createSession(): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }> {
+  async createSession(): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number; mode?: Mode }> {
     const res = await this.request(this.url("/session"), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({}),
     })
     if (!res.ok) throw new Error(`Server createSession: ${res.status} ${await res.text()}`)
-    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }>
+    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number; mode?: Mode }>
   }
 
   async getMessages(
@@ -1130,12 +1130,28 @@ export class NexusServerClient {
     return res.json() as Promise<SessionMessage[]>
   }
 
-  async getSession(sessionId: string): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }> {
+  async getSession(sessionId: string): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number; mode?: Mode }> {
     const res = await this.request(this.url(this.sessionPath(sessionId), { directory: this.directory }), {
       headers: this.headers(),
     })
     if (!res.ok) throw new Error(`Server getSession: ${res.status} ${await res.text()}`)
-    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number }>
+    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number; mode?: Mode }>
+  }
+
+  async setSessionMode(sessionId: string, mode: Mode): Promise<void> {
+    const res = await this.request(
+      this.url(`${this.sessionPath(sessionId)}/mode`, {
+        directory: this.directory,
+      }),
+      {
+        method: "PATCH",
+        headers: this.headers(),
+        body: JSON.stringify({ mode }),
+      },
+    )
+    if (!res.ok) {
+      throw new Error(`Server setSessionMode: ${res.status} ${await res.text()}`)
+    }
   }
 
   async getRecentMessages(

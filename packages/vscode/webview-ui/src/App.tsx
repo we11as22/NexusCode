@@ -804,7 +804,7 @@ function ChatBottomBar() {
   const contextPercent = store.contextPercent
 
   const planChoice = (
-    choice: "implement" | "revise" | "dismiss",
+    choice: "implement" | "revise" | "abandon",
     planTextArg?: string,
     instruction?: string,
     newSession?: boolean,
@@ -1135,12 +1135,14 @@ function PlanActionsBar({
 }: {
   planFollowupText: string | null
   collapsed: boolean
-  onChoice: (choice: "implement" | "revise" | "dismiss", planText?: string, instruction?: string, newSession?: boolean) => void
+  onChoice: (choice: "implement" | "revise" | "abandon", planText?: string, instruction?: string, newSession?: boolean) => void
   onExpand: () => void
   onMinimize: () => void
 }) {
   const [showMore, setShowMore] = useState(false)
-  const [selected, setSelected] = useState<"implement" | "revise">("implement")
+  const [selected, setSelected] = useState<
+    "implement" | "revise" | "abandon"
+  >("implement")
   const [instruction, setInstruction] = useState("")
   const fullText = (planFollowupText ?? "").trim()
   const lines = fullText.split(/\r?\n/)
@@ -1161,7 +1163,7 @@ function PlanActionsBar({
           {!collapsed ? (
             <div className="nexus-plan-followup-actions">
               <button type="button" className="nexus-plan-mini-btn" onClick={() => onMinimize()} title="Collapse plan preview">
-                Minimize
+                Collapse
               </button>
               {expandedNeedsClamp ? (
                 <button
@@ -1210,7 +1212,14 @@ function PlanActionsBar({
           className={`nexus-plan-option ${selected === "revise" ? "nexus-plan-option-active" : ""}`}
           onClick={() => setSelected("revise")}
         >
-          2. No, and tell NexusCode what to do differently
+          2. Revise the plan with feedback
+        </button>
+        <button
+          type="button"
+          className={`nexus-plan-option ${selected === "abandon" ? "nexus-plan-option-active" : ""}`}
+          onClick={() => setSelected("abandon")}
+        >
+          3. Exit Plan without implementing
         </button>
       </div>
       {selected === "revise" ? (
@@ -1222,13 +1231,9 @@ function PlanActionsBar({
         />
       ) : null}
       <div className="nexus-plan-followup-submit-row">
-        <button
-          type="button"
-          className="nexus-secondary-btn text-xs"
-          onClick={() => onChoice("dismiss")}
-        >
-          Dismiss <kbd className="nexus-kbd">Esc</kbd>
-        </button>
+        <span className="nexus-plan-followup-hint">
+          Plan stays active until you choose.
+        </span>
         <button
           type="button"
           className="nexus-primary-btn text-xs"

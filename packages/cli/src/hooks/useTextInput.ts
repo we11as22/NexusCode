@@ -141,19 +141,22 @@ export function useTextInput({
     onMessage?.(false)
   }
 
-  const handleCtrlC = useDoublePress(
-    show => {
-      maybeClearImagePasteErrorTimeout()
-      onExitMessage?.(show, 'Ctrl-C')
-    },
-    () => onExit?.(),
-    () => {
-      if (originalValue) {
-        onChange('')
-        onHistoryReset?.()
-      }
-    },
-  )
+  // The main composer follows Codex's deterministic idle-Ctrl-C contract.
+  // Ink can fan one raw Ctrl-C out through more than one input subscription
+  // during a rerender, which makes a time-based "press again" guard race and
+  // can leave the TUI impossible to close. A non-empty draft is cleared first;
+  // an empty composer exits immediately.
+  function handleCtrlC(): MaybeCursor {
+    maybeClearImagePasteErrorTimeout()
+    if (currentCursorRef.current.text !== '') {
+      onExitMessage?.(false, 'Ctrl-C')
+      onChange('')
+      onHistoryReset?.()
+      return clear()
+    }
+    onExit?.()
+    return currentCursorRef.current
+  }
 
   // Keep Escape for clearing input
   const handleEscape = useDoublePress(

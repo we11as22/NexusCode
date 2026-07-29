@@ -12,6 +12,7 @@ import * as os from "node:os"
 import * as crypto from "node:crypto"
 import type {
   MessagePart,
+  Mode,
   ProviderContextAnchor,
   SessionMessage,
   ToolPart,
@@ -82,6 +83,7 @@ export interface StoredSession {
   todo?: string
   contextUsage?: StoredContextUsage
   providerContextAnchor?: ProviderContextAnchor
+  mode?: Mode
   messages: SessionMessage[]
   /** Monotonic durable journal revision. Legacy v1 files load as revision 0. */
   revision?: number
@@ -93,6 +95,7 @@ export interface StoredSessionMeta {
   ts: number
   title?: string
   todo?: string
+  mode?: Mode
   messageCount: number
   revision: number
 }
@@ -251,6 +254,16 @@ function isProviderContextAnchor(
   )
 }
 
+function isMode(value: unknown): value is Mode {
+  return (
+    value === "agent" ||
+    value === "plan" ||
+    value === "ask" ||
+    value === "debug" ||
+    value === "review"
+  )
+}
+
 function normalizeStoredSession(
   value: Partial<StoredSession>,
   expectedId: string,
@@ -273,6 +286,7 @@ function normalizeStoredSession(
     ...(isProviderContextAnchor(value.providerContextAnchor)
       ? { providerContextAnchor: value.providerContextAnchor }
       : {}),
+    ...(isMode(value.mode) ? { mode: value.mode } : {}),
     messages: value.messages as SessionMessage[],
     revision,
   }
@@ -305,6 +319,7 @@ function createSnapshot(
     ...(session.providerContextAnchor
       ? { providerContextAnchor: session.providerContextAnchor }
       : {}),
+    ...(session.mode ? { mode: session.mode } : {}),
     messages: session.messages,
   }
   return {
@@ -690,6 +705,7 @@ export class SessionStore {
       ts: session.ts,
       title: session.title,
       todo: session.todo,
+      mode: session.mode,
       messageCount: session.messages.length,
       revision: session.revision ?? 0,
     }
@@ -713,6 +729,7 @@ export class SessionStore {
         ts: session.ts,
         title: session.title,
         todo: session.todo,
+        mode: session.mode,
         messageCount: session.messages.length,
         revision: session.revision ?? 0,
       },

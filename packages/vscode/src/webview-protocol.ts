@@ -594,7 +594,7 @@ function validateRequest(message: PlainRecord): WebviewMessage {
         "message",
         {
           type: enumRule([type]),
-          choice: enumRule(["implement", "revise", "dismiss"] as const),
+          choice: enumRule(["implement", "revise", "abandon"] as const),
         },
         {
           planText: stringRule(1_000_000),

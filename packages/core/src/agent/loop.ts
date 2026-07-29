@@ -1868,6 +1868,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               executedToolThisIteration = true
               executedToolCallsTotal++
               if (toolName === "EnterPlanMode" && result.success) {
+                session.setMode("plan")
                 requestedNextMode = "plan"
                 await flushPendingReads()
                 break streamLoop
@@ -2175,6 +2176,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           executedToolThisIteration = true
           executedToolCallsTotal++
           if (call.toolName === "EnterPlanMode" && result.success) {
+            session.setMode("plan")
             requestedNextMode = "plan"
             break
           }

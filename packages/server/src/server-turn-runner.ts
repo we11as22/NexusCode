@@ -10,6 +10,7 @@ import {
   type AgentEvent,
   type ApprovalAction,
   type MessagePart,
+  type Mode,
   type NexusRunServices,
   type ProviderContextAnchor,
   type SessionMessage,
@@ -90,6 +91,7 @@ export interface ServerTurnSessionStore {
     revision: number
     title?: string
     todo?: string
+    mode?: Mode
     contextUsage?: StoredContextUsage
     providerContextAnchor?: ProviderContextAnchor
   }>
@@ -100,6 +102,7 @@ export interface ServerTurnSessionStore {
       messages: SessionMessage[]
       title?: string
       todo?: string
+      mode?: Mode
       contextUsage?: StoredContextUsage
       providerContextAnchor?: ProviderContextAnchor
     },
@@ -121,6 +124,7 @@ class DurableServerSession extends Session {
     revision: number
     title?: string
     todo?: string
+    mode?: Mode
     contextUsage?: StoredContextUsage
     providerContextAnchor?: ProviderContextAnchor
     store: ServerTurnSessionStore
@@ -135,6 +139,7 @@ class DurableServerSession extends Session {
       input.contextUsage,
       input.revision,
       input.providerContextAnchor,
+      input.mode,
     )
     this.#store = input.store
     this.#sessionId = input.sessionId
@@ -156,6 +161,7 @@ class DurableServerSession extends Session {
         messages,
         ...(title ? { title } : {}),
         ...(this.getTodo() ? { todo: this.getTodo() } : {}),
+        ...(this.getMode() ? { mode: this.getMode() } : {}),
         ...(contextUsage ? { contextUsage: { ...contextUsage } } : {}),
         ...(providerContextAnchor
           ? { providerContextAnchor: { ...providerContextAnchor } }
@@ -191,6 +197,7 @@ export class ServerTurnRunner implements TurnRunner {
           revision: stored.revision ?? 0,
           ...(stored.title ? { title: stored.title } : {}),
           ...(stored.todo ? { todo: stored.todo } : {}),
+          ...(stored.mode ? { mode: stored.mode } : {}),
           ...(stored.contextUsage
             ? { contextUsage: stored.contextUsage }
             : {}),
@@ -212,6 +219,7 @@ export class ServerTurnRunner implements TurnRunner {
           messages: snapshot.messages,
           ...(snapshot.title ? { title: snapshot.title } : {}),
           ...(snapshot.todo ? { todo: snapshot.todo } : {}),
+          ...(snapshot.mode ? { mode: snapshot.mode } : {}),
           ...(snapshot.contextUsage
             ? { contextUsage: snapshot.contextUsage }
             : {}),
@@ -241,6 +249,7 @@ export class ServerTurnRunner implements TurnRunner {
       store: this.#sessions,
       ...(stored.title ? { title: stored.title } : {}),
       ...(stored.todo ? { todo: stored.todo } : {}),
+      ...(stored.mode ? { mode: stored.mode } : {}),
       ...(stored.contextUsage
         ? { contextUsage: stored.contextUsage }
         : {}),
@@ -249,6 +258,7 @@ export class ServerTurnRunner implements TurnRunner {
         : {}),
     })
     const content = inputContent(context)
+    session.setMode(context.execution.mode)
     session.addMessage(
       {
         role: "user",
@@ -256,6 +266,7 @@ export class ServerTurnRunner implements TurnRunner {
         ...(context.execution.selection
           ? { presetName: context.execution.selection.profileId }
           : {}),
+        mode: context.execution.mode,
       },
       { id: context.input.id },
     )
@@ -324,6 +335,7 @@ export class ServerTurnRunner implements TurnRunner {
               mode,
               fence: context.fence,
             })
+            session.setMode(mode)
             return {
               success: true,
               mode,

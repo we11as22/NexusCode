@@ -1,6 +1,16 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import type { ISession, SessionMessage, ToolPart, MessagePart } from "../types.js"
+import { PLAN_MODE_ALLOWED_WRITE_PATTERN } from "../agent/modes.js"
+import type {
+  ISession,
+  MessagePart,
+  Mode,
+  SessionMessage,
+  ToolPart,
+} from "../types.js"
+
+const MAX_PLAN_FOLLOWUP_BYTES = 1024 * 1024
+const MODES = new Set<Mode>(["agent", "plan", "ask", "debug", "review"])
 
 /**
  * Kilocode-style: detect if the last assistant message completed plan_exit,
@@ -28,42 +38,149 @@ function getTextFromMessage(msg: SessionMessage): string {
   return texts.join("\n").trim()
 }
 
+function planToolPath(part: ToolPart): string | null {
+  if (
+    !["Write", "Edit", "write_to_file", "replace_in_file"].includes(
+      part.tool,
+    ) ||
+    part.status !== "completed"
+  ) {
+    return null
+  }
+  const raw =
+    part.path ??
+    (part.input?.file_path as string | undefined) ??
+    (part.input?.path as string | undefined)
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null
+}
+
+function isPathInside(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate)
+  return (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) &&
+      relative !== ".." &&
+      !path.isAbsolute(relative))
+  )
+}
+
+async function readSafePlanFile(
+  cwd: string,
+  rawPath: string,
+): Promise<string | null> {
+  const resolvedCwd = path.resolve(cwd)
+  const candidate = path.isAbsolute(rawPath)
+    ? path.resolve(rawPath)
+    : path.resolve(resolvedCwd, rawPath)
+  const relative = path
+    .relative(resolvedCwd, candidate)
+    .replace(/\\/g, "/")
+  if (
+    !isPathInside(resolvedCwd, candidate) ||
+    !PLAN_MODE_ALLOWED_WRITE_PATTERN.test(relative)
+  ) {
+    return null
+  }
+
+  try {
+    const [plansRoot, fileInfo] = await Promise.all([
+      fs.realpath(path.join(resolvedCwd, ".nexus", "plans")),
+      fs.lstat(candidate),
+    ])
+    if (!fileInfo.isFile() || fileInfo.isSymbolicLink()) return null
+    const realCandidate = await fs.realpath(candidate)
+    if (!isPathInside(plansRoot, realCandidate)) return null
+    const stat = await fs.stat(realCandidate)
+    if (!stat.isFile() || stat.size > MAX_PLAN_FOLLOWUP_BYTES) return null
+    const content = (await fs.readFile(realCandidate, "utf8")).trim()
+    return content || null
+  } catch {
+    return null
+  }
+}
+
+function latestCompletedPlanToolPath(session: ISession): string | null {
+  for (let messageIndex = session.messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const message = session.messages[messageIndex]
+    if (!message || message.role !== "assistant" || !Array.isArray(message.content)) {
+      continue
+    }
+    const parts = message.content as MessagePart[]
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
+      const part = parts[partIndex]
+      if (part?.type !== "tool") continue
+      const filePath = planToolPath(part as ToolPart)
+      if (filePath) return filePath
+    }
+  }
+  return null
+}
+
+async function readMostRecentlyModifiedPlan(cwd: string): Promise<string | null> {
+  const plansDir = path.join(cwd, ".nexus", "plans")
+  try {
+    const entries = await fs.readdir(plansDir, { withFileTypes: true })
+    const candidates = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && /\.(md|txt)$/i.test(entry.name))
+        .map(async (entry) => {
+          const filePath = path.join(plansDir, entry.name)
+          const stat = await fs.stat(filePath).catch(() => null)
+          return stat?.isFile()
+            ? { filePath, mtimeMs: stat.mtimeMs }
+            : null
+        }),
+    )
+    candidates.sort((a, b) => (b?.mtimeMs ?? -1) - (a?.mtimeMs ?? -1))
+    for (const candidate of candidates) {
+      if (!candidate) continue
+      const content = await readSafePlanFile(cwd, candidate.filePath)
+      if (content) return content
+    }
+  } catch {
+    // No readable plan directory.
+  }
+  return null
+}
+
 /**
- * Plan content for follow-up: last assistant text, or from last Write/Edit to .nexus/plans, or first .nexus/plans/*.md file.
+ * Recover the per-session execution mode after replay/switching sessions.
+ * New transcripts persist it on user turns; completed legacy PlanExit sessions
+ * recover as plan so the approval surface remains reachable.
+ */
+export function getSessionModeForResume(
+  session: ISession,
+  fallback: Mode = "agent",
+): Mode {
+  const persisted = session.getMode()
+  if (persisted && MODES.has(persisted)) return persisted
+  const latestUser = [...session.messages]
+    .reverse()
+    .find((message) => message.role === "user" && MODES.has(message.mode as Mode))
+  if (latestUser?.mode && MODES.has(latestUser.mode)) return latestUser.mode
+  if (hadPlanExit(session)) return "plan"
+  return fallback
+}
+
+/**
+ * Plan content for follow-up: the exact latest completed plan Write/Edit,
+ * otherwise the most recently modified safe plan file, otherwise assistant text.
  * Used to inject "Implement the following plan: ..." into a new session or continue message.
  */
 export async function getPlanContentForFollowup(session: ISession, cwd: string): Promise<string> {
+  const exactPlanPath = latestCompletedPlanToolPath(session)
+  if (exactPlanPath) {
+    const exact = await readSafePlanFile(cwd, exactPlanPath)
+    if (exact) return exact
+  }
+
+  const newestPlan = await readMostRecentlyModifiedPlan(cwd)
+  if (newestPlan) return newestPlan
+
   const lastAssistant = [...session.messages].reverse().find((m) => m.role === "assistant")
   if (lastAssistant) {
     const text = getTextFromMessage(lastAssistant)
     if (text) return text
-    const parts = Array.isArray(lastAssistant.content) ? (lastAssistant.content as MessagePart[]) : []
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const p = parts[i]
-      if (p?.type !== "tool") continue
-      const tp = p as ToolPart
-      if (!["Write", "Edit", "write_to_file", "replace_in_file"].includes(tp.tool) || tp.status !== "completed") continue
-      const filePath = (tp.input?.path as string) ?? (tp.input?.file_path as string)
-      if (!filePath || typeof filePath !== "string") continue
-      const normalized = path.normalize(filePath).replace(/\\/g, "/")
-      if (!normalized.includes(".nexus/plans") && !normalized.includes(".nexus\\plans")) continue
-      const out = (tp.output ?? "").trim()
-      if (out) return out
-    }
-  }
-  const plansDir = path.join(cwd, ".nexus", "plans")
-  try {
-    const entries = await fs.readdir(plansDir, { withFileTypes: true })
-    const mdFirst = entries
-      .filter((e) => e.isFile() && /\.(md|txt)$/i.test(e.name))
-      .sort((a, b) => a.name.localeCompare(b.name))
-    for (const e of mdFirst) {
-      const content = await fs.readFile(path.join(plansDir, e.name), "utf8")
-      const trimmed = content.trim()
-      if (trimmed) return trimmed
-    }
-  } catch {
-    // no .nexus/plans or not readable
   }
   return "Plan is in .nexus/plans/ (see plan file from the previous turn)."
 }

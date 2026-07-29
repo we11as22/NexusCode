@@ -287,6 +287,7 @@ export async function runSession(opts: RunSessionOptions): Promise<void> {
       role: "user",
       content,
       presetName: presetName || "Default",
+      mode,
     })
   }
 

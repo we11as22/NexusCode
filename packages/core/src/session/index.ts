@@ -2,6 +2,7 @@ import * as crypto from "node:crypto"
 import type {
   ISession,
   MessagePart,
+  Mode,
   ProviderContextAnchor,
   SessionMessage,
   ToolPart,
@@ -58,6 +59,8 @@ export class Session implements ISession {
   private _contextUsageSnapshot: StoredContextUsage | null = null
   /** Last exact provider response boundary used as the hybrid context baseline. */
   private _providerContextAnchor: ProviderContextAnchor | null = null
+  /** Durable host-selected mode. Legacy sessions recover from message metadata. */
+  private _mode: Mode | null = null
   /** Last verified durable journal revision used for optimistic concurrency. */
   private _revision: number
 
@@ -70,6 +73,7 @@ export class Session implements ISession {
     contextUsageSnapshot?: StoredContextUsage | null,
     revision = 0,
     providerContextAnchor?: ProviderContextAnchor | null,
+    mode?: Mode | null,
   ) {
     this.id = id
     this.cwd = canonicalProjectRoot(cwd)
@@ -84,11 +88,20 @@ export class Session implements ISession {
       )
         ? { ...providerContextAnchor }
         : null
+    this._mode = mode ?? null
     this._revision = revision
   }
 
   get messages(): SessionMessage[] {
     return this._messages
+  }
+
+  getMode(): Mode | undefined {
+    return this._mode ?? undefined
+  }
+
+  setMode(mode: Mode): void {
+    this._mode = mode
   }
 
   invalidateTokenEstimate(): void {
@@ -237,6 +250,7 @@ export class Session implements ISession {
       null,
       0,
       anchor,
+      this._mode,
     )
   }
 
@@ -319,6 +333,7 @@ export class Session implements ISession {
       ...(this._providerContextAnchor
         ? { providerContextAnchor: this._providerContextAnchor }
         : {}),
+      ...(this._mode ? { mode: this._mode } : {}),
       messages: this._messages,
     }
     this._revision = await saveSession(stored, { expectedRevision: this._revision })
@@ -338,6 +353,7 @@ export class Session implements ISession {
       )
         ? { ...stored.providerContextAnchor }
         : null
+    this._mode = stored.mode ?? null
     this._revision = stored.revision ?? 0
     this.invalidateTokenEstimate()
     return true
@@ -375,6 +391,7 @@ export class Session implements ISession {
       stored.contextUsage ?? null,
       stored.revision ?? 0,
       stored.providerContextAnchor ?? null,
+      stored.mode ?? null,
     )
   }
 
@@ -386,9 +403,11 @@ export class Session implements ISession {
       cwd,
       loaded.messages,
       loaded.meta.todo ?? "",
-      true,
+      offset > 0 || loaded.messages.length < loaded.meta.messageCount,
       null,
       loaded.meta.revision,
+      null,
+      loaded.meta.mode ?? null,
     )
   }
 

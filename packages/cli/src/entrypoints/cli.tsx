@@ -291,6 +291,10 @@ function NexusREPLWithConfigRefresh({
   return (
     <REPL
       {...replProps}
+      initialMessages={
+        replProps.initialMessages ??
+        replMessagesFromSession(n.session.messages)
+      }
       commands={commandsToUse}
       nexusConfigSnapshot={configSnapshot}
       onNexusConfigSaved={refreshConfig}
@@ -498,7 +502,11 @@ ${commandList}`,
     .option('--server <url>', 'NexusCode server URL (e.g. http://127.0.0.1:4097); uses NEXUS_SERVER_URL env if set', String)
     .option('--continue', 'Continue most recent session', () => true)
     .option('--profile <name>', 'Named profile from nexus.yaml', String)
-    .option('--mode <mode>', 'Mode: agent | ask | plan | debug | review', 'agent')
+    .option(
+      '--mode <mode>',
+      'Override mode: agent | ask | plan | debug | review (resumed sessions keep their saved mode)',
+      String,
+    )
     .action(
       async (
         prompt,
@@ -524,7 +532,10 @@ ${commandList}`,
         const requestedCwd = project ? path.resolve(cwd, project) : cwd
         const effectiveCwd =
           getWorkspaceTrustIdentity(requestedCwd).canonicalPath
-        const mode = resolveRuntimeMode(modeOpt)
+        const mode =
+          modeOpt === undefined
+            ? undefined
+            : resolveRuntimeMode(modeOpt)
         setOriginalCwd(effectiveCwd)
         await setCwd(effectiveCwd)
         await showSetupScreens(

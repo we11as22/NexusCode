@@ -100,6 +100,48 @@ describe("CLI startup authority ordering", () => {
     )
   })
 
+  it("restores the persisted transcript when continuing an interactive session", () => {
+    expect(entrySource).toContain(
+      "replProps.initialMessages ??\n        replMessagesFromSession(n.session.messages)",
+    )
+  })
+
+  it("treats --mode as an explicit override instead of resetting resumed sessions", () => {
+    const optionStart = entrySource.indexOf(".option(\n      '--mode <mode>'")
+    const optionEnd = entrySource.indexOf("\n    )", optionStart)
+    const option = entrySource.slice(optionStart, optionEnd)
+
+    expect(optionStart).toBeGreaterThanOrEqual(0)
+    expect(option).toContain("resumed sessions keep their saved mode")
+    expect(option).toContain("String,")
+    expect(option).not.toContain("'agent'")
+  })
+
+  it("restores an unfinished plan approval instead of showing an empty prompt", () => {
+    expect(replSource).toContain(
+      "getSessionModeForResume(session, 'agent') !== 'plan'",
+    )
+    expect(replSource).toContain("!hadPlanExit(session)")
+    expect(replSource).toContain(
+      "getPlanContentForFollowup(session, nexusBootstrap.cwd)",
+    )
+  })
+
+  it("defers mode persistence until the active turn releases the session", () => {
+    const effectStart = replSource.indexOf(
+      "if (!nexusBootstrap || nexusSessionId == null) return",
+    )
+    const effectEnd = replSource.indexOf(
+      "// Remount header on real dimension changes",
+      effectStart,
+    )
+    const effect = replSource.slice(effectStart, effectEnd)
+
+    expect(effectStart).toBeGreaterThanOrEqual(0)
+    expect(effect).toContain("if (isLoading) return")
+    expect(effect).toContain("isLoading,")
+  })
+
   it("keeps runtime and control footers single-line in narrow terminals", () => {
     const footerStart = promptInputSource.indexOf(
       "{nexusMode != null && suggestions.length === 0",

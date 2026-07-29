@@ -679,6 +679,7 @@ function PromptInput({
 
   // Handle /undo checkpoint panel and pending create-skill/rule scope selection
   useInput((inputChar, key) => {
+    if (isDisabled) return
     if (undoPanel?.phase === 'loading') {
       if (key.escape) {
         undoLoadGenerationRef.current += 1
@@ -820,6 +821,7 @@ Create a .md rule file with a descriptive name. The rule file should define clea
   })
 
   useInput((inputChar, key) => {
+    if (isDisabled) return
     if (input === '' && (key.escape || key.backspace || key.delete)) {
       onModeChange('prompt')
     }

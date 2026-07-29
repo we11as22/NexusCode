@@ -32,6 +32,25 @@ const messageListSource = readFileSync(
 )
 
 describe("VS Code command wiring", () => {
+  it("restores the selected local chat before creating a new one", () => {
+    const ensureStart = controllerSource.indexOf("async ensureInitialized(): Promise<void>")
+    const ensureEnd = controllerSource.indexOf("private async initializeIndexer", ensureStart)
+    const ensureBody = controllerSource.slice(ensureStart, ensureEnd)
+    const restore = ensureBody.indexOf("await this.restoreSelectedLocalSession(cwd)")
+    const create = ensureBody.indexOf(
+      "this.session = Session.create(cwd)",
+      restore,
+    )
+
+    expect(restore).toBeGreaterThan(-1)
+    expect(create).toBeGreaterThan(restore)
+    expect(ensureBody).toContain("await this.session.save()")
+    expect(controllerSource).toContain("await this.setSelectedLocalSessionId(sessionId, cwd)")
+    expect(controllerSource).toContain(
+      "sessionId = (await listSessions(cwd))[0]?.id",
+    )
+  })
+
   it("does not classify agent diagnostics as server transport failures", () => {
     const start = controllerSource.indexOf(
       "private forwardServerEvent(event: AgentEvent)",
@@ -439,7 +458,7 @@ describe("VS Code command wiring", () => {
 
     expect(setModeCase).toContain("if (this.isRunning)")
     expect(setModeCase.indexOf("if (this.isRunning)")).toBeLessThan(
-      setModeCase.indexOf("this.mode = msg.mode"),
+      setModeCase.indexOf("await this.persistSessionMode(msg.mode)"),
     )
   })
 

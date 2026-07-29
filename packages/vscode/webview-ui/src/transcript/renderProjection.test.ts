@@ -119,6 +119,83 @@ describe("transcript exploration projection", () => {
 })
 
 describe("completed turn projection", () => {
+  it("coalesces adjacent exploration waves across provider continuation messages", () => {
+    const messages: SessionMessage[] = [
+      {
+        id: "user-1",
+        ts: 1,
+        role: "user",
+        content: "Inspect both locations",
+      },
+      {
+        id: "assistant-list-root",
+        ts: 2,
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            reasoningId: "reasoning-root",
+            text: "Listing the workspace.",
+            durationMs: 10,
+          },
+          {
+            type: "tool",
+            id: "list-root",
+            tool: "List",
+            status: "completed",
+            input: { path: "." },
+            output: "src",
+          },
+        ],
+      },
+      {
+        id: "assistant-list-src",
+        ts: 3,
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            reasoningId: "reasoning-src",
+            text: "Listing the source directory.",
+            durationMs: 11,
+          },
+          {
+            type: "tool",
+            id: "list-src",
+            tool: "List",
+            status: "completed",
+            input: { path: "src" },
+            output: "index.ts",
+          },
+        ],
+      },
+      {
+        id: "assistant-final",
+        ts: 4,
+        role: "assistant",
+        durationMs: 1_000,
+        content: [{ type: "text", text: "Done." }],
+      },
+    ]
+
+    const items = buildChatRenderItems(messages, false)
+    if (items[1]?.type !== "completed_work") {
+      throw new Error("expected completed work")
+    }
+    const exploredItems = items[1].items.filter(
+      (item) => item.type === "explored",
+    )
+
+    expect(exploredItems).toHaveLength(1)
+    expect(
+      countExplorationMetricsFromItems(exploredItems[0]!.prefixItems),
+    ).toEqual({
+      filesCount: 0,
+      listCount: 2,
+      searchesCount: 0,
+    })
+  })
+
   it("collapses all technical work and leaves the final answer outside", () => {
     const messages: SessionMessage[] = [
       {

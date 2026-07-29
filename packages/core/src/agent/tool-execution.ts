@@ -1371,6 +1371,7 @@ export async function executeValidatedTool(
     }
   }
 
+  let validatedPlanFileWrite = false
   if (mode === "plan" && resolvedToolName === "ApplyPatch") {
     return {
       success: false,
@@ -1402,6 +1403,7 @@ export async function executeValidatedTool(
         output: "In plan mode you may only write plan documentation under .nexus/plans/ (*.md or *.txt). Do not modify source files.",
       }
     }
+    validatedPlanFileWrite = true
   }
 
   const modeInputError = modeSpecificToolInputError(
@@ -1438,6 +1440,7 @@ export async function executeValidatedTool(
           ruleResult === "ask" ||
           (
             ruleResult === null &&
+            !validatedPlanFileWrite &&
             resolvedToolNeedsApproval(
               tool,
               toolInput,

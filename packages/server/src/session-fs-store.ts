@@ -5,7 +5,7 @@
  * Replaces the legacy SQLite session store so server, CLI, and VS Code share one source of truth.
  */
 
-import type { SessionMessage } from "@nexuscode/core"
+import type { Mode, SessionMessage } from "@nexuscode/core"
 import {
   canonicalProjectRoot,
   listSessions as coreListSessions,
@@ -24,6 +24,7 @@ export interface SessionMeta {
   cwd: string
   ts: number
   title?: string
+  mode?: Mode
   messageCount: number
   revision: number
 }
@@ -54,6 +55,7 @@ export async function ensureSessionOnDisk(sessionId: string, cwd: string): Promi
       cwd: existing.cwd,
       ts: existing.ts,
       title: existing.title,
+      mode: existing.mode,
       messageCount: existing.messageCount,
       revision: existing.revision,
     }
@@ -78,6 +80,7 @@ export async function ensureSessionOnDisk(sessionId: string, cwd: string): Promi
       cwd: raced.cwd,
       ts: raced.ts,
       title: raced.title,
+      mode: raced.mode,
       messageCount: raced.messageCount,
       revision: raced.revision,
     }
@@ -98,6 +101,7 @@ export async function getSession(sessionId: string, cwd: string): Promise<Sessio
     cwd: meta.cwd,
     ts: meta.ts,
     title: meta.title,
+    mode: meta.mode,
     messageCount: meta.messageCount,
     revision: meta.revision,
   }
@@ -114,6 +118,20 @@ export async function updateSessionTitle(sessionId: string, cwd: string, title: 
     title,
     ts: Date.now(),
   }))
+}
+
+export async function updateSessionMode(
+  sessionId: string,
+  cwd: string,
+  mode: Mode,
+): Promise<void> {
+  const root = canonicalProjectRoot(cwd)
+  const updated = await mutateSession(sessionId, root, (stored) => ({
+    ...stored,
+    mode,
+    ts: Date.now(),
+  }))
+  if (!updated) throw new Error(`Session not found: ${sessionId}`)
 }
 
 export async function getMessages(
@@ -151,6 +169,11 @@ export async function appendMessages(
     return {
       ...stored,
       messages: additions.length > 0 ? [...stored.messages, ...additions] : stored.messages,
+      mode:
+        [...additions]
+          .reverse()
+          .find((message) => message.role === "user" && message.mode)
+          ?.mode ?? stored.mode,
       ts: additions.length > 0 ? Date.now() : stored.ts,
     }
   })

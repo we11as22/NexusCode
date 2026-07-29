@@ -1915,6 +1915,13 @@ html, body, #root {
   background: var(--vscode-input-background, var(--vscode-editor-background));
 }
 
+.nexus-plan-followup-hint {
+  min-width: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
 .nexus-plan-followup-textarea {
   width: 100%;
   min-height: 72px;

@@ -32,8 +32,11 @@ afterEach(async () => {
 
 async function runWrite(options: {
   rule?: "allow" | "ask" | "deny"
+  rulePattern?: string
   autoApproveWrite?: boolean
   approval?: PermissionResult
+  mode?: "agent" | "plan"
+  filePath?: string
 }) {
   const order: string[] = []
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-file-approval-"))
@@ -80,7 +83,7 @@ async function runWrite(options: {
       rules: options.rule
         ? [{
             tool: "Write",
-            pathPattern: "src/**",
+            pathPattern: options.rulePattern ?? "src/**",
             action: options.rule,
           }]
         : [],
@@ -100,7 +103,7 @@ async function runWrite(options: {
     host,
     session,
     config,
-    mode: "agent",
+    mode: options.mode ?? "agent",
     signal: new AbortController().signal,
     services: createNexusRunServices(),
     executionIdentity: {
@@ -122,7 +125,7 @@ async function runWrite(options: {
       partId: "part_file-edit",
       toolName: "Write",
       input: {
-        file_path: "src/new.ts",
+        file_path: options.filePath ?? "src/new.ts",
         content: "export const value = 1\n",
       },
       origin: "native",
@@ -131,7 +134,7 @@ async function runWrite(options: {
       tools: [writeFileTool],
       context,
       autoApproveActions: new Set(),
-      mode: "agent",
+      mode: options.mode ?? "agent",
       mcpToolNames: new Set(),
       async hookRunner() {
         return []
@@ -184,5 +187,29 @@ describe("file edit approval authority", () => {
     expect(result.success).toBe(false)
     expect(host.approvals).toEqual([])
     expect(order).toEqual([])
+  })
+
+  it("does not interrupt plan mode for its only allowed write target", async () => {
+    const { result, host, order } = await runWrite({
+      mode: "plan",
+      filePath: ".nexus/plans/review.md",
+    })
+
+    expect(result.success).toBe(true)
+    expect(host.approvals).toEqual([])
+    expect(order).toContain("apply")
+  })
+
+  it("still honors an explicit ask rule for an allowed plan file", async () => {
+    const { result, host, order } = await runWrite({
+      mode: "plan",
+      filePath: ".nexus/plans/review.md",
+      rule: "ask",
+      rulePattern: ".nexus/plans/**",
+    })
+
+    expect(result.success).toBe(true)
+    expect(host.approvals).toHaveLength(1)
+    expect(order).toContain("approval")
   })
 })

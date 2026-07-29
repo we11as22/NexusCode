@@ -533,6 +533,10 @@ export interface ProviderContextAnchor {
 export interface ISession {
   readonly id: string
   readonly messages: SessionMessage[]
+  /** Durable execution mode selected for this session. */
+  getMode(): Mode | undefined
+  /** Persistable execution mode selected by the host or admitted user turn. */
+  setMode(mode: Mode): void
   addMessage(
     msg: Omit<SessionMessage, "id" | "ts">,
     identity?: { id?: string; ts?: number },
@@ -601,6 +605,8 @@ export interface SessionMessage {
    * Used to scope skills + MCP/tool visibility for the run that produced the assistant reply.
    */
   presetName?: string
+  /** Exact execution mode captured when this user turn was admitted. */
+  mode?: Mode
   parentId?: string
   model?: string
   tokens?: { input: number; output: number; cacheRead?: number; cacheWrite?: number }

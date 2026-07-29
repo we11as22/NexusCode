@@ -106,6 +106,7 @@ import {
   Session,
   hadPlanExit,
   getPlanContentForFollowup,
+  getSessionModeForResume,
   formatQuestionnaireAnswersForAgent,
   computeContextUsageMetrics,
   estimateToolsDefinitionsTokens,
@@ -395,7 +396,9 @@ export function REPL({
     }
   }, [])
   /** Todo list from agent (TodoWrite). Rendered above input, below progress. */
-  const [nexusTodo, setNexusTodo] = useState('')
+  const [nexusTodo, setNexusTodo] = useState(
+    () => nexusBootstrap?.session.getTodo() ?? '',
+  )
   const [nexusQuestionRequest, setNexusQuestionRequest] = useState<{
     requestId: string
     title?: string
@@ -444,6 +447,29 @@ export function REPL({
   const [nexusPlanFollowup, setNexusPlanFollowup] = useState<{
     planText: string
   } | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const session = nexusBootstrap?.session
+    if (
+      !nexusBootstrap ||
+      !session ||
+      getSessionModeForResume(session, 'agent') !== 'plan' ||
+      !hadPlanExit(session)
+    ) {
+      setNexusPlanFollowup(null)
+      return
+    }
+    void getPlanContentForFollowup(session, nexusBootstrap.cwd)
+      .then((planText) => {
+        if (!cancelled) setNexusPlanFollowup({ planText })
+      })
+      .catch(() => {
+        if (!cancelled) setNexusPlanFollowup(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [nexusBootstrap, nexusSessionId])
   const forcedNexusModeForNextRunRef = useRef<string | null>(null)
   const applyNexusModeTransition = useCallback(
     (message: NexusModeMessage) => {
@@ -1634,6 +1660,9 @@ export function REPL({
     setNexusQuestionRequest(null)
     setSubagentsByPartId({})
     setNexusPlanFollowup(null)
+    setNexusModeOverride(
+      getSessionModeForResume(nexusBootstrap.session, 'agent'),
+    )
     setNexusTodo(nexusBootstrap.session.getTodo())
     setForkNumber(n => n + 1)
     const sid =
@@ -1648,6 +1677,43 @@ export function REPL({
     ])
     void resumeActiveRemoteTurn()
   }, [nexusSessionId, nexusBootstrap, resumeActiveRemoteTurn])
+
+  useEffect(() => {
+    if (!nexusBootstrap || nexusSessionId == null) return
+    if (isLoading) return
+    const mode =
+      nexusModeOverride === 'plan' ||
+      nexusModeOverride === 'ask' ||
+      nexusModeOverride === 'debug' ||
+      nexusModeOverride === 'review'
+        ? nexusModeOverride
+        : 'agent'
+    nexusBootstrap.session.setMode(mode)
+    if (nexusBootstrap.serverUrl && nexusBootstrap.remoteClient) {
+      void nexusBootstrap.remoteClient
+        .setSessionMode(nexusSessionId, mode)
+        .catch((error) => {
+          setNexusBannerText(
+            `Could not persist session mode: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          )
+        })
+      return
+    }
+    void nexusBootstrap.session.save().catch((error) => {
+      setNexusBannerText(
+        `Could not persist session mode: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    })
+  }, [
+    isLoading,
+    nexusBootstrap,
+    nexusModeOverride,
+    nexusSessionId,
+  ])
 
   // Remount header on real dimension changes so layout matches the new width. Do not clear the
   // viewport: ESC 2J wipes the screen while Ink still tracks prior output, which desyncs the TUI
@@ -2059,7 +2125,7 @@ export function REPL({
                       'plan',
                     )
                   }}
-                  onDismiss={() => {
+                  onAbandon={() => {
                     setNexusPlanFollowup(null)
                     setNexusModeOverride('agent')
                   }}

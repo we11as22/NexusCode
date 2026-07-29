@@ -45,6 +45,7 @@ import {
   deleteSession,
   getSessionMeta,
   loadSessionMessages,
+  mutateSession,
   createLLMClient,
   ToolRegistry,
   loadSkills,
@@ -74,6 +75,7 @@ import {
   getModelsCatalog,
   hadPlanExit,
   getPlanContentForFollowup,
+  getSessionModeForResume,
   NexusServerClient,
   canonicalizeNexusServerBaseUrl,
   UserInputPartSchema,
@@ -1357,7 +1359,17 @@ export class Controller {
       this.checkpoint = undefined
       this.lastRunMode = null
       this.initialFullConfigSnapshot = undefined
-      this.session = Session.create(cwd)
+      this.session = undefined
+      if (!nextServerUrl) {
+        await this.restoreSelectedLocalSession(cwd)
+      }
+      if (!this.session) {
+        this.session = Session.create(cwd)
+      }
+      if (!nextServerUrl && !(await getSessionMeta(this.session.id, cwd))) {
+        await this.session.save()
+        await this.setSelectedLocalSessionId(this.session.id, cwd)
+      }
       this.postStateToWebview()
       void this.postSlashCommandCatalog().catch(() => undefined)
       if (!wasRunning) {
@@ -1530,7 +1542,12 @@ export class Controller {
       messages,
       undefined,
       true,
+      null,
+      0,
+      null,
+      meta.mode ?? null,
     )
+    this.mode = getSessionModeForResume(this.session, this.mode)
     this.serverSessionOldestLoadedOffset = offset
     this.localSessionWindowed = false
   }
@@ -1597,6 +1614,83 @@ export class Controller {
       this.reportServerError(error)
       return false
     }
+  }
+
+  private localSelectedSessionKey(cwd = this.getCwd()): string {
+    return `nexuscode.local.v1.${hashWorkspaceIdentity(canonicalProjectRoot(cwd))}.selectedSession`
+  }
+
+  private isPersistableSessionId(value: unknown): value is string {
+    return (
+      typeof value === "string" &&
+      value.length > 0 &&
+      value.length <= 512 &&
+      !/[\u0000-\u001f\u007f]/u.test(value)
+    )
+  }
+
+  private async setSelectedLocalSessionId(
+    sessionId: string | undefined,
+    cwd = this.getCwd(),
+  ): Promise<void> {
+    if (sessionId !== undefined && !this.isPersistableSessionId(sessionId)) {
+      throw new TypeError("Local session id is invalid")
+    }
+    await this.context.workspaceState.update(
+      this.localSelectedSessionKey(cwd),
+      sessionId,
+    )
+  }
+
+  private async restoreSelectedLocalSession(
+    cwd = this.getCwd(),
+  ): Promise<boolean> {
+    const key = this.localSelectedSessionKey(cwd)
+    let sessionId = this.context.workspaceState.get<unknown>(key)
+    let meta =
+      this.isPersistableSessionId(sessionId)
+        ? await getSessionMeta(sessionId, cwd)
+        : null
+    if (!meta) {
+      sessionId = (await listSessions(cwd))[0]?.id
+      meta =
+        this.isPersistableSessionId(sessionId)
+          ? await getSessionMeta(sessionId, cwd)
+          : null
+    }
+    if (!this.isPersistableSessionId(sessionId) || !meta) {
+      await this.setSelectedLocalSessionId(undefined, cwd)
+      return false
+    }
+    const offset = Math.max(
+      0,
+      meta.messageCount - INITIAL_SERVER_MESSAGES,
+    )
+    const loaded = await Session.resumeWindow(
+      sessionId,
+      cwd,
+      INITIAL_SERVER_MESSAGES,
+      offset,
+    )
+    if (!loaded) {
+      await this.setSelectedLocalSessionId(undefined, cwd)
+      return false
+    }
+    this.session = loaded
+    this.mode = getSessionModeForResume(loaded, this.mode)
+    loaded.setMode(this.mode)
+    if (meta.mode !== this.mode) {
+      await mutateSession(sessionId, cwd, (stored) => ({
+        ...stored,
+        mode: this.mode,
+        ts: stored.ts,
+      }))
+    }
+    this.serverSessionId = undefined
+    this.serverSessionOldestLoadedOffset = offset
+    this.localSessionWindowed = offset > 0
+    await this.setSelectedLocalSessionId(sessionId, cwd)
+    return true
   }
 
   private resumeRemoteTurnIfActive(): Promise<boolean> {
@@ -2228,6 +2322,34 @@ export class Controller {
     this.setServerConnectionState("error", message)
   }
 
+  private async persistSessionMode(mode: Mode): Promise<void> {
+    this.mode = mode
+    const session = this.session
+    if (!session) return
+    session.setMode(mode)
+
+    const cwd = this.getCwd()
+    const serverUrl = this.getServerUrl()
+    if (serverUrl && this.serverSessionId) {
+      try {
+        await (await this.createServerClient(cwd))
+          .setSessionMode(this.serverSessionId, mode)
+      } catch (error) {
+        this.reportServerError(error)
+      }
+      return
+    }
+
+    const updated = await mutateSession(session.id, cwd, (stored) => ({
+      ...stored,
+      mode,
+      ts: Date.now(),
+    }))
+    if (!updated) {
+      await session.save()
+    }
+  }
+
   /** Load skills from config paths, skillsUrls registries, Nexus skill dirs (.nexus/skills), Claude ~/.claude/skills, walk-up, send to webview Skills list. */
   private loadAndSendSkillDefinitions(): void {
     const generation = ++this.skillDefinitionsLoadGeneration
@@ -2325,6 +2447,7 @@ export class Controller {
       const cwd = this.getCwd()
       const remoteRuntime = Boolean(this.getServerUrl())
       let restoredRemoteSession = false
+      let restoredLocalSession = false
       if (!remoteRuntime) {
         await this.migrateLegacyPlaintextSecrets(cwd).catch((error: unknown) => {
           const message = error instanceof Error ? error.message : String(error)
@@ -2350,8 +2473,17 @@ export class Controller {
       if (remoteRuntime) {
         restoredRemoteSession =
           await this.restoreSelectedRemoteSession(cwd)
+      } else {
+        restoredLocalSession =
+          await this.restoreSelectedLocalSession(cwd)
       }
-      this.session ??= Session.create(cwd)
+      if (!this.session) {
+        this.session = Session.create(cwd)
+      }
+      if (!remoteRuntime && !restoredLocalSession) {
+        await this.session.save()
+        await this.setSelectedLocalSessionId(this.session.id, cwd)
+      }
       this.onAutocompleteConfigReady?.()
       this.postStateToWebview()
       this.sendIndexStatus()
@@ -2438,7 +2570,7 @@ export class Controller {
           this.postStateToWebview()
           break
         }
-        this.mode = msg.mode
+        await this.persistSessionMode(msg.mode)
         this.forcedRemoteModeForNextRun = null
         this.postStateToWebview()
         break
@@ -3399,8 +3531,8 @@ export class Controller {
         }
         break
       case "planFollowupChoice": {
-        if (msg.choice === "dismiss") {
-          this.mode = "agent"
+        if (msg.choice === "abandon") {
+          await this.persistSessionMode("agent")
           this.postStateToWebview()
           break
         }
@@ -3416,6 +3548,10 @@ export class Controller {
           if (msg.newSession && this.session) {
             const freshPlanText = planText || (await getPlanContentForFollowup(this.session, cwd))
             this.session = Session.create(cwd)
+            if (!this.getServerUrl()) {
+              await this.session.save()
+              await this.setSelectedLocalSessionId(this.session.id, cwd)
+            }
             this.lastRunMode = null
             this.checkpoint = undefined
             this.serverSessionId = undefined
@@ -4162,6 +4298,7 @@ export class Controller {
       forcedRemoteModeForRun ?? mode ?? this.mode
     this.mode = requestedMode
     const runMode: Mode = reviewCommand ? "review" : requestedMode
+    this.session.setMode(runMode)
     this.lastRunMode = runMode
     this.abortController = new AbortController()
     this.isRunning = true
@@ -4311,6 +4448,7 @@ Return in this format:
         role: "user",
         content: userContent,
         presetName: effectivePresetName,
+        mode: runMode,
       },
       clientMessageId ? { id: clientMessageId } : undefined,
     )
@@ -5262,6 +5400,8 @@ Return in this format:
           offset,
         })
         this.session = new Session(sessionId, cwd, messages, undefined, true)
+        if (meta.mode) this.session.setMode(meta.mode)
+        this.mode = getSessionModeForResume(this.session, this.mode)
         this.serverSessionId = sessionId
         await this.getRemoteWorkspaceState(cwd)
           .setSelectedSessionId(sessionId)
@@ -5283,6 +5423,8 @@ Return in this format:
     const loaded = await Session.resumeWindow(sessionId, cwd, INITIAL_SERVER_MESSAGES, offset)
     if (loaded) {
       this.session = loaded
+      this.mode = getSessionModeForResume(loaded, this.mode)
+      await this.setSelectedLocalSessionId(sessionId, cwd)
       this.sessionUnacceptedEdits = []
       this.changeSetReviewSessionId = null
       this.serverSessionId = undefined
@@ -5319,6 +5461,8 @@ Return in this format:
       }
     } else {
       this.session = Session.create(cwd)
+      await this.session.save()
+      await this.setSelectedLocalSessionId(this.session.id, cwd)
       this.serverSessionId = undefined
     }
     this.sessionUnacceptedEdits = []
@@ -5371,6 +5515,8 @@ Return in this format:
         }
       } else {
         this.session = Session.create(cwd)
+        await this.session.save()
+        await this.setSelectedLocalSessionId(this.session.id, cwd)
         this.serverSessionId = undefined
       }
       this.checkpoint = undefined

@@ -110,16 +110,17 @@ describe("NexusServerClient authorization", () => {
     await client.createSession()
     await client.getSession("session_test")
     await client.getMessages("session_test")
+    await client.setSessionMode("session_test", "plan")
     await client.deleteSession("session_test")
 
-    expect(headers).toHaveLength(5)
+    expect(headers).toHaveLength(6)
     expect(
       headers.every(
         (value) => value.get("authorization") === "Bearer secret-token",
       ),
     ).toBe(true)
     const calls = vi.mocked(fetch).mock.calls
-    expect(calls).toHaveLength(5)
+    expect(calls).toHaveLength(6)
     expect(calls.every(([, init]) => init?.redirect === "error")).toBe(true)
   })
 

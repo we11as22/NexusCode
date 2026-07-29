@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   createNexusRunServices,
   hashWorkspaceIdentity,
+  type Mode,
   type SessionMessage,
 } from "@nexuscode/core"
 
@@ -34,6 +35,7 @@ function createMemorySessionStore(
 ): {
   store: ServerTurnSessionStore
   messages(sessionId: string): SessionMessage[]
+  mode(sessionId: string): Mode | undefined
 } {
   const records = new Map(
     sessionIds.map((sessionId) => [
@@ -43,6 +45,7 @@ function createMemorySessionStore(
         revision: 0,
         title: undefined as string | undefined,
         todo: undefined as string | undefined,
+        mode: undefined as Mode | undefined,
       },
     ]),
   )
@@ -54,6 +57,7 @@ function createMemorySessionStore(
       revision: 0,
       title: undefined as string | undefined,
       todo: undefined as string | undefined,
+      mode: undefined as Mode | undefined,
     }
     records.set(sessionId, created)
     return created
@@ -74,6 +78,7 @@ function createMemorySessionStore(
           revision: current.revision,
           ...(current.title ? { title: current.title } : {}),
           ...(current.todo ? { todo: current.todo } : {}),
+          ...(current.mode ? { mode: current.mode } : {}),
         }
       },
       checkpoint: async (
@@ -95,11 +100,13 @@ function createMemorySessionStore(
         )
         current.title = snapshot.title
         current.todo = snapshot.todo
+        current.mode = snapshot.mode
         current.revision += 1
         return current.revision
       },
     },
     messages: (sessionId) => record(sessionId).messages,
+    mode: (sessionId) => record(sessionId).mode,
   }
 }
 
@@ -240,12 +247,13 @@ describe("ServerTurnRunner", () => {
         mode: "plan",
       })
     })
+    const sessionStore = createMemorySessionStore(["session-mode"])
     const runner = new ServerTurnRunner({
       canonicalDirectory: workspace,
       state,
       approvals,
       execute,
-      sessions: createMemorySessionStore(["session-mode"]).store,
+      sessions: sessionStore.store,
     })
 
     try {
@@ -263,6 +271,7 @@ describe("ServerTurnRunner", () => {
           safeBoundary: async () => [],
         }),
       ).resolves.toEqual({ status: "completed" })
+      expect(sessionStore.mode("session-mode")).toBe("plan")
       state.prepareCommand({
         command: {
           version: 2,

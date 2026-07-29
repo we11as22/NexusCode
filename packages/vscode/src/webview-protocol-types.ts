@@ -109,7 +109,7 @@ export type WebviewMessage =
   | { type: "applyAgentPreset"; presetName: string }
   | {
       type: "planFollowupChoice"
-      choice: "implement" | "revise" | "dismiss"
+      choice: "implement" | "revise" | "abandon"
       planText?: string
       instruction?: string
       newSession?: boolean

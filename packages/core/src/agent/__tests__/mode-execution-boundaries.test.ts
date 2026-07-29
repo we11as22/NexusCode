@@ -473,6 +473,7 @@ describe("runtime mode boundaries", () => {
     expect(host.events.some(
       (event) => event.type === "tool_start" && event.tool === "Bash",
     )).toBe(false)
+    expect(session.getMode()).toBe("plan")
   })
 
   it("rejects a forced synthetic PlanExit when no plan file was written", async () => {

@@ -342,7 +342,9 @@ function explorationPrefixItemSignature(item: ExploredPrefixItem): string {
   return `tool:${item.part.id}`
 }
 
-function dedupeExplorationPrefixItems(items: ExploredPrefixItem[]): ExploredPrefixItem[] {
+export function dedupeExplorationPrefixItems(
+  items: ExploredPrefixItem[],
+): ExploredPrefixItem[] {
   if (items.length <= 1) return items
   const seen = new Set<string>()
   const deduped: ExploredPrefixItem[] = []

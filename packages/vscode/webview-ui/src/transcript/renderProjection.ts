@@ -1,5 +1,9 @@
 import type { MessagePart, ReasoningPart, SessionMessage, ToolPart } from "../stores/chat.js"
-import { getAssistantDisplaySegments, type ExploredPrefixItem } from "../components/ExploredProgressBlock.js"
+import {
+  dedupeExplorationPrefixItems,
+  getAssistantDisplaySegments,
+  type ExploredPrefixItem,
+} from "../components/ExploredProgressBlock.js"
 
 const TODO_TOOL_NAMES = new Set(["TodoWrite", "update_todo_list"])
 const PLACEHOLDER_TEXT = "Model reasoning is active, but the provider has not streamed visible reasoning text yet."
@@ -81,6 +85,28 @@ function explorationSegmentIsRunning(
     if (item.type === "reasoning") return item.durationMs == null
     return false
   })
+}
+
+function coalesceAdjacentExplored(
+  items: ChatRenderLeaf[],
+): ChatRenderLeaf[] {
+  const coalesced: ChatRenderLeaf[] = []
+  for (const item of items) {
+    const previous = coalesced[coalesced.length - 1]
+    if (item.type === "explored" && previous?.type === "explored") {
+      coalesced[coalesced.length - 1] = {
+        ...previous,
+        prefixItems: dedupeExplorationPrefixItems([
+          ...previous.prefixItems,
+          ...item.prefixItems,
+        ]),
+        isRunning: previous.isRunning || item.isRunning,
+      }
+      continue
+    }
+    coalesced.push(item)
+  }
+  return coalesced
 }
 
 function buildMessageRenderItems(
@@ -248,11 +274,21 @@ export function buildChatRenderItems(
       type: "completed_work",
       key: `${message.id}-worked`,
       durationMs: Math.floor(finalAssistant.durationMs ?? 0),
-      items: technicalItems,
+      items: coalesceAdjacentExplored(technicalItems),
     })
     renderItems.push(...finalAnswerItems)
     messageIndex = endIndex - 1
   }
 
-  return renderItems
+  const coalesced: ChatRenderItem[] = []
+  for (const item of renderItems) {
+    const previous = coalesced[coalesced.length - 1]
+    if (item.type === "explored" && previous?.type === "explored") {
+      coalesced[coalesced.length - 1] =
+        coalesceAdjacentExplored([previous, item])[0]!
+      continue
+    }
+    coalesced.push(item)
+  }
+  return coalesced
 }

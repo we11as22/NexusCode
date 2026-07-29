@@ -10,14 +10,14 @@ type Props = {
   planText: string
   onImplement: () => void | Promise<void>
   onRevise: (instruction: string) => void | Promise<void>
-  onDismiss: () => void
+  onAbandon: () => void
 }
 
 export function NexusPlanFollowupPanel({
   planText,
   onImplement,
   onRevise,
-  onDismiss,
+  onAbandon,
 }: Props): React.ReactNode {
   const theme = getTheme()
   const { columns } = useTerminalSize()
@@ -28,7 +28,8 @@ export function NexusPlanFollowupPanel({
   const options = useMemo(
     () => [
       'Yes, implement this plan',
-      'No, and tell NexusCode what to do differently',
+      'Revise the plan with feedback',
+      'Exit Plan without implementing',
     ],
     [],
   )
@@ -56,10 +57,6 @@ export function NexusPlanFollowupPanel({
       return
     }
 
-    if (key.escape) {
-      onDismiss()
-      return
-    }
     if (key.upArrow || input === 'k') {
       setSelectedIndex((i) => (i - 1 + options.length) % options.length)
       return
@@ -77,11 +74,17 @@ export function NexusPlanFollowupPanel({
       setMode('instruct')
       return
     }
+    if (input === '3') {
+      onAbandon()
+      return
+    }
     if (key.return) {
       if (selectedIndex === 0) {
         void onImplement()
-      } else {
+      } else if (selectedIndex === 1) {
         setMode('instruct')
+      } else {
+        onAbandon()
       }
     }
   })
@@ -106,7 +109,7 @@ export function NexusPlanFollowupPanel({
             </Text>
           ))}
           <Box marginTop={1}>
-            <Text dimColor>↑/↓ choose · Enter confirm · Esc dismiss</Text>
+            <Text dimColor>↑/↓ choose · Enter confirm · Esc keeps Plan active</Text>
           </Box>
         </Box>
       ) : (

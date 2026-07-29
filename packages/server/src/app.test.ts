@@ -264,6 +264,11 @@ describe("server boundary", () => {
       new Request("http://localhost/session/session_test", {
         method: "DELETE",
       }),
+      new Request("http://localhost/session/session_test/mode", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "plan" }),
+      }),
       new Request("http://localhost/session/session_test/abort", {
         method: "POST",
         body: "{}",

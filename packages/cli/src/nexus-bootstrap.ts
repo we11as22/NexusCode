@@ -49,6 +49,7 @@ import {
   NEXUS_SERVER_TOKEN_SECRET_KEY,
   mergeProviderConfigSafely,
   selectProviderProfile,
+  getSessionModeForResume,
   type WorkspaceAuthorityStoreOptions,
 } from '@nexuscode/core'
 import type { CodebaseIndexer } from '@nexuscode/core'
@@ -428,7 +429,6 @@ export async function bootstrapNexus(opts: {
       },
     ) as unknown as NexusConfig
 
-  const mode: Mode = modeArg ?? 'agent'
   const mcpAuthorizationHost = new CliHost(cwd, () => {})
   const mcpClient = new McpClient({
     remoteRequestAuthorizer:
@@ -548,7 +548,17 @@ export async function bootstrapNexus(opts: {
     try {
       const meta = await remoteClient.getSession(sessionId)
       const messages = await remoteClient.getRecentMessages(sessionId)
-      return new Session(meta.id, cwd, messages, undefined, true)
+      return new Session(
+        meta.id,
+        cwd,
+        messages,
+        undefined,
+        true,
+        null,
+        0,
+        null,
+        meta.mode ?? null,
+      )
     } catch (error) {
       if (error instanceof Error && /\b404\b/.test(error.message)) return null
       throw error
@@ -579,6 +589,8 @@ export async function bootstrapNexus(opts: {
     load: sessionStore.load,
     create: sessionStore.create,
   })
+  const mode: Mode =
+    modeArg ?? getSessionModeForResume(session, 'agent')
 
   let indexer: CodebaseIndexer | undefined
   if (

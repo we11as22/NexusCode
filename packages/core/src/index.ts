@@ -220,7 +220,11 @@ export type {
   StoredSessionMeta,
   StoredContextUsage,
 } from "./session/storage.js"
-export { hadPlanExit, getPlanContentForFollowup } from "./session/plan-followup.js"
+export {
+  hadPlanExit,
+  getPlanContentForFollowup,
+  getSessionModeForResume,
+} from "./session/plan-followup.js"
 export {
   compactSessionAndPersist,
   createCompaction,
