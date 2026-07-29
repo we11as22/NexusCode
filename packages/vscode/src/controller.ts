@@ -100,6 +100,7 @@ import {
   settleRuntimeDependency,
   hashWorkspaceIdentity,
 } from "@nexuscode/core"
+import { PendingQuestionCoordinator } from "./question-lifecycle.js"
 import {
   VsCodeHost,
   resolveWebviewApproval,
@@ -570,8 +571,15 @@ export class Controller {
   private statePostTimer: ReturnType<typeof setTimeout> | null = null
   /** True when a local session was opened as a recent-message window instead of fully loaded. */
   private localSessionWindowed = false
-  /** Pending structured questionnaire requested by AskFollowupQuestion. */
-  private pendingQuestionRequest: UserQuestionRequest | null = null
+  /** Single owner for the pending question lifecycle and response identity. */
+  private readonly pendingQuestionCoordinator = new PendingQuestionCoordinator()
+  private get pendingQuestionRequest(): UserQuestionRequest | null {
+    return this.pendingQuestionCoordinator.snapshot()
+  }
+  private set pendingQuestionRequest(request: UserQuestionRequest | null) {
+    if (request) this.pendingQuestionCoordinator.publish(request)
+    else this.pendingQuestionCoordinator.clear("new-run")
+  }
   private cwdOverride: string | null = null
 
   private normalizePathKey(filePath: string, cwd: string): string {
@@ -3436,17 +3444,24 @@ export class Controller {
         break
       }
       case "dismissQuestionnaire": {
-        if (this.pendingQuestionRequest?.requestId === msg.requestId) {
-          this.pendingQuestionRequest = null
+        if (this.pendingQuestionCoordinator.dismiss(msg.requestId)) {
           // Force immediate sync so webview doesn't briefly re-show stale pending from a batched state post.
           this.postStateToWebview(true)
         }
         break
       }
       case "questionnaireResponse": {
-        if (!this.pendingQuestionRequest || this.pendingQuestionRequest.requestId !== msg.requestId) break
-        const prompt = formatQuestionnaireAnswersForAgent(this.pendingQuestionRequest, msg.answers)
-        this.pendingQuestionRequest = null
+        const resolution = this.pendingQuestionCoordinator.resolve(
+          msg.requestId,
+          msg.answers,
+        )
+        if (!resolution.accepted || !resolution.request || !resolution.answers) {
+          break
+        }
+        const prompt = formatQuestionnaireAnswersForAgent(
+          resolution.request,
+          resolution.answers,
+        )
         this.postStateToWebview(true)
         await this.runAgent(prompt, this.mode)
         break

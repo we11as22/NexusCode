@@ -93,6 +93,42 @@ describe("webview host protocol", () => {
     ).toThrow(/answers|large|limit/i)
   })
 
+  it.each([
+    {
+      type: "questionnaireResponse",
+      requestId: "request",
+      answers: [],
+    },
+    {
+      type: "questionnaireResponse",
+      requestId: "request",
+      answers: [
+        { questionId: "q1", optionId: "a" },
+        { questionId: "q1", optionId: "b" },
+      ],
+    },
+    {
+      type: "questionnaireResponse",
+      requestId: "request",
+      answers: [{ questionId: "q1", customText: "missing selection" }],
+    },
+    {
+      type: "questionnaireResponse",
+      requestId: "request",
+      answers: [
+        {
+          questionId: "q1",
+          optionId: "a",
+          optionIds: ["b"],
+        },
+      ],
+    },
+  ])("rejects invalid questionnaire response contracts: %j", (input) => {
+    expect(() => parseWebviewInboundMessage(input)).toThrow(
+      WebviewProtocolError,
+    )
+  })
+
   it("counts object-key characters toward the aggregate payload limit", () => {
     const oversizedKey = "k".repeat(24 * 1024 * 1024 + 1)
     let code: WebviewProtocolError["code"] | undefined

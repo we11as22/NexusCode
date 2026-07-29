@@ -270,14 +270,43 @@ const questionnaireAnswerRule: Rule = (value, path) => {
     { questionId: identifierRule },
     {
       optionId: identifierRule,
-      optionLabel: stringRule(4_096),
-      optionIds: arrayRule(identifierRule, 128),
-      optionLabels: arrayRule(stringRule(4_096), 128),
-      customText: stringRule(64 * 1024),
+      optionLabel: stringRule(1_024),
+      optionIds: arrayRule(identifierRule, 4),
+      optionLabels: arrayRule(stringRule(1_024), 4),
+      customText: stringRule(16_384),
     },
   )
-  if (answer["optionId"] !== undefined && answer["optionIds"] !== undefined) {
-    fail("invalid_field", `${path} cannot contain both optionId and optionIds`)
+  const hasSingle = answer["optionId"] !== undefined
+  const hasMultiple = answer["optionIds"] !== undefined
+  if (hasSingle === hasMultiple) {
+    fail(
+      "invalid_field",
+      `${path} must contain exactly one of optionId or optionIds`,
+    )
+  }
+  if (
+    hasMultiple &&
+    (answer["optionIds"] as unknown[]).length === 0
+  ) {
+    fail("invalid_field", `${path}.optionIds must not be empty`)
+  }
+}
+
+const questionnaireAnswersRule: Rule = (value, path) => {
+  arrayRule(questionnaireAnswerRule, 4)(value, path)
+  const answers = value as Array<{ questionId: string }>
+  if (answers.length === 0) {
+    fail("invalid_field", `${path} must contain at least one answer`)
+  }
+  const questionIds = new Set<string>()
+  for (const answer of answers) {
+    if (questionIds.has(answer.questionId)) {
+      fail(
+        "invalid_field",
+        `${path} contains duplicate questionId "${answer.questionId}"`,
+      )
+    }
+    questionIds.add(answer.questionId)
   }
 }
 
@@ -584,7 +613,7 @@ function validateRequest(message: PlainRecord): WebviewMessage {
         {
           type: enumRule([type]),
           requestId: identifierRule,
-          answers: arrayRule(questionnaireAnswerRule, 128),
+          answers: questionnaireAnswersRule,
         },
       )
       break
