@@ -5,6 +5,44 @@ import {
   type UserQuestionRequest,
 } from "@nexuscode/core"
 
+export interface QuestionnaireDisplayOption {
+  id: string
+  label: string
+  description?: string
+  preview?: string
+  isCustom: boolean
+}
+
+export function questionOptions(
+  question: UserQuestionItem,
+  request: UserQuestionRequest,
+): QuestionnaireDisplayOption[] {
+  const options = question.options.map((option) => ({
+    ...option,
+    isCustom: false,
+  }))
+  if (question.allowCustom === true) {
+    options.push({
+      id: NEXUS_CUSTOM_OPTION_ID,
+      label: request.customOptionLabel?.trim() || "Other",
+      isCustom: true,
+    })
+  }
+  return options
+}
+
+export function resolveQuestionCapability(interactive: boolean): {
+  supported: boolean
+  reason?: string
+} {
+  return interactive
+    ? { supported: true }
+    : {
+        supported: false,
+        reason: "Interactive input is unavailable in this CLI mode.",
+      }
+}
+
 export type QuestionnairePhase = "answering" | "review"
 
 export interface QuestionnaireDraft {

@@ -3,6 +3,7 @@ import React, { useMemo, useState } from 'react'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import { getTheme } from '../utils/theme.js'
 import { NEXUS_CUSTOM_OPTION_ID, type UserQuestionRequest, type UserQuestionAnswer } from '@nexuscode/core'
+import { questionOptions } from './questionnaire-model.js'
 
 type AnswerState = {
   optionId?: string
@@ -50,13 +51,6 @@ function stepLabel(
   return q.split(/\s+/).slice(0, 3).join(' ').slice(0, 18)
 }
 
-function displayCustomOptionLabel(customOptionLabel?: string): string {
-  const label = customOptionLabel?.trim()
-  if (!label) return 'Type something.'
-  if (/^other$/i.test(label)) return 'Type something.'
-  return label
-}
-
 export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): React.ReactNode {
   const theme = getTheme()
   const { columns } = useTerminalSize()
@@ -68,13 +62,7 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
   const question = questionIndex < request.questions.length ? request.questions[questionIndex] : undefined
   const options = useMemo(() => {
     if (!question) return []
-    const base = question.options.map((option) => ({ ...option, isCustom: false }))
-    base.push({
-      id: NEXUS_CUSTOM_OPTION_ID,
-      label: displayCustomOptionLabel(request.customOptionLabel),
-      isCustom: true,
-    })
-    return base
+    return questionOptions(question, request)
   }, [question, request.customOptionLabel])
   const stepLabels = useMemo(
     () => request.questions.map((item, index) => stepLabel(item, index)),
@@ -106,8 +94,41 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
     if (nextIndex >= request.questions.length) setSelectedIndex(0)
   }
 
-  const advanceAfterAnswer = () => {
+  const buildSubmission = (nextAnswers: Record<string, AnswerState>) =>
+    request.questions.map((item) => {
+      const a = nextAnswers[item.id]
+      if (item.multiSelect) {
+        if (a?.optionId === NEXUS_CUSTOM_OPTION_ID) {
+          return {
+            questionId: item.id,
+            optionId: a.optionId,
+            optionLabel: a.optionLabel,
+            customText: a.customText,
+          }
+        }
+        const ids = a?.optionIds ?? []
+        const labels = ids
+          .map((id) => item.options.find((o) => o.id === id)?.label)
+          .filter((x): x is string => Boolean(x?.trim()))
+        return { questionId: item.id, optionIds: ids, optionLabels: labels }
+      }
+      return {
+        questionId: item.id,
+        optionId: a?.optionId,
+        optionLabel: a?.optionLabel,
+        customText: a?.customText,
+      }
+    })
+
+  const submitAllAnswers = (nextAnswers: Record<string, AnswerState> = answers) =>
+    onSubmit(buildSubmission(nextAnswers))
+
+  const advanceAfterAnswer = (nextAnswers: Record<string, AnswerState> = answers) => {
     if (questionIndex >= request.questions.length - 1) {
+      if (request.questions.length === 1) {
+        void submitAllAnswers(nextAnswers)
+        return
+      }
       setQuestionIndex(reviewPageIndex)
       setSelectedIndex(0)
       return
@@ -115,34 +136,6 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
     setQuestionIndex((prev) => prev + 1)
     setSelectedIndex(0)
   }
-
-  const submitAllAnswers = () =>
-    onSubmit(
-      request.questions.map((item) => {
-        const a = answers[item.id]
-        if (item.multiSelect) {
-          if (a?.optionId === NEXUS_CUSTOM_OPTION_ID) {
-            return {
-              questionId: item.id,
-              optionId: a.optionId,
-              optionLabel: a.optionLabel,
-              customText: a.customText,
-            }
-          }
-          const ids = a?.optionIds ?? []
-          const labels = ids
-            .map((id) => item.options.find((o) => o.id === id)?.label)
-            .filter((x): x is string => Boolean(x?.trim()))
-          return { questionId: item.id, optionIds: ids, optionLabels: labels }
-        }
-        return {
-          questionId: item.id,
-          optionId: a?.optionId,
-          optionLabel: a?.optionLabel,
-          customText: a?.customText,
-        }
-      }),
-    )
 
   useInput((input, key) => {
     if (questionIndex >= reviewPageIndex) {
@@ -200,7 +193,7 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
       }
       if (key.return) {
         if (!(answers[question.id]?.customText ?? '').trim()) return
-        advanceAfterAnswer()
+        advanceAfterAnswer(answers)
         return
       }
       if (key.backspace || input === '\x7f' || key.delete) {
@@ -237,9 +230,10 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
       goToQuestion(questionIndex - 1)
       return
     }
-    // Do not require an answer: ←/→ only move between questions (matches footer hint).
     if (key.rightArrow || input === 'l') {
-      goToQuestion(questionIndex + 1)
+      if (questionAnswered(question, answers[question.id])) {
+        advanceAfterAnswer(answers)
+      }
       return
     }
     if (key.upArrow || input === 'k') {
@@ -290,31 +284,33 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
         setSelectedIndex(idx)
         if (isMulti) return
         const selected = options[idx]!
-        setAnswers((prev) => ({
-          ...prev,
+        const nextAnswers = {
+          ...answers,
           [question.id]: {
             optionId: selected.id,
             optionLabel: selected.label,
-            customText: selected.isCustom ? (prev[question.id]?.customText ?? '') : undefined,
+            customText: selected.isCustom ? (answers[question.id]?.customText ?? '') : undefined,
           },
-        }))
-        if (!selected.isCustom) advanceAfterAnswer()
+        }
+        setAnswers(nextAnswers)
+        if (!selected.isCustom) advanceAfterAnswer(nextAnswers)
       }
       return
     }
     if (!isMulti && key.return) {
       const selected = options[selectedIndex]
       if (!selected) return
-      setAnswers((prev) => ({
-        ...prev,
+      const nextAnswers = {
+        ...answers,
         [question.id]: {
           optionId: selected.id,
           optionLabel: selected.label,
-          customText: selected.isCustom ? (prev[question.id]?.customText ?? '') : undefined,
+          customText: selected.isCustom ? (answers[question.id]?.customText ?? '') : undefined,
         },
-      }))
+      }
+      setAnswers(nextAnswers)
       if (!selected.isCustom) {
-        advanceAfterAnswer()
+        advanceAfterAnswer(nextAnswers)
       }
     }
   })
@@ -397,7 +393,9 @@ export function NexusQuestionPanel({ request, onDismiss, onSubmit }: Props): Rea
           ) : null}
           {customMode ? (
             <Box marginTop={1} borderStyle="single" borderColor={theme.secondaryBorder} paddingX={1}>
-              <Text>{activeAnswer?.customText || ' '}</Text>
+              <Text dimColor={!activeAnswer?.customText}>
+                {activeAnswer?.customText || 'Type something.'}
+              </Text>
             </Box>
           ) : null}
           <Box marginTop={1} justifyContent="space-between">

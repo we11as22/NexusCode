@@ -6,6 +6,8 @@ import {
   editQuestionnaireAnswer,
   nextQuestionnaireStep,
   openQuestionnaireReview,
+  questionOptions,
+  resolveQuestionCapability,
   selectQuestionOption,
   setCustomQuestionAnswer,
 } from "./questionnaire-model.js"
@@ -55,5 +57,14 @@ describe("terminal questionnaire model", () => {
       "No",
     )
     expect(disabled.answers.q2).toBeUndefined()
+    expect(questionOptions(request.questions[1]!, request)).toHaveLength(2)
+  })
+
+  it("describes non-interactive question support explicitly", () => {
+    expect(resolveQuestionCapability(false)).toEqual({
+      supported: false,
+      reason: "Interactive input is unavailable in this CLI mode.",
+    })
+    expect(resolveQuestionCapability(true)).toEqual({ supported: true })
   })
 })
