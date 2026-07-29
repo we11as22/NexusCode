@@ -33,6 +33,9 @@ const askQuestionItemSchema = z.object({
   multi_select: z.boolean().optional().describe(
     "When true, the user may pick multiple options; answers are comma-separated. Previews are disallowed in this mode.",
   ),
+  allow_custom: z.boolean().optional().describe(
+    "Set false only when the user must choose one of the listed options. Defaults to true.",
+  ),
 })
 
 const askSchema = z.object({
@@ -42,6 +45,9 @@ const askSchema = z.object({
     "Two to four suggested answers: strings, CSV, or { label, description?, preview? } rows.",
   ),
   multi_select: z.boolean().optional().describe("Legacy single-question multi-select toggle."),
+  allow_custom: z.boolean().optional().describe(
+    "Set false only when the user must choose one of the listed options. Defaults to true.",
+  ),
   questions: z.array(askQuestionItemSchema).min(1).max(4).optional().describe("One to four tightly related questions shown in one form"),
   title: z.string().trim().min(1).max(120).optional().describe("Optional title for the grouped question panel"),
   submit_label: z.string().trim().min(1).max(40).optional().describe("Optional label for the final submit button"),
@@ -150,7 +156,7 @@ function normalizeQuestionRequest(input: AskFollowupQuestionArgs): UserQuestionR
       question: item.question.trim(),
       multiSelect: multiSelect || undefined,
       options: buildUserQuestionOptionsFromRows(item.options ?? [], multiSelect, customOptionLabel, index),
-      allowCustom: true,
+      allowCustom: item.allow_custom !== false,
     }
   }
 
@@ -168,7 +174,7 @@ function normalizeQuestionRequest(input: AskFollowupQuestionArgs): UserQuestionR
             customOptionLabel,
             0,
           ),
-          allowCustom: true,
+          allowCustom: input.allow_custom !== false,
         }]
 
   return {
@@ -202,7 +208,7 @@ Options (OpenClaude-style):
 - \`multi_select: true\` when choices are not mutually exclusive; user answers are comma-separated in the injected user message.
 - Optional \`header\` per question: very short chip (e.g. \`"Library"\`, \`"Auth"\`).
 - Plain string arrays and CSV strings still work. Short labels; put **(Recommended)** on the first option when applicable.
-- Do not add Other/custom yourself; the UI injects exactly one custom row.
+- Do not add Other/custom yourself. The UI injects exactly one custom row by default; set \`allow_custom: false\` only when the user must choose one of the listed options.
 
 Prefer making a reasonable choice and stating the assumption over asking. Examples of when NOT to ask:
 - "Should I run tests?" → just run them

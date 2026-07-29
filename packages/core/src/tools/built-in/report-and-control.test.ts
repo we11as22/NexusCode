@@ -90,6 +90,30 @@ describe("AskFollowupQuestion contract", () => {
     expect(new Set(requestIds).size).toBe(2)
   })
 
+  it("lets the agent explicitly suppress the custom answer row", async () => {
+    const emitted: AgentEvent[] = []
+    const input = askFollowupTool.parameters.parse({
+      question: "Choose the target",
+      options: ["Workspace", "Worktree"],
+      allow_custom: false,
+    })
+    await askFollowupTool.execute(input, {
+      host: {
+        emit(event: AgentEvent) {
+          emitted.push(event)
+        },
+      },
+      partId: "part-no-custom",
+    } as ToolContext)
+
+    const request = emitted.find(
+      (event) => event.type === "question_request",
+    )
+    expect(request?.type).toBe("question_request")
+    if (request?.type !== "question_request") return
+    expect(request.request.questions[0]?.allowCustom).toBe(false)
+  })
+
   it("returns an actionable model-facing validation error", () => {
     const parsed = askFollowupTool.parameters.safeParse({
       question: "Choose the target",
