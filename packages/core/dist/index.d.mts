@@ -2392,6 +2392,17 @@ interface ChangeFileSummary {
         removed: number;
     };
     binary: boolean;
+    /** Bounded exact changed-line projection for compact multi-file previews. */
+    diffHunks?: ToolDiffLine[];
+}
+interface ToolDiffLine {
+    type: "add" | "remove";
+    lineNum: number;
+    line: string;
+}
+interface AppliedReplacement {
+    oldSnippet: string;
+    newSnippet: string;
 }
 interface ToolPart {
     type: "tool";
@@ -2423,6 +2434,10 @@ interface ToolPart {
         added: number;
         removed: number;
     };
+    /** Bounded exact changed-line projection retained across compaction/reload. */
+    diffHunks?: ToolDiffLine[];
+    /** Bounded snippets actually replaced by Edit, used for compact previews. */
+    appliedReplacements?: AppliedReplacement[];
     /** Durable ownership for an exact file-change proposal and its review state. */
     changeSetId?: string;
     proposalHash?: string;
@@ -7271,15 +7286,15 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
         added: number;
     }>>;
     diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-        type: z.ZodString;
+        type: z.ZodEnum<["add", "remove"]>;
         lineNum: z.ZodEffects<z.ZodNumber, number, number>;
         line: z.ZodString;
     }, "strict", z.ZodTypeAny, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }>, "many">>;
@@ -7317,15 +7332,15 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
         added: number;
     }>>;
     diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-        type: z.ZodString;
+        type: z.ZodEnum<["add", "remove"]>;
         lineNum: z.ZodEffects<z.ZodNumber, number, number>;
         line: z.ZodString;
     }, "strict", z.ZodTypeAny, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }>, "many">>;
@@ -7363,15 +7378,15 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
         added: number;
     }>>;
     diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-        type: z.ZodString;
+        type: z.ZodEnum<["add", "remove"]>;
         lineNum: z.ZodEffects<z.ZodNumber, number, number>;
         line: z.ZodString;
     }, "strict", z.ZodTypeAny, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }>, "many">>;
@@ -7823,15 +7838,15 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
         added: number;
     }>>;
     diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-        type: z.ZodString;
+        type: z.ZodEnum<["add", "remove"]>;
         lineNum: z.ZodEffects<z.ZodNumber, number, number>;
         line: z.ZodString;
     }, "strict", z.ZodTypeAny, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }>, "many">>;
@@ -8029,15 +8044,15 @@ declare const LegacyAgentEventSchema: z.ZodEffects<z.ZodDiscriminatedUnion<"type
         added: number;
     }>>;
     diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-        type: z.ZodString;
+        type: z.ZodEnum<["add", "remove"]>;
         lineNum: z.ZodEffects<z.ZodNumber, number, number>;
         line: z.ZodString;
     }, "strict", z.ZodTypeAny, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }, {
-        type: string;
+        type: "add" | "remove";
         line: string;
         lineNum: number;
     }>, "many">>;
@@ -8487,15 +8502,15 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
             added: number;
         }>>;
         diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-            type: z.ZodString;
+            type: z.ZodEnum<["add", "remove"]>;
             lineNum: z.ZodEffects<z.ZodNumber, number, number>;
             line: z.ZodString;
         }, "strict", z.ZodTypeAny, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }>, "many">>;
@@ -8533,15 +8548,15 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
             added: number;
         }>>;
         diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-            type: z.ZodString;
+            type: z.ZodEnum<["add", "remove"]>;
             lineNum: z.ZodEffects<z.ZodNumber, number, number>;
             line: z.ZodString;
         }, "strict", z.ZodTypeAny, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }>, "many">>;
@@ -8579,15 +8594,15 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
             added: number;
         }>>;
         diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-            type: z.ZodString;
+            type: z.ZodEnum<["add", "remove"]>;
             lineNum: z.ZodEffects<z.ZodNumber, number, number>;
             line: z.ZodString;
         }, "strict", z.ZodTypeAny, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }>, "many">>;
@@ -9039,15 +9054,15 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
             added: number;
         }>>;
         diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-            type: z.ZodString;
+            type: z.ZodEnum<["add", "remove"]>;
             lineNum: z.ZodEffects<z.ZodNumber, number, number>;
             line: z.ZodString;
         }, "strict", z.ZodTypeAny, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }>, "many">>;
@@ -9245,15 +9260,15 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
             added: number;
         }>>;
         diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-            type: z.ZodString;
+            type: z.ZodEnum<["add", "remove"]>;
             lineNum: z.ZodEffects<z.ZodNumber, number, number>;
             line: z.ZodString;
         }, "strict", z.ZodTypeAny, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }>, "many">>;
@@ -9454,15 +9469,15 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
             added: number;
         }>>;
         diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-            type: z.ZodString;
+            type: z.ZodEnum<["add", "remove"]>;
             lineNum: z.ZodEffects<z.ZodNumber, number, number>;
             line: z.ZodString;
         }, "strict", z.ZodTypeAny, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }>, "many">>;
@@ -9663,15 +9678,15 @@ declare const ProtocolPayloadSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObjec
             added: number;
         }>>;
         diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-            type: z.ZodString;
+            type: z.ZodEnum<["add", "remove"]>;
             lineNum: z.ZodEffects<z.ZodNumber, number, number>;
             line: z.ZodString;
         }, "strict", z.ZodTypeAny, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }, {
-            type: string;
+            type: "add" | "remove";
             line: string;
             lineNum: number;
         }>, "many">>;
@@ -10258,15 +10273,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -10304,15 +10319,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -10350,15 +10365,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -10810,15 +10825,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -11016,15 +11031,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -11225,15 +11240,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -11434,15 +11449,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -11804,15 +11819,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -12105,15 +12120,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -12406,15 +12421,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;
@@ -12707,15 +12722,15 @@ declare const ProtocolEnvelopeSchema: z.ZodEffects<z.ZodObject<{
                 added: number;
             }>>;
             diffHunks: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                type: z.ZodString;
+                type: z.ZodEnum<["add", "remove"]>;
                 lineNum: z.ZodEffects<z.ZodNumber, number, number>;
                 line: z.ZodString;
             }, "strict", z.ZodTypeAny, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }, {
-                type: string;
+                type: "add" | "remove";
                 line: string;
                 lineNum: number;
             }>, "many">>;

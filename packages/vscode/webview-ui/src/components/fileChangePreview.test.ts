@@ -101,6 +101,27 @@ describe("buildFileChangePreview", () => {
     expect(preview.statusOnly).toBe(false)
   })
 
+  it("shows an exact proposed Edit preview before approval", () => {
+    const preview = buildFileChangePreview(
+      part({
+        status: "pending",
+        input: {
+          file_path: "fixture.txt",
+          old_string: "ALPHA\nBETA",
+          new_string: "ALPHA\nGAMMA",
+        },
+        diffStats: { added: 1, removed: 1 },
+      }),
+      6,
+    )
+
+    expect(preview.lines).toEqual([
+      { type: "remove", lineNum: 2, line: "BETA" },
+      { type: "add", lineNum: 2, line: "GAMMA" },
+    ])
+    expect(preview.statusOnly).toBe(false)
+  })
+
   it("rejects malformed hunks and reports the full hidden count", () => {
     const preview = buildFileChangePreview(
       part({

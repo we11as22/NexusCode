@@ -112,7 +112,7 @@ function buildMessageRenderItems(
         if (segment.prefixItems.length === 0) return
         renderItems.push({
           type: "explored",
-          // Stable across streaming appends within the same wave (endIndex grows); avoids Virtuoso remount flicker.
+          // Stable across streaming appends within the same wave (endIndex grows).
           key: `${message.id}-explored-${segment.startIndex}`,
           prefixItems: segment.prefixItems,
           isRunning: Boolean(

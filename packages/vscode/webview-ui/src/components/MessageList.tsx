@@ -1,5 +1,4 @@
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useMemo } from "react"
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import {
@@ -29,6 +28,7 @@ import {
   getParallelDelegatedAgentTaskDescriptions,
   isPureSubagentParallelInput,
 } from "../transcript/helpers.js"
+import { shouldFollowNewContent } from "./native-scroll-policy.js"
 
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file", "Edit", "Write"])
 const BASH_OUTPUT_TAIL_LINES = 80
@@ -42,18 +42,6 @@ function isDeniedFileEdit(part: ToolPart): boolean {
   const output = (part.output ?? "").trim()
   return /^User denied (write|edit) /i.test(output)
 }
-
-const MessageListScroller = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  (props, ref) => (
-    <div
-      {...props}
-      ref={ref}
-      className={`${props.className ?? ""} nexus-message-list-scroller`.trim()}
-      style={{ ...props.style, minHeight: 0 }}
-    />
-  )
-)
-MessageListScroller.displayName = "MessageListScroller"
 
 /**
  * Compact approval request inline.
@@ -168,7 +156,7 @@ export function BashCommandBlock({
 }: {
   part: ToolPart
   approval?: React.ReactNode
-  /** Notify parent when height may change (expand/collapse, streaming output) so Virtuoso can re-pin to bottom. */
+  /** Notify parent when height may change so the native scroll viewport can remain pinned. */
   onListLayoutHint?: () => void
 }) {
   // null = follow auto logic; true/false = user override
@@ -349,13 +337,12 @@ type ChatRenderItem =
     }
 
 export function MessageList({ messages, isRunning = false, hasOlderMessages = false, loadingOlderMessages = false }: Props) {
-  const virtuosoRef = useRef<VirtuosoHandle>(null)
-  const virtuosoViewportWrapRef = useRef<HTMLDivElement>(null)
-  const initialTopMostItemIndexRef = useRef<number | undefined>(undefined)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
   const [stickToBottom, setStickToBottom] = useState(true)
   const stickToBottomRef = useRef(true)
-  const renderLenRef = useRef(0)
   const scrollBottomRafRef = useRef<number | null>(null)
+  const programmaticScrollUntilRef = useRef(0)
   const prevLastUserIdRef = useRef<string | undefined>(undefined)
   const store = useChatStore()
   const compactionUi = useChatStore((s) => s.compactionUi)
@@ -372,42 +359,55 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
     }
     return [...base, ...extra]
   }, [messages, isRunning, compactionLog, compactionUi])
-  const virtuosoComponents = useMemo(() => ({ Scroller: MessageListScroller }), [])
 
-  renderLenRef.current = renderedMessages.length
   useEffect(() => {
     stickToBottomRef.current = stickToBottom
   }, [stickToBottom])
 
-  /** Virtuoso: scroll range + internal state after resize or dynamic row height must stay consistent or the viewport goes blank. */
-  const flushPinToBottom = useCallback(() => {
-    if (!stickToBottomRef.current) return
-    const n = renderLenRef.current
-    if (n <= 0) return
-    virtuosoRef.current?.scrollToIndex({
-      index: n - 1,
-      align: "end",
-      behavior: "auto",
-    })
-    virtuosoRef.current?.autoscrollToBottom()
+  const setPinned = useCallback((pinned: boolean) => {
+    stickToBottomRef.current = pinned
+    setStickToBottom((current) => current === pinned ? current : pinned)
   }, [])
 
-  const schedulePinToBottom = useCallback(() => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        flushPinToBottom()
-      })
+  /** Kilo-style native follow: keep the live tail mounted and lock it before paint. */
+  const flushPinToBottom = useCallback((force = false) => {
+    if (!force && !stickToBottomRef.current) return
+    const element = scrollRef.current
+    if (!element) return
+    programmaticScrollUntilRef.current = Date.now() + 750
+    element.scrollTop = element.scrollHeight
+    if (force) setPinned(true)
+  }, [setPinned])
+
+  const schedulePinToBottom = useCallback((force = false) => {
+    if (!force && !stickToBottomRef.current) return
+    if (scrollBottomRafRef.current != null) {
+      cancelAnimationFrame(scrollBottomRafRef.current)
+    }
+    scrollBottomRafRef.current = requestAnimationFrame(() => {
+      scrollBottomRafRef.current = null
+      flushPinToBottom(force)
     })
   }, [flushPinToBottom])
 
   useLayoutEffect(() => {
-    const el = virtuosoViewportWrapRef.current
-    if (!el || typeof ResizeObserver === "undefined") return
-    const ro = new ResizeObserver(() => schedulePinToBottom())
-    ro.observe(el)
+    if (!stickToBottomRef.current) return
+    flushPinToBottom()
     schedulePinToBottom()
-    return () => ro.disconnect()
-  }, [schedulePinToBottom])
+  }, [renderedMessages, flushPinToBottom, schedulePinToBottom])
+
+  useLayoutEffect(() => {
+    const content = contentRef.current
+    if (!content || typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottomRef.current) return
+      flushPinToBottom()
+      schedulePinToBottom()
+    })
+    observer.observe(content)
+    schedulePinToBottom()
+    return () => observer.disconnect()
+  }, [flushPinToBottom, schedulePinToBottom])
 
   useEffect(() => {
     const onExternalLayout = () => schedulePinToBottom()
@@ -415,20 +415,36 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
     return () => window.removeEventListener(NEXUS_CHAT_LAYOUT_EVENT, onExternalLayout)
   }, [schedulePinToBottom])
 
-  const onTotalListHeightChanged = useCallback(() => {
+  useEffect(() => () => {
+    if (scrollBottomRafRef.current != null) {
+      cancelAnimationFrame(scrollBottomRafRef.current)
+    }
+  }, [])
+
+  const onListLayoutHint = useCallback(() => {
     schedulePinToBottom()
   }, [schedulePinToBottom])
 
-  const onListLayoutHint = useCallback(() => {
-    if (!stickToBottomRef.current) return
-    if (scrollBottomRafRef.current != null) return
-    scrollBottomRafRef.current = requestAnimationFrame(() => {
-      scrollBottomRafRef.current = requestAnimationFrame(() => {
-        scrollBottomRafRef.current = null
-        flushPinToBottom()
-      })
-    })
-  }, [flushPinToBottom])
+  const onScroll = useCallback(() => {
+    const element = scrollRef.current
+    if (!element) return
+    if (shouldFollowNewContent(element)) {
+      setPinned(true)
+      return
+    }
+    if (
+      stickToBottomRef.current &&
+      Date.now() <= programmaticScrollUntilRef.current
+    ) {
+      schedulePinToBottom()
+      return
+    }
+    setPinned(false)
+  }, [schedulePinToBottom, setPinned])
+
+  const onWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if (event.deltaY < 0) setPinned(false)
+  }, [setPinned])
 
   useEffect(() => {
     const last = messages[messages.length - 1]
@@ -439,36 +455,13 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
     if (last.role !== "user") return
     if (last.id === prevLastUserIdRef.current) return
     prevLastUserIdRef.current = last.id
-    setStickToBottom(true)
-    stickToBottomRef.current = true
-    requestAnimationFrame(() => {
-      const n = renderLenRef.current
-      if (n <= 0) return
-      virtuosoRef.current?.scrollToIndex({
-        index: n - 1,
-        align: "end",
-        behavior: "auto",
-      })
-      virtuosoRef.current?.autoscrollToBottom()
-    })
-  }, [messages])
-
-  if (initialTopMostItemIndexRef.current == null && renderedMessages.length > 0) {
-    initialTopMostItemIndexRef.current = renderedMessages.length - 1
-  }
+    setPinned(true)
+    schedulePinToBottom(true)
+  }, [messages, schedulePinToBottom, setPinned])
 
   const jumpToLatest = useCallback(() => {
-    setStickToBottom(true)
-    stickToBottomRef.current = true
-    requestAnimationFrame(() => {
-      virtuosoRef.current?.scrollToIndex({
-        index: renderedMessages.length - 1,
-        behavior: "smooth",
-        align: "end",
-      })
-      virtuosoRef.current?.autoscrollToBottom()
-    })
-  }, [renderedMessages.length])
+    schedulePinToBottom(true)
+  }, [schedulePinToBottom])
 
   if (renderedMessages.length === 0) {
     return (
@@ -493,32 +486,23 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
           </button>
         </div>
       )}
-      <div className="message-list-virtuoso">
-        <div ref={virtuosoViewportWrapRef} className="message-list-virtuoso-wrap">
-        <Virtuoso
-          ref={virtuosoRef}
-          data={renderedMessages}
-          initialTopMostItemIndex={initialTopMostItemIndexRef.current}
-          followOutput={stickToBottom ? "auto" : false}
-          atBottomStateChange={setStickToBottom}
-          atBottomThreshold={120}
-          increaseViewportBy={{ top: 200, bottom: 480 }}
-          totalListHeightChanged={onTotalListHeightChanged}
-          computeItemKey={(_, item) => (item as ChatRenderItem).key}
-          itemContent={(idx, item) => (
-            <div className="message-list-item">
+      <div
+        ref={scrollRef}
+        className="message-list nexus-message-list-native-scroller"
+        onScroll={onScroll}
+        onWheel={onWheel}
+      >
+        <div ref={contentRef} className="nexus-message-list-native-content">
+          {renderedMessages.map((item) => (
+            <div key={item.key} className="message-list-item">
               <RenderItemRow
-                item={item as ChatRenderItem}
+                item={item}
                 pendingApproval={store.pendingApproval}
                 onResolveApproval={store.resolveApproval}
                 onListLayoutHint={onListLayoutHint}
               />
             </div>
-          )}
-          style={{ height: "100%", minHeight: 0, overflowAnchor: "none" }}
-          className="message-list-virtuoso-inner"
-          components={virtuosoComponents}
-        />
+          ))}
         </div>
       </div>
       {!stickToBottom && (

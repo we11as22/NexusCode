@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  appliedFileLabel,
   inputContextPanelKind,
   reviewActionForFileCount,
+  uniqueEditedFileCount,
 } from "./input-context-panel-policy.js"
 
 describe("inputContextPanelKind", () => {
@@ -38,5 +40,28 @@ describe("reviewActionForFileCount", () => {
   it("opens a single diff directly and expands multi-file changes", () => {
     expect(reviewActionForFileCount(1)).toBe("open-single")
     expect(reviewActionForFileCount(2)).toBe("expand-list")
+  })
+})
+
+describe("applied edit file summary", () => {
+  it("counts unique paths instead of edit operations", () => {
+    const edits = [
+      { path: "nexus-ui-fresh-a.txt" },
+      { path: "nexus-ui-fresh-b.txt" },
+      { path: "nexus-ui-fresh-a.txt" },
+    ]
+
+    expect(uniqueEditedFileCount(edits)).toBe(2)
+    expect(appliedFileLabel(edits)).toBe("2 Files")
+  })
+
+  it("uses the singular label when several operations touch one file", () => {
+    const edits = [
+      { path: "fixture.txt" },
+      { path: "fixture.txt" },
+    ]
+
+    expect(uniqueEditedFileCount(edits)).toBe(1)
+    expect(appliedFileLabel(edits)).toBe("1 File")
   })
 })

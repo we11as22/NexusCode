@@ -2513,49 +2513,6 @@ html, body, #root {
   cursor: not-allowed;
 }
 
-.message-list-virtuoso {
-  flex: 1 1 0%;
-  min-height: 0;
-  min-width: 0;
-  width: 100%;
-  padding: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  position: relative;
-  /* Kilo-style: fill parent so scroll area gets a definite height */
-  height: 100%;
-}
-
-.nexus-message-list-top-indicator {
-  flex-shrink: 0;
-  padding: 4px 12px;
-  font-size: 10px;
-  color: var(--vscode-descriptionForeground);
-  background: var(--vscode-editor-inactiveSelectionBackground);
-  border-bottom: 1px solid var(--vscode-panel-border);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.nexus-message-list-top-preview {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Stable scroll viewport for Virtuoso (prevents remount-like jumps on long chats). */
-.message-list-virtuoso-wrap {
-  position: relative;
-  flex: 1 1 0%;
-  /* Keep a floor so flex siblings (todo, input) cannot shrink the virtualized viewport to zero */
-  min-height: 48px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
 .nexus-rollback-btn {
   display: inline-flex;
   align-items: center;
@@ -2624,58 +2581,6 @@ html, body, #root {
   word-break: break-word;
 }
 
-/* Scrollable area: fills the wrap; reserve space for scrollbar so it doesn't overlap content */
-.nexus-message-list-scroller {
-  flex: 1 1 0%;
-  min-height: 0;
-  width: 100%;
-  overflow-y: auto !important;
-  overflow-x: hidden !important;
-  scrollbar-gutter: stable;
-}
-
-/*
- * react-virtuoso (≤4.x): inner viewport uses inline style
- *   { position: "absolute", top: 0, width: "100%", height: "100%" }
- * without left/right. Percentage width against a scroll container is resolved in a way
- * that often ignores the vertical scrollbar gutter, so list content extends under the
- * scrollbar and rounded cards look flush against the extension’s right edge while the
- * left still shows padding. Pin both horizontal edges and let width follow.
- */
-.nexus-message-list-scroller[data-virtuoso-scroller] [data-viewport-type="element"] {
-  left: 0 !important;
-  right: 0 !important;
-  width: auto !important;
-  max-width: none;
-  box-sizing: border-box;
-  overflow-x: hidden;
-  min-width: 0;
-}
-
-/* List column must not expand past the viewport (long file paths / pre output). */
-.nexus-message-list-scroller[data-virtuoso-scroller] [data-test-id="virtuoso-item-list"],
-.nexus-message-list-scroller[data-virtuoso-scroller] [data-test-id="virtuoso-top-item-list"] {
-  min-width: 0 !important;
-  max-width: 100% !important;
-  box-sizing: border-box;
-}
-
-.message-list-virtuoso-inner {
-  padding: 12px 20px;
-  background: var(--nexus-chat-bg);
-  max-width: 100%;
-  overflow-x: hidden;
-  box-sizing: border-box;
-}
-
-/* Virtuoso root must fill the wrap and form a flex column so the Scroller gets a definite height (Kilo-style) */
-.message-list-virtuoso-wrap .message-list-virtuoso-inner {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  flex: 1 1 0%;
-}
-
 .message-list-item {
   padding-bottom: 10px;
   min-width: 0;
@@ -2700,6 +2605,18 @@ html, body, #root {
   overflow-x: hidden;
   padding: 12px 20px;
   background: var(--nexus-chat-bg);
+}
+
+.nexus-message-list-native-scroller {
+  scrollbar-gutter: stable;
+  overflow-anchor: none;
+}
+
+.nexus-message-list-native-content {
+  min-height: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .nexus-jump-latest {

@@ -1,8 +1,10 @@
 import React, { useMemo, useState } from "react"
 import { useChatStore } from "../stores/chat.js"
 import {
+  appliedFileLabel,
   inputContextPanelKind,
   reviewActionForFileCount,
+  uniqueEditedFileCount,
 } from "./input-context-panel-policy.js"
 
 /** File icon (document) for context panel */
@@ -40,8 +42,8 @@ export function InputContextPanel() {
 
   // Applied session edits: compact Cursor-style Undo / Keep / Review strip.
   if (panelKind === "applied-changes") {
-    const n = sessionEditsForPanel.length
-    const fileLabel = n === 1 ? "1 File" : `${n} Files`
+    const n = uniqueEditedFileCount(sessionEditsForPanel)
+    const fileLabel = appliedFileLabel(sessionEditsForPanel)
 
     return (
       <div className={`nexus-input-context-panel ${!expanded ? "nexus-input-context-panel-collapsed" : ""}`}>
@@ -91,7 +93,7 @@ export function InputContextPanel() {
           </div>
           {expanded && (
             <div className="nexus-input-context-file-list">
-              {sessionEditsForPanel.map((edit) => {
+              {sessionEditsForPanel.map((edit, index) => {
                 const name = edit.path.split(/[/\\]/).pop() ?? edit.path
                 const hasDiff = edit.diffStats.added > 0 || edit.diffStats.removed > 0
                 const groupedChange =
@@ -99,7 +101,10 @@ export function InputContextPanel() {
                   (edit.changeSetFileCount ?? 1) > 1
                 const groupedCount = edit.changeSetFileCount ?? 1
                 return (
-                  <div key={edit.path} className="nexus-input-context-file-row">
+                  <div
+                    key={`${edit.changeSetId ?? "legacy"}:${edit.path}:${index}`}
+                    className="nexus-input-context-file-row"
+                  >
                     <button
                       type="button"
                       className="nexus-input-context-file-row-clickable nexus-input-context-file-row-main"

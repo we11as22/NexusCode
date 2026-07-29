@@ -5,6 +5,23 @@ export function reviewActionForFileCount(fileCount: number): ReviewAction {
   return fileCount === 1 ? "open-single" : "expand-list"
 }
 
+export function uniqueEditedFileCount(
+  edits: readonly { readonly path: string }[],
+): number {
+  return new Set(
+    edits
+      .map((edit) => edit.path.replace(/\\/gu, "/").trim())
+      .filter(Boolean),
+  ).size
+}
+
+export function appliedFileLabel(
+  edits: readonly { readonly path: string }[],
+): string {
+  const count = uniqueEditedFileCount(edits)
+  return count === 1 ? "1 File" : `${count} Files`
+}
+
 export function inputContextPanelKind(input: {
   readonly hasPendingApproval: boolean
   readonly mode: string

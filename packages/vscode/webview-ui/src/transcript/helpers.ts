@@ -114,10 +114,26 @@ export function ensureAssistantMessage(messages: SessionMessage[], messageId?: s
   if (lastIdx >= 0 && messages[lastIdx]?.role === "assistant") {
     const existing = messages[lastIdx]!
     if (existing.id !== id) {
-      return {
-        list: [...messages.slice(0, lastIdx), { ...existing, id }],
-        index: lastIdx,
+      // Provider tool loops consist of multiple assistant responses. Keep each
+      // response as its own row so a durable snapshot cannot coexist with a
+      // re-identified live copy of the previous tool. Only an empty transport
+      // placeholder is safe to reuse.
+      if (!hasAssistantContent(existing.content)) {
+        return {
+          list: [...messages.slice(0, lastIdx), { ...existing, id }],
+          index: lastIdx,
+        }
       }
+      const list: SessionMessage[] = [
+        ...messages,
+        {
+          id,
+          ts: Date.now(),
+          role: "assistant",
+          content: "",
+        },
+      ]
+      return { list, index: list.length - 1 }
     }
     return { list: [...messages], index: lastIdx }
   }
@@ -407,13 +423,6 @@ export function mergeStateMessagesForStream(previous: SessionMessage[], incoming
     if (mergedContent !== lastIncoming.content) {
       merged[merged.length - 1] = { ...lastIncoming, content: mergedContent }
     }
-  } else if (
-    lastIncoming?.role === "assistant" &&
-    lastPrevious?.role === "assistant" &&
-    !hasAssistantContent(lastIncoming.content) &&
-    hasAssistantContent(lastPrevious.content)
-  ) {
-    merged[merged.length - 1] = { ...lastIncoming, content: lastPrevious.content }
   }
 
   if (incoming.length < previous.length) {

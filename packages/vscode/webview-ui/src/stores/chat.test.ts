@@ -167,6 +167,54 @@ describe("agent-event delivery", () => {
     expect(useChatStore.getState().messages.at(-1)?.content).toBe("samesame")
   })
 
+  it("starts each provider round in a fresh assistant message", () => {
+    useChatStore.setState({
+      messages: [
+        {
+          id: "assistant-round-1",
+          ts: 1,
+          role: "assistant",
+          content: [
+            {
+              type: "tool",
+              id: "edit-1",
+              tool: "Edit",
+              status: "completed",
+              input: {
+                file_path: "demo.txt",
+                old_string: "before",
+                new_string: "after",
+              },
+            },
+          ],
+        },
+      ],
+      isRunning: true,
+    })
+
+    useChatStore.getState().handleAgentEvent({
+      type: "assistant_message_started",
+      messageId: "assistant-round-2",
+    })
+
+    expect(useChatStore.getState().messages).toEqual([
+      expect.objectContaining({
+        id: "assistant-round-1",
+        content: [
+          expect.objectContaining({
+            type: "tool",
+            id: "edit-1",
+          }),
+        ],
+      }),
+      expect.objectContaining({
+        id: "assistant-round-2",
+        role: "assistant",
+        content: "",
+      }),
+    ])
+  })
+
   it("keeps an active run alive after a non-fatal diagnostic", () => {
     useChatStore.getState().handleAgentEvent({
       type: "error",
@@ -539,9 +587,73 @@ describe("message admission", () => {
 
     expect(useChatStore.getState().messages).toContainEqual(optimistic)
   })
+
+  it("restores a raced queued turn to the queue instead of the composer", () => {
+    const queued = {
+      id: "q-race",
+      text: "run after current turn",
+      images: [],
+      mode: "agent" as const,
+      presetName: "Default",
+      createdAt: 1,
+    }
+    useChatStore.setState({
+      isRunning: false,
+      inputValue: "",
+      attachedImages: [],
+      queuedMessages: [queued],
+    })
+
+    useChatStore.getState().sendQueuedImmediately(queued.id)
+    const optimistic = useChatStore.getState().messages.at(-1)!
+    useChatStore.getState().handleSubmissionResult(optimistic.id, false)
+
+    expect(useChatStore.getState().queuedMessages).toContainEqual(queued)
+    expect(useChatStore.getState().inputValue).toBe("")
+    expect(useChatStore.getState().messages).not.toContainEqual(
+      expect.objectContaining({ id: optimistic.id }),
+    )
+  })
 })
 
 describe("transcript reconciliation", () => {
+  it("does not copy a completed provider round into a new empty round", () => {
+    const completedRound = {
+      id: "assistant-round-1",
+      ts: 10,
+      role: "assistant" as const,
+      content: [
+        {
+          type: "tool" as const,
+          id: "edit-1",
+          tool: "Edit",
+          status: "completed" as const,
+          input: {
+            file_path: "demo.txt",
+            old_string: "before",
+            new_string: "after",
+          },
+        },
+      ],
+    }
+    const emptyNextRound = {
+      id: "assistant-round-2",
+      ts: 20,
+      role: "assistant" as const,
+      content: "",
+    }
+
+    const merged = mergeStateMessagesForStream(
+      [completedRound],
+      [completedRound, emptyNextRound],
+    )
+
+    expect(merged).toEqual([
+      completedRound,
+      emptyNextRound,
+    ])
+  })
+
   it("matches repeated optimistic user messages one-to-one in FIFO order", () => {
     const previous = [
       {

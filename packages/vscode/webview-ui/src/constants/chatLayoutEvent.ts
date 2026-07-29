@@ -1,2 +1,2 @@
-/** Fired on `window` when chat-adjacent UI (todo panel, etc.) changes height so Virtuoso can re-pin. */
+/** Fired when chat-adjacent UI changes height so the native viewport can re-pin. */
 export const NEXUS_CHAT_LAYOUT_EVENT = "nexus-chat-layout"

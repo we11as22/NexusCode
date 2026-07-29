@@ -77,13 +77,14 @@ TypeScript-ядро для CLI, VS Code и сервера и заимствуе�
 | Контрольные точки и проверка изменений | Долговечные content-addressed наборы изменений, подтверждение точного предложения, CAS-применение/откат/восстановление, восстановление контрольной точки в пределах путей, ограниченные Git status/diff и review в CLI/server/VS Code | Codex, Kimi Code, Qwen, MiMo | Реализовано; старые теневые контрольные точки без точной привязки к сообщению доступны только для просмотра, ни один путь восстановления не запускает безусловный reset/clean и не переименовывает метаданные вложенных Git-репозиториев |
 | Изменение файлов | Write, Edit и строгий многофайловый ApplyPatch используют единый долговечный поток «сначала предложение» | Codex, Kilo, Roo, MiMo | Реализовано; ApplyPatch проверяет каждый точный hunk до одного атомарного review-действия, сохраняет байты удаляемых бинарных файлов, компенсирует частичные сбои хоста и честно обозначает сгруппированные многофайловые действия |
 | Терминал | Активные и фоновые задачи, жизненный цикл вывода/остановки, встроенный терминал VS Code, отмена | Codex, Cline | Реализовано; CLI отображает полный жизненный цикл задачи, VS Code показывает ограниченный вывод, cwd, id задачи, длительность, код выхода и доступность артефакта |
+| Лента VS Code и review | Точный долговечный diff до и после подтверждения, компактные Thought/Explored/Worked, один активный tab, очередь, Review/Undo/Keep и автоскролл без переходных дублей | Cursor (визуальный эталон), Kilo, Codex, OpenClaude, Roo | Реализовано; ограниченное окно истории рендерится напрямую по Kilo-паттерну, каждый provider round сохраняет отдельную идентичность, snapshot никогда не переносит содержимое между разными message id, поиски входят в Explored, а два Edit одного файла дают две хронологические карточки и один уникальный `1 File` в review |
 | CLI/TUI и очередь ввода | Стабильная проекция потокового ответа без дублей, FIFO-очередь со снимком режима/вставок, отзыв последнего элемента через ↑, раздельное владение Escape модальным подтверждением и активным ходом | Codex, Kimi Code, Qwen Code | Реализовано; queued-turn получает виденный при отправке режим и набор инструментов, завершённый ответ заменяет live-черновик по стабильному id, скрытый reasoning не просачивается в preview, очередь защищена от двойной отправки |
 | Нагрузка TUI и память | Коалесинг соседних deltas, ограниченная частота анимации, пауза фоновых спиннеров под modal/primary spinner, замещение transcript после компакции, симметричная очистка AbortSignal-listeners | Qwen Code, Codex, Kimi Code | Реализовано; длинная история больше не перерисовывается каждые 120 мс из-за каждого спиннера, UI не удерживает отброшенную компакцией историю, а тестовый monorepo-параллелизм ограничен |
 | Провайдеры | Anthropic, OpenAI-compatible, OpenAI, Google, Azure, Bedrock и совместимые шлюзы | Kilo, OpenCode | Реализовано с тестами совместимости для используемого в репозитории поколения AI SDK |
 | Конфигурация, учётные данные и первый запуск | Иерархия YAML, секреты с привязкой к назначению, атомарное CLI-состояние только для владельца и Kilo как источник бесплатных моделей по умолчанию | Codex, Kimi CLI, Qwen, Kilo | Реализовано; установщик выбирает точно закреплённую версию Node и не сохраняет удалённый открытый CLI-ключ |
 | Установка и упаковка | Закреплённые Node/pnpm, воспроизводимая сборка монорепозитория, CLI-wrapper и самодостаточные ресурсы VSIX | Kilo, Roo, Cline | Реализовано и проверено smoke-тестом из shell, изначально использующего Node 20; установленный wrapper выбрал Node 24.18.0 и создал состояние первого запуска с правами 0700/0600 для каталога/файла |
 | Браузер | Встроены Web search/fetch; интерактивный браузер доступен только через установленный плагин или MCP-инструмент | Cline | Намеренно внешний; промпт больше не заявляет отсутствующий встроенный браузер |
-| Паритет интерфейсов | Общее ядро в CLI, сервере и VS Code; адаптеры возможностей конкретных хостов | Codex app server, Cline SDK | Существенный паритет; очередь ходов сохраняет текст, изображения, режим и preset, современные события задач и фона видны в обоих интерфейсах, Exploring→Explored использует стабильную идентичность, новая VS Code-сессия очищает live-снимок контекста и получает различимый короткий id, секреты и доверие workspace работают fail-closed; глубина настоящих host E2E всё ещё уступает Cline |
+| Паритет интерфейсов | Общее ядро в CLI, сервере и VS Code; адаптеры возможностей конкретных хостов | Codex app server, Cline SDK | Существенный паритет; очередь ходов сохраняет текст, изображения, режим и preset, queued turn автоматически принимается после освобождения host-run, современные события задач и фона видны в обоих интерфейсах, Exploring→Explored использует стабильную идентичность, новая VS Code-сессия очищает live-снимок контекста и получает различимый короткий id, секреты и доверие workspace работают fail-closed |
 
 ## Режимы, видимость инструментов и длинный диалог
 
@@ -299,13 +300,13 @@ SQLite FTS/индекса не оправдано без измеренной п
 версии Node, изначально доступной в shell пользователя:
 
 - typecheck монорепозитория прошёл во всех шести исполняемых workspace-пакетах;
-- 1666 тестов монорепозитория прошли в пакетах core, state, webview, CLI, server
+- 1722 теста монорепозитория прошли в пакетах core, state, webview, CLI, server
   и VS Code;
 - полная production-сборка прошла, включая проверки импорта встроенной SQLite
   из `dist`;
 - набор проверок переносимости рантайма/хранилища и безопасной инкрементальной
   установки: 13/13;
-- детерминированная перепись возможностей: 242 заявленные исполняемые функции,
+- детерминированная перепись возможностей: 243 заявленные исполняемые функции,
   список пересоздан и проверен на актуальность;
 - end-to-end-проверка MCP/навыков прошла;
 - VSIX упакован со 168 файлами, включая ресурсы Tree-sitter и
@@ -313,6 +314,11 @@ SQLite FTS/индекса не оправдано без измеренной п
 - свежий VSIX установлен в настоящий VS Code, окно Extension Host
   перезагружено, а создание двух последовательных пустых сессий подтвердило
   смену различимого короткого id без переноса истории предыдущего чата;
+- в настоящем VS Code выполнен наблюдаемый сценарий Glob/Grep/Read/Bash,
+  атомарный двухфайловый ApplyPatch, Edit, read-only субагент, очередь следующего
+  хода, Review/Keep, а затем отдельный сценарий из двух Edit одного файла с
+  точным preview до Allow, уникальным `1 File`, автозапуском очереди и Undo;
+  переход между provider rounds проверен покадрово без ложной копии diff;
 - изолированный smoke-тест установщика начался с Node 20 первым в `PATH`, выбрал
   закреплённый бинарник Node 24, собрал CLI, установил временный wrapper и
   завершил set/get конфигурации с правами `0700` на каталог и `0600` на файл;
@@ -321,13 +327,17 @@ SQLite FTS/индекса не оправдано без измеренной п
   ограничен, а обычная установка больше не удаляет dependency store;
 - headless-команда `nexus doctor` прошла для `/Users/mac/Projects/nexus/test`,
   не открывая Ink/raw mode и не изменяя основное хранилище настроек хоста;
+- реальный API smoke прошёл и в `--print` (`CLI_API_OK`), и в интерактивном Ink
+  (`CLI_INTERACTIVE_OK`) с отключённой индексацией; в VS Code модельный контекст
+  определился из каталога как `256.0k`, а не из старого fallback `128k`;
 - loopback smoke-тест сервера проверил health, ошибку аутентификации и
   аутентифицированный список сессий в пределах workspace.
 
-Для проверки не выполнялись платные запросы к провайдерам, разрушительное
-восстановление workspace или реальные произвольные shell-изменения от агента.
-Они требуют явно подготовленной пользователем тестовой среды и не подходят для
-автоматического smoke-теста без наблюдения.
+Для проверки использовалась только настроенная бесплатная модель Kilo. Не
+выполнялись платные запросы, разрушительное восстановление workspace,
+неограниченная индексация или произвольные shell-изменения от агента. Все
+наблюдаемые файловые изменения были ограничены `/Users/mac/Projects/nexus/test`
+и возвращены через Undo.
 
 ## Оставшиеся реальные пробелы
 
@@ -349,8 +359,10 @@ SQLite FTS/индекса не оправдано без измеренной п
    Поток провайдера или произвольный сторонний инструмент нельзя возобновить
    точно с границы инструкции после смерти процесса; ход помечается прерванным
    и безопасно повторяется либо передаётся на review.
-5. **Глубина host-level E2E.** Unit- и integration-тесты core/server/CLI/VS Code
-   широки, но автоматизация настоящего UI Extension Host всё ещё слабее Cline.
+5. **Глубина автоматизированного host-level E2E.** Unit- и integration-тесты
+   core/server/CLI/VS Code широки, а основные сценарии вручную проверены в
+   настоящем Extension Host, но полностью воспроизводимая CI-автоматизация UI
+   всё ещё слабее Cline.
 6. **Семантика multi-root IDE.** Индексация поддерживает несколько проектов, но
    каждый workflow изменения, контрольной точки, терминала и review ещё не
    проверен для сложных multi-root workspace VS Code.
@@ -394,6 +406,7 @@ Nexus объединяет возможности, которые обычно �
 | --- | --- | --- |
 | Цикл агента и выполнение инструментов | `source_projects/codex/codex-rs/core/src/tools/orchestrator.rs`; `source_projects/openclaude/src/tools/AgentTool/runAgent.ts`; `source_projects/kilocode/packages/core/src/session/runner/index.ts`; `source_projects/qwen-code/packages/core/src/agents/runtime/agent-core.ts` | `packages/core/src/agent/loop.ts`; `packages/core/src/agent/tool-pipeline.ts`; `packages/core/src/agent/tool-execution.ts`; `packages/core/src/agent/run-services.ts` |
 | Режим хода, очередь и проекция промпта | Codex `codex-rs/tui/src/chatwidget/input_flow.rs` и `interaction.rs`; Kilo `packages/opencode/src/cli/cmd/run/runtime.queue.ts`; Kimi Code `apps/kimi-code/src/tui/types.ts`; пути очереди команд и инструкций plan mode в OpenClaude | `packages/core/src/agent/modes.ts`; `packages/core/src/agent/prompts/components/index.ts`; `packages/core/src/session/plan-write-gate.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; `packages/cli/src/screens/REPL.tsx` |
+| Лента VS Code, автоскролл и live/snapshot reconciliation | Kilo `packages/ui/src/hooks/create-auto-scroll.tsx` и `packages/kilo-vscode/webview-ui/src/components/chat/MessageList.tsx`; Codex item/message identity; OpenClaude streaming refs; Roo `webview-ui` Virtuoso lifecycle как пример сложности, которую не следует переносить без необходимости | `packages/vscode/webview-ui/src/components/MessageList.tsx`; `packages/vscode/webview-ui/src/components/native-scroll-policy.ts`; `packages/vscode/webview-ui/src/transcript/helpers.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; соответствующие тесты рядом |
 | Потоковый TUI, очередь и ограничение перерисовок | Codex `codex-rs/tui/src/streaming/controller.rs`; Kimi Code `apps/kimi-code/src/tui/controllers/streaming-ui.ts` и `editor-keyboard.ts`; Qwen Code `packages/cli/src/ui/hooks/useGeminiStream.ts` и `utils/MarkdownDisplay.tsx` | `packages/cli/src/nexus-message-projection.ts`; `packages/cli/src/prompt-queue.ts`; `packages/cli/src/cancel-policy.ts`; `packages/cli/src/event-waiter.ts`; `packages/cli/src/components/Spinner.tsx`; `packages/cli/src/screens/REPL.tsx` |
 | Компакция | `source_projects/codex/codex-rs/core/src/compact.rs`; `source_projects/kilocode/packages/core/src/session/compaction.ts`; `source_projects/kimi-cli/src/kimi_cli/soul/compaction.py` | `packages/core/src/session/compaction.ts`; `packages/core/src/context/compaction-projection.ts` |
 | Песочница и разрешения | `source_projects/codex/codex-rs/core/src/tools/sandboxing.rs`; `source_projects/codex/codex-rs/core/src/tools/approvals.rs`; `source_projects/kilocode/packages/core/src/permission.ts`; `source_projects/MiMo-Code/SECURITY.md` | `packages/core/src/agent/approval-coordinator.ts`; `packages/core/src/agent/mode-input-policy.ts`; `packages/core/src/agent/tool-execution.ts`; реализации хостов в `packages/cli/src/host.ts`, `packages/vscode/src/host.ts` и `packages/server/src/host.ts` |

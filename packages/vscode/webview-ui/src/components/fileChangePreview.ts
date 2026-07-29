@@ -39,10 +39,13 @@ function replacementHunks(part: ToolPart): FileChangePreviewLine[] {
   ) {
     return []
   }
-  if (!Array.isArray(part.appliedReplacements)) return []
+  const replacements = Array.isArray(part.appliedReplacements)
+    ? part.appliedReplacements
+    : proposedInputReplacement(part)
+  if (replacements.length === 0) return []
 
   const lines: FileChangePreviewLine[] = []
-  for (const replacement of part.appliedReplacements) {
+  for (const replacement of replacements) {
     if (
       !replacement ||
       typeof replacement.oldSnippet !== "string" ||
@@ -50,22 +53,57 @@ function replacementHunks(part: ToolPart): FileChangePreviewLine[] {
     ) {
       continue
     }
-    replacement.oldSnippet.split(/\r?\n/u).forEach((line, index) => {
+    const oldLines = replacement.oldSnippet.split(/\r?\n/u)
+    const newLines = replacement.newSnippet.split(/\r?\n/u)
+    let prefix = 0
+    while (
+      prefix < oldLines.length &&
+      prefix < newLines.length &&
+      oldLines[prefix] === newLines[prefix]
+    ) {
+      prefix += 1
+    }
+    let suffix = 0
+    while (
+      suffix < oldLines.length - prefix &&
+      suffix < newLines.length - prefix &&
+      oldLines[oldLines.length - 1 - suffix] ===
+        newLines[newLines.length - 1 - suffix]
+    ) {
+      suffix += 1
+    }
+    oldLines.slice(prefix, oldLines.length - suffix).forEach((line, index) => {
       lines.push({
         type: "remove",
-        lineNum: index + 1,
+        lineNum: prefix + index + 1,
         line,
       })
     })
-    replacement.newSnippet.split(/\r?\n/u).forEach((line, index) => {
+    newLines.slice(prefix, newLines.length - suffix).forEach((line, index) => {
       lines.push({
         type: "add",
-        lineNum: index + 1,
+        lineNum: prefix + index + 1,
         line,
       })
     })
   }
   return lines
+}
+
+function proposedInputReplacement(
+  part: ToolPart,
+): Array<{ oldSnippet: string; newSnippet: string }> {
+  const input = part.input
+  if (!input || typeof input !== "object") return []
+  const oldSnippet = input.old_string ?? input.oldString
+  const newSnippet = input.new_string ?? input.newString
+  if (
+    typeof oldSnippet !== "string" ||
+    typeof newSnippet !== "string"
+  ) {
+    return []
+  }
+  return [{ oldSnippet, newSnippet }]
 }
 
 function normalizedStats(
@@ -120,4 +158,3 @@ export function buildFileChangePreview(
     stats,
   }
 }
-

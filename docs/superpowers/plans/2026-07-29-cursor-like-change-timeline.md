@@ -6,7 +6,7 @@
 
 **Architecture:** Persist a bounded canonical diff projection on each mutating `ToolPart`, derive both session state and live `tool_end` events through one core helper, and render only proven structured changes. Keep full review/revert authority in the existing ChangeSet service while using the bounded projection for transcript UI.
 
-**Tech Stack:** TypeScript, Zod, Vitest, React, Zustand, Ink, react-virtuoso, VS Code webview.
+**Tech Stack:** TypeScript, Zod, Vitest, React, Zustand, Ink, native bounded chat scrolling, VS Code webview.
 
 ## Global Constraints
 
@@ -44,7 +44,7 @@ returned and malformed lines are discarded.
 Run:
 
 ```bash
-corepack pnpm --filter @nexus/core test -- file-change-projection.test.ts
+corepack pnpm --filter @nexuscode/core test -- file-change-projection.test.ts
 ```
 
 Expected: failure because `projectFileChangeToolResult` does not exist.
@@ -70,7 +70,7 @@ stored session message contains the same diff projection as the emitted
 Run:
 
 ```bash
-corepack pnpm --filter @nexus/core test -- loop.test.ts
+corepack pnpm --filter @nexuscode/core test -- loop.test.ts
 ```
 
 Expected: stored `ToolPart.diffHunks`/`appliedReplacements` are missing.
@@ -116,8 +116,8 @@ bounded structured fields while webview projection removes only private fields.
 Run:
 
 ```bash
-corepack pnpm --filter @nexus/core test -- session protocol
-corepack pnpm --filter @nexus/vscode test -- webview-projection controller
+corepack pnpm --filter @nexuscode/core test -- session protocol
+corepack pnpm --filter nexuscode test -- webview-projection controller
 ```
 
 - [ ] **Step 3: Make the smallest serializer/projection corrections**
@@ -167,7 +167,7 @@ Literal cases:
 Run:
 
 ```bash
-corepack pnpm --filter @nexus/vscode-webview test -- fileChangePreview.test.ts
+corepack pnpm --filter @nexuscode/webview-ui test -- fileChangePreview.test.ts
 ```
 
 Expected: module absent.
@@ -191,7 +191,7 @@ legacy fallback, toggle behavior, and diff-open message.
 Run:
 
 ```bash
-corepack pnpm --filter @nexus/vscode-webview test -- ToolCallCard.test.tsx
+corepack pnpm --filter @nexuscode/webview-ui test -- ToolCallCard.test.tsx
 ```
 
 - [ ] **Step 7: Implement Cursor-like markup and CSS**
@@ -242,13 +242,13 @@ Assert:
 Run:
 
 ```bash
-corepack pnpm --filter @nexus/vscode-webview test -- renderProjection.test.ts CompletedWorkBlock.test.tsx ExploredProgressBlock.test.tsx
+corepack pnpm --filter @nexuscode/webview-ui test -- renderProjection.test.ts CompletedWorkBlock.test.tsx ExploredProgressBlock.test.tsx
 ```
 
 - [ ] **Step 3: Implement local worked rows and spacing tokens**
 
 Use an 8px local gap and remove the nested global wrapper. Preserve stable
-Virtuoso keys and the collapsed-by-default behavior.
+message/part keys and the collapsed-by-default behavior.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
@@ -286,7 +286,7 @@ edit. Assert both produce red `BETA`, green `GAMMA`, and `+1/−1`.
 Run:
 
 ```bash
-corepack pnpm --filter @nexus/cli test -- nexus-query-stream.test.ts UserToolSuccessMessage.test.tsx messages.test.tsx
+corepack pnpm --filter @nexuscode/cli test -- nexus-query-stream.test.ts UserToolSuccessMessage.test.tsx messages.test.tsx
 ```
 
 - [ ] **Step 3: Implement shared CLI projection**

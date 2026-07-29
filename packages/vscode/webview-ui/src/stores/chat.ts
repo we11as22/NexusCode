@@ -27,6 +27,7 @@ const pendingMessageSubmissions = new Map<
     images: Array<{ id: string; data: string; mimeType: string }>
     mode: Mode
     presetName: string
+    queueItem?: QueuedTurn
   }
 >()
 
@@ -457,6 +458,7 @@ interface ChatState {
       mode?: Mode
       images?: Array<{ id: string; data: string; mimeType: string }>
       presetName?: string
+      queueItem?: QueuedTurn
     },
   ) => void
   abort: () => void
@@ -804,7 +806,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sendQueuedImmediately: (id) => {
     const item = get().queuedMessages.find((q) => q.id === id)
     if (!item) return
-    const { isRunning, sendMessage, removeFromQueue } = get()
+    const { isRunning, sendMessage } = get()
     if (isRunning) {
       set((prev) => ({
         queuedMessages: [
@@ -814,11 +816,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }))
       return
     }
-    removeFromQueue(id)
     sendMessage(item.text, {
       mode: item.mode,
       images: item.images,
       presetName: item.presetName,
+      queueItem: item,
     })
   },
 
@@ -872,6 +874,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       images: messageImages.map((image) => ({ ...image })),
       mode: runMode,
       presetName: runPresetName,
+      ...(options?.queueItem ? { queueItem: options.queueItem } : {}),
     })
     set((prev) => ({
       inputValue: "",
@@ -880,6 +883,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       mode: runMode,
       activePresetName: runPresetName,
       view: "chat",
+      queuedMessages: options?.queueItem
+        ? prev.queuedMessages.filter(
+            (queued) => queued.id !== options.queueItem!.id,
+          )
+        : prev.queuedMessages,
       messages: [
         ...prev.messages,
         {
@@ -912,6 +920,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       type: "setChatPreset",
       presetName: pending.presetName,
     })
+    if (pending.queueItem) {
+      set((prev) => ({
+        messages: prev.messages.filter(
+          (message) => message.id !== clientMessageId,
+        ),
+        queuedMessages: prev.queuedMessages.some(
+          (queued) => queued.id === pending.queueItem!.id,
+        )
+          ? prev.queuedMessages
+          : [pending.queueItem!, ...prev.queuedMessages],
+        isRunning: false,
+        mode: pending.mode,
+        activePresetName: pending.presetName,
+      }))
+      return
+    }
     set((prev) => {
       const restoredText =
         pending.content.length === 0
@@ -1921,16 +1945,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         })
         // Send next queued message when agent has finished
-        const state = get()
-        if (state.queuedMessages.length > 0) {
-          const first = state.queuedMessages[0]
-          state.removeFromQueue(first!.id)
-          state.sendMessage(first!.text, {
-            mode: first!.mode,
-            images: first!.images,
-            presetName: first!.presetName,
+        // The host clears its active run immediately after emitting `done`.
+        // Dispatch on the next host turn so the queued message is not rejected
+        // as "already running"; provenance keeps it queued if admission still races.
+        setTimeout(() => {
+          const state = get()
+          if (state.isRunning || state.queuedMessages.length === 0) return
+          const first = state.queuedMessages[0]!
+          state.sendMessage(first.text, {
+            mode: first.mode,
+            images: first.images,
+            presetName: first.presetName,
+            queueItem: first,
           })
-        }
+        }, 150)
         break
 
       case "error":
@@ -1962,37 +1990,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 }))
-
-function ensureAssistantMessage(messages: SessionMessage[], messageId?: string): { list: SessionMessage[]; index: number } {
-  const id = messageId || `msg_${Date.now()}`
-  const idx = messages.findIndex((m) => m.id === id && m.role === "assistant")
-  if (idx >= 0) {
-    return { list: [...messages], index: idx }
-  }
-
-  const lastIdx = messages.length - 1
-  if (lastIdx >= 0 && messages[lastIdx]?.role === "assistant") {
-    const existing = messages[lastIdx]!
-    if (existing.id !== id) {
-      return {
-        list: [...messages.slice(0, lastIdx), { ...existing, id }],
-        index: lastIdx,
-      }
-    }
-    return { list: [...messages], index: lastIdx }
-  }
-
-  const list: SessionMessage[] = [
-    ...messages,
-    {
-      id,
-      ts: Date.now(),
-      role: "assistant",
-      content: "",
-    },
-  ]
-  return { list, index: list.length - 1 }
-}
 
 function mergeAssistantContent(
   previous: string | MessagePart[],
@@ -2066,13 +2063,6 @@ function mergeStateMessagesForStream(previous: SessionMessage[], incoming: Sessi
     if (mergedContent !== lastIncoming.content) {
       merged[merged.length - 1] = { ...lastIncoming, content: mergedContent }
     }
-  } else if (
-    lastIncoming?.role === "assistant" &&
-    lastPrevious?.role === "assistant" &&
-    !hasAssistantContent(lastIncoming.content) &&
-    hasAssistantContent(lastPrevious.content)
-  ) {
-    merged[merged.length - 1] = { ...lastIncoming, content: lastPrevious.content }
   }
 
   if (incoming.length < previous.length) {
