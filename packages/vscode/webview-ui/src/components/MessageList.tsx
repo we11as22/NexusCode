@@ -537,7 +537,7 @@ function RenderItemRow({
 
   if (item.type === "compaction_live") {
     return (
-      <div className="w-full min-w-0">
+      <div className="nexus-chat-slot-content">
         <CompactionLiveBlock onLayoutHint={onListLayoutHint} />
       </div>
     )
@@ -545,7 +545,7 @@ function RenderItemRow({
 
   if (item.type === "compaction_done") {
     return (
-      <div className="w-full min-w-0">
+      <div className="nexus-chat-slot-content">
         <CompactionDoneBlock durationSec={item.durationSec} onLayoutHint={onListLayoutHint} />
       </div>
     )
@@ -553,7 +553,7 @@ function RenderItemRow({
 
   if (item.type === "explored") {
     return (
-      <div className="w-full min-w-0">
+      <div className="nexus-chat-slot-content">
         <ExploredSummaryInline
           prefixItems={item.prefixItems}
           isRunning={item.isRunning}
@@ -587,7 +587,7 @@ function RenderItemRow({
 
   if (item.type === "assistant_part") {
     return (
-      <div className="w-full min-w-0">
+      <div className="nexus-chat-slot-content">
         <AssistantPartRow
           part={item.part}
           partIndex={item.partIndex}
@@ -632,7 +632,7 @@ function RenderItemRow({
       const body = userText.slice(NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX.length).trim()
       const lines = body ? body.split("\n").filter(Boolean) : []
       return (
-        <div className="nexus-qnr-user-wrap">
+        <div className="nexus-qnr-user-wrap nexus-chat-slot-root">
           <div className={`nexus-qnr-user-row${canRollback ? " nexus-qnr-user-row--rollback" : ""}`}>
             <div className="nexus-qnr-user-lines">
               {lines.map((line, i) => (
@@ -656,7 +656,7 @@ function RenderItemRow({
       )
     }
     return (
-      <div className="nexus-user-msg-wrap">
+      <div className="nexus-user-msg-wrap nexus-chat-slot-root">
         <div className={`nexus-user-msg-bubble${canRollback ? " nexus-user-msg-bubble-has-rollback" : ""}`}>
           <div className="nexus-user-msg-content">{renderUserTextWithPasteChips(userText)}</div>
           {canRollback && (
@@ -676,7 +676,7 @@ function RenderItemRow({
 
   if (message.role === "system") {
     return (
-      <div className="rounded-xl px-3 py-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20">
+      <div className="nexus-chat-slot-content rounded-xl px-3 py-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20">
         {typeof message.content === "string" ? message.content : ""}
       </div>
     )
@@ -684,7 +684,7 @@ function RenderItemRow({
 
   // Assistant — on chat background, no frame (only user messages are in a bubble)
   return (
-    <div className="w-full min-w-0">
+    <div className="nexus-chat-slot-content">
       {typeof message.content === "string" ? (
         <AssistantText text={message.content} streaming={!isComplete} />
       ) : (
@@ -917,14 +917,14 @@ const AssistantText = React.memo(function AssistantText({ text, streaming, varia
   const isMuted = variant === "muted"
   if (streaming) {
     return (
-      <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words whitespace-pre-wrap pl-[var(--nexus-content-inset)] box-border ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
+      <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words whitespace-pre-wrap box-border ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
         {text}
         <span className={`nexus-streaming-cursor inline-block w-0.5 h-4 ml-0.5 align-middle animate-pulse ${isMuted ? "bg-[var(--vscode-descriptionForeground)]" : "bg-[var(--vscode-foreground)]"}`} aria-hidden />
       </div>
     )
   }
   return (
-    <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words pl-[var(--nexus-content-inset)] box-border ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
+    <div className={`text-sm min-w-0 max-w-full overflow-x-hidden break-words box-border ${isMuted ? "text-[11px] text-[var(--vscode-descriptionForeground)] opacity-90" : "text-[var(--vscode-foreground)]"}`}>
       <ReactMarkdown
         className="prose-nexus"
         remarkPlugins={[remarkGfm]}

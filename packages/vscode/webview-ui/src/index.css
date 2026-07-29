@@ -2753,6 +2753,8 @@ html, body, #root {
 }
 
 .message-list {
+  --nexus-chat-root-gutter: 12px;
+  --nexus-chat-content-inset: 12px;
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -2761,8 +2763,38 @@ html, body, #root {
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 12px 20px;
+  padding: 12px var(--nexus-chat-root-gutter);
   background: var(--nexus-chat-bg);
+}
+
+.nexus-chat-slot-root {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin-inline: 0;
+  box-sizing: border-box;
+}
+
+.nexus-chat-slot-content {
+  width: calc(100% - var(--nexus-chat-content-inset));
+  min-width: 0;
+  max-width: calc(100% - var(--nexus-chat-content-inset));
+  margin-inline-start: var(--nexus-chat-content-inset);
+  margin-inline-end: 0;
+  box-sizing: border-box;
+}
+
+.nexus-chat-slot-content .nexus-chat-slot-content,
+.nexus-chat-slot-content > .nexus-tool-call-card,
+.nexus-chat-slot-content > .nexus-explored-block,
+.nexus-chat-slot-content > .nexus-thought-block,
+.nexus-chat-slot-content > .nexus-thought-inline-block,
+.nexus-chat-slot-content > .nexus-reasoning-block,
+.nexus-chat-slot-content > .nexus-bash-command-block,
+.nexus-chat-slot-content > .nexus-subagent-inline-outer {
+  width: 100%;
+  max-width: 100%;
+  margin-inline: 0;
 }
 
 .nexus-message-list-native-scroller {
@@ -3512,8 +3544,21 @@ input[type="text"]:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 4px 0 6px 12px;
+  padding: 4px 0 6px;
   border-left: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-worked-details .nexus-chat-slot-content,
+.nexus-worked-details .nexus-tool-call-card,
+.nexus-worked-details .nexus-explored-block,
+.nexus-worked-details .nexus-thought-block,
+.nexus-worked-details .nexus-thought-inline-block,
+.nexus-worked-details .nexus-reasoning-block,
+.nexus-worked-details .nexus-bash-command-block,
+.nexus-worked-details .nexus-subagent-inline-outer {
+  width: 100%;
+  max-width: 100%;
+  margin-inline: 0;
 }
 
 .nexus-worked-item {

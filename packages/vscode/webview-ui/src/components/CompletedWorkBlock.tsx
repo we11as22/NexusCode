@@ -14,7 +14,7 @@ export function CompletedWorkDetails({
   children?: React.ReactNode
 }) {
   return (
-    <div className="nexus-worked-details">
+    <div className="nexus-worked-details nexus-chat-slot-content">
       {React.Children.map(children, (child) => (
         <div className="nexus-worked-item">{child}</div>
       ))}
@@ -34,7 +34,7 @@ export function CompletedWorkBlock({
   const [expanded, setExpanded] = useState(false)
 
   return (
-    <div className="nexus-worked-block">
+    <div className="nexus-worked-block nexus-chat-slot-root">
       <button
         type="button"
         className="nexus-worked-toggle"
