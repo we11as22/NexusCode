@@ -76,7 +76,12 @@ export function buildRoleBlock(ctx: PromptContext): string {
 
   lines.push(IDENTITY_BLOCK)
   lines.push("")
-  lines.push(getModeBlock(ctx.mode))
+  lines.push(
+    adaptQuestionGuidanceToHost(
+      getModeBlock(ctx.mode),
+      enabledTools.has("AskFollowupQuestion"),
+    ),
+  )
   if (ctx.mode === "ask" || ctx.mode === "review") {
     lines.push("")
     lines.push(PROMPT_CONTRACT_READ_ONLY)
@@ -270,6 +275,52 @@ You are in audit mode for code changes. Your task is to review and report findin
 - **Always end your turn with a text review summary.** Never end with only tool calls.`,
   }
   return blocks[mode] ?? String(mode)
+}
+
+function adaptQuestionGuidanceToHost(
+  text: string,
+  interactiveQuestions: boolean,
+): string {
+  if (interactiveQuestions) return text
+
+  const marker = "__NEXUS_INTERACTIVE_QUESTION__"
+  const scrubbed = text
+    .replaceAll("`AskFollowupQuestion`", marker)
+    .replaceAll("AskFollowupQuestion", marker)
+  const lines = scrubbed.split("\n").map((line) => {
+    if (!line.includes(marker)) return line
+    const trimmed = line.trimStart()
+    if (trimmed.startsWith("**Phase 3 — Review:**")) {
+      return "**Phase 3 — Review:** Re-read critical paths and align with the user's stated goals. Resolve ambiguities from code and existing context; if a user-only decision still blocks the plan, state that blocker in the final response."
+    }
+    if (trimmed.startsWith("3. **Ask the user**")) {
+      return "3. **Handle blockers** — Resolve every discoverable question from evidence. If a decision only the user can make remains, record it clearly in the final response and stop."
+    }
+    if (trimmed.startsWith("**First turn habit:**")) {
+      return "**First turn habit:** Skim key files and write a skeleton plan (headers + rough notes). Continue discovery autonomously; surface only genuinely blocking user decisions in the final response."
+    }
+    if (trimmed.startsWith("End each planning turn with")) {
+      return "End a planning turn with `PlanExit` only when the plan is ready for handoff. If a user-only decision blocks completion, explain that decision in the final response and stop."
+    }
+    if (trimmed.startsWith("Do **not** ask for plan approval")) {
+      return "Do **not** ask for plan approval in chat; use `PlanExit` only for a completed plan handoff."
+    }
+    if (trimmed.startsWith("**After tools, add a brief text summary")) {
+      return "**After tools, add a brief text summary for the user** when you still have turn budget, unless `PlanExit` handed off the completed plan."
+    }
+    if (trimmed.startsWith("- Use")) {
+      return "- Interactive questions are unavailable in this host. Resolve ambiguity from available evidence; if still blocked, explain the missing decision in the final response."
+    }
+    if (trimmed.startsWith("Follow the full **PLAN** section")) {
+      return "Follow the full **PLAN** section above. End with `PlanExit` only when the plan is ready; otherwise explain any genuinely blocking user-only decision in the final response."
+    }
+    return "Interactive questions are unavailable in this host. Do not attempt an interactive question handoff; resolve from evidence or state the blocker in the final response."
+  })
+  lines.push("")
+  lines.push(
+    "Interactive questions are unavailable in this host. Do not attempt an interactive question handoff; resolve ambiguity from available evidence or state the blocker in the final response.",
+  )
+  return lines.join("\n")
 }
 
 const CORE_PRINCIPLES = `## Core Principles
@@ -1117,7 +1168,14 @@ export function buildSystemPrompt(ctx: PromptContext): { blocks: string[]; cache
   // DYNAMIC BLOCKS
   blocks.push(buildSystemInfoBlock(ctx))
   if (ctx.mode === "plan" && ctx.planModeSparseReminder) {
-    blocks.push(PLAN_MODE_SPARSE_REMINDER)
+    blocks.push(
+      adaptQuestionGuidanceToHost(
+        PLAN_MODE_SPARSE_REMINDER,
+        new Set(
+          ctx.enabledToolNames ?? getBuiltinToolsForMode(ctx.mode),
+        ).has("AskFollowupQuestion"),
+      ),
+    )
   }
   if (ctx.sessionMemoryContent?.trim()) {
     blocks.push(buildSessionMemoryBlock(ctx.sessionMemoryContent))

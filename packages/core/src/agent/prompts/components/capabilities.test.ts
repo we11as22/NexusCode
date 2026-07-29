@@ -73,6 +73,30 @@ describe("agent capability prompt", () => {
     expect(prompt).not.toContain("`Bash` only for actual shell operations")
   })
 
+  it.each(["plan", "ask"] as const)(
+    "does not instruct %s mode to call a host-disabled question tool",
+    (mode) => {
+      const prompt = buildRoleBlock({
+        mode,
+        config: NexusConfigSchema.parse({}) as NexusConfig,
+        cwd: "/workspace",
+        modelId: "test-model",
+        providerName: "test-provider",
+        skills: [],
+        rulesContent: "",
+        enabledToolNames:
+          mode === "plan"
+            ? ["Read", "Grep", "Write", "Edit", "PlanExit"]
+            : ["Read", "Grep"],
+      })
+
+      expect(prompt).not.toContain("AskFollowupQuestion")
+      expect(prompt).toContain(
+        "Interactive questions are unavailable in this host.",
+      )
+    },
+  )
+
   it("projects configured mode prompts and instructions into the system prompt", () => {
     const config = NexusConfigSchema.parse({
       modes: {
