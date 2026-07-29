@@ -205,18 +205,126 @@ export function dedupeOptionsPreservingOrder(labels: string[]): string[] {
 export function sanitizeAgentQuestionOptions(raw: string[], customOptionLabel: string): string[] {
   const label = normalizeCustomOptionLabel(customOptionLabel)
   const deduped = dedupeOptionsPreservingOrder(raw.map((s) => s.trim()).filter(Boolean))
-  let filtered = deduped.filter((l) => !labelLooksLikeReservedCustomOption(l, label))
-  if (filtered.length < 2) {
-    filtered = deduped.filter((l) => l.toLowerCase().replace(/\s+/g, " ") !== label.toLowerCase())
+  return deduped.filter((option) =>
+    !labelLooksLikeReservedCustomOption(option, label),
+  )
+}
+
+const MAX_CUSTOM_ANSWER_CHARACTERS = 16_384
+const MAX_QUESTIONNAIRE_RESPONSE_CHARACTERS = 65_536
+
+/**
+ * Validate a host response against the exact options that core emitted.
+ * Labels are rebuilt from the request so a client cannot inject forged
+ * display text into the next model turn.
+ */
+export function validateQuestionnaireAnswers(
+  request: UserQuestionRequest,
+  answers: UserQuestionAnswer[],
+): UserQuestionAnswer[] {
+  const questionsById = new Map(
+    request.questions.map((question) => [question.id, question]),
+  )
+  const answersById = new Map<string, UserQuestionAnswer>()
+
+  for (const answer of answers) {
+    if (answersById.has(answer.questionId)) {
+      throw new Error(`Duplicate answer for question "${answer.questionId}".`)
+    }
+    if (!questionsById.has(answer.questionId)) {
+      throw new Error(`Unknown question "${answer.questionId}".`)
+    }
+    answersById.set(answer.questionId, answer)
   }
-  if (filtered.length < 2) {
-    filtered = deduped
+
+  const normalized = request.questions.map((question): UserQuestionAnswer => {
+    const answer = answersById.get(question.id)
+    if (!answer) {
+      throw new Error(`Missing answer for question "${question.id}".`)
+    }
+
+    if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) {
+      if (question.allowCustom !== true) {
+        throw new Error(`Custom answer is not allowed for question "${question.id}".`)
+      }
+      if (answer.optionIds?.length) {
+        throw new Error(`Custom answer cannot include concrete options for question "${question.id}".`)
+      }
+      const customText = answer.customText?.trim() ?? ""
+      if (!customText) {
+        throw new Error(`Custom answer is required for question "${question.id}".`)
+      }
+      if (customText.length > MAX_CUSTOM_ANSWER_CHARACTERS) {
+        throw new Error(
+          `Custom answer for question "${question.id}" exceeds ${MAX_CUSTOM_ANSWER_CHARACTERS} characters.`,
+        )
+      }
+      return {
+        questionId: question.id,
+        optionId: NEXUS_CUSTOM_OPTION_ID,
+        optionLabel: normalizeCustomOptionLabel(request.customOptionLabel),
+        customText,
+      }
+    }
+
+    if (question.multiSelect) {
+      if (answer.optionId || answer.customText) {
+        throw new Error(`Multi-select answer has an invalid shape for question "${question.id}".`)
+      }
+      const optionIds = answer.optionIds ?? []
+      if (optionIds.length === 0) {
+        throw new Error(`At least one option is required for question "${question.id}".`)
+      }
+      if (new Set(optionIds).size !== optionIds.length) {
+        throw new Error(`Duplicate option in answer for question "${question.id}".`)
+      }
+      const optionsById = new Map(
+        question.options.map((option) => [option.id, option]),
+      )
+      const optionLabels = optionIds.map((optionId) => {
+        const option = optionsById.get(optionId)
+        if (!option) {
+          throw new Error(
+            `Unknown option "${optionId}" for question "${question.id}".`,
+          )
+        }
+        return option.label
+      })
+      return {
+        questionId: question.id,
+        optionIds: [...optionIds],
+        optionLabels,
+      }
+    }
+
+    if (answer.optionIds?.length || answer.customText) {
+      throw new Error(`Single-select answer has an invalid shape for question "${question.id}".`)
+    }
+    const option = question.options.find(
+      (candidate) => candidate.id === answer.optionId,
+    )
+    if (!option) {
+      throw new Error(
+        `Unknown option "${answer.optionId ?? ""}" for question "${question.id}".`,
+      )
+    }
+    return {
+      questionId: question.id,
+      optionId: option.id,
+      optionLabel: option.label,
+    }
+  })
+
+  if (JSON.stringify(normalized).length > MAX_QUESTIONNAIRE_RESPONSE_CHARACTERS) {
+    throw new Error("Questionnaire response exceeds the 64 KiB limit.")
   }
-  return filtered
+
+  return normalized
 }
 
 export function formatQuestionnaireAnswersForAgent(request: UserQuestionRequest, answers: UserQuestionAnswer[]): string {
-  const byId = new Map(answers.map((answer) => [answer.questionId, answer]))
+  const validated = validateQuestionnaireAnswers(request, answers)
+  const byId = new Map(validated.map((answer) => [answer.questionId, answer]))
   const lines = request.questions.map((question) => {
     const answer = byId.get(question.id)
     let value = "—"
@@ -243,56 +351,10 @@ export function formatQuestionnaireAnswersForAgent(request: UserQuestionRequest,
   return `${NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX}${lines.join("\n")}`
 }
 
-/** Generic choices when the model omits options; UI still adds custom/Other. */
-const DEFAULT_OPTION_PAD = ["Brief answer", "Detailed answer"]
-
 /**
- * When the model leaves questions under-specified, we pad to two choices. Rotate pairs by
- * question index so a multi-question batch does not show identical labels on every step.
- */
-const DEFAULT_OPTION_PAD_ROTATIONS: string[][] = [
-  ["Brief answer", "Detailed answer"],
-  ["Short reply", "Longer explanation"],
-  ["Summary style", "Step-by-step"],
-  ["Quick take", "Expanded take"],
-  ["Concise", "Comprehensive"],
-  ["Simple option", "Detailed option"],
-]
-
-/**
- * Ensure at least two concrete choices after sanitization (Zod no longer hard-fails on <2).
- */
-export function padQuestionOptionsToMinTwo(
-  labels: string[],
-  customOptionLabel: string,
-  questionIndex = 0,
-): string[] {
-  let cleaned = sanitizeAgentQuestionOptions(labels, customOptionLabel)
-  if (cleaned.length >= 2) return cleaned
-  const out = [...cleaned]
-  const seen = new Set(out.map((x) => optionKey(x)).filter(Boolean))
-  const tryPush = (label: string) => {
-    const key = optionKey(label)
-    if (!key || seen.has(key)) return
-    seen.add(key)
-    out.push(label)
-  }
-  const rotation =
-    DEFAULT_OPTION_PAD_ROTATIONS[questionIndex % DEFAULT_OPTION_PAD_ROTATIONS.length] ??
-    DEFAULT_OPTION_PAD
-  for (const d of rotation) {
-    if (out.length >= 2) break
-    tryPush(d)
-  }
-  for (const d of DEFAULT_OPTION_PAD) {
-    if (out.length >= 2) break
-    tryPush(d)
-  }
-  return out
-}
-
-/**
- * Build stable ids, sanitize, pad to ≥2 choices, and attach description/preview metadata (preview stripped when multiSelect).
+ * Build stable ids, sanitize model choices, and attach description/preview
+ * metadata. Semantic validation happens before this builder; it never invents
+ * answer choices.
  */
 export function buildUserQuestionOptionsFromRows(
   rows: QuestionOptionRow[],
@@ -306,13 +368,12 @@ export function buildUserQuestionOptionsFromRows(
   }))
   const labels = deduped.map((r) => r.label)
   const sanitizedLabels = sanitizeAgentQuestionOptions(labels, customOptionLabel)
-  const padded = padQuestionOptionsToMinTwo(sanitizedLabels, customOptionLabel, questionIndex)
   const metaByKey = new Map<string, QuestionOptionRow>()
   for (const r of deduped) {
     const k = optionKey(r.label)
     if (!metaByKey.has(k)) metaByKey.set(k, r)
   }
-  return padded.map((lab, i) => {
+  return sanitizedLabels.map((lab, i) => {
     const meta = metaByKey.get(optionKey(lab))
     return {
       id: `opt_${questionIndex + 1}_${i + 1}`,

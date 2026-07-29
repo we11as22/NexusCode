@@ -1,29 +1,34 @@
+import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import type { ToolDef, ToolContext, UserQuestionRequest, UserQuestionItem } from "../../types.js"
-import { buildUserQuestionOptionsFromRows, coerceQuestionOptionRows, normalizeCustomOptionLabel } from "../user-question-utils.js"
+import {
+  buildUserQuestionOptionsFromRows,
+  coerceQuestionOptionRows,
+  labelLooksLikeReservedCustomOption,
+  normalizeCustomOptionLabel,
+} from "../user-question-utils.js"
 
 const questionOptionRowSchema = z.object({
-  label: z.string(),
-  description: z.string().optional(),
-  preview: z.string().optional(),
+  label: z.string().trim().min(1).max(120),
+  description: z.string().trim().min(1).max(500).optional(),
+  preview: z.string().trim().min(1).max(8_192).optional(),
 })
 
-const optionalStructuredQuestionOptionsSchema = z.preprocess(
+const structuredQuestionOptionsSchema = z.preprocess(
   (val) => {
-    if (val === undefined || val === null) return undefined
+    if (val === undefined || val === null) return []
     const rows = coerceQuestionOptionRows(val)
-    return rows.length > 0 ? rows : undefined
+    return rows
   },
-  z.array(questionOptionRowSchema).optional(),
+  z.array(questionOptionRowSchema).min(2).max(4),
 )
 
 const askQuestionItemSchema = z.object({
-  id: z.string().optional().describe("Optional stable id for this question"),
-  header: z.string().optional().describe("Very short chip/tag label for this question (OpenClaude-style, e.g. \"Auth method\")."),
-  question: z.string().describe("The question to ask the user"),
-  /** If empty or one item, core pads with generic brief/detailed choices. */
-  options: optionalStructuredQuestionOptionsSchema.describe(
-    "Options: string[], CSV string, or objects { label, description?, preview? }. Host pads if fewer than two. Do not use preview when multi_select is true.",
+  id: z.string().trim().min(1).max(80).optional().describe("Optional stable id for this question"),
+  header: z.string().trim().min(1).max(40).optional().describe("Very short chip/tag label for this question (OpenClaude-style, e.g. \"Auth method\")."),
+  question: z.string().trim().min(1).max(2_000).describe("The question to ask the user"),
+  options: structuredQuestionOptionsSchema.describe(
+    "Two to four real options: string[], CSV string, or objects { label, description?, preview? }. Do not use preview when multi_select is true.",
   ),
   multi_select: z.boolean().optional().describe(
     "When true, the user may pick multiple options; answers are comma-separated. Previews are disallowed in this mode.",
@@ -31,16 +36,16 @@ const askQuestionItemSchema = z.object({
 })
 
 const askSchema = z.object({
-  question: z.string().optional().describe("Single legacy question to ask the user"),
-  header: z.string().optional().describe("Chip/tag for the legacy single-question shape."),
-  options: optionalStructuredQuestionOptionsSchema.describe(
-    "Suggested answers: strings, CSV, or { label, description?, preview? } rows (if omitted, generic choices are added).",
+  question: z.string().trim().min(1).max(2_000).optional().describe("Single legacy question to ask the user"),
+  header: z.string().trim().min(1).max(40).optional().describe("Chip/tag for the legacy single-question shape."),
+  options: structuredQuestionOptionsSchema.optional().describe(
+    "Two to four suggested answers: strings, CSV, or { label, description?, preview? } rows.",
   ),
   multi_select: z.boolean().optional().describe("Legacy single-question multi-select toggle."),
-  questions: z.array(askQuestionItemSchema).optional().describe("Structured multi-question form shown to the user at once"),
-  title: z.string().optional().describe("Optional title for the grouped question panel"),
-  submit_label: z.string().optional().describe("Optional label for the final submit button"),
-  custom_option_label: z.string().optional().describe("Label for the host-added custom row (default Other). Do not duplicate this string inside options."),
+  questions: z.array(askQuestionItemSchema).min(1).max(4).optional().describe("One to four tightly related questions shown in one form"),
+  title: z.string().trim().min(1).max(120).optional().describe("Optional title for the grouped question panel"),
+  submit_label: z.string().trim().min(1).max(40).optional().describe("Optional label for the final submit button"),
+  custom_option_label: z.string().trim().min(1).max(80).optional().describe("Label for the host-added custom row (default Other). Do not duplicate this string inside options."),
   task_progress: z.string().optional(),
 }).refine((value) => {
   if (Array.isArray(value.questions) && value.questions.length > 0) return true
@@ -48,9 +53,49 @@ const askSchema = z.object({
 }, {
   message: "Provide either question or questions.",
 }).superRefine((data, ctx) => {
+  const customOptionLabel = normalizeCustomOptionLabel(data.custom_option_label)
+  const validateOptions = (
+    options: Array<z.infer<typeof questionOptionRowSchema>>,
+    path: Array<string | number>,
+  ) => {
+    const seen = new Set<string>()
+    for (let index = 0; index < options.length; index++) {
+      const label = options[index]!.label
+      const key = label.toLowerCase().replace(/\s+/g, " ").trim()
+      if (seen.has(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Question options must have unique labels.",
+          path: [...path, index, "label"],
+        })
+      }
+      seen.add(key)
+      if (labelLooksLikeReservedCustomOption(label, customOptionLabel)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Do not add Other/custom; the host adds it.",
+          path: [...path, index, "label"],
+        })
+      }
+    }
+  }
+
   if (Array.isArray(data.questions) && data.questions.length > 0) {
+    const seenIds = new Set<string>()
     for (let qi = 0; qi < data.questions.length; qi++) {
       const q = data.questions[qi]!
+      const id = q.id?.trim()
+      if (id) {
+        if (seenIds.has(id)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Question ids must be unique.",
+            path: ["questions", qi, "id"],
+          })
+        }
+        seenIds.add(id)
+      }
+      validateOptions(q.options, ["questions", qi, "options"])
       if (!q.multi_select) continue
       const opts = q.options ?? []
       for (let oi = 0; oi < opts.length; oi++) {
@@ -66,6 +111,15 @@ const askSchema = z.object({
     }
     return
   }
+  if (!data.options) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Provide 2–4 real options.",
+      path: ["options"],
+    })
+    return
+  }
+  validateOptions(data.options ?? [], ["options"])
   if (data.multi_select) {
     const opts = data.options ?? []
     for (let oi = 0; oi < opts.length; oi++) {
@@ -118,7 +172,7 @@ function normalizeQuestionRequest(input: AskFollowupQuestionArgs): UserQuestionR
         }]
 
   return {
-    requestId: `question_request_${Date.now()}`,
+    requestId: `question_request_${randomUUID()}`,
     title: input.title?.trim() || "Asking questions",
     submitLabel: input.submit_label?.trim() || "Continue",
     customOptionLabel,
@@ -157,7 +211,7 @@ Prefer making a reasonable choice and stating the assumption over asking. Exampl
 
 Structured questionnaire mode:
 - Use \`questions\` to ask multiple tightly related questions in one panel.
-- Each question should include real answer options when possible. If you omit options or send fewer than two, the host pads with generic choices so the UI can render.
+- Every question must include 2–4 real, mutually distinct answer options. The host never invents missing choices.
 - Prefer \`options\` as a JSON array of strings or \`{ label, description?, preview? }\` objects. A single comma-separated string is also accepted (e.g. \`"A, B, C"\`).
 - For batching multiple AskFollowupQuestion calls, prefer \`Parallel\` with only AskFollowupQuestion entries; the host will merge them into one questionnaire.
 
@@ -165,6 +219,20 @@ Turn boundary (OpenClaude-style):
 - After \`AskFollowupQuestion\`, **end your turn** — do not call other tools in the same assistant step. The run pauses until the user answers; continue in the **next** turn with their reply.
 - Prefer **one** blocking question per pause (or one merged questionnaire). Do not chain unrelated AskFollowupQuestion rounds without doing work between them.`,
   parameters: askSchema as z.ZodType<AskFollowupQuestionArgs>,
+  formatValidationError(error) {
+    const issues = error.issues
+      .slice(0, 4)
+      .map((issue) => {
+        const path = issue.path.length > 0 ? issue.path.join(".") : "request"
+        return `${path}: ${issue.message}`
+      })
+      .join("; ")
+    return [
+      `Invalid AskFollowupQuestion: ${issues || "the request does not match the questionnaire schema"}.`,
+      "Provide 1–4 questions with 2–4 real options each; do not add Other/custom.",
+      'Example: {"questions":[{"id":"target","question":"Where should the change go?","options":[{"label":"Workspace (Recommended)","description":"Use the current workspace."},{"label":"Worktree","description":"Use an isolated worktree."}]}]}',
+    ].join(" ")
+  },
 
   async execute(args, ctx: ToolContext) {
     const request = normalizeQuestionRequest(args)

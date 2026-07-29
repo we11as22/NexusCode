@@ -414,6 +414,7 @@ export {
   NEXUS_CUSTOM_OPTION_ID,
   NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX,
   formatQuestionnaireAnswersForAgent,
+  validateQuestionnaireAnswers,
   type QuestionOptionRow,
 } from "./tools/user-question-utils.js"
 export {
