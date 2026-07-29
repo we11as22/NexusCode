@@ -1950,6 +1950,11 @@ html, body, #root {
   padding: 8px 10px 6px !important;
 }
 
+.nexus-questionnaire {
+  width: 100%;
+  min-width: 0;
+}
+
 .nexus-questionnaire-card {
   border: 1px solid var(--vscode-panel-border);
   border-radius: 8px;
@@ -1988,6 +1993,29 @@ html, body, #root {
   color: var(--vscode-foreground);
 }
 
+.nexus-questionnaire-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.nexus-questionnaire-title {
+  min-width: 0;
+  color: var(--vscode-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.nexus-questionnaire-subtitle {
+  margin-top: 2px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .nexus-questionnaire-pager {
   display: flex;
   align-items: center;
@@ -2001,8 +2029,38 @@ html, body, #root {
   white-space: nowrap;
 }
 
+.nexus-questionnaire-nav {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--vscode-descriptionForeground);
+  background: transparent;
+  cursor: pointer;
+}
+
+.nexus-questionnaire-nav:hover:not(:disabled) {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-questionnaire-nav:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .nexus-questionnaire-body {
   padding: 6px 8px 4px;
+}
+
+.nexus-questionnaire-body--with-preview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
 }
 
 .nexus-questionnaire-body-inner {
@@ -2065,9 +2123,14 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
 }
 
 .nexus-questionnaire-option {
+  position: relative;
   width: 100%;
   text-align: left;
   border: 1px solid transparent;
@@ -2083,6 +2146,14 @@ html, body, #root {
   gap: 6px;
 }
 
+.nexus-questionnaire-option > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .nexus-questionnaire-option-num {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
@@ -2093,6 +2164,14 @@ html, body, #root {
 .nexus-questionnaire-option-label {
   flex: 1;
   min-width: 0;
+}
+
+.nexus-questionnaire-option-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .nexus-questionnaire-option--custom .nexus-questionnaire-custom-placeholder {
@@ -2126,6 +2205,62 @@ html, body, #root {
   font-family: var(--vscode-font-family);
 }
 
+.nexus-questionnaire-review {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+}
+
+.nexus-questionnaire-review-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 6px;
+  border-radius: 6px;
+}
+
+.nexus-questionnaire-review-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-questionnaire-review-copy {
+  min-width: 0;
+}
+
+.nexus-questionnaire-review-question {
+  color: var(--vscode-descriptionForeground);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.nexus-questionnaire-review-answer {
+  margin-top: 1px;
+  color: var(--vscode-foreground);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.nexus-questionnaire-edit,
+.nexus-questionnaire-back {
+  flex-shrink: 0;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--vscode-descriptionForeground);
+  background: transparent;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.nexus-questionnaire-edit:hover,
+.nexus-questionnaire-back:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
+}
+
 .nexus-questionnaire-card-footer {
   display: flex;
   align-items: center;
@@ -2134,6 +2269,29 @@ html, body, #root {
   padding: 5px 8px 6px;
   border-top: 1px solid var(--vscode-panel-border);
   background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-panel-border) 8%);
+}
+
+.nexus-questionnaire-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px 0;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.nexus-questionnaire-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (min-width: 520px) {
+  .nexus-questionnaire-body--with-preview {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
 }
 
 .nexus-questionnaire-dismiss {

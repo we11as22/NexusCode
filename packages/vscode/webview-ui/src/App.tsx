@@ -17,6 +17,7 @@ import { ModeDropdown } from "./components/ModeDropdown.js"
 import { AgentPresetDropdown } from "./components/AgentPresetDropdown.js"
 import { ProgressTodoBlock } from "./components/ProgressTodoBlock.js"
 import { RuntimeActivityPanel } from "./components/RuntimeActivityPanel.js"
+import { Questionnaire } from "./components/questionnaire/Questionnaire.js"
 import type { AutocompleteExtensionUiState, ExtensionMessage } from "./types/messages.js"
 import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
 import { NEXUS_CUSTOM_OPTION_ID } from "./constants/questionnaire.js"
@@ -822,7 +823,7 @@ function ChatBottomBar() {
     <div className="chat-input-inner">
       {pendingQuestion ? (
         <div className="chat-input-area nexus-questionnaire-input-area">
-          <QuestionnaireBar
+          <Questionnaire
             request={pendingQuestion}
             onDismiss={() => {
               postMessage({ type: "dismissQuestionnaire", requestId: pendingQuestion.requestId })
