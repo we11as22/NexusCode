@@ -1005,6 +1005,37 @@ html, body, #root {
   color: var(--vscode-foreground);
 }
 
+.nexus-bash-copy-btn {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.nexus-bash-copy-btn:hover:not(:disabled) {
+  border-color: var(--vscode-panel-border);
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
+}
+
+.nexus-bash-copy-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .nexus-input-context-file-dismiss:hover {
   color: var(--vscode-errorForeground);
   background: var(--vscode-inputValidation-errorBackground);

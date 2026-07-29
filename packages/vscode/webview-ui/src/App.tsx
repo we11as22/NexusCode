@@ -23,6 +23,7 @@ import { NEXUS_CUSTOM_OPTION_ID } from "./constants/questionnaire.js"
 import { MarketplacePanel } from "./components/marketplace/MarketplacePanel.js"
 import { createExtensionMessageBuffer } from "./bridge/message-buffer.js"
 import { formatSessionLabel } from "./utils/session-label.js"
+import { visibleSessionTabs } from "./components/session-tab-policy.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
@@ -1014,10 +1015,7 @@ function SessionTabBar() {
     return () => document.removeEventListener("click", onDocClick)
   }, [dropdownOpen])
 
-  const hasCurrentInList = sessions.some((s) => s.id === sessionId)
-  const displaySessions = hasCurrentInList
-    ? sessions
-    : [{ id: sessionId, ts: Date.now(), title: "New chat", messageCount: 0 }, ...sessions]
+  const displaySessions = visibleSessionTabs(sessions, sessionId)
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation()

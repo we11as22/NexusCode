@@ -161,7 +161,7 @@ function ApprovalInline({
 }
 
 /** Bash (execute_command) block: command in header, expandable output (tail when long). */
-function BashCommandBlock({
+export function BashCommandBlock({
   part,
   approval,
   onListLayoutHint,
@@ -296,7 +296,7 @@ function BashCommandBlock({
           <div className="mt-2 flex flex-wrap items-center gap-1">
             <button
               type="button"
-              className="nexus-input-context-file-btn rounded px-1.5 py-0.5 text-[10px]"
+              className="nexus-bash-copy-btn"
               onClick={() => void copy("command", command)}
               disabled={!command}
             >
@@ -304,7 +304,7 @@ function BashCommandBlock({
             </button>
             <button
               type="button"
-              className="nexus-input-context-file-btn rounded px-1.5 py-0.5 text-[10px]"
+              className="nexus-bash-copy-btn"
               onClick={() => void copy("output", output)}
               disabled={!output}
             >
@@ -313,7 +313,7 @@ function BashCommandBlock({
             {part.outputArtifactId ? (
               <button
                 type="button"
-                className="nexus-input-context-file-btn rounded px-1.5 py-0.5 text-[10px]"
+                className="nexus-bash-copy-btn"
                 title="Copy the opaque ToolOutputRead artifact id"
                 onClick={() => void copy("artifact", part.outputArtifactId!)}
               >
