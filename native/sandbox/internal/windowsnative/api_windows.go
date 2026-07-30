@@ -51,6 +51,7 @@ var (
 	procLookupPrivilegeValueW   = advapi32.NewProc("LookupPrivilegeValueW")
 	procAdjustTokenPrivileges   = advapi32.NewProc("AdjustTokenPrivileges")
 	procSetEntriesInACLW        = advapi32.NewProc("SetEntriesInAclW")
+	procSetSecurityInfo         = advapi32.NewProc("SetSecurityInfo")
 	procSetTokenInformation     = advapi32.NewProc("SetTokenInformation")
 	kernel32                    = syscall.NewLazyDLL("kernel32.dll")
 	procCreateJobObjectW        = kernel32.NewProc("CreateJobObjectW")
@@ -602,6 +603,70 @@ type privateDesktop struct {
 	name   *uint16
 }
 
+func grantPrivateDesktopAccess(handle uintptr) error {
+	current, err := syscall.OpenCurrentProcessToken()
+	if err != nil {
+		return fmt.Errorf("open token for private desktop ACL: %w", err)
+	}
+	defer current.Close()
+	logonSID, logonBuffer, err := tokenLogonSID(current)
+	if err != nil {
+		return fmt.Errorf("resolve logon SID for private desktop ACL: %w", err)
+	}
+	// Keep the backing TOKEN_GROUPS allocation alive until both Win32 calls
+	// have consumed the SID pointer.
+	_ = logonBuffer
+
+	const (
+		desktopAllAccess        = 0x000F01FF
+		seWindowObject          = 7
+		daclSecurityInformation = 0x00000004
+	)
+	entry := explicitAccessW{
+		Permissions: desktopAllAccess,
+		AccessMode:  grantAccess,
+		Trustee: trusteeW{
+			TrusteeForm: trusteeIsSID,
+			TrusteeType: trusteeIsUnknown,
+			Name:        (*uint16)(unsafe.Pointer(logonSID)),
+		},
+	}
+	var acl *windowsACL
+	result, _, callErr := procSetEntriesInACLW.Call(
+		1,
+		uintptr(unsafe.Pointer(&entry)),
+		0,
+		uintptr(unsafe.Pointer(&acl)),
+	)
+	if result != errorSuccess {
+		return fmt.Errorf(
+			"SetEntriesInAclW for private desktop failed with status %d: %w",
+			result,
+			callErr,
+		)
+	}
+	if acl != nil {
+		defer syscall.LocalFree(syscall.Handle(uintptr(unsafe.Pointer(acl))))
+	}
+	result, _, callErr = procSetSecurityInfo.Call(
+		handle,
+		seWindowObject,
+		daclSecurityInformation,
+		0,
+		0,
+		uintptr(unsafe.Pointer(acl)),
+		0,
+	)
+	if result != errorSuccess {
+		return fmt.Errorf(
+			"SetSecurityInfo for private desktop failed with status %d: %w",
+			result,
+			callErr,
+		)
+	}
+	return nil
+}
+
 func createPrivateDesktop() (*privateDesktop, error) {
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
@@ -612,17 +677,20 @@ func createPrivateDesktop() (*privateDesktop, error) {
 	if err != nil {
 		return nil, err
 	}
-	const desktopAllAccess = 0x000F01FF
 	handle, _, callErr := procCreateDesktopW.Call(
 		uintptr(unsafe.Pointer(shortNameWide)),
 		0,
 		0,
 		0,
-		desktopAllAccess,
+		0x000F01FF,
 		0,
 	)
 	if handle == 0 {
 		return nil, fmt.Errorf("CreateDesktopW failed: %w", callErr)
+	}
+	if err := grantPrivateDesktopAccess(handle); err != nil {
+		procCloseDesktop.Call(handle)
+		return nil, err
 	}
 	startupName, err := syscall.UTF16PtrFromString(`Winsta0\` + shortName)
 	if err != nil {
